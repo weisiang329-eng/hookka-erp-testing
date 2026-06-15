@@ -165,6 +165,7 @@ function pickItemM3(
 function rowToItem(
   row: DeliveryOrderItemRow,
   productM3Map?: Map<string, number>,
+  repairScopeByPo?: Map<string, string | null>,
 ) {
   return {
     id: row.id,
@@ -179,6 +180,12 @@ function rowToItem(
     rackingNumber: row.rackingNumber ?? "",
     packingStatus: row.packingStatus ?? "PENDING",
     salesOrderNo: row.salesOrderNo ?? "",
+    // Partial-repair scope (raw JSON) from the line's production order, for the
+    // DO detail "Repair: <parts> (code)" badge. null when no map is supplied
+    // (list path) or the PO has no scope.
+    repairScope: row.productionOrderId
+      ? repairScopeByPo?.get(row.productionOrderId) ?? null
+      : null,
   };
 }
 
@@ -264,11 +271,38 @@ export async function loadProductM3Map(
   return map;
 }
 
+// productionOrderId → raw repairScope JSON, for the DO detail items' "Repair:
+// <parts> (code)" badge. SELECT * so the runtime-added repairScope column
+// round-trips the Postgres compat layer (read dual-key, lowercase-folded).
+async function loadRepairScopeByPo(
+  db: D1Database,
+  poIds: (string | null)[],
+): Promise<Map<string, string | null>> {
+  const ids = Array.from(new Set(poIds.filter((x): x is string => !!x)));
+  const out = new Map<string, string | null>();
+  if (ids.length === 0) return out;
+  const ph = ids.map(() => "?").join(",");
+  const res = await db
+    .prepare(`SELECT * FROM production_orders WHERE id IN (${ph})`)
+    .bind(...ids)
+    .all<Record<string, unknown>>();
+  for (const row of res.results ?? []) {
+    const pid = String(row.id ?? "");
+    if (!pid) continue;
+    out.set(
+      pid,
+      (row.repairScope as string) ?? (row.repairscope as string) ?? null,
+    );
+  }
+  return out;
+}
+
 function rowToOrder(
   row: DeliveryOrderRow,
   items: DeliveryOrderItemRow[] = [],
   productM3Map?: Map<string, number>,
   hubStateMap?: Map<string, string>,
+  repairScopeByPo?: Map<string, string | null>,
 ) {
   const pod = parseJson<Record<string, unknown> | null>(row.proofOfDelivery, null);
   const fgUnitIds = parseJson<string[]>(row.fgUnitIds, []);
@@ -313,7 +347,7 @@ function rowToOrder(
     vehicleType: row.vehicleType ?? "",
     items: items
       .filter((i) => i.deliveryOrderId === row.id)
-      .map((it) => rowToItem(it, productM3Map)),
+      .map((it) => rowToItem(it, productM3Map, repairScopeByPo)),
     // Recompute totalM3 on read using live product unitM3 — legacy DOs
     // were persisted with itemM3=0 / totalM3=0 before BUG-2026-04-27 fix.
     totalM3: productM3Map
@@ -938,11 +972,12 @@ async function fetchOrderWithItems(db: D1Database, id: string) {
   ]);
   if (!order) return null;
   const items = itemsRes.results ?? [];
-  const [m3Map, hubStateMap] = await Promise.all([
+  const [m3Map, hubStateMap, repairScopeByPo] = await Promise.all([
     loadProductM3Map(db, items.map((i) => i.productCode)),
     loadHubStateMap(db, [order.hubId]),
+    loadRepairScopeByPo(db, items.map((i) => i.productionOrderId)),
   ]);
-  return rowToOrder(order, items, m3Map, hubStateMap);
+  return rowToOrder(order, items, m3Map, hubStateMap, repairScopeByPo);
 }
 
 // GET /api/delivery-orders — list all, nested items

@@ -26,7 +26,7 @@ import {
   type BomVariantContext,
 } from "./bom-wip-breakdown";
 import { isHeadboardOnlySpecial } from "../routes/fg-units";
-import { type RepairScope } from "../../lib/repair-scope";
+import { normalizePartLabel, type RepairScope } from "../../lib/repair-scope";
 
 // One BOM template per product code, already collapsed to the version we
 // print from (ACTIVE preferred, then latest effectiveFrom).
@@ -150,7 +150,7 @@ export function piecesFor(args: {
       .filter((cmp) => cmp && String(cmp.label || "").trim())
       .map(
         (cmp) =>
-          `${(Number(cmp.qty) || 1) * (qty || 1)} ${String(cmp.label).trim()}`,
+          `${(Number(cmp.qty) || 1) * (qty || 1)} ${normalizePartLabel(String(cmp.label))}`,
       );
     if (parts.length > 0) return parts.join(" + ");
   }
@@ -162,8 +162,11 @@ export function piecesFor(args: {
   // note. Count it as its own FG unit, labelled by its variant so the
   // roll-up can list "2 1A(LHF) + 1 STOOL".
   if (!isBedframe) {
-    // Label by the sofa TYPE (product-code variant, e.g. "1A(LHF)",
-    // "STOOL") — that's what "一套沙发" means — not the seat size.
+    // A complete SOFA set (any variant — 1A / 2A / 1L1A / 2L / …) is counted as
+    // one "Sofa" piece on the DO (Wei Siang 2026-06-16); the specific variant
+    // still rides the Description's product name. Non-sofa accessories keep
+    // their own variant label.
+    if (C === "SOFA") return `${qty || 1} Sofa`;
     const dash = code.indexOf("-");
     const variant =
       (dash >= 0 ? code.slice(dash + 1).trim() : "") ||
@@ -207,9 +210,9 @@ export function piecesFor(args: {
     const t = w.wipType.toUpperCase();
     const label =
       t === "HEADBOARD"
-        ? "HB"
+        ? "Headboard"
         : t === "DIVAN"
-          ? "DIVAN"
+          ? "Divan"
           : (w.wipLabel || w.wipType || "PC").trim();
     if (!agg.has(label)) order.push(label);
     agg.set(

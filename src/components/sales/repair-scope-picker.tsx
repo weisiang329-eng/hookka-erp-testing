@@ -13,6 +13,7 @@
 // already accept.
 // ---------------------------------------------------------------------------
 import { useState, useEffect, useMemo } from "react";
+import { Wrench } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   REPAIR_DEPT_CODES,
@@ -22,6 +23,7 @@ import {
   parseRepairScope,
   serializeRepairScope,
   repairScopeBadgeLabel,
+  repairPartsLabel,
   canonicalizeComponentPicks,
   type RepairDeptCode,
 } from "@/lib/repair-scope";
@@ -59,6 +61,29 @@ export function RepairScopeBadge({ repairScope }: { repairScope?: string | null 
   return (
     <Badge className="bg-[#E0EDF0] text-[#3E6570]">
       {repairScopeBadgeLabel(parsed)}
+    </Badge>
+  );
+}
+
+// Delivery badge — lists the repaired PARTS of a partial repair in full words
+// (Wei Siang 2026-06-16): "Repair: Headboard + Armrest". Renders nothing for a
+// normal order or a full / dept-only repair (no component picks). Shown next to
+// the product name in the delivery lists and the DO detail items; the model is
+// already on the row (product code + name), so the parts aren't tagged again.
+// `productCode` is accepted (call sites pass it) but not rendered — kept for a
+// quick re-add if the tag is ever wanted back.
+export function RepairPartsBadge({
+  repairScope,
+}: {
+  repairScope?: string | null;
+  productCode?: string | null;
+}) {
+  const parts = repairPartsLabel(parseRepairScope(repairScope ?? null));
+  if (!parts) return null;
+  return (
+    <Badge className="bg-[#F7EFD9] text-[#7A5B1A] gap-1 whitespace-normal">
+      <Wrench className="h-3 w-3 shrink-0" />
+      Repair: {parts}
     </Badge>
   );
 }

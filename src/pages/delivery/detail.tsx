@@ -4,6 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { RepairPartsBadge } from "@/components/sales/repair-scope-picker";
 import { formatDate, formatDateTime } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { LockBanner } from "@/components/ui/lock-banner";
@@ -53,6 +54,7 @@ type DeliveryOrderItem = {
   itemM3: number;
   rackingNumber: string;
   packingStatus: string;
+  repairScope?: string | null;
 };
 
 type DeliveryOrder = {
@@ -847,6 +849,7 @@ export default function DeliveryDetailPage() {
                     <td className="h-12 px-4">
                       <p className="font-medium text-[#1F1D1B]">{item.productName}</p>
                       <p className="text-xs text-[#9CA3AF] doc-number">{item.productCode}</p>
+                      <RepairPartsBadge repairScope={item.repairScope} productCode={item.productCode} />
                     </td>
                     <td className="h-12 px-4 text-[#4B5563]">{item.sizeLabel}</td>
                     <td className="h-12 px-4 text-[#4B5563]">{item.fabricCode}</td>

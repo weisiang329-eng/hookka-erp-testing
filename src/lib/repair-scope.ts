@@ -648,3 +648,32 @@ export function repairScopeBadgeLabel(scope: RepairScope | null): string {
   }
   return base;
 }
+
+// Normalize a repaired-component label to the full English word printed on the
+// DO (Wei Siang 2026-06-16: spell parts out — "HB" → "Headboard"). The other
+// picker labels (Divan, Base, Back Cushion, Armrest, Headrest) are already the
+// words we print, so they pass through unchanged.
+export function normalizePartLabel(label: string): string {
+  const u = label.trim().toUpperCase();
+  if (u === "HB" || u === "HEADBOARD") return "Headboard";
+  if (u === "DIVAN") return "Divan";
+  return label.trim();
+}
+
+// Parts-only summary for the delivery "Repair: …" badge — just the repaired
+// component labels in full words ("Headboard + Armrest", or "Headboard + 2
+// Armrest" when a part's picked qty > 1). Returns null when the scope has no
+// component picks (a full or dept-only repair has no specific parts to list, so
+// no badge).
+export function repairPartsLabel(scope: RepairScope | null): string | null {
+  const comps = scope?.components;
+  if (!comps || comps.length === 0) return null;
+  const parts = comps
+    .map((c) => {
+      const lab = normalizePartLabel(String(c.label || c.key || ""));
+      if (!lab) return "";
+      return c.qty > 1 ? `${c.qty} ${lab}` : lab;
+    })
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join(" + ") : null;
+}

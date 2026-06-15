@@ -406,6 +406,7 @@ export function renderDoInto(
   let totalSets = 0;
   let totalPcsAll = 0;
   const grand = new Map<string, number>();
+  const grandSeen = new Map<string, number>(); // label → first-seen index
   for (const it of order.items) {
     totalSets += it.quantity;
     const pcs = extras?.items?.[it.id]?.pieces;
@@ -415,23 +416,28 @@ export function renderDoInto(
       for (const part of String(pcs).split(" + ")) {
         const mm = part.trim().match(/^(\d+)\s+(.+)$/);
         if (!mm) continue;
-        const raw = mm[2].trim().toUpperCase();
-        // Grand total stays short: keep HB / DIVAN broken out, but
-        // collapse every sofa variant (1A(LHF), 2S, STOOL, …) into a
-        // single "SOFA" tally so the footer never balloons.
-        const lab = raw === "HB" || raw === "DIVAN" ? raw : "SOFA";
+        // Sum each part by its FULL label (Wei Siang 2026-06-16: spell parts
+        // out — "2 Headboard + 2 Divan + 1 Back Cushion + 1 Armrest" — no more
+        // collapsing every sofa part into "SOFA"). Complete sofas already
+        // arrive as "Sofa" from piecesFor, so the footer stays readable; the
+        // full breakdown lives on its own full-width row so it can't overflow.
+        const lab = mm[2].trim();
+        if (!grandSeen.has(lab)) grandSeen.set(lab, grandSeen.size);
         grand.set(lab, (grand.get(lab) || 0) + Number(mm[1]));
       }
     }
   }
-  const rankL = (lab: string) => {
+  const rankL = (lab: string): number => {
     const u = lab.toUpperCase();
-    return u === "HB" ? 0 : u === "DIVAN" ? 1 : 2;
+    return u === "HEADBOARD" ? 0 : u === "DIVAN" ? 1 : u === "SOFA" ? 2 : 3;
   };
   const grandBreakdown =
-    Array.from(grand.entries())
-      .sort((a, b) => rankL(a[0]) - rankL(b[0]))
-      .map(([lab, n]) => `${n} ${lab}`)
+    Array.from(grand.keys())
+      .sort(
+        (a, b) =>
+          rankL(a) - rankL(b) || (grandSeen.get(a) ?? 0) - (grandSeen.get(b) ?? 0),
+      )
+      .map((lab) => `${grand.get(lab)} ${lab}`)
       .join("  +  ") || "-";
 
   // Keep the deliberate category banding (BEDFRAME / SOFA / ACCESSORY /
@@ -542,8 +548,24 @@ export function renderDoInto(
       [
         { content: "Total", colSpan: 2, styles: { halign: "right" } },
         { content: `${totalSets} SETS`, styles: { halign: "center" } },
-        { content: grandBreakdown, styles: { halign: "right" } },
+        { content: "", styles: {} },
         { content: `${totalPcsAll} ITEMS`, styles: { halign: "right" } },
+      ],
+      // Full breakdown on its OWN full-width row (colSpan 5 ≈ 182mm) so a long
+      // list ("2 Headboard + 2 Divan + 1 Back Cushion + 1 Armrest") wraps
+      // instead of being squeezed off the 42mm Quantity cell (Wei Siang
+      // 2026-06-16 "被挤出去" fix).
+      [
+        {
+          content: grandBreakdown,
+          colSpan: 5,
+          styles: {
+            halign: "right",
+            fontStyle: "normal",
+            overflow: "linebreak",
+            lineWidth: { top: 0, bottom: 0, left: 0, right: 0 },
+          },
+        },
       ],
     ],
     margin: { top: HEADER_BOTTOM, left: m, right: m, bottom: 16 },

@@ -6632,19 +6632,33 @@ type CfApiRow = {
   depth: number;
   groupId?: string;
   values: (number | null)[];
+  accountCode?: string;
 };
 type CfApiData = { period: string; columns: { key: string; label: string; accum?: boolean }[]; rows: CfApiRow[] };
 
 function CashFlowTab() {
+  const { toast } = useToast();
   const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
   const [level, setLevel] = useState(3);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const { data: resp } = useCachedJson<{ success?: boolean; data?: CfApiData }>(
-    `/api/accounting/cashflow-statement?period=${period}`,
+  const [edit, setEdit] = useState(false);
+  const [map, setMap] = useState<Record<string, { section: string; order: number }>>({});
+  const [dragCode, setDragCode] = useState<string | null>(null);
+  const [dragOverSec, setDragOverSec] = useState<string | null>(null);
+  const { data: resp, refresh } = useCachedJson<{ success?: boolean; data?: CfApiData }>(
+    `/api/accounting/cashflow-statement?period=${period}${edit ? "&editable=1" : ""}`,
   );
   const data = resp?.success ? resp.data : undefined;
   const cols = data?.columns ?? [];
   const rows = data?.rows ?? [];
+
+  useEffect(() => {
+    if (!edit) return;
+    fetch("/api/accounting/cashflow/map")
+      .then((r) => r.json() as Promise<{ data?: { map?: Record<string, { section: string; order: number }> } }>)
+      .then((j) => setMap(j?.data?.map ?? {}))
+      .catch(() => {});
+  }, [edit]);
 
   const cfCollapseForLevel = (rs: CfApiRow[], L: number): Set<string> => {
     const s = new Set<string>();
@@ -6655,12 +6669,30 @@ function CashFlowTab() {
     return s;
   };
   const applyLevel = (L: number) => { setCollapsed(cfCollapseForLevel(rows, L)); setLevel(L); };
-  // Reset collapse state to the active L-level when fresh data arrives. Intentional
-  // set-state-in-effect (one-shot sync on data change); `level`/`rows` excluded so
-  // the effect keys only off the new payload — see docs/KNOWN-ISSUES.md §1.
   /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   useEffect(() => { setCollapsed(cfCollapseForLevel(rows, level)); }, [data]);
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
+
+  const sectionAccounts = (sec: string): string[] =>
+    rows.filter((r) => r.kind === "line" && r.section === sec && r.accountCode).map((r) => r.accountCode!);
+  const moveTo = async (code: string, sec: string, beforeCode?: string) => {
+    const peers = sectionAccounts(sec).filter((c) => c !== code);
+    let idx = beforeCode ? peers.indexOf(beforeCode) : peers.length;
+    if (idx < 0) idx = peers.length;
+    const ordered = [...peers.slice(0, idx), code, ...peers.slice(idx)];
+    const next = { ...map };
+    ordered.forEach((c, i) => { next[c] = { section: sec, order: i }; });
+    setMap(next);
+    try {
+      const res = await fetch("/api/accounting/cashflow/map", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ map: next }),
+      });
+      const j = (await res.json()) as { success?: boolean };
+      if (j?.success) { toast.success("Mapping updated"); refresh(); }
+      else toast.error("Save failed");
+    } catch { toast.error("Save failed"); }
+  };
 
   const fmt = (v: number | null): string => {
     if (v === null || v === undefined) return "";
@@ -6687,12 +6719,18 @@ function CashFlowTab() {
     return aoa;
   };
 
+  const isDropTarget = (r: CfApiRow) => edit && (r.kind === "group" || r.kind === "section") && !!r.section;
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Statement of Cash Flow</h2>
         <span className="text-xs text-[#9CA3AF]">cash basis · full detail</span>
         <div className="ml-auto flex items-center gap-2">
+          <button onClick={() => setEdit((e) => !e)}
+            className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${edit ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>
+            {edit ? "Done" : "Edit"}
+          </button>
           {[1, 2, 3].map((L) => (
             <button key={L} onClick={() => applyLevel(L)}
               className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${level === L ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>L{L}</button>
@@ -6705,6 +6743,7 @@ function CashFlowTab() {
           <ExportButtons build={buildExport} filenameBase={`CashFlow-${period}`} title="Statement of Cash Flow" subtitle={`Period: ${period}`} />
         </div>
       </div>
+      {edit && <p className="text-[11px] text-[#6B5C32]">拖科目行到目标段标题改归类 · 改的是规则、所有月份按新规则现算 · Bank c/f 总额不变 · 拖回可还原</p>}
       <Card>
         <CardContent className="p-4 overflow-x-auto">
           {!data ? (
@@ -6724,15 +6763,31 @@ function CashFlowTab() {
                   const isGroup = r.kind === "group";
                   const isOpen = isGroup && r.groupId ? !collapsed.has(r.groupId) : false;
                   const strong = r.kind === "subtotal" || r.kind === "result" || r.kind === "total" || r.kind === "cf" || r.kind === "section" || isGroup;
+                  const draggable = edit && r.kind === "line" && !!r.accountCode;
+                  const dropHere = isDropTarget(r);
                   const rowCls =
                     r.kind === "result" ? "bg-[#F0ECE9]/60 font-semibold" :
                     r.kind === "total" ? "border-t-2 border-[#6B5C32] font-semibold" :
                     r.kind === "cf" ? "border-b-2 border-[#6B5C32] bg-[#F0ECE9]/40 font-semibold" :
                     r.kind === "section" ? "font-semibold text-[#1F1D1B]" : "";
                   return (
-                    <tr key={i} className={`${rowCls} ${isGroup ? "cursor-pointer hover:bg-[#F7F4EF] bg-[#F0ECE9]/30 font-semibold" : ""}`}
-                      onClick={isGroup ? () => { const n = new Set(collapsed); if (n.has(r.groupId!)) n.delete(r.groupId!); else n.add(r.groupId!); setCollapsed(n); } : undefined}>
-                      <td className="py-1 whitespace-nowrap" style={pad}>{isGroup ? (isOpen ? "▾ " : "▸ ") : ""}{r.label}</td>
+                    <tr key={i}
+                      className={`${rowCls} ${isGroup ? "cursor-pointer hover:bg-[#F7F4EF] bg-[#F0ECE9]/30 font-semibold" : ""} ${draggable ? "cursor-move" : ""} ${dragCode === r.accountCode ? "opacity-40" : ""} ${dropHere && dragOverSec === r.section ? "ring-2 ring-inset ring-[#6B5C32]" : ""}`}
+                      draggable={draggable}
+                      onDragStart={draggable ? (e) => { setDragCode(r.accountCode!); e.dataTransfer.setData("text/plain", r.accountCode!); e.dataTransfer.effectAllowed = "move"; } : undefined}
+                      onDragEnd={draggable ? () => { setDragCode(null); setDragOverSec(null); } : undefined}
+                      onDragOver={(dropHere || (edit && r.kind === "line" && !!r.accountCode)) && dragCode ? (e) => { e.preventDefault(); if (r.section) setDragOverSec(r.section); } : undefined}
+                      onDragLeave={dropHere ? () => { if (dragOverSec === r.section) setDragOverSec(null); } : undefined}
+                      onDrop={(edit && dragCode) ? (e) => {
+                        e.preventDefault();
+                        const src = e.dataTransfer.getData("text/plain");
+                        setDragOverSec(null); setDragCode(null);
+                        if (!src || !r.section) return;
+                        if (r.kind === "line" && r.accountCode && r.accountCode !== src) void moveTo(src, r.section, r.accountCode);
+                        else void moveTo(src, r.section);
+                      } : undefined}
+                      onClick={isGroup && !edit ? () => { const n = new Set(collapsed); if (n.has(r.groupId!)) n.delete(r.groupId!); else n.add(r.groupId!); setCollapsed(n); } : undefined}>
+                      <td className="py-1 whitespace-nowrap" style={pad}>{isGroup ? (isOpen ? "▾ " : "▸ ") : ""}{draggable ? "⠿ " : ""}{r.label}</td>
                       {r.values.map((v, j) => (
                         <td key={j} className={`text-right px-2 tabular-nums whitespace-nowrap ${typeof v === "number" && v < 0 ? "text-[#9A3A2D]" : ""} ${strong ? "font-semibold" : ""}`}>{fmt(v)}</td>
                       ))}

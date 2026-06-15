@@ -24,7 +24,7 @@ import type { Env } from "../worker";
 import { resolveWorkerToken } from "./worker-auth";
 import { computeMonthlyLabor, computeAttendanceDayDetail, absenceCutoffDay, effectiveSalarySenForMonth } from "../../lib/labor-engine";
 import { jcMinutesTotal } from "../../lib/job-card-minutes";
-import { deriveJobCardId, deptFromCode2, isShortJobCardToken } from "../../lib/job-card-id";
+import { deriveBarcodeToken, deptOfBarcodeToken, isBarcodeToken } from "../../lib/job-card-id";
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
 import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
 import {
@@ -423,13 +423,13 @@ app.get("/scan-lookup", async (c) => {
       ).results ?? [];
   }
 
-  // Old-card Code 128: the printed barcode encodes the SHORT re-derived token,
-  // but a card created before the id-shortening has a LONG primary key, so the
-  // jc.id match above missed. Re-derive deriveJobCardId across that department's
-  // OPEN cards (the token's last 2 digits = dept code) to find it — bounded by
-  // current WIP for one dept, and migration-free (no id rewrite, no new column).
-  if (poRows.length === 0 && isShortJobCardToken(term)) {
-    const deptCode = deptFromCode2(term.slice(-2));
+  // Schedule Code 128: the printed barcode is the SHORT token b<deptNN><7hash>,
+  // which is NOT a stored id — resolve it by re-deriving deriveBarcodeToken
+  // across that department's OPEN cards (the token's 2 digits = dept code).
+  // Bounded by current WIP for one dept; works for new AND old cards alike, with
+  // no id rewrite and no new column.
+  if (poRows.length === 0 && isBarcodeToken(term)) {
+    const deptCode = deptOfBarcodeToken(term);
     if (deptCode) {
       const cand =
         (
@@ -448,7 +448,7 @@ app.get("/scan-lookup", async (c) => {
         ).results ?? [];
       const hit = cand.find(
         (j) =>
-          deriveJobCardId(
+          deriveBarcodeToken(
             j.productionOrderId,
             j.wipKey ?? "",
             j.departmentCode ?? deptCode,

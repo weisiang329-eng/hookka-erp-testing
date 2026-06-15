@@ -81,3 +81,36 @@ const SHORT_JC_RE = /^jc-[0-9a-z]{14}-\d{2}$/;
 export function isShortJobCardToken(s: string): boolean {
   return SHORT_JC_RE.test(s);
 }
+
+// ---------------------------------------------------------------------------
+// SHORT Code 128 barcode token (Wei Siang 2026-06-16: a normal barcode "哪有那麽
+// 厚那麽長" — the printed 1D code MUST be short or a phone can't read the bars).
+// `b<deptNN><7-char hash of poId::wipKey>` = 10 chars (vs the ~25-char id), which
+// halves the bar count → fat, retail-grade bars that scan first try.
+//
+// This is NOT a primary key — it carries no global-uniqueness guarantee. It's
+// resolved ONLY by re-deriving across the department's OPEN cards (the dept is
+// the 2 digits), a set of at most current WIP for one dept, where a 32-bit hash
+// collision is negligible. The `b` sentinel + strict shape keep a stray courier
+// barcode from being mistaken for ours.
+// ---------------------------------------------------------------------------
+const BARCODE_RE = /^b\d{2}[0-9a-z]{7}$/;
+export function deriveBarcodeToken(
+  poId: string,
+  wipKey: string,
+  deptCode: string,
+): string {
+  const h = fnv1a32(`${poId}::${wipKey}`, 2166136261)
+    .toString(36)
+    .padStart(7, "0")
+    .slice(-7);
+  return `b${deptCode2(deptCode)}${h}`;
+}
+export function isBarcodeToken(s: string): boolean {
+  return BARCODE_RE.test(s);
+}
+// The department a barcode token belongs to (from its 2 digits), or null.
+export function deptOfBarcodeToken(token: string): string | null {
+  const m = /^b(\d{2})[0-9a-z]{7}$/.exec(token);
+  return m ? deptFromCode2(m[1]) : null;
+}

@@ -9,8 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData, jobCardBarcodeValue } from "@/lib/qr-utils";
-import { deriveJobCardId, isShortJobCardToken } from "@/lib/job-card-id";
+import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData } from "@/lib/qr-utils";
+import { deriveBarcodeToken } from "@/lib/job-card-id";
 // Static import (not dynamic) so Code 128 generation is SYNCHRONOUS inside the
 // print click gesture — an await before window.open would trip the pop-up
 // blocker. jsbarcode is small and scoped to this (already heavy) page chunk.
@@ -97,23 +97,24 @@ type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
 // Wei Siang 2026-05-29: drag a header's right edge to resize; double-click to
 // reset. Widths persist per-browser in localStorage. Shared with every header
 // cell via context so we don't thread two callbacks through 15 call sites.
-// Render a WIP's scan code as a Code 128 (HKJC:<token>) PNG data URL,
-// SYNCHRONOUSLY, for the Production Schedule print. The schedule's rows are thin
-// and many — a square QR there is too small to see/scan (Wei Siang 2026-06-16:
-// "QR 放在 production schedule 裏面看不到"), so a wide-but-short 1D barcode fits the
-// row. jobCardBarcodeValue() is the single source of the encoded string (shared
-// with the scanner's parseJobCardBarcode). Returns "" on failure so a bad row
+// Render a WIP's SHORT barcode token (`b<deptNN><7hash>`, ~10 chars) as a Code
+// 128 PNG data URL, SYNCHRONOUSLY, for the Production Schedule print. The
+// schedule's rows are thin and many — a square QR there is too small to scan
+// (Wei Siang 2026-06-16), and a barcode of the full id was "那麽厚那麽長" and
+// wouldn't read. The 10-char token halves the bar count → fat, retail-grade
+// bars. The token IS the encoded string (its own `b` sentinel — no wrapper),
+// shared with the scanner's parseJobCardBarcode. "" on failure so a bad row
 // never blocks the print.
 function jobCardCode128DataUrl(token: string): string {
   try {
     const canvas = document.createElement("canvas");
-    JsBarcode(canvas, jobCardBarcodeValue(token), {
+    JsBarcode(canvas, token, {
       format: "CODE128",
       height: 38,
-      // 3px/module source → crisp; the token is short (~20 chars hashed) so the
-      // canvas stays modest and prints at a fat, scannable X-dimension.
-      width: 3,
-      margin: 4,
+      // 4px/module source — the token is tiny (10 chars) so even at 4px the
+      // canvas is small, and it prints at a fat, easy-to-scan X-dimension.
+      width: 4,
+      margin: 6,
       displayValue: false, // the human WIP name is printed as crisp HTML below
     });
     return canvas.toDataURL("image/png");
@@ -3708,20 +3709,18 @@ export default function ProductionPage({
     {
       // "Scan to complete" — a DEFAULT-HIDDEN column toggled in the Columns menu
       // like any other (Wei Siang 2026-06-15: "应该做在 column 那边"). On screen it
-      // shows the SHORT scan token (not the long internal id — Wei Siang 2026-06-16
-      // "很多字是多余的"); the actual scannable QR is drawn by the Print Schedule
-      // output (see handlePrintSchedule / jobCardQrDataUrl).
+      // shows the SHORT 10-char barcode token (Wei Siang 2026-06-16 "很多字是多余的");
+      // the scannable Code 128 of the same token is drawn by the Print Schedule
+      // output (see handlePrintSchedule / jobCardCode128DataUrl).
       key: "scanCode",
-      label: "Scan QR",
+      label: "Scan",
       type: "text",
-      width: "150px",
+      width: "120px",
       sortable: false,
       defaultHidden: true,
       render: (_v, row) => {
         if (!row.jobCardId) return null;
-        const token = isShortJobCardToken(row.jobCardId)
-          ? row.jobCardId
-          : deriveJobCardId(row.poId, row.wipKey ?? "", activeTab);
+        const token = deriveBarcodeToken(row.poId, row.wipKey ?? "", activeTab);
         return (
           <span className="font-mono text-[11px] text-[#6B7280]">{token}</span>
         );
@@ -5581,16 +5580,11 @@ export default function ProductionPage({
       if (showScan) {
         for (const r of printRows) {
           if (r.jobCardId && !barcodeByJc.has(r.jobCardId)) {
-            // Encode the SHORT scannable token. A card created after the id-
-            // shortening already has a short id → use it verbatim (the scanner
-            // hits it on the fast jc.id path). A card created BEFORE it has a
-            // long id → re-derive the short token from its (poId, wipKey, dept);
-            // the scanner resolves that by re-deriving across the dept's open
-            // cards (scan-lookup fallback). Migration-free, and new cards are
-            // byte-identical to before — only old cards gain a scannable code.
-            const token = isShortJobCardToken(r.jobCardId)
-              ? r.jobCardId
-              : deriveJobCardId(r.poId, r.wipKey ?? "", activeTab);
+            // Encode the SHORT 10-char barcode token (b<deptNN><7hash>). The
+            // scanner resolves it by re-deriving across the dept's OPEN cards
+            // (dept = the 2 digits) — works for new AND old cards alike, no id
+            // migration, and the code is short enough to actually scan.
+            const token = deriveBarcodeToken(r.poId, r.wipKey ?? "", activeTab);
             barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(token));
           }
         }
@@ -5743,12 +5737,11 @@ export default function ProductionPage({
     table.schedule td.m, table.schedule th.m {
       text-align: center; width: ${sizes.mWidth}px; padding: ${sizes.mPad}px;
     }
-    /* "Scan to complete" column — one Code 128 per WIP row. Wide-but-short so it
-       fits the schedule's thin rows (a square QR there is too small to scan —
-       Wei Siang "QR 放在 schedule 看不到"). 240px cap is narrower than before so it's
-       less "夸张" while staying a scannable X-dimension. */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 248px; }
-    table.schedule td.bc img { height: 32px; width: auto; max-width: 240px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
+    /* "Scan to complete" column — one Code 128 per WIP row. The token is now just
+       10 chars, so the barcode is a NORMAL size: ~50mm wide × ~7mm tall, fat
+       retail-grade bars (Wei Siang 2026-06-16: "正常的哪有那麽厚那麽長的"). */
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 196px; }
+    table.schedule td.bc img { height: 28px; width: auto; max-width: 188px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
     /* The human WIP name printed below the bars so the worker can confirm the
        code matches the piece. Wraps on word breaks (it's a readable name). */
     table.schedule td.bc .bccode { display: block; font-family: Arial, sans-serif; font-size: 9px; line-height: 1.1; color: #000; margin-top: 1px; word-break: normal; overflow-wrap: anywhere; }

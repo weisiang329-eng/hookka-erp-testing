@@ -8492,11 +8492,15 @@ export default function ProductionPage({
                   <div className="mt-auto pt-[1.5mm] border-t border-dashed border-black">
                     <div className="flex items-end gap-[2mm] pt-[1.5mm]">
                       {s.qrDataUrl && (
+                        // Fab Cut 100x150mm: QR gets its OWN left/bottom margin
+                        // (on top of the 6mm page padding) so it sits further from
+                        // the edge than the text — same anti-clip treatment as the
+                        // Packing FG box label.
                         <img
                           src={s.qrDataUrl}
                           alt="Job card QR"
                           style={{ width: "34mm", height: "34mm" }}
-                          className="shrink-0"
+                          className="shrink-0 ml-[2mm] mb-[1.5mm]"
                         />
                       )}
                       <div className="flex-1 min-w-0 self-stretch flex flex-col justify-between" style={{ fontSize: "11pt" }}>
@@ -8530,10 +8534,14 @@ export default function ProductionPage({
                 className="sticker-jc-page bg-white text-black flex flex-col items-center"
                 style={{ width: "50mm", height: "75mm" }}
               >
+                {/* 50x75mm: QR is top-centred (already clear left/right). Give it
+                    a top margin too so its top edge clears the printer margin —
+                    parity with the larger labels' anti-clip treatment. */}
                 <img
                   src={s.qrDataUrl}
                   alt="Job card QR"
                   style={{ width: "30mm", height: "30mm" }}
+                  className="mt-[1mm]"
                 />
                 <div
                   className="font-bold text-center leading-tight w-full"

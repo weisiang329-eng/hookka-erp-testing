@@ -14,7 +14,7 @@ import { deriveJobCardId, isShortJobCardToken } from "@/lib/job-card-id";
 // Static import (not dynamic) so Code 128 generation is SYNCHRONOUS inside the
 // print click gesture — an await before window.open would trip the pop-up
 // blocker. jsbarcode is small and scoped to this (already heavy) page chunk.
-import JsBarcode from "jsbarcode";
+import QRCode from "qrcode";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 // useTimeout — P4.3 effect-replacement (still referenced at L2386+).
@@ -97,29 +97,39 @@ type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
 // Wei Siang 2026-05-29: drag a header's right edge to resize; double-click to
 // reset. Widths persist per-browser in localStorage. Shared with every header
 // cell via context so we don't thread two callbacks through 15 call sites.
-// Render a WIP's Code 128 (HKJC:<jobCardId>) to a PNG data URL, SYNCHRONOUSLY,
-// for the Production Schedule print. Scanning it on the phone marks the WIP
-// complete — the linear-scan twin of the QR, for the no-sticker depts
-// (Woodcutting / Framing / Webbing). Returns "" on any failure so a bad row
-// never blocks the print. jobCardBarcodeValue() is the single source of the
-// encoded string (shared with the scanner's parseJobCardBarcode).
-function jobCardCode128DataUrl(jobCardId: string): string {
+// Render the SAME scan string (HKJC:<token>) as a small QR for the Production
+// Schedule print. A QR is far easier to scan on a phone than the wide 1D Code
+// 128 was (2D, compact, error-corrected) AND it scans in the worker app's
+// DEFAULT mode — no Barcode-mode switch (Wei Siang 2026-06-16: the 1D barcode
+// "完全没反应" on real phones, and it was too wide). Same encoded string, so the
+// scanner's parseJobCardBarcode path resolves it identically. SYNC (QRCode.create
+// + manual canvas draw) so the print's data-URL prebuild stays synchronous and
+// window.open isn't popup-blocked by an await.
+function jobCardQrDataUrl(value: string): string {
   try {
+    // errorCorrectionLevel M (not Q): the payload is short (~25 chars → 25×25
+    // modules), so M keeps the module count low → bigger, easier-to-scan cells
+    // at the small printed size.
+    const qr = QRCode.create(value, { errorCorrectionLevel: "M" });
+    const n = qr.modules.size;
+    const quiet = 2; // quiet-zone modules
+    const scale = 6; // px per module in the source canvas
+    const dim = (n + quiet * 2) * scale;
     const canvas = document.createElement("canvas");
-    JsBarcode(canvas, jobCardBarcodeValue(jobCardId), {
-      format: "CODE128",
-      height: 46,
-      // Wide narrow-bar (3px source) = lots of pixels per bar → crisp + reliably
-      // scannable when printed. The id is now short (~20 chars, hashed) so even
-      // at 3px/module the canvas stays small enough to print at a fat X-dimension
-      // (the old 84-char id forced a 5×-too-dense barcode that never scanned).
-      width: 3,
-      margin: 6,
-      // The human-readable id is printed as crisp HTML below the bars (see the
-      // print cell's <span class="bccode">), NOT baked into the canvas — the
-      // baked text rasterised at bar-resolution and printed blurry. Bars only.
-      displayValue: false,
-    });
+    canvas.width = dim;
+    canvas.height = dim;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return "";
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, dim, dim);
+    ctx.fillStyle = "#000000";
+    for (let row = 0; row < n; row++) {
+      for (let col = 0; col < n; col++) {
+        if (qr.modules.get(row, col)) {
+          ctx.fillRect((col + quiet) * scale, (row + quiet) * scale, scale, scale);
+        }
+      }
+    }
     return canvas.toDataURL("image/png");
   } catch {
     return "";
@@ -3710,23 +3720,26 @@ export default function ProductionPage({
       render: (_v, row) => renderStatusCell(row),
     },
     {
-      // Code 128 "Scan to complete" — a normal, DEFAULT-HIDDEN column toggled
-      // in the Columns menu like any other (Wei Siang 2026-06-15: "应该做在
-      // column 那边"). Off by default — the barcode isn't used on the floor yet.
-      // On screen it shows the job-card id (light); the actual scannable Code
-      // 128 is drawn by the Print Schedule output (see handlePrintSchedule).
+      // "Scan to complete" — a DEFAULT-HIDDEN column toggled in the Columns menu
+      // like any other (Wei Siang 2026-06-15: "应该做在 column 那边"). On screen it
+      // shows the SHORT scan token (not the long internal id — Wei Siang 2026-06-16
+      // "很多字是多余的"); the actual scannable QR is drawn by the Print Schedule
+      // output (see handlePrintSchedule / jobCardQrDataUrl).
       key: "scanCode",
-      label: "Barcode",
+      label: "Scan QR",
       type: "text",
       width: "150px",
       sortable: false,
       defaultHidden: true,
-      render: (_v, row) =>
-        row.jobCardId ? (
-          <span className="font-mono text-[11px] text-[#6B7280]">
-            {row.jobCardId}
-          </span>
-        ) : null,
+      render: (_v, row) => {
+        if (!row.jobCardId) return null;
+        const token = isShortJobCardToken(row.jobCardId)
+          ? row.jobCardId
+          : deriveJobCardId(row.poId, row.wipKey ?? "", activeTab);
+        return (
+          <span className="font-mono text-[11px] text-[#6B7280]">{token}</span>
+        );
+      },
     },
   ], [activeTab, upstreamDepts, isTablet]);
 
@@ -5592,21 +5605,24 @@ export default function ProductionPage({
             const token = isShortJobCardToken(r.jobCardId)
               ? r.jobCardId
               : deriveJobCardId(r.poId, r.wipKey ?? "", activeTab);
-            barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(token));
+            barcodeByJc.set(
+              r.jobCardId,
+              jobCardQrDataUrl(jobCardBarcodeValue(token)),
+            );
           }
         }
       }
       const renderCell = (col: Column<DeptRow>, r: DeptRow): string => {
         const key = col.key;
-        // Code 128 column: scannable bars (image) + the job-card id as crisp
-        // HTML below (sharp at print DPI; the bars carry no baked text).
+        // "Scan to complete" column: a small QR (image) + the human WIP name
+        // below it.
         if (key === "scanCode") {
           const bc = (r.jobCardId && barcodeByJc.get(r.jobCardId)) || "";
           if (!bc) return "";
           // Caption = the human WIP name (token-stripped), NOT the cryptic id —
-          // the worker reads it to confirm the barcode matches the piece in
-          // hand. Any stray __SIZE__/__MODEL__ template token is stripped
-          // defensively; the scannable id lives in the bars + the img alt.
+          // the worker reads it to confirm the QR matches the piece in hand. Any
+          // stray __SIZE__/__MODEL__ template token is stripped defensively; the
+          // scannable token lives in the QR + the img alt.
           const wipRaw = String(
             (r as unknown as Record<string, unknown>).wip ?? "",
           );
@@ -5744,16 +5760,15 @@ export default function ProductionPage({
     table.schedule td.m, table.schedule th.m {
       text-align: center; width: ${sizes.mWidth}px; padding: ${sizes.mPad}px;
     }
-    /* Code 128 "Scan to complete" column — one barcode per WIP row. Sized
-       generously so it prints crisp and scans reliably (not dense/blurry). */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 255px; }
-    /* The id is now a short hash (~20 chars), so the Code 128 is far less dense.
-       A 290px cap gives each bar a fat X-dimension (~0.25mm) — comfortably above
-       a phone camera's ~0.19mm floor, so it scans first-try every time. */
-    table.schedule td.bc img { height: 34px; width: auto; max-width: 248px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
-    /* The human WIP name printed as real (vector) text below the bars, so the
-       worker can confirm the barcode matches the piece. Wraps on word breaks
-       (it's a readable name now, not a long id). */
+    /* "Scan to complete" column — one small QR per WIP row (was a wide Code 128;
+       the 1D barcode was too wide and wouldn't scan on a phone). A QR is compact
+       and scans in the worker app's default mode. */
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 96px; }
+    /* ~21mm square at print — its short payload (~25 chars, 25×25 modules) gives
+       fat ~0.8mm cells, so a phone locks on instantly. */
+    table.schedule td.bc img { width: 80px; height: 80px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
+    /* The human WIP name printed below the QR so the worker can confirm the code
+       matches the piece. Wraps on word breaks (it's a readable name, not an id). */
     table.schedule td.bc .bccode { display: block; font-family: Arial, sans-serif; font-size: 9px; line-height: 1.1; color: #000; margin-top: 1px; word-break: normal; overflow-wrap: anywhere; }
     table.schedule td.so { font-weight: 700; white-space: nowrap; }
     table.schedule td.prod small,

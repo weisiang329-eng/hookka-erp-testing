@@ -694,43 +694,30 @@ app.post("/clock", async (c) => {
           );
           const endMin = rules.endMin;
           const outTime = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(endMin % 60).padStart(2, "0")}`;
-          const inMin = hhmmToMinutes(s.clockIn) ?? 0;
-          const total = Math.max(0, endMin - inMin);
-          const prodMin = Math.max(0, Math.round(total * 0.85));
+          // Forgotten clock-out → count the day as the NORMAL shift (Wei Siang
+          // 2026-06-16: just the standard hours — 9h / 7.5h — with NO overtime
+          // and NO short-hour dock; a missed punch isn't a real short/long day)
+          // and FLAG it so the office sees they forgot to punch out. No
+          // working-hours autofill either (nothing to reconcile).
           const stdMin = (worker.workingHoursPerDay || 9) * 60;
-          const otMin = Math.max(0, total - stdMin);
+          const prodMin = Math.max(0, Math.round(stdMin * 0.85));
           const effPct = stdMin > 0 ? Math.round((prodMin / stdMin) * 100) : 0;
           await c.var.DB.prepare(
             `UPDATE attendance_records
                SET clockOut = ?, workingMinutes = ?, productionTimeMinutes = ?,
-                   efficiencyPct = ?, overtimeMinutes = ?,
+                   efficiencyPct = ?, overtimeMinutes = 0,
                    notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes END
              WHERE id = ? AND clockOut IS NULL`,
           )
-            .bind(outTime, total, prodMin, effPct, otMin, "Auto clock-out (forgot to punch out)", s.id)
+            .bind(
+              outTime,
+              stdMin,
+              prodMin,
+              effPct,
+              "Forgot to punch out — auto-counted as a normal shift",
+              s.id,
+            )
             .run();
-          try {
-            await maybeApplyAutoPunchDock(c.var.DB, {
-              workerId: s.employeeId,
-              date: s.date,
-              clockIn: s.clockIn,
-              clockOut: outTime,
-            });
-          } catch {
-            /* best-effort */
-          }
-          try {
-            await autofillWorkingHoursFromPunch(c.var.DB, {
-              attendanceId: s.id,
-              workerId: s.employeeId,
-              date: s.date,
-              clockIn: s.clockIn,
-              clockOut: outTime,
-              homeDeptCode: s.departmentCode,
-            });
-          } catch {
-            /* best-effort */
-          }
         }
       }
     } catch (e) {

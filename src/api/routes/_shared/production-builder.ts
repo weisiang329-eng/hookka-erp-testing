@@ -37,6 +37,7 @@ import {
 } from "../../lib/lead-times";
 import {
   breakBomIntoWips,
+  deriveJobCardId,
   type BomVariantContext,
 } from "../../lib/bom-wip-breakdown";
 import { isHeadboardOnlySpecial } from "../fg-units";
@@ -856,9 +857,7 @@ export async function createProductionOrdersForOrder(
           continue;
         }
 
-        const jcId = `jc-${poId}-${p.wipKey}-${p.deptCode}`
-          .replace(/[^a-zA-Z0-9_-]/g, "_")
-          .slice(0, 128);
+        const jcId = deriveJobCardId(poId, p.wipKey, p.deptCode);
         const isFirstDeptForWip = p.sequence === 0;
         statements.push(
           db
@@ -924,9 +923,7 @@ export async function createProductionOrdersForOrder(
       for (const l1p of l1Procs) {
         const deptMeta = deptByCode.get(l1p.deptCode);
         if (!deptMeta) continue;
-        const jcId = `jc-${poId}-FG-${l1p.deptCode}`
-          .replace(/[^a-zA-Z0-9_-]/g, "_")
-          .slice(0, 128);
+        const jcId = deriveJobCardId(poId, "FG", l1p.deptCode);
         statements.push(
           db
             .prepare(

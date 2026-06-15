@@ -108,9 +108,11 @@ function jobCardCode128DataUrl(jobCardId: string): string {
     JsBarcode(canvas, jobCardBarcodeValue(jobCardId), {
       format: "CODE128",
       height: 46,
-      // Wider narrow-bar (2.4px) = more pixels per bar → crisp + reliably
-      // scannable when printed (the 1.5px version printed blurry/dense).
-      width: 2.4,
+      // Wide narrow-bar (3px source) = lots of pixels per bar → crisp + reliably
+      // scannable when printed. The id is now short (~20 chars, hashed) so even
+      // at 3px/module the canvas stays small enough to print at a fat X-dimension
+      // (the old 84-char id forced a 5×-too-dense barcode that never scanned).
+      width: 3,
       margin: 6,
       // The human-readable id is printed as crisp HTML below the bars (see the
       // print cell's <span class="bccode">), NOT baked into the canvas — the
@@ -5585,8 +5587,19 @@ export default function ProductionPage({
         if (key === "scanCode") {
           const bc = (r.jobCardId && barcodeByJc.get(r.jobCardId)) || "";
           if (!bc) return "";
-          const idText = escapeHtml(r.jobCardId || "");
-          return `<img src="${bc}" alt="${idText}" /><span class="bccode">${idText}</span>`;
+          // Caption = the human WIP name (token-stripped), NOT the cryptic id —
+          // the worker reads it to confirm the barcode matches the piece in
+          // hand. Any stray __SIZE__/__MODEL__ template token is stripped
+          // defensively; the scannable id lives in the bars + the img alt.
+          const wipRaw = String(
+            (r as unknown as Record<string, unknown>).wip ?? "",
+          );
+          const cap =
+            wipRaw
+              .replace(/__[A-Z0-9_]+__/g, "")
+              .replace(/\s{2,}/g, " ")
+              .trim() || (r.jobCardId || "");
+          return `<img src="${bc}" alt="${escapeHtml(r.jobCardId || "")}" /><span class="bccode">${escapeHtml(cap)}</span>`;
         }
         // Dept pill columns — keys look like "sched_FAB_CUT.sortKey".
         const deptMatch = key.match(/^sched_([A-Z_]+)\.sortKey$/);
@@ -5717,14 +5730,15 @@ export default function ProductionPage({
     }
     /* Code 128 "Scan to complete" column — one barcode per WIP row. Sized
        generously so it prints crisp and scans reliably (not dense/blurry). */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 210px; }
-    /* Headroom (P2): a long job-card id makes the Code 128 intrinsically wider,
-       so the cap is raised from 182px to 204px — long codes keep thicker, more
-       scannable bars instead of being squeezed thin. */
-    table.schedule td.bc img { height: 46px; width: auto; max-width: 204px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
-    /* Job-card id printed as real (vector) text, NOT baked into the barcode
-       image, so it stays sharp at print DPI instead of blurring. */
-    table.schedule td.bc .bccode { display: block; font-family: "Courier New", monospace; font-size: 8px; letter-spacing: 0.3px; color: #000; margin-top: 1px; word-break: break-all; }
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 300px; }
+    /* The id is now a short hash (~20 chars), so the Code 128 is far less dense.
+       A 290px cap gives each bar a fat X-dimension (~0.25mm) — comfortably above
+       a phone camera's ~0.19mm floor, so it scans first-try every time. */
+    table.schedule td.bc img { height: 46px; width: auto; max-width: 290px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
+    /* The human WIP name printed as real (vector) text below the bars, so the
+       worker can confirm the barcode matches the piece. Wraps on word breaks
+       (it's a readable name now, not a long id). */
+    table.schedule td.bc .bccode { display: block; font-family: Arial, sans-serif; font-size: 9px; line-height: 1.1; color: #000; margin-top: 1px; word-break: normal; overflow-wrap: anywhere; }
     table.schedule td.so { font-weight: 700; white-space: nowrap; }
     table.schedule td.prod small,
     table.schedule tbody small { color: #555; font-size: ${sizes.small}px; }

@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
+import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa } from "@/lib/export-report";
 import { COA_TYPE_COLOR, SUCCESS, DANGER, INFO, ACCENT_PLUM } from "@/lib/design-tokens";
 import {
   BookOpen,
@@ -2872,9 +2873,27 @@ function CostStructureTab() {
         {([["all", "Overall"], ["sofa", "Sofa"], ["bedframe", "Bedframe"]] as const).map(([k, lbl]) => (
           <button key={k} onClick={() => setLine(k)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${line === k ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{lbl}</button>
         ))}
-        <select value={fy} onChange={(e) => setFy(parseInt(e.target.value, 10))} className="ml-auto rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
-          {[yrNow, yrNow - 1, yrNow - 2].map((y) => <option key={y} value={y}>FY {y}</option>)}
-        </select>
+        <div className="ml-auto flex items-center gap-2">
+          {data && (
+            <ExportButtons
+              build={() => {
+                const head = ["MONTH", "SALES", ...shown.flatMap((g) => [`${g.description} O/P`, "PUR", "C/L", "SPEND"]), "SPEND % SALES"];
+                const body: Aoa = data.cols.map((m, i) => {
+                  const monthSpend = shown.reduce((s, g) => s + g.months[i].spend, 0);
+                  const s = sales[i] || 0;
+                  return [m, (s / 100).toFixed(2), ...shown.flatMap((g) => [(g.months[i].opening / 100).toFixed(2), (g.months[i].purchase / 100).toFixed(2), (g.months[i].closing / 100).toFixed(2), (g.months[i].spend / 100).toFixed(2)]), s > 0 ? `${((monthSpend / s) * 100).toFixed(1)}%` : "-"];
+                });
+                return [head, ...body];
+              }}
+              filenameBase={`CostStructure-${line}-FY${fy}`}
+              title={`Cost Structure (${line})`}
+              subtitle={data.fyLabel}
+            />
+          )}
+          <select value={fy} onChange={(e) => setFy(parseInt(e.target.value, 10))} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+            {[yrNow, yrNow - 1, yrNow - 2].map((y) => <option key={y} value={y}>FY {y}</option>)}
+          </select>
+        </div>
       </div>
       {loading ? (
         <Card><CardContent className="py-12 text-center text-[#6B7280] text-sm">Loading…</CardContent></Card>
@@ -3018,9 +3037,38 @@ function CostExpenseClassesTab() {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Cost &amp; Expense Classes</h2>
-        <select value={fy} onChange={(e) => setFy(parseInt(e.target.value, 10))} className="ml-auto rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
-          {[yrNow, yrNow - 1, yrNow - 2].map((y) => <option key={y} value={y}>FY {y}</option>)}
-        </select>
+        {data && (
+          <div className="ml-auto flex items-center gap-2">
+            <ExportButtons
+              build={() => {
+                const aoa: Aoa = [["CLASS / ACCOUNT", ...data.cols.map((m) => m.slice(2)), "TOTAL"]];
+                const section = (title: string, sec: CeSection) => {
+                  aoa.push([title]);
+                  for (const cls of ["FIXED", "VARIABLE", "OTHERS"]) {
+                    const rws = sec[cls] ?? [];
+                    if (!rws.length) continue;
+                    aoa.push([cls, ...data.cols.map((_, i) => (rws.reduce((s, r) => s + r.months[i], 0) / 100).toFixed(2)), (rws.reduce((s, r) => s + r.total, 0) / 100).toFixed(2)]);
+                    for (const r of rws) aoa.push([`  ${r.account} ${r.name}`, ...r.months.map((m) => (m / 100).toFixed(2)), (r.total / 100).toFixed(2)]);
+                  }
+                };
+                section("COST OF PRODUCTION", data.cost);
+                section("OPERATING EXPENSES", data.expense);
+                return aoa;
+              }}
+              filenameBase={`CostExpenseClasses-FY${fy}`}
+              title="Cost & Expense Classes"
+              subtitle={data.fyLabel}
+            />
+            <select value={fy} onChange={(e) => setFy(parseInt(e.target.value, 10))} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+              {[yrNow, yrNow - 1, yrNow - 2].map((y) => <option key={y} value={y}>FY {y}</option>)}
+            </select>
+          </div>
+        )}
+        {!data && (
+          <select value={fy} onChange={(e) => setFy(parseInt(e.target.value, 10))} className="ml-auto rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+            {[yrNow, yrNow - 1, yrNow - 2].map((y) => <option key={y} value={y}>FY {y}</option>)}
+          </select>
+        )}
       </div>
       {loading ? (
         <Card><CardContent className="py-12 text-center text-[#6B7280] text-sm">Loading…</CardContent></Card>
@@ -3081,6 +3129,14 @@ function MonthlyTrendTab() {
           {[6, 9, 12].map((n) => (
             <button key={n} onClick={() => setMonths(n)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${months === n ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{n} mo</button>
           ))}
+          {!loading && cols.length > 0 && (
+            <ExportButtons
+              build={() => [["ITEM", ...cols.map((c2) => c2.ym)], ...rowDefs.map((rd) => [rd.label, ...cols.map((c2) => (c2[rd.key] / 100).toFixed(2))])]}
+              filenameBase={`MonthlyTrend-${line}`}
+              title={`Monthly Trend (${line})`}
+              subtitle={`${months} months`}
+            />
+          )}
         </div>
       </div>
       <Card>
@@ -3108,6 +3164,19 @@ function MonthlyTrendTab() {
         </CardContent>
       </Card>
       <p className="text-[11px] text-[#9CA3AF]">Newest month at left · the small number under each amount is % of that month's net sales · negatives in red.</p>
+    </div>
+  );
+}
+
+// Shared CSV / Excel / PDF export buttons for the finance reports. The tab
+// supplies a builder that returns the table as an array-of-arrays (header
+// row + body) plus a filename base + title.
+function ExportButtons({ build, filenameBase, title, subtitle }: { build: () => Aoa; filenameBase: string; title: string; subtitle: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <button onClick={() => exportReportCsv(`${filenameBase}.csv`, build())} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">CSV</button>
+      <button onClick={() => exportReportXlsx(`${filenameBase}.xlsx`, title.slice(0, 28), build())} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">Excel</button>
+      <button onClick={() => exportReportPdf(`${filenameBase}.pdf`, title, subtitle, build())} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">PDF</button>
     </div>
   );
 }
@@ -3169,6 +3238,23 @@ function PLStatementTab() {
   const numCell = (v: number | undefined) =>
     v === undefined ? "" : v < 0 ? `(${formatCurrency(Math.abs(v))})` : formatCurrency(v);
 
+  // Export: every row (indented by depth), with both money columns.
+  const buildExport = (): Aoa => {
+    const aoa: Aoa = [["ITEM", "FY YTD (RM)", "YTD %", `${data?.periodLabel ?? period} (RM)`, "%"]];
+    for (const r of rows) {
+      if (r.kind === "gap") { aoa.push(["", "", "", "", ""]); continue; }
+      const indent = "  ".repeat(r.depth) + (r.kind === "group" ? "› " : "");
+      aoa.push([
+        indent + r.label,
+        r.ytdSen === undefined ? "" : (r.ytdSen / 100).toFixed(2),
+        pct(r.ytdSen),
+        r.periodSen === undefined ? "" : (r.periodSen / 100).toFixed(2),
+        pct(r.periodSen),
+      ]);
+    }
+    return aoa;
+  };
+
   const lineTabs: { k: "all" | "sofa" | "bedframe"; label: string }[] = [
     { k: "all", label: "Overall" },
     { k: "sofa", label: "Sofa P&L" },
@@ -3210,6 +3296,9 @@ function PLStatementTab() {
           {[1, 2, 3, 4].map((L) => (
             <button key={L} onClick={() => applyLevel(rows, L)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${level === L ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>L{L}</button>
           ))}
+          {!loading && rows.length > 0 && (
+            <ExportButtons build={buildExport} filenameBase={`PL-${line}-${period}`} title={`P&L ${line === "all" ? "Overall" : line === "sofa" ? "Sofa" : "Bedframe"}`} subtitle={`Period: ${data?.periodLabel ?? period} · ${data?.fyLabel ?? ""}`} />
+          )}
         </div>
       </div>
 

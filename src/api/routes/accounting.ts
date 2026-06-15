@@ -25,6 +25,7 @@ import {
 import { getFyeMonth, fyWindowFor } from "../lib/fiscal";
 import { emitAudit } from "../lib/audit";
 import { parseDebtorCode } from "../../lib/debtor";
+import type { CfMap } from "../../lib/cashflow-engine";
 
 const app = new Hono<Env>();
 
@@ -5146,6 +5147,30 @@ async function getLabourMap(
   return DEFAULT_LABOUR_MAP;
 }
 
+async function getCashflowMap(
+  db: Env["Variables"]["DB"],
+): Promise<CfMap> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'cashflow_account_map'")
+      .first<{ value: string | null }>();
+    if (row?.value) return JSON.parse(row.value) as CfMap;
+  } catch { /* absent → empty: engine falls back to defaults */ }
+  return {};
+}
+
+async function getCashflowStockGroupMap(
+  db: Env["Variables"]["DB"],
+): Promise<Record<string, string>> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'cashflow_stockgroup_map'")
+      .first<{ value: string | null }>();
+    if (row?.value) return JSON.parse(row.value) as Record<string, string>;
+  } catch { /* absent → empty */ }
+  return {};
+}
+
 type LabourDeptAgg = {
   departmentCode: string;
   account: string;
@@ -5321,6 +5346,45 @@ app.put("/labor/map", async (c) => {
       .bind(JSON.stringify({ fallback, byDept }), new Date().toISOString())
       .run();
     return c.json({ success: true, data: { fallback, byDept } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.get("/cashflow/map", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const map = await getCashflowMap(c.var.DB);
+  const sgMap = await getCashflowStockGroupMap(c.var.DB);
+  return c.json({ success: true, data: { map, stockGroupMap: sgMap } });
+});
+
+app.put("/cashflow/map", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as {
+      map?: Record<string, { section?: string; order?: number }>;
+      stockGroupMap?: Record<string, string>;
+    };
+    const map: Record<string, { section: string; order: number }> = {};
+    for (const [code, v] of Object.entries(body.map ?? {})) {
+      if (v && typeof v.section === "string")
+        map[code] = { section: v.section, order: Number(v.order) || 0 };
+    }
+    const sg: Record<string, string> = {};
+    for (const [g, line] of Object.entries(body.stockGroupMap ?? {}))
+      if (typeof line === "string" && line.trim()) sg[g] = line.trim();
+    const now = new Date().toISOString();
+    await c.var.DB.prepare(
+      `INSERT INTO kv_config (key, value, updated_at) VALUES ('cashflow_account_map', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).bind(JSON.stringify(map), now).run();
+    await c.var.DB.prepare(
+      `INSERT INTO kv_config (key, value, updated_at) VALUES ('cashflow_stockgroup_map', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).bind(JSON.stringify(sg), now).run();
+    return c.json({ success: true, data: { map, stockGroupMap: sg } });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

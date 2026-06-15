@@ -12,7 +12,9 @@ import {
   AlertTriangle,
   CheckCircle2,
   PackageX,
+  Plus,
   Send,
+  SlidersHorizontal,
   Truck,
 } from "lucide-react";
 import { csrfHeaders } from "@/lib/csrf";
@@ -58,6 +60,28 @@ type AdvanceResponse = {
     failed: number;
     summary?: PublicPayload;
   };
+};
+
+// Item-edit (lorry space) — load before dispatch, adjust what's on the truck.
+// `items` are already on the DO (ticked = keep); `addable` are other ready POs
+// for the same customer (ticked = add to this trip). Server owns the trusted
+// set — the page only sends back the chosen production-order ids.
+type EditItem = {
+  productionOrderId: string;
+  poNo: string;
+  productCode: string;
+  productName: string;
+  sizeLabel: string;
+  fabricCode: string;
+  quantity: number;
+  itemM3: number;
+};
+
+type EditModel = {
+  do: { doNo: string; status: string; customerName: string; area: string };
+  editable: boolean;
+  items: EditItem[];
+  addable: EditItem[];
 };
 
 // Same words the office Delivery page uses for the DO pipeline.
@@ -170,6 +194,53 @@ function ActionButton({
   );
 }
 
+// One row in the Adjust-load panel — a DO item (keep) or an addable ready PO.
+function ItemRow({
+  it,
+  checked,
+  onToggle,
+  addable,
+}: {
+  it: EditItem;
+  checked: boolean;
+  onToggle: () => void;
+  addable?: boolean;
+}) {
+  const sub = [it.sizeLabel, it.fabricCode, it.poNo].filter(Boolean).join(" · ");
+  return (
+    <label
+      className={`flex items-center gap-2.5 rounded-lg border p-2.5 cursor-pointer ${
+        checked
+          ? "border-[#6B5C32]/40 bg-[#6B5C32]/5"
+          : addable
+            ? "border-dashed border-[#CDBD9B]"
+            : "border-[#E6E0D9]"
+      }`}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={onToggle}
+        className="h-4 w-4 accent-[#6B5C32]"
+      />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium text-[#1F1D1B]">
+          {it.productName || it.productCode || it.poNo || "Item"}
+        </p>
+        {sub && <p className="truncate text-xs text-gray-500">{sub}</p>}
+      </div>
+      <div className="shrink-0 text-right">
+        <p className="text-xs font-semibold text-[#1F1D1B]">×{it.quantity}</p>
+        {it.itemM3 > 0 && (
+          <p className="text-[10px] text-gray-400">
+            {(it.itemM3 * it.quantity).toFixed(2)} m³
+          </p>
+        )}
+      </div>
+    </label>
+  );
+}
+
 export default function DoScanPage() {
   const { token } = useParams();
   const [payload, setPayload] = useState<PublicPayload | null>(null);
@@ -183,6 +254,14 @@ export default function DoScanPage() {
   const [advanceError, setAdvanceError] = useState<string | null>(null);
   const [lastResults, setLastResults] = useState<AdvanceResult[] | null>(null);
   const [justCompleted, setJustCompleted] = useState<ActionMode | null>(null);
+
+  // ── Item-edit (lorry space) — single-DO DRAFT only ─────────────────────
+  const [editOpen, setEditOpen] = useState(false);
+  const [editModel, setEditModel] = useState<EditModel | null>(null);
+  const [editLoading, setEditLoading] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  // Set of production-order ids ticked = "on the lorry".
+  const [checked, setChecked] = useState<Set<string>>(new Set());
 
   // No synchronous setState before the first await — `loading` starts true
   // and every write below lands in the async continuation, so the mount
@@ -240,11 +319,79 @@ export default function DoScanPage() {
     [payload],
   );
 
-  const handleAdvance = async (mode: ActionMode) => {
+  // Item editing is offered only for a single DO still Pending Dispatch
+  // (DRAFT). Packing-list (multi-DO) scans keep the simple one-tap flow.
+  const canEditLoad = useMemo(
+    () =>
+      !!payload &&
+      payload.kind === "DO" &&
+      payload.dos.length === 1 &&
+      (payload.dos[0].status || "").toUpperCase() === "DRAFT",
+    [payload],
+  );
+
+  const openEdit = useCallback(async () => {
+    if (!token || editLoading) return;
+    setEditLoading(true);
+    setEditError(null);
+    try {
+      const r = await fetch(
+        `/api/public/do-qr/${encodeURIComponent(token)}/edit`,
+        { cache: "no-store" },
+      );
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: EditModel;
+        error?: string;
+      };
+      if (!r.ok || !j.success || !j.data) {
+        setEditError(j.error || "Could not load items. Please try again.");
+        return;
+      }
+      if (!j.data.editable) {
+        setEditError("This delivery can no longer be edited (already dispatched).");
+        return;
+      }
+      setEditModel(j.data);
+      // Pre-tick everything already on the DO.
+      setChecked(
+        new Set(j.data.items.map((i) => i.productionOrderId).filter(Boolean)),
+      );
+      setEditOpen(true);
+    } catch {
+      setEditError("Network error. Please try again.");
+    } finally {
+      setEditLoading(false);
+    }
+  }, [token, editLoading]);
+
+  const toggleChecked = (poId: string) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(poId)) next.delete(poId);
+      else next.add(poId);
+      return next;
+    });
+  };
+
+  // Items currently ticked (across keep + add lists) and the running load.
+  const editChosen = editModel
+    ? [...editModel.items, ...editModel.addable].filter((x) =>
+        checked.has(x.productionOrderId),
+      )
+    : [];
+  const chosenCount = editChosen.reduce((s, x) => s + (x.quantity || 0), 0);
+  const chosenM3 = editChosen.reduce(
+    (s, x) => s + (x.itemM3 || 0) * (x.quantity || 0),
+    0,
+  );
+
+  const handleAdvance = async (mode: ActionMode, poIds?: string[]) => {
     if (!token || busy) return;
-    // First tap arms THIS button; a second tap on the same button confirms.
-    // Tapping the other button re-arms it instead of firing.
-    if (armed !== mode) {
+    // The two-tap arm→confirm guard applies to the big top-level buttons. An
+    // edited dispatch (poIds supplied from the Adjust-load panel) is already a
+    // deliberate action with its own button, so it fires immediately.
+    if (!poIds && armed !== mode) {
       setArmed(mode);
       return;
     }
@@ -262,7 +409,14 @@ export default function DoScanPage() {
           // a logged-in staff phone DOES carry the session cookie, and the
           // backend then requires the CSRF echo — include it so both work.
           headers: csrfHeaders(),
-          body: JSON.stringify({ action: apiAction, incomplete }),
+          body: JSON.stringify({
+            action: apiAction,
+            incomplete,
+            // Edited item set (production-order ids) — only sent for a
+            // dispatch from the Adjust-load panel; the server rebuilds the
+            // trusted items from these ids.
+            ...(poIds ? { poIds } : {}),
+          }),
         },
       );
       const j = (await r.json().catch(() => ({}))) as AdvanceResponse;
@@ -275,6 +429,7 @@ export default function DoScanPage() {
       else await load();
       if (j.data.done > 0) {
         setJustCompleted(mode);
+        setEditOpen(false);
       } else if (j.data.failed > 0) {
         setAdvanceError(
           j.data.results.find((x) => x.outcome === "FAILED")?.note ||
@@ -417,7 +572,7 @@ export default function DoScanPage() {
             {/* Action button — one forward step: Mark Dispatched, then Mark
                 Delivered. (The "Delivered with issues" outcome is parked — no
                 downstream process yet; office handles problems manually.) */}
-            {action && !justCompleted && (
+            {action && !justCompleted && !editOpen && (
               <div className="space-y-3">
                 {action === "DISPATCH" ? (
                   <ActionButton
@@ -449,14 +604,116 @@ export default function DoScanPage() {
                     Cancel
                   </button>
                 )}
+                {/* Adjust the lorry load before dispatch (single DO only). */}
+                {action === "DISPATCH" && canEditLoad && !armed && (
+                  <button
+                    type="button"
+                    disabled={editLoading || busy}
+                    onClick={() => void openEdit()}
+                    className="w-full rounded-xl bg-white border border-[#E6E0D9] text-[#6B5C32] py-3 text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-60"
+                  >
+                    {editLoading ? (
+                      <span className="h-4 w-4 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                    ) : (
+                      <SlidersHorizontal className="h-4 w-4" />
+                    )}
+                    Adjust load (add / remove items)
+                  </button>
+                )}
+                {editError && (
+                  <p className="text-sm text-center text-[#9A3A2D]">{editError}</p>
+                )}
               </div>
             )}
 
-            {/* No staff-ERP link here — this is the public driver page
-                (Wei Siang 2026-06-15: a driver shouldn't see a staff login). */}
+            {/* Adjust-load panel — tick what rides on the lorry, untick what
+                won't fit (it returns to the ready pool for a later trip), and
+                add other finished items for the same customer. Then dispatch
+                the ticked set in one tap. */}
+            {editOpen && editModel && !justCompleted && (
+              <div className="rounded-xl bg-white shadow-sm border border-[#E6E0D9] p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-base font-bold text-[#1F1D1B]">Adjust load</p>
+                  <span className="text-xs text-gray-500 truncate">
+                    {editModel.do.customerName}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-500">
+                  Tick what goes on the lorry. Untick anything that won&apos;t
+                  fit — it stays ready for the next trip.
+                </p>
+
+                <div className="space-y-1.5">
+                  {editModel.items.map((it) => (
+                    <ItemRow
+                      key={it.productionOrderId}
+                      it={it}
+                      checked={checked.has(it.productionOrderId)}
+                      onToggle={() => toggleChecked(it.productionOrderId)}
+                    />
+                  ))}
+                </div>
+
+                {editModel.addable.length > 0 && (
+                  <div className="space-y-1.5 border-t border-[#E6E0D9] pt-2.5">
+                    <p className="flex items-center gap-1 text-xs font-semibold text-[#6B5C32]">
+                      <Plus className="h-3.5 w-3.5" /> Add more for{" "}
+                      {editModel.do.customerName || "this customer"}
+                    </p>
+                    {editModel.addable.map((it) => (
+                      <ItemRow
+                        key={it.productionOrderId}
+                        it={it}
+                        checked={checked.has(it.productionOrderId)}
+                        onToggle={() => toggleChecked(it.productionOrderId)}
+                        addable
+                      />
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between border-t border-[#E6E0D9] pt-2.5 text-sm">
+                  <span className="text-gray-600">On the lorry</span>
+                  <span className="font-semibold text-[#1F1D1B]">
+                    {chosenCount} item{chosenCount === 1 ? "" : "s"}
+                    {chosenM3 > 0 ? ` · ${chosenM3.toFixed(2)} m³` : ""}
+                  </span>
+                </div>
+
+                {advanceError && (
+                  <p className="text-sm text-[#9A3A2D]">{advanceError}</p>
+                )}
+
+                <div className="space-y-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={busy || chosenCount === 0}
+                    onClick={() => void handleAdvance("DISPATCH", [...checked])}
+                    className="w-full rounded-xl bg-[#9C6F1E] active:bg-[#835D19] text-white py-3.5 text-base font-bold shadow-sm flex items-center justify-center gap-2 disabled:opacity-60"
+                  >
+                    {busy ? (
+                      <span className="h-5 w-5 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                    ) : (
+                      <Send className="h-5 w-5" />
+                    )}
+                    Dispatch {chosenCount} item{chosenCount === 1 ? "" : "s"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setEditOpen(false)}
+                    className="w-full rounded-xl bg-white border border-[#E6E0D9] text-gray-600 py-2.5 text-sm font-medium disabled:opacity-60"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* No staff-ERP link here — this is the public driver/crew page
+                (Wei Siang 2026-06-15: no staff login on the public scan). */}
             <p className="text-[10px] text-center text-gray-400">
-              Need a change to the load? Contact the Hookka office — this page
-              only updates delivery status.
+              For other changes, contact the Hookka office.
             </p>
           </>
         )}

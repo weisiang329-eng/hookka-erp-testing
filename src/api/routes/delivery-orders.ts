@@ -238,8 +238,9 @@ async function loadDoInvoiceMap(
 }
 
 // Loads { productCode → unitM3 } for the given codes. Used by every DO
-// read path so legacy items (itemM3=0) get backfilled on the fly.
-async function loadProductM3Map(
+// read path so legacy items (itemM3=0) get backfilled on the fly. Exported
+// so the public DO-QR edit flow can backfill itemM3 on its addable POs too.
+export async function loadProductM3Map(
   db: D1Database,
   productCodes: Array<string | null | undefined>,
 ): Promise<Map<string, number>> {

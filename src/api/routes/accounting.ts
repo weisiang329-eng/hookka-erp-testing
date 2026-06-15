@@ -3807,6 +3807,78 @@ function buildPnlRows(p: PnlWindow, y: PnlWindow) {
   return rows;
 }
 
+// Phase 5.9 — Cost & Expense classes: for a financial year, COST (mfg) and
+// EXPENSE (operating) accounts laid out months-as-columns, grouped by
+// pnl_category (FIXED / VARIABLE / OTHERS). This report is the ONLY thing
+// pnl_category drives — it does NOT change the Overall/Sofa/Bedframe P&L
+// format (owner decision 2026-06-11). Unclassified accounts fall to OTHERS.
+app.get("/cost-expense-classes", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const fyParam = c.req.query("fy"); // YYYY (FY start year) optional
+  const fyeMonth = await getFyeMonth(db);
+  const anchorDate = fyParam
+    ? new Date(Date.UTC(parseInt(fyParam, 10), fyeMonth % 12, 15))
+    : new Date();
+  const fyWin = fyWindowFor(anchorDate, fyeMonth);
+  const startYm = fyWin.startIso.slice(0, 7);
+  const endYm = fyWin.endIso.slice(0, 7);
+  const cols: string[] = [];
+  {
+    let [y, m] = startYm.split("-").map((n) => parseInt(n, 10));
+    for (let i = 0; i < 12; i++) {
+      cols.push(`${y}-${String(m).padStart(2, "0")}`);
+      m += 1; if (m > 12) { m = 1; y += 1; }
+    }
+  }
+  const [legRes, coaRes] = await Promise.all([
+    db.prepare("SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries").all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+    db.prepare("SELECT code, name, type, pnlCategory FROM chart_of_accounts").all<{ code: string; name: string; type: CoaRow["type"]; pnlCategory: string | null }>(),
+  ]);
+  const resolve = await loadAccountResolver(db);
+  const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
+  const byAcct = new Map<string, number[]>();
+  for (const l of legRes.results ?? []) {
+    if (isOpeningSource(l.sourceType) || l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal" || l.sourceType === "year_close") continue;
+    const ym = String(l.postedAt ?? "").slice(0, 7);
+    if (ym < startYm || ym > endYm) continue;
+    const code = resolve(l.accountCode);
+    const meta = coa.get(code);
+    if (!meta || (meta.type !== "COST" && meta.type !== "EXPENSE")) continue;
+    const idx = cols.indexOf(ym);
+    if (idx < 0) continue;
+    let arr = byAcct.get(code);
+    if (!arr) { arr = new Array(12).fill(0); byAcct.set(code, arr); }
+    arr[idx] += (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+  }
+  const classOf = (cat: string | null) => {
+    const v = String(cat ?? "").toUpperCase();
+    return v === "FIXED" || v === "VARIABLE" ? v : "OTHERS";
+  };
+  const buildSection = (type: "COST" | "EXPENSE") => {
+    const classes: Record<string, { account: string; name: string; months: number[]; total: number }[]> = { FIXED: [], VARIABLE: [], OTHERS: [] };
+    for (const [code, arr] of byAcct) {
+      const meta = coa.get(code);
+      if (!meta || meta.type !== type) continue;
+      const total = arr.reduce((s, n) => s + n, 0);
+      if (total === 0 && arr.every((n) => n === 0)) continue;
+      classes[classOf(meta.pnlCategory)].push({ account: code, name: meta.name, months: arr, total });
+    }
+    for (const k of Object.keys(classes)) classes[k].sort((a, b) => a.account.localeCompare(b.account));
+    return classes;
+  };
+  return c.json({
+    success: true,
+    data: {
+      fyLabel: fyWin.label,
+      cols,
+      cost: buildSection("COST"),
+      expense: buildSection("EXPENSE"),
+    },
+  });
+});
+
 // Phase 5.8 — Monthly Trend: per-month P&L summary for the last N months
 // (newest first), one product line. Reuses computePnlWindow per month.
 app.get("/pl-trend", async (c) => {

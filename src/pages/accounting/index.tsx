@@ -1,3 +1,4 @@
+import * as React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
@@ -41,7 +42,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "trend" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "stock" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "trend" | "ceclass" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "stock" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -165,6 +166,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "overview", label: "Overview", icon: <LayoutDashboard className="h-4 w-4" /> },
   { key: "pl", label: "P&L Report", icon: <BarChart3 className="h-4 w-4" /> },
   { key: "trend", label: "Monthly Trend", icon: <TrendingUp className="h-4 w-4" /> },
+  { key: "ceclass", label: "Cost/Exp Classes", icon: <BarChart3 className="h-4 w-4" /> },
   { key: "bs", label: "Balance Sheet", icon: <Scale className="h-4 w-4" /> },
   { key: "coa", label: "Chart of Accounts", icon: <List className="h-4 w-4" /> },
   { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" /> },
@@ -243,6 +245,7 @@ export default function AccountingPage() {
           )}
           {tab === "pl" && <PLStatementTab />}
           {tab === "trend" && <MonthlyTrendTab />}
+          {tab === "ceclass" && <CostExpenseClassesTab />}
           {tab === "bs" && <BalanceSheetTab />}
           {tab === "coa" && <COATab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "journals" && (
@@ -2831,6 +2834,105 @@ type PnlStmtRow = {
   totalLabel?: string;
   badge?: string;
 };
+
+// Phase 5.9 — Cost & Expense classes: a FY's COST and EXPENSE accounts
+// laid out months-as-columns + TOTAL, grouped by pnl_category
+// (Fixed/Variable/Others). Independent report; does not affect the P&L.
+type CeRow = { account: string; name: string; months: number[]; total: number };
+type CeSection = Record<string, CeRow[]>;
+
+function CostExpenseClassesTab() {
+  const yrNow = new Date().getUTCFullYear();
+  const [fy, setFy] = useState<number>(yrNow);
+  const [data, setData] = useState<{ fyLabel: string; cols: string[]; cost: CeSection; expense: CeSection } | null>(null);
+  const loading = data === null;
+  useEffect(() => {
+    let stale = false;
+    fetch(`/api/accounting/cost-expense-classes?fy=${fy}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof data> }>)
+      .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [fy]);
+
+  const numTd = (v: number, key: string) => (
+    <td key={key} className="px-2 py-0.5 text-right tabular-nums whitespace-nowrap">{v === 0 ? "-" : v < 0 ? `(${formatCurrency(Math.abs(v))})` : formatCurrency(v)}</td>
+  );
+
+  const renderSection = (title: string, section: CeSection) => {
+    const cols = data!.cols;
+    const classOrder = ["FIXED", "VARIABLE", "OTHERS"];
+    const sectionMonths = new Array(cols.length).fill(0);
+    let sectionTotal = 0;
+    for (const k of classOrder) for (const r of section[k] ?? []) { r.months.forEach((m, i) => sectionMonths[i] += m); sectionTotal += r.total; }
+    return (
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          <div className="px-3 py-2 bg-[#6B5C32] text-white text-sm font-semibold">{title}</div>
+          <table className="text-[12px] whitespace-nowrap">
+            <thead>
+              <tr className="border-b border-[#E2DDD8] text-[11px] text-[#6B7280]">
+                <th className="px-3 py-2 text-left sticky left-0 bg-white">CLASS / ACCOUNT</th>
+                {cols.map((m) => <th key={m} className="px-2 py-2 text-right">{m.slice(2)}</th>)}
+                <th className="px-2 py-2 text-right font-semibold">TOTAL</th>
+              </tr>
+            </thead>
+            <tbody>
+              {classOrder.map((cls) => {
+                const rows = section[cls] ?? [];
+                if (rows.length === 0) return null;
+                const clsMonths = new Array(cols.length).fill(0);
+                let clsTotal = 0;
+                for (const r of rows) { r.months.forEach((m, i) => clsMonths[i] += m); clsTotal += r.total; }
+                return (
+                  <React.Fragment key={cls}>
+                    <tr className="bg-[#F0ECE9]/60 font-semibold text-[#1F1D1B]">
+                      <td className="px-3 py-1 text-left sticky left-0 bg-[#F7F4EF]">{cls}{cls === "OTHERS" ? " (unclassified — tag in COA)" : ""}</td>
+                      {clsMonths.map((m, i) => numTd(m, `c${i}`))}
+                      {numTd(clsTotal, "ct")}
+                    </tr>
+                    {rows.map((r) => (
+                      <tr key={r.account} className="border-b border-[#F0ECE9]">
+                        <td className="px-3 py-0.5 text-left pl-6 sticky left-0 bg-white"><span className="tabular-nums text-[#9CA3AF] mr-1">{r.account}</span>{r.name}</td>
+                        {r.months.map((m, i) => numTd(m, `${r.account}-${i}`))}
+                        {numTd(r.total, `${r.account}-t`)}
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                );
+              })}
+              <tr className="bg-[#1F1D1B] text-white font-bold">
+                <td className="px-3 py-1.5 text-left sticky left-0 bg-[#1F1D1B]">TOTAL {title}</td>
+                {sectionMonths.map((m, i) => <td key={i} className="px-2 py-1.5 text-right tabular-nums">{m === 0 ? "-" : formatCurrency(m)}</td>)}
+                <td className="px-2 py-1.5 text-right tabular-nums">{formatCurrency(sectionTotal)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Cost &amp; Expense Classes</h2>
+        <select value={fy} onChange={(e) => setFy(parseInt(e.target.value, 10))} className="ml-auto rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+          {[yrNow, yrNow - 1, yrNow - 2].map((y) => <option key={y} value={y}>FY {y}</option>)}
+        </select>
+      </div>
+      {loading ? (
+        <Card><CardContent className="py-12 text-center text-[#6B7280] text-sm">Loading…</CardContent></Card>
+      ) : (
+        <>
+          <p className="text-xs text-[#6B7280]">{data!.fyLabel} · Fixed / Variable / Others is driven by each account's P&amp;L Category (set on the Chart of Accounts) and only affects this report.</p>
+          {renderSection("COST OF PRODUCTION — BY CLASS", data!.cost)}
+          {renderSection("OPERATING EXPENSES — BY CLASS", data!.expense)}
+        </>
+      )}
+    </div>
+  );
+}
 
 // Phase 5.8 — Monthly Trend: months as columns (newest left), P&L lines as
 // rows, with the % of net sales under each amount; negatives in red.

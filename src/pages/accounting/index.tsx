@@ -2888,13 +2888,75 @@ function CostStructureTab() {
     return () => { stale = true; };
   }, [fy]);
 
-  const shown = (data?.groups ?? []).filter((g) => {
-    if (line === "bedframe") return g.group.startsWith("B.");
-    if (line === "sofa") return g.group.startsWith("S.");
-    return true;
-  });
-  const sales = data ? (line === "sofa" ? data.salesSofa : line === "bedframe" ? data.salesBed : data.salesAll) : [];
-  const f = (v: number) => (v === 0 ? "-" : formatCurrency(v));
+  // Amounts shown WITHOUT the RM prefix (the section title carries "(RM)")
+  // and slightly larger, so the table reads without scrolling far right.
+  const n = (v: number) => (v === 0 ? "-" : (v / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const groupsFor = (pred: (g: CsGroup) => boolean) => (data?.groups ?? []).filter(pred);
+  const bedGroups = groupsFor((g) => g.group.startsWith("B."));
+  const sofaGroups = groupsFor((g) => g.group.startsWith("S."));
+  const sharedGroups = groupsFor((g) => !g.group.startsWith("B.") && !g.group.startsWith("S."));
+
+  // One Cost-Structure table for a set of groups + that line's sales.
+  const renderCsTable = (title: string, grps: CsGroup[], salesArr: number[]) => {
+    if (!data || grps.length === 0) return null;
+    return (
+      <Card key={title}>
+        <CardContent className="p-0 overflow-x-auto">
+          <div className="px-3 py-2 bg-[#6B5C32] text-white text-sm font-semibold">{title} · {data.fyLabel} · all amounts RM</div>
+          <table className="text-[13px] whitespace-nowrap">
+            <thead>
+              <tr className="border-b border-[#E2DDD8] text-[11px] text-[#6B7280]">
+                <th className="px-2 py-1.5 text-left sticky left-0 bg-white">MONTH</th>
+                <th className="px-2 py-1.5 text-right">SALES</th>
+                {grps.map((g) => (
+                  <th key={g.group} colSpan={4} className="px-2 py-1.5 text-center border-l border-[#E2DDD8]">{g.description}</th>
+                ))}
+                <th className="px-2 py-1.5 text-right border-l border-[#E2DDD8]">SPEND % SALES</th>
+              </tr>
+              <tr className="border-b border-[#E2DDD8] text-[10px] text-[#9CA3AF]">
+                <th className="sticky left-0 bg-white" /><th />
+                {grps.map((g) => (
+                  <React.Fragment key={g.group}>
+                    <th className="px-1.5 py-1 text-right border-l border-[#E2DDD8]">O/P</th>
+                    <th className="px-1.5 py-1 text-right">PUR</th>
+                    <th className="px-1.5 py-1 text-right">C/L</th>
+                    <th className="px-1.5 py-1 text-right">SPEND</th>
+                  </React.Fragment>
+                ))}
+                <th className="border-l border-[#E2DDD8]" />
+              </tr>
+            </thead>
+            <tbody>
+              {data.cols.map((m, i) => {
+                const monthSpend = grps.reduce((s, g) => s + g.months[i].spend, 0);
+                const s = salesArr[i] || 0;
+                const pctTxt = s > 0 ? `${((monthSpend / s) * 100).toFixed(1)}%` : "-";
+                return (
+                  <tr key={m} className="border-b border-[#F0ECE9]">
+                    <td className="px-2 py-1 text-left sticky left-0 bg-white">{m}</td>
+                    <td className="px-2 py-1 text-right tabular-nums">{n(s)}</td>
+                    {grps.map((g) => (
+                      <React.Fragment key={g.group}>
+                        <td className="px-1.5 py-1 text-right tabular-nums border-l border-[#F0ECE9]">{n(g.months[i].opening)}</td>
+                        <td className="px-1.5 py-1 text-right tabular-nums">{n(g.months[i].purchase)}</td>
+                        <td className="px-1.5 py-1 text-right tabular-nums">{n(g.months[i].closing)}</td>
+                        <td className="px-1.5 py-1 text-right tabular-nums font-medium">{n(g.months[i].spend)}</td>
+                      </React.Fragment>
+                    ))}
+                    <td className="px-2 py-1 text-right tabular-nums text-[#9A3A2D] border-l border-[#F0ECE9]">{pctTxt}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+    );
+  };
+
+  // Export covers whatever sections are visible for the current line.
+  const exportGroups = line === "sofa" ? sofaGroups : line === "bedframe" ? bedGroups : data?.groups ?? [];
+  const exportSales = data ? (line === "sofa" ? data.salesSofa : line === "bedframe" ? data.salesBed : data.salesAll) : [];
 
   return (
     <div className="space-y-4">
@@ -2906,11 +2968,11 @@ function CostStructureTab() {
           {data && (
             <ExportButtons
               build={() => {
-                const head = ["MONTH", "SALES", ...shown.flatMap((g) => [`${g.description} O/P`, "PUR", "C/L", "SPEND"]), "SPEND % SALES"];
+                const head = ["MONTH", "SALES", ...exportGroups.flatMap((g) => [`${g.description} O/P`, "PUR", "C/L", "SPEND"]), "SPEND % SALES"];
                 const body: Aoa = data.cols.map((m, i) => {
-                  const monthSpend = shown.reduce((s, g) => s + g.months[i].spend, 0);
-                  const s = sales[i] || 0;
-                  return [m, (s / 100).toFixed(2), ...shown.flatMap((g) => [(g.months[i].opening / 100).toFixed(2), (g.months[i].purchase / 100).toFixed(2), (g.months[i].closing / 100).toFixed(2), (g.months[i].spend / 100).toFixed(2)]), s > 0 ? `${((monthSpend / s) * 100).toFixed(1)}%` : "-"];
+                  const monthSpend = exportGroups.reduce((s, g) => s + g.months[i].spend, 0);
+                  const s = exportSales[i] || 0;
+                  return [m, (s / 100).toFixed(2), ...exportGroups.flatMap((g) => [(g.months[i].opening / 100).toFixed(2), (g.months[i].purchase / 100).toFixed(2), (g.months[i].closing / 100).toFixed(2), (g.months[i].spend / 100).toFixed(2)]), s > 0 ? `${((monthSpend / s) * 100).toFixed(1)}%` : "-"];
                 });
                 return [head, ...body];
               }}
@@ -2926,60 +2988,19 @@ function CostStructureTab() {
       </div>
       {loading ? (
         <Card><CardContent className="py-12 text-center text-[#6B7280] text-sm">Loading…</CardContent></Card>
+      ) : line === "sofa" ? (
+        renderCsTable("SOFA COST STRUCTURE", sofaGroups, data!.salesSofa)
+      ) : line === "bedframe" ? (
+        renderCsTable("BEDFRAME COST STRUCTURE", bedGroups, data!.salesBed)
       ) : (
-        <Card>
-          <CardContent className="p-0 overflow-x-auto">
-            <div className="px-3 py-2 bg-[#6B5C32] text-white text-sm font-semibold">{line === "all" ? "OVERALL" : line === "sofa" ? "SOFA" : "BEDFRAME"} COST STRUCTURE · {data!.fyLabel}</div>
-            <table className="text-[11.5px] whitespace-nowrap">
-              <thead>
-                <tr className="border-b border-[#E2DDD8] text-[10px] text-[#6B7280]">
-                  <th className="px-2 py-1 text-left sticky left-0 bg-white">MONTH</th>
-                  <th className="px-2 py-1 text-right">SALES</th>
-                  {shown.map((g) => (
-                    <th key={g.group} colSpan={4} className="px-2 py-1 text-center border-l border-[#E2DDD8]">{g.description}</th>
-                  ))}
-                  <th className="px-2 py-1 text-right border-l border-[#E2DDD8]">SPEND % SALES</th>
-                </tr>
-                <tr className="border-b border-[#E2DDD8] text-[9px] text-[#9CA3AF]">
-                  <th className="sticky left-0 bg-white" /><th />
-                  {shown.map((g) => (
-                    <React.Fragment key={g.group}>
-                      <th className="px-1 py-0.5 text-right border-l border-[#E2DDD8]">O/P</th>
-                      <th className="px-1 py-0.5 text-right">PUR</th>
-                      <th className="px-1 py-0.5 text-right">C/L</th>
-                      <th className="px-1 py-0.5 text-right">SPEND</th>
-                    </React.Fragment>
-                  ))}
-                  <th className="border-l border-[#E2DDD8]" />
-                </tr>
-              </thead>
-              <tbody>
-                {data!.cols.map((m, i) => {
-                  const monthSpend = shown.reduce((s, g) => s + g.months[i].spend, 0);
-                  const s = sales[i] || 0;
-                  const pctTxt = s > 0 ? `${((monthSpend / s) * 100).toFixed(1)}%` : "-";
-                  return (
-                    <tr key={m} className="border-b border-[#F0ECE9]">
-                      <td className="px-2 py-0.5 text-left sticky left-0 bg-white">{m}</td>
-                      <td className="px-2 py-0.5 text-right tabular-nums">{f(s)}</td>
-                      {shown.map((g) => (
-                        <React.Fragment key={g.group}>
-                          <td className="px-1 py-0.5 text-right tabular-nums border-l border-[#F0ECE9]">{f(g.months[i].opening)}</td>
-                          <td className="px-1 py-0.5 text-right tabular-nums">{f(g.months[i].purchase)}</td>
-                          <td className="px-1 py-0.5 text-right tabular-nums">{f(g.months[i].closing)}</td>
-                          <td className="px-1 py-0.5 text-right tabular-nums font-medium">{f(g.months[i].spend)}</td>
-                        </React.Fragment>
-                      ))}
-                      <td className="px-2 py-0.5 text-right tabular-nums text-[#9A3A2D] border-l border-[#F0ECE9]">{pctTxt}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </CardContent>
-        </Card>
+        // Overall — stacked: Bedframe on top, Sofa below, then shared.
+        <>
+          {renderCsTable("BEDFRAME COST STRUCTURE", bedGroups, data!.salesBed)}
+          {renderCsTable("SOFA COST STRUCTURE", sofaGroups, data!.salesSofa)}
+          {renderCsTable("SHARED / COMMON MATERIALS", sharedGroups, data!.salesAll)}
+        </>
       )}
-      <p className="text-[11px] text-[#9CA3AF]">O/P = opening stock, PUR = purchases, C/L = closing stock, SPEND = consumed (O/P + PUR − C/L). % = month spend ÷ that line's sales. Shared materials (no B./S. prefix) show under Overall only.</p>
+      <p className="text-[11px] text-[#9CA3AF]">O/P = opening stock, PUR = purchases, C/L = closing stock, SPEND = consumed (O/P + PUR − C/L). % = month spend ÷ that line's sales. Shared materials (no B./S. prefix) shown as their own section under Overall.</p>
     </div>
   );
 }

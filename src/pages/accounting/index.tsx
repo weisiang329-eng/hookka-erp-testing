@@ -308,6 +308,7 @@ export default function AccountingPage() {
               <CleanupReportCard />
               <LandedCostCard />
               <StockMapCard accounts={accounts} />
+              <CashflowMapCard accounts={accounts} />
             </div>
           )}
         </>
@@ -925,6 +926,112 @@ function StockMapCard({ accounts }: { accounts: ChartOfAccount[] }) {
             </table>
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+const CF_SECTIONS: { key: string; label: string }[] = [
+  { key: "REVENUE_COLLECTION", label: "Revenue Collection" },
+  { key: "RAW_MATERIALS", label: "Raw Materials" },
+  { key: "DIRECT_LABOUR", label: "Direct Labour" },
+  { key: "FACTORY_OVERHEAD", label: "Factory Overhead" },
+  { key: "GENERAL_EXPENSE", label: "General Expense" },
+  { key: "TAXATION", label: "Taxation" },
+  { key: "FINANCE_COST", label: "Finance Cost" },
+  { key: "CAPEX", label: "Capital Expenditure (CAPEX)" },
+  { key: "DEPOSIT", label: "Deposit Incurred / (Repay)" },
+  { key: "LOAN", label: "Loan / (Repayment)" },
+  { key: "UNALLOCATED", label: "Unallocated" },
+];
+
+function CashflowMapCard({ accounts }: { accounts: ChartOfAccount[] }) {
+  const { toast } = useToast();
+  const [map, setMap] = useState<Record<string, { section: string; order: number }>>({});
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [dragCode, setDragCode] = useState<string | null>(null);
+  const [dragOverSec, setDragOverSec] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/accounting/cashflow/map")
+      .then((r) => r.json() as Promise<{ data?: { map?: Record<string, { section: string; order: number }> } }>)
+      .then((j) => setMap(j?.data?.map ?? {}))
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, []);
+
+  const cfSectionOf = (code: string): string => {
+    if (map[code]?.section) return map[code].section;
+    const b = parseInt(code.split("-")[0] ?? "0", 10) || 0;
+    if (b === 300 || b === 305 || b === 350) return "REVENUE_COLLECTION";
+    if (b === 400 || b === 405) return "RAW_MATERIALS";
+    if (b === 750) return "DIRECT_LABOUR";
+    if (b === 780 || (b >= 700 && b <= 705)) return "FACTORY_OVERHEAD";
+    if (b >= 200 && b <= 299) return "CAPEX";
+    if (b >= 450 && b <= 459) return "LOAN";
+    if (b === 900) return "GENERAL_EXPENSE";
+    return "UNALLOCATED";
+  };
+  const orderOf = (code: string): number => map[code]?.order ?? 9999;
+
+  const postable = accounts.filter((a) => a.isPostable !== false && a.isActive !== false);
+  const bySection = (sec: string) =>
+    postable.filter((a) => cfSectionOf(a.code) === sec)
+      .sort((x, y) => orderOf(x.code) - orderOf(y.code) || x.code.localeCompare(y.code));
+
+  const moveTo = (code: string, sec: string, beforeCode?: string) => {
+    const next = { ...map };
+    const peers = bySection(sec).filter((a) => a.code !== code);
+    const idx = beforeCode ? peers.findIndex((a) => a.code === beforeCode) : peers.length;
+    const ordered = [...peers.slice(0, idx).map((a) => a.code), code, ...peers.slice(idx).map((a) => a.code)];
+    ordered.forEach((cc, i) => { next[cc] = { section: sec, order: i }; });
+    setMap(next);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch("/api/accounting/cashflow/map", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ map }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) toast.success("Cash-flow mapping saved"); else toast.error(j?.error || "Save failed");
+    } catch { toast.error("Save failed"); } finally { setSaving(false); }
+  };
+
+  return (
+    <Card className="mb-4">
+      <CardContent className="p-4">
+        <div className="flex items-center gap-3 mb-3">
+          <h3 className="text-sm font-semibold text-[#1F1D1B]">Cash Flow account mapping</h3>
+          <Button variant="primary" size="sm" onClick={save} disabled={saving || !loaded} className="ml-auto">{saving ? "Saving…" : "Save"}</Button>
+        </div>
+        <p className="text-[11px] text-[#9CA3AF] mb-3">Drag an account to another section, or reorder within a section. The report recomputes subtotals automatically; Bank c/f total never changes.</p>
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" }}>
+          {CF_SECTIONS.map((sec) => (
+            <div key={sec.key}
+              onDragOver={dragCode ? (e) => { e.preventDefault(); setDragOverSec(sec.key); } : undefined}
+              onDragLeave={() => { if (dragOverSec === sec.key) setDragOverSec(null); }}
+              onDrop={(e) => { e.preventDefault(); const src = e.dataTransfer.getData("text/plain"); setDragOverSec(null); setDragCode(null); if (src) moveTo(src, sec.key); }}
+              className={`rounded-md border p-2 ${dragOverSec === sec.key ? "ring-2 ring-inset ring-[#6B5C32] border-[#6B5C32]" : "border-[#E2DDD8]"}`}>
+              <div className="text-xs font-semibold text-[#1F1D1B] mb-1">{sec.label}</div>
+              <div className="space-y-0.5 min-h-[24px]">
+                {bySection(sec.key).map((a) => (
+                  <div key={a.code} draggable
+                    onDragStart={(e) => { setDragCode(a.code); e.dataTransfer.setData("text/plain", a.code); e.dataTransfer.effectAllowed = "move"; }}
+                    onDragEnd={() => { setDragCode(null); setDragOverSec(null); }}
+                    onDragOver={dragCode && dragCode !== a.code ? (e) => { e.preventDefault(); } : undefined}
+                    onDrop={(e) => { e.preventDefault(); e.stopPropagation(); const src = e.dataTransfer.getData("text/plain"); setDragOverSec(null); setDragCode(null); if (src) moveTo(src, sec.key, a.code); }}
+                    className={`text-[12px] px-2 py-1 rounded border border-[#F0ECE9] bg-white hover:bg-[#F7F4EF] cursor-move ${dragCode === a.code ? "opacity-40" : ""}`}>
+                    <span className="tabular-nums text-[#6B7280] mr-1">{a.code}</span>{a.name}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
       </CardContent>
     </Card>
   );

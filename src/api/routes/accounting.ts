@@ -25,6 +25,7 @@ import {
 import { getFyeMonth, fyWindowFor } from "../lib/fiscal";
 import { emitAudit } from "../lib/audit";
 import { parseDebtorCode } from "../../lib/debtor";
+import { pnlBucketFor } from "../../lib/pnl-bucket";
 import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
 
@@ -3599,6 +3600,7 @@ async function computePnlWindow(
   startYm: string | null,
   endYm: string | null,
   line: "all" | "sofa" | "bedframe",
+  override: Record<string, string> = {},
 ) {
   const [stock, gl, ratio] = await Promise.all([
     stockSummaryRange(db, startYm, endYm),
@@ -3617,7 +3619,6 @@ async function computePnlWindow(
     }
     return s;
   };
-  const codeBand = (code: string) => parseInt(code.split("-")[0], 10) || 0;
 
   // --- Sales (revenue < 530), net (credit-normal so sign −1 on DR−CR) ---
   const revLines: { code: string; name: string; amountSen: number }[] = [];
@@ -3625,10 +3626,11 @@ async function computePnlWindow(
   const otherIncomeLines: { code: string; name: string; amountSen: number }[] = [];
   for (const [code, v] of gl.net) {
     const meta = gl.coa.get(code);
-    if (!meta || meta.type !== "REVENUE") continue;
-    const amt = -v; // credit-normal
-    if (codeBand(code) >= 530) { otherIncomeSen += amt; otherIncomeLines.push({ code, name: meta.name, amountSen: amt }); }
-    else revLines.push({ code, name: meta.name, amountSen: amt });
+    if (!meta) continue;
+    const bucket = pnlBucketFor(code, meta.type, override);
+    const amt = -v; // credit-normal (income class)
+    if (bucket === "REVENUE") revLines.push({ code, name: meta.name, amountSen: amt });
+    else if (bucket === "OTHER_INCOME") { otherIncomeSen += amt; otherIncomeLines.push({ code, name: meta.name, amountSen: amt }); }
   }
   const grossSalesSen = revLines.reduce((s, r) => s + r.amountSen, 0);
   // For a line, scale sales by the line's share (sofa = sofa+accessory).
@@ -3652,7 +3654,8 @@ async function computePnlWindow(
   const labourLines: { code: string; name: string; amountSen: number }[] = [];
   for (const [code, v] of gl.net) {
     const meta = gl.coa.get(code);
-    if (!meta || codeBand(code) !== 750) continue;
+    if (!meta) continue;
+    if (pnlBucketFor(code, meta.type, override) !== "DIRECT_LABOUR") continue;
     labourLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)) });
   }
   const labourSen = labourLines.reduce((s, l) => s + l.amountSen, 0);
@@ -3661,7 +3664,8 @@ async function computePnlWindow(
   const overheadLines: { code: string; name: string; amountSen: number }[] = [];
   for (const [code, v] of gl.net) {
     const meta = gl.coa.get(code);
-    if (!meta || codeBand(code) !== 780) continue;
+    if (!meta) continue;
+    if (pnlBucketFor(code, meta.type, override) !== "FACTORY_OVERHEAD") continue;
     overheadLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)) });
   }
   const overheadSen = overheadLines.reduce((s, l) => s + l.amountSen, 0);
@@ -3681,8 +3685,10 @@ async function computePnlWindow(
   const expenseLines: { code: string; name: string; amountSen: number; salary: boolean }[] = [];
   for (const [code, v] of gl.net) {
     const meta = gl.coa.get(code);
-    if (!meta || meta.type !== "EXPENSE") continue;
-    expenseLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)), salary: /^900-S0/.test(code) });
+    if (!meta) continue;
+    const bucket = pnlBucketFor(code, meta.type, override);
+    if (bucket !== "OPERATING_EXPENSE" && bucket !== "OPEX_SALARIES") continue;
+    expenseLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)), salary: bucket === "OPEX_SALARIES" });
   }
   const expenseSen = expenseLines.reduce((s, l) => s + l.amountSen, 0);
   const netProfitSen = grossProfitSen + otherIncomeSen * (isAll ? 1 : R) - expenseSen;

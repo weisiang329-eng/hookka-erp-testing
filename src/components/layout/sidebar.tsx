@@ -233,6 +233,7 @@ const navigationGroups: NavGroup[] = [
           { name: "Chart of Accounts", href: "/accounting?tab=coa", icon: List },
           { name: "Labour", href: "/accounting?tab=labor", icon: Users },
           { name: "Stock", href: "/accounting?tab=stock", icon: Boxes },
+          { name: "Stock Mapping", href: "/accounting?tab=stockmap", icon: Boxes },
           { name: "Opening Balance", href: "/accounting?tab=opening", icon: Scale },
           { name: "Settings", href: "/accounting?tab=maint", icon: Wrench },
         ],

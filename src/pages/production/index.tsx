@@ -5717,8 +5717,11 @@ export default function ProductionPage({
     }
     /* Code 128 "Scan to complete" column — one barcode per WIP row. Sized
        generously so it prints crisp and scans reliably (not dense/blurry). */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 188px; }
-    table.schedule td.bc img { height: 46px; width: auto; max-width: 182px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 210px; }
+    /* Headroom (P2): a long job-card id makes the Code 128 intrinsically wider,
+       so the cap is raised from 182px to 204px — long codes keep thicker, more
+       scannable bars instead of being squeezed thin. */
+    table.schedule td.bc img { height: 46px; width: auto; max-width: 204px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
     /* Job-card id printed as real (vector) text, NOT baked into the barcode
        image, so it stays sharp at print DPI instead of blurring. */
     table.schedule td.bc .bccode { display: block; font-family: "Courier New", monospace; font-size: 8px; letter-spacing: 0.3px; color: #000; margin-top: 1px; word-break: break-all; }

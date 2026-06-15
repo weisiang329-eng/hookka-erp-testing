@@ -512,6 +512,7 @@ function CreateSalesOrderPage() {
             sourceType: "SO" | "CO" | "EXTERNAL";
             sourceId: string;
             affectedProducts?: CaseAffectedProduct[];
+            coveredProductIds?: string[];
           };
         };
         if (!caseRes.ok || !caseJson.success || !caseJson.data) {
@@ -543,17 +544,31 @@ function CreateSalesOrderPage() {
         if (cancelled) return;
         const draft = json.data;
         const affected = Array.isArray(sc.affectedProducts) ? sc.affectedProducts : [];
+        // Re-spawn (#10): a previous service order on this case may already
+        // cover some affected products — pre-fill ONLY the NEW ones. Fall back
+        // to all affected on the FIRST spawn (nothing covered yet) or if the
+        // narrowing would leave nothing to work from.
+        const covered = Array.isArray(sc.coveredProductIds)
+          ? sc.coveredProductIds
+          : [];
+        const newAffected = affected.filter(
+          (ap) => !(ap.productId && covered.includes(ap.productId)),
+        );
+        const effectiveAffected = newAffected.length > 0 ? newAffected : affected;
         const matchEntry = (it: CopyDraftItem): CaseAffectedProduct | undefined =>
-          affected.find(
+          effectiveAffected.find(
             (ap) =>
               (!!ap.productId && ap.productId === it.productId) ||
               (!!ap.code && ap.code === it.productCode),
           );
-        // Keep only the lines the case flagged. No affected products on the
-        // case — or zero overlap (product edited off the source order since
-        // the case was opened) — keeps every line so the operator still has
-        // something to work from.
-        const kept = affected.length > 0 ? draft.items.filter((it) => !!matchEntry(it)) : draft.items;
+        // Keep only the lines the case flagged (narrowed to NEW items for a
+        // re-spawn). No affected products — or zero overlap (product edited off
+        // the source order since the case was opened) — keeps every line so the
+        // operator still has something to work from.
+        const kept =
+          effectiveAffected.length > 0
+            ? draft.items.filter((it) => !!matchEntry(it))
+            : draft.items;
         const baseItems = kept.length > 0 ? kept : draft.items;
         applyCopyDraftHeader(draft);
         const built = buildLinesFromCopyDraft(baseItems).map((line, i) => {
@@ -583,7 +598,12 @@ function CreateSalesOrderPage() {
         });
         if (built.length > 0) setItems(built);
         setLinkedCase({ id: sc.id, caseNo: sc.caseNo });
-        toast.success(`Loaded ${built.length} line(s) from case ${sc.caseNo}. Set prices before saving.`);
+        const coveredCount = affected.length - effectiveAffected.length;
+        toast.success(
+          coveredCount > 0
+            ? `Loaded ${built.length} NEW line(s) from case ${sc.caseNo} (${coveredCount} already on a service order). Set prices before saving.`
+            : `Loaded ${built.length} line(s) from case ${sc.caseNo}. Set prices before saving.`,
+        );
       } catch (e) {
         if (!cancelled) {
           toast.error(e instanceof Error ? e.message : "Couldn't hydrate from the case");

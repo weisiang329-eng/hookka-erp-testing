@@ -305,6 +305,35 @@ async function loadSvOrdersForCases(
   }
 }
 
+// Product ids already covered by a NON-cancelled service order on this case, so
+// re-spawning a 2nd service order can pre-fill ONLY the newly-affected products
+// (#10). Reuses the already-loaded SV order rows; best-effort (empty on error).
+async function loadCoveredProductIdsForCase(
+  db: D1Database,
+  svOrders: SvOrderRow[],
+): Promise<string[]> {
+  const activeIds = svOrders
+    .filter((o) => (o.status || "").toUpperCase() !== "CANCELLED")
+    .map((o) => o.id)
+    .filter(Boolean);
+  if (activeIds.length === 0) return [];
+  try {
+    const ph = activeIds.map(() => "?").join(",");
+    const res = await db
+      .prepare(`SELECT * FROM sales_order_items WHERE salesOrderId IN (${ph})`)
+      .bind(...activeIds)
+      .all<{ productId?: string | null }>();
+    const out: string[] = [];
+    for (const r of res.results ?? []) {
+      const p = (r.productId || "").trim();
+      if (p && !out.includes(p)) out.push(p);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 async function nextCaseNo(db: D1Database, now: Date): Promise<string> {
   // 2026-04-29 operator request: rename Case # prefix from "CASE-YYMM-NNN" to
   // the more compact "SC-YYMM-NNN" so it's the same length as Sales Order #s
@@ -502,9 +531,15 @@ app.get("/:id", async (c) => {
   if (!caseRow) {
     return c.json({ success: false, error: "Service case not found" }, 404);
   }
+  const coveredProductIds = await loadCoveredProductIdsForCase(c.var.DB, svOrders);
   return c.json({
     success: true,
-    data: rowToApi(caseRow, orders.results ?? [], svOrders),
+    data: {
+      ...rowToApi(caseRow, orders.results ?? [], svOrders),
+      // product ids already on a non-cancelled service order (#10) — the
+      // re-spawn flow pre-fills only the affected products NOT in this list.
+      coveredProductIds,
+    },
   });
 });
 

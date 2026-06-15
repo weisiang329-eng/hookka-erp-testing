@@ -907,6 +907,38 @@ export default function WorkerScanPage() {
     // Native detect is cheap → scan more often (~16/s); jsQR is heavier (~11/s).
     const THROTTLE_MS = nativeDetector ? 60 : 90;
 
+    // Adaptive zoom-on-fail (Wei Siang 2026-06-15: auto-zoom for dense codes).
+    // Read the lens zoom range ONCE. Easy codes decode in the first ~1.8s at the
+    // default zoom and never trigger this; only a code the worker has been
+    // pointing at with no luck — a small / dense Code 128 — escalates the zoom so
+    // it fills more of the frame. Capped at 60% of the range so it never tunnels
+    // in so far that framing becomes impossible, and it resets every scan session
+    // (a fresh getUserMedia starts at default zoom). Best-effort: silently off
+    // where the platform doesn't expose zoom (most desktops / some phones).
+    const zoomTrack = stream.getVideoTracks?.()[0] ?? null;
+    let zoomRange: { min: number; max: number } | null = null;
+    let curZoom = 0;
+    let lastZoomAt = 0;
+    try {
+      const zc = (
+        zoomTrack?.getCapabilities?.() as
+          | (MediaTrackCapabilities & { zoom?: { min?: number; max?: number } })
+          | undefined
+      )?.zoom;
+      if (
+        zc &&
+        typeof zc.min === "number" &&
+        typeof zc.max === "number" &&
+        zc.max > zc.min
+      ) {
+        zoomRange = { min: zc.min, max: zc.max };
+        curZoom = zc.min;
+      }
+    } catch {
+      zoomRange = null;
+    }
+    const scanStartedAt = performance.now();
+
     const onHit = (data: string) => {
       if (stopped || !data) return;
       stopped = true;
@@ -977,6 +1009,32 @@ export default function WorkerScanPage() {
                 }
               }
             }
+          }
+        }
+      }
+      // Adaptive zoom-on-fail: after the worker has been pointing at a code for
+      // a while with no decode, step the lens zoom up so a small / dense Code 128
+      // fills more of the frame. Time-guarded so an easy code (decoded in the
+      // first ~1.8s) never zooms — see the zoom setup above.
+      if (
+        zoomRange &&
+        zoomTrack &&
+        now - scanStartedAt > 1800 &&
+        now - lastZoomAt > 1100
+      ) {
+        const cap = zoomRange.min + (zoomRange.max - zoomRange.min) * 0.6;
+        if (curZoom < cap) {
+          lastZoomAt = now;
+          curZoom = Math.min(
+            cap,
+            curZoom + (zoomRange.max - zoomRange.min) * 0.2,
+          );
+          try {
+            void zoomTrack.applyConstraints({
+              advanced: [{ zoom: curZoom } as unknown as MediaTrackConstraintSet],
+            });
+          } catch {
+            /* zoom is best-effort; never break the scan loop */
           }
         }
       }

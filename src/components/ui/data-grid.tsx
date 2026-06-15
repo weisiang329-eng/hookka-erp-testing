@@ -1777,18 +1777,24 @@ export function DataGrid<T extends Record<string, any>>({
   // breaks. Returns a map: column key → left offset in pixels.
   const stickyOffsets = useMemo(() => {
     const out = new Map<string, number>();
+    // The selectable checkbox gutter is pinned to exactly 32px (see its th/td
+    // below) and frozen alongside the sticky run, so the first sticky column
+    // sits at 32 with no gap.
     let acc = selectable ? 32 : 0;
     for (const col of visibleColumns) {
       if (!col.sticky) break; // contiguous leading run only
       out.set(col.key, acc);
-      // Parse a pixel width like "170px"; if the column lacks one, give up
-      // freezing later columns to avoid mis-aligned offsets.
-      const m = col.width ? /^(\d+(?:\.\d+)?)px$/.exec(col.width) : null;
+      // Use the EFFECTIVE width — a user resize (colWidths) must win over the
+      // declared width, else a resized sticky column drifts every following
+      // sticky column's left offset and the scroll content leaks through the
+      // seam ("走漏风", Wei Siang 2026-06-16). Falls back to the declared px.
+      const eff = colWidths[col.key] || col.width;
+      const m = eff ? /^(\d+(?:\.\d+)?)px$/.exec(eff) : null;
       if (!m) break;
       acc += parseFloat(m[1]);
     }
     return out;
-  }, [visibleColumns, selectable]);
+  }, [visibleColumns, selectable, colWidths]);
 
   // ── Search / Filter ──
   // Persisted in sessionStorage keyed by gridId so the search text and
@@ -2607,7 +2613,16 @@ export function DataGrid<T extends Record<string, any>>({
             {/* Header row */}
             <tr className="border-b border-[#D0D0D0] bg-[#F0ECE9]">
               {selectable && (
-                <th className="px-2 py-1.5 text-center bg-[#F0ECE9]">
+                <th
+                  className={cn(
+                    "px-2 py-1.5 text-center bg-[#F0ECE9]",
+                    // When a sticky column run exists, the gutter is the first
+                    // frozen cell (left:0) — without this it scrolls away and
+                    // the 32px the offsets reserve for it leaks ("走漏风").
+                    stickyOffsets.size > 0 && "sticky left-0 z-20",
+                  )}
+                  style={{ width: "32px", minWidth: "32px", maxWidth: "32px" }}
+                >
                   <input
                     type="checkbox"
                     className="h-4 w-4 accent-[#6B5C32] cursor-pointer"
@@ -2779,8 +2794,19 @@ export function DataGrid<T extends Record<string, any>>({
                     >
                       {selectable && (
                         <td
-                          className="p-2 text-center cursor-pointer"
-                          style={{ minHeight: "40px" }}
+                          className={cn(
+                            "p-2 text-center cursor-pointer",
+                            // Freeze the gutter alongside the sticky run with an
+                            // opaque, row-matched bg — a transparent sticky cell
+                            // lets the scrolling cells show through (the leak the
+                            // owner saw beside Send / SO ID). Mirrors the data
+                            // sticky cells' bg logic below.
+                            stickyOffsets.size > 0 && "sticky left-0 z-10 bg-white",
+                            stickyOffsets.size > 0 && isEven && "bg-[#FAFAFA]",
+                            stickyOffsets.size > 0 && rowClassName?.(row),
+                            stickyOffsets.size > 0 && isSelected && "!bg-[#CCE0FF]",
+                          )}
+                          style={{ minHeight: "40px", width: "32px", minWidth: "32px", maxWidth: "32px" }}
                           onClick={(e) => {
                             e.stopPropagation();
                             setSelectedKeys(prev => {

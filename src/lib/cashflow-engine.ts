@@ -84,3 +84,59 @@ export function defaultSectionFor(a: CoaLite): CfSection {
   if (a.type === "EXPENSE" || b === 900) return "GENERAL_EXPENSE";
   return "UNALLOCATED";
 }
+
+export const RM_LINES = [
+  "Purchase of Fabric",
+  "Purchase of Wooden",
+  "Purchase of Filler",
+  "Purchase of Other & Packaging",
+] as const;
+export type RmLine = (typeof RM_LINES)[number];
+
+// Default stock-group → raw-material line. Override map (cashflow_stockgroup_map)
+// takes precedence; unmapped groups fall to "Other & Packaging".
+export function rawMaterialLineFor(
+  group: string,
+  override: Record<string, string>,
+): string {
+  if (override[group]) return override[group];
+  const g = group.toUpperCase();
+  if (g.includes("FABR")) return "Purchase of Fabric";
+  if (g.includes("PLYWOOD") || g.includes("WD") || g.includes("WOOD"))
+    return "Purchase of Wooden";
+  if (g.includes("FILLER")) return "Purchase of Filler";
+  return "Purchase of Other & Packaging";
+}
+
+// Distribute an integer total (sen) across weighted buckets so the parts sum
+// EXACTLY to total (largest-remainder method). Used to split one supplier
+// payment across the material lines of the PI it settled.
+export function splitByLargestRemainder(
+  totalSen: number,
+  buckets: { key: string; weight: number }[],
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const b of buckets) out[b.key] = (out[b.key] ?? 0) + 0;
+  const wsum = buckets.reduce((s, b) => s + Math.max(0, b.weight), 0);
+  if (buckets.length === 0) return out;
+  if (wsum <= 0) {
+    out[buckets[0].key] = (out[buckets[0].key] ?? 0) + totalSen;
+    return out;
+  }
+  const exact = buckets.map((b) => ({
+    key: b.key,
+    raw: (totalSen * Math.max(0, b.weight)) / wsum,
+  }));
+  let assigned = 0;
+  const floored = exact.map((e) => {
+    const f = Math.floor(e.raw);
+    assigned += f;
+    return { key: e.key, floor: f, rem: e.raw - f };
+  });
+  let leftover = totalSen - assigned;
+  floored.sort((a, b) => b.rem - a.rem);
+  for (let i = 0; i < floored.length && leftover > 0; i++, leftover--)
+    floored[i].floor += 1;
+  for (const f of floored) out[f.key] = (out[f.key] ?? 0) + f.floor;
+  return out;
+}

@@ -62,7 +62,12 @@ import {
   validateSofaSizeLabels,
   unknownSofaSizeLabelError,
 } from "../lib/sofa-size-validation";
-import { validateRepairScopeInput } from "../../lib/repair-scope";
+import {
+  validateRepairScopeInput,
+  parseRepairScope,
+  serializeRepairScope,
+  canonicalizeComponentPicks,
+} from "../../lib/repair-scope";
 
 const app = new Hono<Env>();
 
@@ -1341,6 +1346,117 @@ app.get("/repair-components", async (c) => {
   });
 });
 
+// Collapse a FULL component pick to "no components" (= full repair) before a
+// service order's lines are stored (Wei Siang 2026-06-16): if a repair scope's
+// components cover EVERY top-level BOM component at full qty, it's the whole
+// unit, so the DO / list badge should treat it as a complete unit, not a parts
+// breakdown. Runs canonicalizeComponentPicks against the SAME options the
+// /repair-components picker offers. Mutates items[].repairScope in place;
+// best-effort — a missing/unusable BOM leaves the scope untouched.
+async function canonicalizeRepairScopesAgainstBom(
+  db: D1Database,
+  items: Array<{
+    productCode: string;
+    sizeLabel: string;
+    sizeCode: string;
+    fabricCode: string;
+    gapInches: unknown;
+    divanHeightInches: unknown;
+    legHeightInches: unknown;
+    repairScope: string | null;
+  }>,
+): Promise<void> {
+  const toNum = (v: unknown): number | null => {
+    if (v == null || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const targets = items.filter((it) => {
+    const s = it.repairScope ? parseRepairScope(it.repairScope) : null;
+    return !!(s?.components && s.components.length > 0);
+  });
+  if (targets.length === 0) return;
+  const codes = [
+    ...new Set(targets.map((it) => it.productCode).filter(Boolean)),
+  ];
+  if (codes.length === 0) return;
+  const ph = codes.map(() => "?").join(",");
+  const rows = await db
+    .prepare(
+      `SELECT productCode, wipComponents, baseModel, versionStatus, effectiveFrom
+         FROM bom_templates WHERE productCode IN (${ph})`,
+    )
+    .bind(...codes)
+    .all<{
+      productCode: string | null;
+      wipComponents: string | null;
+      baseModel: string | null;
+      versionStatus: string | null;
+      effectiveFrom: string | null;
+    }>();
+  // Best BOM per code — ACTIVE preferred, then newest effectiveFrom (same
+  // two-step rule as GET /repair-components, so options match the picker).
+  const best = new Map<
+    string,
+    { wipComponents: string; baseModel: string | null; active: boolean; eff: string }
+  >();
+  for (const r of rows.results ?? []) {
+    const code = (r.productCode || "").trim();
+    if (!code || !r.wipComponents) continue;
+    const active = (r.versionStatus || "").toUpperCase() === "ACTIVE";
+    const eff = r.effectiveFrom || "";
+    const prev = best.get(code);
+    if (
+      !prev ||
+      (active && !prev.active) ||
+      (active === prev.active && eff > prev.eff)
+    ) {
+      best.set(code, {
+        wipComponents: r.wipComponents,
+        baseModel: r.baseModel,
+        active,
+        eff,
+      });
+    }
+  }
+  for (const it of targets) {
+   try {
+    const bom = best.get(it.productCode);
+    if (!bom) continue;
+    const scope = parseRepairScope(it.repairScope);
+    if (!scope?.components) continue;
+    const wips = breakBomIntoWips(bom.wipComponents, it.productCode, {
+      productCode: it.productCode,
+      model: bom.baseModel || it.productCode,
+      sizeLabel: it.sizeLabel,
+      sizeCode: it.sizeCode,
+      fabricCode: it.fabricCode,
+      divanHeightInches: toNum(it.divanHeightInches),
+      legHeightInches: toNum(it.legHeightInches),
+      gapInches: toNum(it.gapInches),
+    });
+    if (wips.length === 1 && wips[0].wipKey === `${it.productCode}::FG_MAIN`) {
+      continue; // unusable BOM — leave the scope alone
+    }
+    const options = wips.map((w) => ({
+      key: w.wipKey,
+      label: w.wipLabel || w.wipCode,
+      qty: w.quantityMultiplier,
+    }));
+    const canon = canonicalizeComponentPicks(options, scope.components);
+    // undefined = every component picked at full qty → it's a FULL repair: drop
+    // components so the DO/badge render it as the whole unit.
+    it.repairScope = serializeRepairScope(
+      canon === undefined
+        ? { preset: scope.preset, depts: scope.depts }
+        : { ...scope, components: canon },
+    );
+   } catch {
+     // best-effort — leave this line's scope untouched on any BOM/serialize error
+   }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/sales-orders/:id/edit-eligibility — can this SO be edited right now?
 //
@@ -2101,6 +2217,12 @@ app.post("/", async (c) => {
         };
       }),
     );
+
+    // Service orders: collapse a FULL component pick to "no components" so a
+    // whole-unit repair renders as the complete unit on the DO/badge (#10b).
+    if (isServiceOrder) {
+      await canonicalizeRepairScopesAgainstBom(c.var.DB, items);
+    }
 
     // Sofa combo renegotiation — covers manual create AND scan-PO/OCR orders.
     // Combo discounts are SALES pricing — service-order lines keep the
@@ -3483,6 +3605,12 @@ app.put("/:id", async (c) => {
           _lineIndex: idx,
         };
       }));
+
+      // Service orders: collapse a FULL component pick to "no components" so a
+      // whole-unit repair renders as the complete unit on the DO/badge (#10b).
+      if (mergedIsServiceOrder) {
+        await canonicalizeRepairScopesAgainstBom(c.var.DB, newItems);
+      }
 
       // Sofa combo renegotiation on EDIT too — previously edit lost the combo
       // discount (the edit page has no combo logic and re-priced at full).

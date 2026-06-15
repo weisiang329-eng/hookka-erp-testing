@@ -666,16 +666,16 @@ export function normalizePartLabel(label: string): string {
       return "BC";
     case "RIGHT ARM":
     case "R ARM":
-      return "R Arm";
+      return "Right Arm";
     case "LEFT ARM":
     case "L ARM":
-      return "L Arm";
+      return "Left Arm";
     case "ARM":
     case "ARMREST":
       return "Arm";
     case "HR":
     case "HEADREST":
-      return "HR";
+      return "Headrest";
     case "BASE":
       return "Base";
     default:

@@ -163,8 +163,8 @@ test("piecesFor: SOFA partial repair lists sub-components (was the whole set)", 
       { key: "k3", label: "Headrest", qty: 1 },
     ]),
   });
-  // Abbreviated to match the WIP sticker / complete-unit style (Wei Siang).
-  assert.equal(out, "1 BC + 1 Arm + 1 HR");
+  // HB/BC/Arm stay short; Headrest / Right Arm / Left Arm spell out (Wei Siang).
+  assert.equal(out, "1 BC + 1 Arm + 1 Headrest");
 });
 
 test("piecesFor: component qty × line set-qty (2 sets, 1 HB each → '2 HB')", () => {
@@ -199,7 +199,7 @@ test("partLabelFromKey: clean short label from the wipKey (not the verbose label
     partLabelFromKey("5531-2A(RHF)::0::BACK_CUSHION::BC", "5531 -Back Cushion 28"),
     "BC",
   );
-  assert.equal(partLabelFromKey("5531::1::RIGHT_ARM::RA", "5531 -Right Arm"), "R Arm");
+  assert.equal(partLabelFromKey("5531::1::RIGHT_ARM::RA", "5531 -Right Arm"), "Right Arm");
   assert.equal(partLabelFromKey("X::0::BASE::B", "X -Base 28"), "Base");
   assert.equal(partLabelFromKey("X::0::HEADBOARD::HB", "x"), "HB");
   // Unknown wipType → title-cased; no key segments → fall back to the label.

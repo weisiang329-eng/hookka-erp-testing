@@ -1953,29 +1953,14 @@ export default function WorkerScanPage() {
             <span className="text-sm font-semibold">
               {scanMode === "barcode" ? t("scan.modeBarcode") : t("scan.modeQr")}
             </span>
-            <div className="flex items-center gap-2">
-              {/* Switch between the square QR scanner and the wide 1D-barcode
-                  scanner (Wei Siang 2026-06-16). */}
-              <button
-                type="button"
-                onClick={() =>
-                  setScanMode((m) => (m === "qr" ? "barcode" : "qr"))
-                }
-                className="h-9 px-3 rounded-full bg-white/15 active:bg-white/25 text-xs font-semibold"
-              >
-                {scanMode === "qr"
-                  ? t("scan.switchToBarcode")
-                  : t("scan.switchToQr")}
-              </button>
-              <button
-                type="button"
-                onClick={stopLiveScan}
-                className="h-9 w-9 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center"
-                aria-label={t("scan.cancel")}
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={stopLiveScan}
+              className="h-9 w-9 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center"
+              aria-label={t("scan.cancel")}
+            >
+              <X className="h-5 w-5" />
+            </button>
           </div>
           <div className="relative flex-1 overflow-hidden">
             <video
@@ -2006,10 +1991,25 @@ export default function WorkerScanPage() {
               </div>
             </div>
           </div>
-          <div className="px-4 py-3 text-white/90 text-center text-sm">
-            {scanMode === "barcode"
-              ? t("scan.aimHintBarcode")
-              : t("scan.aimHint")}
+          <div className="px-4 pb-7 pt-3 flex flex-col items-center gap-3">
+            <p className="text-white/90 text-center text-sm">
+              {scanMode === "barcode"
+                ? t("scan.aimHintBarcode")
+                : t("scan.aimHint")}
+            </p>
+            {/* Big mode toggle at the BOTTOM-centre so it's in thumb reach
+                (Wei Siang 2026-06-16: the top one was too high to tap). */}
+            <button
+              type="button"
+              onClick={() =>
+                setScanMode((m) => (m === "qr" ? "barcode" : "qr"))
+              }
+              className="w-full max-w-xs h-12 rounded-full bg-white text-black font-bold text-base active:bg-white/80"
+            >
+              {scanMode === "qr"
+                ? t("scan.switchToBarcode")
+                : t("scan.switchToQr")}
+            </button>
           </div>
         </div>
       )}

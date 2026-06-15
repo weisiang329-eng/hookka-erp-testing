@@ -5746,11 +5746,11 @@ export default function ProductionPage({
     }
     /* Code 128 "Scan to complete" column — one barcode per WIP row. Sized
        generously so it prints crisp and scans reliably (not dense/blurry). */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 300px; }
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 255px; }
     /* The id is now a short hash (~20 chars), so the Code 128 is far less dense.
        A 290px cap gives each bar a fat X-dimension (~0.25mm) — comfortably above
        a phone camera's ~0.19mm floor, so it scans first-try every time. */
-    table.schedule td.bc img { height: 46px; width: auto; max-width: 290px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
+    table.schedule td.bc img { height: 34px; width: auto; max-width: 248px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
     /* The human WIP name printed as real (vector) text below the bars, so the
        worker can confirm the barcode matches the piece. Wraps on word breaks
        (it's a readable name now, not a long id). */

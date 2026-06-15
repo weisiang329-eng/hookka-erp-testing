@@ -140,3 +140,188 @@ export function splitByLargestRemainder(
   for (const f of floored) out[f.key] = (out[f.key] ?? 0) + f.floor;
   return out;
 }
+
+export type ClassifiedLeg = {
+  accountCode: string; // resolved canonical contra account
+  debitSen: number;
+  creditSen: number;
+  ym: string; // YYYY-MM (opening-adjusted by caller)
+  sourceType: string;
+  sourceId: string;
+};
+export type BankLeg = {
+  accountCode: string;
+  debitSen: number;
+  creditSen: number;
+  ym: string;
+};
+// Per-PI raw-material weights (line label → weight in sen of the PI's lines).
+export type RmSplit = Record<string, { line: string; weight: number }[]>;
+
+export type CfMapEntry = { section: CfSection; order: number };
+export type CfMap = Record<string, CfMapEntry>;
+
+export type CfColumn = { key: string; label: string; accum?: boolean };
+export type CfRow = {
+  kind: "section" | "group" | "line" | "subtotal" | "result" | "total" | "bf" | "cf" | "gap";
+  label: string;
+  section?: CfSection;
+  depth: number;
+  groupId?: string;
+  values: (number | null)[];
+};
+export type CfStatement = { columns: CfColumn[]; rows: CfRow[] };
+
+// Months of the current FY from period back to FY start (inclusive),
+// newest first, e.g. fye=8, period=2026-03 → [2026-03,...,2025-09,2025-08].
+export function fyMonths(period: string, fyeMonth: number): string[] {
+  const [py, pm] = period.split("-").map((n) => parseInt(n, 10));
+  const startMonth = (fyeMonth % 12) + 1; // month after FYE
+  const out: string[] = [];
+  let y = py, m = pm;
+  for (let i = 0; i < 13; i++) {
+    out.push(`${y}-${String(m).padStart(2, "0")}`);
+    if (m === startMonth) break;
+    m -= 1; if (m === 0) { m = 12; y -= 1; }
+  }
+  return out;
+}
+
+const monthLabel = (ym: string): string => {
+  const [y, m] = ym.split("-");
+  const names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${names[parseInt(m, 10)]}'${y.slice(2)}`;
+};
+
+const cashDelta = (l: { debitSen: number; creditSen: number }): number =>
+  l.creditSen - l.debitSen; // + = cash into the bank account
+
+export function buildStatement(opts: {
+  classified: ClassifiedLeg[];
+  bankLegs: BankLeg[];
+  coa: Map<string, CoaLite>;
+  map: CfMap;
+  rmSplit: RmSplit;
+  stockGroupOverride: Record<string, string>;
+  fyeMonth: number;
+  period: string;
+}): CfStatement {
+  const { classified, bankLegs, coa, map, rmSplit, fyeMonth, period } = opts;
+  const months = fyMonths(period, fyeMonth);        // newest first
+  const fyStart = months[months.length - 1];        // FY start ym
+  const columns: CfColumn[] = [
+    { key: "__accum__", label: `Accumulated`, accum: true },
+    ...months.map((m) => ({ key: m, label: monthLabel(m) })),
+  ];
+  const colIndex = new Map(columns.map((c, i) => [c.key, i] as const));
+  const inFy = (ym: string) => ym >= fyStart && ym <= period;
+
+  type Agg = { section: CfSection; label: string; order: number; vals: number[] };
+  const lines = new Map<string, Agg>();
+  const ensure = (section: CfSection, label: string, order: number): Agg => {
+    const k = `${section}|${label}`;
+    let a = lines.get(k);
+    if (!a) { a = { section, label, order, vals: columns.map(() => 0) }; lines.set(k, a); }
+    return a;
+  };
+  const addToLine = (section: CfSection, label: string, order: number, ym: string, deltaSen: number) => {
+    const a = ensure(section, label, order);
+    if (inFy(ym)) { a.vals[colIndex.get("__accum__")!] += deltaSen; }
+    const ci = colIndex.get(ym);
+    if (ci !== undefined) a.vals[ci] += deltaSen;
+  };
+
+  const placement = (code: string, fallback: CoaLite | undefined): { section: CfSection; order: number; name: string } => {
+    const m = map[code];
+    if (m) return { section: m.section, order: m.order, name: fallback?.name ?? code };
+    const sec = fallback ? defaultSectionFor(fallback) : "UNALLOCATED";
+    return { section: sec, order: 9999, name: fallback?.name ?? code };
+  };
+
+  for (const leg of classified) {
+    const a = coa.get(leg.accountCode);
+    const place = placement(leg.accountCode, a);
+    const delta = cashDelta(leg); // signed; + = cash in
+    if (place.section === "RAW_MATERIALS") {
+      const split = rmSplit[leg.sourceId];
+      if (split && split.length) {
+        const parts = splitByLargestRemainder(
+          Math.abs(delta),
+          split.map((s) => ({ key: s.line, weight: s.weight })),
+        );
+        const sign = delta < 0 ? -1 : 1;
+        for (const [line, sen] of Object.entries(parts))
+          addToLine("RAW_MATERIALS", line, 10, leg.ym, sign * sen);
+      } else {
+        addToLine("RAW_MATERIALS", "Unallocated raw material", 99, leg.ym, delta);
+      }
+    } else {
+      addToLine(place.section, place.name, place.order, leg.ym, delta);
+    }
+  }
+
+  const surplusByCol = columns.map(() => 0); // = bank movement (authoritative)
+  for (const bl of bankLegs) {
+    const d = bl.debitSen - bl.creditSen; // + = balance up
+    if (inFy(bl.ym)) surplusByCol[colIndex.get("__accum__")!] += d;
+    const ci = colIndex.get(bl.ym);
+    if (ci !== undefined) surplusByCol[ci] += d;
+  }
+  const balBefore = (ym: string): number => {
+    let s = 0;
+    for (const bl of bankLegs) if (bl.ym < ym) s += bl.debitSen - bl.creditSen;
+    return s;
+  };
+  const bfVals = columns.map((col) =>
+    col.accum ? balBefore(fyStart) : balBefore(col.key),
+  );
+  const cfVals = columns.map((col, i) => bfVals[i] + surplusByCol[i]);
+
+  const rows: CfRow[] = [];
+  const push = (r: CfRow) => rows.push(r);
+  const sectionLines = (sec: CfSection): Agg[] =>
+    [...lines.values()].filter((a) => a.section === sec)
+      .sort((x, y) => x.order - y.order || x.label.localeCompare(y.label));
+  const sumCols = (aggs: Agg[]): number[] =>
+    columns.map((_, i) => aggs.reduce((s, a) => s + a.vals[i], 0));
+
+  const emitSection = (sec: CfSection, asGroup: boolean) => {
+    const aggs = sectionLines(sec);
+    if (aggs.length === 0 && sec !== "REVENUE_COLLECTION") return;
+    const sign = displaySign(sec);
+    const sub = sumCols(aggs);
+    if (asGroup) {
+      push({ kind: "group", label: SECTION_LABELS[sec], section: sec, depth: 1,
+        groupId: sec, values: sub.map((v) => sign * v) });
+      for (const a of aggs)
+        push({ kind: "line", label: a.label, section: sec, depth: 2,
+          groupId: sec, values: a.vals.map((v) => sign * v) });
+    } else {
+      push({ kind: "section", label: SECTION_LABELS[sec], section: sec, depth: 0, values: columns.map(() => null) });
+      for (const a of aggs)
+        push({ kind: "line", label: a.label, section: sec, depth: 1, values: a.vals.map((v) => sign * v) });
+      push({ kind: "subtotal", label: SECTION_LABELS[sec], section: sec, depth: 1, values: sub.map((v) => sign * v) });
+    }
+  };
+
+  emitSection("REVENUE_COLLECTION", false);
+  push({ kind: "gap", label: "", depth: 0, values: columns.map(() => null) });
+  push({ kind: "section", label: "COST / EXPENSE OUT", depth: 0, values: columns.map(() => null) });
+  for (const sec of ["RAW_MATERIALS", "DIRECT_LABOUR", "FACTORY_OVERHEAD", "GENERAL_EXPENSE", "TAXATION"] as CfSection[])
+    emitSection(sec, true);
+
+  const opAggs = [...lines.values()].filter((a) => OPERATING_SECTIONS.has(a.section));
+  push({ kind: "gap", label: "", depth: 0, values: columns.map(() => null) });
+  push({ kind: "result", label: "Net operation surplus / (deficit)", depth: 0, values: sumCols(opAggs) });
+
+  push({ kind: "gap", label: "", depth: 0, values: columns.map(() => null) });
+  for (const sec of ["FINANCE_COST", "CAPEX", "DEPOSIT", "LOAN", "UNALLOCATED"] as CfSection[])
+    emitSection(sec, true);
+
+  push({ kind: "gap", label: "", depth: 0, values: columns.map(() => null) });
+  push({ kind: "total", label: "Cash Surplus / (Deficit)", depth: 0, values: surplusByCol.slice() });
+  push({ kind: "bf", label: "Bank balance b/f", depth: 0, values: bfVals });
+  push({ kind: "cf", label: "Bank balance c/f", depth: 0, values: cfVals });
+
+  return { columns, rows };
+}

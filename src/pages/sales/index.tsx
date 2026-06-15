@@ -44,7 +44,53 @@ type LinkedPOSummary = {
   soId: string;
   poNo: string;
   status: string;
+  currentDepartment: string;
+  progress: number;
+  quantity: number;
 };
+
+// Production dept order — mirrors DEPT_ORDER in src/api/lib/lead-times.ts
+// (inlined so the Service Orders panel doesn't pull a server lib into the
+// bundle). Used to pick a multi-PO service order's EARLIEST open department.
+const SO_DEPT_ORDER = [
+  "FAB_CUT",
+  "FAB_SEW",
+  "WOOD_CUT",
+  "FOAM",
+  "FRAMING",
+  "WEBBING",
+  "UPHOLSTERY",
+  "PACKING",
+] as const;
+
+// Aggregate a service order's linked production orders into one current-dept +
+// progress for the Service Orders panel (#13). Single-PO SVs (the common case)
+// collapse to that PO's exact values.
+function aggregateServiceOrderProgress(pos: LinkedPOSummary[]): {
+  dept: string | null;
+  progress: number | null;
+} {
+  if (!pos || pos.length === 0) return { dept: null, progress: null };
+  const open = pos.filter((p) => (p.status || "").toUpperCase() !== "COMPLETED");
+  // Quantity-weighted progress so a big line isn't out-voted by a tiny one.
+  const totQty = pos.reduce((s, p) => s + (Number(p.quantity) || 1), 0) || 1;
+  const progress = Math.round(
+    pos.reduce((s, p) => s + (Number(p.progress) || 0) * (Number(p.quantity) || 1), 0) /
+      totQty,
+  );
+  if (open.length === 0) return { dept: "Done", progress: 100 };
+  const rank = (d: string) => {
+    const i = SO_DEPT_ORDER.indexOf(
+      (d || "").toUpperCase() as (typeof SO_DEPT_ORDER)[number],
+    );
+    return i >= 0 ? i : SO_DEPT_ORDER.length;
+  };
+  const frontier = open.reduce((earliest, p) =>
+    rank(p.currentDepartment) < rank(earliest.currentDepartment) ? p : earliest,
+  );
+  const dept = (frontier.currentDepartment || "").replace(/_/g, " ") || "—";
+  return { dept, progress };
+}
 
 type SOStatusChangeEntry = {
   id: string;
@@ -185,7 +231,7 @@ export default function SalesPage() {
     outstandingItemsSen?: number;
   }>(`/api/sales-orders/stats?${soFilterQs}`);
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
-  const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders");
+  const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string; currentDepartment?: string; progress?: number; quantity?: number }[] }>("/api/production-orders");
   const { data: statusChangesResp, refresh: refreshStatusChanges } = useCachedJson<{ success?: boolean; data?: SOStatusChangeEntry[] }>("/api/sales-orders/status-changes");
   // Per-SO delivered quantity (items on a DELIVERED/INVOICED DO), keyed by
   // companySOId. Paired with each SO's own total qty to show partial-delivery
@@ -215,7 +261,14 @@ export default function SalesPage() {
     if (productionOrdersResp?.success && productionOrdersResp.data) {
       for (const po of productionOrdersResp.data) {
         if (!map[po.salesOrderId]) map[po.salesOrderId] = [];
-        map[po.salesOrderId].push({ soId: po.salesOrderId, poNo: po.poNo, status: po.status });
+        map[po.salesOrderId].push({
+          soId: po.salesOrderId,
+          poNo: po.poNo,
+          status: po.status,
+          currentDepartment: po.currentDepartment ?? "",
+          progress: po.progress ?? 0,
+          quantity: po.quantity ?? 1,
+        });
       }
     }
     return map;
@@ -610,8 +663,53 @@ export default function SalesPage() {
       },
     },
     { key: "totalSen", label: "Total", type: "currency", width: "100px", sortable: true },
+    // Service Orders panel only (#13): the repair's current production dept +
+    // progress, aggregated from its linked production order(s) — the same
+    // dept/progress the production grid shows. Hidden on the normal Sales list.
+    ...(isServiceOrderMode
+      ? [
+          {
+            key: "currentDept",
+            label: "Current Dept",
+            type: "text" as const,
+            width: "120px",
+            render: (_value: unknown, row: SalesOrder) => {
+              const agg = aggregateServiceOrderProgress(linkedPOMap[row.id] ?? []);
+              return agg.dept ? (
+                <span>{agg.dept}</span>
+              ) : (
+                <span className="text-[#9CA3AF]">—</span>
+              );
+            },
+          },
+          {
+            key: "poProgress",
+            label: "Progress",
+            type: "number" as const,
+            width: "130px",
+            render: (_value: unknown, row: SalesOrder) => {
+              const agg = aggregateServiceOrderProgress(linkedPOMap[row.id] ?? []);
+              if (agg.progress == null)
+                return <span className="text-[#9CA3AF]">—</span>;
+              return (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 h-1.5 rounded bg-[#E2DDD8] overflow-hidden min-w-[44px]">
+                    <div
+                      className="h-full bg-[#6B5C32]"
+                      style={{ width: `${agg.progress}%` }}
+                    />
+                  </div>
+                  <span className="text-xs tabular-nums text-[#6B7280]">
+                    {agg.progress}%
+                  </span>
+                </div>
+              );
+            },
+          },
+        ]
+      : []),
     { key: "status", label: "Status", type: "status", width: "100px", sortable: true },
-  ], [linkedPOMap, deliveredQtyMap]);
+  ], [linkedPOMap, deliveredQtyMap, isServiceOrderMode]);
 
   const getContextMenuItems = (row: SalesOrder): ContextMenuItem[] => [
     {

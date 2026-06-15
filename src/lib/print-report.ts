@@ -247,7 +247,7 @@ export function buildReportHTML(opts: PrintReportOptions): string {
     h2 { font-size: 12px; margin: 16px 0 6px; font-weight: 700; color: #1F1D1B; letter-spacing: 0.5px; text-transform: uppercase; }
     p.note { font-size: 10px; color: #6B7280; margin-bottom: 6px; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 4px; }
-    th, td { padding: 5px 9px; border-bottom: 1px solid #E2DDD8; }
+    th, td { padding: 5px 9px; border-bottom: 1px solid #E2DDD8; word-break: break-word; overflow-wrap: anywhere; }
     th { background: #1F1D1B; color: #fff; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
     td { font-size: 11px; }
     th.left, td.left { text-align: left; }

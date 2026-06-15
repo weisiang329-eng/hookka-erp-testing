@@ -129,6 +129,19 @@ export function deriveTopLevelWipKey(
   return `${productCode}::${idx}::${wipType}::${rawTopCode}`;
 }
 
+// THE job_card id / Code 128 token formula lives in the pure, browser-safe
+// module src/lib/job-card-id.ts so the dashboard print + scanner can share it.
+// Re-exported here so existing backend imports (production-builder, jobcard-sync)
+// keep resolving `deriveJobCardId` from this module.
+export {
+  shortKeyHash,
+  DEPT_CODE2,
+  deptCode2,
+  deptFromCode2,
+  deriveJobCardId,
+  isShortJobCardToken,
+} from "../../lib/job-card-id";
+
 // Resolve `{TOKEN}` placeholders inside a master wipCode / wipLabel against
 // the SO line's variant context. Any token with no value substitutes empty,
 // then whitespace is collapsed so gaps don't cascade into trailing dashes.

@@ -116,6 +116,12 @@ export type DataGridProps<T> = {
   maxHeight?: string;
   className?: string;
   gridId?: string; // unique key for persisting column visibility in localStorage
+  // When set (and gridId present), the Columns popover shows a "Save as <label>"
+  // button that snapshots the CURRENT visible columns + order into a dedicated
+  // print preset (`datagrid-cols-${gridId}-print`). A printout can then read that
+  // preset to use a curated layout independent of the on-screen view. NOT admin-
+  // gated — it's a per-browser print layout the operator owns. (Wei Siang #25.)
+  printPresetLabel?: string;
   groupBy?: string; // column key to group rows by — inserts group header rows
   // When `groupBy` is set, grouping is auto-enabled on first render by
   // default. Pass `autoGroup={false}` to keep the grid FLAT on open — the
@@ -1110,6 +1116,9 @@ function ColumnCustomizer<T>({
   onClose,
   onSaveAsOrgDefault,
   onResetToOrgDefault,
+  printPresetLabel,
+  onSaveAsPrintPreset,
+  onResetPrintPreset,
 }: {
   columns: Column<T>[];
   visibleKeys: Set<string>;
@@ -1121,6 +1130,11 @@ function ColumnCustomizer<T>({
   // (without an id there's no stable key to namespace per-grid org default).
   onSaveAsOrgDefault?: () => boolean;
   onResetToOrgDefault?: () => boolean;
+  // Optional print-preset actions (Wei Siang #25) — wired when the grid has a
+  // gridId AND a printPresetLabel. Not admin-gated.
+  printPresetLabel?: string;
+  onSaveAsPrintPreset?: () => boolean;
+  onResetPrintPreset?: () => boolean;
 }) {
   const { toast } = useToast();
   // SUPER_ADMIN is the only role allowed to publish an org-wide default.
@@ -1286,8 +1300,45 @@ function ColumnCustomizer<T>({
           Show All
         </button>
       </div>
-      {(onSaveAsOrgDefault || onResetToOrgDefault) && (
+      {(onSaveAsOrgDefault || onResetToOrgDefault || onSaveAsPrintPreset) && (
         <div className="border-t border-[#E5E5E5] px-3 py-2 space-y-1.5 bg-[#FAF8F5]">
+          {onSaveAsPrintPreset && printPresetLabel && (
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                className="flex items-center gap-1.5 text-[11px] font-medium text-[#6B5C32] hover:underline"
+                onClick={() => {
+                  const ok = onSaveAsPrintPreset();
+                  toast[ok ? "success" : "error"](
+                    ok
+                      ? `Saved — printing "${printPresetLabel}" will use these columns.`
+                      : "Could not save print layout.",
+                  );
+                }}
+                title={`Use the current columns when printing the ${printPresetLabel}`}
+              >
+                <span aria-hidden>🖨</span>
+                Save as {printPresetLabel}
+              </button>
+              {onResetPrintPreset && (
+                <button
+                  type="button"
+                  className="text-[10px] text-[#888] hover:text-[#555] hover:underline"
+                  onClick={() => {
+                    const ok = onResetPrintPreset();
+                    toast[ok ? "success" : "error"](
+                      ok
+                        ? "Print layout cleared — printout mirrors the screen again."
+                        : "Could not clear print layout.",
+                    );
+                  }}
+                  title="Forget the saved print layout"
+                >
+                  clear
+                </button>
+              )}
+            </div>
+          )}
           {onSaveAsOrgDefault && isSuperAdmin && (
             <button
               type="button"
@@ -1439,6 +1490,7 @@ export function DataGrid<T extends Record<string, any>>({
   maxHeight,
   className,
   gridId,
+  printPresetLabel,
   groupBy,
   autoGroup = true,
   viewStorageKey,
@@ -1617,6 +1669,41 @@ export function DataGrid<T extends Record<string, any>>({
     }
   }, [gridId, visibleKeys, columnOrder]);
 
+  // Snapshot the CURRENT layout into a dedicated PRINT preset
+  // (`datagrid-cols-${gridId}-print`) — a printout reads this instead of the
+  // live on-screen columns so the operator can curate a print layout once and
+  // keep working with a different on-screen view. Not admin-gated. (Wei Siang #25
+  // "Save as Production Schedule".)
+  const saveAsPrintPreset = useCallback((): boolean => {
+    if (!gridId || typeof window === "undefined") return false;
+    try {
+      localStorage.setItem(
+        `datagrid-cols-${gridId}-print`,
+        JSON.stringify([...visibleKeys]),
+      );
+      localStorage.setItem(
+        `datagrid-colorder-${gridId}-print`,
+        JSON.stringify(columnOrder),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }, [gridId, visibleKeys, columnOrder]);
+
+  // Forget the print preset → the printout falls back to mirroring the on-screen
+  // columns again.
+  const resetPrintPreset = useCallback((): boolean => {
+    if (!gridId || typeof window === "undefined") return false;
+    try {
+      localStorage.removeItem(`datagrid-cols-${gridId}-print`);
+      localStorage.removeItem(`datagrid-colorder-${gridId}-print`);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [gridId]);
+
   // Drop the user's Personal layout for this grid and re-seed state from the
   // Org Default (or column-definition defaults if no Org Default exists).
   const resetToOrgDefault = useCallback((): boolean => {
@@ -1777,18 +1864,24 @@ export function DataGrid<T extends Record<string, any>>({
   // breaks. Returns a map: column key → left offset in pixels.
   const stickyOffsets = useMemo(() => {
     const out = new Map<string, number>();
+    // The selectable checkbox gutter is pinned to exactly 32px (see its th/td
+    // below) and frozen alongside the sticky run, so the first sticky column
+    // sits at 32 with no gap.
     let acc = selectable ? 32 : 0;
     for (const col of visibleColumns) {
       if (!col.sticky) break; // contiguous leading run only
       out.set(col.key, acc);
-      // Parse a pixel width like "170px"; if the column lacks one, give up
-      // freezing later columns to avoid mis-aligned offsets.
-      const m = col.width ? /^(\d+(?:\.\d+)?)px$/.exec(col.width) : null;
+      // Use the EFFECTIVE width — a user resize (colWidths) must win over the
+      // declared width, else a resized sticky column drifts every following
+      // sticky column's left offset and the scroll content leaks through the
+      // seam ("走漏风", Wei Siang 2026-06-16). Falls back to the declared px.
+      const eff = colWidths[col.key] || col.width;
+      const m = eff ? /^(\d+(?:\.\d+)?)px$/.exec(eff) : null;
       if (!m) break;
       acc += parseFloat(m[1]);
     }
     return out;
-  }, [visibleColumns, selectable]);
+  }, [visibleColumns, selectable, colWidths]);
 
   // ── Search / Filter ──
   // Persisted in sessionStorage keyed by gridId so the search text and
@@ -2556,6 +2649,9 @@ export function DataGrid<T extends Record<string, any>>({
               onClose={() => setShowCustomizer(false)}
               onSaveAsOrgDefault={gridId ? saveAsOrgDefault : undefined}
               onResetToOrgDefault={gridId ? resetToOrgDefault : undefined}
+              printPresetLabel={gridId ? printPresetLabel : undefined}
+              onSaveAsPrintPreset={gridId && printPresetLabel ? saveAsPrintPreset : undefined}
+              onResetPrintPreset={gridId && printPresetLabel ? resetPrintPreset : undefined}
             />
           )}
         </div>
@@ -2607,7 +2703,16 @@ export function DataGrid<T extends Record<string, any>>({
             {/* Header row */}
             <tr className="border-b border-[#D0D0D0] bg-[#F0ECE9]">
               {selectable && (
-                <th className="px-2 py-1.5 text-center bg-[#F0ECE9]">
+                <th
+                  className={cn(
+                    "px-2 py-1.5 text-center bg-[#F0ECE9]",
+                    // When a sticky column run exists, the gutter is the first
+                    // frozen cell (left:0) — without this it scrolls away and
+                    // the 32px the offsets reserve for it leaks ("走漏风").
+                    stickyOffsets.size > 0 && "sticky left-0 z-20",
+                  )}
+                  style={{ width: "32px", minWidth: "32px", maxWidth: "32px" }}
+                >
                   <input
                     type="checkbox"
                     className="h-4 w-4 accent-[#6B5C32] cursor-pointer"
@@ -2779,8 +2884,19 @@ export function DataGrid<T extends Record<string, any>>({
                     >
                       {selectable && (
                         <td
-                          className="p-2 text-center cursor-pointer"
-                          style={{ minHeight: "40px" }}
+                          className={cn(
+                            "p-2 text-center cursor-pointer",
+                            // Freeze the gutter alongside the sticky run with an
+                            // opaque, row-matched bg — a transparent sticky cell
+                            // lets the scrolling cells show through (the leak the
+                            // owner saw beside Send / SO ID). Mirrors the data
+                            // sticky cells' bg logic below.
+                            stickyOffsets.size > 0 && "sticky left-0 z-10 bg-white",
+                            stickyOffsets.size > 0 && isEven && "bg-[#FAFAFA]",
+                            stickyOffsets.size > 0 && rowClassName?.(row),
+                            stickyOffsets.size > 0 && isSelected && "!bg-[#CCE0FF]",
+                          )}
+                          style={{ minHeight: "40px", width: "32px", minWidth: "32px", maxWidth: "32px" }}
                           onClick={(e) => {
                             e.stopPropagation();
                             setSelectedKeys(prev => {

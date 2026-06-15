@@ -5,6 +5,7 @@ import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { RepairPartsBadge } from "@/components/sales/repair-scope-picker";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { cn, formatDate, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -78,6 +79,8 @@ type DOItem = {
   quantity: number;
   itemM3: number;
   rackingNumber: string;
+  // Partial-repair scope (raw JSON) for the "Repair: <parts> (code)" badge.
+  repairScope?: string | null;
   // Per-row customer references — each item resolves to its OWN sales order
   // (a DO can consolidate several SOs on one truck), so every line carries
   // its own customer PO / SO / Ref instead of one DO-level summary.
@@ -261,6 +264,8 @@ function mapDOToRow(
       quantity: i.quantity || 0,
       itemM3: i.itemM3 || 0,
       rackingNumber: i.rackingNumber || "",
+      repairScope:
+        ((i as Record<string, unknown>).repairScope as string) || null,
       customerPOId: ref?.customerPO || "",
       customerSO: ref?.customerSO || "",
       customerRef: ref?.reference || "",
@@ -443,6 +448,10 @@ type ReadyPORow = {
   sizeLabel: string;
   fabricCode: string;
   quantity: number;
+  // Service-order Repair Scope snapshot (raw JSON) — drives the "Repair: <parts>
+  // (code)" badge next to the product name on partial-repair rows. null on a
+  // normal sales PO.
+  repairScope: string | null;
   valueSen: number;              // Sales Figure — this PO's SO line value (SO unit price × qty)
   unitM3: number;                // per-unit volume from /api/products (Products page · Unit M³)
   completedDate: string | null;
@@ -1233,6 +1242,7 @@ export default function DeliveryPage() {
               sizeLabel: po.sizeLabel || "",
               fabricCode: po.fabricCode || "",
               quantity: po.quantity || 0,
+              repairScope: po.repairScope ?? null,
               valueSen:
                 poValMap.get(po.id) ??
                 (soPriceByProduct
@@ -3228,7 +3238,21 @@ export default function DeliveryPage() {
         render: (_v, row) => <span className="doc-number">{displaySoId(row)}</span>,
       },
       { key: "productCode", label: "Product Code", type: "docno", width: "110px", sortable: true },
-      { key: "productName", label: "Product", type: "text", sortable: true },
+      {
+        key: "productName",
+        label: "Product",
+        type: "text",
+        sortable: true,
+        render: (value, row, _index, highlight) => (
+          <span className="inline-flex flex-col items-start gap-0.5">
+            <span>{highlight(String(value ?? ""))}</span>
+            <RepairPartsBadge
+              repairScope={row.repairScope}
+              productCode={row.productCode}
+            />
+          </span>
+        ),
+      },
       { key: "sizeLabel", label: "Size", type: "text", width: "80px", sortable: true },
       { key: "fabricCode", label: "Fabric", type: "text", width: "80px", sortable: true },
       { key: "customerName", label: "Customer", type: "text", width: "120px", sortable: true },
@@ -3387,7 +3411,21 @@ export default function DeliveryPage() {
         render: (_v, row) => <span className="doc-number">{displaySoId(row)}</span>,
       },
       { key: "productCode", label: "Product Code", type: "docno", width: "110px", sortable: true },
-      { key: "productName", label: "Product", type: "text", sortable: true },
+      {
+        key: "productName",
+        label: "Product",
+        type: "text",
+        sortable: true,
+        render: (value, row, _index, highlight) => (
+          <span className="inline-flex flex-col items-start gap-0.5">
+            <span>{highlight(String(value ?? ""))}</span>
+            <RepairPartsBadge
+              repairScope={row.repairScope}
+              productCode={row.productCode}
+            />
+          </span>
+        ),
+      },
       { key: "sizeLabel", label: "Size", type: "text", width: "80px", sortable: true },
       { key: "fabricCode", label: "Fabric", type: "text", width: "80px", sortable: true },
       { key: "customerName", label: "Customer", type: "text", width: "120px", sortable: true },
@@ -5826,6 +5864,7 @@ export default function DeliveryPage() {
                                 <span className="text-[#6B7280]">Cust SO: <span className="text-[#1F1D1B]">{po.customerSO}</span></span>
                               )}
                               <span>{po.productName}</span>
+                              <RepairPartsBadge repairScope={po.repairScope} productCode={po.productCode} />
                               <span className="text-[#6B7280]">{po.sizeLabel} · {po.fabricCode}</span>
                             </div>
                             <div className="flex items-center gap-2">
@@ -5886,7 +5925,12 @@ export default function DeliveryPage() {
                           <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{refs.customerRef || "—"}</td>
                           <td className="px-2.5 py-1 text-xs text-[#6B5C32] whitespace-nowrap">{item.productCode}</td>
                           <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{(() => { const c = item.productCode || ""; const i = c.indexOf("-"); return i >= 0 ? c.slice(i + 1) : "—"; })()}</td>
-                          <td className="px-2.5 py-1 whitespace-nowrap">{item.productName}</td>
+                          <td className="px-2.5 py-1 whitespace-nowrap">
+                            <span className="inline-flex flex-col items-start gap-0.5">
+                              <span>{item.productName}</span>
+                              <RepairPartsBadge repairScope={item.repairScope} productCode={item.productCode} />
+                            </span>
+                          </td>
                           <td className="px-2.5 py-1 text-[#6B7280] whitespace-nowrap">{item.sizeLabel}</td>
                           <td className="px-2.5 py-1 text-[#6B7280] whitespace-nowrap">{item.fabricCode}</td>
                           <td className="px-2.5 py-1 text-right tabular-nums">{item.quantity}</td>

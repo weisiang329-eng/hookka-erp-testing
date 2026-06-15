@@ -9,7 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData, jobCardBarcodeValue } from "@/lib/qr-utils";
+import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData } from "@/lib/qr-utils";
+import { deriveBarcodeToken } from "@/lib/job-card-id";
 // Static import (not dynamic) so Code 128 generation is SYNCHRONOUS inside the
 // print click gesture — an await before window.open would trip the pop-up
 // blocker. jsbarcode is small and scoped to this (already heavy) page chunk.
@@ -96,26 +97,25 @@ type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
 // Wei Siang 2026-05-29: drag a header's right edge to resize; double-click to
 // reset. Widths persist per-browser in localStorage. Shared with every header
 // cell via context so we don't thread two callbacks through 15 call sites.
-// Render a WIP's Code 128 (HKJC:<jobCardId>) to a PNG data URL, SYNCHRONOUSLY,
-// for the Production Schedule print. Scanning it on the phone marks the WIP
-// complete — the linear-scan twin of the QR, for the no-sticker depts
-// (Woodcutting / Framing / Webbing). Returns "" on any failure so a bad row
-// never blocks the print. jobCardBarcodeValue() is the single source of the
-// encoded string (shared with the scanner's parseJobCardBarcode).
-function jobCardCode128DataUrl(jobCardId: string): string {
+// Render a WIP's SHORT barcode token (`b<deptNN><7hash>`, ~10 chars) as a Code
+// 128 PNG data URL, SYNCHRONOUSLY, for the Production Schedule print. The
+// schedule's rows are thin and many — a square QR there is too small to scan
+// (Wei Siang 2026-06-16), and a barcode of the full id was "那麽厚那麽長" and
+// wouldn't read. The 10-char token halves the bar count → fat, retail-grade
+// bars. The token IS the encoded string (its own `b` sentinel — no wrapper),
+// shared with the scanner's parseJobCardBarcode. "" on failure so a bad row
+// never blocks the print.
+function jobCardCode128DataUrl(token: string): string {
   try {
     const canvas = document.createElement("canvas");
-    JsBarcode(canvas, jobCardBarcodeValue(jobCardId), {
+    JsBarcode(canvas, token, {
       format: "CODE128",
-      height: 46,
-      // Wider narrow-bar (2.4px) = more pixels per bar → crisp + reliably
-      // scannable when printed (the 1.5px version printed blurry/dense).
-      width: 2.4,
+      height: 38,
+      // 4px/module source — the token is tiny (10 chars) so even at 4px the
+      // canvas is small, and it prints at a fat, easy-to-scan X-dimension.
+      width: 4,
       margin: 6,
-      // The human-readable id is printed as crisp HTML below the bars (see the
-      // print cell's <span class="bccode">), NOT baked into the canvas — the
-      // baked text rasterised at bar-resolution and printed blurry. Bars only.
-      displayValue: false,
+      displayValue: false, // the human WIP name is printed as crisp HTML below
     });
     return canvas.toDataURL("image/png");
   } catch {
@@ -3707,23 +3707,24 @@ export default function ProductionPage({
       render: (_v, row) => renderStatusCell(row),
     },
     {
-      // Code 128 "Scan to complete" — a normal, DEFAULT-HIDDEN column toggled
-      // in the Columns menu like any other (Wei Siang 2026-06-15: "应该做在
-      // column 那边"). Off by default — the barcode isn't used on the floor yet.
-      // On screen it shows the job-card id (light); the actual scannable Code
-      // 128 is drawn by the Print Schedule output (see handlePrintSchedule).
+      // "Scan to complete" — a DEFAULT-HIDDEN column toggled in the Columns menu
+      // like any other (Wei Siang 2026-06-15: "应该做在 column 那边"). On screen it
+      // shows the SHORT 10-char barcode token (Wei Siang 2026-06-16 "很多字是多余的");
+      // the scannable Code 128 of the same token is drawn by the Print Schedule
+      // output (see handlePrintSchedule / jobCardCode128DataUrl).
       key: "scanCode",
-      label: "Barcode",
+      label: "Scan",
       type: "text",
-      width: "150px",
+      width: "120px",
       sortable: false,
       defaultHidden: true,
-      render: (_v, row) =>
-        row.jobCardId ? (
-          <span className="font-mono text-[11px] text-[#6B7280]">
-            {row.jobCardId}
-          </span>
-        ) : null,
+      render: (_v, row) => {
+        if (!row.jobCardId) return null;
+        const token = deriveBarcodeToken(row.poId, row.wipKey ?? "", activeTab);
+        return (
+          <span className="font-mono text-[11px] text-[#6B7280]">{token}</span>
+        );
+      },
     },
   ], [activeTab, upstreamDepts, isTablet]);
 
@@ -5526,13 +5527,18 @@ export default function ProductionPage({
           }
         }
       } catch { /* ignore — don't block print on storage errors */ }
+      // "Save as Production Schedule" print preset wins (Wei Siang #25) — a
+      // curated print layout independent of the on-screen view; then the user's
+      // personal layout, then the org default.
       const visibleSetRaw =
+        readJson(`datagrid-cols-${gridId}-print`) ??
         readJson(`datagrid-cols-${gridId}-${userEmailLc}`) ??
         readJson(`datagrid-cols-${gridId}-org-default`);
       const visibleSet = Array.isArray(visibleSetRaw)
         ? new Set<string>(visibleSetRaw as string[])
         : new Set<string>(deptColumns.filter((c) => !c.hidden && !c.defaultHidden).map((c) => c.key));
       const orderRaw =
+        readJson(`datagrid-colorder-${gridId}-print`) ??
         readJson(`datagrid-colorder-${gridId}-${userEmailLc}`) ??
         readJson(`datagrid-colorder-${gridId}-org-default`);
       const order: string[] = Array.isArray(orderRaw)
@@ -5574,19 +5580,35 @@ export default function ProductionPage({
       if (showScan) {
         for (const r of printRows) {
           if (r.jobCardId && !barcodeByJc.has(r.jobCardId)) {
-            barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(r.jobCardId));
+            // Encode the SHORT 10-char barcode token (b<deptNN><7hash>). The
+            // scanner resolves it by re-deriving across the dept's OPEN cards
+            // (dept = the 2 digits) — works for new AND old cards alike, no id
+            // migration, and the code is short enough to actually scan.
+            const token = deriveBarcodeToken(r.poId, r.wipKey ?? "", activeTab);
+            barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(token));
           }
         }
       }
       const renderCell = (col: Column<DeptRow>, r: DeptRow): string => {
         const key = col.key;
-        // Code 128 column: scannable bars (image) + the job-card id as crisp
-        // HTML below (sharp at print DPI; the bars carry no baked text).
+        // "Scan to complete" column: the Code 128 (image) + the human WIP name
+        // below it.
         if (key === "scanCode") {
           const bc = (r.jobCardId && barcodeByJc.get(r.jobCardId)) || "";
           if (!bc) return "";
-          const idText = escapeHtml(r.jobCardId || "");
-          return `<img src="${bc}" alt="${idText}" /><span class="bccode">${idText}</span>`;
+          // Caption = the human WIP name (token-stripped), NOT the cryptic id —
+          // the worker reads it to confirm the code matches the piece in hand.
+          // Any stray __SIZE__/__MODEL__ template token is stripped defensively;
+          // the scannable token lives in the bars + the img alt.
+          const wipRaw = String(
+            (r as unknown as Record<string, unknown>).wip ?? "",
+          );
+          const cap =
+            wipRaw
+              .replace(/__[A-Z0-9_]+__/g, "")
+              .replace(/\s{2,}/g, " ")
+              .trim() || (r.jobCardId || "");
+          return `<img src="${bc}" alt="${escapeHtml(r.jobCardId || "")}" /><span class="bccode">${escapeHtml(cap)}</span>`;
         }
         // Dept pill columns — keys look like "sched_FAB_CUT.sortKey".
         const deptMatch = key.match(/^sched_([A-Z_]+)\.sortKey$/);
@@ -5715,13 +5737,14 @@ export default function ProductionPage({
     table.schedule td.m, table.schedule th.m {
       text-align: center; width: ${sizes.mWidth}px; padding: ${sizes.mPad}px;
     }
-    /* Code 128 "Scan to complete" column — one barcode per WIP row. Sized
-       generously so it prints crisp and scans reliably (not dense/blurry). */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 188px; }
-    table.schedule td.bc img { height: 46px; width: auto; max-width: 182px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
-    /* Job-card id printed as real (vector) text, NOT baked into the barcode
-       image, so it stays sharp at print DPI instead of blurring. */
-    table.schedule td.bc .bccode { display: block; font-family: "Courier New", monospace; font-size: 8px; letter-spacing: 0.3px; color: #000; margin-top: 1px; word-break: break-all; }
+    /* "Scan to complete" column — one Code 128 per WIP row. The token is now just
+       10 chars, so the barcode is a NORMAL size: ~50mm wide × ~7mm tall, fat
+       retail-grade bars (Wei Siang 2026-06-16: "正常的哪有那麽厚那麽長的"). */
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 196px; }
+    table.schedule td.bc img { height: 28px; width: auto; max-width: 188px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
+    /* The human WIP name printed below the bars so the worker can confirm the
+       code matches the piece. Wraps on word breaks (it's a readable name). */
+    table.schedule td.bc .bccode { display: block; font-family: Arial, sans-serif; font-size: 9px; line-height: 1.1; color: #000; margin-top: 1px; word-break: normal; overflow-wrap: anywhere; }
     table.schedule td.so { font-weight: 700; white-space: nowrap; }
     table.schedule td.prod small,
     table.schedule tbody small { color: #555; font-size: ${sizes.small}px; }
@@ -6768,6 +6791,10 @@ export default function ProductionPage({
               },
             ]}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
+            // "Save as Production Schedule" in the Columns popover → snapshots
+            // the current columns into a print preset the schedule printout uses
+            // (independent of the on-screen view). Wei Siang #25.
+            printPresetLabel="Production Schedule"
             // Roll out the newly-added Customer SO column to existing users
             // whose saved column layout predates it (one-time per user/grid).
             ensureColumns={["customerSO"]}
@@ -8150,7 +8177,11 @@ export default function ProductionPage({
                   // 2026-06-06: the /track tracking page isn't used; this sticker
                   // is scanned at Packing to mark the unit done + assign a rack).
                   // FG-PACKING sentinel resolves to the PO's PACKING card on scan.
-                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}`;
+                  // Drop the redundant &dept=PACKING — the FG-PACKING sentinel
+                  // already encodes the dept (parseStickerData derives it), so
+                  // omitting it shortens the payload → fewer QR modules → bigger,
+                  // more scannable cells that survive a clipped/dirty corner.
+                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}`;
                   // Wei Siang 2026-05-15: drop the parent customer name
                   // when a hub is set — "Houzs Century (Houzs KL)" wrapped
                   // to two lines on the 100mm-wide sticker and ate too
@@ -8353,7 +8384,12 @@ export default function ProductionPage({
                 page-break-after: always;
                 break-after: page;
                 margin: 0 !important;
-                padding: ${useLargeSticker ? "4mm" : "2mm"} !important;
+                /* Padding bumped (large 4→6mm, small 2→4mm) so the QR — bottom-
+                   left on the 100mm card, top-centre on the 50mm one — clears a
+                   printer's ~5mm non-printable margin instead of being shaved
+                   off, same fix as the FG box label (Wei Siang 2026-06-16). The
+                   QR's new quiet zone covers the rest. */
+                padding: ${useLargeSticker ? "6mm" : "4mm"} !important;
                 overflow: hidden;
               }
               .sticker-jc-page:last-child {
@@ -8446,11 +8482,15 @@ export default function ProductionPage({
                   <div className="mt-auto pt-[1.5mm] border-t border-dashed border-black">
                     <div className="flex items-end gap-[2mm] pt-[1.5mm]">
                       {s.qrDataUrl && (
+                        // Fab Cut 100x150mm: QR gets its OWN left/bottom margin
+                        // (on top of the 6mm page padding) so it sits further from
+                        // the edge than the text — same anti-clip treatment as the
+                        // Packing FG box label.
                         <img
                           src={s.qrDataUrl}
                           alt="Job card QR"
                           style={{ width: "34mm", height: "34mm" }}
-                          className="shrink-0"
+                          className="shrink-0 ml-[2mm] mb-[1.5mm]"
                         />
                       )}
                       <div className="flex-1 min-w-0 self-stretch flex flex-col justify-between" style={{ fontSize: "11pt" }}>
@@ -8484,10 +8524,14 @@ export default function ProductionPage({
                 className="sticker-jc-page bg-white text-black flex flex-col items-center"
                 style={{ width: "50mm", height: "75mm" }}
               >
+                {/* 50x75mm: QR is top-centred (already clear left/right). Give it
+                    a top margin too so its top edge clears the printer margin —
+                    parity with the larger labels' anti-clip treatment. */}
                 <img
                   src={s.qrDataUrl}
                   alt="Job card QR"
                   style={{ width: "30mm", height: "30mm" }}
+                  className="mt-[1mm]"
                 />
                 <div
                   className="font-bold text-center leading-tight w-full"
@@ -8567,7 +8611,12 @@ export default function ProductionPage({
                 width: 100mm !important; height: 150mm !important;
                 page-break-after: always;
                 break-after: page;
-                margin: 0 !important; padding: 4mm !important;
+                /* 6mm inner padding (was 4mm) so NOTHING — especially the
+                   bottom-left QR — sits inside a printer's ~5-6mm non-printable
+                   margin and gets shaved off (Wei Siang 2026-06-15: the Packing
+                   QR was "挤出去了"). Combined with the QR's new 2-module quiet
+                   zone, the scannable area clears the edge with room to spare. */
+                margin: 0 !important; padding: 6mm !important;
                 overflow: hidden;
               }
               .sticker-fg-page:last-child {
@@ -8617,7 +8666,11 @@ export default function ProductionPage({
                   // 2026-06-06: the /track tracking page isn't used; this sticker
                   // is scanned at Packing to mark the unit done + assign a rack).
                   // FG-PACKING sentinel resolves to the PO's PACKING card on scan.
-                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}`;
+                  // Drop the redundant &dept=PACKING — the FG-PACKING sentinel
+                  // already encodes the dept (parseStickerData derives it), so
+                  // omitting it shortens the payload → fewer QR modules → bigger,
+                  // more scannable cells that survive a clipped/dirty corner.
+                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}`;
               // Hub-only when set — see on-screen tile comment above.
               const customerLine = s.customerHub || s.customerName;
               // Legs / Pillow render INSIDE their primary's print page —
@@ -8702,7 +8755,12 @@ export default function ProductionPage({
                         by-side. Same 100×150mm physical card. */}
                     <div className="mt-auto pt-[2mm] border-t border-dashed border-black">
                       <div className="flex items-end gap-[2mm] pt-[2mm]">
-                        <QRImg eager data={trackUrl} size={pillowPair ? 98 : 150} alt="FG unit QR" className="block" />
+                        {/* Slightly smaller + its OWN left/bottom margin (on top
+                            of the page's 6mm padding) so the QR sits further from
+                            the edge than the text — the text can lose a sliver,
+                            the QR must survive. With the quiet zone + Q-level
+                            error correction it scans even if a corner is shaved. */}
+                        <QRImg eager data={trackUrl} size={pillowPair ? 88 : 132} alt="FG unit QR" className="block ml-[2mm] mb-[1.5mm]" />
                         <div className="flex-1 text-center min-w-0">
                           {legsPair && (
                             <>

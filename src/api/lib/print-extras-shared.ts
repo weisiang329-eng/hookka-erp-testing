@@ -26,6 +26,7 @@ import {
   type BomVariantContext,
 } from "./bom-wip-breakdown";
 import { isHeadboardOnlySpecial } from "../routes/fg-units";
+import { partLabelFromKey, type RepairScope } from "../../lib/repair-scope";
 
 // One BOM template per product code, already collapsed to the version we
 // print from (ACTIVE preferred, then latest effectiveFrom).
@@ -116,6 +117,12 @@ export function piecesFor(args: {
   divanHeightInches: number | null;
   legHeightInches: number | null;
   qty: number;
+  // Component-level repair scope (partial repair). When its `components` are
+  // set, the line lists ONLY those repaired components by their picker labels
+  // ("1 Headboard + 1 Back Cushion") instead of the full set composition.
+  // Omitted/null on a normal sales line (and on the CN path, which never passes
+  // it) → full set.
+  repairScope?: RepairScope | null;
 }): string | null {
   const {
     code,
@@ -129,26 +136,19 @@ export function piecesFor(args: {
     divanHeightInches: d,
     legHeightInches: l,
     qty,
+    repairScope,
   } = args;
   const C = (cat || "").toUpperCase();
   const cu = code.toUpperCase();
   const isBedframe = C === "BEDFRAME" || cu.startsWith("DIVAN");
-  // A sofa "1A" / a stool / an accessory IS one finished set — it is NOT
-  // broken into Base / Cushion / Arm WIP pieces on a delivery/consignment
-  // note. Count it as its own FG unit, labelled by its variant so the
-  // roll-up can list "2 1A(LHF) + 1 STOOL".
-  if (!isBedframe) {
-    // Label by the sofa TYPE (product-code variant, e.g. "1A(LHF)",
-    // "STOOL") — that's what "一套沙发" means — not the seat size.
-    const dash = code.indexOf("-");
-    const variant =
-      (dash >= 0 ? code.slice(dash + 1).trim() : "") ||
-      (sizeLabel && sizeLabel.trim()) ||
-      code ||
-      "SET";
-    return `${qty || 1} ${variant}`;
-  }
-  if (!wipComponents) return null;
+  const hasRepairComponents = !!(
+    repairScope?.components && repairScope.components.length > 0
+  );
+
+  // Break the BOM once when we'll actually need it — a bedframe's HB/Divan
+  // pieces, or a repair's full-SKU check + component listing. A sofa BOM breaks
+  // into its Base / Cushion / Arm sub-components, used ONLY for repairs (a
+  // normal whole-sofa line never breaks).
   const variants: BomVariantContext = {
     productCode: code,
     model: baseModel || code,
@@ -159,7 +159,60 @@ export function piecesFor(args: {
     legHeightInches: l,
     gapInches: g,
   };
-  let wips = breakBomIntoWips(wipComponents, code, variants);
+  const allWips =
+    (isBedframe || hasRepairComponents) && wipComponents
+      ? breakBomIntoWips(wipComponents, code, variants)
+      : [];
+  const isFgMain = allWips.length === 1 && allWips[0].wipCode === "FG_MAIN";
+
+  // Partial repair: list ONLY the repaired components, by clean short labels
+  // derived from each component's wipKey (Headboard→HB, Back Cushion→BC, Right
+  // Arm→R Arm, …); qty is the picked per-set count × the line's set quantity.
+  // BUT if the picks cover EVERY top-level BOM component at full qty, it's the
+  // WHOLE unit — fall through to the normal complete-unit pieces ("1 Sofa" /
+  // "1 HB + 2 Divan"), don't break it apart (Wei Siang 2026-06-16).
+  if (hasRepairComponents) {
+    const comps = repairScope!.components!;
+    const bomQtyByKey = new Map(
+      (isFgMain ? [] : allWips).map((w) => [
+        w.wipKey,
+        Number(w.quantityMultiplier) || 1,
+      ]),
+    );
+    const coversWholeSku =
+      bomQtyByKey.size > 0 &&
+      [...bomQtyByKey.entries()].every(([k, bomQty]) => {
+        const pick = comps.find((cmp) => cmp.key === k);
+        return !!pick && (Number(pick.qty) || 1) >= bomQty;
+      });
+    if (!coversWholeSku) {
+      const parts = comps
+        .filter((cmp) => cmp && (cmp.key || cmp.label))
+        .map(
+          (cmp) =>
+            `${(Number(cmp.qty) || 1) * (qty || 1)} ${partLabelFromKey(cmp.key, cmp.label)}`,
+        );
+      if (parts.length > 0) return parts.join(" + ");
+    }
+    // coversWholeSku → fall through to the complete-unit pieces below.
+  }
+
+  // A sofa / stool / accessory IS one finished set — NOT broken into pieces on
+  // a normal delivery/consignment note.
+  if (!isBedframe) {
+    // A complete SOFA set (any variant — 1A / 2A / 1L1A / 2L / …) counts as one
+    // "Sofa" piece (Wei Siang 2026-06-16); the variant rides the product name.
+    if (C === "SOFA") return `${qty || 1} Sofa`;
+    const dash = code.indexOf("-");
+    const variant =
+      (dash >= 0 ? code.slice(dash + 1).trim() : "") ||
+      (sizeLabel && sizeLabel.trim()) ||
+      code ||
+      "SET";
+    return `${qty || 1} ${variant}`;
+  }
+  if (!wipComponents) return null;
+  let wips = allWips;
   if (wips.length === 1 && wips[0].wipCode === "FG_MAIN") return null;
   // What actually ships = what reaches PACKING. Count only the WIPs that have
   // a PACKING process so the figure matches the loaded pieces ("packing 有多
@@ -185,7 +238,7 @@ export function piecesFor(args: {
       t === "HEADBOARD"
         ? "HB"
         : t === "DIVAN"
-          ? "DIVAN"
+          ? "Divan"
           : (w.wipLabel || w.wipType || "PC").trim();
     if (!agg.has(label)) order.push(label);
     agg.set(
@@ -194,6 +247,29 @@ export function piecesFor(args: {
     );
   }
   return order.map((lab) => `${agg.get(lab)} ${lab}`).join(" + ");
+}
+
+// ---------------------------------------------------------------------------
+// buildRepairNote — the short "Repair: HB only" line a partial-repair DO line
+// prints under its spec. Derived from the ALREADY-FILTERED pieces string so
+// the labels (HB / DIVAN / …) match the printed Quantity breakdown exactly.
+// English only — the document PDFs carry no CJK glyphs. The caller gates this
+// on the line actually being a narrowed partial repair (components present AND
+// the filtered pieces differ from the full set), so a stale-pick fallback
+// never prints a misleading "only".
+// ---------------------------------------------------------------------------
+export function buildRepairNote(filteredPieces: string | null): string | null {
+  if (!filteredPieces) return null;
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const part of String(filteredPieces).split(" + ")) {
+    const lab = part.trim().replace(/^\d+\s+/, "").trim();
+    if (lab && !seen.has(lab)) {
+      seen.add(lab);
+      labels.push(lab);
+    }
+  }
+  return labels.length ? `Repair: ${labels.join(" + ")} only` : null;
 }
 
 // ---------------------------------------------------------------------------

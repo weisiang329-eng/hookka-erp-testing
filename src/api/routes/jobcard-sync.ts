@@ -26,6 +26,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import {
   breakBomIntoWips,
+  deriveJobCardId,
   type BomVariantContext,
 } from "../lib/bom-wip-breakdown";
 
@@ -280,11 +281,7 @@ app.post("/", async (c) => {
       if (existing.has(key)) continue;
       const deptMeta = deptByCode.get(exp.deptCode);
       if (!deptMeta) continue;
-      const jcIdBase =
-        exp.wipKey === "FG"
-          ? `jc-${po.id}-FG-${exp.deptCode}`
-          : `jc-${po.id}-${exp.wipKey}-${exp.deptCode}`;
-      const jcId = jcIdBase.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+      const jcId = deriveJobCardId(po.id, exp.wipKey, exp.deptCode);
       insertStatements.push(
         db
           .prepare(

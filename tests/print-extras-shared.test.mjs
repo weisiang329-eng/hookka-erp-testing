@@ -22,9 +22,23 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   piecesFor,
+  buildRepairNote,
   deriveComponentRacks,
   selectBestBomByCode,
 } from "../src/api/lib/print-extras-shared.ts";
+import { breakBomIntoWips } from "../src/api/lib/bom-wip-breakdown.ts";
+import { partLabelFromKey } from "../src/lib/repair-scope.ts";
+
+const BF_VARIANTS_CTX = {
+  productCode: "TRION-K",
+  model: "TRION",
+  sizeLabel: "6FT",
+  sizeCode: "",
+  fabricCode: "PC151-02",
+  divanHeightInches: 12,
+  legHeightInches: 2,
+  gapInches: 2,
+};
 
 // A minimal King-bedframe BOM: one HEADBOARD node + one DIVAN node, both with
 // a PACKING process so they survive the "what reaches packing ships" filter.
@@ -48,7 +62,7 @@ const KING_BF_BOM = JSON.stringify([
   },
 ]);
 
-test("piecesFor: King bedframe BOM → '1 HB + 2 DIVAN' (HB first)", () => {
+test("piecesFor: King bedframe BOM → '1 HB + 2 Divan' (HB first)", () => {
   const out = piecesFor({
     code: "TRION-K",
     baseModel: "TRION",
@@ -62,7 +76,7 @@ test("piecesFor: King bedframe BOM → '1 HB + 2 DIVAN' (HB first)", () => {
     legHeightInches: 2,
     qty: 1,
   });
-  assert.equal(out, "1 HB + 2 DIVAN");
+  assert.equal(out, "1 HB + 2 Divan");
 });
 
 test("piecesFor: HB-only BEDFRAME special drops the DIVAN pieces", () => {
@@ -82,9 +96,9 @@ test("piecesFor: HB-only BEDFRAME special drops the DIVAN pieces", () => {
   assert.equal(out, "1 HB");
 });
 
-test("piecesFor: a sofa variant is ONE labelled set, not WIP pieces", () => {
-  // A sofa "1A(LHF)" must NOT be broken into Base/Cushion/Arm — it ships as a
-  // single FG set, labelled by the product-code variant after the dash.
+test("piecesFor: a complete sofa set counts as 'Sofa', not its variant pieces", () => {
+  // A sofa "1A(LHF)" must NOT be broken into Base/Cushion/Arm — it ships as one
+  // labelled set, counted as "Sofa" (the variant stays in the product name).
   const out = piecesFor({
     code: "BO315-1A(LHF)",
     baseModel: "BO315",
@@ -98,7 +112,133 @@ test("piecesFor: a sofa variant is ONE labelled set, not WIP pieces", () => {
     legHeightInches: null,
     qty: 2,
   });
-  assert.equal(out, "2 1A(LHF)");
+  assert.equal(out, "2 Sofa");
+});
+
+// --- Partial-repair component listing (DO compartment-aware print) ---------
+// A partial repair lists ONLY the repaired components, by their own picker
+// labels (Headboard / Divan / Base / Back Cushion / Armrest / Headrest), so the
+// DO shows exactly what's delivered for repair — sofa sub-components included.
+const BF_BASE = {
+  code: "TRION-K",
+  baseModel: "TRION",
+  wipComponents: KING_BF_BOM,
+  cat: "BEDFRAME",
+  special: null,
+  sizeLabel: "6FT",
+  fabricCode: "PC151-02",
+  gapInches: 2,
+  divanHeightInches: 12,
+  legHeightInches: 2,
+  qty: 1,
+};
+const scope = (components) => ({ preset: "CUSTOM", depts: ["UPHOLSTERY"], components });
+
+test("piecesFor: bedframe partial repair (HB only) → '1 HB' (matches full unit)", () => {
+  const out = piecesFor({
+    ...BF_BASE,
+    repairScope: scope([{ key: "k1", label: "HB", qty: 1 }]),
+  });
+  assert.equal(out, "1 HB");
+});
+
+test("piecesFor: SOFA partial repair lists sub-components (was the whole set)", () => {
+  // The key fix: a sofa normally ships as ONE labelled set ("1 1A(LHF)"), but a
+  // partial repair must list the repaired sub-components by their picker labels.
+  const out = piecesFor({
+    code: "BO315-1A(LHF)",
+    baseModel: "BO315",
+    wipComponents: KING_BF_BOM, // irrelevant — repair scope drives the listing
+    cat: "SOFA",
+    special: null,
+    sizeLabel: "35",
+    fabricCode: "FAB-1",
+    gapInches: null,
+    divanHeightInches: null,
+    legHeightInches: null,
+    qty: 1,
+    repairScope: scope([
+      { key: "k1", label: "Back Cushion", qty: 1 },
+      { key: "k2", label: "Armrest", qty: 1 },
+      { key: "k3", label: "Headrest", qty: 1 },
+    ]),
+  });
+  // HB/BC/Arm stay short; Headrest / Right Arm / Left Arm spell out (Wei Siang).
+  assert.equal(out, "1 BC + 1 Arm + 1 Headrest");
+});
+
+test("piecesFor: component qty × line set-qty (2 sets, 1 HB each → '2 HB')", () => {
+  const out = piecesFor({
+    ...BF_BASE,
+    qty: 2,
+    repairScope: scope([{ key: "k1", label: "HB", qty: 1 }]),
+  });
+  assert.equal(out, "2 HB");
+});
+
+test("piecesFor: picked component qty is respected (2 of 2 Divan → '2 Divan')", () => {
+  const out = piecesFor({
+    ...BF_BASE,
+    repairScope: scope([{ key: "k2", label: "Divan", qty: 2 }]),
+  });
+  assert.equal(out, "2 Divan");
+});
+
+test("piecesFor: no repairScope → full set unchanged", () => {
+  assert.equal(piecesFor({ ...BF_BASE }), "1 HB + 2 Divan");
+  assert.equal(piecesFor({ ...BF_BASE, repairScope: null }), "1 HB + 2 Divan");
+  // A dept-only scope (no component picks) is NOT a narrowing → full set.
+  assert.equal(
+    piecesFor({ ...BF_BASE, repairScope: { preset: "FABRIC", depts: ["UPHOLSTERY"] } }),
+    "1 HB + 2 Divan",
+  );
+});
+
+test("partLabelFromKey: clean short label from the wipKey (not the verbose label)", () => {
+  assert.equal(
+    partLabelFromKey("5531-2A(RHF)::0::BACK_CUSHION::BC", "5531 -Back Cushion 28"),
+    "BC",
+  );
+  assert.equal(partLabelFromKey("5531::1::RIGHT_ARM::RA", "5531 -Right Arm"), "Right Arm");
+  assert.equal(partLabelFromKey("X::0::BASE::B", "X -Base 28"), "Base");
+  assert.equal(partLabelFromKey("X::0::HEADBOARD::HB", "x"), "HB");
+  // Unknown wipType → title-cased; no key segments → fall back to the label.
+  assert.equal(partLabelFromKey("X::0::SEAT_CUSHION::SC", "x"), "Seat Cushion");
+  assert.equal(partLabelFromKey("k1", "Back Cushion"), "BC");
+});
+
+test("piecesFor: FULL-SKU repair (all components at full qty) → complete unit, not parts", () => {
+  // Pick BOTH bedframe components at their full BOM qty → it's the WHOLE bed,
+  // so it prints as the complete unit, NOT a broken-out repair parts list.
+  const wips = breakBomIntoWips(KING_BF_BOM, "TRION-K", BF_VARIANTS_CTX);
+  const components = wips.map((w) => ({
+    key: w.wipKey,
+    label: w.wipLabel,
+    qty: w.quantityMultiplier,
+  }));
+  const out = piecesFor({ ...BF_BASE, repairScope: scope(components) });
+  assert.equal(out, "1 HB + 2 Divan");
+});
+
+test("piecesFor: partial repair by REAL key (only HB) → '1 HB'", () => {
+  const wips = breakBomIntoWips(KING_BF_BOM, "TRION-K", BF_VARIANTS_CTX);
+  const hb = wips.find((w) => w.wipType.toUpperCase() === "HEADBOARD");
+  const out = piecesFor({
+    ...BF_BASE,
+    repairScope: scope([{ key: hb.wipKey, label: hb.wipLabel, qty: 1 }]),
+  });
+  assert.equal(out, "1 HB");
+});
+
+test("buildRepairNote: strips counts, multi-word labels, English 'Repair: X only'", () => {
+  assert.equal(buildRepairNote("1 HB"), "Repair: HB only");
+  assert.equal(
+    buildRepairNote("1 Back Cushion + 1 Armrest"),
+    "Repair: Back Cushion + Armrest only",
+  );
+  assert.equal(buildRepairNote("2 Divan"), "Repair: Divan only");
+  assert.equal(buildRepairNote(null), null);
+  assert.equal(buildRepairNote(""), null);
 });
 
 test("deriveComponentRacks: groups distinct racks, HB first then DIVAN numeric", () => {

@@ -24,6 +24,7 @@ import type { Env } from "../worker";
 import { resolveWorkerToken } from "./worker-auth";
 import { computeMonthlyLabor, computeAttendanceDayDetail, absenceCutoffDay, effectiveSalarySenForMonth } from "../../lib/labor-engine";
 import { jcMinutesTotal } from "../../lib/job-card-minutes";
+import { deriveBarcodeToken, deptOfBarcodeToken, isBarcodeToken } from "../../lib/job-card-id";
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
 import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
 import {
@@ -422,6 +423,50 @@ app.get("/scan-lookup", async (c) => {
       ).results ?? [];
   }
 
+  // Schedule Code 128: the printed barcode is the SHORT token b<deptNN><7hash>,
+  // which is NOT a stored id — resolve it by re-deriving deriveBarcodeToken
+  // across that department's OPEN cards (the token's 2 digits = dept code).
+  // Bounded by current WIP for one dept; works for new AND old cards alike, with
+  // no id rewrite and no new column.
+  if (poRows.length === 0 && isBarcodeToken(term)) {
+    const deptCode = deptOfBarcodeToken(term);
+    if (deptCode) {
+      const cand =
+        (
+          await c.var.DB.prepare(
+            `SELECT id, productionOrderId, wipKey, departmentCode
+               FROM job_cards
+              WHERE departmentCode = ? AND status <> 'COMPLETED'`,
+          )
+            .bind(deptCode)
+            .all<{
+              id: string;
+              productionOrderId: string;
+              wipKey: string | null;
+              departmentCode: string | null;
+            }>()
+        ).results ?? [];
+      const hit = cand.find(
+        (j) =>
+          deriveBarcodeToken(
+            j.productionOrderId,
+            j.wipKey ?? "",
+            j.departmentCode ?? deptCode,
+          ) === term,
+      );
+      if (hit) {
+        poRows =
+          (
+            await c.var.DB.prepare(
+              "SELECT * FROM production_orders WHERE id = ? LIMIT 1",
+            )
+              .bind(hit.productionOrderId)
+              .all<PoRowFull>()
+          ).results ?? [];
+      }
+    }
+  }
+
   if (poRows.length === 0) return c.json({ success: true, data: [] });
 
   const poIds = poRows.map((p) => p.id);
@@ -633,6 +678,90 @@ async function stampPunchPhoto(
     .run();
 }
 
+// ── Forgotten clock-out auto-close ──────────────────────────────────────────
+// A worker who clocks IN but never OUT leaves an open punch. Per Wei Siang
+// 2026-06-16: once it's past midnight with no clock-out it counts as a forgotten
+// punch — that day STILL pays as a NORMAL shift (standard hours, NO overtime, NO
+// short-hour dock; a missed punch isn't a real short/long day) and is FLAGGED in
+// Attendance so the office sees it. Two triggers close these, sharing this one
+// helper so the rule never drifts:
+//   1. The worker's NEXT clock-in (self-heal in POST /clock) — but only fires if
+//      they actually return the next day.
+//   2. The midnight cron (autoCloseStalePunches) — closes them even when the
+//      worker is absent the next day.
+// Idempotent via the `clockOut IS NULL` guard, so the two can never double-close.
+async function autoCloseForgottenPunch(
+  db: D1Database,
+  row: AttendanceRow,
+  payRules: Awaited<ReturnType<typeof loadPayRuleVersions>>,
+  workingHoursPerDay: number,
+): Promise<void> {
+  if (!row.clockIn || row.clockOut) return;
+  const rules = toAttendanceRules(
+    resolvePayRulesAsOf(payRules, (row.date || "").slice(0, 10)),
+  );
+  const endMin = rules.endMin;
+  const outTime = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(endMin % 60).padStart(2, "0")}`;
+  const stdMin = (workingHoursPerDay || 9) * 60;
+  const prodMin = Math.max(0, Math.round(stdMin * 0.85));
+  const effPct = stdMin > 0 ? Math.round((prodMin / stdMin) * 100) : 0;
+  await db
+    .prepare(
+      `UPDATE attendance_records
+         SET clockOut = ?, workingMinutes = ?, productionTimeMinutes = ?,
+             efficiencyPct = ?, overtimeMinutes = 0,
+             notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes END
+       WHERE id = ? AND clockOut IS NULL`,
+    )
+    .bind(
+      outTime,
+      stdMin,
+      prodMin,
+      effPct,
+      "Forgot to punch out — auto-counted as a normal shift",
+      row.id,
+    )
+    .run();
+}
+
+// Midnight cron entry: close EVERY worker's prior-day open punch (date < today
+// MYT, clocked in, never out) — even workers who don't return the next day, the
+// gap the per-clock-in self-heal can't cover. Joins `workers` for each one's
+// standard shift length. Best-effort per row so one bad row never aborts the
+// batch; returns a small tally for the cron log. Exposed via the CRON_SECRET-
+// gated POST /api/internal/auto-clockout in worker.ts (the app entry).
+export async function autoCloseStalePunches(
+  db: D1Database,
+): Promise<{ scanned: number; closed: number }> {
+  const today = malaysiaNow().toISOString().slice(0, 10);
+  const stale = await db
+    .prepare(
+      `SELECT a.*, COALESCE(w.workingHoursPerDay, 9) AS whpd
+         FROM attendance_records a
+         LEFT JOIN workers w ON w.id = a.employeeId
+        WHERE a.date < ? AND a.clockIn IS NOT NULL AND a.clockOut IS NULL`,
+    )
+    .bind(today)
+    .all<AttendanceRow & { whpd: number }>();
+  const rows = stale.results ?? [];
+  let payRules: Awaited<ReturnType<typeof loadPayRuleVersions>> = [];
+  try {
+    payRules = await loadPayRuleVersions(db);
+  } catch {
+    payRules = [];
+  }
+  let closed = 0;
+  for (const r of rows) {
+    try {
+      await autoCloseForgottenPunch(db, r, payRules, Number(r.whpd) || 9);
+      closed++;
+    } catch (e) {
+      console.warn("[auto-clockout] skip row", r.id, e);
+    }
+  }
+  return { scanned: rows.length, closed };
+}
+
 app.post("/clock", async (c) => {
   const auth = await getWorker(c);
   if (!auth.ok) return auth.response;
@@ -666,6 +795,41 @@ app.post("/clock", async (c) => {
     .first<AttendanceRow>();
 
   if (action === "CLOCK_IN") {
+    // Self-heal a forgotten clock-out: close any PRIOR-day open punch (this
+    // worker, date < today, clocked in but never out) at its shift end — 18:00
+    // by the day's pay rules — running the SAME auto short-hour dock + Working-
+    // Hours autofill a manual clock-out does, so the forgotten day still counts
+    // for pay instead of sitting at 0h. The worker then clocks in fresh today
+    // (state is per calendar day, so this never blocks today's punch). Wei Siang
+    // 2026-06-16. Best-effort — a hiccup must never break the clock-in.
+    try {
+      const stale = await c.var.DB.prepare(
+        "SELECT * FROM attendance_records WHERE employeeId = ? AND date < ? AND clockIn IS NOT NULL AND clockOut IS NULL",
+      )
+        .bind(worker.id, date)
+        .all<AttendanceRow>();
+      const staleRows = stale.results ?? [];
+      if (staleRows.length > 0) {
+        let payRules: Awaited<ReturnType<typeof loadPayRuleVersions>> = [];
+        try {
+          payRules = await loadPayRuleVersions(c.var.DB);
+        } catch {
+          payRules = [];
+        }
+        // Same rule as the midnight cron — close each at shift end, normal
+        // hours, flagged. Shared helper so the two paths can never drift.
+        for (const s of staleRows) {
+          await autoCloseForgottenPunch(
+            c.var.DB,
+            s,
+            payRules,
+            worker.workingHoursPerDay || 9,
+          );
+        }
+      }
+    } catch (e) {
+      console.warn("[worker/clock] prior-day auto clock-out skipped:", e);
+    }
     if (existing) {
       // Idempotent — if a clockIn already exists, leave it; just ensure
       // status is PRESENT.

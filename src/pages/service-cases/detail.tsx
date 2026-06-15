@@ -403,7 +403,12 @@ export default function ServiceCaseDetailPage() {
               }}
               className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
             >
-              <Plus className="h-4 w-4" /> Spawn Service Order
+              {/* Re-spawn (#10): once a service order exists, this pre-fills only
+                  the affected products NOT yet on a service order. */}
+              <Plus className="h-4 w-4" />{" "}
+              {caseDetail.orders.length > 0
+                ? "Spawn for New Items"
+                : "Spawn Service Order"}
             </Button>
           )}
         </CardHeader>

@@ -648,3 +648,78 @@ export function repairScopeBadgeLabel(scope: RepairScope | null): string {
   }
   return base;
 }
+
+// Normalize a repaired-component label to the short form printed on the DO
+// (Wei Siang 2026-06-16): the repaired part must read the SAME way as on a
+// complete unit / the WIP sticker — "1 HB", "1 BC", "1 Arm", never spelled out.
+// Maps the picker's labels to their abbreviations; an unknown label passes
+// through unchanged (and can be added here when a new component appears).
+export function normalizePartLabel(label: string): string {
+  switch (label.trim().toUpperCase()) {
+    case "HB":
+    case "HEADBOARD":
+      return "HB";
+    case "DIVAN":
+      return "Divan";
+    case "BC":
+    case "BACK CUSHION":
+      return "BC";
+    case "RIGHT ARM":
+    case "R ARM":
+      return "Right Arm";
+    case "LEFT ARM":
+    case "L ARM":
+      return "Left Arm";
+    case "ARM":
+    case "ARMREST":
+      return "Arm";
+    case "HR":
+    case "HEADREST":
+      return "Headrest";
+    case "BASE":
+      return "Base";
+    default:
+      return label.trim();
+  }
+}
+
+// Clean short part label from a repair component's wipKey. The stored `label`
+// is the VERBOSE BOM wipLabel ("5531-2A(RHF) -Base 28"); the KEY encodes the
+// wipType (productCode::idx::WIPTYPE::rawCode), which is clean — so map the
+// wipType to its short form (BASE→Base, BACK_CUSHION→BC, RIGHT_ARM→R Arm, …).
+// An unknown wipType title-cases ("SEAT_CUSHION" → "Seat Cushion"); a key with
+// no wipType segment falls back to normalizing the stored label.
+export function partLabelFromKey(
+  key: string | undefined | null,
+  fallbackLabel?: string | null,
+): string {
+  const seg = String(key || "").split("::");
+  if (seg.length >= 4 && seg[2]) {
+    const wipType = seg[2].replace(/_/g, " ").trim();
+    const mapped = normalizePartLabel(wipType);
+    if (mapped.toUpperCase() === wipType.toUpperCase()) {
+      // Unknown type — title-case it so it reads "Seat Cushion", not "SEAT CUSHION".
+      return wipType.toLowerCase().replace(/\b\w/g, (ch) => ch.toUpperCase());
+    }
+    return mapped;
+  }
+  return normalizePartLabel(String(fallbackLabel || ""));
+}
+
+// Parts-only summary for the delivery "Repair: …" badge — just the repaired
+// component labels in full words ("Headboard + Armrest", or "Headboard + 2
+// Armrest" when a part's picked qty > 1). Returns null when the scope has no
+// component picks (a full or dept-only repair has no specific parts to list, so
+// no badge).
+export function repairPartsLabel(scope: RepairScope | null): string | null {
+  const comps = scope?.components;
+  if (!comps || comps.length === 0) return null;
+  const parts = comps
+    .map((c) => {
+      const lab = partLabelFromKey(c.key, c.label);
+      if (!lab) return "";
+      return c.qty > 1 ? `${c.qty} ${lab}` : lab;
+    })
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join(" + ") : null;
+}

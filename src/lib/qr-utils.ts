@@ -20,11 +20,26 @@ export function getQRCodeUrl(data: string, size: number = 150): string {
  *
  * Returns a Promise<string> of the form `data:image/png;base64,...`.
  */
-export async function getQRCodeDataURL(data: string, size: number = 300): Promise<string> {
+export async function getQRCodeDataURL(
+  data: string,
+  size: number = 300,
+  margin: number = 2,
+): Promise<string> {
   return QRCode.toDataURL(data, {
     width: size,
-    margin: 0,
-    errorCorrectionLevel: "M",
+    // A quiet zone (white border) is REQUIRED by the QR spec for a scanner to
+    // lock on, and it makes the code tolerant of slight edge-clipping when a
+    // sticker prints near a printer's non-printable margin (Wei Siang 2026-06-15:
+    // the Packing FG QR was getting shaved off the left edge — "挤出去了"). Was 0,
+    // which printed an edge-to-edge QR with no quiet zone at all. 2 modules is the
+    // practical minimum; callers can pass more if a layout needs extra breathing.
+    margin,
+    // Q = ~25% damage recovery (was M = ~15%). Shop-floor labels get wrinkled,
+    // smudged, and printed near a printer's clip margin — Q lets the scanner
+    // rebuild the code even when a corner is shaved off or dirty (Wei Siang
+    // 2026-06-16). Q over H to keep the module count — and the print density —
+    // sane on the small 50x75mm job-card stickers.
+    errorCorrectionLevel: "Q",
   });
 }
 
@@ -55,16 +70,22 @@ export function jobCardBarcodeValue(jobCardId: string): string {
 }
 
 /**
- * Parse a scanned Code 128 back to a bare job_card id, or null when it isn't
- * one of ours. Requires the `HKJC:` prefix AND a `jc-` shaped id so random
- * barcodes (and our own QR URLs, which never carry this prefix) are ignored.
+ * Parse a scanned Code 128 back to a WIP barcode token, or null when it isn't
+ * one of ours. The schedule barcode is now the SHORT `b<deptNN><7hash>` form
+ * (Wei Siang 2026-06-16: a real barcode must be short, not "那麽厚那麽長") — the
+ * `b` sentinel + strict 10-char shape ignore a stray courier barcode AND our own
+ * QR URLs (which never look like this). The legacy `HKJC:jc-…` form is still
+ * accepted so any already-printed sheet keeps working.
  */
 export function parseJobCardBarcode(value: string): string | null {
   if (!value) return null;
   const v = value.trim();
-  if (!v.startsWith(JC_BARCODE_PREFIX)) return null;
-  const id = v.slice(JC_BARCODE_PREFIX.length).trim();
-  return /^jc-/.test(id) ? id : null;
+  if (/^b\d{2}[0-9a-z]{7}$/.test(v)) return v; // new short token
+  if (v.startsWith(JC_BARCODE_PREFIX)) {
+    const id = v.slice(JC_BARCODE_PREFIX.length).trim();
+    return /^jc-/.test(id) ? id : null; // legacy HKJC:jc-… token
+  }
+  return null;
 }
 
 /**

@@ -36,7 +36,9 @@ import {
   selectBestBomByCode,
   piecesFor as piecesForShared,
   deriveComponentRacks,
+  buildRepairNote,
 } from "../lib/print-extras-shared";
+import { parseRepairScope, type RepairScope } from "../../lib/repair-scope";
 import { createPackingListCore } from "./packing-lists";
 import {
   groupPosByCustomerHub,
@@ -163,6 +165,7 @@ function pickItemM3(
 function rowToItem(
   row: DeliveryOrderItemRow,
   productM3Map?: Map<string, number>,
+  repairScopeByPo?: Map<string, string | null>,
 ) {
   return {
     id: row.id,
@@ -177,6 +180,12 @@ function rowToItem(
     rackingNumber: row.rackingNumber ?? "",
     packingStatus: row.packingStatus ?? "PENDING",
     salesOrderNo: row.salesOrderNo ?? "",
+    // Partial-repair scope (raw JSON) from the line's production order, for the
+    // DO detail "Repair: <parts> (code)" badge. null when no map is supplied
+    // (list path) or the PO has no scope.
+    repairScope: row.productionOrderId
+      ? repairScopeByPo?.get(row.productionOrderId) ?? null
+      : null,
   };
 }
 
@@ -262,11 +271,38 @@ export async function loadProductM3Map(
   return map;
 }
 
+// productionOrderId → raw repairScope JSON, for the DO detail items' "Repair:
+// <parts> (code)" badge. SELECT * so the runtime-added repairScope column
+// round-trips the Postgres compat layer (read dual-key, lowercase-folded).
+async function loadRepairScopeByPo(
+  db: D1Database,
+  poIds: (string | null)[],
+): Promise<Map<string, string | null>> {
+  const ids = Array.from(new Set(poIds.filter((x): x is string => !!x)));
+  const out = new Map<string, string | null>();
+  if (ids.length === 0) return out;
+  const ph = ids.map(() => "?").join(",");
+  const res = await db
+    .prepare(`SELECT * FROM production_orders WHERE id IN (${ph})`)
+    .bind(...ids)
+    .all<Record<string, unknown>>();
+  for (const row of res.results ?? []) {
+    const pid = String(row.id ?? "");
+    if (!pid) continue;
+    out.set(
+      pid,
+      (row.repairScope as string) ?? (row.repairscope as string) ?? null,
+    );
+  }
+  return out;
+}
+
 function rowToOrder(
   row: DeliveryOrderRow,
   items: DeliveryOrderItemRow[] = [],
   productM3Map?: Map<string, number>,
   hubStateMap?: Map<string, string>,
+  repairScopeByPo?: Map<string, string | null>,
 ) {
   const pod = parseJson<Record<string, unknown> | null>(row.proofOfDelivery, null);
   const fgUnitIds = parseJson<string[]>(row.fgUnitIds, []);
@@ -311,7 +347,7 @@ function rowToOrder(
     vehicleType: row.vehicleType ?? "",
     items: items
       .filter((i) => i.deliveryOrderId === row.id)
-      .map((it) => rowToItem(it, productM3Map)),
+      .map((it) => rowToItem(it, productM3Map, repairScopeByPo)),
     // Recompute totalM3 on read using live product unitM3 — legacy DOs
     // were persisted with itemM3=0 / totalM3=0 before BUG-2026-04-27 fix.
     totalM3: productM3Map
@@ -372,8 +408,9 @@ function rowToOrderList(
   items: DeliveryOrderItemRow[] = [],
   productM3Map?: Map<string, number>,
   hubStateMap?: Map<string, string>,
+  repairScopeByPo?: Map<string, string | null>,
 ): Record<string, unknown> {
-  const full = rowToOrder(row, items, productM3Map, hubStateMap);
+  const full = rowToOrder(row, items, productM3Map, hubStateMap, repairScopeByPo);
   return {
     ...full,
     proofOfDelivery: null,
@@ -392,6 +429,11 @@ function rowToOrderList(
         quantity: it.quantity,
         itemM3: pickItemM3(it, productM3Map),
         rackingNumber: it.rackingNumber ?? "",
+        // So the DO detail/view modal (opened from the list) shows the repair
+        // badge without waiting for a save round-trip (review M1).
+        repairScope: it.productionOrderId
+          ? repairScopeByPo?.get(it.productionOrderId) ?? null
+          : null,
       })),
   };
 }
@@ -936,11 +978,12 @@ async function fetchOrderWithItems(db: D1Database, id: string) {
   ]);
   if (!order) return null;
   const items = itemsRes.results ?? [];
-  const [m3Map, hubStateMap] = await Promise.all([
+  const [m3Map, hubStateMap, repairScopeByPo] = await Promise.all([
     loadProductM3Map(db, items.map((i) => i.productCode)),
     loadHubStateMap(db, [order.hubId]),
+    loadRepairScopeByPo(db, items.map((i) => i.productionOrderId)),
   ]);
-  return rowToOrder(order, items, m3Map, hubStateMap);
+  return rowToOrder(order, items, m3Map, hubStateMap, repairScopeByPo);
 }
 
 // GET /api/delivery-orders — list all, nested items
@@ -980,10 +1023,11 @@ app.get("/", async (c) => {
     ]);
     const itemRows = items.results ?? [];
     const orderRows = orders.results ?? [];
-    const [m3Map, hubStateMap, invoiceMap] = await Promise.all([
+    const [m3Map, hubStateMap, invoiceMap, repairScopeByPo] = await Promise.all([
       loadProductM3Map(db, itemRows.map((i) => i.productCode)),
       loadHubStateMap(db, orderRows.map((o) => o.hubId)),
       loadDoInvoiceMap(db, orgId),
+      loadRepairScopeByPo(db, itemRows.map((i) => i.productionOrderId)),
     ]);
     // De-quadratic (2026-06-04): group items by deliveryOrderId ONCE so each
     // rowToOrderList gets only its own items instead of re-scanning ALL items
@@ -998,7 +1042,7 @@ app.get("/", async (c) => {
       else itemsByDO.set(it.deliveryOrderId, [it]);
     }
     const data = orderRows.map((o) => {
-      const order = rowToOrderList(o, itemsByDO.get(o.id) ?? [], m3Map, hubStateMap);
+      const order = rowToOrderList(o, itemsByDO.get(o.id) ?? [], m3Map, hubStateMap, repairScopeByPo);
       order.valueSen = valueMap.get(o.id) ?? 0;
       order.invoiceNo = invoiceMap.get(o.id) ?? "";
       return order;
@@ -1063,12 +1107,14 @@ app.get("/", async (c) => {
       .all<DeliveryOrderItemRow>();
     items = itemsRes.results ?? [];
   }
-  const [m3Map, hubStateMap, valueMap, invoiceMap] = await Promise.all([
-    loadProductM3Map(db, items.map((i) => i.productCode)),
-    loadHubStateMap(db, orderRows.map((o) => o.hubId)),
-    loadDoValueMap(db, orgId),
-    loadDoInvoiceMap(db, orgId),
-  ]);
+  const [m3Map, hubStateMap, valueMap, invoiceMap, repairScopeByPo] =
+    await Promise.all([
+      loadProductM3Map(db, items.map((i) => i.productCode)),
+      loadHubStateMap(db, orderRows.map((o) => o.hubId)),
+      loadDoValueMap(db, orgId),
+      loadDoInvoiceMap(db, orgId),
+      loadRepairScopeByPo(db, items.map((i) => i.productionOrderId)),
+    ]);
   // De-quadratic: same per-DO grouping as the full-list branch above.
   const itemsByDO = new Map<string, DeliveryOrderItemRow[]>();
   for (const it of items) {
@@ -1077,7 +1123,7 @@ app.get("/", async (c) => {
     else itemsByDO.set(it.deliveryOrderId, [it]);
   }
   const data = orderRows.map((o) => {
-    const order = rowToOrderList(o, itemsByDO.get(o.id) ?? [], m3Map, hubStateMap);
+    const order = rowToOrderList(o, itemsByDO.get(o.id) ?? [], m3Map, hubStateMap, repairScopeByPo);
     order.valueSen = valueMap.get(o.id) ?? 0;
     order.invoiceNo = invoiceMap.get(o.id) ?? "";
     return order;
@@ -4238,6 +4284,34 @@ app.get("/:id/print-extras", async (c) => {
     }
   }
 
+  // Per-PO repair scope (partial repair). Loaded with SELECT * so the runtime-
+  // added repairScope column round-trips the Postgres compat layer (an aliased
+  // camelCase column on the big multi-join above would NOT — the same reason
+  // diPoById is a clean single-table read). Used to narrow a partial-repair
+  // line's printed pieces to just the repaired compartment(s).
+  const repairScopeByPo = new Map<string, RepairScope | null>();
+  {
+    const poIds = Array.from(new Set(diPoById.values()));
+    if (poIds.length > 0) {
+      const ph = poIds.map(() => "?").join(",");
+      const rsRes = await c.var.DB.prepare(
+        `SELECT * FROM production_orders WHERE id IN (${ph})`,
+      )
+        .bind(...poIds)
+        .all<Record<string, unknown>>();
+      for (const row of rsRes.results ?? []) {
+        const pid = String(row.id ?? "");
+        if (!pid) continue;
+        repairScopeByPo.set(
+          pid,
+          parseRepairScope(
+            (row.repairScope as string) ?? (row.repairscope as string) ?? null,
+          ),
+        );
+      }
+    }
+  }
+
   // Per-line set composition string, e.g. "1 HB + 2 DIVAN" (bedframe)
   // or "1 1A + 1 2A + 1 STOOL" (sofa set). Shared with the CN print-extras
   // (src/api/lib/print-extras-shared.ts) so both documents produce the
@@ -4254,6 +4328,7 @@ app.get("/:id/print-extras", async (c) => {
     d: number | null,
     l: number | null,
     qty: number,
+    repairScope?: RepairScope | null,
   ): string | null =>
     piecesForShared({
       code,
@@ -4267,6 +4342,7 @@ app.get("/:id/print-extras", async (c) => {
       divanHeightInches: d,
       legHeightInches: l,
       qty,
+      repairScope,
     });
 
   let customerRef = "";
@@ -4280,6 +4356,9 @@ app.get("/:id/print-extras", async (c) => {
       salesOrderNo: string | null;
       specialOrder: string | null;
       pieces: string | null;
+      // "Repair: HB only" when this line is a narrowed partial repair; null
+      // otherwise. Printed under the DO line's spec (English — PDF has no CJK).
+      repairNote: string | null;
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -4323,6 +4402,15 @@ app.get("/:id/print-extras", async (c) => {
         ? null
         : (Number(g) || 0) + (Number(d) || 0) + (Number(l) || 0);
     const bom = bomByCode.get((r.productCode || "").trim());
+    // Partial repair: narrow the printed pieces to just the repaired
+    // compartment(s). The note is built ONLY when the scope actually narrowed
+    // the line (filtered ≠ full) so a stale-pick fallback never prints a
+    // misleading "only". Inventory / invoice are unaffected — they key off the
+    // line's set quantity, never this pieces string.
+    const lineScope = repairScopeByPo.get(diPoById.get(r.id) || "") ?? null;
+    const hasPartial = !!(
+      lineScope?.components && lineScope.components.length > 0
+    );
     const pieces = bom
       ? piecesFor(
           r.productCode || "",
@@ -4336,8 +4424,27 @@ app.get("/:id/print-extras", async (c) => {
           d,
           l,
           Number(r.quantity) || 1,
+          hasPartial ? lineScope : null,
         )
       : null;
+    let repairNote: string | null = null;
+    if (bom && hasPartial && pieces) {
+      const fullPieces = piecesFor(
+        r.productCode || "",
+        bom.baseModel,
+        bom.wipComponents,
+        itemCategory,
+        specialOrder,
+        r.sizeLabel || "",
+        r.fabricCode || "",
+        g,
+        d,
+        l,
+        Number(r.quantity) || 1,
+        null,
+      );
+      if (pieces !== fullPieces) repairNote = buildRepairNote(pieces);
+    }
     // Packed date + per-component racks from the PO's PACKING job cards.
     // Same rule as the on-screen Packed column (delivery/index.tsx mapPO):
     // every PACKING card done ⇒ latest completedDate; any open card ⇒ null.
@@ -4357,6 +4464,7 @@ app.get("/:id/print-extras", async (c) => {
       salesOrderNo: soNo || null,
       specialOrder,
       pieces,
+      repairNote,
       gapInches: g,
       divanHeightInches: d,
       legHeightInches: l,

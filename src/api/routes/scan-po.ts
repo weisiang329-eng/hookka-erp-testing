@@ -1525,7 +1525,65 @@ app.post("/samples/:id/confirm", async (c) => {
     );
   }
 
-  return c.json({ success: true });
+  // Self-evolution (Wei Siang 2026-06-16 "你要自我进化哦"): the moment an operator
+  // confirms a sample as GOLD, regenerate THIS customer's OCR rule block from
+  // their now-larger gold pool — don't wait up to a week for the distill cron.
+  // Fire-and-forget via waitUntil so the click returns instantly; distillCustomer-
+  // Rules cheap-skips when the customer still has <2 gold samples (no Anthropic
+  // call), so an early gold-mark is free. A brand-new customer thus "learns" its
+  // template the instant its 2nd example is confirmed. Best-effort — never let a
+  // distillation hiccup fail the gold-mark the operator just made.
+  let distillQueued = false;
+  if (goldFlag === 1) {
+    try {
+      const orgId = getOrgId(c);
+      const sample = await (c.var.DB as unknown as DBLike)
+        .prepare("SELECT customerHint FROM po_scan_samples WHERE id = ?")
+        .bind(id)
+        .first<{ customerHint: string | null }>();
+      const hint = (sample?.customerHint ?? "").trim();
+      if (hint) {
+        // Resolve the customer the same way distillCustomerRules matches its
+        // gold pool: exact name, or the short customer name as a normalized
+        // prefix of the PO's full legal name ("Houzs Century" ⊂ "Houzs Century
+        // Sdn Bhd"). Longest name first = most specific match.
+        const cust = await (c.var.DB as unknown as DBLike)
+          .prepare(
+            `SELECT id FROM customers
+               WHERE orgId = ? AND isActive = 1
+                 AND (
+                       UPPER(name) = UPPER(?)
+                    OR regexp_replace(UPPER(?), '[^A-Z0-9]', '', 'g')
+                         LIKE regexp_replace(UPPER(name), '[^A-Z0-9]', '', 'g') || '%'
+                 )
+               ORDER BY LENGTH(name) DESC
+               LIMIT 1`,
+          )
+          .bind(orgId, hint, hint)
+          .first<{ id: string }>();
+        if (cust?.id && c.executionCtx?.waitUntil) {
+          c.executionCtx.waitUntil(
+            distillCustomerRules(c.var.DB, c.env, orgId, cust.id)
+              .then((r) => {
+                if (r.status === "error") {
+                  console.warn(
+                    `[scan-po gold→distill] ${cust.id}: ${r.reason ?? "unknown"}`,
+                  );
+                }
+              })
+              .catch((e) =>
+                console.warn("[scan-po gold→distill] threw:", e),
+              ),
+          );
+          distillQueued = true;
+        }
+      }
+    } catch (e) {
+      console.warn("[scan-po gold→distill] dispatch skipped:", e);
+    }
+  }
+
+  return c.json({ success: true, distillQueued });
 });
 
 // ===========================================================================

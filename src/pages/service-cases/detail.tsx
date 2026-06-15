@@ -6,7 +6,7 @@
 // any service orders spawned for this case, plus a "Spawn Service Order"
 // button to open a new resolution flow (REPRODUCE / STOCK_SWAP / REPAIR).
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { computeCasePipeline, CASE_PIPELINE_STEPS } from "@/lib/case-pipeline";
@@ -1494,6 +1494,107 @@ function CategoryDetailsForm({
 }
 
 // ===========================================================================
+// CaseDamagedPartsEditor — pick which BOM pieces of an affected product are
+// damaged, editable right on the case detail (Wei Siang 2026-06-15: "不能在
+// Service Case 改损坏部件吗" — previously these were read-only chips set only at
+// case-create). Fetches the product's top-level WIP pieces from the SAME
+// endpoint the create modal + the SO Repair Scope picker use, so the options
+// match. Default tick = qty 1 (usually only one piece is damaged), clamped to
+// the per-FG max. No picks = "all parts" (parent stores components: undefined).
+// ===========================================================================
+type DamagedPartOption = { key: string; label: string; qty: number };
+
+function CaseDamagedPartsEditor({
+  productCode,
+  picks,
+  onChange,
+}: {
+  productCode: string;
+  picks: DamagedPartOption[];
+  onChange: (next: DamagedPartOption[]) => void;
+}) {
+  const [options, setOptions] = useState<DamagedPartOption[] | null>(null);
+  useEffect(() => {
+    if (!productCode) return;
+    let cancelled = false;
+    fetch(
+      `/api/sales-orders/repair-components?productCode=${encodeURIComponent(productCode)}`,
+    )
+      .then((res): Promise<{ success?: boolean; data?: DamagedPartOption[] } | null> =>
+        res.ok ? res.json() : Promise.resolve(null),
+      )
+      .then((data) => {
+        if (cancelled) return;
+        if (data?.success && Array.isArray(data.data)) setOptions(data.data);
+      })
+      .catch(() => {
+        /* endpoint unreachable — hide the picker (= whole product) */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [productCode]);
+
+  // Flat / legacy product with no top-level pieces → nothing to pick (the
+  // whole product is the unit), same as the create modal.
+  if (!options || options.length === 0) return null;
+
+  const toggle = (opt: DamagedPartOption) => {
+    const has = picks.some((p) => p.key === opt.key);
+    onChange(
+      has
+        ? picks.filter((p) => p.key !== opt.key)
+        : [...picks, { key: opt.key, label: opt.label, qty: 1 }],
+    );
+  };
+  const setQty = (opt: DamagedPartOption, raw: string) => {
+    const maxQty = Math.max(1, Math.floor(opt.qty) || 1);
+    const n = Math.floor(Number(raw));
+    const qty = Number.isFinite(n) ? Math.min(Math.max(1, n), maxQty) : maxQty;
+    onChange(picks.map((p) => (p.key === opt.key ? { ...p, qty } : p)));
+  };
+
+  return (
+    <div className="mt-1.5 rounded border border-[#E8D8B2] bg-[#FAF7F0] px-2 py-1.5">
+      <div className="text-[10px] text-[#6B5C32] mb-1">
+        Damaged parts (optional — all if none picked)
+      </div>
+      <div className="space-y-1">
+        {options.map((opt) => {
+          const pick = picks.find((p) => p.key === opt.key);
+          const maxQty = Math.max(1, Math.floor(opt.qty) || 1);
+          return (
+            <div key={opt.key} className="flex items-center gap-2 text-[11px]">
+              <label className="flex items-center gap-1.5 flex-1 min-w-0 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!pick}
+                  onChange={() => toggle(opt)}
+                  className="h-3 w-3"
+                />
+                <span className="truncate">{opt.label}</span>
+                <span className="text-[#9CA3AF]">×{maxQty}</span>
+              </label>
+              {pick ? (
+                <Input
+                  type="number"
+                  min={1}
+                  max={maxQty}
+                  value={pick.qty}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onChange={(e) => setQty(opt, e.target.value)}
+                  className="h-6 w-14 text-[11px] px-1.5"
+                />
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
 // AffectedProductsPanel — attach 0..N product SKUs to the case.
 // ===========================================================================
 // Optional: a case might be about a single product, a multi-product order,
@@ -1618,6 +1719,20 @@ function AffectedProductsPanel({
     void persist(next);
   }
 
+  // Edit which BOM pieces are damaged, right here on the case (#16). Empty =
+  // "all parts" → drop the field so it stays the canonical "whole product".
+  function updateComponents(
+    productId: string,
+    components: Array<{ key: string; label: string; qty: number }>,
+  ) {
+    const next = caseDetail.affectedProducts.map((p) =>
+      p.productId === productId
+        ? { ...p, components: components.length > 0 ? components : undefined }
+        : p,
+    );
+    void persist(next);
+  }
+
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -1711,21 +1826,14 @@ function AffectedProductsPanel({
                     <span className="text-[#C9C3BC]"> — </span>
                     <span className="text-[#1F1D1B]">{p.name}</span>
                   </div>
-                  {/* Damaged-part picks from the create modal — read-only
-                      tags (absent = all parts). */}
-                  {p.components && p.components.length > 0 && (
-                    <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {p.components.map((cp) => (
-                        <span
-                          key={cp.key}
-                          className="inline-flex items-center gap-1 rounded-full border border-[#E2DDD8] bg-white px-2 py-0.5 text-[11px] text-[#5A5550]"
-                        >
-                          {cp.label || cp.key}
-                          <span className="font-semibold text-[#1F1D1B]">×{cp.qty}</span>
-                        </span>
-                      ))}
-                    </div>
-                  )}
+                  {/* Damaged parts — now EDITABLE here (#16), not just at
+                      case-create. Tick which pieces are damaged + how many;
+                      changes save immediately like the qty field. */}
+                  <CaseDamagedPartsEditor
+                    productCode={p.code}
+                    picks={p.components ?? []}
+                    onChange={(next) => updateComponents(p.productId, next)}
+                  />
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <Input

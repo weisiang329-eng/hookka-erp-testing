@@ -3722,7 +3722,7 @@ export default function DeliveryPage() {
         // Distinct SO numbers from items[]. A DO can span multiple SOs
         // (e.g. one truck trip consolidating SO-2604-326 + SO-2604-328);
         // shown comma-separated.
-        render: (_value, row) => {
+        render: (_value, row, _index, highlight) => {
           const sos = Array.from(
             new Set(
               (row.items || [])
@@ -3731,9 +3731,9 @@ export default function DeliveryPage() {
             )
           );
           if (sos.length === 0) {
-            return <span className="text-[#9CA3AF]">{row.salesOrderId || "-"}</span>;
+            return <span className="text-[#9CA3AF]">{highlight(row.salesOrderId || "-")}</span>;
           }
-          return <span className="text-[#1F1D1B]">{sos.join(", ")}</span>;
+          return <span className="text-[#1F1D1B]">{highlight(sos.join(", "))}</span>;
         },
       },
       // Customer-side reference numbers (operator request 2026-05-19) — the
@@ -3750,8 +3750,8 @@ export default function DeliveryPage() {
         type: "text",
         width: "150px",
         sortable: true,
-        render: (_value, row) => row.customerPOId
-          ? <span className="text-[#1F1D1B]">{row.customerPOId}</span>
+        render: (_value, row, _index, highlight) => row.customerPOId
+          ? <span className="text-[#1F1D1B]">{highlight(row.customerPOId)}</span>
           : <span className="text-[#9CA3AF]">{"—"}</span>,
       },
       {
@@ -3760,8 +3760,8 @@ export default function DeliveryPage() {
         type: "text",
         width: "130px",
         sortable: true,
-        render: (_value, row) => row.customerRef
-          ? <span className="text-[#1F1D1B]">{row.customerRef}</span>
+        render: (_value, row, _index, highlight) => row.customerRef
+          ? <span className="text-[#1F1D1B]">{highlight(row.customerRef)}</span>
           : <span className="text-[#9CA3AF]">{"—"}</span>,
       },
       {
@@ -3770,8 +3770,8 @@ export default function DeliveryPage() {
         type: "text",
         width: "150px",
         sortable: true,
-        render: (_value, row) => row.customerSO
-          ? <span className="text-[#1F1D1B]">{row.customerSO}</span>
+        render: (_value, row, _index, highlight) => row.customerSO
+          ? <span className="text-[#1F1D1B]">{highlight(row.customerSO)}</span>
           : <span className="text-[#9CA3AF]">{"—"}</span>,
       },
       {

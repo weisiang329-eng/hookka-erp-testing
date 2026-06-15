@@ -46,7 +46,16 @@ export type Column<T> = {
   sortable?: boolean;
   hidden?: boolean; // context-driven: column is excluded from the toggle list AND from render. Final.
   defaultHidden?: boolean; // column appears in the Columns toggle list but is OFF by default. User can toggle on.
-  render?: (value: any, row: T, index: number) => React.ReactNode;
+  // `highlight` wraps the matched global-search term in the cell text (Wei
+  // Siang 2026-06-15). Optional + additive — renders that ignore it are
+  // unchanged; text-bearing renders should wrap their displayed string with it
+  // so a search match is visible (e.g. the comma-joined SO / Customer-PO cols).
+  render?: (
+    value: any,
+    row: T,
+    index: number,
+    highlight: (text: string) => React.ReactNode,
+  ) => React.ReactNode;
   type?: "text" | "date" | "currency" | "number" | "docno" | "status";
   // Freeze this column to the left edge so it stays visible during horizontal
   // scroll. Sticky columns must appear contiguously at the start of the
@@ -1326,18 +1335,54 @@ function ColumnCustomizer<T>({
 // Default Cell Renderers
 // ---------------------------------------------------------------------------
 
+// Bold every occurrence of the active global-search term inside a plain-text
+// cell so the matched part is obvious when many rows look alike (Wei Siang
+// 2026-06-15: "搜了没 bold 起来,不知道哪个是我要找的"). Mirrors the global
+// command-palette's highlighter; returns the raw text untouched when there's
+// no query, so non-search rendering is byte-identical.
+function highlightMatch(text: string, query: string): React.ReactNode {
+  const q = (query || "").trim();
+  if (!q || !text) return text;
+  const lower = text.toLowerCase();
+  const ql = q.toLowerCase();
+  let from = 0;
+  let i = lower.indexOf(ql, from);
+  if (i === -1) return text;
+  const parts: React.ReactNode[] = [];
+  while (i !== -1) {
+    if (i > from) parts.push(text.slice(from, i));
+    parts.push(
+      <mark
+        key={i}
+        className="rounded-[2px] bg-[#FBEFB8] px-0.5 font-semibold text-inherit"
+      >
+        {text.slice(i, i + q.length)}
+      </mark>,
+    );
+    from = i + q.length;
+    i = lower.indexOf(ql, from);
+  }
+  if (from < text.length) parts.push(text.slice(from));
+  return <>{parts}</>;
+}
+
 function DefaultCellRenderer<T>({
   column,
   value,
   row,
   index,
+  search,
 }: {
   column: Column<T>;
   value: any;
   row: T;
   index: number;
+  // Active global-search term — used to highlight matches in text cells, and
+  // passed to custom column.render so those cells can highlight too.
+  search?: string;
 }) {
-  if (column.render) return <>{column.render(value, row, index)}</>;
+  const hl = (t: string): React.ReactNode => highlightMatch(t, search ?? "");
+  if (column.render) return <>{column.render(value, row, index, hl)}</>;
 
   switch (column.type) {
     case "date":
@@ -1355,19 +1400,17 @@ function DefaultCellRenderer<T>({
         </span>
       );
     case "docno":
-      return (
-        <span className="tabular-nums">{value}</span>
-      );
+      return <span className="tabular-nums">{hl(String(value ?? ""))}</span>;
     case "status": {
       const colors = getStatusColor(String(value ?? ""));
       return (
         <span className={cn("inline-block rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-tight", colors.bg, colors.text)}>
-          {String(value ?? "").replace(/_/g, " ")}
+          {hl(String(value ?? "").replace(/_/g, " "))}
         </span>
       );
     }
     default:
-      return <>{value != null ? String(value) : ""}</>;
+      return <>{value != null ? hl(String(value)) : ""}</>;
   }
 }
 
@@ -2816,7 +2859,7 @@ export function DataGrid<T extends Record<string, any>>({
                             }}
                           >
                             {col.noClip ? (
-                              <DefaultCellRenderer column={col} value={value} row={row} index={index} />
+                              <DefaultCellRenderer column={col} value={value} row={row} index={index} search={deferredSearch} />
                             ) : (
                               <div
                                 className="truncate"
@@ -2826,7 +2869,7 @@ export function DataGrid<T extends Record<string, any>>({
                                     : { maxWidth: "300px" }
                                 }
                               >
-                                <DefaultCellRenderer column={col} value={value} row={row} index={index} />
+                                <DefaultCellRenderer column={col} value={value} row={row} index={index} search={deferredSearch} />
                               </div>
                             )}
                           </td>

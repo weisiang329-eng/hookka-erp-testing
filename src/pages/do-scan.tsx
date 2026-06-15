@@ -77,11 +77,23 @@ type EditItem = {
   itemM3: number;
 };
 
-type EditModel = {
-  do: { doNo: string; status: string; customerName: string; area: string };
+// One DO's edit model. A single-DO scan returns one; a packing-list scan
+// returns one per member DO so the phone can show + edit each.
+type EditDoModel = {
+  doId: string;
+  doNo: string;
+  status: string;
+  customerName: string;
+  area: string;
   editable: boolean;
   items: EditItem[];
   addable: EditItem[];
+};
+
+type EditResponse = {
+  kind: "DO" | "PL";
+  packingNo?: string;
+  dos: EditDoModel[];
 };
 
 // Same words the office Delivery page uses for the DO pipeline.
@@ -255,13 +267,15 @@ export default function DoScanPage() {
   const [lastResults, setLastResults] = useState<AdvanceResult[] | null>(null);
   const [justCompleted, setJustCompleted] = useState<ActionMode | null>(null);
 
-  // ── Item-edit (lorry space) — single-DO DRAFT only ─────────────────────
+  // ── Item-edit (lorry space) — single DO or every DO under a packing list ─
   const [editOpen, setEditOpen] = useState(false);
-  const [editModel, setEditModel] = useState<EditModel | null>(null);
+  const [editData, setEditData] = useState<EditResponse | null>(null);
   const [editLoading, setEditLoading] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
-  // Set of production-order ids ticked = "on the lorry".
-  const [checked, setChecked] = useState<Set<string>>(new Set());
+  // doId → set of production-order ids ticked = "on the lorry".
+  const [checkedByDo, setCheckedByDo] = useState<Record<string, Set<string>>>(
+    {},
+  );
 
   // No synchronous setState before the first await — `loading` starts true
   // and every write below lands in the async continuation, so the mount
@@ -319,14 +333,12 @@ export default function DoScanPage() {
     [payload],
   );
 
-  // Item editing is offered only for a single DO still Pending Dispatch
-  // (DRAFT). Packing-list (multi-DO) scans keep the simple one-tap flow.
+  // Item editing is offered whenever there's a DO still Pending Dispatch
+  // (DRAFT) — a single DO scan, or any DRAFT member of a packing-list scan.
   const canEditLoad = useMemo(
     () =>
       !!payload &&
-      payload.kind === "DO" &&
-      payload.dos.length === 1 &&
-      (payload.dos[0].status || "").toUpperCase() === "DRAFT",
+      payload.dos.some((d) => (d.status || "").toUpperCase() === "DRAFT"),
     [payload],
   );
 
@@ -341,22 +353,29 @@ export default function DoScanPage() {
       );
       const j = (await r.json().catch(() => ({}))) as {
         success?: boolean;
-        data?: EditModel;
+        data?: EditResponse;
         error?: string;
       };
       if (!r.ok || !j.success || !j.data) {
         setEditError(j.error || "Could not load items. Please try again.");
         return;
       }
-      if (!j.data.editable) {
-        setEditError("This delivery can no longer be edited (already dispatched).");
+      const editable = j.data.dos.filter((d) => d.editable);
+      if (editable.length === 0) {
+        setEditError(
+          "Nothing to adjust — these deliveries are already dispatched.",
+        );
         return;
       }
-      setEditModel(j.data);
-      // Pre-tick everything already on the DO.
-      setChecked(
-        new Set(j.data.items.map((i) => i.productionOrderId).filter(Boolean)),
-      );
+      setEditData(j.data);
+      // Pre-tick every DO's current items.
+      const init: Record<string, Set<string>> = {};
+      for (const d of j.data.dos) {
+        init[d.doId] = new Set(
+          d.items.map((i) => i.productionOrderId).filter(Boolean),
+        );
+      }
+      setCheckedByDo(init);
       setEditOpen(true);
     } catch {
       setEditError("Network error. Please try again.");
@@ -365,33 +384,37 @@ export default function DoScanPage() {
     }
   }, [token, editLoading]);
 
-  const toggleChecked = (poId: string) => {
-    setChecked((prev) => {
-      const next = new Set(prev);
-      if (next.has(poId)) next.delete(poId);
-      else next.add(poId);
-      return next;
+  const toggleChecked = (doId: string, poId: string) => {
+    setCheckedByDo((prev) => {
+      const cur = new Set(prev[doId] ?? []);
+      if (cur.has(poId)) cur.delete(poId);
+      else cur.add(poId);
+      return { ...prev, [doId]: cur };
     });
   };
 
-  // Items currently ticked (across keep + add lists) and the running load.
-  const editChosen = editModel
-    ? [...editModel.items, ...editModel.addable].filter((x) =>
-        checked.has(x.productionOrderId),
-      )
-    : [];
-  const chosenCount = editChosen.reduce((s, x) => s + (x.quantity || 0), 0);
-  const chosenM3 = editChosen.reduce(
+  // Editable DOs + running load total across all of them.
+  const editableDos = editData ? editData.dos.filter((d) => d.editable) : [];
+  const chosenAcross = editableDos.flatMap((d) =>
+    [...d.items, ...d.addable].filter((x) =>
+      (checkedByDo[d.doId] ?? new Set<string>()).has(x.productionOrderId),
+    ),
+  );
+  const chosenCount = chosenAcross.reduce((s, x) => s + (x.quantity || 0), 0);
+  const chosenM3 = chosenAcross.reduce(
     (s, x) => s + (x.itemM3 || 0) * (x.quantity || 0),
     0,
   );
 
-  const handleAdvance = async (mode: ActionMode, poIds?: string[]) => {
+  const handleAdvance = async (
+    mode: ActionMode,
+    edits?: Record<string, string[]>,
+  ) => {
     if (!token || busy) return;
     // The two-tap arm→confirm guard applies to the big top-level buttons. An
-    // edited dispatch (poIds supplied from the Adjust-load panel) is already a
+    // edited dispatch (edits supplied from the Adjust-load panel) is already a
     // deliberate action with its own button, so it fires immediately.
-    if (!poIds && armed !== mode) {
+    if (!edits && armed !== mode) {
       setArmed(mode);
       return;
     }
@@ -412,10 +435,10 @@ export default function DoScanPage() {
           body: JSON.stringify({
             action: apiAction,
             incomplete,
-            // Edited item set (production-order ids) — only sent for a
+            // Edited item set per DO (production-order ids) — only sent for a
             // dispatch from the Adjust-load panel; the server rebuilds the
             // trusted items from these ids.
-            ...(poIds ? { poIds } : {}),
+            ...(edits ? { edits } : {}),
           }),
         },
       );
@@ -626,69 +649,103 @@ export default function DoScanPage() {
               </div>
             )}
 
-            {/* Adjust-load panel — tick what rides on the lorry, untick what
-                won't fit (it returns to the ready pool for a later trip), and
-                add other finished items for the same customer. Then dispatch
-                the ticked set in one tap. */}
-            {editOpen && editModel && !justCompleted && (
-              <div className="rounded-xl bg-white shadow-sm border border-[#E6E0D9] p-4 space-y-3">
-                <div className="flex items-center justify-between gap-2">
+            {/* Adjust-load panel — one card per DO (single scan = one card;
+                packing-list scan = one card per member DO). Tick what rides on
+                the lorry, untick what won't fit (it returns to the ready pool
+                for a later trip), add other finished items for the same
+                customer, then dispatch the ticked set in one tap. */}
+            {editOpen && editData && !justCompleted && (
+              <div className="space-y-3">
+                <div className="rounded-xl bg-white shadow-sm border border-[#E6E0D9] p-4 space-y-1">
                   <p className="text-base font-bold text-[#1F1D1B]">Adjust load</p>
-                  <span className="text-xs text-gray-500 truncate">
-                    {editModel.do.customerName}
-                  </span>
-                </div>
-                <p className="text-xs text-gray-500">
-                  Tick what goes on the lorry. Untick anything that won&apos;t
-                  fit — it stays ready for the next trip.
-                </p>
-
-                <div className="space-y-1.5">
-                  {editModel.items.map((it) => (
-                    <ItemRow
-                      key={it.productionOrderId}
-                      it={it}
-                      checked={checked.has(it.productionOrderId)}
-                      onToggle={() => toggleChecked(it.productionOrderId)}
-                    />
-                  ))}
-                </div>
-
-                {editModel.addable.length > 0 && (
-                  <div className="space-y-1.5 border-t border-[#E6E0D9] pt-2.5">
-                    <p className="flex items-center gap-1 text-xs font-semibold text-[#6B5C32]">
-                      <Plus className="h-3.5 w-3.5" /> Add more for{" "}
-                      {editModel.do.customerName || "this customer"}
+                  <p className="text-xs text-gray-500">
+                    Tick what goes on the lorry. Untick anything that won&apos;t
+                    fit — it stays ready for the next trip. Unticking a whole
+                    delivery order leaves it for later.
+                  </p>
+                  {editData.kind === "PL" && editData.packingNo && (
+                    <p className="text-xs text-gray-400">
+                      Packing list {editData.packingNo} · {editableDos.length}{" "}
+                      delivery order{editableDos.length === 1 ? "" : "s"}
                     </p>
-                    {editModel.addable.map((it) => (
-                      <ItemRow
-                        key={it.productionOrderId}
-                        it={it}
-                        checked={checked.has(it.productionOrderId)}
-                        onToggle={() => toggleChecked(it.productionOrderId)}
-                        addable
-                      />
-                    ))}
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between border-t border-[#E6E0D9] pt-2.5 text-sm">
-                  <span className="text-gray-600">On the lorry</span>
-                  <span className="font-semibold text-[#1F1D1B]">
-                    {chosenCount} item{chosenCount === 1 ? "" : "s"}
-                    {chosenM3 > 0 ? ` · ${chosenM3.toFixed(2)} m³` : ""}
-                  </span>
+                  )}
                 </div>
 
-                {advanceError && (
-                  <p className="text-sm text-[#9A3A2D]">{advanceError}</p>
-                )}
+                {editableDos.map((d) => {
+                  const doChecked = checkedByDo[d.doId] ?? new Set<string>();
+                  return (
+                    <div
+                      key={d.doId}
+                      className="rounded-xl bg-white shadow-sm border border-[#E6E0D9] p-4 space-y-3"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-sm font-bold text-[#1F1D1B]">
+                          {d.doNo}
+                        </p>
+                        <span className="truncate text-xs text-gray-500">
+                          {d.customerName}
+                          {d.area ? ` · ${d.area}` : ""}
+                        </span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {d.items.map((it) => (
+                          <ItemRow
+                            key={it.productionOrderId}
+                            it={it}
+                            checked={doChecked.has(it.productionOrderId)}
+                            onToggle={() =>
+                              toggleChecked(d.doId, it.productionOrderId)
+                            }
+                          />
+                        ))}
+                      </div>
+                      {d.addable.length > 0 && (
+                        <div className="space-y-1.5 border-t border-[#E6E0D9] pt-2.5">
+                          <p className="flex items-center gap-1 text-xs font-semibold text-[#6B5C32]">
+                            <Plus className="h-3.5 w-3.5" /> Add more for{" "}
+                            {d.customerName || "this customer"}
+                          </p>
+                          {d.addable.map((it) => (
+                            <ItemRow
+                              key={it.productionOrderId}
+                              it={it}
+                              checked={doChecked.has(it.productionOrderId)}
+                              onToggle={() =>
+                                toggleChecked(d.doId, it.productionOrderId)
+                              }
+                              addable
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
 
-                <div className="space-y-2 pt-1">
+                <div className="rounded-xl bg-white shadow-sm border border-[#E6E0D9] p-4 space-y-3">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-600">On the lorry</span>
+                    <span className="font-semibold text-[#1F1D1B]">
+                      {chosenCount} item{chosenCount === 1 ? "" : "s"}
+                      {chosenM3 > 0 ? ` · ${chosenM3.toFixed(2)} m³` : ""}
+                    </span>
+                  </div>
+                  {advanceError && (
+                    <p className="text-sm text-[#9A3A2D]">{advanceError}</p>
+                  )}
                   <button
                     type="button"
                     disabled={busy || chosenCount === 0}
-                    onClick={() => void handleAdvance("DISPATCH", [...checked])}
+                    onClick={() => {
+                      const edits: Record<string, string[]> = {};
+                      for (const d of editableDos) {
+                        const ids = [
+                          ...(checkedByDo[d.doId] ?? new Set<string>()),
+                        ];
+                        if (ids.length > 0) edits[d.doId] = ids;
+                      }
+                      void handleAdvance("DISPATCH", edits);
+                    }}
                     className="w-full rounded-xl bg-[#9C6F1E] active:bg-[#835D19] text-white py-3.5 text-base font-bold shadow-sm flex items-center justify-center gap-2 disabled:opacity-60"
                   >
                     {busy ? (

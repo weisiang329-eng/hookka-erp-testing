@@ -494,39 +494,46 @@ async function loadDoEditModel(
   };
 }
 
-// GET /api/public/do-qr/:token/edit — DRAFT-only item editor model. Returns
-// the DO's current items (tick = keep on the lorry) plus the addable ready
-// POs for the same customer (tick = add to this trip).
+// GET /api/public/do-qr/:token/edit — DRAFT-only item editor model. Works for
+// BOTH a single DO scan and a packing-list scan: returns one edit model per
+// member DO (its current items = tick to keep on the lorry, plus the addable
+// ready POs for the same customer + hub = tick to add to this trip). A PL with
+// two DOs returns two entries so the phone can show + edit each (Wei Siang
+// 2026-06-15: "扫 Packing List 也显示对应的 DO 及明细,第二张也显示").
 app.get("/:token/edit", async (c) => {
   const token = (c.req.param("token") || "").trim();
   if (!TOKEN_RE.test(token)) return unknownToken(c);
   try {
     const resolved = await resolveToken(c.var.DB, token);
     if (!resolved) return unknownToken(c);
-    if (resolved.kind !== "DO" || resolved.dos.length !== 1) {
+    if (resolved.dos.length === 0) {
       return c.json(
-        {
-          success: false,
-          error:
-            "Editing items is only available for a single delivery order, not a packing list.",
-        },
+        { success: false, error: "This code has no delivery orders." },
         409,
       );
     }
-    const model = await loadDoEditModel(c.var.DB, resolved.dos[0].id);
-    if (!model) return unknownToken(c);
+    const models = await Promise.all(
+      resolved.dos.map((d) => loadDoEditModel(c.var.DB, d.id)),
+    );
+    const dos = models
+      .filter((m): m is DoEditModel => !!m)
+      .map((m) => ({
+        doId: m.doId,
+        doNo: m.doNo,
+        status: m.status,
+        customerName: m.customerName,
+        area: m.area,
+        editable: m.editable,
+        items: m.items,
+        addable: m.addable,
+      }));
+    if (dos.length === 0) return unknownToken(c);
     return c.json({
       success: true,
       data: {
-        do: {
-          doNo: model.doNo,
-          status: model.status,
-          customerName: model.customerName,
-          area: model.area,
-        },
-        editable: model.editable,
-        items: model.items,
-        addable: model.addable,
+        kind: resolved.kind,
+        ...(resolved.kind === "PL" ? { packingNo: resolved.pl.packingNo } : {}),
+        dos,
       },
     });
   } catch (err) {
@@ -597,8 +604,11 @@ app.post("/:token/advance", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     action?: string;
     incomplete?: boolean;
-    // Optional edited item set (production-order ids) for a DISPATCH on a
-    // single DO — "adjust what's on the lorry, then dispatch" in one tap.
+    // Optional edited item set for a DISPATCH — "adjust what's on the lorry,
+    // then dispatch". `edits` maps each DO id to the production-order ids that
+    // ride the lorry (works for a single DO or every DO under a packing list).
+    // `poIds` is the single-DO shorthand kept for backward-compat.
+    edits?: unknown;
     poIds?: unknown;
   };
   const action =
@@ -626,66 +636,97 @@ app.post("/:token/advance", async (c) => {
       );
     }
 
-    // Edited dispatch (single DO only): the page sends the final set of
-    // production-order ids to load. Rebuild the items from the SERVER's
-    // trusted edit model so a tampered payload can't inject another
-    // customer's goods or a wrong volume. Ignored for DELIVER and for
-    // packing-list (multi-DO) tokens.
-    let editItems: EditItem[] | null = null;
-    let editDoId: string | null = null;
-    if (
-      action === "DISPATCH" &&
-      resolved.kind === "DO" &&
-      resolved.dos.length === 1 &&
-      Array.isArray(body.poIds)
-    ) {
-      const model = await loadDoEditModel(c.var.DB, resolved.dos[0].id);
-      if (!model) return unknownToken(c);
-      if (!model.editable) {
-        return c.json(
-          {
-            success: false,
-            error: "This delivery can no longer be edited (already dispatched).",
-          },
-          409,
-        );
-      }
-      const requested = [
-        ...new Set(
-          (body.poIds as unknown[])
-            .map((x) => (typeof x === "string" ? x : ""))
-            .filter(Boolean),
-        ),
-      ];
-      if (requested.length === 0) {
-        return c.json(
-          { success: false, error: "Pick at least one item to dispatch." },
-          400,
-        );
-      }
-      const built: EditItem[] = [];
-      for (const poId of requested) {
-        const it = model.allowedById.get(poId);
-        if (!it) {
-          return c.json(
-            {
-              success: false,
-              error:
-                "One of the chosen items is no longer available for this delivery. Please reload and try again.",
-            },
-            409,
-          );
+    // Edited dispatch: the page sends, per DO, the production-order ids that
+    // ride the lorry. Rebuild the items from the SERVER's trusted edit model
+    // (current items ∪ same-customer/hub ready POs) so a tampered payload can
+    // never inject another customer's goods or a wrong volume. Works for a
+    // single DO (`poIds` shorthand) or every DO under a packing list (`edits`
+    // map). Ignored for DELIVER. In edit mode only the DOs the user kept items
+    // on are dispatched — a DO fully unticked is left DRAFT for the next trip.
+    let editsByDo: Map<string, EditItem[]> | null = null;
+    if (action === "DISPATCH") {
+      const editsInput: Record<string, unknown> | null =
+        body.edits && typeof body.edits === "object" && !Array.isArray(body.edits)
+          ? (body.edits as Record<string, unknown>)
+          : Array.isArray(body.poIds) && resolved.dos.length === 1
+            ? { [resolved.dos[0].id]: body.poIds }
+            : null;
+      if (editsInput) {
+        editsByDo = new Map();
+        for (const [doId, rawIds] of Object.entries(editsInput)) {
+          if (!resolved.dos.some((d) => d.id === doId)) {
+            return c.json(
+              {
+                success: false,
+                error: "An edited delivery order is not on this code.",
+              },
+              400,
+            );
+          }
+          const model = await loadDoEditModel(c.var.DB, doId);
+          if (!model) return unknownToken(c);
+          if (!model.editable) {
+            return c.json(
+              {
+                success: false,
+                error:
+                  "This delivery can no longer be edited (already dispatched).",
+              },
+              409,
+            );
+          }
+          const requested = [
+            ...new Set(
+              (Array.isArray(rawIds) ? rawIds : [])
+                .map((x) => (typeof x === "string" ? x : ""))
+                .filter(Boolean),
+            ),
+          ];
+          if (requested.length === 0) {
+            return c.json(
+              {
+                success: false,
+                error: `Pick at least one item to dispatch for ${model.doNo}.`,
+              },
+              400,
+            );
+          }
+          const built: EditItem[] = [];
+          for (const poId of requested) {
+            const it = model.allowedById.get(poId);
+            if (!it) {
+              return c.json(
+                {
+                  success: false,
+                  error:
+                    "One of the chosen items is no longer available. Please reload and try again.",
+                },
+                409,
+              );
+            }
+            built.push(it);
+          }
+          editsByDo.set(doId, built);
         }
-        built.push(it);
       }
-      editItems = built;
-      editDoId = model.doId;
     }
 
     const step = STEP[action];
     const results: AdvanceResult[] = [];
     for (const d of resolved.dos) {
       const from = (d.status || "").toUpperCase();
+      // Edit mode: only dispatch the DOs the user kept items on. A DRAFT DO not
+      // in the edits map (everything unticked) is intentionally held for a
+      // later trip — skip it instead of dispatching its original contents.
+      if (editsByDo && !editsByDo.has(d.id) && from === "DRAFT") {
+        results.push({
+          doNo: d.doNo,
+          outcome: "SKIPPED",
+          from,
+          note: "Not loaded this trip",
+        });
+        continue;
+      }
       if (step.past.includes(from)) {
         results.push({
           doNo: d.doNo,
@@ -730,10 +771,11 @@ app.post("/:token/advance", async (c) => {
 
       // THE office transition path — identical guards + cascades. On a
       // "with issues" deliver, deliveryIncomplete withholds the invoice.
+      const editedItems = editsByDo?.get(d.id) ?? null;
       const res = await applyDeliveryOrderUpdate(c, d.id, {
         status: step.to,
         ...(incomplete ? { deliveryIncomplete: true } : {}),
-        ...(editItems && d.id === editDoId ? { items: editItems } : {}),
+        ...(editedItems ? { items: editedItems } : {}),
       });
       let ok = false;
       let errMsg = "";

@@ -18,6 +18,7 @@ import {
   Truck,
 } from "lucide-react";
 import { csrfHeaders } from "@/lib/csrf";
+import { compareDoLinesByCustomerPO } from "@/lib/do-item-order";
 
 type PublicDoSummary = {
   id: string;
@@ -75,6 +76,10 @@ type EditItem = {
   fabricCode: string;
   quantity: number;
   itemM3: number;
+  // Sort keys — the scan list orders these EXACTLY like the printed DO
+  // (customer PO asc, then SO no.; see compareDoLinesByCustomerPO).
+  salesOrderNo?: string | null;
+  customerPOId?: string | null;
 };
 
 // One DO's edit model. A single-DO scan returns one; a packing-list scan
@@ -367,14 +372,19 @@ export default function DoScanPage() {
         );
         return;
       }
-      setEditData(j.data);
-      // Pre-tick every DO's current items.
+      // Sort each DO's lines EXACTLY like the printed DO (customer PO asc, then
+      // SO no.) so the scan mirrors the office row-for-row — D.O. 第一行 ==
+      // 扫描后第一行, and add/remove keeps the same order. Then pre-tick the
+      // current items. Display-only; the server still owns the trusted set.
       const init: Record<string, Set<string>> = {};
       for (const d of j.data.dos) {
+        d.items.sort(compareDoLinesByCustomerPO);
+        d.addable.sort(compareDoLinesByCustomerPO);
         init[d.doId] = new Set(
           d.items.map((i) => i.productionOrderId).filter(Boolean),
         );
       }
+      setEditData(j.data);
       setCheckedByDo(init);
       setEditOpen(true);
     } catch {

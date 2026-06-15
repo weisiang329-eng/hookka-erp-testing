@@ -14,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { getCurrentUser } from "@/lib/auth";
 import { compressImage } from "@/lib/image-compress";
 import {
@@ -181,6 +182,7 @@ function dateLabel(iso: string): string {
 export default function ServiceCaseDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
   const navigate = useNavigate();
   const user = getCurrentUser();
 
@@ -323,7 +325,16 @@ export default function ServiceCaseDetailPage() {
               variant="primary"
               size="sm"
               disabled={advancing}
-              onClick={() => advanceStatus("CLOSED")}
+              onClick={async () => {
+                if (
+                  await confirm({
+                    title: "Close this case?",
+                    message: `Mark ${caseDetail.caseNo} as CLOSED. A closed case can't be reopened or have new service orders spawned.`,
+                    confirmLabel: "Close Case",
+                  })
+                )
+                  advanceStatus("CLOSED");
+              }}
               className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
             >
               <CheckCircle2 className="h-4 w-4" /> Close Case
@@ -335,7 +346,18 @@ export default function ServiceCaseDetailPage() {
               size="sm"
               disabled={advancing}
               className="text-[#9A3A2D] hover:text-[#7A2E24]"
-              onClick={() => advanceStatus("CANCELLED")}
+              onClick={async () => {
+                if (
+                  await confirm({
+                    title: "Cancel this case?",
+                    message: `Mark ${caseDetail.caseNo} as CANCELLED. This is terminal — the case can't be reopened.`,
+                    confirmLabel: "Cancel Case",
+                    cancelLabel: "Keep Open",
+                    tone: "danger",
+                  })
+                )
+                  advanceStatus("CANCELLED");
+              }}
             >
               <XCircle className="h-4 w-4" /> Cancel
             </Button>
@@ -520,6 +542,7 @@ export default function ServiceCaseDetailPage() {
           createdByName={user?.displayName ?? user?.email ?? ""}
         />
       )}
+      {confirmDialog}
     </div>
   );
 }
@@ -885,9 +908,11 @@ function IssueDescriptionPanel({
   const { toast } = useToast();
   const [description, setDescription] = useState(caseDetail.issueDescription);
   const [saving, setSaving] = useState(false);
+  // Explicit Edit→Save (no more auto-save on blur — [[feedback_no_naked_edits]]).
+  const dirty = description !== caseDetail.issueDescription;
 
   async function save() {
-    if (description === caseDetail.issueDescription) return;
+    if (!dirty) return;
     setSaving(true);
     try {
       const res = await fetch(`/api/service-cases/${caseDetail.id}`, {
@@ -897,6 +922,7 @@ function IssueDescriptionPanel({
       });
       const data = (await res.json()) as { success?: boolean; error?: string };
       if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      toast.success("Saved");
       onSaved();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed");
@@ -919,7 +945,6 @@ function IssueDescriptionPanel({
         <textarea
           rows={6}
           value={description}
-          onBlur={save}
           onChange={(e) => setDescription(e.target.value)}
           disabled={saving}
           placeholder={[
@@ -932,6 +957,36 @@ function IssueDescriptionPanel({
           ].join("\n")}
           className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
         />
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <span
+            className={`text-[11px] ${dirty ? "text-[#8A6D1E]" : "text-[#9CA3AF]"}`}
+          >
+            {dirty ? "Unsaved changes" : "All changes saved"}
+          </span>
+          <div className="flex items-center gap-2">
+            {dirty && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setDescription(caseDetail.issueDescription)}
+                disabled={saving}
+              >
+                Discard
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              onClick={save}
+              disabled={!dirty || saving}
+              className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+            >
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        </div>
       </CardContent>
     </Card>
   );
@@ -1614,6 +1669,7 @@ function AffectedProductsPanel({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
   const { data: prodResp } = useCachedJson<{
@@ -1713,8 +1769,27 @@ function AffectedProductsPanel({
     void persist(next);
   }
 
-  function removeProduct(productId: string) {
-    void persist(caseDetail.affectedProducts.filter((p) => p.productId !== productId));
+  async function removeProduct(productId: string) {
+    const p = caseDetail.affectedProducts.find((x) => x.productId === productId);
+    if (
+      !(await confirm({
+        title: "Remove this product?",
+        message: (
+          <>
+            Remove{" "}
+            <span className="font-semibold text-[#6B5C32]">
+              {p?.code}
+              {p?.name ? ` — ${p.name}` : ""}
+            </span>{" "}
+            from this case's affected products?
+          </>
+        ),
+        confirmLabel: "Remove",
+        tone: "danger",
+      }))
+    )
+      return;
+    void persist(caseDetail.affectedProducts.filter((x) => x.productId !== productId));
   }
 
   function setQty(productId: string, qty: number | null) {
@@ -1739,6 +1814,7 @@ function AffectedProductsPanel({
   }
 
   return (
+    <>
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm">
@@ -1873,6 +1949,8 @@ function AffectedProductsPanel({
         )}
       </CardContent>
     </Card>
+    {confirmDialog}
+    </>
   );
 }
 
@@ -1916,6 +1994,7 @@ function StockTopUpPanel({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
   const user = getCurrentUser();
   const [type, setType] = useState<ReplacementType>("RM");
   const [itemId, setItemId] = useState("");
@@ -1989,6 +2068,27 @@ function StockTopUpPanel({
 
   async function handleIssue() {
     if (!selected || !Number.isFinite(qtyNum) || qtyNum <= 0) return;
+    // Posting to live inventory — confirm first ([[feedback_no_naked_edits]]:
+    // a "post" that moves real stock must not fire on a single click).
+    if (
+      !(await confirm({
+        title: "Deduct from live stock?",
+        message: (
+          <>
+            Issue{" "}
+            <span className="font-semibold text-[#6B5C32]">
+              {selected.code} × {Math.abs(qtyNum)}
+            </span>{" "}
+            and deduct it from <span className="font-semibold">{type}</span> stock
+            (currently {selected.onHand} on hand). This writes a stock adjustment
+            against {caseDetail.caseNo} and can't be auto-undone.
+          </>
+        ),
+        confirmLabel: "Issue & deduct",
+        tone: "danger",
+      }))
+    )
+      return;
     setSaving(true);
     try {
       const res = await fetch("/api/stock-adjustments", {
@@ -2052,6 +2152,7 @@ function StockTopUpPanel({
     "h-8 rounded border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20";
 
   return (
+    <>
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm">
@@ -2204,6 +2305,8 @@ function StockTopUpPanel({
         )}
       </CardContent>
     </Card>
+    {confirmDialog}
+    </>
   );
 }
 
@@ -2221,6 +2324,7 @@ function PhotosPanel({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
   const [saving, setSaving] = useState(false);
   // Per-batch upload progress for the off-main-thread compressor — null when idle.
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
@@ -2268,11 +2372,21 @@ function PhotosPanel({
     void persist([...caseDetail.issuePhotos, ...added]);
   }
 
-  function handleRemove(idx: number) {
+  async function handleRemove(idx: number) {
+    if (
+      !(await confirm({
+        title: "Remove this photo?",
+        message: "The photo will be detached from this case. This can't be undone.",
+        confirmLabel: "Remove",
+        tone: "danger",
+      }))
+    )
+      return;
     void persist(caseDetail.issuePhotos.filter((_, i) => i !== idx));
   }
 
   return (
+    <>
     <Card>
       <CardHeader className="pb-2 flex flex-row items-center justify-between">
         <CardTitle className="text-sm">Photos ({caseDetail.issuePhotos.length})</CardTitle>
@@ -2330,6 +2444,8 @@ function PhotosPanel({
         )}
       </CardContent>
     </Card>
+    {confirmDialog}
+    </>
   );
 }
 
@@ -2337,8 +2453,8 @@ function PhotosPanel({
 // ActionLogPanel — Service-agent log of actions taken over the case lifetime.
 // ===========================================================================
 // Stored as JSON array on service_cases.action_log. Each entry: { id, date,
-// description, createdAt, createdByName? }. Auto-saves on blur of any field
-// or when entries are added/removed.
+// description, createdAt, createdByName? }. Explicit Edit→Save (no auto-save
+// on blur — [[feedback_no_naked_edits]]); the Save bar persists the whole log.
 function ActionLogPanel({
   caseDetail,
   onSaved,
@@ -2388,9 +2504,21 @@ function ActionLogPanel({
     setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
   }
   function removeEntry(id: string) {
-    const next = entries.filter((e) => e.id !== id);
-    setEntries(next);
-    void persist(next);
+    // Local removal only — the Save bar commits, so a stray click doesn't wipe
+    // a logged action straight off the record ([[feedback_no_naked_edits]]).
+    setEntries((prev) => prev.filter((e) => e.id !== id));
+  }
+
+  const dirty =
+    JSON.stringify(entries) !== JSON.stringify(caseDetail.actionLog ?? []);
+  async function handleSave() {
+    if (!dirty) return;
+    // Drop fully-blank rows (no date AND no description) before persisting.
+    const cleaned = entries.filter(
+      (e) => (e.date || "").trim() || (e.description || "").trim(),
+    );
+    setEntries(cleaned);
+    await persist(cleaned);
   }
 
   return (
@@ -2415,14 +2543,12 @@ function ActionLogPanel({
                   type="date"
                   value={e.date}
                   onChange={(ev) => patchEntry(e.id, { date: ev.target.value })}
-                  onBlur={() => void persist(entries)}
                   className="h-8 w-[150px] text-xs"
                 />
                 <Input
                   type="text"
                   value={e.description}
                   onChange={(ev) => patchEntry(e.id, { description: ev.target.value })}
-                  onBlur={() => void persist(entries)}
                   placeholder="What did you do? (e.g. Called customer, scheduled on-site inspection)"
                   className="h-8 flex-1 text-xs"
                 />
@@ -2438,6 +2564,24 @@ function ActionLogPanel({
             ))}
           </div>
         )}
+        {/* Save bar — the log no longer auto-saves on blur. */}
+        <div className="mt-3 flex items-center justify-between gap-2 border-t border-[#F0ECE9] pt-3">
+          <span
+            className={`text-[11px] ${dirty ? "text-[#8A6D1E]" : "text-[#9CA3AF]"}`}
+          >
+            {dirty ? "Unsaved changes" : "All changes saved"}
+          </span>
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            onClick={handleSave}
+            disabled={!dirty || saving}
+            className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+          >
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

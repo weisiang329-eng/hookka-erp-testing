@@ -261,6 +261,10 @@ type EditItem = {
   rackingNumber: string;
   packingStatus: string;
   salesOrderNo: string;
+  // Per-line customer PO — the SCAN list must sort EXACTLY like the printed DO
+  // (customer PO asc, then SO; see compareDoLinesByCustomerPO). Derived from the
+  // line's sales order (by SO no.), mirroring the office DO detail builder.
+  customerPOId: string;
 };
 
 type DoEditModel = {
@@ -485,6 +489,7 @@ async function loadDoEditModel(
           packingStatus: "PACKED",
           salesOrderNo:
             (r.companySOId as string) ?? (r.companysoid as string) ?? "",
+          customerPOId: "", // backfilled below once SO→PO is resolved
         }));
       }
     }
@@ -492,6 +497,37 @@ async function loadDoEditModel(
 
   // One product→unitM3 read for both lists (the office read path's helper).
   const m3Map = await loadProductM3Map(db, productCodes);
+
+  // Per-line customer PO → so the SCAN list sorts EXACTLY like the printed DO.
+  // The office derives each line's customer PO from its sales order (joined by
+  // SO no.; delivery-orders.ts ~4395). Mirror that here with one batched read
+  // covering both current + addable lines, keyed by SO no. (companySOId).
+  const soNosForPo = [
+    ...new Set(
+      [
+        ...curRows.map((r) => (r.salesOrderNo ?? "").trim()),
+        ...addable.map((a) => (a.salesOrderNo ?? "").trim()),
+      ].filter(Boolean),
+    ),
+  ];
+  const poBySoNo = new Map<string, string>();
+  if (soNosForPo.length > 0) {
+    const ph = soNosForPo.map(() => "?").join(",");
+    const poRes = await db
+      .prepare(
+        `SELECT companySOId, customerPOId FROM sales_orders
+          WHERE orgId = ? AND companySOId IN (${ph})`,
+      )
+      .bind(doRow.orgId, ...soNosForPo)
+      .all<{ companySOId: string | null; customerPOId: string | null }>();
+    for (const r of poRes.results ?? []) {
+      if (r.companySOId)
+        poBySoNo.set(r.companySOId, (r.customerPOId ?? "").trim());
+    }
+  }
+  const poOf = (soNo: string | null | undefined): string =>
+    poBySoNo.get((soNo ?? "").trim()) ?? "";
+
   const items: EditItem[] = curRows.map((r) => ({
     productionOrderId: r.productionOrderId ?? "",
     poNo: r.poNo ?? "",
@@ -504,8 +540,13 @@ async function loadDoEditModel(
     rackingNumber: r.rackingNumber ?? "",
     packingStatus: r.packingStatus || "PACKED",
     salesOrderNo: r.salesOrderNo ?? "",
+    customerPOId: poOf(r.salesOrderNo),
   }));
-  addable = addable.map((a) => ({ ...a, itemM3: m3Map.get(a.productCode) || 0 }));
+  addable = addable.map((a) => ({
+    ...a,
+    itemM3: m3Map.get(a.productCode) || 0,
+    customerPOId: poOf(a.salesOrderNo),
+  }));
 
   const allowedById = new Map<string, EditItem>();
   for (const it of items) {

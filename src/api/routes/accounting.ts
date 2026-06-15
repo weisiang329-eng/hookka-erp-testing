@@ -4038,6 +4038,7 @@ app.get("/cashflow-statement", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
+  const editable = c.req.query("editable") === "1";
 
   const resolveAcct = await loadAccountResolver(c.var.DB);
   const fyeMonth = await getFyeMonth(c.var.DB);
@@ -4126,7 +4127,7 @@ app.get("/cashflow-statement", async (c) => {
 
   const statement = buildStatement({
     classified, bankLegs, coa, map, rmSplit, stockGroupOverride: sgOverride,
-    fyeMonth, period,
+    fyeMonth, period, editable,
   });
   return c.json({ success: true, data: { period, ...statement } });
 });

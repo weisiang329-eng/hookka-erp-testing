@@ -169,6 +169,7 @@ export type CfRow = {
   depth: number;
   groupId?: string;
   values: (number | null)[];
+  accountCode?: string;
 };
 export type CfStatement = { columns: CfColumn[]; rows: CfRow[] };
 
@@ -205,8 +206,9 @@ export function buildStatement(opts: {
   stockGroupOverride: Record<string, string>;
   fyeMonth: number;
   period: string;
+  editable?: boolean;
 }): CfStatement {
-  const { classified, bankLegs, coa, map, rmSplit, fyeMonth, period } = opts;
+  const { classified, bankLegs, coa, map, rmSplit, fyeMonth, period, editable } = opts;
   const months = fyMonths(period, fyeMonth);        // newest first
   const fyStart = months[months.length - 1];        // FY start ym
   const columns: CfColumn[] = [
@@ -216,16 +218,16 @@ export function buildStatement(opts: {
   const colIndex = new Map(columns.map((c, i) => [c.key, i] as const));
   const inFy = (ym: string) => ym >= fyStart && ym <= period;
 
-  type Agg = { section: CfSection; label: string; order: number; vals: number[] };
+  type Agg = { section: CfSection; label: string; order: number; vals: number[]; accountCode?: string };
   const lines = new Map<string, Agg>();
-  const ensure = (section: CfSection, label: string, order: number): Agg => {
+  const ensure = (section: CfSection, label: string, order: number, accountCode?: string): Agg => {
     const k = `${section}|${label}`;
     let a = lines.get(k);
-    if (!a) { a = { section, label, order, vals: columns.map(() => 0) }; lines.set(k, a); }
+    if (!a) { a = { section, label, order, vals: columns.map(() => 0), accountCode }; lines.set(k, a); }
     return a;
   };
-  const addToLine = (section: CfSection, label: string, order: number, ym: string, deltaSen: number) => {
-    const a = ensure(section, label, order);
+  const addToLine = (section: CfSection, label: string, order: number, ym: string, deltaSen: number, accountCode?: string) => {
+    const a = ensure(section, label, order, accountCode);
     if (inFy(ym)) { a.vals[colIndex.get("__accum__")!] += deltaSen; }
     const ci = colIndex.get(ym);
     if (ci !== undefined) a.vals[ci] += deltaSen;
@@ -256,7 +258,7 @@ export function buildStatement(opts: {
         addToLine("RAW_MATERIALS", "Unallocated raw material", 99, leg.ym, delta);
       }
     } else {
-      addToLine(place.section, place.name, place.order, leg.ym, delta);
+      addToLine(place.section, place.name, place.order, leg.ym, delta, leg.accountCode);
     }
   }
 
@@ -287,7 +289,7 @@ export function buildStatement(opts: {
 
   const emitSection = (sec: CfSection, asGroup: boolean) => {
     const aggs = sectionLines(sec);
-    if (aggs.length === 0 && sec !== "REVENUE_COLLECTION") return;
+    if (aggs.length === 0 && sec !== "REVENUE_COLLECTION" && !editable) return;
     const sign = displaySign(sec);
     const sub = sumCols(aggs);
     if (asGroup) {
@@ -295,11 +297,11 @@ export function buildStatement(opts: {
         groupId: sec, values: sub.map((v) => sign * v) });
       for (const a of aggs)
         push({ kind: "line", label: a.label, section: sec, depth: 2,
-          groupId: sec, values: a.vals.map((v) => sign * v) });
+          groupId: sec, values: a.vals.map((v) => sign * v), accountCode: a.accountCode });
     } else {
       push({ kind: "section", label: SECTION_LABELS[sec], section: sec, depth: 0, values: columns.map(() => null) });
       for (const a of aggs)
-        push({ kind: "line", label: a.label, section: sec, depth: 1, values: a.vals.map((v) => sign * v) });
+        push({ kind: "line", label: a.label, section: sec, depth: 1, values: a.vals.map((v) => sign * v), accountCode: a.accountCode });
       push({ kind: "subtotal", label: SECTION_LABELS[sec], section: sec, depth: 1, values: sub.map((v) => sign * v) });
     }
   };

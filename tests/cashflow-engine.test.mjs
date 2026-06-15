@@ -124,3 +124,40 @@ test("buildStatement — unmapped contra account lands in Unallocated", () => {
   });
   assert.ok(st.rows.some((r) => r.section === "UNALLOCATED" && r.kind === "line"));
 });
+
+test("buildStatement — account lines carry accountCode", () => {
+  const classified = [L("900-0001", 0, 15000, "2026-03")];
+  const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 15000, ym: "2026-03" }];
+  const st = cf.buildStatement({
+    classified, bankLegs, coa: coaMap, map: {}, rmSplit: {},
+    stockGroupOverride: {}, fyeMonth: 8, period: "2026-03",
+  });
+  const line = st.rows.find((r) => r.kind === "line" && r.label === "Transport expense");
+  assert.equal(line.accountCode, "900-0001");
+});
+
+test("buildStatement — raw-material split lines have no accountCode", () => {
+  const classified = [L("400-0000", 0, 9000, "2026-03", "supplier_payment", "PI1")];
+  const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 9000, ym: "2026-03" }];
+  const st = cf.buildStatement({
+    classified, bankLegs, coa: coaMap, map: {},
+    rmSplit: { PI1: [{ line: "Purchase of Fabric", weight: 1 }] },
+    stockGroupOverride: {}, fyeMonth: 8, period: "2026-03",
+  });
+  const fabric = st.rows.find((r) => r.label === "Purchase of Fabric");
+  assert.equal(fabric.accountCode, undefined);
+});
+
+test("buildStatement — editable emits empty section headers as drop targets", () => {
+  const classified = [L("900-0001", 0, 15000, "2026-03")];
+  const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 15000, ym: "2026-03" }];
+  const base = {
+    classified, bankLegs, coa: coaMap, map: {}, rmSplit: {},
+    stockGroupOverride: {}, fyeMonth: 8, period: "2026-03",
+  };
+  const off = cf.buildStatement(base);
+  const on = cf.buildStatement({ ...base, editable: true });
+  const hasDeposit = (st) => st.rows.some((r) => r.kind === "group" && r.section === "DEPOSIT");
+  assert.equal(hasDeposit(off), false);
+  assert.equal(hasDeposit(on), true);
+});

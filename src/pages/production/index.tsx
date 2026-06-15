@@ -8390,7 +8390,12 @@ export default function ProductionPage({
                 page-break-after: always;
                 break-after: page;
                 margin: 0 !important;
-                padding: ${useLargeSticker ? "4mm" : "2mm"} !important;
+                /* Padding bumped (large 4→6mm, small 2→4mm) so the QR — bottom-
+                   left on the 100mm card, top-centre on the 50mm one — clears a
+                   printer's ~5mm non-printable margin instead of being shaved
+                   off, same fix as the FG box label (Wei Siang 2026-06-16). The
+                   QR's new quiet zone covers the rest. */
+                padding: ${useLargeSticker ? "6mm" : "4mm"} !important;
                 overflow: hidden;
               }
               .sticker-jc-page:last-child {

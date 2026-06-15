@@ -81,7 +81,9 @@ Non-transactional, but wide free-text columns can overflow. **Fix:** add
 
 ## Fix status
 
-- [ ] **P1** WIP/FG sticker — reserve QR footer band + clamp body (PDF + HTML)
+- [x] **P1** WIP/FG sticker — long fields now single-line truncate (HTML: all
+      sticker value rows; PDF: clamp landscape WIP/customer to fit width + cap
+      portrait WIP to 3 lines) so the QR + piece indicator are never pushed off
 - [ ] **P1** DO totals → full-width block (bundle with the compartment breakdown)
 - [ ] **P2** Barcode column min-width / scannability check
 - [ ] **P3** Print-report `table-layout:fixed`

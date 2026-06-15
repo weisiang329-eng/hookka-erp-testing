@@ -4299,7 +4299,7 @@ export default function ProductionPage({
         <div className="flex items-baseline gap-1">
           <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">Customer Name</span>
           <span
-            className="flex-1 break-words"
+            className="flex-1 min-w-0 truncate"
             style={{
               fontSize: "12px",
               lineHeight: 1.2,
@@ -4314,7 +4314,7 @@ export default function ProductionPage({
           <div className="flex items-baseline gap-1">
             <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span>
             <span
-              className="flex-1 break-words"
+              className="flex-1 min-w-0 truncate"
               style={{
                 fontSize: "11px",
                 lineHeight: 1.2,
@@ -4334,7 +4334,7 @@ export default function ProductionPage({
         <div className="flex items-baseline gap-1">
           <span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
           <span
-            className="flex-1 break-words"
+            className="flex-1 min-w-0 truncate"
             style={{
               fontSize: "11px",
               lineHeight: 1.2,
@@ -8201,7 +8201,7 @@ export default function ProductionPage({
                           <div className="flex items-baseline gap-1">
                             <span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">WIP</span>
                             <span
-                              className="flex-1 break-words"
+                              className="flex-1 min-w-0 truncate"
                               style={{
                                 fontSize: "11px",
                                 lineHeight: 1.2,
@@ -8227,7 +8227,7 @@ export default function ProductionPage({
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
                           <span
-                            className="flex-1 break-words"
+                            className="flex-1 min-w-0 truncate"
                             style={{
                               fontSize: "11px",
                               lineHeight: 1.2,
@@ -8391,7 +8391,7 @@ export default function ProductionPage({
                     <div className="flex items-baseline gap-[1mm]">
                       <span className="inline-block w-[35mm] font-semibold shrink-0">Customer Name</span>
                       <span
-                        className="flex-1 break-words"
+                        className="flex-1 min-w-0 truncate"
                         style={{
                           fontSize: "11pt",
                           lineHeight: 1.2,
@@ -8406,7 +8406,7 @@ export default function ProductionPage({
                       <div className="flex items-baseline gap-[1mm]">
                         <span className="font-semibold shrink-0" style={{ width: "35mm" }}>WIP</span>
                         <span
-                          className="flex-1 break-words"
+                          className="flex-1 min-w-0 truncate"
                           style={{
                             fontSize: "11pt",
                             lineHeight: 1.2,
@@ -8426,7 +8426,7 @@ export default function ProductionPage({
                     <div className="flex items-baseline gap-[1mm]">
                       <span className="font-semibold shrink-0" style={{ width: "35mm", color: "#9A3A2D" }}>Notes</span>
                       <span
-                        className="flex-1 break-words"
+                        className="flex-1 min-w-0 truncate"
                         style={{
                           fontSize: "11pt",
                           lineHeight: 1.2,
@@ -8659,7 +8659,7 @@ export default function ProductionPage({
                         <div className="flex items-baseline gap-[1mm]">
                           <span className="font-semibold shrink-0" style={{ width: "30mm" }}>WIP</span>
                           <span
-                            className="flex-1 break-words"
+                            className="flex-1 min-w-0 truncate"
                             style={{
                               fontSize: "11pt",
                               lineHeight: 1.2,
@@ -8685,7 +8685,7 @@ export default function ProductionPage({
                       <div className="flex items-baseline gap-[1mm]">
                         <span className="font-semibold shrink-0" style={{ width: "30mm", color: "#9A3A2D" }}>Notes</span>
                         <span
-                          className="flex-1 break-words"
+                          className="flex-1 min-w-0 truncate"
                           style={{
                             fontSize: "11pt",
                             lineHeight: 1.2,

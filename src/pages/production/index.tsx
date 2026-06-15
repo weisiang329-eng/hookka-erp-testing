@@ -8604,7 +8604,12 @@ export default function ProductionPage({
                 width: 100mm !important; height: 150mm !important;
                 page-break-after: always;
                 break-after: page;
-                margin: 0 !important; padding: 4mm !important;
+                /* 6mm inner padding (was 4mm) so NOTHING — especially the
+                   bottom-left QR — sits inside a printer's ~5-6mm non-printable
+                   margin and gets shaved off (Wei Siang 2026-06-15: the Packing
+                   QR was "挤出去了"). Combined with the QR's new 2-module quiet
+                   zone, the scannable area clears the edge with room to spare. */
+                margin: 0 !important; padding: 6mm !important;
                 overflow: hidden;
               }
               .sticker-fg-page:last-child {

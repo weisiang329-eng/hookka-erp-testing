@@ -20,10 +20,20 @@ export function getQRCodeUrl(data: string, size: number = 150): string {
  *
  * Returns a Promise<string> of the form `data:image/png;base64,...`.
  */
-export async function getQRCodeDataURL(data: string, size: number = 300): Promise<string> {
+export async function getQRCodeDataURL(
+  data: string,
+  size: number = 300,
+  margin: number = 2,
+): Promise<string> {
   return QRCode.toDataURL(data, {
     width: size,
-    margin: 0,
+    // A quiet zone (white border) is REQUIRED by the QR spec for a scanner to
+    // lock on, and it makes the code tolerant of slight edge-clipping when a
+    // sticker prints near a printer's non-printable margin (Wei Siang 2026-06-15:
+    // the Packing FG QR was getting shaved off the left edge — "挤出去了"). Was 0,
+    // which printed an edge-to-edge QR with no quiet zone at all. 2 modules is the
+    // practical minimum; callers can pass more if a layout needs extra breathing.
+    margin,
     errorCorrectionLevel: "M",
   });
 }

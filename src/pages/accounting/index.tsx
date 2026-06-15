@@ -41,7 +41,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "stock" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "trend" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "stock" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -164,6 +164,7 @@ function AccountPicker({
 const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "overview", label: "Overview", icon: <LayoutDashboard className="h-4 w-4" /> },
   { key: "pl", label: "P&L Report", icon: <BarChart3 className="h-4 w-4" /> },
+  { key: "trend", label: "Monthly Trend", icon: <TrendingUp className="h-4 w-4" /> },
   { key: "bs", label: "Balance Sheet", icon: <Scale className="h-4 w-4" /> },
   { key: "coa", label: "Chart of Accounts", icon: <List className="h-4 w-4" /> },
   { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" /> },
@@ -241,6 +242,7 @@ export default function AccountingPage() {
             <OverviewTab accounts={accounts} journals={journals} arData={arData} apData={apData} />
           )}
           {tab === "pl" && <PLStatementTab />}
+          {tab === "trend" && <MonthlyTrendTab />}
           {tab === "bs" && <BalanceSheetTab />}
           {tab === "coa" && <COATab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "journals" && (
@@ -2829,6 +2831,83 @@ type PnlStmtRow = {
   totalLabel?: string;
   badge?: string;
 };
+
+// Phase 5.8 — Monthly Trend: months as columns (newest left), P&L lines as
+// rows, with the % of net sales under each amount; negatives in red.
+function MonthlyTrendTab() {
+  const [line, setLine] = useState<"all" | "sofa" | "bedframe">("all");
+  const [months, setMonths] = useState(6);
+  const [data, setData] = useState<{ cols: { ym: string; netSalesSen: number; cogsSen: number; grossProfitSen: number; otherIncomeSen: number; expenseSen: number; netProfitSen: number }[] } | null>(null);
+  const loading = data === null;
+  useEffect(() => {
+    let stale = false;
+    fetch(`/api/accounting/pl-trend?line=${line}&months=${months}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof data> }>)
+      .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [line, months]);
+
+  const cols = data?.cols ?? [];
+  const rowDefs: { key: "netSalesSen" | "cogsSen" | "grossProfitSen" | "otherIncomeSen" | "expenseSen" | "netProfitSen"; label: string; strong?: boolean }[] = [
+    { key: "netSalesSen", label: "NET SALES", strong: true },
+    { key: "cogsSen", label: "COST OF GOODS SOLD" },
+    { key: "grossProfitSen", label: "GROSS PROFIT", strong: true },
+    { key: "otherIncomeSen", label: "OTHER INCOME" },
+    { key: "expenseSen", label: "OPERATING EXPENSES" },
+    { key: "netProfitSen", label: "NET PROFIT / (LOSS)", strong: true },
+  ];
+  const cell = (key: string, v: number, ns: number) => {
+    const pctTxt = ns > 0 ? `${((v / ns) * 100).toFixed(1)}%` : "";
+    const neg = v < 0;
+    return (
+      <td key={key} className="px-2 py-1 text-right whitespace-nowrap">
+        <div className={`tabular-nums ${neg ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>{neg ? `(${formatCurrency(Math.abs(v))})` : formatCurrency(v)}</div>
+        <div className="text-[10px] text-[#9CA3AF] tabular-nums">{pctTxt}</div>
+      </td>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {([["all", "Overall"], ["sofa", "Sofa"], ["bedframe", "Bedframe"]] as const).map(([k, lbl]) => (
+          <button key={k} onClick={() => setLine(k)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${line === k ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{lbl}</button>
+        ))}
+        <div className="ml-auto flex items-center gap-2">
+          {[6, 9, 12].map((n) => (
+            <button key={n} onClick={() => setMonths(n)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${months === n ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{n} mo</button>
+          ))}
+        </div>
+      </div>
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          {loading ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+          ) : (
+            <table className="text-[12.5px] whitespace-nowrap">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left sticky left-0 bg-white">ITEM</th>
+                  {cols.map((c2) => <th key={c2.ym} className="px-2 py-2 text-right">{c2.ym}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {rowDefs.map((rd) => (
+                  <tr key={rd.key} className={`border-b border-[#F0ECE9] ${rd.strong ? "font-semibold bg-[#F0ECE9]/30" : ""}`}>
+                    <td className="px-3 py-1 text-left sticky left-0 bg-white">{rd.label}</td>
+                    {cols.map((c2) => cell(c2.ym, c2[rd.key], c2.netSalesSen))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+      <p className="text-[11px] text-[#9CA3AF]">Newest month at left · the small number under each amount is % of that month's net sales · negatives in red.</p>
+    </div>
+  );
+}
 
 function PLStatementTab() {
   const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));

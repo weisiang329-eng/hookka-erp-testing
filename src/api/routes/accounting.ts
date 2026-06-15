@@ -3807,6 +3807,37 @@ function buildPnlRows(p: PnlWindow, y: PnlWindow) {
   return rows;
 }
 
+// Phase 5.8 — Monthly Trend: per-month P&L summary for the last N months
+// (newest first), one product line. Reuses computePnlWindow per month.
+app.get("/pl-trend", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const lineParam = (c.req.query("line") || "all").toLowerCase();
+  const line: "all" | "sofa" | "bedframe" = lineParam === "sofa" ? "sofa" : lineParam === "bedframe" ? "bedframe" : "all";
+  const months = Math.min(24, Math.max(3, parseInt(c.req.query("months") || "6", 10) || 6));
+  const anchor = c.req.query("anchor") || new Date().toISOString().slice(0, 7);
+  const [ay, am] = anchor.split("-").map((n) => parseInt(n, 10));
+  const cols: { ym: string; netSalesSen: number; cogsSen: number; grossProfitSen: number; otherIncomeSen: number; expenseSen: number; netProfitSen: number }[] = [];
+  for (let i = 0; i < months; i++) {
+    // newest first: anchor, anchor-1, …
+    let y = ay;
+    let m = am - i;
+    while (m <= 0) { m += 12; y -= 1; }
+    const ym = `${y}-${String(m).padStart(2, "0")}`;
+    const p = await computePnlWindow(c.var.DB, ym, ym, line);
+    cols.push({
+      ym,
+      netSalesSen: p.netSalesSen,
+      cogsSen: p.cogsSen,
+      grossProfitSen: p.grossProfitSen,
+      otherIncomeSen: p.otherIncomeSen,
+      expenseSen: p.expenseSen,
+      netProfitSen: p.netProfitSen,
+    });
+  }
+  return c.json({ success: true, data: { line, months, cols } });
+});
+
 app.get("/pl-statement", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;

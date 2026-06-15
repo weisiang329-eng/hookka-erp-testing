@@ -46,12 +46,14 @@ import {
   queueDoCustomerNotice,
   ensureDeliveryIncompleteColumn,
   loadProductM3Map,
+  loadHubStateMap,
 } from "./delivery-orders";
 import {
   poReadyForDelivery,
   type PipelineJobCard,
   type PipelinePO,
 } from "../../lib/delivery-pipeline";
+import { resolveStateCode } from "../../lib/malaysia-states";
 
 const app = new Hono<Env>();
 
@@ -329,9 +331,23 @@ async function loadDoEditModel(
   const curRows = curRes.results ?? [];
   const productCodes: Array<string | null> = curRows.map((r) => r.productCode);
 
-  // ── Addable: ready POs for the same customer + hub, not yet on any DO ───
+  // ── Addable: ready POs for the same customer + state, not yet on any DO ─
+  // Mirrors the office "Available Production Orders" picker (delivery/index.tsx
+  // `addablePOs`): same customer + same STATE (resolveStateCode of the PO's
+  // customerState vs this DO's hub state / customerState). The one-hub guard in
+  // validateDoComposition is the dispatch-time safety net, exactly as on the
+  // desktop — so the phone shows the SAME candidates the desktop edit does.
   let addable: EditItem[] = [];
   if (editable && doRow.customerId && doRow.orgId) {
+    // This DO's state — hub state (via hubId) preferred, customerState fallback
+    // (the same fallback chain the office State column uses). null = no
+    // resolvable state (e.g. a hub-less service DO) → customer-only filter.
+    const hubStateMap = await loadHubStateMap(db, [doRow.hubId]);
+    const doState = resolveStateCode(
+      (doRow.hubId ? hubStateMap.get(doRow.hubId) : null) ||
+        doRow.customerState ||
+        null,
+    );
     // Candidate POs: same org + customer, not cancelled. Consignment + the
     // production-readiness gate are applied in JS via poReadyForDelivery so
     // there is exactly ONE definition of "ready" (shared with the office
@@ -350,7 +366,7 @@ async function loadDoEditModel(
 
     if (candIds.length > 0) {
       const ph = candIds.map(() => "?").join(",");
-      const [linkRes, jcRes, soRes] = await Promise.all([
+      const [linkRes, jcRes] = await Promise.all([
         // POs already on a non-cancelled DO (incl. this one) — excluded by
         // poReadyForDelivery's linkedPOIds, so this DO's own items never
         // show up twice (they're in `items`, not `addable`).
@@ -376,19 +392,6 @@ async function loadDoEditModel(
             wipType: string | null;
             completedDate: string | null;
           }>(),
-        // Hub of each candidate's sales order — keep only same-hub POs so an
-        // added item can never trip validateDoComposition's one-hub rule at
-        // dispatch. Service POs (no SO row → hub null) stay in for the same
-        // customer; a genuine hub mismatch is still caught at dispatch.
-        db
-          .prepare(
-            `SELECT po.id AS poId, so.hubId AS hubId
-               FROM production_orders po
-               LEFT JOIN sales_orders so ON so.id = po.salesOrderId
-              WHERE po.id IN (${ph})`,
-          )
-          .bind(...candIds)
-          .all<{ poId: string | null; hubId: string | null }>(),
       ]);
 
       const linkedPOIds = new Set(
@@ -408,12 +411,6 @@ async function loadDoEditModel(
         });
         jcByPo.set(j.productionOrderId, list);
       }
-      const hubByPo = new Map<string, string | null>();
-      for (const r of soRes.results ?? []) {
-        if (r.poId) hubByPo.set(r.poId, r.hubId);
-      }
-      const doHub = (doRow.hubId || "").trim();
-
       const readyCands = cands.filter((r) => {
         const id = String((r.id as string) ?? "");
         if (!id) return false;
@@ -431,8 +428,14 @@ async function loadDoEditModel(
           jobCards: jcByPo.get(id) ?? [],
         };
         if (!poReadyForDelivery(po, linkedPOIds)) return false;
-        const poHub = (hubByPo.get(id) || "").trim();
-        if (doHub && poHub && poHub !== doHub) return false;
+        // Same-state gate — identical to the office picker. doState null
+        // (hub-less DO) → customer-only, so the picker is never empty.
+        if (
+          doState !== null &&
+          resolveStateCode(String((r.customerState as string) ?? "")) !== doState
+        ) {
+          return false;
+        }
         return true;
       });
 

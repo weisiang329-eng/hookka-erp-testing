@@ -184,7 +184,9 @@ function rowToItem(
 // to surface the hub's state on each row even when delivery_orders.customerState
 // is NULL (operator created the DO without typing a state but did pick a hub).
 // Frontend prefers hubState over customerState in the State column fallback chain.
-async function loadHubStateMap(
+// Exported so the public DO-QR edit flow can resolve a DO's state the same way
+// the office "Available Production Orders" picker does (same-state gate).
+export async function loadHubStateMap(
   db: D1Database,
   hubIds: Array<string | null | undefined>,
 ): Promise<Map<string, string>> {

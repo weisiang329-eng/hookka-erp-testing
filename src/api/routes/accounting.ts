@@ -25,7 +25,8 @@ import {
 import { getFyeMonth, fyWindowFor } from "../lib/fiscal";
 import { emitAudit } from "../lib/audit";
 import { parseDebtorCode } from "../../lib/debtor";
-import type { CfMap } from "../../lib/cashflow-engine";
+import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
+import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
 
 const app = new Hono<Env>();
 
@@ -4031,6 +4032,103 @@ app.get("/pl-statement", async (c) => {
       rows: buildPnlRows(p, y),
     },
   });
+});
+
+app.get("/cashflow-statement", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
+
+  const resolveAcct = await loadAccountResolver(c.var.DB);
+  const fyeMonth = await getFyeMonth(c.var.DB);
+  const obDate = await getOpeningDate(c.var.DB);
+
+  const coaRes = await c.var.DB.prepare(
+    "SELECT code, name, type, specialAccountType FROM chart_of_accounts",
+  ).all<{ code: string; name: string; type: CoaLite["type"]; specialAccountType: string | null }>();
+  const coa = new Map<string, CoaLite>();
+  const bankCodes = new Set<string>();
+  for (const a of coaRes.results ?? []) {
+    const code = resolveAcct(a.code);
+    coa.set(code, { code, name: a.name, type: a.type, sat: a.specialAccountType ?? null });
+    if (a.specialAccountType === "SBK" || a.specialAccountType === "SCH")
+      bankCodes.add(code);
+  }
+
+  const legRes = await c.var.DB.prepare(
+    "SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries",
+  ).all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>();
+  const allLegs = (legRes.results ?? []).map((l) => ({
+    code: resolveAcct(l.accountCode),
+    sourceType: l.sourceType,
+    sourceId: l.sourceId,
+    debitSen: l.debitSen,
+    creditSen: l.creditSen,
+    ym:
+      isOpeningSource(l.sourceType) && obDate
+        ? obDate.slice(0, 7)
+        : String(l.postedAt ?? "").slice(0, 7),
+  }));
+
+  const byEntry = new Map<string, typeof allLegs>();
+  for (const l of allLegs) {
+    const k = `${l.sourceType}::${l.sourceId}`;
+    const arr = byEntry.get(k) ?? [];
+    arr.push(l);
+    byEntry.set(k, arr);
+  }
+
+  const classified: ClassifiedLeg[] = [];
+  const bankLegs: BankLeg[] = [];
+  const piIds = new Set<string>();
+  for (const legs of byEntry.values()) {
+    const hasBank = legs.some((l) => bankCodes.has(l.code));
+    if (!hasBank) continue;
+    const opening = legs.some((l) => isOpeningSource(l.sourceType));
+    for (const l of legs) {
+      if (bankCodes.has(l.code)) {
+        bankLegs.push({ accountCode: l.code, debitSen: l.debitSen, creditSen: l.creditSen, ym: l.ym });
+      } else if (!opening) {
+        classified.push({
+          accountCode: l.code, debitSen: l.debitSen, creditSen: l.creditSen,
+          ym: l.ym, sourceType: l.sourceType, sourceId: l.sourceId,
+        });
+        if (l.sourceType === "supplier_payment") piIds.add(l.sourceId);
+      }
+    }
+  }
+
+  const map = await getCashflowMap(c.var.DB);
+  const sgOverride = await getCashflowStockGroupMap(c.var.DB);
+  const rmSplit: RmSplit = {};
+  if (piIds.size) {
+    const rmRes = await c.var.DB.prepare("SELECT * FROM raw_materials").all<Record<string, unknown>>();
+    const grpByCode = new Map<string, string>();
+    for (const r of rmRes.results ?? []) {
+      const code = String((r.item_code ?? r.itemCode) ?? "");
+      const grp = String((r.item_group ?? r.itemGroup) ?? "");
+      if (code) grpByCode.set(code, grp);
+    }
+    for (const pi of piIds) {
+      const itRes = await c.var.DB.prepare("SELECT * FROM purchase_invoice_items WHERE pi_id = ?").bind(pi).all<Record<string, unknown>>();
+      const weights = new Map<string, number>();
+      for (const it of itRes.results ?? []) {
+        const lt = String((it.line_type ?? it.lineType) ?? "STOCKED");
+        const amt = Number((it.line_total_sen ?? it.lineTotalSen) ?? 0);
+        const mc = String((it.material_code ?? it.materialCode) ?? "");
+        const grp = mc ? grpByCode.get(mc) ?? "" : "";
+        const line = lt === "TAX" ? "Purchase of Other & Packaging" : rawMaterialLineFor(grp, sgOverride);
+        weights.set(line, (weights.get(line) ?? 0) + Math.max(0, amt));
+      }
+      rmSplit[pi] = [...weights.entries()].map(([line, weight]) => ({ line, weight }));
+    }
+  }
+
+  const statement = buildStatement({
+    classified, bankLegs, coa, map, rmSplit, stockGroupOverride: sgOverride,
+    fyeMonth, period,
+  });
+  return c.json({ success: true, data: { period, ...statement } });
 });
 
 // GL-truth P&L + Balance Sheet, computed from the immutable

@@ -1009,26 +1009,6 @@ export default function ProductionPage({
     }
   });
 
-  // Code 128 "Scan to complete" column on the printed dept schedule. Default
-  // OFF — the barcode isn't in use on the floor yet (owner 2026-06-15: "还没
-  // 用到,需要可以开关先"), so the operator opts in per-browser. Persisted, like
-  // the incomplete filter above.
-  const SCAN_COLUMN_LS_KEY = "production:schedule:scanColumn";
-  const [includeScanColumn, setIncludeScanColumn] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(SCAN_COLUMN_LS_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem(SCAN_COLUMN_LS_KEY, includeScanColumn ? "1" : "0");
-    } catch {
-      /* ignore quota / private-mode failures */
-    }
-  }, [includeScanColumn]);
-
   // PIC dropdown — "Show all workers" override. False by default (strict
   // per-dept filter, operator-requested 2026-05-12). Flipping true expands
   // every PIC dropdown on the page to the full worker roster, for the
@@ -3726,6 +3706,25 @@ export default function ProductionPage({
       sortable: true,
       render: (_v, row) => renderStatusCell(row),
     },
+    {
+      // Code 128 "Scan to complete" — a normal, DEFAULT-HIDDEN column toggled
+      // in the Columns menu like any other (Wei Siang 2026-06-15: "应该做在
+      // column 那边"). Off by default — the barcode isn't used on the floor yet.
+      // On screen it shows the job-card id (light); the actual scannable Code
+      // 128 is drawn by the Print Schedule output (see handlePrintSchedule).
+      key: "scanCode",
+      label: "Scan to complete",
+      type: "text",
+      width: "150px",
+      sortable: false,
+      defaultHidden: true,
+      render: (_v, row) =>
+        row.jobCardId ? (
+          <span className="font-mono text-[11px] text-[#6B7280]">
+            {row.jobCardId}
+          </span>
+        ) : null,
+    },
   ], [activeTab, upstreamDepts, isTablet]);
 
   const activeDept = DEPARTMENTS.find((d) => d.code === activeTab);
@@ -5565,8 +5564,30 @@ export default function ProductionPage({
           : sched.due;
         return `<span class="pill ${sched.state}">${word}${date ? " " + fmt(date) : ""}</span>`;
       };
+      // Pre-render one Code 128 per WIP row ONLY when the "Scan to complete"
+      // column is visible (toggled in the Columns menu like any other column).
+      // Scanning it on the phone marks that WIP complete — the linear twin of
+      // the sticker QR for the no-sticker depts. Off by default; when hidden
+      // the schedule is byte-identical to before this feature.
+      const showScan = orderedColumns.some((c) => c.key === "scanCode");
+      const barcodeByJc = new Map<string, string>();
+      if (showScan) {
+        for (const r of printRows) {
+          if (r.jobCardId && !barcodeByJc.has(r.jobCardId)) {
+            barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(r.jobCardId));
+          }
+        }
+      }
       const renderCell = (col: Column<DeptRow>, r: DeptRow): string => {
         const key = col.key;
+        // Code 128 column: scannable bars (image) + the job-card id as crisp
+        // HTML below (sharp at print DPI; the bars carry no baked text).
+        if (key === "scanCode") {
+          const bc = (r.jobCardId && barcodeByJc.get(r.jobCardId)) || "";
+          if (!bc) return "";
+          const idText = escapeHtml(r.jobCardId || "");
+          return `<img src="${bc}" alt="${idText}" /><span class="bccode">${idText}</span>`;
+        }
         // Dept pill columns — keys look like "sched_FAB_CUT.sortKey".
         const deptMatch = key.match(/^sched_([A-Z_]+)\.sortKey$/);
         if (deptMatch) return renderPillFor(r, deptMatch[1]);
@@ -5579,55 +5600,31 @@ export default function ProductionPage({
         return escapeHtml(String(raw));
       };
       const cellClassFor = (col: Column<DeptRow>): string => {
+        if (col.key === "scanCode") return "bc";
         if (col.align === "right" || col.type === "number") return "num";
         if (col.key === "soId") return "so";
         return "";
       };
-      // Pre-render one Code 128 per WIP row (synchronously — see
-      // jobCardCode128DataUrl). Scanning it on the phone marks that WIP
-      // complete, so the no-sticker depts (Woodcutting / Framing / Webbing)
-      // get a scannable code that travels WITH the printed schedule instead
-      // of on a sticker. Keyed by jobCardId; rows without one (shouldn't
-      // happen on a dept tab) just get a blank cell.
-      // The Code 128 column is opt-in (includeScanColumn) — off by default
-      // since the barcode isn't used on the floor yet. When off, the schedule
-      // is byte-identical to before this feature. Only pre-render barcodes when
-      // the column is actually printed.
-      const barcodeByJc = new Map<string, string>();
-      if (includeScanColumn) {
-        for (const r of printRows) {
-          if (r.jobCardId && !barcodeByJc.has(r.jobCardId)) {
-            barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(r.jobCardId));
-          }
-        }
-      }
-      const headerCellsHtml =
-        orderedColumns
-          .map((c) => `<th${cellClassFor(c) ? ` class="${cellClassFor(c)}"` : ""}>${escapeHtml(c.label)}</th>`)
-          .join("") +
-        (includeScanColumn ? `<th class="bc">Scan to complete</th>` : "");
-      const rowsHtml = printRows.map((r) => {
-        const cells = orderedColumns
-          .map((c) => {
-            const cls = cellClassFor(c);
-            return `<td${cls ? ` class="${cls}"` : ""}>${renderCell(c, r)}</td>`;
-          })
-          .join("");
-        if (!includeScanColumn) return `<tr>${cells}</tr>`;
-        // Bars from the image; the job-card id printed as crisp HTML BELOW the
-        // bars (<span class="bccode">) so it stays sharp at print DPI.
-        const bc = (r.jobCardId && barcodeByJc.get(r.jobCardId)) || "";
-        const idText = escapeHtml(r.jobCardId || "");
-        const bcCell = `<td class="bc">${bc ? `<img src="${bc}" alt="${idText}" /><span class="bccode">${idText}</span>` : ""}</td>`;
-        return `<tr>${cells}${bcCell}</tr>`;
-      }).join("");
+      const headerCellsHtml = orderedColumns
+        .map((c) => `<th${cellClassFor(c) ? ` class="${cellClassFor(c)}"` : ""}>${escapeHtml(c.label)}</th>`)
+        .join("");
+      const rowsHtml = printRows
+        .map((r) => {
+          const cells = orderedColumns
+            .map((c) => {
+              const cls = cellClassFor(c);
+              return `<td${cls ? ` class="${cls}"` : ""}>${renderCell(c, r)}</td>`;
+            })
+            .join("");
+          return `<tr>${cells}</tr>`;
+        })
+        .join("");
       body = `
         <table class="schedule">
           <thead><tr>${headerCellsHtml}</tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>`;
-      // +1 for the trailing Scan-to-complete (Code 128) column when shown.
-      columnCount = orderedColumns.length + (includeScanColumn ? 1 : 0);
+      columnCount = orderedColumns.length;
     }
 
     // Build the final filter chip strip. Constructed AFTER the body
@@ -5799,7 +5796,6 @@ export default function ProductionPage({
     activeTab, activeDept, visibleOrders, deptRows, deptColumns,
     filteredOrders.length,
     fltSearch, fltCustomer, fltState, fltCategory, fltDueFrom, fltDueTo, incompleteOnly,
-    includeScanColumn,
     gridFilterIdSet, gridFilteredDeptRows,
     saveAllNow, toast,
   ]);
@@ -6303,23 +6299,9 @@ export default function ProductionPage({
               <option value="total">Total Listing</option>
             </select>
           </label>
-          {/* Code 128 column toggle — only meaningful for a dept's Detailed
-              schedule (the only print that has a per-WIP Scan column). Off by
-              default; the barcode isn't used on the floor yet. */}
-          {activeTab !== "ALL" && printMode === "detailed" && (
-            <label
-              className="flex items-center gap-1.5 text-xs text-[#6B7280]"
-              title="Add a scannable Code 128 column to the printed schedule (off by default — the barcode isn't in use on the floor yet)"
-            >
-              <input
-                type="checkbox"
-                checked={includeScanColumn}
-                onChange={(e) => setIncludeScanColumn(e.target.checked)}
-                className="h-3.5 w-3.5 accent-[#6B5C32]"
-              />
-              Scan barcode
-            </label>
-          )}
+          {/* The Code 128 "Scan to complete" column is now toggled in the grid's
+              Columns menu (default hidden) like any other column — no separate
+              checkbox (Wei Siang 2026-06-15: "应该做在 column 那边"). */}
           <Button
             variant="outline"
             onClick={() =>

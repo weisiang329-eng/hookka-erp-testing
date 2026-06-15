@@ -47,6 +47,7 @@ import {
   ensureDeliveryIncompleteColumn,
   loadProductM3Map,
   loadHubStateMap,
+  loadServiceOrderHubMeta,
 } from "./delivery-orders";
 import {
   poReadyForDelivery,
@@ -332,54 +333,97 @@ async function loadDoEditModel(
   const productCodes: Array<string | null> = curRows.map((r) => r.productCode);
 
   // ── Addable: ready POs for the same customer + state, not yet on any DO ─
-  // Mirrors the office "Available Production Orders" picker (delivery/index.tsx
-  // `addablePOs`): same customer + same STATE (resolveStateCode of the PO's
-  // customerState vs this DO's hub state / customerState). The one-hub guard in
-  // validateDoComposition is the dispatch-time safety net, exactly as on the
-  // desktop — so the phone shows the SAME candidates the desktop edit does.
+  // Mirrors the office "Available Production Orders" picker: same customer +
+  // same STATE; the one-hub guard in validateDoComposition is the dispatch-time
+  // safety net. IMPORTANT: production_orders has NO customerId column, so the
+  // customer + hub are derived from the PO's sales order (salesOrderId →
+  // sales_orders) or service order (serviceOrderId → service_orders), the same
+  // canonical resolution validateDoComposition uses. (The previous version
+  // filtered on a non-existent production_orders.customerId, which threw → the
+  // "Could not load this delivery for editing" 500.)
   let addable: EditItem[] = [];
   if (editable && doRow.customerId && doRow.orgId) {
-    // This DO's state — hub state (via hubId) preferred, customerState fallback
-    // (the same fallback chain the office State column uses). null = no
-    // resolvable state (e.g. a hub-less service DO) → customer-only filter.
-    const hubStateMap = await loadHubStateMap(db, [doRow.hubId]);
-    const doState = resolveStateCode(
-      (doRow.hubId ? hubStateMap.get(doRow.hubId) : null) ||
-        doRow.customerState ||
-        null,
-    );
-    // Candidate POs: same org + customer, not cancelled. Consignment + the
-    // production-readiness gate are applied in JS via poReadyForDelivery so
-    // there is exactly ONE definition of "ready" (shared with the office
-    // delivery page).
+    // Candidate POs: non-cancelled, NOT already on a (non-cancelled) DO. The
+    // NOT EXISTS bounds the set to undelivered POs (so this stays light even on
+    // a big org / high-latency DB).
     const candRes = await db
       .prepare(
-        `SELECT * FROM production_orders
-          WHERE orgId = ? AND customerId = ? AND status != 'CANCELLED'`,
+        `SELECT * FROM production_orders po
+          WHERE po.orgId = ? AND po.status != 'CANCELLED'
+            AND NOT EXISTS (
+              SELECT 1 FROM delivery_order_items di
+              JOIN delivery_orders d ON d.id = di.deliveryOrderId
+              WHERE di.productionOrderId = po.id AND d.status != 'CANCELLED'
+            )`,
       )
-      .bind(doRow.orgId, doRow.customerId)
+      .bind(doRow.orgId)
       .all<Record<string, unknown>>();
     const cands = candRes.results ?? [];
-    const candIds = cands
-      .map((r) => String((r.id as string) ?? ""))
-      .filter(Boolean);
 
-    if (candIds.length > 0) {
-      const ph = candIds.map(() => "?").join(",");
-      const [linkRes, jcRes] = await Promise.all([
-        // POs already on a non-cancelled DO (incl. this one) — excluded by
-        // poReadyForDelivery's linkedPOIds, so this DO's own items never
-        // show up twice (they're in `items`, not `addable`).
-        db
-          .prepare(
-            `SELECT DISTINCT di.productionOrderId AS poId
-               FROM delivery_order_items di
-               JOIN delivery_orders d ON d.id = di.deliveryOrderId
-              WHERE d.status != 'CANCELLED' AND di.productionOrderId IN (${ph})`,
-          )
-          .bind(...candIds)
-          .all<{ poId: string | null }>(),
-        db
+    if (cands.length > 0) {
+      // Resolve each candidate's customer + hub from its SO / service order.
+      const soIds = [
+        ...new Set(
+          cands.map((r) => String((r.salesOrderId as string) ?? "")).filter(Boolean),
+        ),
+      ];
+      const svcIds = [
+        ...new Set(
+          cands.map((r) => String((r.serviceOrderId as string) ?? "")).filter(Boolean),
+        ),
+      ];
+      const soMeta = new Map<string, { customerId: string | null; hubId: string | null }>();
+      if (soIds.length > 0) {
+        const ph = soIds.map(() => "?").join(",");
+        const soRes = await db
+          .prepare(`SELECT id, customerId, hubId FROM sales_orders WHERE id IN (${ph})`)
+          .bind(...soIds)
+          .all<{ id: string; customerId: string | null; hubId: string | null }>();
+        for (const r of soRes.results ?? []) {
+          soMeta.set(r.id, { customerId: r.customerId, hubId: r.hubId });
+        }
+      }
+      const svcMeta =
+        svcIds.length > 0 ? await loadServiceOrderHubMeta(db, svcIds) : new Map();
+      const custOf = (r: Record<string, unknown>): string | null => {
+        const so = soMeta.get(String((r.salesOrderId as string) ?? ""));
+        if (so?.customerId) return so.customerId;
+        const sv = svcMeta.get(String((r.serviceOrderId as string) ?? ""));
+        return sv?.customerId ?? null;
+      };
+      const hubOf = (r: Record<string, unknown>): string | null => {
+        const so = soMeta.get(String((r.salesOrderId as string) ?? ""));
+        if (so?.hubId) return so.hubId;
+        const sv = svcMeta.get(String((r.serviceOrderId as string) ?? ""));
+        return sv?.hubId ?? null;
+      };
+
+      // Same-customer gate (the real one). Then same-state via the hub.
+      const sameCust = cands.filter((r) => custOf(r) === doRow.customerId);
+      const hubStateMap = await loadHubStateMap(db, [
+        doRow.hubId,
+        ...sameCust.map(hubOf),
+      ]);
+      const doState = resolveStateCode(
+        (doRow.hubId ? hubStateMap.get(doRow.hubId) : null) ||
+          doRow.customerState ||
+          null,
+      );
+      const candAfterState = sameCust.filter((r) => {
+        if (doState === null) return true;
+        const h = hubOf(r);
+        const st = resolveStateCode((h ? hubStateMap.get(h) : null) || null);
+        // Unknown candidate state → keep (validateDoComposition is the
+        // dispatch-time safety net); only drop a KNOWN different state.
+        return st === null || st === doState;
+      });
+      const candIds = candAfterState
+        .map((r) => String((r.id as string) ?? ""))
+        .filter(Boolean);
+
+      if (candIds.length > 0) {
+        const ph = candIds.map(() => "?").join(",");
+        const jcRes = await db
           .prepare(
             `SELECT productionOrderId, departmentCode, status, wipType, completedDate
                FROM job_cards WHERE productionOrderId IN (${ph})`,
@@ -391,71 +435,58 @@ async function loadDoEditModel(
             status: string | null;
             wipType: string | null;
             completedDate: string | null;
-          }>(),
-      ]);
-
-      const linkedPOIds = new Set(
-        (linkRes.results ?? [])
-          .map((r) => r.poId)
-          .filter((x): x is string => !!x),
-      );
-      const jcByPo = new Map<string, PipelineJobCard[]>();
-      for (const j of jcRes.results ?? []) {
-        if (!j.productionOrderId) continue;
-        const list = jcByPo.get(j.productionOrderId) ?? [];
-        list.push({
-          departmentCode: j.departmentCode ?? "",
-          status: j.status ?? "",
-          completedDate: j.completedDate,
-          wipType: j.wipType ?? "",
-        });
-        jcByPo.set(j.productionOrderId, list);
-      }
-      const readyCands = cands.filter((r) => {
-        const id = String((r.id as string) ?? "");
-        if (!id) return false;
-        const po: PipelinePO = {
-          id,
-          status: String((r.status as string) ?? ""),
-          consignmentOrderId:
-            (r.consignmentOrderId as string) ??
-            (r.consignmentorderid as string) ??
-            undefined,
-          itemCategory: (r.itemCategory as string) ?? undefined,
-          specialOrder: (r.specialOrder as string) ?? undefined,
-          repairScope:
-            (r.repairScope as string) ?? (r.repairscope as string) ?? null,
-          jobCards: jcByPo.get(id) ?? [],
-        };
-        if (!poReadyForDelivery(po, linkedPOIds)) return false;
-        // Same-state gate — identical to the office picker. doState null
-        // (hub-less DO) → customer-only, so the picker is never empty.
-        if (
-          doState !== null &&
-          resolveStateCode(String((r.customerState as string) ?? "")) !== doState
-        ) {
-          return false;
+          }>();
+        const jcByPo = new Map<string, PipelineJobCard[]>();
+        for (const j of jcRes.results ?? []) {
+          if (!j.productionOrderId) continue;
+          const list = jcByPo.get(j.productionOrderId) ?? [];
+          list.push({
+            departmentCode: j.departmentCode ?? "",
+            status: j.status ?? "",
+            completedDate: j.completedDate,
+            wipType: j.wipType ?? "",
+          });
+          jcByPo.set(j.productionOrderId, list);
         }
-        return true;
-      });
+        // The NOT EXISTS already removed on-DO POs, so linkedPOIds is empty.
+        const linkedPOIds = new Set<string>();
+        const readyCands = candAfterState.filter((r) => {
+          const id = String((r.id as string) ?? "");
+          if (!id) return false;
+          const po: PipelinePO = {
+            id,
+            status: String((r.status as string) ?? ""),
+            consignmentOrderId:
+              (r.consignmentOrderId as string) ??
+              (r.consignmentorderid as string) ??
+              undefined,
+            itemCategory: (r.itemCategory as string) ?? undefined,
+            specialOrder: (r.specialOrder as string) ?? undefined,
+            repairScope:
+              (r.repairScope as string) ?? (r.repairscope as string) ?? null,
+            jobCards: jcByPo.get(id) ?? [],
+          };
+          return poReadyForDelivery(po, linkedPOIds);
+        });
 
-      productCodes.push(
-        ...readyCands.map((r) => (r.productCode as string) ?? ""),
-      );
-      addable = readyCands.map((r) => ({
-        productionOrderId: String((r.id as string) ?? ""),
-        poNo: (r.poNo as string) ?? "",
-        productCode: (r.productCode as string) ?? "",
-        productName: (r.productName as string) ?? "",
-        sizeLabel: (r.sizeLabel as string) ?? "",
-        fabricCode: (r.fabricCode as string) ?? "",
-        quantity: Number(r.quantity) || 0,
-        itemM3: 0, // backfilled below once every product code is known
-        rackingNumber: (r.rackingNumber as string) ?? "",
-        packingStatus: "PACKED",
-        salesOrderNo:
-          (r.companySOId as string) ?? (r.companysoid as string) ?? "",
-      }));
+        productCodes.push(
+          ...readyCands.map((r) => (r.productCode as string) ?? ""),
+        );
+        addable = readyCands.map((r) => ({
+          productionOrderId: String((r.id as string) ?? ""),
+          poNo: (r.poNo as string) ?? "",
+          productCode: (r.productCode as string) ?? "",
+          productName: (r.productName as string) ?? "",
+          sizeLabel: (r.sizeLabel as string) ?? "",
+          fabricCode: (r.fabricCode as string) ?? "",
+          quantity: Number(r.quantity) || 0,
+          itemM3: 0, // backfilled below once every product code is known
+          rackingNumber: (r.rackingNumber as string) ?? "",
+          packingStatus: "PACKED",
+          salesOrderNo:
+            (r.companySOId as string) ?? (r.companysoid as string) ?? "",
+        }));
+      }
     }
   }
 

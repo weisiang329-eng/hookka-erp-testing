@@ -2432,7 +2432,10 @@ type DoCreateOutcome =
 // to live-deriving the hub from the source order. The hubId SELECT is
 // try/catch'd because the column self-applies on first service-order POST —
 // DO creation must keep working on isolates where it hasn't landed yet.
-async function loadServiceOrderHubMeta(
+// Exported so the public DO-QR edit flow can resolve a service-order PO's
+// customer + hub the same canonical way (production_orders has no customerId
+// column — customer is derived from the SO / service order).
+export async function loadServiceOrderHubMeta(
   db: D1Database,
   serviceOrderIds: string[],
 ): Promise<

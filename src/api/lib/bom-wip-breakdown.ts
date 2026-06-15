@@ -129,63 +129,18 @@ export function deriveTopLevelWipKey(
   return `${productCode}::${idx}::${wipType}::${rawTopCode}`;
 }
 
-// One 32-bit FNV-1a pass with a seed. Two passes (different seeds) concatenated
-// give a ~14-char, effectively-64-bit token whose collision odds are negligible
-// across the lifetime card count (birthday ~50% only at ~5e9 distinct keys).
-function fnv1a32(s: string, seed: number): number {
-  let h = seed >>> 0;
-  for (let i = 0; i < s.length; i++) {
-    h = Math.imul(h ^ s.charCodeAt(i), 16777619);
-  }
-  return h >>> 0;
-}
-
-// Short, deterministic hash of any natural key → 14 fixed base36 chars. Used to
-// keep the job_card id SHORT so its Code 128 prints scannable: the raw wipKey is
-// 60+ chars of BOM template tokens, which made an 84-char barcode ~5× too dense
-// to scan (Wei Siang 2026-06-16). Same key → same hash, so production-builder,
-// jobcard-sync, the printed barcode AND the id-rename backfill all agree.
-export function shortKeyHash(key: string): string {
-  const a = fnv1a32(key, 2166136261);
-  const b = fnv1a32(key, 0x811c9dc5 ^ 0x9e3779b9);
-  return a.toString(36).padStart(7, "0") + b.toString(36).padStart(7, "0");
-}
-
-// Two-digit department codes (Wei Siang 2026-06-16: "Framing 叫 01 之类的") — the
-// id no longer carries the long dept string (e.g. "UPHOLSTERY" → "07"), which
-// shaves another ~8 chars off the barcode. Order follows the production line
-// (SEED_DEPARTMENTS dept-1..8). Unknown depts fall through to their own code so
-// the id stays unique even for non-production cards.
-export const DEPT_CODE2: Record<string, string> = {
-  FAB_CUT: "01",
-  FAB_SEW: "02",
-  WOOD_CUT: "03",
-  FOAM: "04",
-  FRAMING: "05",
-  WEBBING: "06",
-  UPHOLSTERY: "07",
-  PACKING: "08",
-};
-export function deptCode2(deptCode: string): string {
-  return DEPT_CODE2[deptCode] ?? deptCode;
-}
-
-// THE job_card id formula (one definition — do NOT re-implement elsewhere):
-// `jc-<hash>-<deptNN>`, where <hash> = shortKeyHash(`<poId>::<wipKey>`) (FG cards
-// pass wipKey "FG", folded into the same hash) and <deptNN> is the 2-digit dept
-// code. ~20 chars total — short enough that the Code 128 prints at a scannable
-// X-dimension. Sanitised to id-safe chars, ≤128. The hash already encodes poId +
-// wipKey, so uniqueness per (poId, wipKey, dept) holds; the readable poId is
-// dropped from the id (the schedule shows the PO in its own column).
-export function deriveJobCardId(
-  poId: string,
-  wipKey: string,
-  deptCode: string,
-): string {
-  return `jc-${shortKeyHash(`${poId}::${wipKey}`)}-${deptCode2(deptCode)}`
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .slice(0, 128);
-}
+// THE job_card id / Code 128 token formula lives in the pure, browser-safe
+// module src/lib/job-card-id.ts so the dashboard print + scanner can share it.
+// Re-exported here so existing backend imports (production-builder, jobcard-sync)
+// keep resolving `deriveJobCardId` from this module.
+export {
+  shortKeyHash,
+  DEPT_CODE2,
+  deptCode2,
+  deptFromCode2,
+  deriveJobCardId,
+  isShortJobCardToken,
+} from "../../lib/job-card-id";
 
 // Resolve `{TOKEN}` placeholders inside a master wipCode / wipLabel against
 // the SO line's variant context. Any token with no value substitutes empty,

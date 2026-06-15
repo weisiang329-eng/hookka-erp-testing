@@ -10,6 +10,7 @@ import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData, jobCardBarcodeValue } from "@/lib/qr-utils";
+import { deriveJobCardId, isShortJobCardToken } from "@/lib/job-card-id";
 // Static import (not dynamic) so Code 128 generation is SYNCHRONOUS inside the
 // print click gesture — an await before window.open would trip the pop-up
 // blocker. jsbarcode is small and scoped to this (already heavy) page chunk.
@@ -5576,7 +5577,17 @@ export default function ProductionPage({
       if (showScan) {
         for (const r of printRows) {
           if (r.jobCardId && !barcodeByJc.has(r.jobCardId)) {
-            barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(r.jobCardId));
+            // Encode the SHORT scannable token. A card created after the id-
+            // shortening already has a short id → use it verbatim (the scanner
+            // hits it on the fast jc.id path). A card created BEFORE it has a
+            // long id → re-derive the short token from its (poId, wipKey, dept);
+            // the scanner resolves that by re-deriving across the dept's open
+            // cards (scan-lookup fallback). Migration-free, and new cards are
+            // byte-identical to before — only old cards gain a scannable code.
+            const token = isShortJobCardToken(r.jobCardId)
+              ? r.jobCardId
+              : deriveJobCardId(r.poId, r.wipKey ?? "", activeTab);
+            barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(token));
           }
         }
       }

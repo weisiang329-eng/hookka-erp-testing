@@ -42,6 +42,7 @@ import jsQR from "jsqr";
 import { useT } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
 import { parseStickerData, parseJobCardBarcode } from "@/lib/qr-utils";
+import { deriveJobCardId } from "@/lib/job-card-id";
 import { deriveWipName } from "@/lib/wip-name";
 import { z } from "zod";
 
@@ -468,9 +469,16 @@ export default function WorkerScanPage() {
       const data = POListEnvelope.parse(await res.json());
       if (!data.success || !data.data) return [];
       const orders = data.data as unknown as Order[];
-      // Job-card id — unique → return the single hit and stop.
+      // Job-card id / Code 128 token — unique → return the single hit and stop.
+      // Match the stored id directly (new short id, or a per-piece sticker's
+      // op=<id>) OR the re-derived short token (an OLD card's printed barcode
+      // encodes the short token, not its long PK — see scan-lookup's fallback).
       for (const o of orders) {
-        const jc = o.jobCards.find((j) => j.id === term);
+        const jc = o.jobCards.find(
+          (j) =>
+            j.id === term ||
+            deriveJobCardId(o.id, j.wipKey ?? "", j.departmentCode) === term,
+        );
         if (jc) return [{ order: o, jobCard: jc }];
       }
       // PO number / order id — collect ALL job cards in the matching

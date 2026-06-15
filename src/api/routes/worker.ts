@@ -24,6 +24,7 @@ import type { Env } from "../worker";
 import { resolveWorkerToken } from "./worker-auth";
 import { computeMonthlyLabor, computeAttendanceDayDetail, absenceCutoffDay, effectiveSalarySenForMonth } from "../../lib/labor-engine";
 import { jcMinutesTotal } from "../../lib/job-card-minutes";
+import { deriveJobCardId, deptFromCode2, isShortJobCardToken } from "../../lib/job-card-id";
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
 import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
 import {
@@ -420,6 +421,50 @@ app.get("/scan-lookup", async (c) => {
           .bind(term)
           .all<PoRowFull>()
       ).results ?? [];
+  }
+
+  // Old-card Code 128: the printed barcode encodes the SHORT re-derived token,
+  // but a card created before the id-shortening has a LONG primary key, so the
+  // jc.id match above missed. Re-derive deriveJobCardId across that department's
+  // OPEN cards (the token's last 2 digits = dept code) to find it — bounded by
+  // current WIP for one dept, and migration-free (no id rewrite, no new column).
+  if (poRows.length === 0 && isShortJobCardToken(term)) {
+    const deptCode = deptFromCode2(term.slice(-2));
+    if (deptCode) {
+      const cand =
+        (
+          await c.var.DB.prepare(
+            `SELECT id, productionOrderId, wipKey, departmentCode
+               FROM job_cards
+              WHERE departmentCode = ? AND status <> 'COMPLETED'`,
+          )
+            .bind(deptCode)
+            .all<{
+              id: string;
+              productionOrderId: string;
+              wipKey: string | null;
+              departmentCode: string | null;
+            }>()
+        ).results ?? [];
+      const hit = cand.find(
+        (j) =>
+          deriveJobCardId(
+            j.productionOrderId,
+            j.wipKey ?? "",
+            j.departmentCode ?? deptCode,
+          ) === term,
+      );
+      if (hit) {
+        poRows =
+          (
+            await c.var.DB.prepare(
+              "SELECT * FROM production_orders WHERE id = ? LIMIT 1",
+            )
+              .bind(hit.productionOrderId)
+              .all<PoRowFull>()
+          ).results ?? [];
+      }
+    }
   }
 
   if (poRows.length === 0) return c.json({ success: true, data: [] });

@@ -49,7 +49,7 @@ const KING_BF_BOM = JSON.stringify([
   },
 ]);
 
-test("piecesFor: King bedframe BOM → '1 Headboard + 2 Divan' (Headboard first)", () => {
+test("piecesFor: King bedframe BOM → '1 HB + 2 Divan' (HB first)", () => {
   const out = piecesFor({
     code: "TRION-K",
     baseModel: "TRION",
@@ -63,7 +63,7 @@ test("piecesFor: King bedframe BOM → '1 Headboard + 2 Divan' (Headboard first)
     legHeightInches: 2,
     qty: 1,
   });
-  assert.equal(out, "1 Headboard + 2 Divan");
+  assert.equal(out, "1 HB + 2 Divan");
 });
 
 test("piecesFor: HB-only BEDFRAME special drops the DIVAN pieces", () => {
@@ -80,7 +80,7 @@ test("piecesFor: HB-only BEDFRAME special drops the DIVAN pieces", () => {
     legHeightInches: null,
     qty: 1,
   });
-  assert.equal(out, "1 Headboard");
+  assert.equal(out, "1 HB");
 });
 
 test("piecesFor: a complete sofa set counts as 'Sofa', not its variant pieces", () => {
@@ -121,12 +121,12 @@ const BF_BASE = {
 };
 const scope = (components) => ({ preset: "CUSTOM", depts: ["UPHOLSTERY"], components });
 
-test("piecesFor: bedframe partial repair (HB only) → '1 Headboard' (full word)", () => {
+test("piecesFor: bedframe partial repair (HB only) → '1 HB' (matches full unit)", () => {
   const out = piecesFor({
     ...BF_BASE,
     repairScope: scope([{ key: "k1", label: "HB", qty: 1 }]),
   });
-  assert.equal(out, "1 Headboard");
+  assert.equal(out, "1 HB");
 });
 
 test("piecesFor: SOFA partial repair lists sub-components (was the whole set)", () => {
@@ -153,13 +153,13 @@ test("piecesFor: SOFA partial repair lists sub-components (was the whole set)", 
   assert.equal(out, "1 Back Cushion + 1 Armrest + 1 Headrest");
 });
 
-test("piecesFor: component qty × line set-qty (2 sets, 1 HB each → '2 Headboard')", () => {
+test("piecesFor: component qty × line set-qty (2 sets, 1 HB each → '2 HB')", () => {
   const out = piecesFor({
     ...BF_BASE,
     qty: 2,
     repairScope: scope([{ key: "k1", label: "HB", qty: 1 }]),
   });
-  assert.equal(out, "2 Headboard");
+  assert.equal(out, "2 HB");
 });
 
 test("piecesFor: picked component qty is respected (2 of 2 Divan → '2 Divan')", () => {
@@ -171,15 +171,12 @@ test("piecesFor: picked component qty is respected (2 of 2 Divan → '2 Divan')"
 });
 
 test("piecesFor: no repairScope → full set unchanged", () => {
-  assert.equal(piecesFor({ ...BF_BASE }), "1 Headboard + 2 Divan");
-  assert.equal(
-    piecesFor({ ...BF_BASE, repairScope: null }),
-    "1 Headboard + 2 Divan",
-  );
+  assert.equal(piecesFor({ ...BF_BASE }), "1 HB + 2 Divan");
+  assert.equal(piecesFor({ ...BF_BASE, repairScope: null }), "1 HB + 2 Divan");
   // A dept-only scope (no component picks) is NOT a narrowing → full set.
   assert.equal(
     piecesFor({ ...BF_BASE, repairScope: { preset: "FABRIC", depts: ["UPHOLSTERY"] } }),
-    "1 Headboard + 2 Divan",
+    "1 HB + 2 Divan",
   );
 });
 

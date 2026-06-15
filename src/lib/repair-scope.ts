@@ -649,13 +649,14 @@ export function repairScopeBadgeLabel(scope: RepairScope | null): string {
   return base;
 }
 
-// Normalize a repaired-component label to the full English word printed on the
-// DO (Wei Siang 2026-06-16: spell parts out — "HB" → "Headboard"). The other
-// picker labels (Divan, Base, Back Cushion, Armrest, Headrest) are already the
-// words we print, so they pass through unchanged.
+// Normalize a repaired-component label so it matches EXACTLY how the same part
+// shows on a complete unit / the WIP stickers (Wei Siang 2026-06-16: keep "HB"
+// as "HB", never "Headboard" — the repair and the full unit must read the same).
+// "Headboard" folds back to "HB"; the other picker labels (Divan, Base, Back
+// Cushion, Armrest, Headrest) already match, so they pass through unchanged.
 export function normalizePartLabel(label: string): string {
   const u = label.trim().toUpperCase();
-  if (u === "HB" || u === "HEADBOARD") return "Headboard";
+  if (u === "HB" || u === "HEADBOARD") return "HB";
   if (u === "DIVAN") return "Divan";
   return label.trim();
 }

@@ -210,7 +210,7 @@ export function piecesFor(args: {
     const t = w.wipType.toUpperCase();
     const label =
       t === "HEADBOARD"
-        ? "Headboard"
+        ? "HB"
         : t === "DIVAN"
           ? "Divan"
           : (w.wipLabel || w.wipType || "PC").trim();

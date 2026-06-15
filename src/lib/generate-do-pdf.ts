@@ -429,7 +429,7 @@ export function renderDoInto(
   }
   const rankL = (lab: string): number => {
     const u = lab.toUpperCase();
-    return u === "HEADBOARD" ? 0 : u === "DIVAN" ? 1 : u === "SOFA" ? 2 : 3;
+    return u === "HB" ? 0 : u === "DIVAN" ? 1 : u === "SOFA" ? 2 : 3;
   };
   const grandBreakdown =
     Array.from(grand.keys())

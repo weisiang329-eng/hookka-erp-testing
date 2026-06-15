@@ -22,9 +22,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   piecesFor,
+  buildRepairNote,
   deriveComponentRacks,
   selectBestBomByCode,
 } from "../src/api/lib/print-extras-shared.ts";
+import { breakBomIntoWips } from "../src/api/lib/bom-wip-breakdown.ts";
 
 // A minimal King-bedframe BOM: one HEADBOARD node + one DIVAN node, both with
 // a PACKING process so they survive the "what reaches packing ships" filter.
@@ -99,6 +101,91 @@ test("piecesFor: a sofa variant is ONE labelled set, not WIP pieces", () => {
     qty: 2,
   });
   assert.equal(out, "2 1A(LHF)");
+});
+
+// --- Partial-repair component filter (DO compartment-aware print) ----------
+// Derive the REAL wipKeys from the same breakdown the filter matches on, so
+// the test pins behaviour without hard-coding the key format.
+const BF_VARIANTS = {
+  productCode: "TRION-K",
+  model: "TRION",
+  sizeLabel: "6FT",
+  sizeCode: "",
+  fabricCode: "PC151-02",
+  divanHeightInches: 12,
+  legHeightInches: 2,
+  gapInches: 2,
+};
+const bfWips = breakBomIntoWips(KING_BF_BOM, "TRION-K", BF_VARIANTS);
+const HB_KEY = bfWips.find((w) => w.wipType.toUpperCase() === "HEADBOARD").wipKey;
+const DIVAN_KEY = bfWips.find((w) => w.wipType.toUpperCase() === "DIVAN").wipKey;
+const baseArgs = {
+  code: "TRION-K",
+  baseModel: "TRION",
+  wipComponents: KING_BF_BOM,
+  cat: "BEDFRAME",
+  special: null,
+  sizeLabel: "6FT",
+  fabricCode: "PC151-02",
+  gapInches: 2,
+  divanHeightInches: 12,
+  legHeightInches: 2,
+  qty: 1,
+};
+
+test("piecesFor: partial repair (HB only) narrows '1 HB + 2 DIVAN' → '1 HB'", () => {
+  const out = piecesFor({
+    ...baseArgs,
+    repairScope: {
+      preset: "CUSTOM",
+      depts: ["UPHOLSTERY"],
+      components: [{ key: HB_KEY, label: "Headboard", qty: 1 }],
+    },
+  });
+  assert.equal(out, "1 HB");
+});
+
+test("piecesFor: partial repair clamps a reduced qty (1 of 2 DIVAN) → '1 DIVAN'", () => {
+  const out = piecesFor({
+    ...baseArgs,
+    repairScope: {
+      preset: "CUSTOM",
+      depts: ["UPHOLSTERY"],
+      components: [{ key: DIVAN_KEY, label: "Divan", qty: 1 }],
+    },
+  });
+  assert.equal(out, "1 DIVAN");
+});
+
+test("piecesFor: no repairScope → full set unchanged", () => {
+  assert.equal(piecesFor({ ...baseArgs }), "1 HB + 2 DIVAN");
+  assert.equal(
+    piecesFor({ ...baseArgs, repairScope: null }),
+    "1 HB + 2 DIVAN",
+  );
+});
+
+test("piecesFor: a STALE component pick never blanks the line — falls back to full", () => {
+  // BOM changed since the operator picked: the key no longer exists. For a
+  // delivery note we must still print something, so it falls back to the full
+  // set rather than an empty line.
+  const out = piecesFor({
+    ...baseArgs,
+    repairScope: {
+      preset: "CUSTOM",
+      depts: ["UPHOLSTERY"],
+      components: [{ key: "TRION-K::9::GONE::GONE", label: "Gone", qty: 1 }],
+    },
+  });
+  assert.equal(out, "1 HB + 2 DIVAN");
+});
+
+test("buildRepairNote: strips counts, dedupes, English 'Repair: X only'", () => {
+  assert.equal(buildRepairNote("1 HB"), "Repair: HB only");
+  assert.equal(buildRepairNote("1 HB + 1 DIVAN"), "Repair: HB + DIVAN only");
+  assert.equal(buildRepairNote("2 DIVAN"), "Repair: DIVAN only");
+  assert.equal(buildRepairNote(null), null);
+  assert.equal(buildRepairNote(""), null);
 });
 
 test("deriveComponentRacks: groups distinct racks, HB first then DIVAN numeric", () => {

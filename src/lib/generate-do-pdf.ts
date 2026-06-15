@@ -35,6 +35,11 @@ export type DOPrintExtras = {
       salesOrderNo?: string | null; // our SO no. for this line
       specialOrder?: string | null; // e.g. "Headboard Only" / "DIVAN CURVE"
       pieces?: string | null; // BOM set composition, e.g. "1 HB + 2 DIVAN"
+      // Partial-repair note, e.g. "Repair: HB only". Set ONLY when the line's
+      // production order carries a component-level repair scope, so the DO
+      // prints just the repaired compartment(s) and says so. English (the DO
+      // PDF font has no CJK glyphs). null/absent on a normal line.
+      repairNote?: string | null;
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -503,9 +508,15 @@ export function renderDoInto(
       },
       ex,
     );
+    // Partial-repair lines append a note ("Repair: HB only") under the spec so
+    // the driver/customer sees this DO ships just the repaired compartment —
+    // the Quantity column above already shows the filtered pieces ("1 HB").
+    const descCell = ex?.repairNote
+      ? `${desc}\n${ex.repairNote}`
+      : desc;
     body.push([
       refLines.length ? refLines.join("\n") : "-",
-      desc,
+      descCell,
       String(it.quantity),
       qtyTxt,
       String(totQty),

@@ -26,6 +26,10 @@ import {
   type BomVariantContext,
 } from "./bom-wip-breakdown";
 import { isHeadboardOnlySpecial } from "../routes/fg-units";
+import {
+  filterWipsByRepairComponents,
+  type RepairScope,
+} from "../../lib/repair-scope";
 
 // One BOM template per product code, already collapsed to the version we
 // print from (ACTIVE preferred, then latest effectiveFrom).
@@ -116,6 +120,11 @@ export function piecesFor(args: {
   divanHeightInches: number | null;
   legHeightInches: number | null;
   qty: number;
+  // Component-level repair scope (partial repair). When its `components` are
+  // set, the pieces are narrowed to ONLY the repaired compartments so the DO
+  // prints "1 HB" instead of the full "1 HB + 2 DIVAN". Omitted/null on a
+  // normal sales line (and on the CN path, which never passes it) → full set.
+  repairScope?: RepairScope | null;
 }): string | null {
   const {
     code,
@@ -129,6 +138,7 @@ export function piecesFor(args: {
     divanHeightInches: d,
     legHeightInches: l,
     qty,
+    repairScope,
   } = args;
   const C = (cat || "").toUpperCase();
   const cu = code.toUpperCase();
@@ -161,6 +171,10 @@ export function piecesFor(args: {
   };
   let wips = breakBomIntoWips(wipComponents, code, variants);
   if (wips.length === 1 && wips[0].wipCode === "FG_MAIN") return null;
+  // Capture the FULL breakdown's keys BEFORE any narrowing so the repair-scope
+  // filter judges stale picks against the whole BOM (a component dropped by the
+  // packed / Headboard-only filters below is legal narrowing, not stale).
+  const allBomWipKeys = wips.map((w) => w.wipKey);
   // What actually ships = what reaches PACKING. Count only the WIPs that have
   // a PACKING process so the figure matches the loaded pieces ("packing 有多
   // 少东西就是多少东西"). Keep all if the BOM never marks packing (don't zero
@@ -175,6 +189,19 @@ export function piecesFor(args: {
     wips = wips.filter((w) => w.wipType.toUpperCase() === "DIVAN");
   } else if (C === "BEDFRAME" && isHeadboardOnlySpecial(special)) {
     wips = wips.filter((w) => w.wipType.toUpperCase() !== "DIVAN");
+  }
+  // Partial repair: keep only the repaired compartments. Judged against the
+  // FULL BOM keys (allBomWipKeys) so a component dropped by the filters above
+  // isn't mis-flagged stale. A genuinely stale pick (BOM changed since the
+  // operator picked) returns no wips — for a PRINT we never blank the line, so
+  // fall back to the full set rather than show an empty delivery note.
+  if (repairScope?.components && repairScope.components.length > 0) {
+    const { wips: kept } = filterWipsByRepairComponents(
+      wips,
+      repairScope,
+      allBomWipKeys,
+    );
+    if (kept.length > 0) wips = kept;
   }
   if (wips.length === 0) return null;
   const agg = new Map<string, number>();
@@ -194,6 +221,29 @@ export function piecesFor(args: {
     );
   }
   return order.map((lab) => `${agg.get(lab)} ${lab}`).join(" + ");
+}
+
+// ---------------------------------------------------------------------------
+// buildRepairNote — the short "Repair: HB only" line a partial-repair DO line
+// prints under its spec. Derived from the ALREADY-FILTERED pieces string so
+// the labels (HB / DIVAN / …) match the printed Quantity breakdown exactly.
+// English only — the document PDFs carry no CJK glyphs. The caller gates this
+// on the line actually being a narrowed partial repair (components present AND
+// the filtered pieces differ from the full set), so a stale-pick fallback
+// never prints a misleading "only".
+// ---------------------------------------------------------------------------
+export function buildRepairNote(filteredPieces: string | null): string | null {
+  if (!filteredPieces) return null;
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const part of String(filteredPieces).split(" + ")) {
+    const lab = part.trim().replace(/^\d+\s+/, "").trim();
+    if (lab && !seen.has(lab)) {
+      seen.add(lab);
+      labels.push(lab);
+    }
+  }
+  return labels.length ? `Repair: ${labels.join(" + ")} only` : null;
 }
 
 // ---------------------------------------------------------------------------

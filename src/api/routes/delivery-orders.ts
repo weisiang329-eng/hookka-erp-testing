@@ -36,7 +36,9 @@ import {
   selectBestBomByCode,
   piecesFor as piecesForShared,
   deriveComponentRacks,
+  buildRepairNote,
 } from "../lib/print-extras-shared";
+import { parseRepairScope, type RepairScope } from "../../lib/repair-scope";
 import { createPackingListCore } from "./packing-lists";
 import {
   groupPosByCustomerHub,
@@ -4238,6 +4240,34 @@ app.get("/:id/print-extras", async (c) => {
     }
   }
 
+  // Per-PO repair scope (partial repair). Loaded with SELECT * so the runtime-
+  // added repairScope column round-trips the Postgres compat layer (an aliased
+  // camelCase column on the big multi-join above would NOT — the same reason
+  // diPoById is a clean single-table read). Used to narrow a partial-repair
+  // line's printed pieces to just the repaired compartment(s).
+  const repairScopeByPo = new Map<string, RepairScope | null>();
+  {
+    const poIds = Array.from(new Set(diPoById.values()));
+    if (poIds.length > 0) {
+      const ph = poIds.map(() => "?").join(",");
+      const rsRes = await c.var.DB.prepare(
+        `SELECT * FROM production_orders WHERE id IN (${ph})`,
+      )
+        .bind(...poIds)
+        .all<Record<string, unknown>>();
+      for (const row of rsRes.results ?? []) {
+        const pid = String(row.id ?? "");
+        if (!pid) continue;
+        repairScopeByPo.set(
+          pid,
+          parseRepairScope(
+            (row.repairScope as string) ?? (row.repairscope as string) ?? null,
+          ),
+        );
+      }
+    }
+  }
+
   // Per-line set composition string, e.g. "1 HB + 2 DIVAN" (bedframe)
   // or "1 1A + 1 2A + 1 STOOL" (sofa set). Shared with the CN print-extras
   // (src/api/lib/print-extras-shared.ts) so both documents produce the
@@ -4254,6 +4284,7 @@ app.get("/:id/print-extras", async (c) => {
     d: number | null,
     l: number | null,
     qty: number,
+    repairScope?: RepairScope | null,
   ): string | null =>
     piecesForShared({
       code,
@@ -4267,6 +4298,7 @@ app.get("/:id/print-extras", async (c) => {
       divanHeightInches: d,
       legHeightInches: l,
       qty,
+      repairScope,
     });
 
   let customerRef = "";
@@ -4280,6 +4312,9 @@ app.get("/:id/print-extras", async (c) => {
       salesOrderNo: string | null;
       specialOrder: string | null;
       pieces: string | null;
+      // "Repair: HB only" when this line is a narrowed partial repair; null
+      // otherwise. Printed under the DO line's spec (English — PDF has no CJK).
+      repairNote: string | null;
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -4323,6 +4358,15 @@ app.get("/:id/print-extras", async (c) => {
         ? null
         : (Number(g) || 0) + (Number(d) || 0) + (Number(l) || 0);
     const bom = bomByCode.get((r.productCode || "").trim());
+    // Partial repair: narrow the printed pieces to just the repaired
+    // compartment(s). The note is built ONLY when the scope actually narrowed
+    // the line (filtered ≠ full) so a stale-pick fallback never prints a
+    // misleading "only". Inventory / invoice are unaffected — they key off the
+    // line's set quantity, never this pieces string.
+    const lineScope = repairScopeByPo.get(diPoById.get(r.id) || "") ?? null;
+    const hasPartial = !!(
+      lineScope?.components && lineScope.components.length > 0
+    );
     const pieces = bom
       ? piecesFor(
           r.productCode || "",
@@ -4336,8 +4380,27 @@ app.get("/:id/print-extras", async (c) => {
           d,
           l,
           Number(r.quantity) || 1,
+          hasPartial ? lineScope : null,
         )
       : null;
+    let repairNote: string | null = null;
+    if (bom && hasPartial && pieces) {
+      const fullPieces = piecesFor(
+        r.productCode || "",
+        bom.baseModel,
+        bom.wipComponents,
+        itemCategory,
+        specialOrder,
+        r.sizeLabel || "",
+        r.fabricCode || "",
+        g,
+        d,
+        l,
+        Number(r.quantity) || 1,
+        null,
+      );
+      if (pieces !== fullPieces) repairNote = buildRepairNote(pieces);
+    }
     // Packed date + per-component racks from the PO's PACKING job cards.
     // Same rule as the on-screen Packed column (delivery/index.tsx mapPO):
     // every PACKING card done ⇒ latest completedDate; any open card ⇒ null.
@@ -4357,6 +4420,7 @@ app.get("/:id/print-extras", async (c) => {
       salesOrderNo: soNo || null,
       specialOrder,
       pieces,
+      repairNote,
       gapInches: g,
       divanHeightInches: d,
       legHeightInches: l,

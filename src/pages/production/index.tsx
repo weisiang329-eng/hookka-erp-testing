@@ -3713,7 +3713,7 @@ export default function ProductionPage({
       // On screen it shows the job-card id (light); the actual scannable Code
       // 128 is drawn by the Print Schedule output (see handlePrintSchedule).
       key: "scanCode",
-      label: "Scan to complete",
+      label: "Barcode",
       type: "text",
       width: "150px",
       sortable: false,

@@ -5912,12 +5912,24 @@ function YearCloseCard() {
   );
 }
 
+type CashFlowResp = { operating: number; investing: number; financing: number; netChange: number; note: string };
+
 function BalanceSheetTab() {
-  const { data: bsResp, loading: bsLoading } = useCachedJson<{ success?: boolean; data?: { balanceSheet?: BalanceSheetEntry[] } }>("/api/accounting/pl");
+  const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
+  const months: string[] = [];
+  {
+    const now = new Date();
+    for (let i = 0; i < 18; i++) {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+      months.push(d.toISOString().slice(0, 7));
+    }
+  }
+  const { data: bsResp, loading: bsLoading } = useCachedJson<{ success?: boolean; data?: { balanceSheet?: BalanceSheetEntry[]; cashFlow?: CashFlowResp } }>(`/api/accounting/pl?period=${period}`);
   const bsData: BalanceSheetEntry[] = useMemo(
     () => (bsResp?.success && bsResp.data?.balanceSheet ? bsResp.data.balanceSheet : []),
     [bsResp]
   );
+  const cashFlow = bsResp?.success ? bsResp.data?.cashFlow : undefined;
 
   if (bsLoading) {
     return (
@@ -5972,6 +5984,12 @@ function BalanceSheetTab() {
   return (
     <div className="space-y-6">
       <YearCloseCard />
+      <div className="flex items-center gap-2">
+        <label className="text-xs font-semibold text-[#1F1D1B]">As at month-end</label>
+        <select value={period} onChange={(e) => setPeriod(e.target.value)} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+          {months.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </div>
       {/* Balance equation */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
         <Card>
@@ -5998,7 +6016,7 @@ function BalanceSheetTab() {
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2">
             <Scale className="h-5 w-5 text-[#6B5C32]" />
-            Balance Sheet as at 31 March 2026
+            Balance Sheet as at end {period}
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -6056,6 +6074,36 @@ function BalanceSheetTab() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Phase 5.4 — Cash Flow (Operating / Investing / Financing), a
+          categorised P&L-result view by each account's O/I/F tag (not a
+          full IAS7 working-capital statement — see note). */}
+      {cashFlow && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <TrendingUp className="h-5 w-5 text-[#6B5C32]" /> Cash Flow — Operating / Investing / Financing
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <table className="w-full text-sm max-w-md">
+              <tbody>
+                {([["Operating", cashFlow.operating], ["Investing", cashFlow.investing], ["Financing", cashFlow.financing]] as const).map(([label, val]) => (
+                  <tr key={label} className="border-b border-[#F0ECE9]">
+                    <td className="px-2 py-1.5 text-[#4B5563]">{label}</td>
+                    <td className={`px-2 py-1.5 text-right tabular-nums ${val >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>{formatCurrency(val)}</td>
+                  </tr>
+                ))}
+                <tr className="font-semibold">
+                  <td className="px-2 py-2 text-[#1F1D1B]">Net Change</td>
+                  <td className={`px-2 py-2 text-right tabular-nums ${cashFlow.netChange >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>{formatCurrency(cashFlow.netChange)}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p className="text-[11px] text-[#9CA3AF] mt-2">{cashFlow.note}</p>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

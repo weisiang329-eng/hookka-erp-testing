@@ -478,15 +478,29 @@ app.post("/api/internal/distill-ocr-rules", async (c) => {
   }
   const t0 = Date.now();
   try {
-    const { distillAllCustomerRules } = await import("./lib/ocr-distill");
+    const { distillAllCustomerRules, distillAllSupplierRules } = await import(
+      "./lib/ocr-distill"
+    );
     // Optional ?limit=N override; default 200 keeps a single Workers
     // invocation well under any reasonable subrequest budget.
     const url = new URL(c.req.url);
     const limitRaw = url.searchParams.get("limit");
     const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 200;
     const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 200;
+    // Customers (customer PO OCR) AND suppliers (GRN / Purchase Invoice OCR) —
+    // both learn per-entity from their gold pools on the same weekly sweep.
     const result = await distillAllCustomerRules(c.var.DB, c.env, safeLimit);
-    return c.json({ ok: true, elapsedMs: Date.now() - t0, ...result });
+    const supplierResult = await distillAllSupplierRules(
+      c.var.DB,
+      c.env,
+      safeLimit,
+    );
+    return c.json({
+      ok: true,
+      elapsedMs: Date.now() - t0,
+      ...result,
+      suppliers: supplierResult,
+    });
   } catch (e) {
     console.error("[distill-ocr-rules] error:", e);
     return c.json({ ok: false, error: "distill failed" }, 500);

@@ -1047,11 +1047,11 @@ export default function WorkerScanPage() {
               // the nearest one to centre wins — so 2-3 stacked schedule barcodes
               // in view don't all fire; the row the worker aimed at is taken.
               const cy = video.videoHeight / 2;
-              // Wider aim band (0.33 vs 0.18): the narrow strip made the worker
-              // fight to line the code up — a big "扫不到" cause. Nearest-to-
-              // centre still wins, so a stacked schedule row isn't grabbed by
-              // mistake.
-              const band = video.videoHeight * 0.33;
+              // Full-frame, like QR mode (which reads these SAME Code 128s fine):
+              // consider EVERY Code 128 in view and let the one NEAREST the centre
+              // win — no vertical band cutoff. That band cutoff was the "barcode
+              // mode 扫不到 but QR mode scans" cause (Wei Siang 2026-06-17). Stacked
+              // schedule rows still resolve to the centred (aimed) one.
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
@@ -1064,7 +1064,7 @@ export default function WorkerScanPage() {
                 const bb = (c as { boundingBox?: { y: number; height: number } })
                   .boundingBox;
                 const d = bb ? Math.abs(bb.y + bb.height / 2 - cy) : 0;
-                if (d <= band && (!best || d < best.d)) best = { v: c.rawValue, d };
+                if (!best || d < best.d) best = { v: c.rawValue, d };
               }
               if (best) {
                 barcodeNativeMiss = 0;
@@ -1094,12 +1094,12 @@ export default function WorkerScanPage() {
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
             if (scanMode === "barcode") {
-              // Decode ONLY a wide, short central band (matches the reticle) so a
-              // single Code 128 is in view — 1D codes scan far better from a tight
-              // strip, and the other stacked rows are cropped out. Keep width
-              // detail (1280px) since Code 128 density runs horizontally.
-              const bandH = Math.max(1, Math.round(vh * 0.3));
-              const y0 = Math.round((vh - bandH) / 2);
+              // Decode the FULL frame (not a central band). QR mode reads these
+              // same Code 128s full-frame and works, so cropping to a band was the
+              // "barcode mode 扫不到" cause (Wei Siang 2026-06-17). Keep 1280px
+              // width detail since Code 128 density runs horizontally.
+              const bandH = vh;
+              const y0 = 0;
               const s = Math.min(1, 1280 / vw);
               const cw = Math.max(1, Math.round(vw * s));
               const ch = Math.max(1, Math.round(bandH * s));

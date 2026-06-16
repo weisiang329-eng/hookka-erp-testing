@@ -5737,7 +5737,7 @@ export async function applyDeliveryOrderUpdate(
               po.productCode ?? "",
               po.productName ?? "",
               Number(po.quantity) || 0,
-              `DO ${existing.doNo} dispatched`,
+              `${existing.doNo} dispatched`,
               now,
             ),
           );
@@ -5793,7 +5793,7 @@ export async function applyDeliveryOrderUpdate(
               "System",
               now,
               "DO dispatched",
-              JSON.stringify([`DO ${existing.doNo} dispatched (LOADED)`]),
+              JSON.stringify([`${existing.doNo} dispatched (LOADED)`]),
             ),
           );
         }

@@ -686,3 +686,45 @@ export function generateInvoicePdfBase64(
   const at = uri.indexOf("base64,");
   return at >= 0 ? uri.slice(at + "base64,".length) : "";
 }
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type CombinedInvoiceItem = { invoice: any; extras?: InvoicePrintExtras };
+
+// Merge several invoices into ONE downloadable PDF (Invoices list page → bulk
+// "Download PDF"). Each invoice is rendered as its OWN jsPDF first so its
+// internal "Page X of Y" stays per-invoice, then pdf-lib copies every page into
+// a single output document. pdf-lib is dynamically imported so it only loads
+// when the bulk action actually runs.
+export async function generateCombinedInvoicePdf(
+  items: CombinedInvoiceItem[],
+  filename = "Invoices.pdf",
+): Promise<void> {
+  if (items.length === 0) return;
+  // One invoice — no merge needed; reuse the plain single-file save path.
+  if (items.length === 1) {
+    generateInvoicePdf(items[0].invoice, items[0].extras, "download");
+    return;
+  }
+  const { PDFDocument } = await import("pdf-lib");
+  const merged = await PDFDocument.create();
+  for (const { invoice, extras } of items) {
+    const doc = buildInvoiceDoc(invoice, extras);
+    const bytes = doc.output("arraybuffer") as ArrayBuffer;
+    const src = await PDFDocument.load(bytes);
+    const pages = await merged.copyPages(src, src.getPageIndices());
+    pages.forEach((p) => merged.addPage(p));
+  }
+  const out = await merged.save();
+  const blob = new Blob([out as BlobPart], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}

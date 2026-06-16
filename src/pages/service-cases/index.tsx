@@ -28,13 +28,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
-import { useConfirm } from "@/components/ui/confirm-dialog";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { getCurrentUser } from "@/lib/auth";
 import { compressImage } from "@/lib/image-compress";
 import { exportToCsv } from "@/lib/export-csv";
 import { formatDateDMY } from "@/lib/utils";
-import { Plus, X, AlertCircle, Loader2, Download, Trash2 } from "lucide-react";
+import { Plus, X, AlertCircle, Loader2, Download } from "lucide-react";
 
 type CaseStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | "CANCELLED";
 type SourceType = "SO" | "CO" | "EXTERNAL";
@@ -241,51 +240,11 @@ function ordersLabel(row: CaseRow): string {
 export default function ServiceCasesListPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { confirm, confirmDialog } = useConfirm();
-  const currentUser = getCurrentUser();
   const { data: resp, loading, refresh } = useCachedJson<{ data?: ServiceCaseListItem[] }>(
     "/api/service-cases",
   );
   const cases = useMemo(() => resp?.data ?? [], [resp]);
 
-  // Per-case delete (SUPER_ADMIN only) — right-click a row → Delete. Backed by
-  // DELETE /api/service-cases/:id (any status). Linked service_orders cascade;
-  // an "SV" sales order tagged with the case is NOT removed (close it instead).
-  async function handleDeleteCase(row: CaseRow) {
-    if (
-      !(await confirm({
-        title: "Delete this service case?",
-        message: (
-          <>
-            Permanently delete{" "}
-            <strong>{row.caseNo}</strong>
-            {row.customerName ? ` (${row.customerName})` : ""} and any service
-            orders spawned from it. This can't be undone.
-          </>
-        ),
-        confirmLabel: "Delete",
-        tone: "danger",
-      }))
-    )
-      return;
-    try {
-      const res = await fetch(
-        `/api/service-cases/${encodeURIComponent(row.id)}`,
-        { method: "DELETE" },
-      );
-      const data = (await res.json().catch(() => ({}))) as {
-        success?: boolean;
-        error?: string;
-      };
-      if (!res.ok || !data?.success)
-        throw new Error(data?.error || `HTTP ${res.status}`);
-      toast.success(`Deleted ${row.caseNo}`);
-      invalidateCachePrefix("/api/service-cases");
-      refresh();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed");
-    }
-  }
   // Two bulk lists (cached, one fetch each — already used across the app)
   // feed the Case Pipeline derivation for EVERY row; never fetched per-row.
   // The Stage / Status Days columns need delivery + production dates matched
@@ -603,7 +562,6 @@ export default function ServiceCasesListPage() {
           </Button>
         </div>
       </div>
-      {confirmDialog}
 
       <div className="flex flex-wrap gap-2 text-xs">
         {(["ALL", "OPEN", "IN_PROGRESS", "CLOSED", "CANCELLED"] as const).map((s) => (
@@ -646,20 +604,6 @@ export default function ServiceCasesListPage() {
             valueFilterKey={statusFilter}
             onRowClick={(row) => navigate(`/service-cases/${row.id}`)}
             onFilteredDataChange={setExportRows}
-            contextMenuItems={
-              currentUser?.role === "SUPER_ADMIN"
-                ? (row) => [
-                    {
-                      label: "Delete service case",
-                      icon: <Trash2 className="h-3.5 w-3.5" />,
-                      danger: true,
-                      action: () => {
-                        void handleDeleteCase(row);
-                      },
-                    },
-                  ]
-                : undefined
-            }
           />
         </CardContent>
       </Card>

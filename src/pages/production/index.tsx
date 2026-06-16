@@ -110,11 +110,14 @@ function jobCardCode128DataUrl(token: string): string {
     const canvas = document.createElement("canvas");
     JsBarcode(canvas, token, {
       format: "CODE128",
-      height: 38,
-      // 4px/module source — the token is tiny (10 chars) so even at 4px the
-      // canvas is small, and it prints at a fat, easy-to-scan X-dimension.
+      // Taller (90 vs 38) gives the phone more scan lines to lock onto, and a
+      // proper quiet zone (margin 20 ≈ 5 modules) is required by the Code 128
+      // spec. The token is now ALL DIGITS so jsbarcode uses Set C — half the
+      // bars of the old alphanumeric code, so the printed X-dimension ~doubles
+      // (~0.5mm) and a phone can finally resolve it (Wei Siang: 徹底解決 barcode).
+      height: 90,
       width: 4,
-      margin: 6,
+      margin: 20,
       displayValue: false, // the human WIP name is printed as crisp HTML below
     });
     return canvas.toDataURL("image/png");
@@ -5737,11 +5740,12 @@ export default function ProductionPage({
     table.schedule td.m, table.schedule th.m {
       text-align: center; width: ${sizes.mWidth}px; padding: ${sizes.mPad}px;
     }
-    /* "Scan to complete" column — one Code 128 per WIP row. The token is now just
-       10 chars, so the barcode is a NORMAL size: ~50mm wide × ~7mm tall, fat
-       retail-grade bars (Wei Siang 2026-06-16: "正常的哪有那麽厚那麽長的"). */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 196px; }
-    table.schedule td.bc img { height: 28px; width: auto; max-width: 188px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
+    /* "Scan to complete" column — one Code 128 per WIP row. The token is a
+       10-digit numeric (Set C → fat bars). Size by WIDTH only with height:auto
+       so the bar/space ratios are NEVER distorted (the old height:28+max-width
+       squished them) — ~56mm wide × ~11mm tall, ~0.5mm X-dim, phone-scannable. */
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 224px; }
+    table.schedule td.bc img { width: 214px; height: auto; display: block; margin: 0 auto; }
     /* The human WIP name printed below the bars so the worker can confirm the
        code matches the piece. Wraps on word breaks (it's a readable name). */
     table.schedule td.bc .bccode { display: block; font-family: Arial, sans-serif; font-size: 9px; line-height: 1.1; color: #000; margin-top: 1px; word-break: normal; overflow-wrap: anywhere; }

@@ -83,10 +83,10 @@ export function isShortJobCardToken(s: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// SHORT Code 128 barcode token (Wei Siang 2026-06-16: a normal barcode "哪有那麽
-// 厚那麽長" — the printed 1D code MUST be short or a phone can't read the bars).
-// `b<deptNN><7-char hash of poId::wipKey>` = 10 chars (vs the ~25-char id), which
-// halves the bar count → fat, retail-grade bars that scan first try.
+// NUMERIC Code 128 barcode token (Wei Siang: a 1D code MUST be short + fat or a
+// phone can't read the bars). `<deptNN><8-digit hash of poId::wipKey>` = 10
+// DIGITS, so Code 128 uses Set C (2 digits/symbol) → roughly half the bars of
+// the old 10-char alphanumeric token, i.e. ~double the printed X-dimension.
 //
 // This is NOT a primary key — it carries no global-uniqueness guarantee. It's
 // resolved ONLY by re-deriving across the department's OPEN cards (the dept is
@@ -94,23 +94,31 @@ export function isShortJobCardToken(s: string): boolean {
 // collision is negligible. The `b` sentinel + strict shape keep a stray courier
 // barcode from being mistaken for ours.
 // ---------------------------------------------------------------------------
-const BARCODE_RE = /^b\d{2}[0-9a-z]{7}$/;
+// 2026-06-17: the token is now ALL DIGITS — `<deptNN><8-digit hash>` = 10
+// digits. Code 128 auto-switches to Set C (packs 2 digits per symbol), so a
+// 10-digit code is ~half the bars of the old 10-char alphanumeric one. At the
+// same printed width that ~doubles the X-dimension (narrowest bar) from ~0.3mm
+// to ~0.5mm — above the threshold a phone camera can resolve, which is what
+// made the old code unscannable on the production schedule (Wei Siang: "barcode
+// 還是 scan 不到, 徹底解決"). 10 digits also can't be confused with EAN-8 (8) or
+// EAN-13 (13) couriers, and the leading 2 digits still carry the dept.
+const BARCODE_RE = /^\d{10}$/;
 export function deriveBarcodeToken(
   poId: string,
   wipKey: string,
   deptCode: string,
 ): string {
-  const h = fnv1a32(`${poId}::${wipKey}`, 2166136261)
-    .toString(36)
-    .padStart(7, "0")
-    .slice(-7);
-  return `b${deptCode2(deptCode)}${h}`;
+  const h = (fnv1a32(`${poId}::${wipKey}`, 2166136261) % 100_000_000)
+    .toString()
+    .padStart(8, "0");
+  return `${deptCode2(deptCode)}${h}`;
 }
 export function isBarcodeToken(s: string): boolean {
-  return BARCODE_RE.test(s);
+  // 10 digits AND a real dept code in the leading 2 — so a stray courier /
+  // product barcode is never mistaken for one of ours.
+  return BARCODE_RE.test(s) && deptFromCode2(s.slice(0, 2)) !== null;
 }
 // The department a barcode token belongs to (from its 2 digits), or null.
 export function deptOfBarcodeToken(token: string): string | null {
-  const m = /^b(\d{2})[0-9a-z]{7}$/.exec(token);
-  return m ? deptFromCode2(m[1]) : null;
+  return BARCODE_RE.test(token) ? deptFromCode2(token.slice(0, 2)) : null;
 }

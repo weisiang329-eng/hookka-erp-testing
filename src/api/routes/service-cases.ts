@@ -928,23 +928,30 @@ app.put("/:id/status", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// DELETE /api/service-cases/:id — delete a single service case (any status).
+// DELETE /api/service-cases/:id — only allowed if status='OPEN'.
+// (Use PUT /:id/status with CANCELLED to soft-cancel anything past OPEN.)
 // ---------------------------------------------------------------------------
-// Gated by service-orders:delete; the UI fronts it with a confirm dialog.
-// Linked service_orders cascade via the FK (service_orders.case_id ON DELETE
-// CASCADE). NOTE: an "SV" order is a sales_orders row merely TAGGED with caseId
-// (no FK), so it is NOT removed here — close / handle those separately.
 app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "service-orders", "delete");
   if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB
-    .prepare("SELECT id FROM service_cases WHERE id = ?")
+    .prepare("SELECT status FROM service_cases WHERE id = ?")
     .bind(id)
-    .first<{ id: string }>();
+    .first<{ status: CaseStatus }>();
   if (!existing) {
     return c.json({ success: false, error: "Service case not found" }, 404);
   }
+  if (existing.status !== "OPEN") {
+    return c.json(
+      {
+        success: false,
+        error: `Only OPEN cases can be deleted. Use PUT /:id/status with CANCELLED instead.`,
+      },
+      400,
+    );
+  }
+  // FK CASCADE on service_orders.case_id → service_orders go away with the case.
   await c.var.DB.prepare("DELETE FROM service_cases WHERE id = ?").bind(id).run();
   return c.json({ success: true });
 });

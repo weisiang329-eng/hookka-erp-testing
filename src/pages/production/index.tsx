@@ -3723,7 +3723,7 @@ export default function ProductionPage({
       defaultHidden: true,
       render: (_v, row) => {
         if (!row.jobCardId) return null;
-        const token = deriveBarcodeToken(row.poId, row.wipKey ?? "", activeTab);
+        const token = deriveBarcodeToken(row.jobCardId, activeTab);
         return (
           <span className="font-mono text-[11px] text-[#6B7280]">{token}</span>
         );
@@ -5587,7 +5587,7 @@ export default function ProductionPage({
             // scanner resolves it by re-deriving across the dept's OPEN cards
             // (dept = the 2 digits) — works for new AND old cards alike, no id
             // migration, and the code is short enough to actually scan.
-            const token = deriveBarcodeToken(r.poId, r.wipKey ?? "", activeTab);
+            const token = deriveBarcodeToken(r.jobCardId, activeTab);
             barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(token));
           }
         }

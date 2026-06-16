@@ -956,4 +956,30 @@ app.delete("/:id", async (c) => {
   return c.json({ success: true });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/service-cases/clear-all — bulk-purge EVERY service case.
+// ---------------------------------------------------------------------------
+// Pre-go-live cleanup: the owner wanted a one-click "clear the test cases"
+// instead of running SQL by hand. Same RBAC gate as the single delete
+// (service-orders:delete) + a mandatory `confirm:true` body (the UI fronts it
+// with a confirm dialog), so it can't be hit casually. Linked service_orders
+// cascade via the FK (service_orders.case_id ON DELETE CASCADE). Case numbering
+// naturally restarts afterwards (nextCaseNo counts the month's rows).
+app.post("/clear-all", async (c) => {
+  const denied = await requirePermission(c, "service-orders", "delete");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { confirm?: unknown };
+  if (body.confirm !== true) {
+    return c.json(
+      { success: false, error: "Refused — confirm:true is required to clear all service cases." },
+      400,
+    );
+  }
+  const before = await c.var.DB.prepare(
+    "SELECT COUNT(*) as n FROM service_cases",
+  ).first<{ n: number }>();
+  await c.var.DB.prepare("DELETE FROM service_cases").run();
+  return c.json({ success: true, deleted: before?.n ?? 0 });
+});
+
 export default app;

@@ -311,9 +311,11 @@ async function renderStickerLandscape(
   doc.setFontSize(6);
   doc.text(order.poNo, pw - 3, 5.5, { align: "right" });
 
-  // QR code
-  const qrSize = 22;
-  const qrX = 3;
+  // QR code — pushed in from the left edge + slightly smaller so the label
+  // printer's left margin can't clip it (same #20 recurrence fix as the FG
+  // sticker below). qrX 3→7, size 22→18.
+  const qrSize = 18;
+  const qrX = 7;
   const qrY = 10;
   doc.setDrawColor(200, 200, 200);
   doc.setFillColor(255, 255, 255);
@@ -491,9 +493,11 @@ async function renderStickerPortrait(
     iy += rowGap;
   }
 
-  // QR area (bottom-left, large)
-  const qrSize = 42;
-  const qrX = 6;
+  // QR area (bottom-left). Smaller + pushed further in from the left edge so a
+  // label printer's left non-printable margin / label misfeed can't clip it
+  // (owner: "QR 又被擠掉了…把 QR 做小一點" — recurrence of #20). qrX 6→10, size 42→36.
+  const qrSize = 36;
+  const qrX = 10;
   const qrY = ph - qrSize - 14;
   doc.setDrawColor(200, 200, 200);
   doc.setFillColor(255, 255, 255);

@@ -7975,7 +7975,7 @@ export default function ProductionPage({
                       <div
                         key={s.key}
                         className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col overflow-hidden"
-                        style={{ width: "200px", height: "300px", padding: "6px" }}
+                        style={{ width: "200px", height: "330px", padding: "6px" }}
                         title={`${s.poNo} · ${s.productCode} · ${s.pieceName} ${s.pieceNo}/${s.totalPieces}`}
                       >
                         <div className="text-center font-bold leading-tight" style={{ fontSize: "13px" }}>
@@ -8014,9 +8014,9 @@ export default function ProductionPage({
                           <QRImg
                             eager
                             data={typeof window !== "undefined" ? `${window.location.origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}` : ""}
-                            size={pillowPair ? 60 : 80}
+                            size={pillowPair ? 48 : 64}
                             alt="FG QR"
-                            className="block"
+                            className="block shrink-0"
                           />
                           <div className="flex-1 text-center min-w-0">
                             {legsPair && (
@@ -8277,7 +8277,7 @@ export default function ProductionPage({
                           this block). Pillow stays side-by-side. */}
                       <div className="mt-auto pt-1 border-t border-dashed border-[#6B5C32]">
                         <div className="flex items-end gap-2 pt-1">
-                          <QRImg data={trackUrl} size={pillowPair ? 82 : 98} alt="FG unit QR" className="block" />
+                          <QRImg data={trackUrl} size={pillowPair ? 64 : 78} alt="FG unit QR" className="block shrink-0" />
                           <div className="flex-1 text-center min-w-0 self-stretch flex flex-col justify-end">
                             {legsPair && (
                               <>
@@ -8764,7 +8764,7 @@ export default function ProductionPage({
                             the edge than the text — the text can lose a sliver,
                             the QR must survive. With the quiet zone + Q-level
                             error correction it scans even if a corner is shaved. */}
-                        <QRImg eager data={trackUrl} size={pillowPair ? 88 : 132} alt="FG unit QR" className="block ml-[2mm] mb-[1.5mm]" />
+                        <QRImg eager data={trackUrl} size={pillowPair ? 72 : 104} alt="FG unit QR" className="block ml-[2mm] mb-[1.5mm] shrink-0" />
                         <div className="flex-1 text-center min-w-0">
                           {legsPair && (
                             <>

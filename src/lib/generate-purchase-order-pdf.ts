@@ -70,14 +70,17 @@ function resolveLetterhead(code: string | undefined): LetterheadInfo {
 // `purchaseOrgCode` field for letterhead override (migration 0142). Keep
 // this typed loosely so we don't have to expand the canonical PurchaseOrder
 // type just for the PDF caller.
-type PurchaseOrderWithLetterhead = PurchaseOrder & {
+export type PurchaseOrderWithLetterhead = PurchaseOrder & {
   purchaseOrgCode?: string;
 };
 
 export function generatePurchaseOrderPdf(
   po: PurchaseOrderWithLetterhead,
   letterheadOverride?: LetterheadInfo,
-) {
+  // returnDoc: hand back the built jsPDF instead of saving — lets the bulk
+  // "Download PDF" action merge several POs into one file (see merge-pdf.ts).
+  opts?: { returnDoc?: boolean },
+): jsPDF | void {
   // Letterhead override: HOOKKA by default; supplier.purchaseOrgCode flips
   // this to OHANA (or any registered sister company via letterheadOverride).
   // The actual buyer in the DB / accounting is always HOOKKA — this swap
@@ -368,5 +371,23 @@ export function generatePurchaseOrderPdf(
   doc.text(`Generated: ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`, pageW - margin, footerY, { align: "right" });
 
   // Save
+  if (opts?.returnDoc) return doc;
   doc.save(`${po.poNo}.pdf`);
+}
+
+// Merge several purchase orders into ONE downloadable PDF (Purchase Orders
+// list → bulk "Download PDF"). Each PO renders with the SAME letterhead-aware
+// layout as the single download, then merge-pdf stitches them into one file.
+export async function generateCombinedPurchaseOrderPdf(
+  items: { po: PurchaseOrderWithLetterhead; letterhead?: LetterheadInfo }[],
+  filename = "PurchaseOrders.pdf",
+): Promise<void> {
+  if (items.length === 0) return;
+  const docs = items
+    .map(({ po, letterhead }) =>
+      generatePurchaseOrderPdf(po, letterhead, { returnDoc: true }),
+    )
+    .filter((d): d is jsPDF => !!d);
+  const { downloadMergedPdf } = await import("./merge-pdf");
+  await downloadMergedPdf(docs, filename);
 }

@@ -82,7 +82,10 @@ export function generateOrderPdf(
   order: BaseOrderForPdf,
   customer: Customer | null | undefined,
   variant: OrderPdfVariant,
-) {
+  // returnDoc: hand back the built jsPDF instead of saving it — lets the bulk
+  // "Download PDF" action merge several orders into one file (see merge-pdf.ts).
+  opts?: { returnDoc?: boolean },
+): jsPDF | void {
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pw = doc.internal.pageSize.getWidth(); // 210
   const ph = doc.internal.pageSize.getHeight(); // 297
@@ -528,5 +531,6 @@ export function generateOrderPdf(
     doc.text(`Page ${p} of ${totalPages}`, pw - m, fy, { align: "right" });
   }
 
+  if (opts?.returnDoc) return doc;
   doc.save(`${variant.filename}.pdf`);
 }

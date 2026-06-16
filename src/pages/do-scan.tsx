@@ -378,10 +378,13 @@ export default function DoScanPage() {
       // current items. Display-only; the server still owns the trusted set.
       const init: Record<string, Set<string>> = {};
       for (const d of j.data.dos) {
-        d.items.sort(compareDoLinesByCustomerPO);
-        d.addable.sort(compareDoLinesByCustomerPO);
+        // Defensive: a malformed payload (missing items/addable) must not throw
+        // here — a bare .sort() on undefined would crash the whole scan page.
+        if (Array.isArray(d.items)) d.items.sort(compareDoLinesByCustomerPO);
+        if (Array.isArray(d.addable))
+          d.addable.sort(compareDoLinesByCustomerPO);
         init[d.doId] = new Set(
-          d.items.map((i) => i.productionOrderId).filter(Boolean),
+          (d.items ?? []).map((i) => i.productionOrderId).filter(Boolean),
         );
       }
       setEditData(j.data);

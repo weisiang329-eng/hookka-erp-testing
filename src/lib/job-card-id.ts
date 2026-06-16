@@ -84,7 +84,7 @@ export function isShortJobCardToken(s: string): boolean {
 
 // ---------------------------------------------------------------------------
 // NUMERIC Code 128 barcode token (Wei Siang: a 1D code MUST be short + fat or a
-// phone can't read the bars). `<deptNN><8-digit hash of poId::wipKey>` = 10
+// phone can't read the bars). `<deptNN><8-digit hash of the JOB CARD ID>` = 10
 // DIGITS, so Code 128 uses Set C (2 digits/symbol) → roughly half the bars of
 // the old 10-char alphanumeric token, i.e. ~double the printed X-dimension.
 //
@@ -103,12 +103,13 @@ export function isShortJobCardToken(s: string): boolean {
 // 還是 scan 不到, 徹底解決"). 10 digits also can't be confused with EAN-8 (8) or
 // EAN-13 (13) couriers, and the leading 2 digits still carry the dept.
 const BARCODE_RE = /^\d{10}$/;
-export function deriveBarcodeToken(
-  poId: string,
-  wipKey: string,
-  deptCode: string,
-): string {
-  const h = (fnv1a32(`${poId}::${wipKey}`, 2166136261) % 100_000_000)
+export function deriveBarcodeToken(jobCardId: string, deptCode: string): string {
+  // Hash the STABLE job_card id (the PK) — NOT (poId, wipKey). The schedule
+  // grid's wipKey can differ from the row stored in job_cards, so re-deriving
+  // from (poId, wipKey) mismatched and the scan said "Not found" (Wei Siang
+  // 2026-06-17). The id is identical on the print side (grid.jobCardId) and the
+  // lookup side (job_cards.id), so the token always round-trips.
+  const h = (fnv1a32(jobCardId, 2166136261) % 100_000_000)
     .toString()
     .padStart(8, "0");
   return `${deptCode2(deptCode)}${h}`;

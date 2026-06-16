@@ -452,12 +452,7 @@ app.get("/scan-lookup", async (c) => {
             }>()
         ).results ?? [];
       const hit = cand.find(
-        (j) =>
-          deriveBarcodeToken(
-            j.productionOrderId,
-            j.wipKey ?? "",
-            j.departmentCode ?? deptCode,
-          ) === term,
+        (j) => deriveBarcodeToken(j.id, j.departmentCode ?? deptCode) === term,
       );
       if (hit) {
         poRows =

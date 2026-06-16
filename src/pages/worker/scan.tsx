@@ -482,7 +482,7 @@ export default function WorkerScanPage() {
         const jc = o.jobCards.find(
           (j) =>
             j.id === term ||
-            deriveBarcodeToken(o.id, j.wipKey ?? "", j.departmentCode) === term,
+            deriveBarcodeToken(j.id, j.departmentCode) === term,
         );
         if (jc) return [{ order: o, jobCard: jc }];
       }

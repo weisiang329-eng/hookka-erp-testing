@@ -90,7 +90,9 @@ test('unmapped dept falls through to its own code (id stays unique, not short-pa
 // ── Numeric barcode token (the printed Code 128, Set C for fat bars) ────────
 test('deriveBarcodeToken is <deptNN><8 digits> — 10 digits, deterministic', () => {
   for (const dept of PROD_DEPTS) {
-    const t = deriveBarcodeToken('pord-so-abc12345-01', 'P1::0::DIVAN::WD', dept);
+    // Now hashes the stable job_card id (the PK), not (poId, wipKey).
+    const jcId = `jc-abc1234567890-${deptCode2(dept)}`;
+    const t = deriveBarcodeToken(jcId, dept);
     assert.match(t, /^\d{10}$/, `${dept} → ${t}`); // ALL digits → Code 128 Set C
     assert.equal(t.length, 10);
     assert.ok(isBarcodeToken(t));
@@ -98,15 +100,14 @@ test('deriveBarcodeToken is <deptNN><8 digits> — 10 digits, deterministic', ()
     assert.equal(t.slice(0, 2), deptCode2(dept));
     assert.equal(deptOfBarcodeToken(t), dept);
     // deterministic
-    assert.equal(t, deriveBarcodeToken('pord-so-abc12345-01', 'P1::0::DIVAN::WD', dept));
+    assert.equal(t, deriveBarcodeToken(jcId, dept));
   }
 });
 
-test('distinct (poId, wipKey, dept) → distinct barcode tokens', () => {
-  const base = deriveBarcodeToken('pord-1', 'WIPA', 'FRAMING');
-  assert.notEqual(base, deriveBarcodeToken('pord-2', 'WIPA', 'FRAMING'));
-  assert.notEqual(base, deriveBarcodeToken('pord-1', 'WIPB', 'FRAMING'));
-  assert.notEqual(base, deriveBarcodeToken('pord-1', 'WIPA', 'WEBBING'));
+test('distinct job-card id (or dept) → distinct barcode tokens', () => {
+  const base = deriveBarcodeToken('jc-aaa-05', 'FRAMING');
+  assert.notEqual(base, deriveBarcodeToken('jc-bbb-05', 'FRAMING')); // different card id
+  assert.notEqual(base, deriveBarcodeToken('jc-aaa-06', 'WEBBING')); // different dept
 });
 
 test('isBarcodeToken / deptOfBarcodeToken reject non-tokens (random barcodes)', () => {

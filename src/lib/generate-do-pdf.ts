@@ -525,10 +525,15 @@ export function renderDoInto(
       (ex?.customerRef && String(ex.customerRef).trim()) ||
       (extras?.customerRef && String(extras.customerRef).trim()) ||
       "";
-    // Always show all three customer refs (PO / SO / REF) so the
-    // customer's sales order is never silently missing — "-" when the
-    // order didn't carry one.
+    // Our own SO no. for this line (a DO can consolidate several SOs). Shown
+    // first so the floor can reconcile each line back to its sales order —
+    // owner: "DO 要看到我們的 SO ID".
+    const ourSO = (ex?.salesOrderNo && String(ex.salesOrderNo).trim()) || "";
+    // Always show our SO + all three customer refs (PO / SO / REF) so neither
+    // our sales order nor the customer's is ever silently missing — "-" when
+    // the order didn't carry one.
     const refLines: string[] = [
+      `Our SO: ${ourSO || "-"}`,
       `PO: ${custPO || "-"}`,
       `SO: ${custSO || "-"}`,
       `REF: ${custRef || "-"}`,
@@ -1066,7 +1071,7 @@ function renderPackingSummary(
         head: [
           [
             { content: "#", styles: { halign: "center" } },
-            "Order (PO / SO / Ref)",
+            "Order (Our SO / PO / SO / Ref)",
             "Description",
             "Quantity",
             { content: "Packed", styles: { halign: "center" } },
@@ -1075,6 +1080,7 @@ function renderPackingSummary(
         ],
         body: items.map((it, k) => {
           const ex = exDo?.items?.[it.id];
+          const ourSO = (ex?.salesOrderNo || "").trim();
           const po = (ex?.customerPOId || "").trim();
           const so = (ex?.customerSO || exDo?.customerSO || "").trim();
           const ref = (ex?.customerRef || exDo?.customerRef || "").trim();
@@ -1093,7 +1099,7 @@ function renderPackingSummary(
           );
           return [
             String(k + 1),
-            `PO: ${po || "-"}\nSO: ${so || "-"}\nREF: ${ref || "-"}`,
+            `Our SO: ${ourSO || "-"}\nPO: ${po || "-"}\nSO: ${so || "-"}\nREF: ${ref || "-"}`,
             desc,
             fp.text || String(it.quantity ?? 0),
             // Packed = the date the PO's LAST packing card completed;

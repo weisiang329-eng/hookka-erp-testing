@@ -845,7 +845,20 @@ export default function DeliveryDetailPage() {
                 {order.items.map((item, idx) => (
                   <tr key={item.id} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
                     <td className="h-12 px-4 text-[#9CA3AF]">{idx + 1}</td>
-                    <td className="h-12 px-4 doc-number font-medium">{item.poNo}</td>
+                    {/* SO ID = our sales-order no. for this line (a DO can span
+                        several SOs). The production-order no. stays below as a
+                        small secondary ref. Was showing poNo under an "SO ID"
+                        header — owner: "DO 要看到我們的 SO ID". */}
+                    <td className="h-12 px-4">
+                      <span className="doc-number font-medium">
+                        {item.salesOrderNo || "-"}
+                      </span>
+                      {item.poNo ? (
+                        <span className="block text-xs text-[#9CA3AF] doc-number">
+                          {item.poNo}
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="h-12 px-4">
                       <p className="font-medium text-[#1F1D1B]">{item.productName}</p>
                       <p className="text-xs text-[#9CA3AF] doc-number">{item.productCode}</p>

@@ -642,17 +642,10 @@ app.use("/api/*", authMiddleware);
 // to 'hookka').
 app.use("/api/*", tenantMiddleware);
 
-// Sprint 4 — translate OrgIdRequiredError thrown by getOrgId / withOrgScope
-// into a 401 instead of a 500. Any tenant-scoped route handler that runs
-// without a resolved orgId on the context (auth bypassed somehow, or
-// tenantMiddleware crashed) now fails closed.
-app.onError((err, c) => {
-  if (err && (err as { name?: string }).name === "OrgIdRequiredError") {
-    return c.json({ success: false, error: "Unauthorized" }, 401);
-  }
-  console.error("[worker.onError]", err);
-  return c.json({ success: false, error: "Internal server error" }, 500);
-});
+// NOTE: the global app.onError handler (including the OrgIdRequiredError → 401
+// mapping that used to live here) is registered ONCE near the end of this file.
+// Hono only honours the LAST onError registration, so a duplicate here would be
+// dead code — keep the single merged handler below the route registrations.
 
 // General API rate limit. Defense-in-depth on top of the per-login limiter:
 // even a valid Bearer token (or a stolen session) can't hammer the API.
@@ -1042,6 +1035,14 @@ app.route("/api/assistant", assistant);
 // triage without waiting for a user to file a ticket. The reporter is
 // no-op when SENTRY_DSN is unset, so this is safe in OSS / self-host.
 app.onError((err, c) => {
+  // Sprint 4 — translate OrgIdRequiredError thrown by getOrgId / withOrgScope
+  // into a 401 instead of a 500. Any tenant-scoped route handler that runs
+  // without a resolved orgId on the context (auth bypassed somehow, or
+  // tenantMiddleware crashed) fails closed. Checked first so it short-circuits
+  // before the generic Sentry-reported 500 below.
+  if (err && (err as { name?: string }).name === "OrgIdRequiredError") {
+    return c.json({ success: false, error: "Unauthorized" }, 401);
+  }
   const url = (() => {
     try {
       return new URL(c.req.url).pathname + new URL(c.req.url).search;

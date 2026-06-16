@@ -142,6 +142,14 @@ function genMovementId(): string {
   return `sm-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+// Matches a document token embedded in a free-text reason string, e.g.
+// "DO-2606-034 dispatched" → "DO-2606-034". DO-dispatch stock-OUT rows store
+// the DO number ONLY in `reason` (no productionOrderId), so the production_orders
+// JOIN can't recover it — this regex does. Covers the doc prefixes the warehouse
+// flow emits: DO/DR/GRN/GR/PI/CN/SO/PO, with or without a dash, then digits and
+// further -digit groups.
+const DOC_TOKEN_RE = /\b(?:DO|DR|GRN|GR|PI|CN|SO|PO)-?\d[\d-]*\b/i;
+
 function rowToMovement(r: StockMovementRow) {
   // Document reference for the row. stock_movements has no ref_type/ref_id
   // columns — the only stored linkage is productionOrderId (resolved here to
@@ -150,8 +158,13 @@ function rowToMovement(r: StockMovementRow) {
   // clickable-grade reference, and leave `reason` as the human note.
   const poNo = r.poNo ?? "";
   const salesOrderNo = r.salesOrderNo ?? "";
-  // Single best label for compact display: PO no first, else SO no.
-  const docRef = poNo || salesOrderNo || "";
+  // DO-dispatch (and other) OUT rows carry the real document only in `reason`.
+  // Pull it out so the UI can show the actual DO/DR/GRN number instead of the
+  // PO/SO behind the JOIN (or "—" when there's no productionOrderId at all).
+  const reasonDoc = (r.reason ?? "").match(DOC_TOKEN_RE)?.[0] ?? "";
+  // Single best label for compact display: reason-extracted doc first (the
+  // dispatched DO), then PO no, then SO no.
+  const docRef = reasonDoc || poNo || salesOrderNo || "";
   return {
     id: r.id,
     type: r.type,
@@ -340,10 +353,13 @@ app.get("/movements", async (c) => {
     `SELECT sm.*, po.poNo AS poNo, po.salesOrderNo AS salesOrderNo
        FROM stock_movements sm
        LEFT JOIN production_orders po ON po.id = sm.productionOrderId`;
+  // Cap the result set — the table is append-only and unbounded; without a
+  // LIMIT every call full-scans + sorts the entire history. 500 newest rows is
+  // plenty for the history view (the UI windows/filters from there).
   const sql =
     where.length > 0
-      ? `${base} WHERE ${where.join(" AND ")} ORDER BY sm.created_at DESC`
-      : `${base} ORDER BY sm.created_at DESC`;
+      ? `${base} WHERE ${where.join(" AND ")} ORDER BY sm.created_at DESC LIMIT 500`
+      : `${base} ORDER BY sm.created_at DESC LIMIT 500`;
   const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<StockMovementRow>();
@@ -384,7 +400,10 @@ app.post("/movements", async (c) => {
         type,
         rackLocationId,
         rackLabel || rackLocationId,
-        productionOrderId || "",
+        // Store NULL (not "") when there's no PO link, so the production_orders
+        // JOIN is honest: a missing link reads as "no document" rather than
+        // matching an empty-string id and looking like "not found".
+        productionOrderId || null,
         productCode,
         productName,
         quantity || 1,

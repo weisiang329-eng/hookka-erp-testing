@@ -176,9 +176,19 @@ function PIFormDialog({
             unitPriceRM: priceRM != null ? priceRM : next[hitIdx].unitPriceRM,
           };
         } else {
+          // When the scanned line has neither a description nor a supplier
+          // code we still APPEND it (with qty/price) so the operator sees the
+          // row — but an empty materialName would be silently dropped by the
+          // validLines filter at submit (operator saw the row, PI omits it).
+          // Seed a visible placeholder name instead: it passes the non-empty
+          // filter AND prompts the operator to fill in the real name before
+          // submit. No data loss.
           next.push({
             materialCode: "",
-            materialName: sl.description?.trim() || sl.supplierCode?.trim() || "",
+            materialName:
+              sl.description?.trim() ||
+              sl.supplierCode?.trim() ||
+              "(扫描项-请补名称)",
             supplierSku: sl.supplierCode?.trim() || "",
             qty: qty > 0 ? qty : 1,
             unitPriceRM: priceRM != null ? priceRM : 0,

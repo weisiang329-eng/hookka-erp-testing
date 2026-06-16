@@ -2909,28 +2909,96 @@ export default function ProductsPage() {
                                   </div>
                                 );
                               };
-                              return (
-                                <>
-                                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                                    {marginRow("Price 2", basePrice)}
-                                    {marginRow("Price 1", price1Val)}
-                                    {/* Labor cost on its own so it reads even
-                                        when a SKU has no price set yet. */}
-                                    <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
-                                      <div className="text-[10px] font-medium text-[#6B7280] uppercase">Labor Cost (est.)</div>
-                                      <div className="mt-0.5 text-sm font-semibold text-[#111827] tabular-nums">
-                                        {laborCostSen > 0 ? formatCurrency(laborCostSen) : <span className="text-[#9CA3AF]">—</span>}
-                                      </div>
-                                      <div className="mt-1 text-[11px] text-[#6B7280] tabular-nums">{totalMin} min</div>
-                                    </div>
+
+                              // Labor-only card — reads even when a SKU has no
+                              // price set yet. Shared by both layouts below.
+                              const laborCard = (
+                                <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
+                                  <div className="text-[10px] font-medium text-[#6B7280] uppercase">Labor Cost (est.)</div>
+                                  <div className="mt-0.5 text-sm font-semibold text-[#111827] tabular-nums">
+                                    {laborCostSen > 0 ? formatCurrency(laborCostSen) : <span className="text-[#9CA3AF]">—</span>}
                                   </div>
-                                  {isSofa && (
+                                  <div className="mt-1 text-[11px] text-[#6B7280] tabular-nums">{totalMin} min</div>
+                                </div>
+                              );
+
+                              // Sofas don't carry flat price1Sen/basePriceSen —
+                              // their selling prices live in seatHeightPrices[]
+                              // per (seat height, tier). Showing the flat Price 2/
+                              // Price 1/Margin cards therefore reads "—" even for a
+                              // sofa that DOES have prices, which is misleading. So
+                              // for sofas we derive a representative price = the
+                              // lowest positive seat-height price in the currently
+                              // selected tier (sofaTier) and compute the margin
+                              // against THAT, labelled "from RM x (seat height …)".
+                              if (isSofa) {
+                                const tierRep = (p.seatHeightPrices || [])
+                                  .filter(
+                                    (s) => entryTier(s.tier) === sofaTier && s.priceSen > 0,
+                                  )
+                                  .sort((a, b) => a.priceSen - b.priceSen)[0];
+                                const tierLabel =
+                                  SOFA_TIERS.find((t) => t.value === sofaTier)?.label ?? "";
+                                const repPriceSen = tierRep?.priceSen ?? 0;
+                                const hasRep = repPriceSen > 0;
+                                const hasLabor = laborCostSen > 0;
+                                const marginSen = repPriceSen - laborCostSen;
+                                const marginPct = hasRep ? (marginSen / repPriceSen) * 100 : null;
+                                const repHeight = tierRep
+                                  ? String(tierRep.height).replace('"', "")
+                                  : null;
+                                return (
+                                  <>
+                                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                                      <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
+                                        <div className="text-[10px] font-medium text-[#6B7280] uppercase">
+                                          Price (from, {tierLabel})
+                                        </div>
+                                        <div className="mt-0.5 text-sm font-semibold text-[#111827] tabular-nums">
+                                          {hasRep ? (
+                                            <>
+                                              {formatCurrency(repPriceSen)}
+                                              {repHeight && (
+                                                <span className="ml-1 text-[10px] font-normal text-[#9CA3AF]">
+                                                  座高 {repHeight}"
+                                                </span>
+                                              )}
+                                            </>
+                                          ) : (
+                                            <span className="text-[#9CA3AF]">—</span>
+                                          )}
+                                        </div>
+                                        <div className="mt-1 text-[11px] text-[#6B7280] tabular-nums">
+                                          Labor {hasLabor ? formatCurrency(laborCostSen) : "—"}
+                                        </div>
+                                        <div className="text-[11px] tabular-nums">
+                                          {hasRep && hasLabor ? (
+                                            <span className={marginSen >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}>
+                                              Margin {formatCurrency(marginSen)}
+                                              {marginPct != null ? ` (${marginPct.toFixed(1)}%)` : ""}
+                                            </span>
+                                          ) : (
+                                            <span className="text-[#9CA3AF]">Margin —</span>
+                                          )}
+                                        </div>
+                                      </div>
+                                      {laborCard}
+                                    </div>
                                     <p className="mt-2 text-[10px] text-[#9CA3AF] italic">
-                                      Sofa selling prices are set per seat height &amp; tier in the row above; the
-                                      Price 1 / Price 2 cards here use the SKU's flat price fields and may be blank.
+                                      Sofa 价格按座高,见上方每个高度的价格。此处 Margin 用当前 {tierLabel} 档最低座高价做对比。
                                     </p>
-                                  )}
-                                </>
+                                  </>
+                                );
+                              }
+
+                              // Bedframes / accessories keep the flat-price cards
+                              // verbatim — those fields are correct for them.
+                              return (
+                                <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                                  {marginRow("Price 2", basePrice)}
+                                  {marginRow("Price 1", price1Val)}
+                                  {laborCard}
+                                </div>
                               );
                             })()}
                           </div>

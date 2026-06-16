@@ -271,7 +271,10 @@ export default function WarehousePage() {
           type: "STOCK_OUT",
           rackLocationId: stockOutTarget.id,
           rackLabel: stockOutTarget.id,
-          productionOrderId: item.productionOrderId || "",
+          // Omit (undefined → not serialized) when the item has no PO link, so
+          // the server stores NULL rather than "" and the movements JOIN stays
+          // honest. Matches the productionOrderId || null bind in warehouse.ts.
+          productionOrderId: item.productionOrderId || undefined,
           productCode: item.productCode || "",
           productName: `${item.productName || ""} ${item.sizeLabel || ""}`.trim(),
           quantity: item.qty ?? 1,
@@ -316,7 +319,10 @@ export default function WarehousePage() {
       return;
     }
     const w = window.open("", "_blank");
-    if (!w) return;
+    if (!w) {
+      toast.error("请允许弹窗以打印 / popup blocked");
+      return;
+    }
     // position is the rack's location label (e.g. a row/bay); only show the row
     // when it carries something distinct from the rack name itself.
     const locationLabel =
@@ -626,14 +632,25 @@ export default function WarehousePage() {
                         </span>
                       </div>
                       {m.productName && <p className="text-xs text-[#4B5563] mt-1">{m.productName}</p>}
-                      {/* Document reference — resolved PO no / SO no, else the reason text */}
-                      {(m.poNo || m.salesOrderNo) && (
-                        <p className="text-xs text-[#4B5563] mt-0.5">
-                          {m.poNo && <span className="font-medium text-[#1F1D1B]">{m.poNo}</span>}
-                          {m.poNo && m.salesOrderNo && <span className="text-[#6B7280]"> · </span>}
-                          {m.salesOrderNo && <span className="text-[#6B7280]">SO {m.salesOrderNo}</span>}
-                        </p>
-                      )}
+                      {/* Document reference — docRef (reason-extracted DO/DR/GRN,
+                          else PO, else SO) as primary; a distinct PO/SO appended
+                          only when it adds info beyond docRef. */}
+                      {(() => {
+                        const primary = m.docRef || m.poNo || m.salesOrderNo || "";
+                        if (!primary) return null;
+                        const secondary =
+                          m.poNo && m.poNo !== primary
+                            ? m.poNo
+                            : m.salesOrderNo && m.salesOrderNo !== primary
+                            ? `SO ${m.salesOrderNo}`
+                            : "";
+                        return (
+                          <p className="text-xs text-[#4B5563] mt-0.5">
+                            <span className="font-medium text-[#1F1D1B]">{primary}</span>
+                            {secondary && <span className="text-[#6B7280]"> · {secondary}</span>}
+                          </p>
+                        );
+                      })()}
                       {m.reason && <p className="text-xs text-[#6B7280] mt-0.5">{m.reason}</p>}
                       {m.performedBy && <p className="text-[11px] text-[#9CA3AF] mt-0.5">By {m.performedBy}</p>}
                     </div>
@@ -982,14 +999,27 @@ function MovementTable({ movements }: { movements: StockMovement[] }) {
                 </td>
                 <td className="h-10 px-4 font-medium text-[#1F1D1B]">{m.rackLabel}</td>
                 <td className="h-10 px-4 whitespace-nowrap">
-                  {m.poNo || m.salesOrderNo ? (
-                    <div className="flex flex-col leading-tight">
-                      {m.poNo && <span className="text-[#1F1D1B] font-medium">{m.poNo}</span>}
-                      {m.salesOrderNo && <span className="text-[11px] text-[#6B7280]">SO {m.salesOrderNo}</span>}
-                    </div>
-                  ) : (
-                    <span className="text-[#9CA3AF]">—</span>
-                  )}
+                  {(() => {
+                    // docRef is the server's best single document token:
+                    // reason-extracted DO/DR/GRN first (so DO dispatches show
+                    // their DO no), else PO no, else SO no. Show it as the
+                    // primary value; surface a distinct PO/SO as a secondary
+                    // line only when it adds info beyond docRef.
+                    const primary = m.docRef || m.poNo || m.salesOrderNo || "";
+                    if (!primary) return <span className="text-[#9CA3AF]">—</span>;
+                    const secondary =
+                      m.poNo && m.poNo !== primary
+                        ? m.poNo
+                        : m.salesOrderNo && m.salesOrderNo !== primary
+                        ? `SO ${m.salesOrderNo}`
+                        : "";
+                    return (
+                      <div className="flex flex-col leading-tight">
+                        <span className="text-[#1F1D1B] font-medium">{primary}</span>
+                        {secondary && <span className="text-[11px] text-[#6B7280]">{secondary}</span>}
+                      </div>
+                    );
+                  })()}
                 </td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.productName}</td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.quantity}</td>

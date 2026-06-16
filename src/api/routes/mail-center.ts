@@ -22,7 +22,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
-import { requirePermission, requireSuperAdmin } from "../lib/rbac";
+import { requireSuperAdmin } from "../lib/rbac";
 import { getOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 import { sendMail } from "../lib/email";
 
@@ -422,7 +422,7 @@ function rowToAddress(r: AddressRow) {
 
 // GET /api/mail-center/threads?mailbox=&status=&q=
 app.get("/threads", async (c) => {
-  const denied = await requirePermission(c, "mail-center", "read");
+  const denied = requireSuperAdmin(c);
   if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
@@ -460,7 +460,7 @@ app.get("/threads", async (c) => {
 
 // GET /api/mail-center/threads/:id — thread + its messages (marks read).
 app.get("/threads/:id", async (c) => {
-  const denied = await requirePermission(c, "mail-center", "read");
+  const denied = requireSuperAdmin(c);
   if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
@@ -496,7 +496,7 @@ app.get("/threads/:id", async (c) => {
 
 // GET /api/mail-center/addresses — our @hookka.com addresses / aliases.
 app.get("/addresses", async (c) => {
-  const denied = await requirePermission(c, "mail-center", "read");
+  const denied = requireSuperAdmin(c);
   if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
@@ -711,7 +711,7 @@ const DEFAULT_REPLY_FROM = "Hookka <support@hookka.com>";
 // thread is still updated correctly; cross-client threading headers are a
 // follow-up once the sender helper grows a headers option.
 app.post("/threads/:id/reply", async (c) => {
-  const denied = await requirePermission(c, "mail-center", "update");
+  const denied = requireSuperAdmin(c);
   if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
@@ -809,7 +809,7 @@ app.post("/threads/:id/reply", async (c) => {
 
 // PATCH /api/mail-center/threads/:id — assign / resolve / reopen a thread.
 app.patch("/threads/:id", async (c) => {
-  const denied = await requirePermission(c, "mail-center", "update");
+  const denied = requireSuperAdmin(c);
   if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);

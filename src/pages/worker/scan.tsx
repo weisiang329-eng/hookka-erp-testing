@@ -281,6 +281,9 @@ export default function WorkerScanPage() {
   const [liveScanning, setLiveScanning] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
+  // Whether the lens exposes a zoom range (iOS Safari often doesn't) — gates the
+  // zoom-reset button so it never shows as a dead no-op control.
+  const [zoomSupported, setZoomSupported] = useState(false);
   // Scan mode (Wei Siang 2026-06-16): the square QR reticle framed 2-3 of the
   // schedule's stacked Code 128 rows at once and couldn't lock onto any. A
   // dedicated "barcode" mode draws a WIDE, short reticle and decodes ONLY the
@@ -305,6 +308,10 @@ export default function WorkerScanPage() {
   const zoomTrackRef = useRef<MediaStreamTrack | null>(null);
   const zoomRangeRef = useRef<{ min: number; max: number } | null>(null);
   const curZoomRef = useRef(0);
+  // Set true when the worker taps zoom-out, so the auto-zoom-on-fail loop stops
+  // yanking the lens back in (without this the reset wasn't durable — it re-zoomed
+  // within ~1.1s). Reset to false at the start of each scan session.
+  const autoZoomSuppressedRef = useRef(false);
   const ensureZxing = useCallback((): Promise<void> => {
     if (zxingRef.current) return Promise.resolve();
     if (zxingLoadingRef.current) return zxingLoadingRef.current;
@@ -355,6 +362,7 @@ export default function WorkerScanPage() {
     const range = zoomRangeRef.current;
     if (!track || !range) return;
     curZoomRef.current = range.min;
+    autoZoomSuppressedRef.current = true; // durable — stop auto-zoom re-escalating
     try {
       void track.applyConstraints({
         advanced: [{ zoom: range.min } as unknown as MediaTrackConstraintSet],
@@ -1007,6 +1015,8 @@ export default function WorkerScanPage() {
     }
     zoomRangeRef.current = zoomRange;
     curZoomRef.current = zoomRange ? zoomRange.min : 0;
+    autoZoomSuppressedRef.current = false;
+    setZoomSupported(!!zoomRange);
     const scanStartedAt = performance.now();
     // Reset the lens to its widest on every (re)start so toggling modes doesn't
     // inherit the previous mode's zoom — a zoomed-in lens crops a wide barcode.
@@ -1038,16 +1048,31 @@ export default function WorkerScanPage() {
     // 600ms (was 900): still requires the SAME code held briefly so a barcode
     // flashing through frame can't fire, but locks faster once the worker is
     // aimed — the 900ms felt like "扫不到" when decodes were sparse.
-    const STABLE_MS = 600;
-    // Barcode aim ROI — fractions of the video frame for the centred wide-short
-    // box the decoder reads (roughly matching the on-screen reticle, 86vw ×
-    // short). Decoding ONLY this region (a) keeps ZXing off the ~2MP full frame
-    // that made iOS Safari feel like "no response", and (b) excludes the stacked
-    // schedule barcodes above/below so only the aimed (centred) code fires
-    // (Wei Siang 2026-06-17: full frame = 没反应 + 扫到别的 barcode). A 1D barcode
-    // decodes from any horizontal slice, so a short band is enough.
-    const BARCODE_ROI_W = 0.86;
-    const BARCODE_ROI_H = 0.2;
+    // Barcode fires after the same value persists this long. Sparse iOS-Safari
+    // ZXing decodes never held 600ms → felt like 扫不到; the value is already
+    // Code128-checksum-valid AND bounded to the aim box, so a short confirm is safe.
+    const STABLE_MS = 300;
+    // Map the on-screen aim box (CSS px, centred over an object-cover video) to a
+    // crop rect in RAW VIDEO pixels. object-cover scales the frame by
+    // max(clientW/vw, clientH/vh) and centre-crops; the inverse maps the centred
+    // CSS box back to a centred video-px rect. WITHOUT this the decoded band did
+    // not line up with the white box, so barcode mode read a neighbouring stacked
+    // row or nothing (Wei Siang 2026-06-17). The box dims here MUST match the
+    // reticle JSX (86vw, max 440px, 118px tall).
+    const aimRoi = () => {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const cw = video.clientWidth || vw;
+      const ch = video.clientHeight || vh;
+      const cover = Math.max(cw / vw, ch / vh) || 1;
+      const boxWcss = Math.min(0.86 * cw, 440);
+      const boxHcss = 118;
+      const sw = Math.max(1, Math.min(vw, Math.round(boxWcss / cover)));
+      const sh = Math.max(1, Math.min(vh, Math.round(boxHcss / cover)));
+      const sx = Math.round((vw - sw) / 2);
+      const sy = Math.round((vh - sh) / 2);
+      return { sx, sy, sw, sh };
+    };
     const considerHit = (data: string) => {
       if (stopped || !data) return;
       if (scanMode !== "barcode") {
@@ -1081,13 +1106,13 @@ export default function WorkerScanPage() {
               // the nearest one to centre wins — so 2-3 stacked schedule barcodes
               // in view don't all fire; the row the worker aimed at is taken.
               const cy = video.videoHeight / 2;
-              // Accept only a Code 128 whose centre sits inside the aim ROI band,
-              // and among those the one NEAREST the centre wins — so the stacked
-              // schedule barcodes above/below are ignored and only the aimed row
-              // fires (Wei Siang 2026-06-17: "只扫中间的长方形"). A code with no
-              // boundingBox (some detectors omit it) is treated as centred so it
-              // still fires — dropping those was the earlier "完全没反应" bug.
-              const roiHalf = (video.videoHeight * BARCODE_ROI_H) / 2;
+              // Accept only a Code 128 whose centre sits inside the aim box band
+              // (mapped to video px via aimRoi so it matches the on-screen box),
+              // and among those the one NEAREST the centre wins — stacked schedule
+              // barcodes above/below are ignored. A code with no boundingBox is
+              // treated as centred so it still fires (dropping those was the
+              // earlier "完全没反应" bug).
+              const roiHalf = aimRoi().sh / 2;
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
@@ -1135,10 +1160,7 @@ export default function WorkerScanPage() {
               // Cropping to the centred band is ~5x fewer pixels (fast) and leaves
               // only the aimed code (accurate). Wei Siang 2026-06-17: "只扫中间的
               // 长方形,不要扫到别的 barcode".
-              const sx = Math.round((vw * (1 - BARCODE_ROI_W)) / 2);
-              const sy = Math.round((vh * (1 - BARCODE_ROI_H)) / 2);
-              const sw = Math.max(1, Math.round(vw * BARCODE_ROI_W));
-              const sh = Math.max(1, Math.round(vh * BARCODE_ROI_H));
+              const { sx, sy, sw, sh } = aimRoi();
               // Downscale only if the ROI is huge; Code 128 density runs
               // horizontally so keep ~1280px across for sharp bars.
               const s = Math.min(1, 1280 / sw);
@@ -1153,9 +1175,14 @@ export default function WorkerScanPage() {
               } catch {
                 imageData = null;
               }
-              // jsQR is QR-only — skip it; ZXing reads the Code 128 in the ROI.
+              // jsQR is QR-only — ZXing is the SOLE Code 128 decoder on iOS. If it
+              // hasn't loaded yet (cold start) or its chunk 404'd after a redeploy,
+              // keep (re)kicking the import so barcode mode self-heals instead of
+              // staying silently dead.
               const zxDecode = zxingRef.current;
-              if (imageData && zxDecode) {
+              if (!zxDecode) {
+                void ensureZxing();
+              } else if (imageData) {
                 const zxText = zxDecode(imageData);
                 if (zxText) {
                   considerHit(zxText);
@@ -1213,6 +1240,7 @@ export default function WorkerScanPage() {
       // never zooms.
       if (
         scanMode === "qr" &&
+        !autoZoomSuppressedRef.current &&
         zoomRange &&
         zoomTrack &&
         now - scanStartedAt > 1800 &&
@@ -2122,7 +2150,7 @@ export default function WorkerScanPage() {
             {/* Zoom-out — the QR auto-zoom can leave the lens zoomed in with no
                 way back; tap to widen again (Wei Siang 2026-06-17). Barcode mode
                 never auto-zooms, so this is QR-only. */}
-            {scanMode === "qr" && (
+            {scanMode === "qr" && zoomSupported && (
               <button
                 type="button"
                 onClick={resetZoom}

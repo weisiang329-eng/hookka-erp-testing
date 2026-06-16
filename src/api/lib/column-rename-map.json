@@ -635,6 +635,7 @@
   "purchaseDate": "purchase_date",
   "purchaseInvoiceId": "purchase_invoice_id",
   "purchaseOrderId": "purchase_order_id",
+  "purchaseOrgCode": "purchase_org_code",
   "purchasesValue": "purchases_value",
   "pvNo": "pv_no",
   "qcInspectionId": "qc_inspection_id",

@@ -5980,6 +5980,10 @@ app.post("/:id/scan-complete", async (c) => {
   const today = nowIso.split("T")[0];
   let assignedSlot: 1 | 2 = 1;
   let newCompletedAt: string | null = target.slot.completedAt ?? null;
+  // Barcode (whole-card) feedback parity with QR: did THIS scan actually
+  // complete anything, or was the row already done? Drives the ✓ card's
+  // "already complete · by <who>" vs a fresh green tick.
+  let wholeCardAlreadyComplete = false;
 
   // Same-worker guard.
   if (!wholeCard && target.slot.pic1Id === worker.id) {
@@ -6053,6 +6057,10 @@ app.post("/:id/scan-complete", async (c) => {
   if (wholeCard) {
     // Whole-WIP completion: PIC1 of every still-open piece → the scanning
     // worker. Idempotent — a piece already signed off keeps its existing PIC.
+    // Count pieces THIS scan fills: zero ⇒ the row was already done (re-scan,
+    // or a second worker after the first already finished it) → the ✓ card
+    // shows "already complete · by <first worker>", matching QR.
+    let filledNow = 0;
     for (const s of slots) {
       if (!s.pic1Id) {
         await db
@@ -6061,8 +6069,10 @@ app.post("/:id/scan-complete", async (c) => {
           )
           .bind(worker.id, worker.name, nowIso, nowIso, s.id)
           .run();
+        filledNow++;
       }
     }
+    wholeCardAlreadyComplete = filledNow === 0;
     newCompletedAt = nowIso;
     assignedSlot = 1;
   } else {
@@ -6107,6 +6117,11 @@ app.post("/:id/scan-complete", async (c) => {
     .all<PiecePicRow>();
   const slotList = allSlots.results ?? [];
   const allPiecesDone = slotList.length > 0 && slotList.every((s) => !!s.pic1Id);
+  // Distinct people credited on this card's pieces — the "by <who>" line on the
+  // ✓ card so a barcode completion reads exactly like a QR one.
+  const wholeCardCompletedBy = [
+    ...new Set(slotList.map((s) => s.pic1Name).filter((n): n is string => !!n)),
+  ];
 
   let jcJustCompleted = false;
   const mergedJc: JobCardRow = { ...target.jc };
@@ -6281,6 +6296,14 @@ app.post("/:id/scan-complete", async (c) => {
       specKey: `${scannedJc.departmentCode}::${scannedJc.wipLabel || scannedPo.productCode}`,
       fifoDueDate: target.jc.dueDate || target.po.targetEndDate || "",
       stickerKey,
+      // Barcode whole-card feedback parity with QR: surface WHO completed the
+      // row + whether this scan found it already done (re-scan / 2nd worker).
+      ...(wholeCard
+        ? {
+            alreadyComplete: wholeCardAlreadyComplete,
+            completedBy: wholeCardCompletedBy,
+          }
+        : {}),
     },
   });
 });

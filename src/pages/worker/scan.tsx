@@ -962,6 +962,29 @@ export default function WorkerScanPage() {
       void handleDecoded(data);
     };
 
+    // "Too sensitive" guard (Wei Siang 2026-06-17): in BARCODE mode the schedule
+    // stacks many codes close together, so firing on the very first detection
+    // grabbed whatever flashed into frame before the worker had aimed. Require
+    // the SAME value to stay decoded for ~1s before locking — that's the "對準
+    // 1-2 秒先". QR mode (one sticker in view) stays instant.
+    let stableVal: string | null = null;
+    let stableSince = 0;
+    const STABLE_MS = 900;
+    const considerHit = (data: string) => {
+      if (stopped || !data) return;
+      if (scanMode !== "barcode") {
+        onHit(data);
+        return;
+      }
+      const t = performance.now();
+      if (data === stableVal) {
+        if (t - stableSince >= STABLE_MS) onHit(data);
+      } else {
+        stableVal = data;
+        stableSince = t;
+      }
+    };
+
     const tick = async () => {
       if (stopped) return;
       const now = performance.now();
@@ -996,11 +1019,11 @@ export default function WorkerScanPage() {
                 if (d <= band && (!best || d < best.d)) best = { v: c.rawValue, d };
               }
               if (best) {
-                onHit(best.v);
+                considerHit(best.v);
                 return;
               }
             } else if (codes.length > 0 && codes[0].rawValue) {
-              onHit(codes[0].rawValue);
+              considerHit(codes[0].rawValue);
               return;
             }
           } catch {
@@ -1036,7 +1059,7 @@ export default function WorkerScanPage() {
               if (imageData && zxDecode) {
                 const zxText = zxDecode(imageData);
                 if (zxText) {
-                  onHit(zxText);
+                  considerHit(zxText);
                   return;
                 }
               }
@@ -1065,7 +1088,7 @@ export default function WorkerScanPage() {
                   inversionAttempts: "attemptBoth",
                 });
                 if (code && code.data) {
-                  onHit(code.data);
+                  considerHit(code.data);
                   return;
                 }
                 // jsQR is QR-only — ZXing adds Code 128 (and QR) on the fallback

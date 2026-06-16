@@ -431,12 +431,17 @@ app.get("/scan-lookup", async (c) => {
   if (poRows.length === 0 && isBarcodeToken(term)) {
     const deptCode = deptOfBarcodeToken(term);
     if (deptCode) {
+      // Match ANY card in the dept (not just non-completed): re-deriving to the
+      // exact token already pins one card, so an already-COMPLETED match should
+      // surface the card (the scan page shows it + "already done") instead of a
+      // confusing "Not found" (Wei Siang 2026-06-17: scanned 0319032601 → not
+      // found). Was `AND status <> 'COMPLETED'`, which hid a finished card.
       const cand =
         (
           await c.var.DB.prepare(
             `SELECT id, productionOrderId, wipKey, departmentCode
                FROM job_cards
-              WHERE departmentCode = ? AND status <> 'COMPLETED'`,
+              WHERE departmentCode = ?`,
           )
             .bind(deptCode)
             .all<{

@@ -24,7 +24,12 @@ import {
   Download,
   DollarSign,
   FileText,
+  ScanLine,
 } from "lucide-react";
+import {
+  ScanSupplierModal,
+  type SupplierExtraction,
+} from "@/components/scan-supplier-modal";
 
 function readErrorMessage(v: unknown): string | null {
   if (!v || typeof v !== "object") return null;
@@ -64,6 +69,7 @@ export function GRNFormDialog({
       rejectionReason: string;
     }[]
   >([]);
+  const [scanOpen, setScanOpen] = useState(false);
 
   const po = purchaseOrders.find((p) => p.id === selectedPO);
 
@@ -101,6 +107,46 @@ export function GRNFormDialog({
       updated[idx].acceptedQty = Math.max(0, recv - rej);
     }
     setItemEntries(updated);
+  };
+
+  // OCR apply — match each scanned supplier line to a PO item (by supplier SKU
+  // or material name, normalized + fuzzy) and pre-fill its received qty. The
+  // operator still reviews every line and submits the form (no naked edit).
+  const applyOcr = (ex: SupplierExtraction) => {
+    if (!po) return;
+    const norm = (s: string | null | undefined) =>
+      String(s ?? "")
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
+    setItemEntries((prev) => {
+      const next = prev.map((e) => ({ ...e }));
+      for (const line of ex.lines ?? []) {
+        const qty = Number(line.qty) || 0;
+        if (qty <= 0) continue;
+        const codeN = norm(line.supplierCode);
+        const descN = norm(line.description);
+        const idx = po.items.findIndex((it) => {
+          const sku = norm(it.supplierSKU);
+          const nm = norm(it.materialName);
+          const codeHit =
+            !!codeN &&
+            !!sku &&
+            (sku === codeN || sku.includes(codeN) || codeN.includes(sku));
+          const nameHit =
+            !!descN && !!nm && (nm.includes(descN) || descN.includes(nm));
+          return codeHit || nameHit;
+        });
+        if (idx >= 0 && next[idx]) {
+          const remaining = Math.max(
+            0,
+            po.items[idx].quantity - (po.items[idx].receivedQty || 0),
+          );
+          const recv = remaining > 0 ? Math.min(qty, remaining) : qty;
+          next[idx] = { ...next[idx], receivedQty: recv, acceptedQty: recv };
+        }
+      }
+      return next;
+    });
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -156,7 +202,18 @@ export function GRNFormDialog({
 
           {po && (
             <div>
-              <h3 className="text-sm font-semibold text-[#1F1D1B] mb-2">Items - Enter Received Quantities</h3>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-[#1F1D1B]">Items - Enter Received Quantities</h3>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setScanOpen(true)}
+                  title="拍/传一张供应商送货单或发票,自动填收货数量"
+                >
+                  <ScanLine className="h-4 w-4" /> 扫描供应商单据
+                </Button>
+              </div>
               <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
                 <table className="w-full text-sm">
                   <thead className="bg-[#F0ECE9]">
@@ -231,6 +288,23 @@ export function GRNFormDialog({
             </Button>
           </div>
         </form>
+        <ScanSupplierModal
+          open={scanOpen}
+          onClose={() => setScanOpen(false)}
+          supplierId={po?.supplierId ?? null}
+          supplierName={po?.supplierName ?? null}
+          poContext={
+            po
+              ? po.items
+                  .map((it) =>
+                    `${it.supplierSKU || ""} ${it.materialName || ""}`.trim(),
+                  )
+                  .filter(Boolean)
+                  .join("\n")
+              : undefined
+          }
+          onApply={applyOcr}
+        />
       </div>
     </div>
   );

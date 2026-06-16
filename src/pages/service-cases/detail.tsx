@@ -19,7 +19,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { compressImage } from "@/lib/image-compress";
 import {
   ArrowLeft, CheckCircle2, XCircle, Plus, X, Wrench, AlertCircle, Loader2,
-  Pencil, Check,
+  Pencil, Check, Download,
 } from "lucide-react";
 
 type CaseStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | "CANCELLED";
@@ -314,6 +314,62 @@ export default function ServiceCaseDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 justify-end shrink-0">
+          {/* Download a one-page Service Case report (info + issue + photos +
+              affected products + root cause + action log). Always available. */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              const { generateServiceCasePdf } = await import(
+                "@/lib/generate-service-case-pdf"
+              );
+              const firstCat =
+                caseDetail.rootCauses?.[0]?.category ||
+                caseDetail.rootCauseCategory ||
+                "";
+              generateServiceCasePdf({
+                caseNo: caseDetail.caseNo,
+                status: caseDetail.status,
+                customerName: customerRecord?.name ?? caseDetail.customerName,
+                customerCode: customerRecord?.code ?? null,
+                customerPhone:
+                  customerRecord?.phone ?? customerRecord?.mobile ?? null,
+                sourceType: caseDetail.sourceType,
+                sourceNo: caseDetail.sourceNo,
+                externalRef: caseDetail.externalRef,
+                category: firstCat
+                  ? ROOT_CAUSE_LABELS[firstCat] ?? firstCat
+                  : null,
+                createdByName: caseDetail.createdByName,
+                createdAt: caseDetail.createdAt,
+                closedAt: caseDetail.closedAt,
+                issueDescription: caseDetail.issueDescription,
+                issuePhotos: caseDetail.issuePhotos,
+                affectedProducts: caseDetail.affectedProducts?.map((p) => ({
+                  code: p.code,
+                  name: p.name,
+                  qty: p.qty,
+                  components: p.components,
+                })),
+                rootCauses: caseDetail.rootCauses,
+                preventionAction: caseDetail.preventionAction,
+                preventionOwner: caseDetail.preventionOwner,
+                actionLog: caseDetail.actionLog?.map((a) => ({
+                  date: a.date,
+                  description: a.description,
+                  createdByName: a.createdByName,
+                })),
+                orders: caseDetail.orders?.map((o) => ({
+                  serviceOrderNo: o.serviceOrderNo,
+                  mode: o.mode,
+                  status: o.status,
+                  isSv: o.isSv,
+                })),
+              });
+            }}
+          >
+            <Download className="h-4 w-4" /> Download PDF
+          </Button>
           {/* Edit ⇄ Done — the case info below is locked until you click Edit
               (no silent auto-save). Shown for every status except a cancelled
               case (closed cases can still be corrected / have RCA added). */}

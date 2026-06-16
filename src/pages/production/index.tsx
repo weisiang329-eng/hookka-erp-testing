@@ -110,13 +110,14 @@ function jobCardCode128DataUrl(token: string): string {
     const canvas = document.createElement("canvas");
     JsBarcode(canvas, token, {
       format: "CODE128",
-      // Taller (90 vs 38) gives the phone more scan lines to lock onto, and a
-      // proper quiet zone (margin 20 ≈ 5 modules) is required by the Code 128
-      // spec. The token is now ALL DIGITS so jsbarcode uses Set C — half the
-      // bars of the old alphanumeric code, so the printed X-dimension ~doubles
-      // (~0.5mm) and a phone can finally resolve it (Wei Siang: 徹底解決 barcode).
-      height: 90,
-      width: 4,
+      // Taller (112) gives the phone more scan lines to lock onto, and a proper
+      // quiet zone (margin 20 ≈ 5 modules) is required by the Code 128 spec. The
+      // token is ALL DIGITS so jsbarcode uses Set C — half the bars of the old
+      // alphanumeric code. Bars bumped to 5px and the printed column widened
+      // (td.bc CSS below) so the X-dimension is larger and a phone resolves it
+      // easily (Wei Siang 2026-06-17: barcode 印大一点 / 更粗).
+      height: 112,
+      width: 5,
       margin: 20,
       displayValue: false, // the human WIP name is printed as crisp HTML below
     });
@@ -5744,8 +5745,8 @@ export default function ProductionPage({
        10-digit numeric (Set C → fat bars). Size by WIDTH only with height:auto
        so the bar/space ratios are NEVER distorted (the old height:28+max-width
        squished them) — ~56mm wide × ~11mm tall, ~0.5mm X-dim, phone-scannable. */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 224px; }
-    table.schedule td.bc img { width: 214px; height: auto; display: block; margin: 0 auto; }
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 276px; }
+    table.schedule td.bc img { width: 264px; height: auto; display: block; margin: 0 auto; }
     /* The human WIP name printed below the bars so the worker can confirm the
        code matches the piece. Wraps on word breaks (it's a readable name). */
     table.schedule td.bc .bccode { display: block; font-family: Arial, sans-serif; font-size: 9px; line-height: 1.1; color: #000; margin-top: 1px; word-break: normal; overflow-wrap: anywhere; }

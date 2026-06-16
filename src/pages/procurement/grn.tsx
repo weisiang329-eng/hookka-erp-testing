@@ -338,6 +338,11 @@ export default function GRNPage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
 
+  // Bulk "Download PDF" — merge every selected GRN into one file. Rows come
+  // back from the DataGrid via `onSelectionChange`.
+  const [selectedGrns, setSelectedGrns] = useState<GoodsReceiptNote[]>([]);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+
   const { data: grnResp, loading: grnLoading, refresh: refreshGrns } = useCachedJson<{ success?: boolean; data?: GoodsReceiptNote[] } | GoodsReceiptNote[]>("/api/grn");
   const { data: poResp, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] } | PurchaseOrder[]>("/api/purchase-orders");
 
@@ -434,6 +439,44 @@ export default function GRNPage() {
     link.download = `grn-list-${new Date().toISOString().split("T")[0]}.csv`;
     link.click();
     URL.revokeObjectURL(url);
+  };
+
+  // ---- Bulk Download PDF ----
+  // Render every selected GRN into one merged PDF. The list rows already carry
+  // the full GRN (items + quantities), so map each row to the generator's
+  // field shape (grnNo / supplierName / poRef / per-item received-accepted-
+  // rejected qty) and hand the batch to generateCombinedGRNPdf.
+  const downloadSelectedPdf = async () => {
+    if (selectedGrns.length === 0 || downloadingPdf) return;
+    setDownloadingPdf(true);
+    try {
+      const ordered = [...selectedGrns].sort((a, b) =>
+        String(a.grnNumber || "").localeCompare(String(b.grnNumber || "")),
+      );
+      const items = ordered.map((grn) => ({
+        data: {
+          grnNo: grn.grnNumber,
+          date: grn.receiveDate,
+          poRef: grn.poNumber,
+          supplierName: grn.supplierName,
+          remarks: grn.notes,
+          items: grn.items.map((it) => ({
+            itemCode: it.materialCode,
+            description: it.materialName,
+            poQty: it.orderedQty,
+            receivedQty: it.receivedQty,
+            rejectedQty: it.rejectedQty,
+            acceptedQty: it.acceptedQty,
+          })),
+        },
+      }));
+      const { generateCombinedGRNPdf } = await import("@/lib/generate-grn-pdf");
+      await generateCombinedGRNPdf(items, `GRNs-${items.length}.pdf`);
+    } catch {
+      /* best-effort; the button returns to idle on failure */
+    } finally {
+      setDownloadingPdf(false);
+    }
   };
 
   // ---- Summary stats ----
@@ -701,9 +744,24 @@ export default function GRNPage() {
                 </span>
               )}
             </div>
-            <Button variant="outline" size="sm" onClick={exportCSV}>
-              <Download className="h-4 w-4" /> Export CSV
-            </Button>
+            <div className="flex items-center gap-2">
+              {selectedGrns.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={downloadingPdf}
+                  onClick={downloadSelectedPdf}
+                >
+                  <Download className="h-4 w-4" />{" "}
+                  {downloadingPdf
+                    ? "Preparing…"
+                    : `Download PDF (${selectedGrns.length})`}
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={exportCSV}>
+                <Download className="h-4 w-4" /> Export CSV
+              </Button>
+            </div>
           </div>
 
           {showFilters && (
@@ -762,6 +820,8 @@ export default function GRNPage() {
             virtualize
             loading={loading}
             stickyHeader={true}
+            selectable
+            onSelectionChange={setSelectedGrns}
             onDoubleClick={(row) => navigate(`/procurement/grn/${row.id}`)}
             contextMenuItems={grnGridContextMenu}
             maxHeight="calc(100vh - 300px)"

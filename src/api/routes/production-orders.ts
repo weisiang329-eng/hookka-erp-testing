@@ -6249,13 +6249,26 @@ app.post("/:id/scan-complete", async (c) => {
     .run();
 
   let scanRecomputed: Awaited<ReturnType<typeof recomputePoStatusAndProgress>> | null = null;
-  try {
-    scanRecomputed = await recomputePoStatusAndProgress(db, target.po.id);
-  } catch (err) {
-    console.error("[recomputePoStatusAndProgress] scan path failed", {
-      poId: target.po.id,
-      err: err instanceof Error ? err.message : String(err),
-    });
+  // RETRY the rollup. The JC is already persisted COMPLETED above, so if this
+  // throws and we give up on the first try, the PO status/progress + the SO/CO
+  // cascade (gated on `allDone` below) silently never run — the card reads done
+  // but the order stays stuck, and we still return success (Wei Siang 2026-06-17).
+  // recomputePoStatusAndProgress is idempotent, so re-running it after a
+  // transient DB blip is safe. 3 attempts; a persistent failure is logged loudly
+  // (every attempt) so the stuck PO is findable rather than invisible.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      scanRecomputed = await recomputePoStatusAndProgress(db, target.po.id);
+      break;
+    } catch (err) {
+      console.error(
+        `[recomputePoStatusAndProgress] scan path failed (attempt ${attempt}/3)`,
+        {
+          poId: target.po.id,
+          err: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
   }
   const allDone = scanRecomputed?.after?.status === "COMPLETED";
 

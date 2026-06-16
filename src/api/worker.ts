@@ -65,6 +65,11 @@ export type Env = {
     // Shared secret expected on /api/internal/* routes that are meant to
     // be invoked by cron / ops tooling only (not public traffic).
     CRON_SECRET?: string;
+    // Shared secret expected on POST /api/mail-center/inbound — the standalone
+    // Cloudflare Email Worker presents it as the x-mail-secret header so the
+    // userless inbound-mail ingestion can bypass authMiddleware safely. Set
+    // via `wrangler secret put MAIL_INBOUND_SECRET` (>= 16 chars).
+    MAIL_INBOUND_SECRET?: string;
     // Per-request hot cache — auth sessions + hot lookup tables (Phase 2.6/4).
     SESSION_CACHE: KVNamespace;
     // Supabase Storage credentials — replaces the legacy FILES (R2) binding.
@@ -590,6 +595,41 @@ app.post("/api/internal/auto-clockout", async (c) => {
   }
 });
 
+// Inbound email ingestion — the standalone Cloudflare Email Worker
+// (hookka-email-worker) parses each received message and POSTs it here.
+// Registered BEFORE authMiddleware (machine-to-machine, no user session) and
+// guarded by MAIL_INBOUND_SECRET via the x-mail-secret header — the same
+// constant-time pattern as the cron triggers above. Idempotent (dedup by
+// Message-ID inside ingestInboundEmail) so the email worker can safely retry.
+app.post("/api/mail-center/inbound", async (c) => {
+  const expected = c.env.MAIL_INBOUND_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error(
+      "[mail-inbound] MAIL_INBOUND_SECRET unset or too short — refusing",
+    );
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-mail-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  try {
+    const { ingestInboundEmail } = await import("./routes/mail-center");
+    const payload = await c.req.json().catch(() => null);
+    if (!payload || typeof payload !== "object") {
+      return c.json({ ok: false, error: "invalid payload" }, 400);
+    }
+    const result = await ingestInboundEmail(
+      c.var.DB,
+      payload as Parameters<typeof ingestInboundEmail>[1],
+    );
+    return c.json(result, result.ok ? 200 : 400);
+  } catch (err) {
+    console.error("[mail-inbound] error:", err);
+    return c.json({ ok: false, error: "ingest failed" }, 500);
+  }
+});
+
 // Global auth gate for /api/* — skips PUBLIC_PATHS (login/logout/health) and
 // PUBLIC_PREFIXES (worker-auth, worker, fg-units) handled inside the middleware.
 // MUST be registered BEFORE any route that touches business data.
@@ -787,8 +827,10 @@ import departmentPerformance from "./routes/department-performance";
 // dept supervisors / planners pick a dept (or SOFA/BEDFRAME category) and
 // see how long each WIP typically takes.
 import wipTimes from "./routes/wip-times";
+import mailCenter from "./routes/mail-center";
 
 app.route("/api/customers", customers);
+app.route("/api/mail-center", mailCenter);
 app.route("/api/bom", bom);
 app.route("/api/products", products);
 app.route("/api/product-configs", productConfigs);

@@ -136,7 +136,10 @@ test("invite preflight prefix is still public", () => {
 // regenerates per-customer OCR rules from gold-marked scan samples),
 // /api/internal/auto-clockout (midnight cron, gated by CRON_SECRET — closes
 // prior-day forgotten clock-outs at shift end), /api/qc-pending/trigger (cron,
-// gated by CRON_SECRET).
+// gated by CRON_SECRET), /api/mail-center/inbound (Mail Center inbound email
+// ingestion — the standalone Cloudflare Email Worker POSTs parsed messages
+// here; gated by MAIL_INBOUND_SECRET via the x-mail-secret header, same
+// constant-time pattern as the crons; idempotent dedup by Message-ID).
 //
 // The catch-all `app.all("/api/*", ...)` at the bottom of worker.ts is
 // registered AFTER the middleware, so it doesn't appear here — the
@@ -151,6 +154,7 @@ const EXPECTED_PRE_AUTH_ROUTES = [
   "POST /api/internal/distill-ocr-rules",
   "POST /api/internal/auto-clockout",
   "POST /api/qc-pending/trigger",
+  "POST /api/mail-center/inbound",
 ];
 
 test("pre-auth routes (mounted before authMiddleware) are locked in", () => {

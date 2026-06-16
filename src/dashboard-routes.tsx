@@ -131,6 +131,8 @@ const RDMaintenance = lazy(() => import('./pages/rd/maintenance'))
 const Reports = lazy(() => import('./pages/reports'))
 const DailyReport = lazy(() => import('./pages/daily-report'))
 const Notifications = lazy(() => import('./pages/notifications'))
+const MailCenter = lazy(() => import('./pages/mail-center'))
+const MailCenterDetail = lazy(() => import('./pages/mail-center/detail'))
 const Maintenance = lazy(() => import('./pages/maintenance'))
 const MaintenanceSofaCombos = lazy(() => import('./pages/maintenance/sofa-combos'))
 
@@ -405,6 +407,8 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // Daily Report — process / SOP exceptions ("what needs attention today").
   { path: '/daily-report', element: <S><DailyReport /></S> },
   { path: '/notifications', element: <S><Notifications /></S> },
+  { path: '/mail-center', element: <S><MailCenter /></S> },
+  { path: '/mail-center/:id', element: <S><MailCenterDetail /></S> },
   { path: '/maintenance', element: <S><Maintenance /></S> },
   { path: '/maintenance/sofa-combos', element: <S><MaintenanceSofaCombos /></S> },
 
@@ -474,6 +478,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/dashboard': () => import('./pages/dashboard-b'),
   '/daily-report': () => import('./pages/daily-report'),
   '/notifications': () => import('./pages/notifications'),
+  '/mail-center': () => import('./pages/mail-center'),
   '/analytics/forecast': () => import('./pages/analytics/forecast'),
   '/sales': () => import('./pages/sales'),
   '/delivery': () => import('./pages/delivery'),

@@ -928,58 +928,25 @@ app.put("/:id/status", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// DELETE /api/service-cases/:id — only allowed if status='OPEN'.
-// (Use PUT /:id/status with CANCELLED to soft-cancel anything past OPEN.)
+// DELETE /api/service-cases/:id — delete a single service case (any status).
 // ---------------------------------------------------------------------------
+// Gated by service-orders:delete; the UI fronts it with a confirm dialog.
+// Linked service_orders cascade via the FK (service_orders.case_id ON DELETE
+// CASCADE). NOTE: an "SV" order is a sales_orders row merely TAGGED with caseId
+// (no FK), so it is NOT removed here — close / handle those separately.
 app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "service-orders", "delete");
   if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB
-    .prepare("SELECT status FROM service_cases WHERE id = ?")
+    .prepare("SELECT id FROM service_cases WHERE id = ?")
     .bind(id)
-    .first<{ status: CaseStatus }>();
+    .first<{ id: string }>();
   if (!existing) {
     return c.json({ success: false, error: "Service case not found" }, 404);
   }
-  if (existing.status !== "OPEN") {
-    return c.json(
-      {
-        success: false,
-        error: `Only OPEN cases can be deleted. Use PUT /:id/status with CANCELLED instead.`,
-      },
-      400,
-    );
-  }
-  // FK CASCADE on service_orders.case_id → service_orders go away with the case.
   await c.var.DB.prepare("DELETE FROM service_cases WHERE id = ?").bind(id).run();
   return c.json({ success: true });
-});
-
-// ---------------------------------------------------------------------------
-// POST /api/service-cases/clear-all — bulk-purge EVERY service case.
-// ---------------------------------------------------------------------------
-// Pre-go-live cleanup: the owner wanted a one-click "clear the test cases"
-// instead of running SQL by hand. Same RBAC gate as the single delete
-// (service-orders:delete) + a mandatory `confirm:true` body (the UI fronts it
-// with a confirm dialog), so it can't be hit casually. Linked service_orders
-// cascade via the FK (service_orders.case_id ON DELETE CASCADE). Case numbering
-// naturally restarts afterwards (nextCaseNo counts the month's rows).
-app.post("/clear-all", async (c) => {
-  const denied = await requirePermission(c, "service-orders", "delete");
-  if (denied) return denied;
-  const body = (await c.req.json().catch(() => ({}))) as { confirm?: unknown };
-  if (body.confirm !== true) {
-    return c.json(
-      { success: false, error: "Refused — confirm:true is required to clear all service cases." },
-      400,
-    );
-  }
-  const before = await c.var.DB.prepare(
-    "SELECT COUNT(*) as n FROM service_cases",
-  ).first<{ n: number }>();
-  await c.var.DB.prepare("DELETE FROM service_cases").run();
-  return c.json({ success: true, deleted: before?.n ?? 0 });
 });
 
 export default app;

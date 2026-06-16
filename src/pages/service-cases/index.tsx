@@ -248,41 +248,38 @@ export default function ServiceCasesListPage() {
   );
   const cases = useMemo(() => resp?.data ?? [], [resp]);
 
-  // One-click pre-go-live cleanup (SUPER_ADMIN only) — purge every service
-  // case so the list starts clean. Backed by POST /api/service-cases/clear-all
-  // (RBAC + confirm:true). Owner wanted a single click instead of running SQL.
-  async function handleClearAll() {
+  // Per-case delete (SUPER_ADMIN only) — right-click a row → Delete. Backed by
+  // DELETE /api/service-cases/:id (any status). Linked service_orders cascade;
+  // an "SV" sales order tagged with the case is NOT removed (close it instead).
+  async function handleDeleteCase(row: CaseRow) {
     if (
       !(await confirm({
-        title: "Clear ALL service cases?",
+        title: "Delete this service case?",
         message: (
           <>
-            This permanently deletes <strong>every</strong> service case
-            {cases.length ? ` (${cases.length} now)` : ""} and any service orders
-            spawned from them. For pre-go-live test cleanup — this can't be undone.
+            Permanently delete{" "}
+            <strong>{row.caseNo}</strong>
+            {row.customerName ? ` (${row.customerName})` : ""} and any service
+            orders spawned from it. This can't be undone.
           </>
         ),
-        confirmLabel: "Clear all",
+        confirmLabel: "Delete",
         tone: "danger",
       }))
     )
       return;
     try {
-      const res = await fetch("/api/service-cases/clear-all", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirm: true }),
-      });
-      const data = (await res.json()) as {
+      const res = await fetch(
+        `/api/service-cases/${encodeURIComponent(row.id)}`,
+        { method: "DELETE" },
+      );
+      const data = (await res.json().catch(() => ({}))) as {
         success?: boolean;
-        deleted?: number;
         error?: string;
       };
       if (!res.ok || !data?.success)
         throw new Error(data?.error || `HTTP ${res.status}`);
-      toast.success(
-        `Cleared ${data.deleted ?? 0} service case${data.deleted === 1 ? "" : "s"}`,
-      );
+      toast.success(`Deleted ${row.caseNo}`);
       invalidateCachePrefix("/api/service-cases");
       refresh();
     } catch (e) {
@@ -587,17 +584,6 @@ export default function ServiceCasesListPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {currentUser?.role === "SUPER_ADMIN" && cases.length > 0 && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleClearAll}
-              className="text-[#9A3A2D] border-[#E8C9C2] hover:bg-[#FBEFEC]"
-              title="Delete every service case (pre-go-live test cleanup)"
-            >
-              <Trash2 className="h-4 w-4" /> Clear all
-            </Button>
-          )}
           <Button
             variant="outline"
             size="sm"
@@ -660,6 +646,20 @@ export default function ServiceCasesListPage() {
             valueFilterKey={statusFilter}
             onRowClick={(row) => navigate(`/service-cases/${row.id}`)}
             onFilteredDataChange={setExportRows}
+            contextMenuItems={
+              currentUser?.role === "SUPER_ADMIN"
+                ? (row) => [
+                    {
+                      label: "Delete service case",
+                      icon: <Trash2 className="h-3.5 w-3.5" />,
+                      danger: true,
+                      action: () => {
+                        void handleDeleteCase(row);
+                      },
+                    },
+                  ]
+                : undefined
+            }
           />
         </CardContent>
       </Card>

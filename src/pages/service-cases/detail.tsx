@@ -342,8 +342,12 @@ export default function ServiceCaseDetailPage() {
                   : null,
                 createdByName: caseDetail.createdByName,
                 createdAt: caseDetail.createdAt,
+                investigatingAt: caseDetail.investigatingAt,
                 closedAt: caseDetail.closedAt,
+                customerState: caseDetail.customerState,
+                responsibleUnit: caseDetail.responsibleUnit,
                 issueDescription: caseDetail.issueDescription,
+                notes: caseDetail.notes,
                 issuePhotos: caseDetail.issuePhotos,
                 affectedProducts: caseDetail.affectedProducts?.map((p) => ({
                   code: p.code,

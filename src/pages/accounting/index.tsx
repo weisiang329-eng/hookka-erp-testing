@@ -6392,11 +6392,34 @@ function BalanceSheetTab() {
       months.push(d.toISOString().slice(0, 7));
     }
   }
-  const { data: bsResp, loading: bsLoading } = useCachedJson<{ success?: boolean; data?: { balanceSheet?: BalanceSheetEntry[]; cashFlow?: CashFlowResp } }>(`/api/accounting/pl?period=${period}`);
+  const { data: bsResp, loading: bsLoading, refresh: bsRefresh } = useCachedJson<{ success?: boolean; data?: { balanceSheet?: BalanceSheetEntry[]; cashFlow?: CashFlowResp } }>(`/api/accounting/pl?period=${period}`);
   const bsData: BalanceSheetEntry[] = useMemo(
     () => (bsResp?.success && bsResp.data?.balanceSheet ? bsResp.data.balanceSheet : []),
     [bsResp]
   );
+
+  const { toast } = useToast();
+  const [edit, setEdit] = useState(false);
+  const [bmap, setBmap] = useState<Record<string, string>>({});
+  const [dragCode, setDragCode] = useState<string | null>(null);
+  const [dragOverSec, setDragOverSec] = useState<string | null>(null);
+  useEffect(() => {
+    if (!edit) return;
+    fetch("/api/accounting/bs/section-map")
+      .then((r) => r.json() as Promise<{ data?: { map?: Record<string, string> } }>)
+      .then((j) => setBmap(j?.data?.map ?? {}))
+      .catch(() => {});
+  }, [edit]);
+  const moveTo = async (code: string, section: string) => {
+    const prev = bmap;
+    const next = { ...bmap, [code]: section };
+    setBmap(next);
+    try {
+      const res = await fetch("/api/accounting/bs/section-map", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ map: next }) });
+      const j = (await res.json()) as { success?: boolean };
+      if (j?.success) { toast.success("Balance-sheet mapping updated"); bsRefresh(); } else { setBmap(prev); toast.error("Save failed"); }
+    } catch { setBmap(prev); toast.error("Save failed"); }
+  };
 
   if (bsLoading) {
     return (
@@ -6426,21 +6449,31 @@ function BalanceSheetTab() {
     entries: BalanceSheetEntry[],
     total: number,
     colorClass: string,
-    bgClass: string
+    bgClass: string,
+    section: string,
   ) => (
     <>
-      <tr className={bgClass}>
+      <tr className={`${bgClass} ${edit && dragCode && dragOverSec === section ? "ring-2 ring-inset ring-[#6B5C32]" : ""}`}
+        onDragOver={edit && dragCode ? (e) => { e.preventDefault(); setDragOverSec(section); } : undefined}
+        onDragLeave={edit && dragCode ? () => { if (dragOverSec === section) setDragOverSec(null); } : undefined}
+        onDrop={edit && dragCode ? (e) => { e.preventDefault(); const src = e.dataTransfer.getData("text/plain"); setDragOverSec(null); setDragCode(null); if (src) void moveTo(src, section); } : undefined}>
         <td colSpan={3} className={`px-4 py-2 font-semibold ${colorClass}`}>{title}</td>
       </tr>
-      {entries.map((e) => (
-        <tr key={e.id} className="border-t border-[#E2DDD8]/50">
-          <td className="px-4 py-1.5 pl-8 text-[#6B7280] text-xs">{e.accountCode}</td>
-          <td className="px-4 py-1.5 text-[#4B5563]">{e.accountName}</td>
-          <td className={`px-4 py-1.5 text-right font-medium ${e.balance < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
-            {e.balance < 0 ? `(${formatCurrency(Math.abs(e.balance))})` : formatCurrency(e.balance)}
-          </td>
-        </tr>
-      ))}
+      {entries.map((e) => {
+        const draggable = edit && e.accountCode !== "NP-CURRENT";
+        return (
+          <tr key={e.id} className={`border-t border-[#E2DDD8]/50 ${draggable ? "cursor-move" : ""} ${dragCode === e.accountCode ? "opacity-40" : ""}`}
+            draggable={draggable}
+            onDragStart={draggable ? (ev) => { setDragCode(e.accountCode); ev.dataTransfer.setData("text/plain", e.accountCode); ev.dataTransfer.effectAllowed = "move"; } : undefined}
+            onDragEnd={draggable ? () => { setDragCode(null); setDragOverSec(null); } : undefined}>
+            <td className="px-4 py-1.5 pl-8 text-[#6B7280] text-xs">{draggable ? "⠿ " : ""}{e.accountCode}</td>
+            <td className="px-4 py-1.5 text-[#4B5563]">{e.accountName}</td>
+            <td className={`px-4 py-1.5 text-right font-medium ${e.balance < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+              {e.balance < 0 ? `(${formatCurrency(Math.abs(e.balance))})` : formatCurrency(e.balance)}
+            </td>
+          </tr>
+        );
+      })}
       <tr className={`border-t border-[#E2DDD8] ${bgClass} font-semibold`}>
         <td colSpan={2} className={`px-4 py-2 ${colorClass}`}>Total {title}</td>
         <td className={`px-4 py-2 text-right ${colorClass}`}>{formatCurrency(total)}</td>
@@ -6456,6 +6489,11 @@ function BalanceSheetTab() {
         <select value={period} onChange={(e) => setPeriod(e.target.value)} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
           {months.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>
+        <button onClick={() => setEdit((v) => !v)}
+          className={`ml-2 rounded-md border px-3 py-1.5 text-sm cursor-pointer ${edit ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>
+          {edit ? "Done" : "Edit"}
+        </button>
+        {edit && <span className="text-[11px] text-[#6B5C32]">拖科目行到目标段改归类 · 资产↔负债也可（搬过去符号反、表仍平衡）· 所有月份按新规则现算 · 拖回可还原</span>}
       </div>
       {/* Balance equation */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
@@ -6501,8 +6539,8 @@ function BalanceSheetTab() {
                 <tr className={`${INFO.bg} border-t-2 ${INFO.border}`}>
                   <td colSpan={3} className={`px-4 py-2 font-bold text-base ${INFO.text}`}>ASSETS</td>
                 </tr>
-                {renderBSSection("Current Assets", currentAssets, totalCurrentAssets, INFO.text, INFO.bg)}
-                {renderBSSection("Fixed Assets (Net)", fixedAssets, totalFixedAssets, INFO.text, INFO.bg)}
+                {renderBSSection("Current Assets", currentAssets, totalCurrentAssets, INFO.text, INFO.bg, "CURRENT_ASSET")}
+                {renderBSSection("Fixed Assets (Net)", fixedAssets, totalFixedAssets, INFO.text, INFO.bg, "FIXED_ASSET")}
                 <tr className={`border-t-2 ${INFO.border} ${INFO.bg} font-bold`}>
                   <td colSpan={2} className={`px-4 py-3 ${INFO.text}`}>TOTAL ASSETS</td>
                   <td className={`px-4 py-3 text-right ${INFO.text}`}>{formatCurrency(totalAssets)}</td>
@@ -6512,15 +6550,15 @@ function BalanceSheetTab() {
                 <tr className={`${DANGER.bg} border-t-2 ${DANGER.border}`}>
                   <td colSpan={3} className={`px-4 py-2 font-bold text-base ${DANGER.text}`}>LIABILITIES</td>
                 </tr>
-                {renderBSSection("Current Liabilities", currentLiabilities, totalCurrentLiab, DANGER.text, DANGER.bg)}
-                {renderBSSection("Long-Term Liabilities", longTermLiabilities, totalLongTermLiab, DANGER.text, DANGER.bg)}
+                {renderBSSection("Current Liabilities", currentLiabilities, totalCurrentLiab, DANGER.text, DANGER.bg, "CURRENT_LIABILITY")}
+                {renderBSSection("Long-Term Liabilities", longTermLiabilities, totalLongTermLiab, DANGER.text, DANGER.bg, "LONG_TERM_LIABILITY")}
                 <tr className={`border-t border-[#E2DDD8] font-semibold ${DANGER.bg}`}>
                   <td colSpan={2} className={`px-4 py-2 ${DANGER.text}`}>Total Liabilities</td>
                   <td className={`px-4 py-2 text-right ${DANGER.text}`}>{formatCurrency(totalLiabilities)}</td>
                 </tr>
 
                 {/* EQUITY — ACCENT_PLUM tint */}
-                {renderBSSection("Equity", equityItems, totalEquity, ACCENT_PLUM.text, ACCENT_PLUM.bg)}
+                {renderBSSection("Equity", equityItems, totalEquity, ACCENT_PLUM.text, ACCENT_PLUM.bg, "EQUITY")}
 
                 {/* Total L+E */}
                 <tr className="border-t-2 border-[#1F1D1B] bg-[#1F1D1B] text-white font-bold">

@@ -766,6 +766,7 @@ import rdTeamMembers from "./routes/rd-team-members";
 import scheduling from "./routes/scheduling";
 import planningSchedule from "./routes/planning-schedule";
 import scanPo from "./routes/scan-po";
+import scanSupplier from "./routes/scan-supplier";
 // One-shot historical job_card completion importer (Wei Siang's GS migration).
 // Server-only super-admin tool gated by production-orders:update; see
 // routes/import-completion.ts for the per-row resolution + cascade logic.
@@ -960,6 +961,7 @@ app.route("/api/rd-team-members", rdTeamMembers);
 app.route("/api/scheduling", scheduling);
 app.route("/api/planning", planningSchedule);
 app.route("/api/scan-po", scanPo);
+app.route("/api/scan-supplier", scanSupplier);
 // One-shot historical job_card completion importer. POST
 // /api/import/job-card-completion drives backfill of pre-ERP orders from a
 // Google Sheets export — see routes/import-completion.ts for body shape +

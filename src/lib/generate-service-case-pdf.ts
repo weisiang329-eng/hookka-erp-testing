@@ -43,8 +43,12 @@ export type ServiceCasePdfData = {
   category?: string | null;
   createdByName?: string | null;
   createdAt?: string | null;
+  investigatingAt?: string | null;
   closedAt?: string | null;
+  customerState?: string | null;
+  responsibleUnit?: string | null;
   issueDescription?: string | null;
+  notes?: string | null;
   issuePhotos?: string[];
   affectedProducts?: Array<{
     code: string;
@@ -134,7 +138,7 @@ export function generateServiceCasePdf(data: ServiceCasePdfData): void {
       "Customer",
       `${data.customerCode ? data.customerCode + " — " : ""}${data.customerName}${
         data.customerPhone ? " (" + data.customerPhone + ")" : ""
-      }`,
+      }${data.customerState ? " · " + data.customerState : ""}`,
     ],
     [
       "Source",
@@ -143,6 +147,9 @@ export function generateServiceCasePdf(data: ServiceCasePdfData): void {
         : data.sourceNo || data.sourceType,
     ],
     ["Category", data.category || "-"],
+    ...(data.responsibleUnit
+      ? ([["Responsible Unit", data.responsibleUnit]] as [string, string][])
+      : []),
     ["Status", data.status],
     [
       "Opened",
@@ -150,6 +157,9 @@ export function generateServiceCasePdf(data: ServiceCasePdfData): void {
         data.createdByName ? " by " + data.createdByName : ""
       }`,
     ],
+    ...(data.investigatingAt
+      ? ([["Investigating", fmtDate(data.investigatingAt)]] as [string, string][])
+      : []),
     ...(data.closedAt ? ([["Closed", fmtDate(data.closedAt)]] as [string, string][]) : []),
   ];
   autoTable(doc, {
@@ -169,6 +179,14 @@ export function generateServiceCasePdf(data: ServiceCasePdfData): void {
     ensure(14);
     y = drawSectionLabel(doc, "Issue Description", y);
     paragraph(data.issueDescription.trim());
+    y += 4;
+  }
+
+  // ── Notes ─────────────────────────────────────────────────────────────
+  if (data.notes && data.notes.trim()) {
+    ensure(14);
+    y = drawSectionLabel(doc, "Notes", y);
+    paragraph(data.notes.trim());
     y += 4;
   }
 

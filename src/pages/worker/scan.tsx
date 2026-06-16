@@ -37,6 +37,7 @@ import {
   X,
   ChevronRight,
   Images,
+  Flashlight,
 } from "lucide-react";
 import jsQR from "jsqr";
 import { useT } from "@/lib/worker-i18n";
@@ -276,6 +277,8 @@ export default function WorkerScanPage() {
   // denied, no camera) we show a message and the user can still use the
   // Take photo / Upload fallbacks.
   const [liveScanning, setLiveScanning] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+  const [torchSupported, setTorchSupported] = useState(false);
   // Scan mode (Wei Siang 2026-06-16): the square QR reticle framed 2-3 of the
   // schedule's stacked Code 128 rows at once and couldn't lock onto any. A
   // dedicated "barcode" mode draws a WIDE, short reticle and decodes ONLY the
@@ -812,7 +815,28 @@ export default function WorkerScanPage() {
       try { videoRef.current.srcObject = null; } catch { /* */ }
     }
     setLiveScanning(false);
+    setTorchOn(false);
+    setTorchSupported(false);
   }, []);
+
+  // Torch / flashlight toggle. A dim warehouse / loading bay is a top cause of a
+  // Code 128 "scan 不到" — the camera can't resolve the thin bars without light.
+  // Best-effort: only Android Chrome exposes `torch` via applyConstraints (iOS
+  // Safari doesn't), so the button only renders when getCapabilities() reports
+  // it (see the camera-init block) and a failed toggle is swallowed.
+  const toggleTorch = useCallback(async () => {
+    const track = streamRef.current?.getVideoTracks?.()[0];
+    if (!track) return;
+    const next = !torchOn;
+    try {
+      await track.applyConstraints({
+        advanced: [{ torch: next } as unknown as MediaTrackConstraintSet],
+      });
+      setTorchOn(next);
+    } catch {
+      /* torch is best-effort — never break the scan over it */
+    }
+  }, [torchOn]);
 
   const startLiveScan = useCallback(async () => {
     // Can't start twice
@@ -839,7 +863,10 @@ export default function WorkerScanPage() {
       try {
         const track = stream.getVideoTracks()[0];
         const caps = track?.getCapabilities?.() as
-          | (MediaTrackCapabilities & { focusMode?: string[] })
+          | (MediaTrackCapabilities & {
+              focusMode?: string[];
+              torch?: boolean;
+            })
           | undefined;
         if (caps?.focusMode && caps.focusMode.includes("continuous")) {
           await track.applyConstraints({
@@ -848,6 +875,8 @@ export default function WorkerScanPage() {
             ],
           });
         }
+        // Surface the torch button only when this lens actually supports it.
+        setTorchSupported(!!caps?.torch);
       } catch {
         /* focus tuning is a nicety, never block the scan on it */
       }
@@ -1990,14 +2019,30 @@ export default function WorkerScanPage() {
             <span className="text-sm font-semibold">
               {scanMode === "barcode" ? t("scan.modeBarcode") : t("scan.modeQr")}
             </span>
-            <button
-              type="button"
-              onClick={stopLiveScan}
-              className="h-9 w-9 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center"
-              aria-label={t("scan.cancel")}
-            >
-              <X className="h-5 w-5" />
-            </button>
+            <div className="flex items-center gap-2">
+              {torchSupported && (
+                <button
+                  type="button"
+                  onClick={toggleTorch}
+                  className={`h-9 w-9 rounded-full flex items-center justify-center ${
+                    torchOn
+                      ? "bg-amber-400 text-black"
+                      : "bg-white/10 text-white active:bg-white/20"
+                  }`}
+                  aria-label="Torch"
+                >
+                  <Flashlight className="h-5 w-5" />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={stopLiveScan}
+                className="h-9 w-9 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center"
+                aria-label={t("scan.cancel")}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
           </div>
           <div className="relative flex-1 overflow-hidden">
             <video

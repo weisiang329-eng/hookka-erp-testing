@@ -277,6 +277,7 @@ export default function SalesPage() {
   // even though we don't render from it directly (matches the previous behaviour).
   useMemo(() => statusChangesResp?.success ? statusChangesResp.data || [] : [], [statusChangesResp]);
   const [selectedRows, setSelectedRows] = useState<SalesOrder[]>([]);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [bulkConverting, setBulkConverting] = useState(false);
   // Bulk-review modal — flat table of every line item across all DRAFT
   // SOs in the current view. Lets the operator scan productCode / size /
@@ -505,6 +506,27 @@ export default function SalesPage() {
   // respect filters the same way.
   const inProductionCount = kpiSource.byStatus.IN_PRODUCTION ?? 0;
   const deliveredCount = (kpiSource.byStatus.DELIVERED ?? 0) + (kpiSource.byStatus.INVOICED ?? 0);
+
+  // Bulk "Download PDF" — merge every selected sales order into one file. Each
+  // order renders with the same layout as the single Print/Preview action.
+  const downloadSelectedPdf = async () => {
+    if (selectedRows.length === 0 || downloadingPdf) return;
+    setDownloadingPdf(true);
+    try {
+      const { generateCombinedSOPdf } = await import("@/lib/generate-so-pdf");
+      await generateCombinedSOPdf(
+        selectedRows.map((o) => ({
+          order: o,
+          customer: customers.find((c) => c.id === o.customerId) ?? null,
+        })),
+        `SalesOrders-${selectedRows.length}.pdf`,
+      );
+    } catch {
+      /* best-effort; button returns to idle on failure */
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
 
   const exportCSV = () => {
     const headers = [
@@ -960,6 +982,19 @@ export default function SalesPage() {
                 </span>
               )}
             </div>
+            {selectedRows.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={downloadingPdf}
+                onClick={downloadSelectedPdf}
+              >
+                <Download className="h-4 w-4" />{" "}
+                {downloadingPdf
+                  ? "Preparing…"
+                  : `Download PDF (${selectedRows.length})`}
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={exportCSV}>
               <Download className="h-4 w-4" /> Export CSV
             </Button>

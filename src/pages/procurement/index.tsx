@@ -890,6 +890,7 @@ export default function ProcurementPage() {
   // successful bulk run so the operator doesn't accidentally re-trigger
   // on the same set.
   const [selectedPOs, setSelectedPOs] = useState<PurchaseOrder[]>([]);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [bulkGrnRunning, setBulkGrnRunning] = useState(false);
 
   const loading = supLoading || poLoading || invLoading || bindingsLoading;
@@ -1099,6 +1100,32 @@ export default function ProcurementPage() {
   // first failure with a toast naming the offending PO; already-POSTED
   // GRNs stay (operator finishes the rest manually). Final toast reports
   // count of GRNs and items received.
+  // Bulk "Download PDF" — merge every selected PO into one file. Each PO keeps
+  // its supplier's letterhead (HOOKKA / OHANA / sister co.) the same way the
+  // single Print/Preview action resolves it.
+  const downloadSelectedPdf = async () => {
+    if (selectedPOs.length === 0 || downloadingPdf) return;
+    setDownloadingPdf(true);
+    try {
+      const { generateCombinedPurchaseOrderPdf } = await import(
+        "@/lib/generate-purchase-order-pdf"
+      );
+      await generateCombinedPurchaseOrderPdf(
+        selectedPOs.map((po) => {
+          const sup = allSuppliers.find((s) => s.id === po.supplierId);
+          return {
+            po: { ...po, purchaseOrgCode: sup?.purchaseOrgCode || "HOOKKA" },
+          };
+        }),
+        `PurchaseOrders-${selectedPOs.length}.pdf`,
+      );
+    } catch {
+      /* best-effort; button returns to idle on failure */
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
+
   const handleBulkConvertToGRN = useCallback(async () => {
     if (selectedPOs.length === 0 || bulkGrnRunning) return;
     if (ineligibleReason) {
@@ -1715,6 +1742,19 @@ export default function ProcurementPage() {
                   the action. Disabled (with tooltip) when any selected PO
                   isn't in an eligible status, instead of silently filtering
                   the bad rows — surfaces the constraint up front. */}
+              {selectedPOs.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={downloadingPdf}
+                  onClick={downloadSelectedPdf}
+                >
+                  <Download className="h-4 w-4" />{" "}
+                  {downloadingPdf
+                    ? "Preparing…"
+                    : `Download PDF (${selectedPOs.length})`}
+                </Button>
+              )}
               {selectedPOs.length > 0 && (
                 <Button
                   variant="primary"

@@ -1014,6 +1014,15 @@ export default function WorkerScanPage() {
     // flashing through frame can't fire, but locks faster once the worker is
     // aimed — the 900ms felt like "扫不到" when decodes were sparse.
     const STABLE_MS = 600;
+    // Barcode aim ROI — fractions of the video frame for the centred wide-short
+    // box the decoder reads (roughly matching the on-screen reticle, 86vw ×
+    // short). Decoding ONLY this region (a) keeps ZXing off the ~2MP full frame
+    // that made iOS Safari feel like "no response", and (b) excludes the stacked
+    // schedule barcodes above/below so only the aimed (centred) code fires
+    // (Wei Siang 2026-06-17: full frame = 没反应 + 扫到别的 barcode). A 1D barcode
+    // decodes from any horizontal slice, so a short band is enough.
+    const BARCODE_ROI_W = 0.86;
+    const BARCODE_ROI_H = 0.2;
     const considerHit = (data: string) => {
       if (stopped || !data) return;
       if (scanMode !== "barcode") {
@@ -1047,23 +1056,22 @@ export default function WorkerScanPage() {
               // the nearest one to centre wins — so 2-3 stacked schedule barcodes
               // in view don't all fire; the row the worker aimed at is taken.
               const cy = video.videoHeight / 2;
-              // Full-frame, like QR mode (which reads these SAME Code 128s fine):
-              // consider EVERY Code 128 in view and let the one NEAREST the centre
-              // win — no vertical band cutoff. That band cutoff was the "barcode
-              // mode 扫不到 but QR mode scans" cause (Wei Siang 2026-06-17). Stacked
-              // schedule rows still resolve to the centred (aimed) one.
+              // Accept only a Code 128 whose centre sits inside the aim ROI band,
+              // and among those the one NEAREST the centre wins — so the stacked
+              // schedule barcodes above/below are ignored and only the aimed row
+              // fires (Wei Siang 2026-06-17: "只扫中间的长方形"). A code with no
+              // boundingBox (some detectors omit it) is treated as centred so it
+              // still fires — dropping those was the earlier "完全没反应" bug.
+              const roiHalf = (video.videoHeight * BARCODE_ROI_H) / 2;
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
                 const fmt = (c as { format?: string }).format;
-                // Be tolerant: some phone detectors don't report format OR
-                // boundingBox. Dropping every such code was the "完全没反应" bug.
-                // Reject only a code we KNOW is a QR; a missing box → treat as
-                // centred so it still fires.
                 if (fmt && fmt !== "code_128") continue;
                 const bb = (c as { boundingBox?: { y: number; height: number } })
                   .boundingBox;
                 const d = bb ? Math.abs(bb.y + bb.height / 2 - cy) : 0;
+                if (bb && d > roiHalf) continue; // outside the aim band → ignore
                 if (!best || d < best.d) best = { v: c.rawValue, d };
               }
               if (best) {
@@ -1094,25 +1102,33 @@ export default function WorkerScanPage() {
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
             if (scanMode === "barcode") {
-              // Decode the FULL frame (not a central band). QR mode reads these
-              // same Code 128s full-frame and works, so cropping to a band was the
-              // "barcode mode 扫不到" cause (Wei Siang 2026-06-17). Keep 1280px
-              // width detail since Code 128 density runs horizontally.
-              const bandH = vh;
-              const y0 = 0;
-              const s = Math.min(1, 1280 / vw);
-              const cw = Math.max(1, Math.round(vw * s));
-              const ch = Math.max(1, Math.round(bandH * s));
+              // Decode ONLY the centred rectangle ROI (matches the on-screen aim
+              // box). The full frame was ~2MP — grayscale + HybridBinarizer +
+              // TRY_HARDER every tick was too slow on iOS Safari (felt like "没反应"),
+              // AND it contained the stacked schedule barcodes above/below, so
+              // ZXing's single-decoder could grab a code the worker didn't aim at.
+              // Cropping to the centred band is ~5x fewer pixels (fast) and leaves
+              // only the aimed code (accurate). Wei Siang 2026-06-17: "只扫中间的
+              // 长方形,不要扫到别的 barcode".
+              const sx = Math.round((vw * (1 - BARCODE_ROI_W)) / 2);
+              const sy = Math.round((vh * (1 - BARCODE_ROI_H)) / 2);
+              const sw = Math.max(1, Math.round(vw * BARCODE_ROI_W));
+              const sh = Math.max(1, Math.round(vh * BARCODE_ROI_H));
+              // Downscale only if the ROI is huge; Code 128 density runs
+              // horizontally so keep ~1280px across for sharp bars.
+              const s = Math.min(1, 1280 / sw);
+              const cw = Math.max(1, Math.round(sw * s));
+              const ch = Math.max(1, Math.round(sh * s));
               canvas.width = cw;
               canvas.height = ch;
-              ctx.drawImage(video, 0, y0, vw, bandH, 0, 0, cw, ch);
+              ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
               let imageData: ImageData | null = null;
               try {
                 imageData = ctx.getImageData(0, 0, cw, ch);
               } catch {
                 imageData = null;
               }
-              // jsQR is QR-only — skip it; ZXing reads the Code 128 in the band.
+              // jsQR is QR-only — skip it; ZXing reads the Code 128 in the ROI.
               const zxDecode = zxingRef.current;
               if (imageData && zxDecode) {
                 const zxText = zxDecode(imageData);

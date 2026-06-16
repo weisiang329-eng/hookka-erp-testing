@@ -72,15 +72,16 @@ export function jobCardBarcodeValue(jobCardId: string): string {
 /**
  * Parse a scanned Code 128 back to a WIP barcode token, or null when it isn't
  * one of ours. The schedule barcode is now the SHORT `b<deptNN><7hash>` form
- * (Wei Siang 2026-06-16: a real barcode must be short, not "那麽厚那麽長") — the
- * `b` sentinel + strict 10-char shape ignore a stray courier barcode AND our own
- * QR URLs (which never look like this). The legacy `HKJC:jc-…` form is still
- * accepted so any already-printed sheet keeps working.
+ * 2026-06-17: the token is now ALL-NUMERIC `<deptNN><8 digits>` = 10 digits so
+ * Code 128 uses Set C (fat, scannable bars — see deriveBarcodeToken). The
+ * leading 2 digits are the dept (01–08), which keeps a stray courier barcode
+ * (EAN-8 = 8 digits, EAN-13 = 13) AND our own QR URLs from matching. The legacy
+ * `HKJC:jc-…` form is still accepted.
  */
 export function parseJobCardBarcode(value: string): string | null {
   if (!value) return null;
   const v = value.trim();
-  if (/^b\d{2}[0-9a-z]{7}$/.test(v)) return v; // new short token
+  if (/^0[1-8]\d{8}$/.test(v)) return v; // new 10-digit numeric token
   if (v.startsWith(JC_BARCODE_PREFIX)) {
     const id = v.slice(JC_BARCODE_PREFIX.length).trim();
     return /^jc-/.test(id) ? id : null; // legacy HKJC:jc-… token

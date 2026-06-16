@@ -87,15 +87,15 @@ test('unmapped dept falls through to its own code (id stays unique, not short-pa
   assert.ok(!isShortJobCardToken(id)); // non-2-digit dept → not the scan fast-pattern
 });
 
-// ── Short barcode token (the printed Code 128) ──────────────────────────────
-test('deriveBarcodeToken is b<deptNN><7hash> — 10 chars, deterministic', () => {
+// ── Numeric barcode token (the printed Code 128, Set C for fat bars) ────────
+test('deriveBarcodeToken is <deptNN><8 digits> — 10 digits, deterministic', () => {
   for (const dept of PROD_DEPTS) {
     const t = deriveBarcodeToken('pord-so-abc12345-01', 'P1::0::DIVAN::WD', dept);
-    assert.match(t, /^b\d{2}[0-9a-z]{7}$/, `${dept} → ${t}`);
+    assert.match(t, /^\d{10}$/, `${dept} → ${t}`); // ALL digits → Code 128 Set C
     assert.equal(t.length, 10);
     assert.ok(isBarcodeToken(t));
-    // The dept rides in the 2 digits and round-trips (scan-lookup scopes by it).
-    assert.equal(t.slice(1, 3), deptCode2(dept));
+    // The dept rides in the leading 2 digits and round-trips (scan-lookup scopes by it).
+    assert.equal(t.slice(0, 2), deptCode2(dept));
     assert.equal(deptOfBarcodeToken(t), dept);
     // deterministic
     assert.equal(t, deriveBarcodeToken('pord-so-abc12345-01', 'P1::0::DIVAN::WD', dept));
@@ -110,8 +110,9 @@ test('distinct (poId, wipKey, dept) → distinct barcode tokens', () => {
 });
 
 test('isBarcodeToken / deptOfBarcodeToken reject non-tokens (random barcodes)', () => {
-  assert.ok(!isBarcodeToken('1234567890'));      // all digits, no b
-  assert.ok(!isBarcodeToken('jc-abc-03'));        // the PK form, not a barcode
-  assert.ok(!isBarcodeToken('b9z12345'));         // too short
-  assert.equal(deptOfBarcodeToken('b99abcdefg'), null); // 99 isn't a mapped dept
+  assert.ok(!isBarcodeToken('1299999999'));       // 10 digits but '12' is no dept
+  assert.ok(!isBarcodeToken('jc-abc-03'));         // the PK form, not a barcode
+  assert.ok(!isBarcodeToken('0112345'));           // too short (not 10 digits)
+  assert.ok(!isBarcodeToken('b0112345678'));       // has a letter → not Set C
+  assert.equal(deptOfBarcodeToken('9912345678'), null); // 99 isn't a mapped dept
 });

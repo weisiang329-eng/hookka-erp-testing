@@ -93,6 +93,56 @@ type ExtractionResult = {
   total?: number | null;
 };
 
+// Robust numeric coercion. Despite the temperature-0 prompt, OCR output drifts:
+// "1,200.50", "RM 50.00", "12 pcs", "" — all of which would poison downstream
+// qty/price math (NaN, or a string concatenated into a sum). Strip everything
+// but digits / dot / minus and parse; un-parseable ⇒ null (never a guess).
+function num(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const cleaned = String(v).replace(/[^0-9.-]/g, "");
+  if (cleaned === "" || cleaned === "-" || cleaned === ".") return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+const str = (v: unknown): string | null =>
+  v === null || v === undefined ? null : String(v).trim() || null;
+
+// Normalise whatever Claude returned into a clean, type-safe ExtractionResult:
+// tolerate `items` as an alias for `lines`, coerce every number, trim strings,
+// and drop fully-empty noise rows. One choke point so the GRN/PI side never
+// sees a stringy qty or a half-shaped line. This is the "做稳一点" guard.
+function sanitizeExtraction(
+  raw: ExtractionResult & { items?: ExtractedLine[] },
+): ExtractionResult {
+  const rawLines = Array.isArray(raw.lines)
+    ? raw.lines
+    : Array.isArray(raw.items)
+      ? raw.items
+      : [];
+  const lines: ExtractedLine[] = rawLines
+    .map((l) => ({
+      supplierCode: str(l?.supplierCode),
+      description: str(l?.description),
+      qty: num(l?.qty),
+      uom: str(l?.uom),
+      unitPrice: num(l?.unitPrice),
+      amount: num(l?.amount),
+    }))
+    .filter((l) => l.description || l.supplierCode || l.qty != null);
+  return {
+    supplierName: str(raw.supplierName),
+    docType: str(raw.docType),
+    docNo: str(raw.docNo),
+    docDate: str(raw.docDate),
+    currency: str(raw.currency) ?? "MYR",
+    lines,
+    subtotal: num(raw.subtotal),
+    tax: num(raw.tax),
+    total: num(raw.total),
+  };
+}
+
 const SYSTEM_PROMPT = `You are an OCR extraction engine for a furniture manufacturer (Hookka) in Malaysia. You read a SUPPLIER's document — a delivery order / delivery note (DO) or a tax invoice — and return the line items so the operator can build a Goods Received Note or a Purchase Invoice.
 
 You will be given the document (PDF or photo). Extract EXACTLY what is printed. Do not invent, do not "correct" the supplier's figures, do not compute totals the document doesn't show.
@@ -332,9 +382,10 @@ app.post("/extract", async (c) => {
           parsedResp.content?.find((b) => b.type === "text")?.text ?? "";
         claudeText = stripJsonFences(firstText);
         try {
-          const raw = JSON.parse(claudeText) as ExtractionResult;
-          raw.lines = Array.isArray(raw.lines) ? raw.lines : [];
-          parsed = raw;
+          const raw = JSON.parse(claudeText) as ExtractionResult & {
+            items?: ExtractedLine[];
+          };
+          parsed = sanitizeExtraction(raw);
         } catch (e) {
           errorMsg = `Claude returned invalid JSON: ${(e as Error).message}. Raw: ${claudeText.slice(0, 300)}`;
         }

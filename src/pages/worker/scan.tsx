@@ -472,9 +472,19 @@ export default function WorkerScanPage() {
       const qs = new URLSearchParams({ q: term });
       if (deptHint) qs.set("dept", deptHint);
       const res = await workerFetch(`/api/worker/scan-lookup?${qs.toString()}`);
-      const data = POListEnvelope.parse(await res.json());
-      if (!data.success || !data.data) return [];
-      const orders = data.data as unknown as Order[];
+      // Degrade gracefully: a non-OK response or a non-JSON / odd-shape body
+      // must NOT throw here. An uncaught throw bubbles to the caller's catch and
+      // shows the scary "出错了 / Something went wrong" card (Wei Siang
+      // 2026-06-17: barcode scan → something went wrong) instead of a useful
+      // "Not found". res.ok guard + safeParse turn any backend hiccup into an
+      // empty result, so the worker sees "Not found: <token>" and can retry.
+      if (!res.ok) return [];
+      const json = await res.json().catch(() => null);
+      const pr = json ? POListEnvelope.safeParse(json) : null;
+      if (!pr?.success) return [];
+      const env = pr.data;
+      if (!env.success || !env.data) return [];
+      const orders = env.data as unknown as Order[];
       // Job-card id / barcode token — unique → return the single hit and stop.
       // Match the stored id directly (a QR sticker's op=<id>) OR the short
       // schedule-barcode token re-derived from (poId, wipKey, dept).

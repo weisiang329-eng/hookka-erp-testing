@@ -19,6 +19,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { compressImage } from "@/lib/image-compress";
 import {
   ArrowLeft, CheckCircle2, XCircle, Plus, X, Wrench, AlertCircle, Loader2,
+  Pencil, Check,
 } from "lucide-react";
 
 type CaseStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | "CANCELLED";
@@ -206,6 +207,9 @@ export default function ServiceCaseDetailPage() {
 
   const [advancing, setAdvancing] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
+  // The whole case is READ-ONLY until "Edit" is clicked (no silent auto-save /
+  // "裸奔"; owner wants an explicit edit function like the SO detail).
+  const [editing, setEditing] = useState(false);
 
   const allowedTransitions = useMemo(
     () => (caseDetail ? STATUS_TRANSITIONS[caseDetail.status] ?? [] : []),
@@ -310,6 +314,29 @@ export default function ServiceCaseDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 justify-end shrink-0">
+          {/* Edit ⇄ Done — the case info below is locked until you click Edit
+              (no silent auto-save). Shown for every status except a cancelled
+              case (closed cases can still be corrected / have RCA added). */}
+          {caseDetail.status !== "CANCELLED" && (
+            <Button
+              variant={editing ? "primary" : "outline"}
+              size="sm"
+              onClick={() => setEditing((v) => !v)}
+              className={
+                editing ? "bg-[#6B5C32] text-white hover:bg-[#5a4d2a]" : undefined
+              }
+            >
+              {editing ? (
+                <>
+                  <Check className="h-4 w-4" /> Done Editing
+                </>
+              ) : (
+                <>
+                  <Pencil className="h-4 w-4" /> Edit
+                </>
+              )}
+            </Button>
+          )}
           {allowedTransitions.includes("IN_PROGRESS") && (
             <Button
               variant="outline"
@@ -365,6 +392,26 @@ export default function ServiceCaseDetailPage() {
         </div>
       </div>
 
+      {/* Edit-mode banner — makes it obvious the case info below is now
+          unlocked (so the explicit edit function is never "看不到"). */}
+      {editing && (
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-[#E8D8B2] bg-[#FAF7F0] px-3 py-2 text-xs text-[#6B5232]">
+          <span className="inline-flex items-center gap-1.5">
+            <Pencil className="h-3.5 w-3.5" />
+            Editing — the case info below is unlocked. Each section has its own
+            Save; click <span className="font-semibold">Done Editing</span> when finished.
+          </span>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => setEditing(false)}
+            className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+          >
+            <Check className="h-4 w-4" /> Done Editing
+          </Button>
+        </div>
+      )}
+
       {/* Case pipeline — auto-computed progress stepper, display-only.
           Derived from the case status + attached orders + their delivery
           orders; nothing here writes. */}
@@ -377,6 +424,7 @@ export default function ServiceCaseDetailPage() {
           2026-04-28 so it's now one editable field, auto-saves on blur. */}
       <IssueDescriptionPanel
         caseDetail={caseDetail}
+        editing={editing}
         onSaved={() => {
           invalidateCachePrefix("/api/service-cases");
           refresh();
@@ -384,6 +432,7 @@ export default function ServiceCaseDetailPage() {
       />
       <PhotosPanel
         caseDetail={caseDetail}
+        editing={editing}
         onSaved={() => {
           invalidateCachePrefix("/api/service-cases");
           refresh();
@@ -396,6 +445,7 @@ export default function ServiceCaseDetailPage() {
           quickly add lines that match the source order's products. */}
       <AffectedProductsPanel
         caseDetail={caseDetail}
+        editing={editing}
         onSaved={() => {
           invalidateCachePrefix("/api/service-cases");
           refresh();
@@ -493,6 +543,7 @@ export default function ServiceCaseDetailPage() {
       {/* Root cause + prevention (open here; track elsewhere) */}
       <RootCausePanel
         caseDetail={caseDetail}
+        editing={editing}
         onSaved={() => {
           invalidateCachePrefix("/api/service-cases");
           refresh();
@@ -507,6 +558,7 @@ export default function ServiceCaseDetailPage() {
       <ActionLogPanel
         key={`actions-${caseDetail.actionLog.length}`}
         caseDetail={caseDetail}
+        editing={editing}
         onSaved={() => {
           invalidateCachePrefix("/api/service-cases");
           refresh();
@@ -690,9 +742,11 @@ type RootCauseBlock = { category: string; details: RootCauseDetails };
 
 function RootCausePanel({
   caseDetail,
+  editing,
   onSaved,
 }: {
   caseDetail: ServiceCaseDetail;
+  editing: boolean;
   onSaved: () => void;
 }) {
   const { toast } = useToast();
@@ -781,22 +835,24 @@ function RootCausePanel({
                 <span className="text-[11px] font-medium uppercase text-[#6B7280]">
                   Root cause #{idx + 1}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => removeBlock(idx)}
-                  disabled={saving}
-                  className="text-[#9A3A2D] hover:text-[#7A2E24]"
-                  title="Remove this root cause"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+                {editing && (
+                  <button
+                    type="button"
+                    onClick={() => removeBlock(idx)}
+                    disabled={saving}
+                    className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                    title="Remove this root cause"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </div>
               {/* Category — drives reporting / categorisation of recurrence. */}
               <select
                 value={block.category}
                 onChange={(e) => setBlockCategory(idx, e.target.value)}
-                disabled={saving}
-                className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm"
+                disabled={saving || !editing}
+                className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm disabled:bg-[#FAF9F7] disabled:text-[#4B5563]"
               >
                 <option value="">Category — not yet assigned</option>
                 {Object.entries(ROOT_CAUSE_LABELS).map(([v, t]) => (
@@ -814,24 +870,26 @@ function RootCausePanel({
                   value={block.details}
                   onChange={(next) => setBlockDetails(idx, next)}
                   onPersist={(next) => setBlockDetails(idx, next)}
-                  disabled={saving}
+                  disabled={saving || !editing}
                 />
               )}
             </div>
           ))
         )}
 
-        {/* Add another root cause. */}
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={addBlock}
-          disabled={saving}
-          className="w-full border-dashed"
-        >
-          <Plus className="h-4 w-4" /> Add root cause
-        </Button>
+        {/* Add another root cause — edit mode only. */}
+        {editing && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={addBlock}
+            disabled={saving}
+            className="w-full border-dashed"
+          >
+            <Plus className="h-4 w-4" /> Add root cause
+          </Button>
+        )}
 
         {/* Prevention action + owner — route through the same dirty/Save flow
             (no auto-save on blur anymore). rootCauseNotes textarea removed
@@ -844,9 +902,9 @@ function RootCausePanel({
             setAction(e.target.value);
             setDirty(true);
           }}
-          disabled={saving}
+          disabled={saving || !editing}
           placeholder="What's the action so the next batch doesn't repeat this?"
-          className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
+          className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm disabled:bg-[#FAF9F7] disabled:text-[#4B5563]"
         />
         <Input
           type="text"
@@ -855,9 +913,9 @@ function RootCausePanel({
             setOwner(e.target.value);
             setDirty(true);
           }}
-          disabled={saving}
+          disabled={saving || !editing}
           placeholder="Owner of follow-up (name)"
-          className="h-8 text-sm"
+          className="h-8 text-sm disabled:bg-[#FAF9F7] disabled:text-[#4B5563]"
         />
         {/* Per design 2026-04-28: case detail OPENS the prevention task; the
             actual progress tracking lives in a dedicated Prevention Tracker
@@ -868,24 +926,27 @@ function RootCausePanel({
           tracking will live in the Prevention Tracker portal (coming soon).
         </p>
 
-        {/* Save bar — explicit persist (the panel no longer auto-saves). */}
-        <div className="flex items-center justify-between gap-2 border-t border-[#F0ECE9] pt-3">
-          <span
-            className={`text-[11px] ${dirty ? "text-[#8A6D1E]" : "text-[#9CA3AF]"}`}
-          >
-            {dirty ? "Unsaved changes" : "All changes saved"}
-          </span>
-          <Button
-            type="button"
-            variant="primary"
-            size="sm"
-            onClick={handleSave}
-            disabled={!dirty || saving}
-            className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-          >
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        </div>
+        {/* Save bar — explicit persist (the panel no longer auto-saves).
+            Edit mode only. */}
+        {editing && (
+          <div className="flex items-center justify-between gap-2 border-t border-[#F0ECE9] pt-3">
+            <span
+              className={`text-[11px] ${dirty ? "text-[#8A6D1E]" : "text-[#9CA3AF]"}`}
+            >
+              {dirty ? "Unsaved changes" : "All changes saved"}
+            </span>
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              onClick={handleSave}
+              disabled={!dirty || saving}
+              className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+            >
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -900,9 +961,11 @@ function RootCausePanel({
 // 2026-04-28 so it's now one editable field.
 function IssueDescriptionPanel({
   caseDetail,
+  editing,
   onSaved,
 }: {
   caseDetail: ServiceCaseDetail;
+  editing: boolean;
   onSaved: () => void;
 }) {
   const { toast } = useToast();
@@ -946,7 +1009,7 @@ function IssueDescriptionPanel({
           rows={6}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          disabled={saving}
+          disabled={saving || !editing}
           placeholder={[
             "What happened? Use the 5W template:",
             "  When  — date / time of incident (e.g. 2026-04-29 10:30)",
@@ -955,38 +1018,40 @@ function IssueDescriptionPanel({
             "  What  — what they did (e.g. dropped the sofa during unloading)",
             "  Result — what problem was caused (e.g. frame cracked at left armrest)",
           ].join("\n")}
-          className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
+          className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm disabled:bg-[#FAF9F7] disabled:text-[#4B5563]"
         />
-        <div className="mt-2 flex items-center justify-between gap-2">
-          <span
-            className={`text-[11px] ${dirty ? "text-[#8A6D1E]" : "text-[#9CA3AF]"}`}
-          >
-            {dirty ? "Unsaved changes" : "All changes saved"}
-          </span>
-          <div className="flex items-center gap-2">
-            {dirty && (
+        {editing && (
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <span
+              className={`text-[11px] ${dirty ? "text-[#8A6D1E]" : "text-[#9CA3AF]"}`}
+            >
+              {dirty ? "Unsaved changes" : "All changes saved"}
+            </span>
+            <div className="flex items-center gap-2">
+              {dirty && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setDescription(caseDetail.issueDescription)}
+                  disabled={saving}
+                >
+                  Discard
+                </Button>
+              )}
               <Button
                 type="button"
-                variant="outline"
+                variant="primary"
                 size="sm"
-                onClick={() => setDescription(caseDetail.issueDescription)}
-                disabled={saving}
+                onClick={save}
+                disabled={!dirty || saving}
+                className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
               >
-                Discard
+                {saving ? "Saving…" : "Save"}
               </Button>
-            )}
-            <Button
-              type="button"
-              variant="primary"
-              size="sm"
-              onClick={save}
-              disabled={!dirty || saving}
-              className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-            >
-              {saving ? "Saving…" : "Save"}
-            </Button>
+            </div>
           </div>
-        </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -1567,10 +1632,12 @@ type DamagedPartOption = { key: string; label: string; qty: number };
 function CaseDamagedPartsEditor({
   productCode,
   picks,
+  editing,
   onChange,
 }: {
   productCode: string;
   picks: DamagedPartOption[];
+  editing: boolean;
   onChange: (next: DamagedPartOption[]) => void;
 }) {
   const [options, setOptions] = useState<DamagedPartOption[] | null>(null);
@@ -1598,6 +1665,13 @@ function CaseDamagedPartsEditor({
   // Flat / legacy product with no top-level pieces → nothing to pick (the
   // whole product is the unit), same as the create modal.
   if (!options || options.length === 0) return null;
+  // View mode with nothing picked = "all parts" — don't show an empty picker.
+  if (!editing && picks.length === 0) return null;
+  // View mode shows only the damaged parts (read-only); edit mode shows the
+  // full pick list.
+  const rows = editing
+    ? options
+    : options.filter((opt) => picks.some((p) => p.key === opt.key));
 
   const toggle = (opt: DamagedPartOption) => {
     const has = picks.some((p) => p.key === opt.key);
@@ -1617,19 +1691,22 @@ function CaseDamagedPartsEditor({
   return (
     <div className="mt-1.5 rounded border border-[#E8D8B2] bg-[#FAF7F0] px-2 py-1.5">
       <div className="text-[10px] text-[#6B5C32] mb-1">
-        Damaged parts (optional — all if none picked)
+        {editing ? "Damaged parts (optional — all if none picked)" : "Damaged parts"}
       </div>
       <div className="space-y-1">
-        {options.map((opt) => {
+        {rows.map((opt) => {
           const pick = picks.find((p) => p.key === opt.key);
           const maxQty = Math.max(1, Math.floor(opt.qty) || 1);
           return (
             <div key={opt.key} className="flex items-center gap-2 text-[11px]">
-              <label className="flex items-center gap-1.5 flex-1 min-w-0 cursor-pointer">
+              <label
+                className={`flex items-center gap-1.5 flex-1 min-w-0 ${editing ? "cursor-pointer" : ""}`}
+              >
                 <input
                   type="checkbox"
                   checked={!!pick}
                   onChange={() => toggle(opt)}
+                  disabled={!editing}
                   className="h-3 w-3"
                 />
                 <span className="truncate">{opt.label}</span>
@@ -1643,7 +1720,8 @@ function CaseDamagedPartsEditor({
                   value={pick.qty}
                   onFocus={(e) => e.currentTarget.select()}
                   onChange={(e) => setQty(opt, e.target.value)}
-                  className="h-6 w-14 text-[11px] px-1.5"
+                  disabled={!editing}
+                  className="h-6 w-14 text-[11px] px-1.5 disabled:bg-white disabled:text-[#4B5563]"
                 />
               ) : null}
             </div>
@@ -1663,9 +1741,11 @@ function CaseDamagedPartsEditor({
 // service_cases.affected_product_ids (migration 0077).
 function AffectedProductsPanel({
   caseDetail,
+  editing,
   onSaved,
 }: {
   caseDetail: ServiceCaseDetail;
+  editing: boolean;
   onSaved: () => void;
 }) {
   const { toast } = useToast();
@@ -1823,7 +1903,8 @@ function AffectedProductsPanel({
       </CardHeader>
       <CardContent className="space-y-2">
         {/* Search-then-add. Empty query shows no list (avoids dropdown
-            of 1000+ SKUs). Click a result to add. */}
+            of 1000+ SKUs). Click a result to add. Edit mode only. */}
+        {editing && (
         <div className="relative">
           <Input
             type="text"
@@ -1850,10 +1931,11 @@ function AffectedProductsPanel({
             </div>
           )}
         </div>
+        )}
 
         {/* Pull from the source order — one tap to attach a line the order
-            already has, instead of searching the whole catalog. */}
-        {sourceItems.length > 0 && (
+            already has, instead of searching the whole catalog. Edit mode only. */}
+        {editing && sourceItems.length > 0 && (
           <div className="rounded-lg border border-dashed border-[#C9B98A] bg-[#FCFBF7] p-2">
             <div className="mb-1.5 flex items-center justify-between">
               <span className="text-xs font-medium text-[#9C6F1E]">
@@ -1913,6 +1995,7 @@ function AffectedProductsPanel({
                   <CaseDamagedPartsEditor
                     productCode={p.code}
                     picks={p.components ?? []}
+                    editing={editing}
                     onChange={(next) => updateComponents(p.productId, next)}
                   />
                 </div>
@@ -1929,19 +2012,21 @@ function AffectedProductsPanel({
                       const n = Math.floor(Number(raw));
                       setQty(p.productId, Number.isFinite(n) && n >= 1 ? n : 1);
                     }}
-                    disabled={saving}
+                    disabled={saving || !editing}
                     placeholder="Qty"
-                    className="h-8 w-16 text-sm"
+                    className="h-8 w-16 text-sm disabled:bg-[#FAF9F7] disabled:text-[#4B5563]"
                   />
-                  <button
-                    type="button"
-                    onClick={() => removeProduct(p.productId)}
-                    disabled={saving}
-                    className="text-[#9A3A2D] hover:text-[#7A2E24]"
-                    title="Remove"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
+                  {editing && (
+                    <button
+                      type="button"
+                      onClick={() => removeProduct(p.productId)}
+                      disabled={saving}
+                      className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                      title="Remove"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
               </li>
             ))}
@@ -2318,9 +2403,11 @@ function StockTopUpPanel({
 // resize-to-base64 pipeline as the create modal.
 function PhotosPanel({
   caseDetail,
+  editing,
   onSaved,
 }: {
   caseDetail: ServiceCaseDetail;
+  editing: boolean;
   onSaved: () => void;
 }) {
   const { toast } = useToast();
@@ -2390,21 +2477,23 @@ function PhotosPanel({
     <Card>
       <CardHeader className="pb-2 flex flex-row items-center justify-between">
         <CardTitle className="text-sm">Photos ({caseDetail.issuePhotos.length})</CardTitle>
-        <label className="inline-flex items-center gap-2 cursor-pointer rounded border border-[#E2DDD8] bg-white hover:bg-[#FAF9F7] px-3 py-1.5 text-xs">
-          <Plus className="h-3.5 w-3.5" />
-          {caseDetail.issuePhotos.length === 0 ? "Add photos" : "Add more photos"}
-          <input
-            type="file"
-            accept="image/*"
-            multiple
-            disabled={saving}
-            onChange={(e) => {
-              handleAdd(e.target.files);
-              e.target.value = "";
-            }}
-            className="hidden"
-          />
-        </label>
+        {editing && (
+          <label className="inline-flex items-center gap-2 cursor-pointer rounded border border-[#E2DDD8] bg-white hover:bg-[#FAF9F7] px-3 py-1.5 text-xs">
+            <Plus className="h-3.5 w-3.5" />
+            {caseDetail.issuePhotos.length === 0 ? "Add photos" : "Add more photos"}
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              disabled={saving}
+              onChange={(e) => {
+                handleAdd(e.target.files);
+                e.target.value = "";
+              }}
+              className="hidden"
+            />
+          </label>
+        )}
       </CardHeader>
       <CardContent>
         {uploadProgress && (
@@ -2429,15 +2518,17 @@ function PhotosPanel({
                     className="h-24 w-24 rounded border border-[#E2DDD8] object-cover hover:border-[#6B5C32]"
                   />
                 </a>
-                <button
-                  type="button"
-                  onClick={() => handleRemove(i)}
-                  disabled={saving}
-                  className="absolute -top-1 -right-1 rounded-full bg-white border border-[#E2DDD8] p-0.5 text-[#9A3A2D] hover:text-[#7A2E24] shadow-sm"
-                  title="Remove"
-                >
-                  <X className="h-3 w-3" />
-                </button>
+                {editing && (
+                  <button
+                    type="button"
+                    onClick={() => handleRemove(i)}
+                    disabled={saving}
+                    className="absolute -top-1 -right-1 rounded-full bg-white border border-[#E2DDD8] p-0.5 text-[#9A3A2D] hover:text-[#7A2E24] shadow-sm"
+                    title="Remove"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -2457,9 +2548,11 @@ function PhotosPanel({
 // on blur — [[feedback_no_naked_edits]]); the Save bar persists the whole log.
 function ActionLogPanel({
   caseDetail,
+  editing,
   onSaved,
 }: {
   caseDetail: ServiceCaseDetail;
+  editing: boolean;
   onSaved: () => void;
 }) {
   const { toast } = useToast();
@@ -2525,15 +2618,18 @@ function ActionLogPanel({
     <Card>
       <CardHeader className="pb-2 flex flex-row items-center justify-between">
         <CardTitle className="text-sm">Action Taken (Service Agent Log)</CardTitle>
-        <Button size="sm" variant="outline" onClick={addEntry} disabled={saving}>
-          <Plus className="mr-1 h-3 w-3" /> Add Entry
-        </Button>
+        {editing && (
+          <Button size="sm" variant="outline" onClick={addEntry} disabled={saving}>
+            <Plus className="mr-1 h-3 w-3" /> Add Entry
+          </Button>
+        )}
       </CardHeader>
       <CardContent>
         {entries.length === 0 ? (
           <p className="text-xs text-[#9CA3AF]">
-            Log each action you take on this case (called customer, scheduled
-            inspection, sent missing part, etc.). Click "Add Entry" to start.
+            {editing
+              ? 'Log each action you take on this case (called customer, scheduled inspection, sent missing part, etc.). Click "Add Entry" to start.'
+              : "No actions logged yet. Click Edit to add one."}
           </p>
         ) : (
           <div className="space-y-2">
@@ -2543,45 +2639,51 @@ function ActionLogPanel({
                   type="date"
                   value={e.date}
                   onChange={(ev) => patchEntry(e.id, { date: ev.target.value })}
-                  className="h-8 w-[150px] text-xs"
+                  disabled={!editing}
+                  className="h-8 w-[150px] text-xs disabled:bg-[#FAF9F7] disabled:text-[#4B5563]"
                 />
                 <Input
                   type="text"
                   value={e.description}
                   onChange={(ev) => patchEntry(e.id, { description: ev.target.value })}
                   placeholder="What did you do? (e.g. Called customer, scheduled on-site inspection)"
-                  className="h-8 flex-1 text-xs"
+                  disabled={!editing}
+                  className="h-8 flex-1 text-xs disabled:bg-[#FAF9F7] disabled:text-[#4B5563]"
                 />
-                <button
-                  type="button"
-                  onClick={() => removeEntry(e.id)}
-                  className="text-[#9A3A2D] hover:text-[#7A2E24] p-1"
-                  title="Remove"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+                {editing && (
+                  <button
+                    type="button"
+                    onClick={() => removeEntry(e.id)}
+                    className="text-[#9A3A2D] hover:text-[#7A2E24] p-1"
+                    title="Remove"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </div>
             ))}
           </div>
         )}
-        {/* Save bar — the log no longer auto-saves on blur. */}
-        <div className="mt-3 flex items-center justify-between gap-2 border-t border-[#F0ECE9] pt-3">
-          <span
-            className={`text-[11px] ${dirty ? "text-[#8A6D1E]" : "text-[#9CA3AF]"}`}
-          >
-            {dirty ? "Unsaved changes" : "All changes saved"}
-          </span>
-          <Button
-            type="button"
-            variant="primary"
-            size="sm"
-            onClick={handleSave}
-            disabled={!dirty || saving}
-            className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-          >
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        </div>
+        {/* Save bar — the log no longer auto-saves on blur. Edit mode only. */}
+        {editing && (
+          <div className="mt-3 flex items-center justify-between gap-2 border-t border-[#F0ECE9] pt-3">
+            <span
+              className={`text-[11px] ${dirty ? "text-[#8A6D1E]" : "text-[#9CA3AF]"}`}
+            >
+              {dirty ? "Unsaved changes" : "All changes saved"}
+            </span>
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              onClick={handleSave}
+              disabled={!dirty || saving}
+              className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+            >
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

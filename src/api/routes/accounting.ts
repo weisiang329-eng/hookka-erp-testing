@@ -26,6 +26,8 @@ import { getFyeMonth, fyWindowFor } from "../lib/fiscal";
 import { emitAudit } from "../lib/audit";
 import { parseDebtorCode } from "../../lib/debtor";
 import { pnlBucketFor } from "../../lib/pnl-bucket";
+import { bsSectionFor, bsSectionClass } from "../../lib/bs-section";
+import type { BsSection } from "../../lib/bs-section";
 import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
 
@@ -3543,16 +3545,6 @@ app.get("/cleanup-report", async (c) => {
   });
 });
 
-function bsCategory(
-  type: string,
-  code: string,
-): "CURRENT_ASSET" | "FIXED_ASSET" | "CURRENT_LIABILITY" | "LONG_TERM_LIABILITY" | "EQUITY" {
-  const p = parseInt(code.split("-")[0], 10) || 0;
-  if (type === "ASSET") return p < 300 ? "FIXED_ASSET" : "CURRENT_ASSET";
-  if (type === "LIABILITY") return "CURRENT_LIABILITY";
-  return "EQUITY";
-}
-
 // ---------------------------------------------------------------------------
 // MANUFACTURING-ACCOUNT P&L STATEMENT (Phase 5.1/5.2, 2026-06) — the
 // owner's workbook format, computed for a date window. Raw-material,
@@ -4426,26 +4418,27 @@ app.get("/pl", async (c) => {
     id: string;
     accountCode: string;
     accountName: string;
-    category: ReturnType<typeof bsCategory>;
+    category: BsSection;
     balance: number;
     asOfDate: string;
   }[] = [];
   const asOf = endYm ? `${endYm}-28` : new Date().toISOString().slice(0, 10);
+  const bsOverride = await getBsSectionMap(c.var.DB);
   const bsCodes = new Set([...bsDr.keys(), ...bsCr.keys()]);
   for (const code of bsCodes) {
     const acct = coa.get(code);
     if (!acct) continue;
-    if (acct.type !== "ASSET" && acct.type !== "LIABILITY" && acct.type !== "EQUITY")
-      continue;
+    const section = bsSectionFor(code, acct.type, bsOverride);
+    if (!section) continue; // not a balance-sheet account
     const dr = bsDr.get(code) ?? 0;
     const cr = bsCr.get(code) ?? 0;
-    const bal = acct.type === "ASSET" ? dr - cr : cr - dr;
+    const bal = bsSectionClass(section) === "asset" ? dr - cr : cr - dr;
     if (bal === 0) continue;
     balanceSheet.push({
       id: code,
       accountCode: code,
       accountName: acct.name,
-      category: bsCategory(acct.type, code),
+      category: section,
       balance: bal,
       asOfDate: asOf,
     });
@@ -5290,6 +5283,18 @@ async function getPnlSectionMap(
   return {};
 }
 
+async function getBsSectionMap(
+  db: Env["Variables"]["DB"],
+): Promise<Record<string, string>> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'bs_section_map'")
+      .first<{ value: string | null }>();
+    if (row?.value) return JSON.parse(row.value) as Record<string, string>;
+  } catch { /* absent → empty */ }
+  return {};
+}
+
 type LabourDeptAgg = {
   departmentCode: string;
   account: string;
@@ -5537,6 +5542,32 @@ app.put("/pnl/section-map", async (c) => {
     for (const [code, b] of Object.entries(body.map)) if (typeof b === "string" && valid.has(b)) map[code] = b;
     await c.var.DB.prepare(
       `INSERT INTO kv_config (key, value, updated_at) VALUES ('pnl_section_map', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).bind(JSON.stringify(map), new Date().toISOString()).run();
+    return c.json({ success: true, data: { map } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.get("/bs/section-map", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const map = await getBsSectionMap(c.var.DB);
+  return c.json({ success: true, data: { map } });
+});
+
+app.put("/bs/section-map", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as { map?: Record<string, string> };
+    if (body.map === undefined) return c.json({ success: false, error: "map required" }, 400);
+    const valid = new Set(["FIXED_ASSET", "CURRENT_ASSET", "CURRENT_LIABILITY", "LONG_TERM_LIABILITY", "EQUITY"]);
+    const map: Record<string, string> = {};
+    for (const [code, s] of Object.entries(body.map)) if (typeof s === "string" && valid.has(s)) map[code] = s;
+    await c.var.DB.prepare(
+      `INSERT INTO kv_config (key, value, updated_at) VALUES ('bs_section_map', ?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
     ).bind(JSON.stringify(map), new Date().toISOString()).run();
     return c.json({ success: true, data: { map } });

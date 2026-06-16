@@ -15,6 +15,7 @@ import {
   X,
   BarChart3,
   List,
+  Download,
 } from "lucide-react";
 import type { Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
@@ -129,6 +130,8 @@ export default function InvoicesPage() {
   const [batchResult, setBatchResult] = useState<
     { ok: number; fail: number; errors: string[] } | null
   >(null);
+  // Bulk "Download PDF" of the selected invoices, merged into one file.
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const openCreate = () => {
     refreshDOs();
@@ -225,6 +228,65 @@ export default function InvoicesPage() {
     setBatchConfirmOpen(false);
     setSelectedInvoices([]);
     setBatchResult({ ok, fail: errors.length, errors });
+  };
+
+  // Bulk "Download PDF" — render EVERY selected invoice (any status, not just
+  // drafts) into one merged PDF the owner opens/prints in a single go. The list
+  // rows are the slim payload (no line items), so fetch each full invoice +
+  // its print-extras, then hand them to generateCombinedInvoicePdf. Chunked so
+  // a 20-30 invoice selection doesn't fire 60 requests at once.
+  const downloadSelectedPdf = async () => {
+    if (selectedInvoices.length === 0 || downloadingPdf) return;
+    setDownloadingPdf(true);
+    try {
+      const ordered = [...selectedInvoices].sort((a, b) =>
+        String(a.invoiceNo || "").localeCompare(String(b.invoiceNo || ""))
+      );
+      const items: { invoice: unknown; extras?: unknown }[] = [];
+      const CHUNK = 5;
+      for (let i = 0; i < ordered.length; i += CHUNK) {
+        const fetched = await Promise.all(
+          ordered.slice(i, i + CHUNK).map(async (sel) => {
+            const [invRes, exRes] = await Promise.all([
+              fetch(`/api/invoices/${encodeURIComponent(sel.id)}`, {
+                credentials: "include",
+              }),
+              fetch(
+                `/api/invoices/${encodeURIComponent(sel.id)}/print-extras`,
+                { credentials: "include" }
+              ),
+            ]);
+            const invJson = (await invRes.json()) as { data?: unknown };
+            const invoice = invJson?.data ?? null;
+            let extras: unknown = {};
+            try {
+              const ej = (await exRes.json()) as {
+                success?: boolean;
+                data?: unknown;
+              };
+              if (ej?.success && ej.data) extras = ej.data;
+            } catch {
+              /* extras are optional — PDF still renders without them */
+            }
+            return invoice ? { invoice, extras } : null;
+          })
+        );
+        for (const f of fetched) if (f) items.push(f);
+      }
+      if (items.length === 0) return;
+      const { generateCombinedInvoicePdf } = await import(
+        "@/lib/generate-invoice-pdf"
+      );
+      await generateCombinedInvoicePdf(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        items as any,
+        `Invoices-${items.length}.pdf`
+      );
+    } catch {
+      /* best-effort; the button returns to idle on failure */
+    } finally {
+      setDownloadingPdf(false);
+    }
   };
 
   const recordPayment = async (inv: Invoice) => {
@@ -590,6 +652,17 @@ export default function InvoicesPage() {
                       onClick={() => setSelectedInvoices([])}
                     >
                       Clear
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={downloadingPdf}
+                      onClick={downloadSelectedPdf}
+                    >
+                      <Download className="w-4 h-4 mr-1" />
+                      {downloadingPdf
+                        ? "Preparing…"
+                        : `Download PDF (${selectedInvoices.length})`}
                     </Button>
                     <Button
                       variant="primary"

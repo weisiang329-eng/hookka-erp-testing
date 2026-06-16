@@ -205,15 +205,12 @@ export default function AccountingPage() {
   // The sidebar deep-links each report via /accounting?tab=<key>; keep the
   // selected tab in the URL so those links land on the right screen and the
   // tab is shareable/bookmarkable.
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
   const urlTab = searchParams.get("tab");
-  // The URL is the source of truth — derive the active tab, no mirror state.
+  // The URL is the source of truth — derive the active tab. Navigation comes
+  // from the sidebar's deep links (/accounting?tab=<key>); the in-page tab bar
+  // was removed as a duplicate of the sidebar (owner 2026-06).
   const tab: TabKey = (TABS.some((t) => t.key === urlTab) ? urlTab : "overview") as TabKey;
-  const setTab = (k: TabKey) => {
-    const next = new URLSearchParams(searchParams);
-    next.set("tab", k);
-    setSearchParams(next, { replace: true });
-  };
   const { data: coaResp, loading: coaLoading, refresh: refreshCoa } = useCachedJson<{ success?: boolean; data?: ChartOfAccount[] }>("/api/accounting/coa");
   const { data: jeResp, loading: jeLoading, refresh: refreshJe } = useCachedJson<{ success?: boolean; data?: JournalEntry[] }>("/api/accounting/journals");
   const { data: agingResp, loading: agingLoading, refresh: refreshAging } = useCachedJson<{ success?: boolean; data?: { ar: ARAgingEntry[]; ap: APAgingEntry[] } }>("/api/accounting/aging");
@@ -239,30 +236,6 @@ export default function AccountingPage() {
           <h1 className="text-xl font-bold text-[#1F1D1B]">Accounting</h1>
           <p className="text-xs text-[#6B7280]">General ledger, accounts receivable, and accounts payable</p>
         </div>
-      </div>
-
-      {/* Tabs — grouped (sidebar drives navigation; this mirrors it). Each
-          group on its own row with a small heading. */}
-      <div className="space-y-2">
-        {[...new Set(TABS.map((t) => t.group))].map((g) => (
-          <div key={g} className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-[#9CA3AF] w-32 shrink-0">{g}</span>
-            {TABS.filter((t) => t.group === g).map((t) => (
-              <button
-                key={t.key}
-                onClick={() => setTab(t.key)}
-                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium border transition-colors cursor-pointer ${
-                  tab === t.key
-                    ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-                    : "bg-white text-[#6B7280] border-[#E2DDD8] hover:text-[#1F1D1B] hover:bg-[#F0ECE9]"
-                }`}
-              >
-                {t.icon}
-                {t.label}
-              </button>
-            ))}
-          </div>
-        ))}
       </div>
 
       {loading ? (

@@ -13,8 +13,13 @@ const COMPANY_FAX = "";
 // Main
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function generateGRNPdf(data: any) {
+export function generateGRNPdf(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: any,
+  // returnDoc: hand back the built jsPDF instead of saving — lets the bulk
+  // "Download PDF" action merge several GRNs into one file (see merge-pdf.ts).
+  opts?: { returnDoc?: boolean },
+): jsPDF | void {
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -221,5 +226,22 @@ export function generateGRNPdf(data: any) {
   doc.text(`${COMPANY_NAME}  |  This is a computer-generated document.`, margin, footerY);
   doc.text(`Generated: ${fmtDate(new Date().toISOString())}`, pageW - margin, footerY, { align: "right" });
 
+  if (opts?.returnDoc) return doc;
   doc.save(`${data.grnNo ?? "GRN"}.pdf`);
+}
+
+// Merge several Goods Received Notes into ONE downloadable PDF (GRN list →
+// bulk "Download PDF"). Each GRN renders with the SAME layout as the single
+// download, then merge-pdf stitches them into one file.
+export async function generateCombinedGRNPdf(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  items: { data: any }[],
+  filename = "GRNs.pdf",
+): Promise<void> {
+  if (items.length === 0) return;
+  const docs = items
+    .map(({ data }) => generateGRNPdf(data, { returnDoc: true }))
+    .filter((d): d is jsPDF => !!d);
+  const { downloadMergedPdf } = await import("./merge-pdf");
+  await downloadMergedPdf(docs, filename);
 }

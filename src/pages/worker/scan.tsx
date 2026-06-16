@@ -28,6 +28,7 @@
 // endpoint now.)
 // ============================================================
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import {
   Camera,
@@ -2031,8 +2032,13 @@ export default function WorkerScanPage() {
           loop above; the first decode closes the overlay and auto-submits
           via handleDecoded.
           ========================================================== */}
-      {liveScanning && (
-        <div className="fixed inset-0 z-50 bg-black flex flex-col">
+      {/* Portal to <body> so NOTHING in the worker layout (the fixed bottom
+          nav, the sticky header) can paint over the camera — the overlay was
+          "漏风" at the bottom where the nav peeked through (Wei Siang). At body
+          level z-[60] sits above the nav's z-30 unconditionally. */}
+      {liveScanning &&
+        createPortal(
+          <div className="fixed inset-0 z-[60] bg-black flex flex-col">
           <div className="flex items-center justify-between px-4 py-3 text-white">
             <span className="text-sm font-semibold">
               {scanMode === "barcode" ? t("scan.modeBarcode") : t("scan.modeQr")}
@@ -2111,8 +2117,9 @@ export default function WorkerScanPage() {
                 : t("scan.switchToQr")}
             </button>
           </div>
-        </div>
-      )}
+        </div>,
+          document.body,
+        )}
 
       {/* ==========================================================
           TODAY'S SNAPSHOT

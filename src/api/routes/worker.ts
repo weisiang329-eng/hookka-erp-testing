@@ -431,38 +431,47 @@ app.get("/scan-lookup", async (c) => {
   if (poRows.length === 0 && isBarcodeToken(term)) {
     const deptCode = deptOfBarcodeToken(term);
     if (deptCode) {
-      // Match ANY card in the dept (not just non-completed): re-deriving to the
-      // exact token already pins one card, so an already-COMPLETED match should
-      // surface the card (the scan page shows it + "already done") instead of a
-      // confusing "Not found" (Wei Siang 2026-06-17: scanned 0319032601 → not
-      // found). Was `AND status <> 'COMPLETED'`, which hid a finished card.
-      const cand =
-        (
-          await c.var.DB.prepare(
-            `SELECT id, productionOrderId, wipKey, departmentCode
-               FROM job_cards
-              WHERE departmentCode = ?`,
-          )
-            .bind(deptCode)
-            .all<{
-              id: string;
-              productionOrderId: string;
-              wipKey: string | null;
-              departmentCode: string | null;
-            }>()
-        ).results ?? [];
-      const hit = cand.find(
-        (j) => deriveBarcodeToken(j.id, j.departmentCode ?? deptCode) === term,
-      );
-      if (hit) {
-        poRows =
+      // Resolve the schedule Code 128 by re-deriving deriveBarcodeToken across
+      // the department's CURRENT WIP (status <> 'COMPLETED'). Scoping to current
+      // WIP matters two ways: (1) a freshly-printed schedule only carries
+      // in-progress cards, so the scanned card is here; (2) an all-status scan
+      // could resolve the token to an old / edge-case completed card whose PO
+      // row then trips the response build downstream — which the worker saw as
+      // "出错了 / Something went wrong" (Wei Siang 2026-06-17: barcode scan →
+      // something went wrong; the symptom flipped from "Not found" the moment
+      // the status filter was dropped). The try/catch is belt-and-suspenders:
+      // any DB hiccup leaves poRows empty → a graceful "Not found", never a 500.
+      try {
+        const cand =
           (
             await c.var.DB.prepare(
-              "SELECT * FROM production_orders WHERE id = ? LIMIT 1",
+              `SELECT id, productionOrderId, departmentCode
+                 FROM job_cards
+                WHERE departmentCode = ? AND status <> 'COMPLETED'`,
             )
-              .bind(hit.productionOrderId)
-              .all<PoRowFull>()
+              .bind(deptCode)
+              .all<{
+                id: string;
+                productionOrderId: string;
+                departmentCode: string | null;
+              }>()
           ).results ?? [];
+        const hit = cand.find(
+          (j) =>
+            deriveBarcodeToken(j.id, j.departmentCode ?? deptCode) === term,
+        );
+        if (hit) {
+          poRows =
+            (
+              await c.var.DB.prepare(
+                "SELECT * FROM production_orders WHERE id = ? LIMIT 1",
+              )
+                .bind(hit.productionOrderId)
+                .all<PoRowFull>()
+            ).results ?? [];
+        }
+      } catch (e) {
+        console.warn("[scan-lookup] barcode-token resolve failed:", e);
       }
     }
   }

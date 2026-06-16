@@ -201,7 +201,10 @@ function boolToInt(v: unknown, fallback: 0 | 1): 0 | 1 {
 // between deploy and migration apply.
 function isMissingPurchaseOrgCol(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
-  return /column .*purchase_org_code.* does not exist/i.test(msg);
+  // Tolerate both the snake_case column name (purchase_org_code) and the
+  // folded camelCase form (purchaseorgcode) so the legacy-shape retry fires
+  // regardless of how Postgres reports the missing identifier.
+  return /column .*purchase_?org_?code.* does not exist/i.test(msg);
 }
 
 // Normalise purchaseOrgCode input. Empty / missing -> 'HOOKKA' default so
@@ -579,8 +582,12 @@ app.put("/:id", async (c) => {
       success: true,
       data: rowToSupplier(updated, matsRes.results ?? []),
     });
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (e) {
+    // Surface the real reason instead of a blanket "Invalid request body"
+    // (which masked the purchaseOrgCode column-name bug for so long).
+    console.error(`[PUT /api/suppliers/${id}] failed:`, e);
+    const msg = e instanceof Error && e.message ? e.message : "Invalid request body";
+    return c.json({ success: false, error: msg }, 400);
   }
 });
 

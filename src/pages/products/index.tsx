@@ -84,6 +84,33 @@ const entryTier = (t: SofaTier | undefined): SofaTier => t ?? "PRICE_2";
 const fabricWidthHint = (category: string): string | null =>
   category === "BEDFRAME" ? "142cm" : category === "SOFA" ? "149cm" : null;
 
+// ---------- Labor cost basis (owner: flat average salary) ----------
+// Per-product labor cost uses the SAME costing basis as the production-cost
+// engine in src/api/lib/po-cost-cascade.ts (postJobCardLabor) /
+// src/lib/labor-engine.ts (productionCostRatePerMinuteSen):
+//   rate = basic salary ÷ working_days ÷ hours_per_day ÷ 60
+// The engine's default worker is RM 2050 / 26 days / 9 h. Per the owner's
+// instruction this Products-page comparison instead uses a FLAT average
+// salary of RM 2,200/month with the same 26-working-day / 9-hour divisors:
+//   RM 2200 / 26 / 9 / 60 ≈ RM 0.156695 per minute.
+// Expressed in SEN per minute (220000 sen ÷ 26 ÷ 9 ÷ 60 ≈ 15.6695 sen/min)
+// so it composes directly with formatCurrency(), which takes sen. This is a
+// display-only estimate — it does NOT feed cost_ledger or any cascade; the
+// real posted labor still costs at each attributed worker's own rate.
+const LABOR_AVG_SALARY_SEN = 220_000; // RM 2,200 / month (flat average)
+const LABOR_WORKING_DAYS = 26;
+const LABOR_HOURS_PER_DAY = 9;
+const LABOR_RATE_PER_MIN_SEN =
+  LABOR_AVG_SALARY_SEN / LABOR_WORKING_DAYS / LABOR_HOURS_PER_DAY / 60; // ≈ 15.6695 sen/min
+
+// Labor cost (in sen) for a product given its total production minutes.
+// Rounded to whole sen to match how money is stored/rendered elsewhere.
+// Returns 0 when minutes are missing/zero so callers can show "—".
+function laborCostSenForMinutes(totalMinutes: number): number {
+  if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return 0;
+  return Math.round(totalMinutes * LABOR_RATE_PER_MIN_SEN);
+}
+
 type DeptWorkingTime = {
   departmentCode: string;
   minutes: number;
@@ -2373,6 +2400,10 @@ export default function ProductsPage() {
                   : (cfg ? totalConfigMinutes(cfg) : 0);
                 const price1Val = p.price1Sen ?? 0;
                 const basePrice = p.basePriceSen ?? p.costPriceSen ?? 0;
+                // Estimated labor cost for this SKU = total production minutes
+                // × flat-average labor rate (see LABOR_RATE_PER_MIN_SEN). 0 when
+                // the SKU has no minutes yet — rendered as "—" downstream.
+                const laborCostSen = laborCostSenForMinutes(totalMin);
                 // Per-SKU default variants — read straight from the product
                 // row. The badge shows "✓ Configured" when ANY default field
                 // is set, otherwise "Configure". Counting the number of set
@@ -2787,8 +2818,18 @@ export default function ProductsPage() {
                                 </div>
                               )}
                             </div>
-                            <div className="px-3 py-1.5 text-right text-sm font-medium text-[#111827] whitespace-nowrap">
-                              {totalMin} min
+                            <div className="px-3 py-1.5 text-right whitespace-nowrap">
+                              <div className="text-sm font-medium text-[#111827]">{totalMin} min</div>
+                              {/* Estimated labor cost (display-only) — total
+                                  minutes × flat-average rate. See
+                                  LABOR_RATE_PER_MIN_SEN for the RM2,200/26d/9h
+                                  basis. */}
+                              <div
+                                className="text-[10px] text-[#9CA3AF] tabular-nums"
+                                title="Estimated labor cost = total minutes × flat-average rate (RM 2,200/mo ÷ 26 days ÷ 9 h ÷ 60)"
+                              >
+                                {laborCostSen > 0 ? `Labor ${formatCurrency(laborCostSen)}` : "—"}
+                              </div>
                             </div>
                             {/* Variants badge */}
                             <div className="px-3 py-1.5 flex justify-center" onClick={(e) => e.stopPropagation()}>
@@ -2815,6 +2856,84 @@ export default function ProductsPage() {
                       {isExpanded && (
                         <div className="px-4 pb-4 space-y-3">
                           {cfg && <ProductionConfig config={cfg} />}
+
+                          {/* ---- Price vs Labor (Margin) ----
+                              Owner-requested side-by-side: each selling price
+                              (Price 2 = company default tier `basePriceSen`,
+                              Price 1 = `price1Sen`) against the estimated labor
+                              cost, with margin = price − labor in RM and %.
+                              Labor here is the flat-average estimate (RM2,200 /
+                              26d / 9h / 60 — see LABOR_RATE_PER_MIN_SEN), NOT
+                              full landed cost, so "margin" is price-minus-labor
+                              only. Existing price labels are kept verbatim. */}
+                          <div className="bg-[#FAF9F7] border border-[#E5E7EB] rounded-lg p-4">
+                            <div className="flex items-center justify-between mb-2">
+                              <h4 className="text-sm font-semibold text-[#374151]">
+                                Price vs Labor (Margin)
+                              </h4>
+                              <span className="text-[10px] text-[#9CA3AF] italic">
+                                Labor = est. {formatCurrency(LABOR_RATE_PER_MIN_SEN)}/min × {totalMin} min
+                                {" "}(RM 2,200/mo ÷ 26d ÷ 9h)
+                              </span>
+                            </div>
+                            {(() => {
+                              // Margin row helper. price in sen; "—" when the
+                              // price is unset (0) or minutes unknown so we never
+                              // show a fake 100% margin against zero labor.
+                              const marginRow = (label: string, priceSen: number) => {
+                                const hasPrice = priceSen > 0;
+                                const hasLabor = laborCostSen > 0;
+                                const marginSen = priceSen - laborCostSen;
+                                const marginPct = hasPrice
+                                  ? (marginSen / priceSen) * 100
+                                  : null;
+                                return (
+                                  <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
+                                    <div className="text-[10px] font-medium text-[#6B7280] uppercase">{label}</div>
+                                    <div className="mt-0.5 text-sm font-semibold text-[#111827] tabular-nums">
+                                      {hasPrice ? formatCurrency(priceSen) : <span className="text-[#9CA3AF]">—</span>}
+                                    </div>
+                                    <div className="mt-1 text-[11px] text-[#6B7280] tabular-nums">
+                                      Labor {hasLabor ? formatCurrency(laborCostSen) : "—"}
+                                    </div>
+                                    <div className="text-[11px] tabular-nums">
+                                      {hasPrice && hasLabor ? (
+                                        <span className={marginSen >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}>
+                                          Margin {formatCurrency(marginSen)}
+                                          {marginPct != null ? ` (${marginPct.toFixed(1)}%)` : ""}
+                                        </span>
+                                      ) : (
+                                        <span className="text-[#9CA3AF]">Margin —</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              };
+                              return (
+                                <>
+                                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                                    {marginRow("Price 2", basePrice)}
+                                    {marginRow("Price 1", price1Val)}
+                                    {/* Labor cost on its own so it reads even
+                                        when a SKU has no price set yet. */}
+                                    <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
+                                      <div className="text-[10px] font-medium text-[#6B7280] uppercase">Labor Cost (est.)</div>
+                                      <div className="mt-0.5 text-sm font-semibold text-[#111827] tabular-nums">
+                                        {laborCostSen > 0 ? formatCurrency(laborCostSen) : <span className="text-[#9CA3AF]">—</span>}
+                                      </div>
+                                      <div className="mt-1 text-[11px] text-[#6B7280] tabular-nums">{totalMin} min</div>
+                                    </div>
+                                  </div>
+                                  {isSofa && (
+                                    <p className="mt-2 text-[10px] text-[#9CA3AF] italic">
+                                      Sofa selling prices are set per seat height &amp; tier in the row above; the
+                                      Price 1 / Price 2 cards here use the SKU's flat price fields and may be blank.
+                                    </p>
+                                  )}
+                                </>
+                              );
+                            })()}
+                          </div>
 
                           {/* Variant Defaults Summary — flat key/value cards
                               for the fields the operator has actually set,

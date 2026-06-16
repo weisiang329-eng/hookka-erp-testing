@@ -89,6 +89,38 @@ export function parseJobCardBarcode(value: string): string | null {
   return null;
 }
 
+// ============================================================
+// Rack QR — a stable identity token for a warehouse rack location.
+//
+// The Warehouse "Rack Overview" can print a QR sticker for any rack so the
+// physical rack can later be SCANNED to select it (stock-in/out target). Unlike
+// the production stickers above, this encodes the rack IDENTITY only — not a
+// scan URL — so it stays small and stable even if rack routes change. Mirrors
+// the `HKJC:` job-card barcode convention: a short sentinel prefix keeps a
+// stray courier / GTIN code (or a production WIP QR) from ever being mistaken
+// for a rack token, and lets a future scanner branch on the prefix.
+// ============================================================
+
+/** Sentinel prefix on every rack QR — `HKRACK:` + rack_locations.id. */
+export const RACK_QR_PREFIX = "HKRACK:";
+
+/** The string to ENCODE in a rack's QR (prefix + rack location id). */
+export function rackQrValue(rackId: string): string {
+  return `${RACK_QR_PREFIX}${rackId}`;
+}
+
+/**
+ * Parse a scanned rack QR back to its rack location id, or null when it isn't
+ * one of ours (wrong prefix / empty). Symmetric with `rackQrValue`.
+ */
+export function parseRackQr(value: string): string | null {
+  if (!value) return null;
+  const v = value.trim();
+  if (!v.startsWith(RACK_QR_PREFIX)) return null;
+  const id = v.slice(RACK_QR_PREFIX.length).trim();
+  return id || null;
+}
+
 /**
  * Generate the scan URL that a QR code should encode.
  * When scanned, it takes the worker to the scan page with the operation pre-filled.

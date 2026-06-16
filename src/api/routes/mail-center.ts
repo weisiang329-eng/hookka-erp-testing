@@ -22,7 +22,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
-import { requirePermission } from "../lib/rbac";
+import { requirePermission, requireSuperAdmin } from "../lib/rbac";
 import { getOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 
 const app = new Hono<Env>();
@@ -505,6 +505,155 @@ app.get("/addresses", async (c) => {
     .bind(orgId)
     .all<AddressRow>();
   return c.json((res.results ?? []).map(rowToAddress));
+});
+
+// ---------------------------------------------------------------------------
+// Address admin endpoints — creating / managing someone's @hookka.com alias
+// is an ACCOUNT-level action, so these are fenced with requireSuperAdmin (the
+// same hard gate that protects user-account management in routes/users.ts),
+// independent of any mail-center:* permission grant.
+//
+// NOTE: this creates an in-ERP ADDRESS RECORD for hookka.com mail received via
+// Cloudflare Email Routing — it is NOT a Google/Gmail account. No Google API
+// is touched here.
+// ---------------------------------------------------------------------------
+
+// Conservative single-@ email shape check. Intentionally not RFC-5322-complete
+// — we only need to reject obvious garbage; the domain suffix is enforced
+// separately below.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// POST /api/mail-center/addresses — create an @hookka.com alias for a user.
+app.post("/addresses", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+
+  type CreateBody = {
+    address?: string;
+    label?: string;
+    assignedUserId?: string;
+    assignedUserName?: string;
+    assignedDept?: string;
+  };
+  const body: CreateBody = await c.req
+    .json<CreateBody>()
+    .catch(() => ({} as CreateBody));
+
+  const address = (body.address ?? "").trim().toLowerCase();
+  if (!address || !EMAIL_RE.test(address)) {
+    return c.json({ error: "invalid email address" }, 400);
+  }
+  if (!address.endsWith("@hookka.com")) {
+    return c.json({ error: "address must end with @hookka.com" }, 400);
+  }
+
+  const userId =
+    (c as unknown as { get: (k: string) => string | undefined }).get(
+      "userId",
+    ) ?? null;
+
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  try {
+    await c.var.DB.prepare(
+      `INSERT INTO email_addresses
+         (id, org_id, address, label, assigned_user_id, assigned_user_name,
+          assigned_dept, active, created_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+    )
+      .bind(
+        id,
+        orgId,
+        address,
+        body.label?.trim() || null,
+        body.assignedUserId ?? null,
+        body.assignedUserName ?? null,
+        body.assignedDept ?? null,
+        now,
+        userId,
+      )
+      .run();
+  } catch (e) {
+    // The (org_id, address) unique index collides when this alias already
+    // exists. SQLite/D1 surfaces "UNIQUE constraint failed"; treat any insert
+    // failure on an existing address as a 409 after confirming it's there.
+    const existing = await c.var.DB.prepare(
+      `SELECT * FROM email_addresses WHERE org_id = ? AND lower(address) = ? LIMIT 1`,
+    )
+      .bind(orgId, address)
+      .first<AddressRow>();
+    if (existing) {
+      return c.json({ error: "address already exists" }, 409);
+    }
+    console.error("[mail-center] address insert failed:", e);
+    return c.json({ error: "failed to create address" }, 500);
+  }
+
+  const row = await c.var.DB.prepare(
+    `SELECT * FROM email_addresses WHERE org_id = ? AND id = ? LIMIT 1`,
+  )
+    .bind(orgId, id)
+    .first<AddressRow>();
+  return c.json(row ? rowToAddress(row) : { id, address }, 201);
+});
+
+// PATCH /api/mail-center/addresses/:id — toggle active / relabel / reassign.
+app.patch("/addresses/:id", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+
+  type PatchBody = {
+    label?: string;
+    assignedUserId?: string | null;
+    assignedUserName?: string | null;
+    active?: boolean;
+  };
+  const body: PatchBody = await c.req
+    .json<PatchBody>()
+    .catch(() => ({} as PatchBody));
+
+  const sets: string[] = [];
+  const binds: (string | number | null)[] = [];
+  if (body.label !== undefined) {
+    sets.push("label = ?");
+    binds.push(body.label?.trim() || null);
+  }
+  if (body.assignedUserId !== undefined) {
+    sets.push("assigned_user_id = ?");
+    binds.push(body.assignedUserId ?? null);
+  }
+  if (body.assignedUserName !== undefined) {
+    sets.push("assigned_user_name = ?");
+    binds.push(body.assignedUserName ?? null);
+  }
+  if (body.active !== undefined) {
+    sets.push("active = ?");
+    binds.push(body.active ? 1 : 0);
+  }
+  if (sets.length === 0) {
+    return c.json({ error: "no fields to update" }, 400);
+  }
+
+  const res = await c.var.DB.prepare(
+    `UPDATE email_addresses SET ${sets.join(", ")} WHERE org_id = ? AND id = ?`,
+  )
+    .bind(...binds, orgId, id)
+    .run();
+  if (!res.meta?.changes) {
+    return c.json({ error: "address not found" }, 404);
+  }
+
+  const row = await c.var.DB.prepare(
+    `SELECT * FROM email_addresses WHERE org_id = ? AND id = ? LIMIT 1`,
+  )
+    .bind(orgId, id)
+    .first<AddressRow>();
+  return c.json(row ? rowToAddress(row) : { id });
 });
 
 export default app;

@@ -38,6 +38,7 @@ import {
   Send,
   Loader2,
   Pencil,
+  AtSign,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { copyText } from "@/lib/copy-text";
@@ -91,6 +92,21 @@ type ApiEnvelope<T = unknown> = {
   error?: string;
 };
 
+// A hookka.com email alias record from the Mail Center. NOTE: the
+// /api/mail-center endpoints return their payload DIRECTLY (a bare array /
+// object), NOT wrapped in the { success, data } envelope the /api/users
+// routes use — so this fetch is handled differently below.
+type MailAddress = {
+  id: string;
+  address: string;
+  label: string;
+  assignedUserId?: string;
+  assignedUserName?: string;
+  assignedDept?: string;
+  active: boolean;
+  createdAt: string;
+};
+
 // ---------- Small helpers --------------------------------------------------
 
 function fmtDateTime(iso: string | null): string {
@@ -120,6 +136,18 @@ function fmtRelativeExpiry(iso: string): string {
   if (hours < 24) return `${hours}h left`;
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h left`;
+}
+
+// Suggest a default @hookka.com alias for a user: first name (or the email
+// local-part) lowercased and stripped to [a-z0-9]. The admin can always edit
+// it before creating.
+function suggestAlias(u: { displayName: string; email: string }): string {
+  const fromName = (u.displayName || "").trim().split(/\s+/)[0] || "";
+  const local = (u.email || "").split("@")[0] || "";
+  const base = (fromName || local)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  return base ? `${base}@hookka.com` : "";
 }
 
 // ---------- Main component -------------------------------------------------
@@ -159,6 +187,14 @@ export default function UsersPage() {
   const [editRoleSubmitting, setEditRoleSubmitting] = useState(false);
   const [editRoleError, setEditRoleError] = useState<string | null>(null);
 
+  // Email-alias modal. Creating an @hookka.com alias for a user is a
+  // SUPER_ADMIN-only account action (POST /api/mail-center/addresses is gated
+  // by requireSuperAdmin). Explicit Create button — never auto-save.
+  const [aliasForUser, setAliasForUser] = useState<UserRow | null>(null);
+  const [aliasAddress, setAliasAddress] = useState("");
+  const [aliasSubmitting, setAliasSubmitting] = useState(false);
+  const [aliasError, setAliasError] = useState<string | null>(null);
+
   // Inline flash banner
   const [flash, setFlash] = useState<{ kind: "ok" | "err"; msg: string } | null>(
     null,
@@ -189,6 +225,8 @@ export default function UsersPage() {
 
   const { data: usersResp, loading: loadingUsers, refresh: refreshUsersHook } = useCachedJson<ApiEnvelope<UserRow[]>>("/api/users");
   const { data: invitesResp, loading: loadingInvites, refresh: refreshInvitesHook } = useCachedJson<ApiEnvelope<InviteRow[]>>("/api/users/invites");
+  // Mail Center returns a bare array (no { success, data } envelope).
+  const { data: addressesResp, refresh: refreshAddressesHook } = useCachedJson<MailAddress[]>("/api/mail-center/addresses");
 
   const fetchUsers = useCallback(() => {
     invalidateCachePrefix("/api/users");
@@ -200,6 +238,11 @@ export default function UsersPage() {
     refreshInvitesHook();
   }, [refreshInvitesHook]);
 
+  const fetchAddresses = useCallback(() => {
+    invalidateCachePrefix("/api/mail-center/addresses");
+    refreshAddressesHook();
+  }, [refreshAddressesHook]);
+
   const users: UserRow[] = useMemo(
     () => (usersResp?.success ? usersResp.data ?? [] : []),
     [usersResp],
@@ -208,6 +251,15 @@ export default function UsersPage() {
     () => (invitesResp?.success ? invitesResp.data ?? [] : []),
     [invitesResp],
   );
+  // Map each user id → their (first) alias, so the row can show the existing
+  // address instead of the "Add alias" control.
+  const aliasByUserId = useMemo(() => {
+    const m = new Map<string, MailAddress>();
+    for (const a of addressesResp ?? []) {
+      if (a.assignedUserId && !m.has(a.assignedUserId)) m.set(a.assignedUserId, a);
+    }
+    return m;
+  }, [addressesResp]);
 
   // ---------- User actions -------------------------------------------------
 
@@ -361,6 +413,60 @@ export default function UsersPage() {
       }
     } finally {
       setEditRoleSubmitting(false);
+    }
+  };
+
+  // ---------- Email-alias actions ------------------------------------------
+
+  const submitAlias = async () => {
+    if (!aliasForUser) return;
+    const target = aliasForUser;
+    setAliasError(null);
+    const address = aliasAddress.trim().toLowerCase();
+    if (!address || !address.includes("@")) {
+      setAliasError("Enter a valid email address");
+      return;
+    }
+    if (!address.endsWith("@hookka.com")) {
+      setAliasError("Address must end with @hookka.com");
+      return;
+    }
+    setAliasSubmitting(true);
+    try {
+      const res = await fetch("/api/mail-center/addresses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          address,
+          assignedUserId: target.id,
+          assignedUserName: target.displayName || target.email,
+        }),
+      });
+      // Mail Center returns the created row directly (201), or
+      // { error } on 400/409/500 — there is no { success } envelope.
+      const json = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        address?: string;
+      };
+      if (res.ok) {
+        showFlash("ok", `Alias ${json.address ?? address} created for ${target.email}`);
+        setAliasForUser(null);
+        setAliasAddress("");
+        fetchAddresses();
+      } else {
+        setAliasError(
+          json.error ??
+            (res.status === 409
+              ? "That address already exists"
+              : "Couldn't create the alias. Please try again."),
+        );
+      }
+    } catch (err) {
+      setAliasError(
+        humanizeError(err, "Network problem — please try again."),
+      );
+    } finally {
+      setAliasSubmitting(false);
     }
   };
 
@@ -549,6 +655,7 @@ export default function UsersPage() {
                   <Th>Name</Th>
                   <Th>Role</Th>
                   <Th>Status</Th>
+                  <Th>Email alias</Th>
                   <Th>Last login</Th>
                   <Th>Created</Th>
                   <Th className="text-right pr-2">Actions</Th>
@@ -557,14 +664,14 @@ export default function UsersPage() {
               <tbody>
                 {loadingUsers ? (
                   <tr>
-                    <td colSpan={7} className="py-6 text-center text-gray-500">
+                    <td colSpan={8} className="py-6 text-center text-gray-500">
                       <Loader2 className="h-4 w-4 animate-spin inline-block mr-2" />
                       Loading users…
                     </td>
                   </tr>
                 ) : users.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-6 text-center text-gray-500">
+                    <td colSpan={8} className="py-6 text-center text-gray-500">
                       No users yet
                     </td>
                   </tr>
@@ -598,6 +705,49 @@ export default function UsersPage() {
                             <Ban className="h-3 w-3" /> Disabled
                           </span>
                         )}
+                      </Td>
+                      <Td>
+                        {(() => {
+                          const alias = aliasByUserId.get(u.id);
+                          if (alias) {
+                            return (
+                              <span
+                                className={
+                                  "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded " +
+                                  (alias.active
+                                    ? "bg-[#EEF3E4] text-[#4F7C3A]"
+                                    : "bg-[#F0ECE9] text-[#6B7280]")
+                                }
+                                title={
+                                  alias.active
+                                    ? "hookka.com alias"
+                                    : "hookka.com alias (inactive)"
+                                }
+                              >
+                                <AtSign className="h-3 w-3" />
+                                {alias.address}
+                              </span>
+                            );
+                          }
+                          if (!canManageUsers) {
+                            return <span className="text-xs text-gray-400">—</span>;
+                          }
+                          return (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                setAliasForUser(u);
+                                setAliasAddress(suggestAlias(u));
+                                setAliasError(null);
+                              }}
+                              title="Create @hookka.com alias"
+                            >
+                              <AtSign className="h-3.5 w-3.5 mr-1" />
+                              Add alias
+                            </Button>
+                          );
+                        })()}
                       </Td>
                       <Td className="text-gray-600">
                         {fmtDateTime(u.lastLoginAt)}
@@ -1107,6 +1257,83 @@ export default function UsersPage() {
                   <Check className="h-4 w-4" />
                 )}
                 Save role
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================== */}
+      {/* Email-alias modal — create a hookka.com address for a user.
+          SUPER_ADMIN only (POST /api/mail-center/addresses is gated by
+          requireSuperAdmin). This creates an in-ERP address record that
+          receives mail in the Mail Center once the domain MX points at
+          Cloudflare Email Routing — it is NOT a Google/Gmail account. */}
+      {/* =========================================================== */}
+      {aliasForUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => !aliasSubmitting && setAliasForUser(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold text-[#1F1D1B] flex items-center gap-2">
+              <AtSign className="h-5 w-5 text-[#6B5C32]" />
+              Create email alias
+            </h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Create a <strong>@hookka.com</strong> address for{" "}
+              <strong>{aliasForUser.email}</strong>. Mail to and from it shows
+              up in the Mail Center. This is a company address received into the
+              ERP — not a separate Gmail login.
+            </p>
+            <div className="mt-4 space-y-2">
+              <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide">
+                Alias address
+              </label>
+              <div className="relative">
+                <AtSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+                <Input
+                  type="email"
+                  autoFocus
+                  value={aliasAddress}
+                  onChange={(e) => setAliasAddress(e.target.value)}
+                  placeholder="name@hookka.com"
+                  className="pl-9"
+                  autoComplete="off"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submitAlias();
+                  }}
+                />
+              </div>
+              <p className="text-xs text-gray-500">
+                Must end with @hookka.com. Edit the suggestion if needed.
+              </p>
+              {aliasError && (
+                <p className="text-xs text-red-600">{aliasError}</p>
+              )}
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setAliasForUser(null)}
+                disabled={aliasSubmitting}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={submitAlias}
+                disabled={aliasSubmitting || !aliasAddress.trim()}
+              >
+                {aliasSubmitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4" />
+                )}
+                Create alias
               </Button>
             </div>
           </div>

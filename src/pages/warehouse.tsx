@@ -5,10 +5,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { getQRCodeDataURL, rackQrValue } from "@/lib/qr-utils";
 import {
   Warehouse, Grid3X3, Package, MapPin, LayoutGrid,
   ArrowDownToLine, ArrowUpFromLine, History, X, ArrowRightLeft,
-  Loader2, RefreshCw,
+  Loader2, RefreshCw, QrCode,
 } from "lucide-react";
 
 // ---------- Types ----------
@@ -276,6 +277,52 @@ export default function WarehousePage() {
     }
   };
 
+  // Print a single rack's QR sticker. Encodes the rack IDENTITY (`HKRACK:<id>`)
+  // — not a URL — so it can be scanned later to select this rack. Mirrors the
+  // delivery-QR / department-poster print pattern: build a hi-res data URL, open
+  // a blank window, write a self-contained sticker, then print() after a short
+  // settle delay (runs from a click gesture, so no pop-up-blocker trip).
+  const handlePrintRackQr = async (slot: RackLocation) => {
+    const qrDataUrl = await getQRCodeDataURL(rackQrValue(slot.id), 600).catch(() => null);
+    if (!qrDataUrl) {
+      toast.error("Failed to generate rack QR");
+      return;
+    }
+    const w = window.open("", "_blank");
+    if (!w) return;
+    // position is the rack's location label (e.g. a row/bay); only show the row
+    // when it carries something distinct from the rack name itself.
+    const locationLabel =
+      slot.position && slot.position !== slot.rack ? slot.position : "";
+    const esc = (s: string) =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Rack QR — ${esc(slot.rack)}</title>
+<style>
+  @page { margin: 14mm; }
+  body { font-family: Helvetica, Arial, sans-serif; color: #111; text-align: center; }
+  .kind { font-size: 13px; text-transform: uppercase; letter-spacing: 3px; color: #555; }
+  .rack-no { font-size: 34px; font-weight: 800; letter-spacing: 1px; margin: 10mm 0 2mm; }
+  .loc { font-size: 14px; color: #555; margin-bottom: 2mm; }
+  img { width: 90mm; height: 90mm; margin-top: 6mm; }
+  .hint { font-size: 13px; color: #333; margin-top: 8mm; }
+  .sub { font-size: 11px; color: #777; margin-top: 2mm; }
+</style></head><body>
+  <div class="kind">Warehouse Rack</div>
+  <div class="rack-no">${esc(slot.rack)}</div>
+  ${locationLabel ? `<div class="loc">${esc(locationLabel)}</div>` : ""}
+  <img src="${qrDataUrl}" alt="Rack QR code" />
+  <div class="hint">Scan to select this rack</div>
+  <div class="sub">HOOKKA INDUSTRIES — warehouse rack QR</div>
+</body></html>`);
+    w.document.close();
+    w.focus();
+    // Give the new window time to lay out before invoking print(). Click
+    // handler, not React lifecycle — useTimeout doesn't apply.
+    // eslint-disable-next-line no-restricted-syntax -- print-window settle delay from event handler
+    setTimeout(() => w.print(), 500);
+  };
+
   // Completed POs that are not yet stocked in
   const availablePOs = productionOrders.filter(
     (po) => po.status === "COMPLETED" && !po.stockedIn
@@ -514,21 +561,30 @@ export default function WarehousePage() {
                 ))}
               </div>
             </div>
-            <div className="mt-6 flex gap-2 justify-end">
+            <div className="mt-6 flex gap-2 justify-between">
               <Button
-                variant="destructive"
+                variant="outline"
                 size="sm"
-                onClick={() => {
-                  setStockOutTarget(selectedSlot);
-                  setSelectedSlot(null);
-                  setActiveTab("stockio");
-                }}
+                onClick={() => void handlePrintRackQr(selectedSlot)}
               >
-                <ArrowUpFromLine className="h-4 w-4" /> Stock Out
+                <QrCode className="h-4 w-4" /> Print Rack QR
               </Button>
-              <Button variant="outline" size="sm" onClick={() => setSelectedSlot(null)}>
-                Close
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => {
+                    setStockOutTarget(selectedSlot);
+                    setSelectedSlot(null);
+                    setActiveTab("stockio");
+                  }}
+                >
+                  <ArrowUpFromLine className="h-4 w-4" /> Stock Out
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => setSelectedSlot(null)}>
+                  Close
+                </Button>
+              </div>
             </div>
           </div>
         </div>

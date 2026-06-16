@@ -1687,8 +1687,11 @@ export default function WorkerScanPage() {
               {t("scan.decoding")}
             </div>
           )}
-          <div className="text-center text-xs text-[#8A7F73] mb-2">
+          <div className="text-center text-sm font-semibold text-[#4B5563] mb-1">
             {t("scan.manual")}
+          </div>
+          <div className="text-center text-xs text-[#8A7F73] mb-2">
+            {t("scan.manualHint")}
           </div>
           <div className="flex gap-2">
             <input
@@ -1696,7 +1699,7 @@ export default function WorkerScanPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && doLookup()}
-              placeholder="PO number or job card ID"
+              placeholder={t("scan.manualPlaceholder")}
               className="flex-1 h-12 px-3 rounded border border-[#D8D2CC] bg-white text-base focus:outline-none focus:ring-2 focus:ring-[#6B5C32] focus:border-[#6B5C32]"
             />
             <button

@@ -237,6 +237,18 @@ const dict: Dict = {
     zh: '手动输入',
     my: 'လက်ဖြင့်ဖြည့်ရန်',
   },
+  'scan.manualHint': {
+    en: 'Scan not working? Type the number printed under the barcode.',
+    ms: 'Tak boleh imbas? Taip nombor di bawah kod bar.',
+    zh: '扫不到?直接输入条形码下面那串号码。',
+    my: 'စကင်ဖတ်၍မရပါက ဘားကုဒ်အောက်ရှိ နံပါတ်ကို ရိုက်ထည့်ပါ။',
+  },
+  'scan.manualPlaceholder': {
+    en: 'Number under the barcode · PO · Job card',
+    ms: 'Nombor bawah kod bar · PO · Kad kerja',
+    zh: '条形码下的号码 · PO · 工卡',
+    my: 'ဘားကုဒ်အောက်နံပါတ် · PO · Job card',
+  },
   'scan.takePhoto': {
     en: 'Take photo',
     ms: 'Ambil gambar',

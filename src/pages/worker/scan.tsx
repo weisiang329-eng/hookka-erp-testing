@@ -1008,7 +1008,11 @@ export default function WorkerScanPage() {
     // 1-2 秒先". QR mode (one sticker in view) stays instant.
     let stableVal: string | null = null;
     let stableSince = 0;
-    const STABLE_MS = 900;
+    let barcodeNativeMiss = 0;
+    // 600ms (was 900): still requires the SAME code held briefly so a barcode
+    // flashing through frame can't fire, but locks faster once the worker is
+    // aimed — the 900ms felt like "扫不到" when decodes were sparse.
+    const STABLE_MS = 600;
     const considerHit = (data: string) => {
       if (stopped || !data) return;
       if (scanMode !== "barcode") {
@@ -1042,7 +1046,11 @@ export default function WorkerScanPage() {
               // the nearest one to centre wins — so 2-3 stacked schedule barcodes
               // in view don't all fire; the row the worker aimed at is taken.
               const cy = video.videoHeight / 2;
-              const band = video.videoHeight * 0.18;
+              // Wider aim band (0.33 vs 0.18): the narrow strip made the worker
+              // fight to line the code up — a big "扫不到" cause. Nearest-to-
+              // centre still wins, so a stacked schedule row isn't grabbed by
+              // mistake.
+              const band = video.videoHeight * 0.33;
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
@@ -1058,8 +1066,18 @@ export default function WorkerScanPage() {
                 if (d <= band && (!best || d < best.d)) best = { v: c.rawValue, d };
               }
               if (best) {
+                barcodeNativeMiss = 0;
                 considerHit(best.v);
                 return;
+              }
+              // Native BarcodeDetector saw nothing usable. Some phones ship one
+              // that simply can't read a dense Code 128 (returns empty, never
+              // throws) — so the loop would spin on "扫不到" forever. After ~0.8s
+              // of misses, retire it for this session (once ZXing is loaded) so
+              // the next ticks fall through to ZXing's TRY_HARDER band decode,
+              // which reads where the native one won't.
+              if (zxingRef.current && ++barcodeNativeMiss >= 12) {
+                nativeDetector = null;
               }
             } else if (codes.length > 0 && codes[0].rawValue) {
               considerHit(codes[0].rawValue);
@@ -1079,7 +1097,7 @@ export default function WorkerScanPage() {
               // single Code 128 is in view — 1D codes scan far better from a tight
               // strip, and the other stacked rows are cropped out. Keep width
               // detail (1280px) since Code 128 density runs horizontally.
-              const bandH = Math.max(1, Math.round(vh * 0.2));
+              const bandH = Math.max(1, Math.round(vh * 0.3));
               const y0 = Math.round((vh - bandH) / 2);
               const s = Math.min(1, 1280 / vw);
               const cw = Math.max(1, Math.round(vw * s));

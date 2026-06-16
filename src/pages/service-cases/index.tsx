@@ -28,12 +28,13 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { getCurrentUser } from "@/lib/auth";
 import { compressImage } from "@/lib/image-compress";
 import { exportToCsv } from "@/lib/export-csv";
 import { formatDateDMY } from "@/lib/utils";
-import { Plus, X, AlertCircle, Loader2, Download } from "lucide-react";
+import { Plus, X, AlertCircle, Loader2, Download, Trash2 } from "lucide-react";
 
 type CaseStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | "CANCELLED";
 type SourceType = "SO" | "CO" | "EXTERNAL";
@@ -240,10 +241,54 @@ function ordersLabel(row: CaseRow): string {
 export default function ServiceCasesListPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
+  const currentUser = getCurrentUser();
   const { data: resp, loading, refresh } = useCachedJson<{ data?: ServiceCaseListItem[] }>(
     "/api/service-cases",
   );
   const cases = useMemo(() => resp?.data ?? [], [resp]);
+
+  // One-click pre-go-live cleanup (SUPER_ADMIN only) — purge every service
+  // case so the list starts clean. Backed by POST /api/service-cases/clear-all
+  // (RBAC + confirm:true). Owner wanted a single click instead of running SQL.
+  async function handleClearAll() {
+    if (
+      !(await confirm({
+        title: "Clear ALL service cases?",
+        message: (
+          <>
+            This permanently deletes <strong>every</strong> service case
+            {cases.length ? ` (${cases.length} now)` : ""} and any service orders
+            spawned from them. For pre-go-live test cleanup — this can't be undone.
+          </>
+        ),
+        confirmLabel: "Clear all",
+        tone: "danger",
+      }))
+    )
+      return;
+    try {
+      const res = await fetch("/api/service-cases/clear-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        deleted?: number;
+        error?: string;
+      };
+      if (!res.ok || !data?.success)
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      toast.success(
+        `Cleared ${data.deleted ?? 0} service case${data.deleted === 1 ? "" : "s"}`,
+      );
+      invalidateCachePrefix("/api/service-cases");
+      refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    }
+  }
   // Two bulk lists (cached, one fetch each — already used across the app)
   // feed the Case Pipeline derivation for EVERY row; never fetched per-row.
   // The Stage / Status Days columns need delivery + production dates matched
@@ -542,6 +587,17 @@ export default function ServiceCasesListPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {currentUser?.role === "SUPER_ADMIN" && cases.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleClearAll}
+              className="text-[#9A3A2D] border-[#E8C9C2] hover:bg-[#FBEFEC]"
+              title="Delete every service case (pre-go-live test cleanup)"
+            >
+              <Trash2 className="h-4 w-4" /> Clear all
+            </Button>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -561,6 +617,7 @@ export default function ServiceCasesListPage() {
           </Button>
         </div>
       </div>
+      {confirmDialog}
 
       <div className="flex flex-wrap gap-2 text-xs">
         {(["ALL", "OPEN", "IN_PROGRESS", "CLOSED", "CANCELLED"] as const).map((s) => (

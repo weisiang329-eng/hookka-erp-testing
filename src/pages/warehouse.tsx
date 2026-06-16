@@ -47,6 +47,12 @@ type StockMovement = {
   reason: string;
   performedBy: string;
   createdAt: string;
+  // Document reference resolved server-side from productionOrderId via the
+  // production_orders join. poNo = production order no, salesOrderNo = the SO
+  // it traces back to, docRef = best single label (poNo, else salesOrderNo).
+  poNo?: string;
+  salesOrderNo?: string;
+  docRef?: string;
 };
 
 type ProductionOrder = {
@@ -68,6 +74,14 @@ type Summary = {
   empty: number;
   reserved: number;
   occupancyRate: number;
+};
+
+// Per-rack detail payload from GET /api/warehouse/:id/details — drives the
+// "Contents" + "Move history" sections of the rack detail popup.
+type RackDetails = {
+  rack: RackLocation;
+  contents: RackItem[];
+  movements: StockMovement[];
 };
 
 // ---------- Constants ----------
@@ -141,6 +155,11 @@ export default function WarehousePage() {
   // basics — productionOrders.find / .filter — never .jobCards).
   // Trims a 12MB payload to ~100-300KB.
   const { data: poResp, loading: poLoading, refresh: fetchProductionOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=");
+  // Per-rack contents + move history for the detail popup. URL is null when no
+  // rack is selected, so nothing is fetched until the owner opens a rack.
+  const { data: rackDetailResp, loading: rackDetailLoading } = useCachedJson<{ success?: boolean; data?: RackDetails }>(
+    selectedSlot ? `/api/warehouse/${encodeURIComponent(selectedSlot.id)}/details` : null
+  );
 
   const rackLocations: RackLocation[] = useMemo(
     () => (rackResp?.success ? rackResp.data ?? [] : Array.isArray(rackResp) ? rackResp : []),
@@ -158,6 +177,14 @@ export default function WarehousePage() {
     () => (poResp?.success ? poResp.data ?? [] : Array.isArray(poResp) ? poResp : []),
     [poResp]
   );
+  // Popup detail: contents fall back to the slot's own items (already loaded in
+  // the grid) until the per-rack fetch lands, so the list never flashes empty.
+  const rackDetails: RackDetails | null = useMemo(
+    () => (rackDetailResp?.success ? rackDetailResp.data ?? null : null),
+    [rackDetailResp]
+  );
+  const popupContents: RackItem[] = rackDetails?.contents ?? selectedSlot?.items ?? [];
+  const popupMovements: StockMovement[] = rackDetails?.movements ?? [];
   const loading = rackLoading || movementsLoading || poLoading;
 
   // ---------- Actions ----------
@@ -539,26 +566,79 @@ export default function WarehousePage() {
                 <span className="text-[#6B7280]">Status</span>
                 <Badge>{selectedSlot.status}</Badge>
               </div>
-              <div className="flex justify-between">
-                <span className="text-[#6B7280]">Items on this rack</span>
-                <span className="font-medium text-[#1F1D1B]">{selectedSlot.items.length}</span>
+
+              {/* ----- Contents: what's currently IN this rack ----- */}
+              <div className="flex items-center justify-between pt-1">
+                <span className="font-semibold text-[#1F1D1B]">Contents</span>
+                <span className="text-xs text-[#6B7280]">{popupContents.length} item{popupContents.length === 1 ? "" : "s"}</span>
               </div>
-              {/* Full list of items */}
-              <div className="space-y-2 pt-2 border-t border-[#E2DDD8]">
-                {selectedSlot.items.map((it, i) => (
-                  <div key={i} className="rounded-md border border-[#E2DDD8] p-3 space-y-0.5 bg-[#FAF9F7]">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-[#1F1D1B]">{it.productCode}</span>
-                      {typeof it.qty === "number" && (
-                        <span className="text-xs text-[#6B7280]">Qty: {it.qty}</span>
-                      )}
+              <div className="space-y-2">
+                {popupContents.length === 0 ? (
+                  <p className="text-xs text-[#6B7280] text-center py-3">No items in this rack.</p>
+                ) : (
+                  popupContents.map((it, i) => (
+                    <div key={i} className="rounded-md border border-[#E2DDD8] p-3 space-y-0.5 bg-[#FAF9F7]">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-[#1F1D1B]">{it.productCode}</span>
+                        {typeof it.qty === "number" && (
+                          <span className="text-xs text-[#6B7280]">Qty: {it.qty}</span>
+                        )}
+                      </div>
+                      {it.productName && <p className="text-xs text-[#4B5563]">{it.productName}{it.sizeLabel ? ` - ${it.sizeLabel}` : ""}</p>}
+                      {it.customerName && <p className="text-xs text-[#6B7280]">Customer: {it.customerName}</p>}
+                      {it.stockedInDate && <p className="text-xs text-[#6B7280]">Stocked In: {it.stockedInDate}</p>}
+                      {it.notes && <p className="text-xs text-[#6B7280]">Notes: {it.notes}</p>}
                     </div>
-                    {it.productName && <p className="text-xs text-[#4B5563]">{it.productName}{it.sizeLabel ? ` - ${it.sizeLabel}` : ""}</p>}
-                    {it.customerName && <p className="text-xs text-[#6B7280]">Customer: {it.customerName}</p>}
-                    {it.stockedInDate && <p className="text-xs text-[#6B7280]">Stocked In: {it.stockedInDate}</p>}
-                    {it.notes && <p className="text-xs text-[#6B7280]">Notes: {it.notes}</p>}
-                  </div>
-                ))}
+                  ))
+                )}
+              </div>
+
+              {/* ----- Move history: in/out for THIS rack, newest first ----- */}
+              <div className="flex items-center justify-between pt-3 border-t border-[#E2DDD8]">
+                <span className="font-semibold text-[#1F1D1B]">Move history</span>
+                {rackDetailLoading && <Loader2 className="h-4 w-4 animate-spin text-[#6B5C32]" />}
+              </div>
+              <div className="space-y-2">
+                {popupMovements.length === 0 ? (
+                  <p className="text-xs text-[#6B7280] text-center py-3">
+                    {rackDetailLoading ? "Loading history..." : "No movements recorded for this rack."}
+                  </p>
+                ) : (
+                  popupMovements.map((m) => (
+                    <div key={m.id} className="rounded-md border border-[#E2DDD8] p-3 bg-white">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <Badge
+                            className={
+                              m.type === "STOCK_IN"
+                                ? "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8]"
+                                : m.type === "STOCK_OUT"
+                                ? "bg-[#F9E1DA] text-[#9A3A2D] border-[#E8B2A1]"
+                                : "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]"
+                            }
+                          >
+                            {m.type === "STOCK_IN" ? "IN" : m.type === "STOCK_OUT" ? "OUT" : "TRANSFER"}
+                          </Badge>
+                          <span className="text-xs text-[#6B7280]">Qty: {m.quantity}</span>
+                        </div>
+                        <span className="text-xs text-[#6B7280] whitespace-nowrap">
+                          {new Date(m.createdAt).toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}
+                        </span>
+                      </div>
+                      {m.productName && <p className="text-xs text-[#4B5563] mt-1">{m.productName}</p>}
+                      {/* Document reference — resolved PO no / SO no, else the reason text */}
+                      {(m.poNo || m.salesOrderNo) && (
+                        <p className="text-xs text-[#4B5563] mt-0.5">
+                          {m.poNo && <span className="font-medium text-[#1F1D1B]">{m.poNo}</span>}
+                          {m.poNo && m.salesOrderNo && <span className="text-[#6B7280]"> · </span>}
+                          {m.salesOrderNo && <span className="text-[#6B7280]">SO {m.salesOrderNo}</span>}
+                        </p>
+                      )}
+                      {m.reason && <p className="text-xs text-[#6B7280] mt-0.5">{m.reason}</p>}
+                      {m.performedBy && <p className="text-[11px] text-[#9CA3AF] mt-0.5">By {m.performedBy}</p>}
+                    </div>
+                  ))
+                )}
               </div>
             </div>
             <div className="mt-6 flex gap-2 justify-between">
@@ -857,6 +937,7 @@ function MovementTable({ movements }: { movements: StockMovement[] }) {
               <th className="h-10 px-4 text-left font-medium text-[#374151]">Date</th>
               <th className="h-10 px-4 text-left font-medium text-[#374151]">Type</th>
               <th className="h-10 px-4 text-left font-medium text-[#374151]">Rack</th>
+              <th className="h-10 px-4 text-left font-medium text-[#374151]">Document</th>
               <th className="h-10 px-4 text-left font-medium text-[#374151]">Product</th>
               <th className="h-10 px-4 text-left font-medium text-[#374151]">Qty</th>
               <th className="h-10 px-4 text-left font-medium text-[#374151]">Reason</th>
@@ -875,7 +956,7 @@ function MovementTable({ movements }: { movements: StockMovement[] }) {
                 <>
                   {padTop > 0 && (
                     <tr aria-hidden="true">
-                      <td colSpan={7} style={{ height: padTop, padding: 0, border: 0 }} />
+                      <td colSpan={8} style={{ height: padTop, padding: 0, border: 0 }} />
                     </tr>
                   )}
                   {vItems.map((vi) => {
@@ -900,6 +981,16 @@ function MovementTable({ movements }: { movements: StockMovement[] }) {
                   </Badge>
                 </td>
                 <td className="h-10 px-4 font-medium text-[#1F1D1B]">{m.rackLabel}</td>
+                <td className="h-10 px-4 whitespace-nowrap">
+                  {m.poNo || m.salesOrderNo ? (
+                    <div className="flex flex-col leading-tight">
+                      {m.poNo && <span className="text-[#1F1D1B] font-medium">{m.poNo}</span>}
+                      {m.salesOrderNo && <span className="text-[11px] text-[#6B7280]">SO {m.salesOrderNo}</span>}
+                    </div>
+                  ) : (
+                    <span className="text-[#9CA3AF]">—</span>
+                  )}
+                </td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.productName}</td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.quantity}</td>
                 <td className="h-10 px-4 text-[#4B5563] max-w-[200px] truncate">{m.reason}</td>
@@ -909,7 +1000,7 @@ function MovementTable({ movements }: { movements: StockMovement[] }) {
                   })}
                   {padBottom > 0 && (
                     <tr aria-hidden="true">
-                      <td colSpan={7} style={{ height: padBottom, padding: 0, border: 0 }} />
+                      <td colSpan={8} style={{ height: padBottom, padding: 0, border: 0 }} />
                     </tr>
                   )}
                 </>

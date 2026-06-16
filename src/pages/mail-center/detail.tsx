@@ -1,17 +1,30 @@
 // ---------------------------------------------------------------------------
-// Mail Center — thread detail (P1: read-only).
+// Mail Center — thread detail (P2: reply + resolve/reopen).
 //
 // Renders a conversation's messages. Bodies are shown as PLAIN TEXT
 // (textBody, or HTML stripped to text) — we never inject untrusted customer
-// HTML into the DOM. Reply / assign / resolve arrive in P2.
+// HTML into the DOM. P2 adds an in-ERP reply composer (POST .../reply, sent
+// via Brevo from the thread's mailbox) and a resolve/reopen control
+// (PATCH .../:id status). Both refresh the thread via cache invalidation.
 // ---------------------------------------------------------------------------
+import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/components/ui/toast";
+import { csrfHeaders } from "@/lib/csrf";
 import { cn } from "@/lib/utils";
-import { ArrowLeft, ArrowDownLeft, ArrowUpRight, Send } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowDownLeft,
+  ArrowUpRight,
+  Send,
+  CheckCircle2,
+  RotateCcw,
+  Loader2,
+} from "lucide-react";
 
 type MailMessage = {
   id: string;
@@ -68,17 +81,82 @@ function htmlToText(html: string): string {
 export default function MailCenterDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { data, loading, error } = useCachedJson<ThreadDetail>(
-    id ? `/api/mail-center/threads/${id}` : null,
-    30,
-  );
+  const { toast } = useToast();
+  const url = id ? `/api/mail-center/threads/${id}` : null;
+  const { data, loading, error } = useCachedJson<ThreadDetail>(url, 30);
 
   const thread = data?.thread;
   const messages = data?.messages ?? [];
 
+  const [replyText, setReplyText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [updatingStatus, setUpdatingStatus] = useState(false);
+
+  // Send the composed reply, then invalidate this thread's cache so the new
+  // outbound message + updated status flag refetch immediately (the hook
+  // subscribes to its own URL's invalidations — see lib/cached-fetch.ts).
+  async function handleSend() {
+    if (!url || sending) return;
+    const text = replyText.trim();
+    if (!text) return;
+    setSending(true);
+    try {
+      const res = await fetch(`${url}/reply`, {
+        method: "POST",
+        headers: csrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) {
+        let msg = "回复发送失败,请重试。";
+        try {
+          const body = (await res.json()) as { error?: string };
+          if (body?.error) msg = body.error;
+        } catch {
+          /* non-JSON error body — keep the default message */
+        }
+        toast.error(msg);
+        return;
+      }
+      setReplyText("");
+      toast.success("回复已发送。");
+      invalidateCache(url);
+    } catch {
+      toast.error("回复发送失败,请检查网络后重试。");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  // Mark resolved / reopen via PATCH status, then refresh the thread.
+  async function handleSetStatus(status: "open" | "closed") {
+    if (!url || updatingStatus) return;
+    setUpdatingStatus(true);
+    try {
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: csrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) {
+        toast.error("更新状态失败,请重试。");
+        return;
+      }
+      toast.success(status === "closed" ? "已标记为已处理。" : "已重新打开。");
+      invalidateCache(url);
+    } catch {
+      toast.error("更新状态失败,请检查网络后重试。");
+    } finally {
+      setUpdatingStatus(false);
+    }
+  }
+
+  const isClosed = thread?.status === "closed";
+
   return (
     <div className="mx-auto max-w-3xl space-y-4">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between gap-2">
         <Button
           variant="ghost"
           size="sm"
@@ -88,6 +166,38 @@ export default function MailCenterDetailPage() {
           <ArrowLeft className="h-4 w-4" />
           返回收件箱
         </Button>
+        {thread &&
+          (isClosed ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              disabled={updatingStatus}
+              onClick={() => handleSetStatus("open")}
+            >
+              {updatingStatus ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RotateCcw className="h-4 w-4" />
+              )}
+              重新打开
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              disabled={updatingStatus}
+              onClick={() => handleSetStatus("closed")}
+            >
+              {updatingStatus ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <CheckCircle2 className="h-4 w-4" />
+              )}
+              标记为已处理
+            </Button>
+          ))}
       </div>
 
       {error && (
@@ -178,16 +288,42 @@ export default function MailCenterDetailPage() {
             )}
           </div>
 
-          {/* Reply placeholder — wired in P2 */}
-          <Card className="border-dashed">
-            <CardContent className="flex items-center justify-between gap-3 p-4">
-              <p className="text-sm text-muted-foreground">
-                在 ERP 里直接回复 —— P2 上线(通过 Brevo 从这个信箱发出)。
-              </p>
-              <Button disabled size="sm" className="gap-1.5">
-                <Send className="h-4 w-4" />
-                回复
-              </Button>
+          {/* Reply composer */}
+          <Card>
+            <CardContent className="space-y-3 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-medium">回复</p>
+                <span className="text-xs text-muted-foreground">
+                  发送至 {thread.counterpartyName || thread.counterpartyEmail}
+                  {thread.mailboxAddress ? ` · 来自 ${thread.mailboxAddress}` : ""}
+                </span>
+              </div>
+              <textarea
+                value={replyText}
+                onChange={(e) => setReplyText(e.target.value)}
+                rows={6}
+                placeholder="输入回复内容…"
+                disabled={sending}
+                className="w-full resize-y rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32] disabled:cursor-not-allowed disabled:opacity-60"
+              />
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] text-muted-foreground">
+                  通过 Brevo 从 {thread.mailboxAddress || "Hookka"} 发出。
+                </p>
+                <Button
+                  size="sm"
+                  className="gap-1.5"
+                  disabled={sending || !replyText.trim()}
+                  onClick={handleSend}
+                >
+                  {sending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Send className="h-4 w-4" />
+                  )}
+                  发送回复
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </>

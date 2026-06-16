@@ -39,6 +39,7 @@ import {
   ChevronRight,
   Images,
   Flashlight,
+  ZoomOut,
 } from "lucide-react";
 import jsQR from "jsqr";
 import { useT } from "@/lib/worker-i18n";
@@ -298,6 +299,12 @@ export default function WorkerScanPage() {
   // leak into the hot tick loop.
   const zxingRef = useRef<((img: ImageData) => string | null) | null>(null);
   const zxingLoadingRef = useRef<Promise<void> | null>(null);
+  // Lens zoom state lifted to refs so a tap-to-reset control (outside the scan
+  // loop) can zoom back out — the QR auto-zoom-on-fail would otherwise leave the
+  // worker stuck zoomed in with no way back (Wei Siang 2026-06-17).
+  const zoomTrackRef = useRef<MediaStreamTrack | null>(null);
+  const zoomRangeRef = useRef<{ min: number; max: number } | null>(null);
+  const curZoomRef = useRef(0);
   const ensureZxing = useCallback((): Promise<void> => {
     if (zxingRef.current) return Promise.resolve();
     if (zxingLoadingRef.current) return zxingLoadingRef.current;
@@ -338,6 +345,23 @@ export default function WorkerScanPage() {
         zxingLoadingRef.current = null;
       });
     return zxingLoadingRef.current;
+  }, []);
+
+  // Tap-to-reset zoom: the QR auto-zoom can leave the lens zoomed in with no way
+  // back out; this returns it to the widest setting (Wei Siang 2026-06-17:
+  // "QR auto zoom 了不能 zoom 回来小").
+  const resetZoom = useCallback(() => {
+    const track = zoomTrackRef.current;
+    const range = zoomRangeRef.current;
+    if (!track || !range) return;
+    curZoomRef.current = range.min;
+    try {
+      void track.applyConstraints({
+        advanced: [{ zoom: range.min } as unknown as MediaTrackConstraintSet],
+      });
+    } catch {
+      /* best-effort */
+    }
   }, []);
 
   // Batch-upload path — worker snaps a bunch of QR stickers during the
@@ -961,8 +985,8 @@ export default function WorkerScanPage() {
     // (a fresh getUserMedia starts at default zoom). Best-effort: silently off
     // where the platform doesn't expose zoom (most desktops / some phones).
     const zoomTrack = stream.getVideoTracks?.()[0] ?? null;
+    zoomTrackRef.current = zoomTrack;
     let zoomRange: { min: number; max: number } | null = null;
-    let curZoom = 0;
     let lastZoomAt = 0;
     try {
       const zc = (
@@ -977,11 +1001,12 @@ export default function WorkerScanPage() {
         zc.max > zc.min
       ) {
         zoomRange = { min: zc.min, max: zc.max };
-        curZoom = zc.min;
       }
     } catch {
       zoomRange = null;
     }
+    zoomRangeRef.current = zoomRange;
+    curZoomRef.current = zoomRange ? zoomRange.min : 0;
     const scanStartedAt = performance.now();
     // Reset the lens to its widest on every (re)start so toggling modes doesn't
     // inherit the previous mode's zoom — a zoomed-in lens crops a wide barcode.
@@ -1194,15 +1219,15 @@ export default function WorkerScanPage() {
         now - lastZoomAt > 1100
       ) {
         const cap = zoomRange.min + (zoomRange.max - zoomRange.min) * 0.35;
-        if (curZoom < cap) {
+        if (curZoomRef.current < cap) {
           lastZoomAt = now;
-          curZoom = Math.min(
+          curZoomRef.current = Math.min(
             cap,
-            curZoom + (zoomRange.max - zoomRange.min) * 0.12,
+            curZoomRef.current + (zoomRange.max - zoomRange.min) * 0.12,
           );
           try {
             void zoomTrack.applyConstraints({
-              advanced: [{ zoom: curZoom } as unknown as MediaTrackConstraintSet],
+              advanced: [{ zoom: curZoomRef.current } as unknown as MediaTrackConstraintSet],
             });
           } catch {
             /* zoom is best-effort; never break the scan loop */
@@ -2094,6 +2119,19 @@ export default function WorkerScanPage() {
               playsInline
               muted
             />
+            {/* Zoom-out — the QR auto-zoom can leave the lens zoomed in with no
+                way back; tap to widen again (Wei Siang 2026-06-17). Barcode mode
+                never auto-zooms, so this is QR-only. */}
+            {scanMode === "qr" && (
+              <button
+                type="button"
+                onClick={resetZoom}
+                className="absolute bottom-4 right-4 h-11 w-11 rounded-full bg-black/55 text-white flex items-center justify-center active:bg-black/75"
+                aria-label="Reset zoom"
+              >
+                <ZoomOut className="h-5 w-5" />
+              </button>
+            )}
             {/* Aiming frame — square for QR, wide + short for a 1D barcode (with a
                 centre aim line). In barcode mode the decoder reads ONLY the code
                 centred in this band, so the other stacked rows are ignored. */}

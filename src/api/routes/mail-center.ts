@@ -24,6 +24,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission, requireSuperAdmin } from "../lib/rbac";
 import { getOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
+import { sendMail } from "../lib/email";
 
 const app = new Hono<Env>();
 
@@ -654,6 +655,211 @@ app.patch("/addresses/:id", async (c) => {
     .bind(orgId, id)
     .first<AddressRow>();
   return c.json(row ? rowToAddress(row) : { id });
+});
+
+// ---------------------------------------------------------------------------
+// P2 — reply + assign/resolve (mounted at /api/mail-center, AFTER auth).
+// ---------------------------------------------------------------------------
+
+// userId / userName are stamped on the context by auth-middleware via the
+// get()/set() escape hatch (not enumerated in worker.ts's Variables map), so
+// read them the same way requireSuperAdmin / POST /addresses already do.
+function getUserId(c: { get: (k: string) => string | undefined }): string | null {
+  const id = c.get("userId");
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+// Resolve a sender display name for the outbound message row. Mirrors
+// presence.ts's getDisplayName: prefer users.displayName, else email, else
+// fall back to the raw userId so the row is never blank.
+async function senderName(db: D1Database, userId: string | null): Promise<string> {
+  if (!userId) return "";
+  try {
+    const row = await db
+      .prepare("SELECT displayName, email FROM users WHERE id = ? LIMIT 1")
+      .bind(userId)
+      .first<{ displayName: string | null; email: string | null }>();
+    return row?.displayName?.trim() || row?.email || userId;
+  } catch {
+    // A name lookup must never block a send that already succeeded.
+    return userId;
+  }
+}
+
+// Minimal HTML escape for wrapping a plain-text reply into an HTML body when
+// the caller didn't supply their own html. Same intent as lib/email.ts's
+// escapeHtml — kept local so this module stays self-contained.
+function escapeHtml(s: string): string {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Default From when a thread has no mailbox_address on file (e.g. an older
+// thread, or one where the original recipient wasn't an @hookka.com address).
+const DEFAULT_REPLY_FROM = "Hookka <support@hookka.com>";
+
+// POST /api/mail-center/threads/:id/reply — send an outbound reply via the
+// shared sender (Brevo when BREVO_API_KEY is set — hookka.com is verified
+// there, so replies SEND today without any MX change), then record it.
+//
+// NOTE: sendMail does not yet support custom In-Reply-To / References headers,
+// so this reply is NOT RFC-threaded on the recipient's side for v1. The local
+// thread is still updated correctly; cross-client threading headers are a
+// follow-up once the sender helper grows a headers option.
+app.post("/threads/:id/reply", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "update");
+  if (denied) return denied;
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+
+  type ReplyBody = { text?: string; html?: string };
+  const body: ReplyBody = await c.req
+    .json<ReplyBody>()
+    .catch(() => ({} as ReplyBody));
+
+  const text = (body.text ?? "").trim();
+  const html = body.html?.trim() || "";
+  if (!text && !html) {
+    return c.json({ error: "reply body is empty" }, 400);
+  }
+
+  const thread = await c.var.DB.prepare(
+    `SELECT * FROM email_threads WHERE org_id = ? AND id = ? LIMIT 1`,
+  )
+    .bind(orgId, id)
+    .first<ThreadRow>();
+  if (!thread) return c.json({ error: "Thread not found" }, 404);
+
+  const to = (thread.counterparty_email ?? "").trim();
+  if (!to) {
+    return c.json({ error: "thread has no counterparty email to reply to" }, 400);
+  }
+
+  const mailbox = (thread.mailbox_address ?? "").trim();
+  const from = mailbox || DEFAULT_REPLY_FROM;
+  const baseSubject = thread.subject ?? "(no subject)";
+  const subject = /^re:/i.test(baseSubject) ? baseSubject : `Re: ${baseSubject}`;
+
+  // When the caller supplied only plain text, wrap it in a minimal HTML body
+  // so the email has both parts (Brevo derives textContent from html anyway,
+  // but a real text/plain part keeps the reply readable everywhere).
+  const htmlBody =
+    html || `<p>${escapeHtml(text).replace(/\n/g, "<br/>")}</p>`;
+
+  const result = await sendMail(c.env, from, {
+    to,
+    subject,
+    text: text || undefined,
+    html: htmlBody,
+  });
+  if (!result.ok) {
+    return c.json({ error: result.error || "failed to send reply" }, 502);
+  }
+
+  const userId = getUserId(
+    c as unknown as { get: (k: string) => string | undefined },
+  );
+  const fromName = await senderName(c.var.DB, userId);
+
+  const now = new Date().toISOString();
+  const snippet = (text || stripHtml(htmlBody)).slice(0, 240);
+  const messageId = crypto.randomUUID();
+  await c.var.DB.prepare(
+    `INSERT INTO email_messages
+       (id, org_id, thread_id, direction, from_address, from_name,
+        to_addresses, subject, text_body, html_body, sent_at, received_at,
+        sent_by_user_id, sent_by_name, provider_message_id, created_at)
+     VALUES (?, ?, ?, 'outbound', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      messageId,
+      orgId,
+      id,
+      from,
+      fromName || null,
+      JSON.stringify([to]),
+      subject,
+      text || null,
+      htmlBody,
+      now,
+      now,
+      userId,
+      fromName || null,
+      result.id ?? null,
+      now,
+    )
+    .run();
+
+  await c.var.DB.prepare(
+    `UPDATE email_threads
+        SET last_message_at = ?, last_direction = 'outbound',
+            last_snippet = ?, message_count = message_count + 1, unread = 0
+      WHERE org_id = ? AND id = ?`,
+  )
+    .bind(now, snippet, orgId, id)
+    .run();
+
+  return c.json({ ok: true, messageId });
+});
+
+// PATCH /api/mail-center/threads/:id — assign / resolve / reopen a thread.
+app.patch("/threads/:id", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "update");
+  if (denied) return denied;
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+
+  type PatchBody = {
+    status?: "open" | "closed";
+    assignedToUserId?: string | null;
+    assignedToName?: string | null;
+  };
+  const body: PatchBody = await c.req
+    .json<PatchBody>()
+    .catch(() => ({} as PatchBody));
+
+  const sets: string[] = [];
+  const binds: (string | number | null)[] = [];
+  if (body.status !== undefined) {
+    if (body.status !== "open" && body.status !== "closed") {
+      return c.json({ error: "status must be 'open' or 'closed'" }, 400);
+    }
+    sets.push("status = ?");
+    binds.push(body.status);
+  }
+  if (body.assignedToUserId !== undefined) {
+    sets.push("assigned_to_user_id = ?");
+    binds.push(body.assignedToUserId ?? null);
+  }
+  if (body.assignedToName !== undefined) {
+    sets.push("assigned_to_name = ?");
+    binds.push(body.assignedToName ?? null);
+  }
+  if (sets.length === 0) {
+    return c.json({ error: "no fields to update" }, 400);
+  }
+
+  const res = await c.var.DB.prepare(
+    `UPDATE email_threads SET ${sets.join(", ")} WHERE org_id = ? AND id = ?`,
+  )
+    .bind(...binds, orgId, id)
+    .run();
+  if (!res.meta?.changes) {
+    return c.json({ error: "Thread not found" }, 404);
+  }
+
+  const row = await c.var.DB.prepare(
+    `SELECT * FROM email_threads WHERE org_id = ? AND id = ? LIMIT 1`,
+  )
+    .bind(orgId, id)
+    .first<ThreadRow>();
+  return c.json(row ? rowToThread(row) : { id });
 });
 
 export default app;

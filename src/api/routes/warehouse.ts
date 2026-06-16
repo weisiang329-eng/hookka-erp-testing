@@ -58,6 +58,11 @@ type StockMovementRow = {
   reason: string | null;
   performedBy: string | null;
   createdAt: string;
+  // Joined from production_orders via productionOrderId (LEFT JOIN). Lets the
+  // UI show which document a movement belongs to — the production order number
+  // and the sales order it traces back to — instead of only the reason string.
+  poNo?: string | null;
+  salesOrderNo?: string | null;
 };
 
 type RackItemApi = {
@@ -138,6 +143,15 @@ function genMovementId(): string {
 }
 
 function rowToMovement(r: StockMovementRow) {
+  // Document reference for the row. stock_movements has no ref_type/ref_id
+  // columns — the only stored linkage is productionOrderId (resolved here to
+  // the PO number + its sales order number via the LEFT JOIN) plus the free
+  // reason text. We surface what's actually stored: poNo / salesOrderNo for a
+  // clickable-grade reference, and leave `reason` as the human note.
+  const poNo = r.poNo ?? "";
+  const salesOrderNo = r.salesOrderNo ?? "";
+  // Single best label for compact display: PO no first, else SO no.
+  const docRef = poNo || salesOrderNo || "";
   return {
     id: r.id,
     type: r.type,
@@ -150,6 +164,9 @@ function rowToMovement(r: StockMovementRow) {
     reason: r.reason ?? "",
     performedBy: r.performedBy ?? "",
     createdAt: r.createdAt,
+    poNo,
+    salesOrderNo,
+    docRef,
   };
 }
 
@@ -305,21 +322,28 @@ app.get("/movements", async (c) => {
   const where: string[] = [];
   const binds: unknown[] = [];
   if (type) {
-    where.push("type = ?");
+    where.push("sm.type = ?");
     binds.push(type);
   }
   if (from) {
-    where.push("created_at >= ?");
+    where.push("sm.created_at >= ?");
     binds.push(from);
   }
   if (to) {
-    where.push("created_at <= ?");
+    where.push("sm.created_at <= ?");
     binds.push(to + "T23:59:59Z");
   }
+  // LEFT JOIN production_orders so each movement can show the document it
+  // belongs to (PO number + the sales order it traces back to). The join key
+  // is the only stored doc linkage on stock_movements: productionOrderId.
+  const base =
+    `SELECT sm.*, po.poNo AS poNo, po.salesOrderNo AS salesOrderNo
+       FROM stock_movements sm
+       LEFT JOIN production_orders po ON po.id = sm.productionOrderId`;
   const sql =
     where.length > 0
-      ? `SELECT * FROM stock_movements WHERE ${where.join(" AND ")} ORDER BY created_at DESC`
-      : "SELECT * FROM stock_movements ORDER BY created_at DESC";
+      ? `${base} WHERE ${where.join(" AND ")} ORDER BY sm.created_at DESC`
+      : `${base} ORDER BY sm.created_at DESC`;
   const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<StockMovementRow>();
@@ -385,6 +409,48 @@ app.post("/movements", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// GET /api/warehouse/:id/details — one rack's contents + its move history.
+// Powers the rack detail popup: `contents` is the rack's current rack_items
+// (with the legacy single-item fallback so seeded racks aren't blank), and
+// `movements` is that rack's stock_movements newest-first (capped at 50),
+// each carrying the resolved document reference (PO no / SO no) via the same
+// production_orders LEFT JOIN used by /movements.
+app.get("/:id/details", async (c) => {
+  const id = c.req.param("id");
+  const [row, items, moves] = await Promise.all([
+    c.var.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
+      .bind(id)
+      .first<RackLocationRow>(),
+    c.var.DB.prepare("SELECT * FROM rack_items WHERE rackLocationId = ?")
+      .bind(id)
+      .all<RackItemRow>(),
+    c.var.DB.prepare(
+      `SELECT sm.*, po.poNo AS poNo, po.salesOrderNo AS salesOrderNo
+         FROM stock_movements sm
+         LEFT JOIN production_orders po ON po.id = sm.productionOrderId
+        WHERE sm.rackLocationId = ?
+        ORDER BY sm.created_at DESC
+        LIMIT 50`,
+    )
+      .bind(id)
+      .all<StockMovementRow>(),
+  ]);
+  if (!row) {
+    return c.json({ success: false, error: "Rack location not found" }, 404);
+  }
+  // Reuse rowToRack so contents include the legacy denormalized single item
+  // when no rack_items rows exist (mirrors the list/detail endpoints).
+  const rack = rowToRack(row, items.results ?? []);
+  return c.json({
+    success: true,
+    data: {
+      rack,
+      contents: rack.items ?? [],
+      movements: (moves.results ?? []).map(rowToMovement),
+    },
+  });
 });
 
 // GET /api/warehouse/:id — single rack location + items

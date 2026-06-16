@@ -151,6 +151,28 @@ export async function enqueueEmail<E extends Env>(
       orgId,
     )
     .run();
+
+  // Eager push: kick a background drain so this email goes out within seconds
+  // instead of waiting for the 5-min cron (which GitHub Actions runs hours
+  // apart in practice — Wei Siang 2026-06-16: "driver scan 了, invoice 為什麼
+  //沒有自動發"). The row is already committed, so this is purely an
+  // optimisation; the cron stays the backstop/retry path. Non-blocking
+  // (waitUntil) so the user's request returns immediately, and processOutbox's
+  // atomic per-row claim makes racing the cron safe (no double-send).
+  try {
+    c.executionCtx?.waitUntil(
+      processOutbox(c.var.DB, c.env).catch((err: unknown) => {
+        // Swallow — the cron will retry. Never fail an enqueue over the push.
+        console.warn(
+          "[email-outbox] eager drain failed (cron will retry):",
+          err,
+        );
+      }),
+    );
+  } catch {
+    // No executionCtx (unit tests / non-Worker invocation) — fine, the cron
+    // drains it. Accessing c.executionCtx can throw when unset, hence the try.
+  }
   return { id };
 }
 
@@ -167,6 +189,10 @@ export async function enqueueEmail<E extends Env>(
 
 const MAX_ATTEMPTS = 3;
 const BATCH_SIZE = 25;
+// A row claimed (status='SENDING') but never finished — e.g. the immediate
+// post-enqueue drain's waitUntil isolate was evicted mid-send — is reclaimed
+// after this window so it's never stranded.
+const STALE_SENDING_MS = 5 * 60_000;
 
 interface OutboxRow {
   id: string;
@@ -267,6 +293,11 @@ export async function processOutbox(
   // db-pg.ts) because the outbox columns aren't in column-rename-map.json.
   // createdAt is in the rename map but using created_at literally keeps the
   // ORDER BY clause matching the migration's column name 1:1.
+  // Reclaim crashed claims: a row stuck at 'SENDING' past the window (its
+  // immediate-send isolate died before it could mark the row) becomes
+  // pickable again, so an evicted eager push never strands an email.
+  const staleThreshold = new Date(Date.now() - STALE_SENDING_MS).toISOString();
+
   const pickRes = await db
     .prepare(
       `SELECT id,
@@ -280,10 +311,11 @@ export async function processOutbox(
               last_attempt_at AS "lastAttemptAt"
          FROM outbox_emails
         WHERE status IN ('PENDING','RETRYING')
+           OR (status = 'SENDING' AND last_attempt_at < ?)
         ORDER BY created_at ASC
         LIMIT ?`,
     )
-    .bind(BATCH_SIZE)
+    .bind(staleThreshold, BATCH_SIZE)
     .all<OutboxRow>();
 
   const rows = pickRes.results ?? [];
@@ -301,6 +333,32 @@ export async function processOutbox(
         result.skippedBackoff++;
         continue;
       }
+    }
+
+    // Atomic claim — flip this row out of the pickable set BEFORE sending so a
+    // concurrent drain can't double-send a customer email. The eager
+    // post-enqueue push (added so mail goes out in seconds) now races the
+    // 5-min cron, and a single batch can fire several pushes at once. Postgres
+    // serialises the UPDATEs on the row, so only the winner sees a pickable
+    // status → changes=1; everyone else no-ops and skips. The OR clause mirrors
+    // the SELECT so a crashed claim is re-grabbable. Same meta.changes race
+    // pattern as edit-lock-override.ts / po-cost-cascade.ts.
+    const claim = await db
+      .prepare(
+        `UPDATE outbox_emails
+            SET status = 'SENDING', last_attempt_at = ?
+          WHERE id = ?
+            AND (status IN ('PENDING','RETRYING')
+                 OR (status = 'SENDING' AND last_attempt_at < ?))`,
+      )
+      .bind(new Date().toISOString(), row.id, staleThreshold)
+      .run();
+    if (
+      ((claim as unknown as { meta?: { changes?: number } }).meta?.changes ??
+        0) === 0
+    ) {
+      // Lost the race — another drain owns this row now.
+      continue;
     }
 
     const send = await sendMail(env, from, {

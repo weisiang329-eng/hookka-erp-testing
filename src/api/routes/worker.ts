@@ -432,22 +432,23 @@ app.get("/scan-lookup", async (c) => {
     const deptCode = deptOfBarcodeToken(term);
     if (deptCode) {
       // Resolve the schedule Code 128 by re-deriving deriveBarcodeToken across
-      // the department's CURRENT WIP (status <> 'COMPLETED'). Scoping to current
-      // WIP matters two ways: (1) a freshly-printed schedule only carries
-      // in-progress cards, so the scanned card is here; (2) an all-status scan
-      // could resolve the token to an old / edge-case completed card whose PO
-      // row then trips the response build downstream — which the worker saw as
-      // "出错了 / Something went wrong" (Wei Siang 2026-06-17: barcode scan →
-      // something went wrong; the symptom flipped from "Not found" the moment
-      // the status filter was dropped). The try/catch is belt-and-suspenders:
-      // any DB hiccup leaves poRows empty → a graceful "Not found", never a 500.
+      // EVERY card in the department — INCLUDING completed ones, so re-scanning
+      // a finished card surfaces it ("already done") instead of a baffling
+      // "Not found" (Wei Siang 2026-06-17: token 0319032601 was a COMPLETED
+      // WOOD_CUT card that the old `status <> 'COMPLETED'` filter hid → "Not
+      // found"). The earlier all-status 500 ("出错了 / something went wrong") was
+      // the `wipKey` column — a 60+ char BOM string pulled for every dept card,
+      // which blew up the payload; it is no longer selected here, so the
+      // candidate scan is just 3 small columns and safe at any status. The
+      // try/catch + the wrapped response build below keep any hiccup graceful
+      // (empty → "Not found"), never a 500.
       try {
         const cand =
           (
             await c.var.DB.prepare(
               `SELECT id, productionOrderId, departmentCode
                  FROM job_cards
-                WHERE departmentCode = ? AND status <> 'COMPLETED'`,
+                WHERE departmentCode = ?`,
             )
               .bind(deptCode)
               .all<{
@@ -514,9 +515,19 @@ app.get("/scan-lookup", async (c) => {
     }
   }
 
-  const data = poRows.map((po) =>
-    rowToMinimalPO(po, jcRows, new Map(), null, null, null, null, null, picsByJcId),
-  );
+  // Belt-and-suspenders: rowToMinimalPO does per-PO derivations; if any single
+  // PO row carries shape the converter doesn't expect, fail the lookup SOFTLY
+  // (empty → "Not found") rather than 500 → the scan page's "出错了 / Something
+  // went wrong". The exception is logged so a genuinely-broken PO is findable.
+  let data: ReturnType<typeof rowToMinimalPO>[];
+  try {
+    data = poRows.map((po) =>
+      rowToMinimalPO(po, jcRows, new Map(), null, null, null, null, null, picsByJcId),
+    );
+  } catch (e) {
+    console.warn("[scan-lookup] response build failed:", e);
+    return c.json({ success: true, data: [] });
+  }
   return c.json({ success: true, data });
 });
 

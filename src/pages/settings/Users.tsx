@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   Mail,
   UserPlus,
@@ -263,6 +264,11 @@ export default function UsersPage() {
   // requireSuperAdmin gate on every user-management route server-side, so a
   // stray Admin can never disable the owner's account. (owner 2026-06-12)
   const canManageUsers = currentUser?.role?.toUpperCase() === "SUPER_ADMIN";
+
+  // In-app confirm ([[feedback_no_naked_edits]]) — destructive actions ask
+  // through this hook's dialog, never the browser's window.confirm. Render
+  // {confirmDialog} once in the tree (bottom of the component).
+  const { confirm, confirmDialog } = useConfirm();
 
   // Which tab is showing. Default = Users.
   const [tab, setTab] = useState<TabKey>("users");
@@ -1045,7 +1051,15 @@ export default function UsersPage() {
 
   const toggleActive = async (u: UserRow) => {
     const next = !u.isActive;
-    if (!next && !confirm(`Disable ${u.email}? Their sessions will be killed.`))
+    if (
+      !next &&
+      !(await confirm({
+        title: "Disable user",
+        message: `Disable ${u.email}? Their sessions will be killed.`,
+        confirmLabel: "Disable",
+        tone: "danger",
+      }))
+    )
       return;
     // 2026-05-27 verifiedSave migration. Auth toggle drives login access —
     // a stale-cache 200 that didn't actually disable the user is a real
@@ -1088,7 +1102,15 @@ export default function UsersPage() {
       showFlash("err", "You can't delete your own account");
       return;
     }
-    if (!confirm(`Delete ${u.email}? Their sessions will be purged.`)) return;
+    if (
+      !(await confirm({
+        title: "Delete user",
+        message: `Delete ${u.email}? Their sessions will be purged.`,
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
+    )
+      return;
     const res = await fetch(`/api/users/${u.id}`, { method: "DELETE" });
     const json = (await res.json()) as ApiEnvelope;
     if (json.success) {
@@ -1146,14 +1168,27 @@ export default function UsersPage() {
     }
     // A role change ends their current session (they re-sign-in with the new
     // access). Spell that out — and flag the self-demotion foot-gun.
-    const selfNote =
-      subject.id === currentUser?.id
-        ? "\n\nThis is YOUR OWN account — moving away from Super Admin signs you out and you may lose access to this page."
-        : "";
+    const isSelf = subject.id === currentUser?.id;
     if (
-      !confirm(
-        `Change ${subject.email} to ${roleLabel(nextRole)}?\n\nTheir current session ends immediately; they sign back in with the new access.${selfNote}`,
-      )
+      !(await confirm({
+        title: `Change ${subject.email} to ${roleLabel(nextRole)}?`,
+        message: (
+          <>
+            <p>
+              Their current session ends immediately; they sign back in with the
+              new access.
+            </p>
+            {isSelf && (
+              <p className="mt-2 font-medium text-red-600">
+                This is YOUR OWN account — moving away from Super Admin signs you
+                out and you may lose access to this page.
+              </p>
+            )}
+          </>
+        ),
+        confirmLabel: "Change role",
+        tone: "danger",
+      }))
     )
       return false;
     setEditRoleSubmitting(true);
@@ -1460,7 +1495,15 @@ export default function UsersPage() {
   };
 
   const revokeInvite = async (inv: InviteRow) => {
-    if (!confirm(`Revoke invite for ${inv.email}?`)) return;
+    if (
+      !(await confirm({
+        title: "Revoke invite",
+        message: `Revoke invite for ${inv.email}?`,
+        confirmLabel: "Revoke",
+        tone: "danger",
+      }))
+    )
+      return;
     const res = await fetch(`/api/users/invites/${inv.token}`, {
       method: "DELETE",
     });
@@ -1858,7 +1901,16 @@ export default function UsersPage() {
                 e.stopPropagation();
                 toggleActive(u);
               }}
-              title={u.isActive ? "Disable" : "Enable"}
+              title={
+                u.id === currentUser?.id
+                  ? "You can't disable your own account"
+                  : u.isActive
+                    ? "Disable"
+                    : "Enable"
+              }
+              // Self-guard: can't disable your own account (mirrors the Delete
+              // button + the server-side lockout guard on PUT /api/users/:id).
+              disabled={u.isActive && u.id === currentUser?.id}
             >
               {u.isActive ? (
                 <Ban className="h-3.5 w-3.5" />
@@ -2601,7 +2653,17 @@ export default function UsersPage() {
                                     e.stopPropagation();
                                     toggleActive(m);
                                   }}
-                                  title={m.isActive ? "Disable" : "Enable"}
+                                  title={
+                                    m.id === currentUser?.id
+                                      ? "You can't disable your own account"
+                                      : m.isActive
+                                        ? "Disable"
+                                        : "Enable"
+                                  }
+                                  // Self-guard: can't disable your own account
+                                  // (mirrors the Delete button + the server-side
+                                  // lockout guard on PUT /api/users/:id).
+                                  disabled={m.isActive && m.id === currentUser?.id}
                                 >
                                   {m.isActive ? (
                                     <Ban className="h-3.5 w-3.5" />
@@ -3309,6 +3371,11 @@ export default function UsersPage() {
           </div>
         </div>
       )}
+
+      {/* In-app confirm dialog ([[feedback_no_naked_edits]]) — rendered once;
+          driven by the useConfirm() hook above for Disable / Delete / role
+          change / revoke-invite. */}
+      {confirmDialog}
     </div>
   );
 }

@@ -39,6 +39,9 @@ import {
   CircleDot,
   PenSquare,
   Inbox as InboxIcon,
+  ChevronRight,
+  Users,
+  User as UserIcon,
 } from "lucide-react";
 
 type MailThread = {
@@ -59,8 +62,38 @@ type MailAddress = {
   id: string;
   address: string;
   label: string;
+  assignedDept: string | null;
+  assignedUserName: string | null;
   active: boolean;
 };
+
+// Mailbox sidebar selection. "all" clears the filter (every scoped thread),
+// "dept" narrows to all mailboxes in one department (client-side filter over
+// the already-fetched threads via the dept→addresses map), and "mailbox"
+// keeps the existing single-address behaviour (drives the ?mailbox= query).
+type MailboxFilter =
+  | { kind: "all" }
+  | { kind: "dept"; value: string }
+  | { kind: "mailbox"; value: string };
+
+// Department ordering for the sidebar: a few priority depts first (matching the
+// Org Chart), then the rest A–Z, with the catch-all bucket pinned last.
+const DEPT_PRIORITY = ["Support", "Finance", "HR"];
+const UNASSIGNED_DEPT = "Other";
+
+function deptRank(dept: string): number {
+  const i = DEPT_PRIORITY.indexOf(dept);
+  if (i !== -1) return i;
+  if (dept === UNASSIGNED_DEPT) return DEPT_PRIORITY.length + 1;
+  return DEPT_PRIORITY.length; // ordinary depts sort A–Z within this band
+}
+
+function sortDepts(a: string, b: string): number {
+  const ra = deptRank(a);
+  const rb = deptRank(b);
+  if (ra !== rb) return ra - rb;
+  return a.localeCompare(b);
+}
 
 function fmtTime(iso: string): string {
   if (!iso) return "";
@@ -225,7 +258,10 @@ export default function MailCenterPage() {
   const isDesktop = useIsDesktop();
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<"open" | "closed" | "all">("open");
-  const [mailbox, setMailbox] = useState<string>("");
+  // Hierarchical mailbox filter: All / a whole department / a single mailbox.
+  // Only the single-mailbox case hits the backend (?mailbox=); All and dept are
+  // resolved client-side over the fetched threads (see `visible` below).
+  const [filter, setFilter] = useState<MailboxFilter>({ kind: "all" });
   const [composeOpen, setComposeOpen] = useState(false);
   // Desktop reading-pane selection. Lives in local state (NOT the URL) so the
   // existing routes stay untouched. Null = show the empty-pane placeholder.
@@ -233,7 +269,9 @@ export default function MailCenterPage() {
 
   const params = new URLSearchParams();
   if (status !== "all") params.set("status", status);
-  if (mailbox) params.set("mailbox", mailbox);
+  // Single-mailbox keeps the existing server-side filter. "all" and "dept"
+  // fetch the full scoped list and narrow client-side, so no query param.
+  if (filter.kind === "mailbox") params.set("mailbox", filter.value);
   const listUrl = `/api/mail-center/threads${params.toString() ? `?${params.toString()}` : ""}`;
 
   const {
@@ -252,10 +290,53 @@ export default function MailCenterPage() {
     [addresses],
   );
 
-  // Client-side text search over the already-scoped list (subject / sender /
-  // snippet) so typing feels instant without a roundtrip per keystroke.
+  // Group active mailboxes by department for the hierarchical sidebar. Blank /
+  // null dept falls into the "Other" bucket. Each group keeps its mailboxes
+  // sorted by person name (falling back to the address) for a stable order.
+  const deptGroups = useMemo(() => {
+    const byDept = new Map<string, MailAddress[]>();
+    for (const a of activeAddresses) {
+      const dept = (a.assignedDept ?? "").trim() || UNASSIGNED_DEPT;
+      const arr = byDept.get(dept);
+      if (arr) arr.push(a);
+      else byDept.set(dept, [a]);
+    }
+    return Array.from(byDept.entries())
+      .map(([dept, mailboxes]) => ({
+        dept,
+        mailboxes: mailboxes
+          .slice()
+          .sort((x, y) =>
+            (x.assignedUserName || x.address).localeCompare(
+              y.assignedUserName || y.address,
+            ),
+          ),
+      }))
+      .sort((a, b) => sortDepts(a.dept, b.dept));
+  }, [activeAddresses]);
+
+  // dept → set of mailbox addresses, used to narrow threads client-side when a
+  // whole department is selected.
+  const addressesByDept = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const g of deptGroups) {
+      m.set(g.dept, new Set(g.mailboxes.map((a) => a.address)));
+    }
+    return m;
+  }, [deptGroups]);
+
+  // Client-side narrowing of the already-scoped list. Two passes:
+  //   1. Department filter — when a whole dept is selected, keep only threads
+  //      whose mailbox belongs to that dept (single-mailbox already narrowed
+  //      server-side; "all" keeps everything).
+  //   2. Text search over subject / sender / snippet so typing feels instant
+  //      without a roundtrip per keystroke.
   const visible = useMemo(() => {
-    const list = threads ?? [];
+    let list = threads ?? [];
+    if (filter.kind === "dept") {
+      const addrs = addressesByDept.get(filter.value);
+      list = addrs ? list.filter((t) => addrs.has(t.mailboxAddress)) : [];
+    }
     const needle = q.trim().toLowerCase();
     if (!needle) return list;
     return list.filter(
@@ -265,7 +346,7 @@ export default function MailCenterPage() {
         t.counterpartyName.toLowerCase().includes(needle) ||
         t.lastSnippet.toLowerCase().includes(needle),
     );
-  }, [threads, q]);
+  }, [threads, q, filter, addressesByDept]);
 
   const unreadCount = (threads ?? []).filter((t) => t.unread).length;
 
@@ -278,6 +359,17 @@ export default function MailCenterPage() {
     }
     return m;
   }, [threads]);
+
+  // Per-department unread counts (sum of its mailboxes) for the dept headers.
+  const unreadByDept = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const g of deptGroups) {
+      let n = 0;
+      for (const a of g.mailboxes) n += unreadByMailbox.get(a.address) ?? 0;
+      m.set(g.dept, n);
+    }
+    return m;
+  }, [deptGroups, unreadByMailbox]);
 
   // Note: when the selected thread leaves the current filter (e.g. resolved
   // while viewing "Open"), we intentionally KEEP showing it in the pane — the
@@ -356,22 +448,26 @@ export default function MailCenterPage() {
             </p>
           )}
 
-          {/* Mailbox sidebar */}
+          {/* Mailbox sidebar — hierarchical: All › Department › Person */}
           <nav className="space-y-0.5">
             <MailboxItem
               label="All mailboxes"
-              active={mailbox === ""}
+              active={filter.kind === "all"}
               unread={unreadCount}
-              onClick={() => setMailbox("")}
+              onClick={() => setFilter({ kind: "all" })}
             />
-            {activeAddresses.map((a) => (
-              <MailboxItem
-                key={a.id}
-                label={a.label || a.address}
-                title={a.address}
-                active={mailbox === a.address}
-                unread={unreadByMailbox.get(a.address) ?? 0}
-                onClick={() => setMailbox(a.address)}
+            {deptGroups.map((g) => (
+              <DeptGroup
+                key={g.dept}
+                dept={g.dept}
+                mailboxes={g.mailboxes}
+                filter={filter}
+                unreadByMailbox={unreadByMailbox}
+                unreadForDept={unreadByDept.get(g.dept) ?? 0}
+                onSelectDept={() => setFilter({ kind: "dept", value: g.dept })}
+                onSelectMailbox={(address) =>
+                  setFilter({ kind: "mailbox", value: address })
+                }
               />
             ))}
           </nav>
@@ -491,6 +587,158 @@ function MailboxItem({
           className={cn(
             "h-4 w-4 shrink-0",
             active ? "text-amber-700" : "text-muted-foreground/60",
+          )}
+        />
+        <span className="truncate">{label}</span>
+      </span>
+      {unread > 0 && (
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+            active ? "bg-amber-200 text-amber-900" : "bg-muted text-muted-foreground",
+          )}
+        >
+          {unread}
+        </span>
+      )}
+    </button>
+  );
+}
+
+// One department in the hierarchical sidebar: a clickable/collapsible header
+// (selects the whole dept) plus its person/mailbox rows. Expand state is local
+// and defaults to open so the tree is browsable at a glance.
+function DeptGroup({
+  dept,
+  mailboxes,
+  filter,
+  unreadByMailbox,
+  unreadForDept,
+  onSelectDept,
+  onSelectMailbox,
+}: {
+  dept: string;
+  mailboxes: MailAddress[];
+  filter: MailboxFilter;
+  unreadByMailbox: Map<string, number>;
+  unreadForDept: number;
+  onSelectDept: () => void;
+  onSelectMailbox: (address: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const deptActive = filter.kind === "dept" && filter.value === dept;
+
+  return (
+    <div>
+      {/* Department header. The chevron toggles expand; the label selects the
+          whole department (all its mailboxes). Two targets, one row. */}
+      <div
+        className={cn(
+          "flex w-full items-center gap-1 rounded-md pr-2 text-sm transition",
+          deptActive
+            ? "bg-amber-50 font-medium text-amber-800"
+            : "text-foreground/80 hover:bg-muted",
+        )}
+      >
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-label={expanded ? `Collapse ${dept}` : `Expand ${dept}`}
+          aria-expanded={expanded}
+          className="flex shrink-0 items-center justify-center rounded p-1 text-muted-foreground/70 hover:text-foreground"
+        >
+          <ChevronRight
+            className={cn(
+              "h-3.5 w-3.5 transition-transform",
+              expanded && "rotate-90",
+            )}
+          />
+        </button>
+        <button
+          type="button"
+          onClick={onSelectDept}
+          className="flex min-w-0 flex-1 items-center justify-between gap-2 py-2 text-left"
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            <Users
+              className={cn(
+                "h-4 w-4 shrink-0",
+                deptActive ? "text-amber-700" : "text-muted-foreground/60",
+              )}
+            />
+            <span className="truncate font-medium">{dept}</span>
+            <span className="shrink-0 text-[11px] font-normal text-muted-foreground/70">
+              {mailboxes.length}
+            </span>
+          </span>
+          {unreadForDept > 0 && (
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+                deptActive
+                  ? "bg-amber-200 text-amber-900"
+                  : "bg-muted text-muted-foreground",
+              )}
+            >
+              {unreadForDept}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {/* Person rows — indented under the department. */}
+      {expanded && (
+        <div className="ml-3 space-y-0.5 border-l border-border/60 pl-2">
+          {mailboxes.map((a) => {
+            const mailboxActive =
+              filter.kind === "mailbox" && filter.value === a.address;
+            return (
+              <PersonItem
+                key={a.id}
+                label={a.assignedUserName || a.address}
+                title={a.address}
+                active={mailboxActive}
+                unread={unreadByMailbox.get(a.address) ?? 0}
+                onClick={() => onSelectMailbox(a.address)}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A single person/mailbox leaf row under a department.
+function PersonItem({
+  label,
+  title,
+  active,
+  unread,
+  onClick,
+}: {
+  label: string;
+  title?: string;
+  active: boolean;
+  unread: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={cn(
+        "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition",
+        active
+          ? "bg-amber-50 font-medium text-amber-800"
+          : "text-foreground/75 hover:bg-muted",
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <UserIcon
+          className={cn(
+            "h-3.5 w-3.5 shrink-0",
+            active ? "text-amber-700" : "text-muted-foreground/50",
           )}
         />
         <span className="truncate">{label}</span>

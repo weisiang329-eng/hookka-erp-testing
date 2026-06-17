@@ -300,6 +300,55 @@ export default function UsersPage() {
     }
   };
 
+  // ---------- Mail view level (SUPER_ADMIN) --------------------------------
+  // Per-user scope that decides how WIDE their Mail Center inbox is:
+  //   personal   — only their own assigned alias
+  //   department — every mailbox in their department
+  //   company    — every mailbox
+  // Same optimistic pattern as the access matrix above: the server list is the
+  // base truth (derived via useMemo, never mirrored into state in an effect —
+  // that's an eslint error here), and a small overrides Map carries the
+  // in-flight change so the <select> reflects the click instantly, reverting on
+  // a failed write. Default 'personal' when the server has no row for a user.
+  const { data: levelsResp } = useCachedJson<
+    { userId: string; level: string }[]
+  >(canManageUsers ? "/api/mail-center/scope-levels" : null);
+  const serverLevels = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of levelsResp ?? []) m.set(r.userId, r.level);
+    return m;
+  }, [levelsResp]);
+  const [levelOverrides, setLevelOverrides] = useState<Map<string, string>>(
+    new Map(),
+  );
+  const viewLevelFor = (userId: string): string => {
+    const ov = levelOverrides.get(userId);
+    if (ov !== undefined) return ov;
+    return serverLevels.get(userId) ?? "personal";
+  };
+  const setViewLevel = async (userId: string, level: string) => {
+    const prevLevel = viewLevelFor(userId);
+    if (level === prevLevel) return;
+    setLevelOverrides((prev) => new Map(prev).set(userId, level));
+    try {
+      const res = await fetch("/api/mail-center/scope-level", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, level }),
+      });
+      if (!res.ok) throw new Error("scope-level update failed");
+      invalidateCachePrefix("/api/mail-center/scope-levels");
+      // The user's own scoped mailbox list (/addresses) widens or narrows.
+      invalidateCachePrefix("/api/mail-center/addresses");
+    } catch {
+      // Revert to the previous value rather than dropping the override —
+      // dropping it would briefly flash the server default before the cache
+      // settles. Re-pin the known-good prior level instead.
+      setLevelOverrides((prev) => new Map(prev).set(userId, prevLevel));
+      showFlash("err", "Failed to update mail view level. Please retry.");
+    }
+  };
+
   const users: UserRow[] = useMemo(
     () => (usersResp?.success ? usersResp.data ?? [] : []),
     [usersResp],
@@ -1004,6 +1053,10 @@ export default function UsersPage() {
                     user always has their own alias (locked ✓); tick a shared
                     mailbox (support@ / hr@ / finance@) to let them work that
                     inbox too.
+                    <span className="mt-1 block text-[11px] text-[#9CA3AF]">
+                      View level: Personal = own mailbox · Department = their
+                      department&apos;s mailboxes · Company = all mailboxes.
+                    </span>
                   </CardDescription>
                 </div>
               </div>
@@ -1015,6 +1068,9 @@ export default function UsersPage() {
                     <tr>
                       <th className="sticky left-0 z-10 bg-white px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-[#6B7280] border-b border-[#E5E7EB]">
                         User
+                      </th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-[#6B7280] border-b border-[#E5E7EB] whitespace-nowrap">
+                        View level
                       </th>
                       {(addressesResp ?? [])
                         .filter((a) => a.active)
@@ -1051,6 +1107,18 @@ export default function UsersPage() {
                             <div className="text-[10px] text-[#9CA3AF]">
                               {u.email}
                             </div>
+                          </td>
+                          <td className="px-3 py-1.5 border-b border-[#F3F4F6] whitespace-nowrap">
+                            <select
+                              value={viewLevelFor(u.id)}
+                              onChange={(e) => setViewLevel(u.id, e.target.value)}
+                              title="How wide this user's Mail Center inbox is"
+                              className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-xs text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+                            >
+                              <option value="personal">Personal</option>
+                              <option value="department">Department</option>
+                              <option value="company">Company</option>
+                            </select>
                           </td>
                           {(addressesResp ?? [])
                             .filter((a) => a.active)

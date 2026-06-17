@@ -76,6 +76,18 @@ export function ensureMailSchema(db: D1Database): Promise<void> {
          ON email_address_access (org_id, address_id, user_id)`,
       `CREATE INDEX IF NOT EXISTS ix_email_access_user
          ON email_address_access (org_id, user_id)`,
+      // Hierarchical mail-visibility level per user (owner 2026-06-17). One row
+      // per user setting how WIDE their inbox is: 'personal' (own assigned +
+      // granted mailboxes — the default), 'department' (also every mailbox in
+      // their dept), or 'company' (every active mailbox in the org). Absent row
+      // ⇒ 'personal'. Managed by SUPER_ADMIN; folded into getMailScope below.
+      `CREATE TABLE IF NOT EXISTS mail_user_scope (
+         org_id TEXT NOT NULL DEFAULT 'hookka',
+         user_id TEXT NOT NULL,
+         level TEXT NOT NULL DEFAULT 'personal',
+         created_at TEXT,
+         PRIMARY KEY (org_id, user_id)
+       )`,
       // One conversation with an external party, grouped by RFC threading.
       `CREATE TABLE IF NOT EXISTS email_threads (
          id TEXT PRIMARY KEY,
@@ -440,24 +452,69 @@ function rowToAddress(r: AddressRow) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-user mailbox visibility (owner 2026-06-17: "每个 account 在 ERP 里有他自己
-// 的 mailbox"). SUPER_ADMIN sees every thread/address in the org; every other
-// authenticated user sees ONLY the threads/addresses on the @hookka.com
-// address(es) assigned to them in email_addresses. Inherently scoped to the
-// caller, so it needs no mail-center:* RBAC grant (which was never seeded).
+// Hierarchical mailbox visibility (owner 2026-06-17). SUPER_ADMIN always sees
+// every thread/address in the org. Every other authenticated user has a
+// VISIBILITY LEVEL stored in mail_user_scope (default 'personal'):
+//   • 'personal'   — own assigned alias(es) + any shared mailbox granted via
+//                    email_address_access. (The original behaviour.)
+//   • 'department' — the personal set PLUS every active mailbox whose
+//                    assigned_dept matches the caller's own dept. If the caller
+//                    has no dept on file, this falls back to 'personal'.
+//   • 'company'    — every active mailbox in the org.
+// Inherently scoped to the caller, so it needs no mail-center:* RBAC grant
+// (which was never seeded). The returned `level` lets callers/the UI reflect
+// the effective scope; isAdmin/userId/addresses are unchanged for callers.
 // ---------------------------------------------------------------------------
+const MAIL_SCOPE_LEVELS = ["personal", "department", "company"] as const;
+type MailScopeLevel = (typeof MAIL_SCOPE_LEVELS)[number];
+
 async function getMailScope(
   c: Context<Env>,
   orgId: string,
-): Promise<{ isAdmin: boolean; userId: string; addresses: string[] }> {
+): Promise<{
+  isAdmin: boolean;
+  userId: string;
+  addresses: string[];
+  level: string;
+}> {
   const get = (c as unknown as { get: (k: string) => string | undefined }).get;
   const role = get("userRole")?.toUpperCase();
   const userId = get("userId") ?? "";
-  if (role === "SUPER_ADMIN") return { isAdmin: true, userId, addresses: [] };
-  if (!userId) return { isAdmin: false, userId: "", addresses: [] };
-  // A user sees their own assigned alias(es) PLUS any shared mailbox granted to
-  // them via the mailbox-access matrix (email_address_access).
-  const res = await c.var.DB.prepare(
+  if (role === "SUPER_ADMIN")
+    return { isAdmin: true, userId, addresses: [], level: "company" };
+  if (!userId)
+    return { isAdmin: false, userId: "", addresses: [], level: "personal" };
+
+  // Effective visibility level for this user (default 'personal' when no row).
+  const levelRow = await c.var.DB.prepare(
+    `SELECT level FROM mail_user_scope WHERE org_id = ? AND user_id = ? LIMIT 1`,
+  )
+    .bind(orgId, userId)
+    .first<{ level: string | null }>();
+  let level: MailScopeLevel = (MAIL_SCOPE_LEVELS as readonly string[]).includes(
+    levelRow?.level ?? "",
+  )
+    ? (levelRow!.level as MailScopeLevel)
+    : "personal";
+
+  // 'company' — every active mailbox in the org.
+  if (level === "company") {
+    const all = await c.var.DB.prepare(
+      `SELECT address FROM email_addresses WHERE org_id = ? AND active = 1`,
+    )
+      .bind(orgId)
+      .all<{ address: string }>();
+    return {
+      isAdmin: false,
+      userId,
+      addresses: dedupeLower((all.results ?? []).map((r) => r.address)),
+      level,
+    };
+  }
+
+  // The 'personal' base set: own assigned alias(es) PLUS any shared mailbox
+  // granted via the mailbox-access matrix (email_address_access).
+  const own = await c.var.DB.prepare(
     `SELECT address FROM email_addresses
        WHERE org_id = ? AND active = 1 AND (
          assigned_user_id = ?
@@ -467,11 +524,53 @@ async function getMailScope(
   )
     .bind(orgId, userId, orgId, userId)
     .all<{ address: string }>();
+  const addresses = (own.results ?? []).map((r) => r.address);
+
+  // 'department' — additionally every active mailbox in the caller's own dept.
+  // The caller's dept is read from their own assigned address row; no dept on
+  // file ⇒ fall back to the personal set.
+  if (level === "department") {
+    const deptRow = await c.var.DB.prepare(
+      `SELECT assigned_dept FROM email_addresses
+         WHERE org_id = ? AND assigned_user_id = ?
+           AND assigned_dept IS NOT NULL AND assigned_dept <> '' LIMIT 1`,
+    )
+      .bind(orgId, userId)
+      .first<{ assigned_dept: string | null }>();
+    const dept = (deptRow?.assigned_dept ?? "").trim();
+    if (dept) {
+      const deptRows = await c.var.DB.prepare(
+        `SELECT address FROM email_addresses
+           WHERE org_id = ? AND active = 1 AND assigned_dept = ?`,
+      )
+        .bind(orgId, dept)
+        .all<{ address: string }>();
+      addresses.push(...(deptRows.results ?? []).map((r) => r.address));
+    } else {
+      // No dept ⇒ effective level is personal.
+      level = "personal";
+    }
+  }
+
   return {
     isAdmin: false,
     userId,
-    addresses: (res.results ?? []).map((r) => r.address.toLowerCase()),
+    addresses: dedupeLower(addresses),
+    level,
   };
+}
+
+// Lowercase + de-duplicate an address list (order-preserving).
+function dedupeLower(addrs: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const a of addrs) {
+    const lc = (a ?? "").toLowerCase();
+    if (!lc || seen.has(lc)) continue;
+    seen.add(lc);
+    out.push(lc);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -568,29 +667,31 @@ app.get("/threads/:id", async (c) => {
 });
 
 // GET /api/mail-center/addresses — our @hookka.com addresses / aliases.
+// The mailbox list MUST match the thread scope at every visibility level, so a
+// non-admin gets exactly the rows whose lower(address) is in scope.addresses
+// (own+granted for 'personal', +dept for 'department', all for 'company').
 app.get("/addresses", async (c) => {
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   const scope = await getMailScope(c, orgId);
-  // SUPER_ADMIN sees every address; a regular user sees only the ones assigned
-  // to them (their own mailbox).
-  const res = scope.isAdmin
-    ? await c.var.DB.prepare(
-        `SELECT * FROM email_addresses WHERE org_id = ? ORDER BY address ASC`,
-      )
-        .bind(orgId)
-        .all<AddressRow>()
-    : await c.var.DB.prepare(
-        `SELECT * FROM email_addresses
-           WHERE org_id = ? AND (
-             assigned_user_id = ?
-             OR id IN (SELECT address_id FROM email_address_access
-                         WHERE org_id = ? AND user_id = ?)
-           )
-           ORDER BY address ASC`,
-      )
-        .bind(orgId, scope.userId, orgId, scope.userId)
-        .all<AddressRow>();
+  if (scope.isAdmin) {
+    const res = await c.var.DB.prepare(
+      `SELECT * FROM email_addresses WHERE org_id = ? ORDER BY address ASC`,
+    )
+      .bind(orgId)
+      .all<AddressRow>();
+    return c.json((res.results ?? []).map(rowToAddress));
+  }
+  // A non-admin with an empty scope sees no mailboxes.
+  if (scope.addresses.length === 0) return c.json([]);
+  const ph = scope.addresses.map(() => "?").join(", ");
+  const res = await c.var.DB.prepare(
+    `SELECT * FROM email_addresses
+       WHERE org_id = ? AND LOWER(address) IN (${ph})
+       ORDER BY address ASC`,
+  )
+    .bind(orgId, ...scope.addresses)
+    .all<AddressRow>();
   return c.json((res.results ?? []).map(rowToAddress));
 });
 
@@ -863,6 +964,66 @@ app.delete("/access", async (c) => {
        WHERE org_id = ? AND address_id = ? AND user_id = ?`,
   )
     .bind(orgId, addressId, userId)
+    .run();
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Hierarchical mail-visibility levels (owner 2026-06-17). SUPER_ADMIN sets a
+// per-user level in mail_user_scope: 'personal' | 'department' | 'company'.
+// A user with no row is treated as 'personal' (the frontend assumes that for
+// any userId absent from GET /scope-levels). getMailScope reads this to widen
+// the inbox. SUPER_ADMIN-only, same hard gate as the address/access admin.
+// ---------------------------------------------------------------------------
+
+// GET /api/mail-center/scope-levels — every per-user level row in the org, for
+// rendering the visibility-level selector. Users absent here = 'personal'.
+app.get("/scope-levels", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  const res = await c.var.DB.prepare(
+    `SELECT user_id, level FROM mail_user_scope WHERE org_id = ?`,
+  )
+    .bind(orgId)
+    .all<{ user_id: string; level: string }>();
+  return c.json(
+    (res.results ?? []).map((r) => ({
+      userId: r.user_id,
+      level: r.level,
+    })),
+  );
+});
+
+// PUT /api/mail-center/scope-level {userId,level} — upsert a user's visibility
+// level. level must be one of the three allowed values. Idempotent upsert keyed
+// on (org_id, user_id).
+app.put("/scope-level", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  const body = await c.req
+    .json<{ userId?: string; level?: string }>()
+    .catch(() => ({}) as { userId?: string; level?: string });
+  const userId = (body.userId ?? "").trim();
+  const level = (body.level ?? "").trim().toLowerCase();
+  if (!userId) {
+    return c.json({ error: "userId is required" }, 400);
+  }
+  if (!(MAIL_SCOPE_LEVELS as readonly string[]).includes(level)) {
+    return c.json(
+      { error: "level must be 'personal', 'department', or 'company'" },
+      400,
+    );
+  }
+  await c.var.DB.prepare(
+    `INSERT INTO mail_user_scope (org_id, user_id, level, created_at)
+       VALUES (?, ?, ?, ?)
+     ON CONFLICT(org_id, user_id) DO UPDATE SET level = excluded.level`,
+  )
+    .bind(orgId, userId, level, new Date().toISOString())
     .run();
   return c.json({ ok: true });
 });

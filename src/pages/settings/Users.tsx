@@ -54,10 +54,10 @@ import {
   X,
   SlidersHorizontal,
   ShieldCheck,
-  GripVertical,
   Layers,
   ChevronDown,
   ChevronRight,
+  Network,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { copyText } from "@/lib/copy-text";
@@ -83,6 +83,69 @@ function roleLabel(role: string): string {
 // Department options for an @hookka.com mailbox (owner 2026-06-17). Used by the
 // create-alias modal; the same three buckets the org chart sorts first.
 const DEPT_OPTIONS = ["Support", "Finance", "HR"] as const;
+
+// ---------- Org Chart taxonomy (mirrors Houzs-Century) ---------------------
+// The Org Chart tab is a Houzs-style TABLE (Name · Department · Position ·
+// Reports to), NOT a kanban — owner kept asking for "like Houzs ERP". This
+// mirrors AdminUsersPage.tsx's POSITIONS_BY_DEPARTMENT (lines 17-23): the
+// chosen Department scopes the Position dropdown. These are sensible
+// furniture-factory roles for HOOKKA (Production / Sales / Office / Warehouse /
+// Management) and stay free-text on the user row, so the list can be extended
+// later without a migration. ORG_DEPARTMENTS drives the Department <select>.
+const ORG_DEPARTMENTS = [
+  "Management",
+  "Production",
+  "Sales",
+  "Office",
+  "Warehouse",
+] as const;
+type OrgDepartment = (typeof ORG_DEPARTMENTS)[number];
+
+const POSITIONS_BY_DEPARTMENT: Record<OrgDepartment, string[]> = {
+  Management: ["Director", "General Manager", "Operations Manager", "Admin Manager"],
+  Production: [
+    "Production Manager",
+    "Supervisor",
+    "Carpenter",
+    "Upholsterer",
+    "Welder",
+    "QC Inspector",
+    "Operator",
+    "Helper",
+  ],
+  Sales: ["Sales Manager", "Sales Executive", "Sales Coordinator", "Showroom Staff"],
+  Office: ["Account Manager", "Accounts Executive", "HR Executive", "Purchasing", "Admin Assistant"],
+  Warehouse: ["Warehouse Manager", "Storekeeper", "Logistics Coordinator", "Driver", "Loader"],
+};
+
+// Positions that mark someone as a manager-ish "upline" candidate — mirrors how
+// Houzs filters the Upline picker to directors/managers (AdminUsersPage.tsx
+// lines 495 & 620, `["Sales Director", "Ops Manager", "Super Admin", …]`).
+// Anyone whose position contains one of these words can be a reports-to target;
+// everyone else is still selectable via the "All active users" fallback below.
+const MANAGER_POSITION_HINTS = ["Director", "Manager", "General Manager", "Supervisor"];
+
+// Department → badge colours. Same idea as Houzs's DeptBadge
+// (AdminUsersPage.tsx lines 404-409): a small coloured pill per department so
+// the table scans fast. Unknown / "Unassigned" departments fall back to grey.
+const DEPT_BADGE_CLASSES: Record<string, string> = {
+  Management: "bg-purple-100 text-purple-700",
+  Production: "bg-amber-100 text-amber-700",
+  Sales: "bg-teal-100 text-teal-700",
+  Office: "bg-sky-100 text-sky-700",
+  Warehouse: "bg-emerald-100 text-emerald-700",
+};
+
+function DeptBadge({ dept }: { dept: string }) {
+  const cls = DEPT_BADGE_CLASSES[dept] ?? "bg-gray-100 text-gray-600";
+  return (
+    <span
+      className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${cls}`}
+    >
+      {dept || "Unassigned"}
+    </span>
+  );
+}
 
 // ---------- Row types ------------------------------------------------------
 
@@ -364,21 +427,28 @@ export default function UsersPage() {
   // this never masks a genuine later change from another admin.
   const [savedLevels, setSavedLevels] = useState<Map<string, string>>(new Map());
 
-  // ----- Org Chart drag-and-drop (Edit → Save, no naked edits) -----
-  // The chart is READ-ONLY until the operator clicks "Edit layout". In edit
-  // mode each person card becomes draggable; dropping it on a Department bucket
-  // queues a department change in `orgDeptDraft` (userId → newDept) without
-  // touching the server. A per-card "Reports to" picker queues an upline change
-  // in `orgReportsDraft` (userId → managerUserId | ""). Save PUTs every queued
-  // change (PUT /api/users/:id { department / reportsTo }); Cancel discards.
+  // ----- Org Chart edit state (Edit → Save, no naked edits) -----
+  // REBUILT 2026-06-17 to match Houzs-Century's AdminUsersPage (the owner kept
+  // asking for "like Houzs ERP"). The chart is now a TABLE — Name · Department ·
+  // Position · Reports to — exactly like Houzs (AdminUsersPage.tsx lines
+  // 243-300), NOT the old department kanban. It is READ-ONLY until the operator
+  // clicks "Edit layout"; in edit mode each row exposes three selectors
+  // (Department / Position scoped to the department / Reports-to upline) whose
+  // changes accumulate in local draft maps keyed by userId. Save PUTs every
+  // changed user (PUT /api/users/:id { department, position, reportsTo }) then
+  // refreshes; Cancel discards. No cell ever auto-saves (no naked edits).
   //
-  // KEY CHANGE (owner 2026-06-17, "這個是看 position，不需要 alias"): department,
-  // position and the reporting line now live on the USER row, so EVERY user can
-  // be placed — no @hookka.com alias required. The chart groups on u.department
-  // / u.position straight from GET /api/users, not on the mail alias.
+  // Department, position and the reporting line live on the USER row (owner
+  // 2026-06-17, "這個是看 position，不需要 alias"), so EVERY active user appears
+  // and is editable — no @hookka.com alias required. All three read straight
+  // from GET /api/users (u.department / u.position / u.reportsTo).
   const [orgEdit, setOrgEdit] = useState(false);
-  // userId → target department (the dragged person's user row gets this dept).
+  // userId → target department. "Unassigned" clears the department on Save.
   const [orgDeptDraft, setOrgDeptDraft] = useState<Map<string, string>>(
+    new Map(),
+  );
+  // userId → position (scoped to the chosen department). "" clears it.
+  const [orgPosDraft, setOrgPosDraft] = useState<Map<string, string>>(
     new Map(),
   );
   // userId → upline user id ("" clears the reporting line). Mirrors Houzs's
@@ -387,10 +457,6 @@ export default function UsersPage() {
     new Map(),
   );
   const [orgSaving, setOrgSaving] = useState(false);
-  // The card currently being dragged + the bucket it is hovering, so the UI
-  // can show a drop-target highlight. userId of the dragged person.
-  const [orgDragId, setOrgDragId] = useState<string | null>(null);
-  const [orgDropDept, setOrgDropDept] = useState<string | null>(null);
 
   const beginMailEdit = () => {
     // Seed drafts from the committed server values so an untouched cell stays
@@ -599,7 +665,26 @@ export default function UsersPage() {
   const aliasIsHeuristic = (u: UserRow, alias: MailAddress | undefined): boolean =>
     !!alias && alias.assignedUserId !== u.id;
 
-  // Effective department for a user, honouring any queued drag in edit mode
+  // Unassigned, active @hookka.com aliases an operator can CLAIM for a user
+  // whose local-part never name-matched them (owner 2026-06-17: "lim@hookka.com
+  // 是 under 我的，爲什麽這邊空"). lim@hookka.com exists but has an empty
+  // assigned_user_id and "lim" doesn't match "Wei Siang", so aliasByUserId never
+  // surfaces it on his row. These are addresses with NO assigned_user_id that
+  // are ALSO not already shown on some user's row via the local-part heuristic
+  // (those are offered a one-click "Link" instead) — so the claim picker only
+  // lists genuinely-floating aliases and can't double-assign one. Claiming
+  // PATCHes assigned_user_id, after which it shows as that user's alias and
+  // drops out of the Mailbox Access shared-mailbox columns automatically.
+  const unassignedAliases = useMemo(() => {
+    const shown = new Set<string>();
+    for (const a of aliasByUserId.values()) if (a?.id) shown.add(a.id);
+    return (addressesResp ?? []).filter(
+      (a) =>
+        a.active && !(a.assignedUserId ?? "").trim() && !shown.has(a.id),
+    );
+  }, [addressesResp, aliasByUserId]);
+
+  // Effective department for a user, honouring any queued change in edit mode
   // (orgDeptDraft on the user id) over the user's saved department. Empty
   // department ⇒ "Unassigned". Driven by the USER row now, so a user needs NO
   // @hookka.com alias to be placed (owner 2026-06-17).
@@ -609,6 +694,16 @@ export default function UsersPage() {
       return u.department || "Unassigned";
     },
     [orgDeptDraft],
+  );
+  // Effective position for a user, honouring any queued change in edit mode
+  // over the saved position. "" ⇒ no position. Like Houzs, the position list
+  // is scoped to the (effective) department in the editor.
+  const effectivePosition = useCallback(
+    (u: UserRow): string => {
+      if (orgPosDraft.has(u.id)) return orgPosDraft.get(u.id)!;
+      return u.position || "";
+    },
+    [orgPosDraft],
   );
   // Effective upline (reportsTo user id) for a user, honouring any queued
   // change in edit mode over the saved reportsTo. "" ⇒ no upline.
@@ -620,83 +715,125 @@ export default function UsersPage() {
     [orgReportsDraft],
   );
 
-  // Org chart — active staff grouped by department → position, using the
-  // department / position recorded on each USER row (the per-user org data the
-  // owner enters). In edit mode the grouping reflects queued drags
-  // (orgDeptDraft) so a card visibly moves the instant it's dropped, before
-  // Save. Users with no department fall under "Unassigned".
-  const orgChart = useMemo(() => {
-    const byDept = new Map<string, Map<string, UserRow[]>>();
-    for (const u of users) {
-      if (!u.isActive) continue;
-      const dept = effectiveDept(u);
-      const pos = u.position || "—";
-      let posMap = byDept.get(dept);
-      if (!posMap) {
-        posMap = new Map();
-        byDept.set(dept, posMap);
-      }
-      const arr = posMap.get(pos);
-      if (arr) arr.push(u);
-      else posMap.set(pos, [u]);
-    }
-    return byDept;
-  }, [users, effectiveDept]);
-  // Stable column order: Support / Finance / HR first, other depts A–Z, then
-  // "Unassigned" last. In edit mode ALWAYS surface the three fixed buckets +
-  // Unassigned even when empty, so there's a visible drop target to drag onto.
-  const orgDepts = useMemo(() => {
-    const order: string[] = [...DEPT_OPTIONS];
-    const keys = new Set<string>(orgChart.keys());
-    if (orgEdit) {
-      for (const d of order) keys.add(d);
-      keys.add("Unassigned");
-    }
-    return [...keys].sort((a, b) => {
-      if (a === "Unassigned") return 1;
-      if (b === "Unassigned") return -1;
-      const ia = order.indexOf(a);
-      const ib = order.indexOf(b);
-      const ra = ia === -1 ? 99 : ia;
-      const rb = ib === -1 ? 99 : ib;
-      return ra === rb ? a.localeCompare(b) : ra - rb;
-    });
-  }, [orgChart, orgEdit]);
-
   // Active users, for the "Reports to" upline picker (a person can report to
   // any other active user; the picker excludes the person themselves).
   const activeUsers = useMemo(
     () => users.filter((u) => u.isActive),
     [users],
   );
-  // userId → display label, so a card can show "Reports to <name>".
+  // userId → display label, so a row can show "Reports to <name>".
   const userLabelById = useMemo(() => {
     const m = new Map<string, string>();
     for (const u of users) m.set(u.id, u.displayName || u.email);
     return m;
   }, [users]);
 
+  // Department display order for the table (Management first, then the rest in
+  // declared order, "Unassigned" last) so the rows read top-down like an org.
+  const deptOrderIndex = useCallback((dept: string): number => {
+    if (dept === "Unassigned" || !dept) return 999;
+    const i = (ORG_DEPARTMENTS as readonly string[]).indexOf(dept);
+    return i === -1 ? 900 : i;
+  }, []);
+
+  // Org Chart ROWS — Houzs-style flat table (Name · Department · Position ·
+  // Reports to), active users only, sorted by department → position → name.
+  // Uses the EFFECTIVE values so a queued edit re-sorts/re-badges live before
+  // Save. Mirrors AdminUsersPage.tsx's table (lines 243-300).
+  const orgRows = useMemo(() => {
+    return [...activeUsers].sort((a, b) => {
+      const da = effectiveDept(a);
+      const db = effectiveDept(b);
+      const di = deptOrderIndex(da) - deptOrderIndex(db);
+      if (di !== 0) return di;
+      if (da !== db) return da.localeCompare(db);
+      const pa = effectivePosition(a);
+      const pb = effectivePosition(b);
+      if (pa !== pb) return (pa || "~").localeCompare(pb || "~");
+      return (a.displayName || a.email).localeCompare(b.displayName || b.email);
+    });
+  }, [activeUsers, effectiveDept, effectivePosition, deptOrderIndex]);
+
+  // "Reports to" candidates — like Houzs, the picker is biased toward
+  // manager-ish positions (AdminUsersPage.tsx lines 495/620), but every active
+  // user remains selectable so the line can always be drawn. Managers first,
+  // then everyone else, each group A–Z; the person themselves is excluded by
+  // the row that renders the picker.
+  const uplineCandidates = useMemo(() => {
+    const isManager = (u: UserRow) => {
+      const pos = effectivePosition(u);
+      return MANAGER_POSITION_HINTS.some((h) => pos.includes(h));
+    };
+    return [...activeUsers].sort((a, b) => {
+      const ma = isManager(a) ? 0 : 1;
+      const mb = isManager(b) ? 0 : 1;
+      if (ma !== mb) return ma - mb;
+      return (a.displayName || a.email).localeCompare(b.displayName || b.email);
+    });
+  }, [activeUsers, effectivePosition]);
+
+  // Indented hierarchy (a light visual tree above the table). Roots are active
+  // users with no upline (or an upline that isn't an active user); children are
+  // grouped under their effective reportsTo. A seen-set guards against cycles.
+  type OrgNode = { user: UserRow; children: OrgNode[]; depth: number };
+  const orgTree = useMemo(() => {
+    const activeIds = new Set(activeUsers.map((u) => u.id));
+    const childrenOf = new Map<string, UserRow[]>();
+    const roots: UserRow[] = [];
+    for (const u of activeUsers) {
+      const up = effectiveReportsTo(u);
+      if (up && activeIds.has(up) && up !== u.id) {
+        const arr = childrenOf.get(up);
+        if (arr) arr.push(u);
+        else childrenOf.set(up, [u]);
+      } else {
+        roots.push(u);
+      }
+    }
+    const byName = (a: UserRow, b: UserRow) =>
+      (a.displayName || a.email).localeCompare(b.displayName || b.email);
+    const seen = new Set<string>();
+    const build = (u: UserRow, depth: number): OrgNode => {
+      seen.add(u.id);
+      const kids = (childrenOf.get(u.id) ?? [])
+        .filter((k) => !seen.has(k.id))
+        .sort(byName)
+        .map((k) => build(k, depth + 1));
+      return { user: u, children: kids, depth };
+    };
+    return roots.sort(byName).map((r) => build(r, 0));
+  }, [activeUsers, effectiveReportsTo]);
+
+  // Flatten the tree to a render list (depth-first) so the hierarchy block is a
+  // simple indented list of rows.
+  const orgTreeFlat = useMemo(() => {
+    const out: OrgNode[] = [];
+    const walk = (n: OrgNode) => {
+      out.push(n);
+      for (const c of n.children) walk(c);
+    };
+    for (const n of orgTree) walk(n);
+    return out;
+  }, [orgTree]);
+
   // ----- Org Chart edit handlers -----
   const beginOrgEdit = () => {
     setOrgDeptDraft(new Map());
+    setOrgPosDraft(new Map());
     setOrgReportsDraft(new Map());
-    setOrgDragId(null);
-    setOrgDropDept(null);
     setOrgEdit(true);
   };
   const cancelOrgEdit = () => {
     setOrgEdit(false);
     setOrgDeptDraft(new Map());
+    setOrgPosDraft(new Map());
     setOrgReportsDraft(new Map());
-    setOrgDragId(null);
-    setOrgDropDept(null);
   };
-  // Drop a dragged person card onto a department bucket. Queues the move in
-  // orgDeptDraft (userId → dept). If it matches the user's saved dept, the
-  // entry is dropped so Save stays a true no-op for unchanged cards.
-  const dropOnDept = (u: UserRow, dept: string) => {
-    setOrgDragId(null);
-    setOrgDropDept(null);
+  // Queue a department change for a user (the Department <select>). Selecting
+  // the user's saved dept removes the entry so Save stays a no-op. Changing the
+  // department also clears a queued position that's no longer valid for the new
+  // department (so you can't save Production + "Sales Executive").
+  const setDeptDraft = (u: UserRow, dept: string) => {
     const saved = u.department || "Unassigned";
     setOrgDeptDraft((prev) => {
       const next = new Map(prev);
@@ -704,9 +841,30 @@ export default function UsersPage() {
       else next.set(u.id, dept);
       return next;
     });
+    // If the currently-effective position isn't offered by the new department,
+    // null it out so the row doesn't keep a mismatched title.
+    const validForDept =
+      dept === "Unassigned"
+        ? []
+        : POSITIONS_BY_DEPARTMENT[dept as OrgDepartment] ?? [];
+    const curPos = effectivePosition(u);
+    if (curPos && !validForDept.includes(curPos)) {
+      setPositionDraft(u, "");
+    }
   };
-  // Queue an upline change for a user (the "Reports to" picker). Dropping it
-  // back to the saved value removes the entry so Save stays a no-op.
+  // Queue a position change for a user (the Position <select>). Selecting back
+  // to the saved value removes the entry so Save stays a no-op.
+  const setPositionDraft = (u: UserRow, position: string) => {
+    const saved = u.position || "";
+    setOrgPosDraft((prev) => {
+      const next = new Map(prev);
+      if (position === saved) next.delete(u.id);
+      else next.set(u.id, position);
+      return next;
+    });
+  };
+  // Queue an upline change for a user (the "Reports to" picker). Selecting back
+  // to the saved value removes the entry so Save stays a no-op.
   const setReportsToDraft = (u: UserRow, managerId: string) => {
     const saved = u.reportsTo || "";
     setOrgReportsDraft((prev) => {
@@ -716,24 +874,28 @@ export default function UsersPage() {
       return next;
     });
   };
-  // True when a user has any queued org change (dept drag or upline edit).
+  // True when a user has any queued org change (dept / position / upline).
   const userHasOrgDraft = (u: UserRow): boolean =>
-    orgDeptDraft.has(u.id) || orgReportsDraft.has(u.id);
+    orgDeptDraft.has(u.id) ||
+    orgPosDraft.has(u.id) ||
+    orgReportsDraft.has(u.id);
   // Count of distinct users with a queued change (for the Save button badge).
   const orgDraftCount = useMemo(() => {
     const ids = new Set<string>([
       ...orgDeptDraft.keys(),
+      ...orgPosDraft.keys(),
       ...orgReportsDraft.keys(),
     ]);
     return ids.size;
-  }, [orgDeptDraft, orgReportsDraft]);
+  }, [orgDeptDraft, orgPosDraft, orgReportsDraft]);
 
   // Save every queued change. One PUT per changed user merging the queued
-  // department and/or reportsTo; "Unassigned" clears the department (sent as
-  // "" → stored NULL by the backend), "" clears the reporting line.
+  // department / position / reportsTo; "Unassigned" clears the department (sent
+  // as "" → stored NULL by the backend), "" clears position / reporting line.
   const saveOrgEdit = async () => {
     const changedIds = new Set<string>([
       ...orgDeptDraft.keys(),
+      ...orgPosDraft.keys(),
       ...orgReportsDraft.keys(),
     ]);
     if (changedIds.size === 0) {
@@ -748,6 +910,9 @@ export default function UsersPage() {
         if (orgDeptDraft.has(userId)) {
           const dept = orgDeptDraft.get(userId)!;
           body.department = dept === "Unassigned" ? "" : dept;
+        }
+        if (orgPosDraft.has(userId)) {
+          body.position = orgPosDraft.get(userId)!;
         }
         if (orgReportsDraft.has(userId)) {
           body.reportsTo = orgReportsDraft.get(userId)!;
@@ -1298,6 +1463,10 @@ export default function UsersPage() {
   // refetches so the column flips from "(matched by name) · Link" to the solid
   // assigned chip. Used straight from the Email Alias cell — no modal needed.
   const [linkingAliasId, setLinkingAliasId] = useState<string | null>(null);
+  // The user-row whose "Claim existing alias" dropdown is currently open in the
+  // Email Alias grid cell (null = none). Keyed by user id. Declared here so
+  // claimAliasForUser (below) can close over the setter.
+  const [claimForUser, setClaimForUser] = useState<string | null>(null);
   const linkAliasToUser = async (alias: MailAddress, u: UserRow) => {
     setLinkingAliasId(alias.id);
     try {
@@ -1311,6 +1480,47 @@ export default function UsersPage() {
       });
       if (res.ok) {
         showFlash("ok", `Linked ${alias.address} to ${u.email}`);
+        fetchAddresses();
+      } else {
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        showFlash("err", json.error ?? "Couldn't link the alias. Please retry.");
+      }
+    } catch (err) {
+      showFlash("err", humanizeError(err, "Network problem — please try again."));
+    } finally {
+      setLinkingAliasId(null);
+    }
+  };
+
+  // Claim an EXISTING unassigned @hookka.com alias for a user (BUG-2 fix). Same
+  // PATCH as linkAliasToUser, but the source alias was never surfaced on the
+  // user's row (its local-part doesn't name-match them and assigned_user_id is
+  // empty — e.g. lim@hookka.com → Wei Siang), so it's chosen from the
+  // unassignedAliases picker rather than a per-row "Link". Writing
+  // assigned_user_id makes it that user's alias and removes it from the Mailbox
+  // Access shared columns. Reuses linkingAliasId for the inline spinner /
+  // disabled state. `claimForUser` (set below) tracks the row whose dropdown is
+  // open in the grid.
+  const claimAliasForUser = async (addressId: string, u: UserRow) => {
+    const alias = unassignedAliases.find((a) => a.id === addressId);
+    if (!alias) return;
+    setLinkingAliasId(addressId);
+    try {
+      const res = await fetch(`/api/mail-center/addresses/${addressId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assignedUserId: u.id,
+          assignedUserName: u.displayName || u.email,
+        }),
+      });
+      if (res.ok) {
+        showFlash("ok", `Linked ${alias.address} to ${u.email}`);
+        setClaimForUser(null);
+        // Also close the Edit-details modal when the claim was made from it, so
+        // the operator returns to the grid and sees the alias on the row.
+        setAliasForUser(null);
+        setAliasExisting(null);
         fetchAddresses();
       } else {
         const json = (await res.json().catch(() => ({}))) as { error?: string };
@@ -1398,16 +1608,17 @@ export default function UsersPage() {
       type: "text",
       width: "140px",
       sortable: true,
-      sortAccessor: (u) => aliasByUserId.get(u.id)?.assignedPosition || "",
-      filterAccessor: (u) => aliasByUserId.get(u.id)?.assignedPosition || "—",
-      render: (_v, u, _i, hl) => {
-        const pos = aliasByUserId.get(u.id)?.assignedPosition;
-        return pos ? (
-          <span className="text-gray-700">{hl(pos)}</span>
+      // Position lives on the USER row now (owner 2026-06-17 — same field the
+      // Org Chart groups on), NOT on the @hookka.com alias, so a user with no
+      // alias still shows their position and the grid agrees with the chart.
+      sortAccessor: (u) => u.position || "",
+      filterAccessor: (u) => u.position || "—",
+      render: (_v, u, _i, hl) =>
+        u.position ? (
+          <span className="text-gray-700">{hl(u.position)}</span>
         ) : (
           <span className="text-gray-400">—</span>
-        );
-      },
+        ),
     },
     {
       key: "department",
@@ -1415,18 +1626,18 @@ export default function UsersPage() {
       type: "text",
       width: "130px",
       sortable: true,
-      sortAccessor: (u) => aliasByUserId.get(u.id)?.assignedDept || "",
-      filterAccessor: (u) => aliasByUserId.get(u.id)?.assignedDept || "—",
-      render: (_v, u) => {
-        const dept = aliasByUserId.get(u.id)?.assignedDept;
-        return dept ? (
+      // Department lives on the USER row now (owner 2026-06-17), so it reads the
+      // user field rather than the alias — matches the Org Chart grouping.
+      sortAccessor: (u) => u.department || "",
+      filterAccessor: (u) => u.department || "—",
+      render: (_v, u) =>
+        u.department ? (
           <span className="inline-flex items-center text-xs font-medium bg-[#EFEAE5] text-[#6B5C32] px-2 py-0.5 rounded">
-            {dept}
+            {u.department}
           </span>
         ) : (
           <span className="text-gray-400">—</span>
-        );
-      },
+        ),
     },
     {
       key: "emailAlias",
@@ -1496,19 +1707,66 @@ export default function UsersPage() {
         if (aliasByUserId.has(u.id)) {
           return <span className="text-xs text-gray-400">—</span>;
         }
+        // No alias yet. Offer "Add alias" (create a new address) AND — when
+        // there are floating unassigned @hookka.com aliases — a "Claim existing"
+        // picker so an operator can link one whose local-part never name-matched
+        // this user (BUG-2: lim@hookka.com → Wei Siang). Claiming PATCHes
+        // assigned_user_id; the alias then shows on this row and leaves the
+        // Mailbox Access shared columns.
+        const claimOpen = claimForUser === u.id;
         return (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={(e) => {
-              e.stopPropagation();
-              openAliasModal(u);
-            }}
-            title="Create @hookka.com alias"
-          >
-            <AtSign className="h-3.5 w-3.5 mr-1" />
-            Add alias
-          </Button>
+          <span className="inline-flex flex-wrap items-center gap-1.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                openAliasModal(u);
+              }}
+              title="Create @hookka.com alias"
+            >
+              <AtSign className="h-3.5 w-3.5 mr-1" />
+              Add alias
+            </Button>
+            {unassignedAliases.length > 0 &&
+              (claimOpen ? (
+                <select
+                  autoFocus
+                  defaultValue=""
+                  disabled={linkingAliasId !== null}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    if (id) claimAliasForUser(id, u);
+                  }}
+                  onBlur={() => setClaimForUser(null)}
+                  title="Pick an existing unassigned @hookka.com alias to link to this user"
+                  className="h-7 max-w-[180px] rounded border border-[#E2DDD8] bg-white px-1.5 text-[11px] text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] disabled:opacity-50"
+                >
+                  <option value="" disabled>
+                    Choose alias…
+                  </option>
+                  {unassignedAliases.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.address}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setClaimForUser(u.id);
+                  }}
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-[#6B5C32] hover:underline"
+                  title="Link an existing unassigned @hookka.com alias to this user"
+                >
+                  <Link2 className="h-3 w-3" />
+                  Claim existing
+                </button>
+              ))}
+          </span>
         );
       },
     },
@@ -1617,7 +1875,7 @@ export default function UsersPage() {
         ),
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [aliasByUserId, canManageUsers, currentUser?.id, linkingAliasId]);
+  ], [aliasByUserId, canManageUsers, currentUser?.id, linkingAliasId, unassignedAliases, claimForUser]);
 
   // ---------- Render -------------------------------------------------------
 
@@ -1979,15 +2237,15 @@ export default function UsersPage() {
                 <div>
                   <CardTitle>Org Chart</CardTitle>
                   <CardDescription>
-                    Active staff grouped by department, then position.
+                    Every active staff member, with their Department, Position
+                    and who they report to (their upline).
                     {canManageUsers ? (
                       <>
                         {" "}
-                        Click <strong>Edit layout</strong>, then{" "}
-                        <strong>drag a person card</strong> into another
-                        department column to move them, and set who each person{" "}
-                        <strong>reports to</strong>. Changes apply only after you
-                        click Save.
+                        Click <strong>Edit</strong>, set each person&apos;s
+                        Department &rarr; Position &rarr; Reports&nbsp;to, then{" "}
+                        <strong>Save</strong>. Changes apply only after you click
+                        Save.
                       </>
                     ) : (
                       <>
@@ -1999,16 +2257,16 @@ export default function UsersPage() {
                   </CardDescription>
                 </div>
               </div>
-              {/* Edit layout / Save / Cancel — Super Admin only (PUT
-                  /api/users/:id is requireSuperAdmin). Mirrors the Mailbox
-                  Access bar: read-only until Edit, Save commits every queued
-                  change (department drag + reporting line), no naked edits. */}
+              {/* Edit / Save / Cancel — Super Admin only (PUT /api/users/:id is
+                  requireSuperAdmin). Mirrors the Mailbox Access bar: read-only
+                  until Edit, Save commits every changed user in one go, no naked
+                  edits. */}
               {canManageUsers && (
                 <div className="flex shrink-0 gap-2">
                   {!orgEdit ? (
                     <Button variant="outline" size="sm" onClick={beginOrgEdit}>
                       <Pencil className="h-3.5 w-3.5" />
-                      Edit layout
+                      Edit
                     </Button>
                   ) : (
                     <>
@@ -2045,306 +2303,269 @@ export default function UsersPage() {
             </div>
           </CardHeader>
           <CardContent>
-            {orgChart.size === 0 && !orgEdit ? (
+            {activeUsers.length === 0 ? (
               <div className="rounded-lg border border-dashed border-[#D6D0C8] bg-[#FAFAF9] py-10 text-center">
                 <UsersIcon className="mx-auto mb-2 h-7 w-7 text-[#C4BBA9]" />
                 <div className="text-sm font-medium text-[#6B7280]">
-                  No staff placed on the org chart yet
+                  No active staff yet
                 </div>
                 <div className="mx-auto mt-1 max-w-md text-xs text-gray-500">
-                  Every active user appears here once they have a{" "}
-                  <strong>Department</strong> set — no email alias required.{" "}
-                  {canManageUsers ? (
-                    <>
-                      Click <strong>Edit layout</strong> and drag each person
-                      into a department column (Support / Finance / HR), or use{" "}
-                      <SlidersHorizontal className="inline h-3 w-3 -mt-0.5" />{" "}
-                      Edit details on the Users tab.
-                    </>
-                  ) : (
-                    <>
-                      Ask a Super Admin to assign departments from the Org Chart
-                      or the Users tab.
-                    </>
-                  )}
+                  Invite team members from the <strong>Users</strong> tab; once
+                  active they appear here and can be given a Department, Position
+                  and reporting line.
                 </div>
               </div>
             ) : (
               <>
-                {/* Edit-mode banner: department + reporting line live on the
-                    user record, so EVERY active person can be dragged and given
-                    an upline — no @hookka.com alias required (owner
+                {/* Edit-mode banner — department, position and reporting line
+                    all live on the USER record, so EVERY active person is
+                    editable here, no @hookka.com alias required (owner
                     2026-06-17). */}
                 {orgEdit && (
                   <div className="mb-4 rounded-md border border-[#CFE0F3] bg-[#F2F7FD] px-3 py-2 text-xs text-[#2C5B8F]">
-                    <GripVertical className="mr-1 inline h-3.5 w-3.5 -mt-0.5" />
-                    Drag a person card onto a department column to move them, and
-                    use the <strong>Reports to</strong> picker on each card to set
-                    their upline. Every active user can be placed — no email
-                    alias needed. Changes apply only after you click Save.
+                    <Pencil className="mr-1 inline h-3.5 w-3.5 -mt-0.5" />
+                    Set each person&apos;s <strong>Department</strong>, then their{" "}
+                    <strong>Position</strong> (the list narrows to that
+                    department), and <strong>Reports&nbsp;to</strong> (their
+                    upline). Every active user can be placed — no email alias
+                    needed. Changes apply only after you click Save.
                   </div>
                 )}
-                {/* When everyone is still Unassigned (no depts entered) and not
-                    editing, make the path obvious — the owner's "unusable"
-                    state. */}
-                {!orgEdit &&
-                  orgDepts.length === 1 &&
-                  orgDepts[0] === "Unassigned" && (
-                    <div className="mb-4 rounded-md border border-[#EAD9A8] bg-[#FBF6E7] px-3 py-2 text-xs text-[#8A6D1E]">
-                      Everyone is <strong>Unassigned</strong> because no
-                      departments have been set yet. Click{" "}
-                      <strong>Edit layout</strong> and drag each person into a
-                      department column — they&apos;ll stay there after you Save.
+
+                {/* Visual hierarchy — a light indented tree by reporting line,
+                    shown above the table when at least one reporting
+                    relationship exists. The TABLE below is the source of truth
+                    for editing (mirrors Houzs's table); this is just an
+                    at-a-glance who-reports-to-whom. */}
+                {orgTreeFlat.some((n) => n.depth > 0) && (
+                  <div className="mb-5 rounded-lg border border-[#E5E7EB] bg-[#FBFAF8] p-3">
+                    <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF]">
+                      <Network className="h-3.5 w-3.5 text-[#6B5C32]" />
+                      Reporting hierarchy
                     </div>
-                  )}
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {orgDepts.map((dept) => {
-                    const posMap = orgChart.get(dept);
-                    const count = posMap
-                      ? [...posMap.values()].reduce((s, arr) => s + arr.length, 0)
-                      : 0;
-                    const isUnassigned = dept === "Unassigned";
-                    const isDropTarget = orgEdit && orgDropDept === dept;
-                    // Position groups: real positions first (A–Z), the "—"
-                    // (no position) bucket last so named roles lead.
-                    const posEntries = posMap
-                      ? [...posMap.entries()].sort((a, b) => {
-                          if (a[0] === "—") return 1;
-                          if (b[0] === "—") return -1;
-                          return a[0].localeCompare(b[0]);
-                        })
-                      : [];
-                    return (
-                      <div
-                        key={dept}
-                        // The whole column is a drop zone in edit mode.
-                        onDragOver={
-                          orgEdit
-                            ? (e) => {
-                                e.preventDefault();
-                                if (orgDropDept !== dept) setOrgDropDept(dept);
-                              }
-                            : undefined
-                        }
-                        onDragLeave={
-                          orgEdit
-                            ? (e) => {
-                                // Only clear when the pointer actually leaves the
-                                // column (not when moving between child cards).
-                                if (
-                                  !e.currentTarget.contains(
-                                    e.relatedTarget as Node | null,
-                                  )
-                                )
-                                  setOrgDropDept((d) => (d === dept ? null : d));
-                              }
-                            : undefined
-                        }
-                        onDrop={
-                          orgEdit
-                            ? (e) => {
-                                e.preventDefault();
-                                const uid = e.dataTransfer.getData("text/plain");
-                                const u = users.find((x) => x.id === uid);
-                                if (u) dropOnDept(u, dept);
-                              }
-                            : undefined
-                        }
-                        className={
-                          "overflow-hidden rounded-lg border transition-colors " +
-                          (isDropTarget
-                            ? "border-[#6B5C32] ring-2 ring-[#6B5C32]/40 bg-[#F7F4EC]"
-                            : isUnassigned
-                              ? "border-[#EAD9A8] bg-[#FCFAF3]"
-                              : "border-[#E5E7EB] bg-white")
-                        }
-                      >
-                        {/* Department header band */}
-                        <div
-                          className={
-                            "flex items-center justify-between px-3 py-2 " +
-                            (isUnassigned ? "bg-[#F6EFD9]" : "bg-[#EFEAE5]")
-                          }
-                        >
-                          <h3
+                    <div className="space-y-0.5">
+                      {orgTreeFlat.map(({ user: m, depth }) => {
+                        const dept = effectiveDept(m);
+                        const pos = effectivePosition(m);
+                        return (
+                          <div
+                            key={m.id}
+                            className="flex items-center gap-2 py-0.5 text-xs"
+                            style={{ paddingLeft: `${depth * 18}px` }}
+                          >
+                            {depth > 0 && (
+                              <span className="text-[#C4BBA9]">└</span>
+                            )}
+                            <span className="font-medium text-[#111827]">
+                              {m.displayName || m.email}
+                            </span>
+                            {pos && (
+                              <span className="text-[10px] text-[#9CA3AF]">
+                                {pos}
+                              </span>
+                            )}
+                            <DeptBadge dept={dept === "Unassigned" ? "" : dept} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Houzs-style table: Name · Department · Position · Reports to.
+                    Read-only when viewing; Department / Position / Reports-to
+                    become selects in edit mode (mirrors AdminUsersPage.tsx
+                    lines 243-300 + its Edit modal selectors). */}
+                <div className="overflow-x-auto rounded-lg border border-[#E5E7EB]">
+                  <table className="w-full min-w-[640px] text-xs">
+                    <thead>
+                      <tr className="border-b border-[#E5E7EB] bg-[#F9FAFB] text-[10px] uppercase tracking-wide text-gray-500">
+                        <th className="px-3 py-2 text-left font-semibold">
+                          Name
+                        </th>
+                        <th className="px-3 py-2 text-left font-semibold">
+                          Department
+                        </th>
+                        <th className="px-3 py-2 text-left font-semibold">
+                          Position
+                        </th>
+                        <th className="px-3 py-2 text-left font-semibold">
+                          Reports to
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orgRows.map((m) => {
+                        const name = m.displayName || m.email;
+                        const initials = name
+                          .trim()
+                          .split(/\s+/)
+                          .slice(0, 2)
+                          .map((p) => p[0]?.toUpperCase() ?? "")
+                          .join("");
+                        const dept = effectiveDept(m);
+                        const pos = effectivePosition(m);
+                        const uplineId = effectiveReportsTo(m);
+                        const uplineName = uplineId
+                          ? (userLabelById.get(uplineId) ?? "(unknown)")
+                          : "";
+                        const moved = userHasOrgDraft(m);
+                        // Positions offered for this row = those of the row's
+                        // EFFECTIVE department (Houzs scopes the same way). If a
+                        // saved position isn't in the list (legacy / dept just
+                        // changed) keep it selectable so it isn't silently lost.
+                        const deptPositions =
+                          dept === "Unassigned"
+                            ? []
+                            : POSITIONS_BY_DEPARTMENT[dept as OrgDepartment] ??
+                              [];
+                        const positionOptions =
+                          pos && !deptPositions.includes(pos)
+                            ? [pos, ...deptPositions]
+                            : deptPositions;
+                        return (
+                          <tr
+                            key={m.id}
                             className={
-                              "text-sm font-semibold " +
-                              (isUnassigned
-                                ? "text-[#8A6D1E]"
-                                : "text-[#5A4D2A]")
+                              "border-b border-[#F0F1F3] last:border-0 " +
+                              (moved ? "bg-[#F7F4EC]" : "hover:bg-[#FAFAF9]")
                             }
                           >
-                            {dept}
-                          </h3>
-                          <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-semibold text-[#6B5C32]">
-                            {count} {count === 1 ? "person" : "people"}
-                          </span>
-                        </div>
-                        <div className="space-y-3 p-3">
-                          {count === 0 && (
-                            <div
-                              className={
-                                "rounded-md border border-dashed px-2 py-4 text-center text-[10px] " +
-                                (isDropTarget
-                                  ? "border-[#6B5C32] text-[#6B5C32]"
-                                  : "border-[#E0DAD0] text-[#A98F4E]")
-                              }
-                            >
-                              {orgEdit
-                                ? "Drop a person here"
-                                : isUnassigned
-                                  ? "No department set"
-                                  : "No one here yet"}
-                            </div>
-                          )}
-                          {posEntries.map(([pos, members]) => (
-                            <div key={pos}>
-                              <div className="mb-1 flex items-center gap-2">
-                                <span className="text-[10px] font-semibold uppercase tracking-wide text-[#9CA3AF]">
-                                  {pos === "—" ? "No position" : pos}
+                            {/* Name (+ email) — avatar like the rest of the UI */}
+                            <td className="px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#EFEAE5] text-[10px] font-semibold text-[#6B5C32]">
+                                  {initials || "?"}
                                 </span>
-                                <span className="text-[10px] text-[#C4BBA9]">
-                                  {members.length}
+                                <div className="min-w-0">
+                                  <div className="truncate font-medium text-[#111827]">
+                                    {name}
+                                    {m.id === currentUser?.id && (
+                                      <span className="ml-1.5 rounded bg-[#6B5C32]/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-[#6B5C32]">
+                                        You
+                                      </span>
+                                    )}
+                                    {moved && (
+                                      <span className="ml-1.5 rounded bg-[#6B5C32]/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#6B5C32]">
+                                        Changed
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="truncate text-[10px] text-[#9CA3AF]">
+                                    {m.email}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+
+                            {/* Department — badge (view) / select (edit) */}
+                            <td className="px-3 py-2">
+                              {orgEdit ? (
+                                <select
+                                  value={dept === "Unassigned" ? "" : dept}
+                                  onChange={(e) =>
+                                    setDeptDraft(
+                                      m,
+                                      e.target.value || "Unassigned",
+                                    )
+                                  }
+                                  title="Department"
+                                  className="h-7 w-full min-w-[8rem] rounded border border-[#E2DDD8] bg-white px-1.5 text-[11px] text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+                                >
+                                  <option value="">— Unassigned —</option>
+                                  {ORG_DEPARTMENTS.map((d) => (
+                                    <option key={d} value={d}>
+                                      {d}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <DeptBadge
+                                  dept={dept === "Unassigned" ? "" : dept}
+                                />
+                              )}
+                            </td>
+
+                            {/* Position — text (view) / dept-scoped select (edit) */}
+                            <td className="px-3 py-2">
+                              {orgEdit ? (
+                                <select
+                                  value={pos}
+                                  onChange={(e) =>
+                                    setPositionDraft(m, e.target.value)
+                                  }
+                                  disabled={dept === "Unassigned"}
+                                  title={
+                                    dept === "Unassigned"
+                                      ? "Pick a department first"
+                                      : "Position"
+                                  }
+                                  className="h-7 w-full min-w-[9rem] rounded border border-[#E2DDD8] bg-white px-1.5 text-[11px] text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] disabled:cursor-not-allowed disabled:bg-[#F4F2EF] disabled:text-[#9CA3AF]"
+                                >
+                                  <option value="">
+                                    {dept === "Unassigned"
+                                      ? "—"
+                                      : "— No position —"}
+                                  </option>
+                                  {positionOptions.map((p) => (
+                                    <option key={p} value={p}>
+                                      {p}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : pos ? (
+                                <span className="text-[#374151]">{pos}</span>
+                              ) : (
+                                <span className="text-gray-400">—</span>
+                              )}
+                            </td>
+
+                            {/* Reports to — upline name (view) / picker (edit).
+                                Picker biases manager-ish positions first but
+                                lists every active user (Houzs's Upline picker). */}
+                            <td className="px-3 py-2">
+                              {orgEdit ? (
+                                <select
+                                  value={uplineId}
+                                  onChange={(e) =>
+                                    setReportsToDraft(m, e.target.value)
+                                  }
+                                  title="Who this person reports to (their upline)"
+                                  className="h-7 w-full min-w-[10rem] rounded border border-[#E2DDD8] bg-white px-1.5 text-[11px] text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+                                >
+                                  <option value="">— None —</option>
+                                  {uplineCandidates
+                                    .filter((c) => c.id !== m.id)
+                                    .map((c) => {
+                                      const cDept = effectiveDept(c);
+                                      const cPos = effectivePosition(c);
+                                      const meta = [
+                                        cPos,
+                                        cDept === "Unassigned" ? "" : cDept,
+                                      ]
+                                        .filter(Boolean)
+                                        .join(" · ");
+                                      return (
+                                        <option key={c.id} value={c.id}>
+                                          {c.displayName || c.email}
+                                          {meta ? ` (${meta})` : ""}
+                                        </option>
+                                      );
+                                    })}
+                                </select>
+                              ) : uplineName ? (
+                                <span className="text-[#6B7280]">
+                                  {uplineName}
                                 </span>
-                                <span className="h-px flex-1 bg-[#F0ECE9]" />
-                              </div>
-                              <div className="space-y-1">
-                                {members.map((m) => {
-                                  const name = m.displayName || m.email;
-                                  const initials = name
-                                    .trim()
-                                    .split(/\s+/)
-                                    .slice(0, 2)
-                                    .map((p) => p[0]?.toUpperCase() ?? "")
-                                    .join("");
-                                  // Department lives on the USER row, so EVERY
-                                  // active person is draggable in edit mode — no
-                                  // @hookka.com alias required (owner 2026-06-17).
-                                  const canDrag = orgEdit;
-                                  const dragging = orgDragId === m.id;
-                                  const moved = userHasOrgDraft(m);
-                                  const uplineId = effectiveReportsTo(m);
-                                  const uplineName = uplineId
-                                    ? (userLabelById.get(uplineId) ??
-                                      "(unknown)")
-                                    : "";
-                                  return (
-                                    <div
-                                      key={m.id}
-                                      className={
-                                        "rounded-md border px-2 py-1.5 transition-opacity " +
-                                        (dragging
-                                          ? "opacity-40 "
-                                          : "opacity-100 ") +
-                                        (moved
-                                          ? "border-[#6B5C32] bg-[#F7F4EC] "
-                                          : "border-[#E5E7EB] bg-white ")
-                                      }
-                                    >
-                                      <div
-                                        draggable={canDrag}
-                                        onDragStart={
-                                          canDrag
-                                            ? (e) => {
-                                                e.dataTransfer.setData(
-                                                  "text/plain",
-                                                  m.id,
-                                                );
-                                                e.dataTransfer.effectAllowed =
-                                                  "move";
-                                                setOrgDragId(m.id);
-                                              }
-                                            : undefined
-                                        }
-                                        onDragEnd={
-                                          canDrag
-                                            ? () => {
-                                                setOrgDragId(null);
-                                                setOrgDropDept(null);
-                                              }
-                                            : undefined
-                                        }
-                                        title={
-                                          canDrag
-                                            ? "Drag to another department"
-                                            : undefined
-                                        }
-                                        className={
-                                          "flex items-center gap-2 " +
-                                          (canDrag
-                                            ? "cursor-grab active:cursor-grabbing"
-                                            : "")
-                                        }
-                                      >
-                                        {canDrag && (
-                                          <GripVertical className="h-3.5 w-3.5 shrink-0 text-[#C4BBA9]" />
-                                        )}
-                                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#EFEAE5] text-[10px] font-semibold text-[#6B5C32]">
-                                          {initials || "?"}
-                                        </span>
-                                        <div className="min-w-0 flex-1">
-                                          <div className="truncate text-xs font-medium text-[#111827]">
-                                            {m.displayName || m.email}
-                                          </div>
-                                          <div className="truncate text-[10px] text-[#9CA3AF]">
-                                            {m.email}
-                                          </div>
-                                        </div>
-                                        {moved && (
-                                          <span className="shrink-0 rounded bg-[#6B5C32]/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#6B5C32]">
-                                            Changed
-                                          </span>
-                                        )}
-                                      </div>
-                                      {/* Reporting line — read-only chip when
-                                          viewing, a picker when editing (mirrors
-                                          Houzs's Upline column + picker). */}
-                                      {orgEdit ? (
-                                        <div className="mt-1.5 flex items-center gap-1">
-                                          <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wide text-[#9CA3AF]">
-                                            Reports to
-                                          </span>
-                                          <select
-                                            value={uplineId}
-                                            onChange={(e) =>
-                                              setReportsToDraft(
-                                                m,
-                                                e.target.value,
-                                              )
-                                            }
-                                            title="Who this person reports to (their upline)"
-                                            className="h-7 min-w-0 flex-1 rounded border border-[#E2DDD8] bg-white px-1.5 text-[11px] text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
-                                          >
-                                            <option value="">— None —</option>
-                                            {activeUsers
-                                              .filter((c) => c.id !== m.id)
-                                              .map((c) => (
-                                                <option key={c.id} value={c.id}>
-                                                  {c.displayName || c.email}
-                                                </option>
-                                              ))}
-                                          </select>
-                                        </div>
-                                      ) : (
-                                        uplineName && (
-                                          <div className="mt-1 truncate text-[10px] text-[#9CA3AF]">
-                                            Reports to{" "}
-                                            <span className="font-medium text-[#6B7280]">
-                                              {uplineName}
-                                            </span>
-                                          </div>
-                                        )
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
+                              ) : (
+                                <span className="text-gray-400">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               </>
             )}
@@ -2908,6 +3129,46 @@ export default function UsersPage() {
               )}
             </p>
             <div className="mt-4 space-y-2">
+              {/* CLAIM path (BUG-2): on the create branch, when floating
+                  unassigned @hookka.com aliases exist, let the operator link one
+                  to this user instead of creating a brand-new address — fixes
+                  the "lim@hookka.com is mine but the row is empty" case where the
+                  alias's local-part never name-matched the user. Claiming PATCHes
+                  assigned_user_id and refreshes; the new address path stays below
+                  for when none of the existing aliases fit. */}
+              {!aliasExisting && unassignedAliases.length > 0 && (
+                <div className="rounded-md border border-[#CFE0F3] bg-[#F2F7FD] p-3">
+                  <label className="block text-xs font-medium text-[#2C5B8F] uppercase tracking-wide mb-1">
+                    Claim an existing alias
+                  </label>
+                  <p className="text-[11px] text-[#2C5B8F] mb-2">
+                    Link an unassigned @hookka.com address that already exists
+                    (e.g. one whose name doesn&apos;t match this person) to{" "}
+                    <strong>{aliasForUser.email}</strong>.
+                  </p>
+                  <select
+                    defaultValue=""
+                    disabled={aliasSubmitting || linkingAliasId !== null}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      if (id) claimAliasForUser(id, aliasForUser);
+                    }}
+                    className="flex h-10 w-full rounded-md border border-[#CFE0F3] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] disabled:opacity-50"
+                  >
+                    <option value="" disabled>
+                      Choose an existing alias to link…
+                    </option>
+                    {unassignedAliases.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.address}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-[#6B7280] mt-2">
+                    Or create a brand-new address below.
+                  </p>
+                </div>
+              )}
               <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide">
                 Email alias
               </label>

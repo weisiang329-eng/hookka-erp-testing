@@ -1220,30 +1220,10 @@ export default function WorkerScanPage() {
     // ZXing decodes never held 600ms → felt like 扫不到; the value is already
     // Code128-checksum-valid AND bounded to the aim box, so a short confirm is safe.
     const STABLE_MS = 300;
-    // Map the on-screen aim box (CSS px, centred over an object-cover video) to a
-    // crop rect in RAW VIDEO pixels. object-cover scales the frame by
-    // max(clientW/vw, clientH/vh) and centre-crops; the inverse maps the centred
-    // CSS box back to a centred video-px rect. WITHOUT this the decoded band did
-    // not line up with the white box, so barcode mode read a neighbouring stacked
-    // row or nothing (Wei Siang 2026-06-17). The box dims here MUST match the
-    // reticle JSX (86vw, max 440px, 118px tall).
-    // Aim box → isolate ONE barcode. Full WIDTH (Code 128 needs every bar + both
-    // quiet zones) × a centred ~30% HEIGHT band. Barcode mode decodes ONLY this
-    // band so it reads the one code the worker aims at — not a neighbour — AND the
-    // decoded value stays STABLE (one code) so the brief stable-hold can lock.
-    // Full-frame let 3 codes flip-flop frame-to-frame so the hold never completed
-    // ("barcode 扫不到" while QR worked — QR fires on the FIRST decode, so it
-    // "worked" but grabbed whatever/whichever code, too eagerly). The band is tall
-    // enough for ZXing to read yet excludes the rows above/below.
-    const aimRoi = () => {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      const sh = Math.max(1, Math.round(vh * 0.3));
-      const sw = vw;
-      const sx = 0;
-      const sy = Math.round((vh - sh) / 2);
-      return { sx, sy, sw, sh };
-    };
+    // Barcode mode decodes the FULL frame (no ROI/band crop) — a crop is what
+    // kept breaking it ("barcode 扫不到" while QR, which is also full-frame, read
+    // the same code fine). Isolation among stacked codes is handled by
+    // nearest-to-centre selection + the stable-hold below, NOT by cropping.
     // Tolerant stable-hold: a SINGLE stray read of a neighbouring stacked row
     // must NOT zero the hold (that fragility, combined with an over-wide ROI, is
     // why barcode mode kept "regressing"). Only switch the tracked value once a
@@ -1284,26 +1264,33 @@ export default function WorkerScanPage() {
             const codes = await nativeDetector.detect(video);
             if (stopped) return;
             if (scanMode === "barcode") {
+              // FULL FRAME, NEAREST code_128 to centre wins — NO band/position
+              // rejection. QR mode reads the SAME barcode fine because it never
+              // rejects on position; ANY ROI/band crop silently dropped the
+              // owner's code ("barcode 扫不到" while QR worked — the recurring
+              // regression, owner 2026-06-17). Nearest-to-centre still resolves a
+              // stacked schedule to the aimed code while ALWAYS decoding; the
+              // stable-hold (considerHit) still requires aiming before it fires.
+              const cx = video.videoWidth / 2;
               const cy = video.videoHeight / 2;
-              // FULL FRAME, NEAREST code_128 to centre wins — NO band rejection.
-              // QR mode reads the SAME barcode fine precisely because it never
-              // rejects on position; the aim-band reject was silently dropping the
-              // owner's code whenever it wasn't dead-centre ("barcode 扫不到"
-              // while QR mode worked). Nearest-to-centre still isolates the aimed
-              // row out of a stacked schedule (owner 2026-06-17).
-              // Only the code INSIDE the aim box (its vertical centre within the
-              // band) wins — a neighbouring barcode above/below is ignored, AND
-              // the decoded value stays stable (one code) so the hold can lock.
-              const roiHalf = aimRoi().sh / 2;
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
                 const fmt = (c as { format?: string }).format;
                 if (fmt && fmt !== "code_128") continue;
-                const bb = (c as { boundingBox?: { y: number; height: number } })
-                  .boundingBox;
-                const d = bb ? Math.abs(bb.y + bb.height / 2 - cy) : 0;
-                if (bb && d > roiHalf) continue; // outside the aim box → ignore
+                const bb = (
+                  c as {
+                    boundingBox?: {
+                      x: number;
+                      y: number;
+                      width: number;
+                      height: number;
+                    };
+                  }
+                ).boundingBox;
+                const d = bb
+                  ? Math.hypot(bb.x + bb.width / 2 - cx, bb.y + bb.height / 2 - cy)
+                  : 0;
                 if (!best || d < best.d) best = { v: c.rawValue, d };
               }
               if (best) {
@@ -1334,17 +1321,17 @@ export default function WorkerScanPage() {
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
             if (scanMode === "barcode") {
-              // Decode ONLY the aim box (full width × the centred band) so it
-              // isolates the one barcode the worker aims at. Full-frame let 3
-              // codes flip-flop so the stable-hold never locked. The band is tall
-              // (~30%) so ZXing still reads it, yet excludes the rows above/below.
-              const { sx, sy, sw, sh } = aimRoi();
-              const s = Math.min(1, 1280 / sw);
-              const cw = Math.max(1, Math.round(sw * s));
-              const ch = Math.max(1, Math.round(sh * s));
+              // Decode the FULL frame — exactly like QR mode, which reads this
+              // same Code 128 fine. A cropped band is what kept breaking barcode
+              // mode ("扫不到"); the stable-hold (considerHit) is what lets the
+              // worker aim, so no crop is needed. ~1280px working width keeps the
+              // Code 128 bars sharp. ZXing is the sole Code 128 decoder on iOS.
+              const s = Math.min(1, 1280 / Math.max(vw, vh));
+              const cw = Math.max(1, Math.round(vw * s));
+              const ch = Math.max(1, Math.round(vh * s));
               canvas.width = cw;
               canvas.height = ch;
-              ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
+              ctx.drawImage(video, 0, 0, cw, ch);
               let imageData: ImageData | null = null;
               try {
                 imageData = ctx.getImageData(0, 0, cw, ch);

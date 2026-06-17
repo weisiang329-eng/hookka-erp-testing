@@ -1,26 +1,20 @@
 // ---------------------------------------------------------------------------
-// Mail Center — client-side state for email-client features the BACKEND does
-// not (yet) persist.
+// Mail Center — client-side state for compose DRAFTS only.
 //
-// The backend `email_threads` table only carries: status (open/closed),
-// assigned_to_*, and an `unread` flag that is auto-cleared on open with NO
-// PATCH to set it back. There is NO column for star/flag, NO label/category
-// field, and NO delete / drafts / trash storage (see src/api/routes/
-// mail-center.ts — PATCH /threads/:id accepts only status + assignedTo*).
+// Star / labels / trash / mark-unread USED to live here in localStorage
+// because the backend had no columns for them. They are now DB-backed:
+//   • star        → email_threads.starred         (PATCH { starred })
+//   • labels      → email_threads.labels (JSON)    (PATCH { labels })
+//   • trash       → email_threads.trashed_at       (PATCH { trashed })
+//   • mark unread → email_threads.unread           (PATCH { unread })
+// so they sync across users/devices via the API (see mail-actions.ts).
 //
-// To still give operators the standard Gmail/Outlook affordances (star, label,
-// trash, mark-unread, save-draft), this module keeps that state LOCALLY in
-// localStorage, keyed per-thread, with a tiny pub/sub so the list, reading
-// pane and sidebar counters stay in sync within and across tabs.
-//
-// GAP (reported to owner): because this is browser-local, these flags do NOT
-// sync between users/devices and are lost if site data is cleared. Promoting
-// any of them to a real shared feature needs a backend column + endpoint:
-//   • star/flag   → email_threads.starred (INTEGER) + PATCH field
-//   • labels      → email_threads.labels  (TEXT json) or a join table + PATCH
-//   • trash       → email_threads.status='trashed' (or a deleted_at column)
-//   • mark unread → a PATCH that can SET unread=1 (today it only clears on read)
-//   • drafts      → an email_drafts table + CRUD endpoints
+// Compose DRAFTS remain LOCAL: there is no draft table this round, so saved
+// drafts are kept in localStorage, keyed per device, with a tiny pub/sub so
+// the inbox Drafts folder and the compose dialog stay in sync within and
+// across tabs. GAP (still reported to owner): drafts do NOT sync between
+// users/devices and are lost if site data is cleared. Promoting them needs an
+// email_drafts table + CRUD endpoints.
 // ---------------------------------------------------------------------------
 
 // Bump the version suffix if the persisted shape ever changes incompatibly.
@@ -36,24 +30,11 @@ export type MailDraft = {
 };
 
 type MailLocalState = {
-  // thread id → starred
-  starred: Record<string, true>;
-  // thread id → trashed
-  trashed: Record<string, true>;
-  // thread id → ordered list of label names
-  labels: Record<string, string[]>;
-  // thread id → local read/unread override. true = forced unread (the operator
-  // hit "mark unread"); false = forced read. Absent = follow the server flag.
-  readOverride: Record<string, boolean>;
   // saved compose drafts (local only — no backend draft store)
   drafts: MailDraft[];
 };
 
 const EMPTY: MailLocalState = {
-  starred: {},
-  trashed: {},
-  labels: {},
-  readOverride: {},
   drafts: [],
 };
 
@@ -66,10 +47,6 @@ function load(): MailLocalState {
     if (!raw) return { ...EMPTY };
     const parsed = JSON.parse(raw) as Partial<MailLocalState>;
     return {
-      starred: parsed.starred ?? {},
-      trashed: parsed.trashed ?? {},
-      labels: parsed.labels ?? {},
-      readOverride: parsed.readOverride ?? {},
       drafts: Array.isArray(parsed.drafts) ? parsed.drafts : [],
     };
   } catch {
@@ -122,83 +99,6 @@ export function getSnapshot(): MailLocalState {
   return state;
 }
 
-// ── Mutators ───────────────────────────────────────────────────────────────
-export function toggleStar(id: string): void {
-  const next = { ...state.starred };
-  if (next[id]) delete next[id];
-  else next[id] = true;
-  state = { ...state, starred: next };
-  persistAndNotify();
-}
-
-export function setStar(id: string, value: boolean): void {
-  const next = { ...state.starred };
-  if (value) next[id] = true;
-  else delete next[id];
-  state = { ...state, starred: next };
-  persistAndNotify();
-}
-
-export function setTrashed(id: string, value: boolean): void {
-  const next = { ...state.trashed };
-  if (value) next[id] = true;
-  else delete next[id];
-  state = { ...state, trashed: next };
-  persistAndNotify();
-}
-
-export function setTrashedMany(ids: string[], value: boolean): void {
-  const next = { ...state.trashed };
-  for (const id of ids) {
-    if (value) next[id] = true;
-    else delete next[id];
-  }
-  state = { ...state, trashed: next };
-  persistAndNotify();
-}
-
-// Force the local read/unread state. `null` clears the override so the row
-// follows the server `unread` flag again.
-export function setReadOverride(id: string, value: boolean | null): void {
-  const next = { ...state.readOverride };
-  if (value === null) delete next[id];
-  else next[id] = value;
-  state = { ...state, readOverride: next };
-  persistAndNotify();
-}
-
-export function setReadOverrideMany(ids: string[], value: boolean | null): void {
-  const next = { ...state.readOverride };
-  for (const id of ids) {
-    if (value === null) delete next[id];
-    else next[id] = value;
-  }
-  state = { ...state, readOverride: next };
-  persistAndNotify();
-}
-
-export function addLabel(id: string, label: string): void {
-  const clean = label.trim();
-  if (!clean) return;
-  const existing = state.labels[id] ?? [];
-  if (existing.some((l) => l.toLowerCase() === clean.toLowerCase())) return;
-  state = {
-    ...state,
-    labels: { ...state.labels, [id]: [...existing, clean] },
-  };
-  persistAndNotify();
-}
-
-export function removeLabel(id: string, label: string): void {
-  const existing = state.labels[id] ?? [];
-  const next = existing.filter((l) => l.toLowerCase() !== label.toLowerCase());
-  const labels = { ...state.labels };
-  if (next.length) labels[id] = next;
-  else delete labels[id];
-  state = { ...state, labels };
-  persistAndNotify();
-}
-
 // ── Draft mutators ───────────────────────────────────────────────────────
 export function saveDraft(draft: MailDraft): void {
   const rest = state.drafts.filter((d) => d.id !== draft.id);
@@ -209,36 +109,4 @@ export function saveDraft(draft: MailDraft): void {
 export function deleteDraft(id: string): void {
   state = { ...state, drafts: state.drafts.filter((d) => d.id !== id) };
   persistAndNotify();
-}
-
-// ── Derived helpers (pure reads off a snapshot) ────────────────────────────
-export function isStarred(snap: MailLocalState, id: string): boolean {
-  return !!snap.starred[id];
-}
-
-export function isTrashed(snap: MailLocalState, id: string): boolean {
-  return !!snap.trashed[id];
-}
-
-export function labelsFor(snap: MailLocalState, id: string): string[] {
-  return snap.labels[id] ?? [];
-}
-
-// Effective unread = local override if present, else the server flag.
-export function effectiveUnread(
-  snap: MailLocalState,
-  id: string,
-  serverUnread: boolean,
-): boolean {
-  const o = snap.readOverride[id];
-  return o === undefined ? serverUnread : o;
-}
-
-// Every distinct label across all threads, sorted, for the sidebar list.
-export function allLabels(snap: MailLocalState): string[] {
-  const set = new Set<string>();
-  for (const arr of Object.values(snap.labels)) {
-    for (const l of arr) set.add(l);
-  }
-  return Array.from(set).sort((a, b) => a.localeCompare(b));
 }

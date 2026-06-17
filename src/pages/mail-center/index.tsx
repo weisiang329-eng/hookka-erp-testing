@@ -15,13 +15,17 @@
 //                  actions, plus a bulk action bar when rows are selected.
 //   • RIGHT (lg+)— a reading pane embedding detail.tsx for the selected thread.
 //
-// FOLDERS vs API STATUS: the backend only knows status 'open' / 'closed'.
+// FOLDERS vs API STATUS: the backend knows status 'open' / 'closed' plus a
+// 'trashed' soft-delete and DB-backed star / labels / unread flags.
 //   Inbox   → status=open (server filter)
 //   Archive → status=closed (server filter, labelled "Archive")  [= "Done"]
-//   Starred / Sent / Trash / All → fetched with status=all, narrowed client-side
-//   Drafts  → local-only compose drafts (no backend draft store)
-// Star, labels, trash and the mark-unread override have NO backend column, so
-// they live in localStorage via mail-local.ts (gap documented there + reported).
+//   Starred → ?starred=1 (server filter)
+//   Trash   → ?status=trashed (server filter; excluded from every other view)
+//   Sent    → fetched with status=all, narrowed client-side by hasOutbound
+//   All     → fetched with status=all
+//   Drafts  → local-only compose drafts (no backend draft table — mail-local.ts)
+// Star, labels, trash and mark-unread are now DB-backed (PATCH /threads/:id),
+// so they sync across users/devices. Only compose drafts remain local.
 //
 // Mobile / under-lg: tapping a row navigates to the standalone
 // /mail-center/:id page (deep links unchanged). The reading pane is lg-only.
@@ -46,19 +50,18 @@ import MailCenterDetailPage from "./detail";
 import {
   subscribe as subscribeLocal,
   getSnapshot as getLocalSnapshot,
-  toggleStar,
-  setTrashedMany,
-  setReadOverride,
-  setReadOverrideMany,
-  isStarred,
-  isTrashed,
-  labelsFor,
-  effectiveUnread,
-  allLabels,
   deleteDraft,
   type MailDraft,
 } from "./mail-local";
-import { patchManyStatus, patchThreadStatus } from "./mail-actions";
+import {
+  patchManyStatus,
+  patchManyTrashed,
+  patchManyUnread,
+  patchThreadStatus,
+  patchThreadStarred,
+  patchThreadUnread,
+  patchThreadTrashed,
+} from "./mail-actions";
 import {
   Mail,
   Search,
@@ -96,6 +99,12 @@ type MailThread = {
   lastSnippet: string;
   messageCount: number;
   unread: boolean;
+  // DB-backed email-client fields (server-side, sync across users/devices).
+  starred: boolean;
+  labels: string[];
+  trashedAt: string | null;
+  // Accurate Sent flag — thread has at least one outbound message.
+  hasOutbound: boolean;
 };
 
 type MailAddress = {
@@ -187,7 +196,8 @@ function useIsDesktop(): boolean {
   return isDesktop;
 }
 
-// Subscribe the whole page to the local star/label/trash/read store.
+// Subscribe the whole page to the local DRAFTS store (star/label/trash/read are
+// now DB-backed and arrive on the thread rows themselves).
 function useLocalMail() {
   return useSyncExternalStore(subscribeLocal, getLocalSnapshot, getLocalSnapshot);
 }
@@ -218,8 +228,6 @@ function ThreadList({
   onInjectTest: () => void;
   onRowAction: (action: RowAction, t: MailThread) => void;
 }) {
-  const local = useLocalMail();
-
   if (threads.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
@@ -249,9 +257,9 @@ function ThreadList({
     <ul className="divide-y divide-border">
       {threads.map((t) => {
         const active = activeId === t.id;
-        const starred = isStarred(local, t.id);
-        const unread = effectiveUnread(local, t.id, t.unread);
-        const chips = labelsFor(local, t.id);
+        const starred = t.starred;
+        const unread = t.unread;
+        const chips = t.labels;
         const selected = selectedIds.has(t.id);
         return (
           <li
@@ -281,12 +289,12 @@ function ThreadList({
               />
             </label>
 
-            {/* Star toggle — local only. */}
+            {/* Star toggle — DB-backed (PATCH starred). */}
             <button
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                toggleStar(t.id);
+                onRowAction(starred ? "unstar" : "star", t);
               }}
               aria-label={starred ? "Unstar" : "Star"}
               title={starred ? "Unstar" : "Star"}
@@ -436,6 +444,8 @@ function ThreadList({
 }
 
 type RowAction =
+  | "star"
+  | "unstar"
   | "read"
   | "unread"
   | "archive"
@@ -588,11 +598,18 @@ export default function MailCenterPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  // Map folder → the server status param. Inbox/Archive filter server-side;
-  // Starred/Sent/Trash/All fetch the full set and narrow client-side; Drafts
-  // doesn't hit the threads endpoint at all.
-  const apiStatus: "open" | "closed" | "all" =
-    folder === "inbox" ? "open" : folder === "archive" ? "closed" : "all";
+  // Map folder → the server status param. Inbox/Archive/Trash filter
+  // server-side; Starred/Sent/All fetch the full (non-trashed) set and narrow
+  // client-side; Drafts doesn't hit the threads endpoint at all. Trashed rows
+  // are excluded from every non-Trash view by the backend.
+  const apiStatus: "open" | "closed" | "trashed" | "all" =
+    folder === "inbox"
+      ? "open"
+      : folder === "archive"
+        ? "closed"
+        : folder === "trash"
+          ? "trashed"
+          : "all";
 
   const params = new URLSearchParams();
   if (apiStatus !== "all") params.set("status", apiStatus);
@@ -608,6 +625,17 @@ export default function MailCenterPage() {
   const { data: addresses } = useCachedJson<MailAddress[]>(
     "/api/mail-center/addresses",
     300,
+  );
+  // Dedicated trashed fetch — drives the Trash folder badge from ANY folder
+  // (the main list excludes trashed rows server-side, so it can't be counted
+  // from there). Mirrors the mailbox filter so the badge tracks the current
+  // mailbox scope.
+  const trashCountUrl = `/api/mail-center/threads?status=trashed${
+    filter.kind === "mailbox" ? `&mailbox=${encodeURIComponent(filter.value)}` : ""
+  }`;
+  const { data: trashedThreads } = useCachedJson<MailThread[]>(
+    trashCountUrl,
+    60,
   );
 
   const activeAddresses = useMemo(
@@ -646,32 +674,24 @@ export default function MailCenterPage() {
     return m;
   }, [deptGroups]);
 
-  // Client-side narrowing of the already-scoped list:
-  //   1. Trash gate — Trash shows ONLY locally-trashed threads; every other
-  //      folder HIDES them.
-  //   2. Folder semantics — Starred (local star set) / Sent (outbound) on top
-  //      of the server status the list was fetched with.
-  //   3. Department filter — when a whole dept is selected.
-  //   4. Label filter — when a sidebar label is active.
-  //   5. Text search over subject / sender name / sender email / snippet.
+  // Client-side narrowing of the already-scoped list. Trash and status are now
+  // resolved server-side (the fetched set is already the right folder), so this
+  // only layers on:
+  //   1. Folder semantics — Starred (DB star) / Sent (hasOutbound) on top of
+  //      the server status the list was fetched with.
+  //   2. Department filter — when a whole dept is selected.
+  //   3. Label filter — when a sidebar label is active (DB labels).
+  //   4. Text search over subject / sender name / sender email / snippet.
   const visible = useMemo(() => {
     let list = threads ?? [];
 
-    // Trash gate.
-    if (folder === "trash") {
-      list = list.filter((t) => isTrashed(local, t.id));
-    } else {
-      list = list.filter((t) => !isTrashed(local, t.id));
-    }
-
     // Folder-specific client narrowing.
     if (folder === "starred") {
-      list = list.filter((t) => isStarred(local, t.id));
+      list = list.filter((t) => t.starred);
     } else if (folder === "sent") {
-      // Best available proxy with list-level data: the last activity was
-      // outbound. (A true Sent view would need a per-message direction roll-up
-      // from the backend — see report.)
-      list = list.filter((t) => t.lastDirection === "outbound");
+      // Accurate Sent: thread has at least one outbound message (server-computed
+      // hasOutbound), not the last_direction proxy.
+      list = list.filter((t) => t.hasOutbound);
     }
 
     // Department narrowing.
@@ -683,9 +703,7 @@ export default function MailCenterPage() {
     // Label filter.
     if (labelFilter) {
       list = list.filter((t) =>
-        labelsFor(local, t.id).some(
-          (l) => l.toLowerCase() === labelFilter.toLowerCase(),
-        ),
+        t.labels.some((l) => l.toLowerCase() === labelFilter.toLowerCase()),
       );
     }
 
@@ -702,39 +720,41 @@ export default function MailCenterPage() {
     }
 
     return list;
-  }, [threads, q, folder, filter, addressesByDept, labelFilter, local]);
+  }, [threads, q, folder, filter, addressesByDept, labelFilter]);
 
-  // Counts for the folder list. Inbox/Archive/Starred/Sent/All/Trash are
-  // computed off the FETCHED set, so they reflect the current mailbox scope.
-  // (Inbox count = unread in Inbox, the most useful badge; others = totals.)
+  // Counts for the folder list. inbox-unread / starred are computed off the
+  // FETCHED set (so they reflect the current mailbox scope), filtered to the
+  // LIVE (non-trashed) rows — the backend already excludes trashed rows from
+  // every non-Trash fetch, so on the Trash folder these read 0 until the user
+  // leaves it. The trash badge comes from its own dedicated fetch so it stays
+  // accurate from any folder.
+  const liveThreads = useMemo(
+    () => (threads ?? []).filter((t) => !t.trashedAt),
+    [threads],
+  );
+
   const folderCounts = useMemo(() => {
-    const all = threads ?? [];
-    const live = all.filter((t) => !isTrashed(local, t.id));
-    const inboxUnread = live.filter(
-      (t) =>
-        t.status === "open" && effectiveUnread(local, t.id, t.unread),
+    const inboxUnread = liveThreads.filter(
+      (t) => t.status === "open" && t.unread,
     ).length;
     return {
       inboxUnread,
-      starred: live.filter((t) => isStarred(local, t.id)).length,
-      trash: all.filter((t) => isTrashed(local, t.id)).length,
+      starred: liveThreads.filter((t) => t.starred).length,
+      trash: (trashedThreads ?? []).length,
     };
-  }, [threads, local]);
+  }, [liveThreads, trashedThreads]);
 
-  const unreadCount = (threads ?? []).filter(
-    (t) => !isTrashed(local, t.id) && effectiveUnread(local, t.id, t.unread),
-  ).length;
+  const unreadCount = liveThreads.filter((t) => t.unread).length;
 
   // Per-mailbox + per-dept unread counts for the mailbox switcher badges.
   const unreadByMailbox = useMemo(() => {
     const m = new Map<string, number>();
-    for (const t of threads ?? []) {
-      if (isTrashed(local, t.id)) continue;
-      if (!effectiveUnread(local, t.id, t.unread)) continue;
+    for (const t of liveThreads) {
+      if (!t.unread) continue;
       m.set(t.mailboxAddress, (m.get(t.mailboxAddress) ?? 0) + 1);
     }
     return m;
-  }, [threads, local]);
+  }, [liveThreads]);
 
   const unreadByDept = useMemo(() => {
     const m = new Map<string, number>();
@@ -746,7 +766,13 @@ export default function MailCenterPage() {
     return m;
   }, [deptGroups, unreadByMailbox]);
 
-  const labels = allLabels(local);
+  // Distinct labels across the loaded (live) threads, sorted, for the sidebar
+  // filter list. Derived from the DB-backed per-thread labels.
+  const labels = useMemo(() => {
+    const set = new Set<string>();
+    for (const t of liveThreads) for (const l of t.labels) set.add(l);
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [liveThreads]);
   const drafts = local.drafts;
 
   // The selection set may hold ids that are no longer visible (folder switch,
@@ -782,9 +808,9 @@ export default function MailCenterPage() {
   }
 
   function openThread(id: string) {
-    // Opening a thread clears any local "forced unread" override and marks it
-    // read locally so the row matches what the server does on GET.
-    setReadOverride(id, false);
+    // Opening a thread marks it read server-side (GET /threads/:id clears the
+    // unread flag); the detail view invalidates the list cache so the row
+    // reflects that on the next read.
     if (isDesktop) {
       setSelectedId(id);
     } else {
@@ -792,15 +818,31 @@ export default function MailCenterPage() {
     }
   }
 
-  // Single-row hover actions.
+  // Single-row hover actions. All DB-backed via PATCH /threads/:id.
   async function onRowAction(action: RowAction, t: MailThread) {
     switch (action) {
-      case "read":
-        setReadOverride(t.id, false);
+      case "star": {
+        const ok = await patchThreadStarred(t.id, true);
+        if (!ok) toast.error("Couldn’t star. Please try again.");
         break;
-      case "unread":
-        setReadOverride(t.id, true);
+      }
+      case "unstar": {
+        const ok = await patchThreadStarred(t.id, false);
+        if (!ok) toast.error("Couldn’t unstar. Please try again.");
         break;
+      }
+      case "read": {
+        const ok = await patchThreadUnread(t.id, false);
+        if (!ok) toast.error("Couldn’t update. Please try again.");
+        break;
+      }
+      case "unread": {
+        const ok = await patchThreadUnread(t.id, true);
+        toast[ok ? "success" : "error"](
+          ok ? "Marked as unread." : "Couldn’t update. Please try again.",
+        );
+        break;
+      }
       case "archive": {
         const ok = await patchThreadStatus(t.id, "closed");
         toast[ok ? "success" : "error"](
@@ -815,15 +857,23 @@ export default function MailCenterPage() {
         );
         break;
       }
-      case "trash":
-        setTrashedMany([t.id], true);
-        if (selectedId === t.id) setSelectedId(null);
-        toast.info("Moved to Trash.");
+      case "trash": {
+        const ok = await patchThreadTrashed(t.id, true);
+        if (ok) {
+          if (selectedId === t.id) setSelectedId(null);
+          toast.info("Moved to Trash.");
+        } else {
+          toast.error("Couldn’t move to Trash. Please try again.");
+        }
         break;
-      case "restore":
-        setTrashedMany([t.id], false);
-        toast.info("Restored from Trash.");
+      }
+      case "restore": {
+        const ok = await patchThreadTrashed(t.id, false);
+        toast[ok ? "info" : "error"](
+          ok ? "Restored from Trash." : "Couldn’t restore. Please try again.",
+        );
         break;
+      }
     }
   }
 
@@ -840,30 +890,33 @@ export default function MailCenterPage() {
     clearSelection();
   }
 
-  function bulkRead(value: boolean) {
+  async function bulkRead(value: boolean) {
     const ids = selectedArr.map((t) => t.id);
     if (ids.length === 0) return;
-    setReadOverrideMany(ids, value);
-    toast.success(
-      `${ids.length} marked as ${value ? "unread" : "read"}.`,
-    );
+    const ok = await patchManyUnread(ids, value);
+    const verb = value ? "unread" : "read";
+    if (ok === ids.length) toast.success(`${ok} marked as ${verb}.`);
+    else if (ok > 0) toast.warning(`${ok} of ${ids.length} marked as ${verb}.`);
+    else toast.error("Couldn’t update. Please try again.");
     clearSelection();
   }
 
   async function bulkTrash() {
     const ids = selectedArr.map((t) => t.id);
     if (ids.length === 0) return;
-    const ok = await confirm({
+    const confirmed = await confirm({
       title: `Move ${ids.length} ${ids.length === 1 ? "conversation" : "conversations"} to Trash?`,
       message:
-        "They’ll move to the Trash folder on this device. You can restore them from there.",
+        "They’ll move to the Trash folder. You can restore them from there.",
       confirmLabel: "Move to Trash",
       tone: "danger",
     });
-    if (!ok) return;
-    setTrashedMany(ids, true);
+    if (!confirmed) return;
+    const ok = await patchManyTrashed(ids, true);
     if (selectedId && ids.includes(selectedId)) setSelectedId(null);
-    toast.info(`${ids.length} moved to Trash.`);
+    if (ok === ids.length) toast.info(`${ok} moved to Trash.`);
+    else if (ok > 0) toast.warning(`${ok} of ${ids.length} moved to Trash.`);
+    else toast.error("Couldn’t move to Trash. Please try again.");
     clearSelection();
   }
 

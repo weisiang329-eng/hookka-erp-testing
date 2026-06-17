@@ -15,7 +15,7 @@
 // Pass an optional `id` prop; it falls back to useParams when absent, so the
 // standalone route keeps working unchanged.
 // ---------------------------------------------------------------------------
-import { useState, useSyncExternalStore } from "react";
+import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
 import { Card, CardContent } from "@/components/ui/card";
@@ -27,17 +27,11 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { csrfHeaders } from "@/lib/csrf";
 import { cn } from "@/lib/utils";
 import {
-  subscribe as subscribeLocal,
-  getSnapshot as getLocalSnapshot,
-  toggleStar,
-  setTrashed,
-  setReadOverride,
-  addLabel,
-  removeLabel,
-  isStarred,
-  isTrashed,
-  labelsFor,
-} from "./mail-local";
+  patchThreadStarred,
+  patchThreadLabels,
+  patchThreadUnread,
+  patchThreadTrashed,
+} from "./mail-actions";
 import {
   ArrowLeft,
   ArrowDownLeft,
@@ -88,6 +82,10 @@ type MailThread = {
   status: string;
   assignedToUserId?: string;
   assignedToName?: string;
+  // DB-backed email-client fields (server-side; arrive on the thread).
+  starred: boolean;
+  labels: string[];
+  trashedAt: string | null;
 };
 
 type ThreadDetail = {
@@ -139,14 +137,6 @@ export default function MailCenterDetailPage({
   const url = id ? `/api/mail-center/threads/${id}` : null;
   const { data, loading, error } = useCachedJson<ThreadDetail>(url, 30);
 
-  // Local star/label/trash/read store (client-side — no backend column; see
-  // mail-local.ts). Subscribe so the controls reflect every change live.
-  const local = useSyncExternalStore(
-    subscribeLocal,
-    getLocalSnapshot,
-    getLocalSnapshot,
-  );
-
   // Users for the Assign dropdown. Envelope is { success, data:[] } (see
   // routes/users.ts). Loaded lazily; the select degrades to disabled if empty.
   const { data: usersResp } = useCachedJson<UsersEnvelope>("/api/users", 300);
@@ -159,46 +149,109 @@ export default function MailCenterDetailPage({
   const [sending, setSending] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [assigning, setAssigning] = useState(false);
+  const [mutating, setMutating] = useState(false);
   const [newLabel, setNewLabel] = useState("");
 
-  const starred = id ? isStarred(local, id) : false;
-  const trashed = id ? isTrashed(local, id) : false;
-  const chips = id ? labelsFor(local, id) : [];
+  // Star / labels / trashed are DB-backed and arrive on the thread itself.
+  const starred = thread?.starred ?? false;
+  const trashed = thread?.trashedAt != null;
+  const chips = thread?.labels ?? [];
 
-  // Move to / restore from Trash (local-only). Trashing also navigates back on
-  // the full-page route since the thread leaves every normal folder.
+  // Star / unstar via PATCH starred, then refresh this thread + the list.
+  async function handleToggleStar() {
+    if (!id || mutating) return;
+    setMutating(true);
+    try {
+      const ok = await patchThreadStarred(id, !starred);
+      if (!ok) toast.error("Couldn’t update. Please try again.");
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  // Move to / restore from Trash via PATCH trashed. Trashing also navigates
+  // back on the full-page route since the thread leaves every normal folder.
   async function handleTrash() {
-    if (!id) return;
+    if (!id || mutating) return;
     if (trashed) {
-      setTrashed(id, false);
-      toast.info("Restored from Trash.");
+      setMutating(true);
+      try {
+        const ok = await patchThreadTrashed(id, false);
+        toast[ok ? "info" : "error"](
+          ok ? "Restored from Trash." : "Couldn’t restore. Please try again.",
+        );
+      } finally {
+        setMutating(false);
+      }
       return;
     }
-    const ok = await confirm({
+    const confirmed = await confirm({
       title: "Move to Trash?",
       message:
-        "This conversation moves to the Trash folder on this device. You can restore it from there.",
+        "This conversation moves to the Trash folder. You can restore it from there.",
       confirmLabel: "Move to Trash",
       tone: "danger",
     });
-    if (!ok) return;
-    setTrashed(id, true);
-    toast.info("Moved to Trash.");
-    if (!embedded) navigate("/mail-center");
+    if (!confirmed) return;
+    setMutating(true);
+    try {
+      const ok = await patchThreadTrashed(id, true);
+      if (ok) {
+        toast.info("Moved to Trash.");
+        if (!embedded) navigate("/mail-center");
+      } else {
+        toast.error("Couldn’t move to Trash. Please try again.");
+      }
+    } finally {
+      setMutating(false);
+    }
   }
 
-  function handleMarkUnread() {
-    if (!id) return;
-    setReadOverride(id, true);
-    toast.success("Marked as unread.");
+  async function handleMarkUnread() {
+    if (!id || mutating) return;
+    setMutating(true);
+    try {
+      const ok = await patchThreadUnread(id, true);
+      toast[ok ? "success" : "error"](
+        ok ? "Marked as unread." : "Couldn’t update. Please try again.",
+      );
+    } finally {
+      setMutating(false);
+    }
   }
 
-  function handleAddLabel() {
-    if (!id) return;
+  async function handleAddLabel() {
+    if (!id || mutating) return;
     const clean = newLabel.trim();
     if (!clean) return;
-    addLabel(id, clean);
-    setNewLabel("");
+    // Replace the whole label set (PATCH labels). De-dupe case-insensitively.
+    if (chips.some((l) => l.toLowerCase() === clean.toLowerCase())) {
+      setNewLabel("");
+      return;
+    }
+    setMutating(true);
+    try {
+      const ok = await patchThreadLabels(id, [...chips, clean]);
+      if (ok) setNewLabel("");
+      else toast.error("Couldn’t add label. Please try again.");
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  // Remove a label by replacing the set without it (PATCH labels).
+  async function handleRemoveLabel(label: string) {
+    if (!id || mutating) return;
+    const next = chips.filter(
+      (l) => l.toLowerCase() !== label.toLowerCase(),
+    );
+    setMutating(true);
+    try {
+      const ok = await patchThreadLabels(id, next);
+      if (!ok) toast.error("Couldn’t remove label. Please try again.");
+    } finally {
+      setMutating(false);
+    }
   }
 
   // Send the composed reply, then invalidate this thread's cache so the new
@@ -316,16 +369,17 @@ export default function MailCenterDetailPage({
         ) : (
           <span />
         )}
-        {/* Action cluster. Star / Mark-unread / Trash are local-only (no
-            backend column — see mail-local.ts). The status button maps to the
-            real PATCH: open ↔ closed ("Move to Inbox" / "Mark done"). */}
+        {/* Action cluster. Star / Mark-unread / Trash are DB-backed via
+            PATCH /threads/:id. The status button maps to the same PATCH:
+            open ↔ closed ("Move to Inbox" / "Mark done"). */}
         {thread && (
           <div className="flex items-center gap-1.5">
             <Button
               variant="outline"
               size="sm"
               className={cn("gap-1.5", starred && "text-amber-700")}
-              onClick={() => id && toggleStar(id)}
+              onClick={handleToggleStar}
+              disabled={mutating}
               title={starred ? "Unstar" : "Star"}
             >
               <Star
@@ -341,6 +395,7 @@ export default function MailCenterDetailPage({
               size="sm"
               className="gap-1.5"
               onClick={handleMarkUnread}
+              disabled={mutating}
               title="Mark this conversation as unread"
             >
               <MailWarning className="h-4 w-4" />
@@ -382,6 +437,7 @@ export default function MailCenterDetailPage({
               size="sm"
               className={cn("gap-1.5", trashed && "text-amber-700")}
               onClick={handleTrash}
+              disabled={mutating}
               title={trashed ? "Restore from Trash" : "Move to Trash"}
             >
               <Trash2 className="h-4 w-4" />
@@ -454,7 +510,7 @@ export default function MailCenterDetailPage({
               )}
             </div>
 
-            {/* Labels — client-side categories (no backend field). Add a label
+            {/* Labels — DB-backed categories (email_threads.labels). Add a label
                 or remove an existing one; the inbox sidebar lists + filters
                 by these. */}
             <div className="flex flex-wrap items-center gap-1.5">
@@ -470,9 +526,10 @@ export default function MailCenterDetailPage({
                   {l}
                   <button
                     type="button"
-                    onClick={() => id && removeLabel(id, l)}
+                    onClick={() => handleRemoveLabel(l)}
+                    disabled={mutating}
                     aria-label={`Remove label ${l}`}
-                    className="text-[#6B5C32]/70 hover:text-[#6B5C32]"
+                    className="text-[#6B5C32]/70 hover:text-[#6B5C32] disabled:opacity-50"
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -495,7 +552,7 @@ export default function MailCenterDetailPage({
                   variant="outline"
                   size="sm"
                   className="h-7 gap-1 px-2 text-xs"
-                  disabled={!newLabel.trim()}
+                  disabled={!newLabel.trim() || mutating}
                   onClick={handleAddLabel}
                 >
                   <Plus className="h-3.5 w-3.5" />

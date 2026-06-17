@@ -713,6 +713,17 @@ export default function UsersPage() {
     [addressesResp],
   );
 
+  // The matrix's grant COLUMNS are SHARED mailboxes only. A personal alias (one
+  // assigned to a specific user, e.g. lim@hookka.com) is that person's OWN box —
+  // not something you grant others — so it must NOT appear as a column (owner
+  // 2026-06-17: "那個 lim 可以移除"). Their own mailbox is already covered by
+  // View Level L1. With no shared mailbox yet, the matrix is just User + View
+  // level (no confusing personal-alias columns).
+  const matrixMailboxes = useMemo(
+    () => activeAddresses.filter((a) => !(a.assignedUserId ?? "").trim()),
+    [activeAddresses],
+  );
+
   // ---------- View-level (L1/L2/L3) helpers --------------------------------
   // The owner frames the three mailbox view levels as L1 / L2 / L3:
   //   • L1 Personal   — the user's OWN mailbox(es) + any shared mailbox
@@ -1522,7 +1533,7 @@ export default function UsersPage() {
   const TABS: TabItem<TabKey>[] = [
     { key: "users", label: "Users", count: users.length },
     { key: "org", label: "Org Chart" },
-    ...(canManageUsers && activeAddresses.length > 0
+    ...(canManageUsers
       ? [{ key: "mailbox" as TabKey, label: "Mailbox Access" }]
       : []),
   ];
@@ -2246,7 +2257,7 @@ export default function UsersPage() {
                     variant="outline"
                     size="sm"
                     onClick={beginMailEdit}
-                    disabled={activeAddresses.length === 0}
+                    disabled={users.length === 0}
                   >
                     <Pencil className="h-3.5 w-3.5" />
                     Edit
@@ -2291,7 +2302,7 @@ export default function UsersPage() {
                     <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-[#6B7280] border-b border-[#E5E7EB] whitespace-nowrap">
                       View level
                     </th>
-                    {activeAddresses.map((a) => (
+                    {matrixMailboxes.map((a) => (
                       <th
                         key={a.id}
                         className="px-2 py-2 text-center text-[11px] font-medium text-[#374151] border-b border-[#E5E7EB] whitespace-nowrap"
@@ -2477,7 +2488,7 @@ export default function UsersPage() {
                               );
                             })()}
                           </td>
-                          {activeAddresses.map((a) => {
+                          {matrixMailboxes.map((a) => {
                             const isPersonal = a.assignedUserId === u.id;
                             const granted = isGranted(a.id, u.id);
                             const on = isPersonal || granted;

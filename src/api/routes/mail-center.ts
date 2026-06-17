@@ -106,6 +106,15 @@ export function ensureMailSchema(db: D1Database): Promise<void> {
          unread INTEGER NOT NULL DEFAULT 1,
          created_at TEXT
        )`,
+      // Email-client affordances that the frontend used to keep only in
+      // localStorage (star / labels / trash). Lazy idempotent adds — the
+      // per-statement try/catch swallows "duplicate column" on isolates where
+      // this already ran. trashed_at is a soft-delete timestamp; like every
+      // timestamp written here via new Date().toISOString() it MUST stay TEXT
+      // (never timestamptz) so the SupabaseAdapter round-trips it unchanged.
+      `ALTER TABLE email_threads ADD COLUMN IF NOT EXISTS starred INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE email_threads ADD COLUMN IF NOT EXISTS labels TEXT`,
+      `ALTER TABLE email_threads ADD COLUMN IF NOT EXISTS trashed_at TEXT`,
       `CREATE INDEX IF NOT EXISTS ix_email_threads_org_box
          ON email_threads (org_id, mailbox_address, last_message_at)`,
       // Individual messages (both directions).
@@ -351,7 +360,13 @@ type ThreadRow = {
   last_snippet: string | null;
   message_count: number | string | null;
   unread: number | boolean | null;
+  starred: number | boolean | null;
+  labels: string | null;
+  trashed_at: string | null;
   created_at: string | null;
+  // Computed (not a column): EXISTS roll-up of any outbound message, so the
+  // frontend's Sent folder is accurate instead of relying on last_direction.
+  has_outbound?: number | boolean | null;
 };
 
 function rowToThread(r: ThreadRow) {
@@ -369,6 +384,10 @@ function rowToThread(r: ThreadRow) {
     lastSnippet: r.last_snippet ?? "",
     messageCount: Number(r.message_count ?? 0),
     unread: Number(r.unread ?? 0) === 1,
+    starred: Number(r.starred ?? 0) === 1,
+    labels: parseJsonArray(r.labels),
+    trashedAt: r.trashed_at ?? null,
+    hasOutbound: Number(r.has_outbound ?? 0) === 1,
     createdAt: r.created_at ?? "",
   };
 }
@@ -590,6 +609,7 @@ app.get("/threads", async (c) => {
   const mailbox = c.req.query("mailbox");
   const status = c.req.query("status");
   const q = c.req.query("q");
+  const starredOnly = c.req.query("starred") === "1";
 
   const where: string[] = ["org_id = ?"];
   const binds: (string | number)[] = [orgId];
@@ -603,9 +623,19 @@ app.get("/threads", async (c) => {
     where.push("mailbox_address = ?");
     binds.push(mailbox);
   }
-  if (status) {
-    where.push("status = ?");
-    binds.push(status);
+  // Trash is its own folder: status=trashed returns ONLY soft-deleted rows;
+  // every other view (open/closed/all/inbox) EXCLUDES them.
+  if (status === "trashed") {
+    where.push("trashed_at IS NOT NULL");
+  } else {
+    where.push("trashed_at IS NULL");
+    if (status) {
+      where.push("status = ?");
+      binds.push(status);
+    }
+  }
+  if (starredOnly) {
+    where.push("starred = 1");
   }
   if (q) {
     where.push(
@@ -615,9 +645,17 @@ app.get("/threads", async (c) => {
     binds.push(like, like, like);
   }
 
+  // has_outbound: accurate Sent flag — does this thread have ANY outbound
+  // message? Computed per row so the frontend's Sent folder is correct
+  // instead of relying on the last_direction proxy.
   const sql =
-    `SELECT * FROM email_threads WHERE ${where.join(" AND ")}` +
-    " ORDER BY last_message_at DESC NULLS LAST LIMIT 300";
+    `SELECT t.*,
+       EXISTS (
+         SELECT 1 FROM email_messages m
+          WHERE m.thread_id = t.id AND m.direction = 'outbound'
+       ) AS has_outbound
+       FROM email_threads t WHERE ${where.join(" AND ")}` +
+    " ORDER BY t.last_message_at DESC NULLS LAST LIMIT 300";
   const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<ThreadRow>();
@@ -1330,22 +1368,46 @@ app.post("/compose", async (c) => {
   return c.json({ ok: true, threadId, messageId }, 201);
 });
 
-// PATCH /api/mail-center/threads/:id — assign / resolve / reopen a thread.
+// PATCH /api/mail-center/threads/:id — mutate a thread: assign / resolve /
+// reopen, plus the email-client affordances star / labels / mark-unread /
+// trash (previously localStorage-only). Gate matches the READS (getMailScope
+// ownership), NOT requireSuperAdmin: a mailbox OWNER may mutate THEIR OWN
+// threads (star/label/archive/trash their own mail); SUPER_ADMIN keeps all.
+// The UPDATE is built dynamically from whichever fields the body carries.
 app.patch("/threads/:id", async (c) => {
-  const denied = requireSuperAdmin(c);
-  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   const id = c.req.param("id");
+  const scope = await getMailScope(c, orgId);
 
   type PatchBody = {
     status?: "open" | "closed";
     assignedToUserId?: string | null;
     assignedToName?: string | null;
+    starred?: boolean;
+    labels?: string[];
+    unread?: boolean;
+    trashed?: boolean;
   };
   const body: PatchBody = await c.req
     .json<PatchBody>()
     .catch(() => ({} as PatchBody));
+
+  // Ownership gate — load the thread first, then allow only when the caller is
+  // SUPER_ADMIN or the thread's mailbox is in their scope. Mirrors the reply
+  // handler: a non-owner gets 404 so thread existence isn't disclosed.
+  const owned = await c.var.DB.prepare(
+    `SELECT mailbox_address FROM email_threads WHERE org_id = ? AND id = ? LIMIT 1`,
+  )
+    .bind(orgId, id)
+    .first<{ mailbox_address: string | null }>();
+  if (!owned) return c.json({ error: "Thread not found" }, 404);
+  if (
+    !scope.isAdmin &&
+    !scope.addresses.includes((owned.mailbox_address ?? "").toLowerCase())
+  ) {
+    return c.json({ error: "Thread not found" }, 404);
+  }
 
   const sets: string[] = [];
   const binds: (string | number | null)[] = [];
@@ -1364,18 +1426,42 @@ app.patch("/threads/:id", async (c) => {
     sets.push("assigned_to_name = ?");
     binds.push(body.assignedToName ?? null);
   }
+  if (body.starred !== undefined) {
+    sets.push("starred = ?");
+    binds.push(body.starred ? 1 : 0);
+  }
+  if (body.labels !== undefined) {
+    // Normalise to a clean string[] before storing as a JSON array string.
+    const clean = Array.isArray(body.labels)
+      ? body.labels.map((l) => String(l).trim()).filter(Boolean)
+      : [];
+    sets.push("labels = ?");
+    binds.push(JSON.stringify(clean));
+  }
+  if (body.unread !== undefined) {
+    // Fixes "mark unread": GET /threads/:id clears unread on open, and this is
+    // the only path that can SET it back to 1.
+    sets.push("unread = ?");
+    binds.push(body.unread ? 1 : 0);
+  }
+  if (body.trashed !== undefined) {
+    // Soft delete: set trashed_at=now to move to Trash, clear to null to
+    // restore. TEXT column (ISO string), never timestamptz.
+    sets.push("trashed_at = ?");
+    binds.push(body.trashed ? new Date().toISOString() : null);
+  }
   if (sets.length === 0) {
     return c.json({ error: "no fields to update" }, 400);
   }
 
-  const res = await c.var.DB.prepare(
+  // Existence + ownership were already verified above, so we don't gate on
+  // meta.changes here — an idempotent write (e.g. clearing an already-clear
+  // trashed_at) reports 0 changes on some engines and must NOT 404.
+  await c.var.DB.prepare(
     `UPDATE email_threads SET ${sets.join(", ")} WHERE org_id = ? AND id = ?`,
   )
     .bind(...binds, orgId, id)
     .run();
-  if (!res.meta?.changes) {
-    return c.json({ error: "Thread not found" }, 404);
-  }
 
   const row = await c.var.DB.prepare(
     `SELECT * FROM email_threads WHERE org_id = ? AND id = ? LIMIT 1`,

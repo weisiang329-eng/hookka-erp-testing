@@ -306,6 +306,24 @@ app.post("/", async (c) => {
     });
     await replaceRackItems(c.var.DB, rackLocationId, current, row.reserved);
 
+    // Stamp the rack onto the piece's job card too (same per-piece signature the
+    // public scan uses: productionOrderId + WIP label) so a MANUAL stock-in also
+    // flows to the Packing sheet + DO — "无论任何渠道" (owner 2026-06-17). Safe
+    // no-op when the item is a raw-material add (no PO) or its name isn't a WIP
+    // label; updated_at bumps the production snapshot cache so the sheet re-reads.
+    if (body.productionOrderId && (body.productName ?? "").trim()) {
+      try {
+        await c.var.DB.prepare(
+          `UPDATE job_cards SET rackingNumber = ?, updated_at = NOW()
+             WHERE productionOrderId = ? AND wipLabel = ?`,
+        )
+          .bind(row.rack, body.productionOrderId, (body.productName ?? "").trim())
+          .run();
+      } catch (e) {
+        console.error("[warehouse stock-in] rack stamp failed:", e);
+      }
+    }
+
     const [updatedRow, updatedItems] = await Promise.all([
       c.var.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
         .bind(rackLocationId)
@@ -601,10 +619,11 @@ app.delete("/:id", async (c) => {
       },
     ];
   }
+  const removedItems: RackItemApi[] = [];
   if (productCode) {
     // Legacy single-code racks — remove the one matching item.
     const idx = remaining.findIndex((it) => it.productCode === productCode);
-    if (idx !== -1) remaining.splice(idx, 1);
+    if (idx !== -1) removedItems.push(...remaining.splice(idx, 1));
   } else if (itemName !== undefined) {
     // Per-piece — remove the first item matching the description + SO signature.
     // Two pieces identical in both are interchangeable, so removing either is
@@ -614,15 +633,35 @@ app.delete("/:id", async (c) => {
         (it.productName ?? "") === itemName &&
         (it.notes ?? "") === (itemNotes ?? ""),
     );
-    if (idx !== -1) remaining.splice(idx, 1);
+    if (idx !== -1) removedItems.push(...remaining.splice(idx, 1));
   } else if (productCode === undefined) {
     // No item target at all → explicit "clear the whole rack".
+    removedItems.push(...remaining);
     remaining = [];
   }
   // Else: productCode was passed but EMPTY with no itemName — an ambiguous
   // single-item target with no usable key. Remove nothing rather than nuking
   // every piece in the rack (the old behaviour, which lost whole racks).
   await replaceRackItems(c.var.DB, id, remaining, existing.reserved);
+
+  // A piece leaving the rack (delivered / manually removed) must STOP showing
+  // this rack on the Packing sheet + DO. Clear its job-card Rack # — but only
+  // cards still pointing at THIS rack (don't wipe one already re-racked
+  // elsewhere). Same per-piece signature the scan/manual stock-in set it with.
+  for (const it of removedItems) {
+    const wip = (it.productName ?? "").trim();
+    if (!it.productionOrderId || !wip) continue;
+    try {
+      await c.var.DB.prepare(
+        `UPDATE job_cards SET rackingNumber = '', updated_at = NOW()
+           WHERE productionOrderId = ? AND wipLabel = ? AND rackingNumber = ?`,
+      )
+        .bind(it.productionOrderId, wip, existing.rack)
+        .run();
+    } catch (e) {
+      console.error("[warehouse stock-out] rack clear failed:", e);
+    }
+  }
 
   const [updatedRow, updatedItems] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")

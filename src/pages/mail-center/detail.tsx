@@ -15,15 +15,29 @@
 // Pass an optional `id` prop; it falls back to useParams when absent, so the
 // standalone route keeps working unchanged.
 // ---------------------------------------------------------------------------
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { csrfHeaders } from "@/lib/csrf";
 import { cn } from "@/lib/utils";
+import {
+  subscribe as subscribeLocal,
+  getSnapshot as getLocalSnapshot,
+  toggleStar,
+  setTrashed,
+  setReadOverride,
+  addLabel,
+  removeLabel,
+  isStarred,
+  isTrashed,
+  labelsFor,
+} from "./mail-local";
 import {
   ArrowLeft,
   ArrowDownLeft,
@@ -34,6 +48,12 @@ import {
   Loader2,
   UserPlus,
   Check,
+  Star,
+  Trash2,
+  MailWarning,
+  Tag,
+  X,
+  Plus,
 } from "lucide-react";
 
 type UserOption = {
@@ -115,8 +135,17 @@ export default function MailCenterDetailPage({
   const id = idProp ?? params.id;
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
   const url = id ? `/api/mail-center/threads/${id}` : null;
   const { data, loading, error } = useCachedJson<ThreadDetail>(url, 30);
+
+  // Local star/label/trash/read store (client-side — no backend column; see
+  // mail-local.ts). Subscribe so the controls reflect every change live.
+  const local = useSyncExternalStore(
+    subscribeLocal,
+    getLocalSnapshot,
+    getLocalSnapshot,
+  );
 
   // Users for the Assign dropdown. Envelope is { success, data:[] } (see
   // routes/users.ts). Loaded lazily; the select degrades to disabled if empty.
@@ -130,6 +159,47 @@ export default function MailCenterDetailPage({
   const [sending, setSending] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [assigning, setAssigning] = useState(false);
+  const [newLabel, setNewLabel] = useState("");
+
+  const starred = id ? isStarred(local, id) : false;
+  const trashed = id ? isTrashed(local, id) : false;
+  const chips = id ? labelsFor(local, id) : [];
+
+  // Move to / restore from Trash (local-only). Trashing also navigates back on
+  // the full-page route since the thread leaves every normal folder.
+  async function handleTrash() {
+    if (!id) return;
+    if (trashed) {
+      setTrashed(id, false);
+      toast.info("Restored from Trash.");
+      return;
+    }
+    const ok = await confirm({
+      title: "Move to Trash?",
+      message:
+        "This conversation moves to the Trash folder on this device. You can restore it from there.",
+      confirmLabel: "Move to Trash",
+      tone: "danger",
+    });
+    if (!ok) return;
+    setTrashed(id, true);
+    toast.info("Moved to Trash.");
+    if (!embedded) navigate("/mail-center");
+  }
+
+  function handleMarkUnread() {
+    if (!id) return;
+    setReadOverride(id, true);
+    toast.success("Marked as unread.");
+  }
+
+  function handleAddLabel() {
+    if (!id) return;
+    const clean = newLabel.trim();
+    if (!clean) return;
+    addLabel(id, clean);
+    setNewLabel("");
+  }
 
   // Send the composed reply, then invalidate this thread's cache so the new
   // outbound message + updated status flag refetch immediately (the hook
@@ -246,41 +316,79 @@ export default function MailCenterDetailPage({
         ) : (
           <span />
         )}
-        {/* Status action. Labels are email-native ("Move to Inbox" / "Mark
-            done") but the status VALUES sent to the API are unchanged:
-            open ↔ closed. */}
-        {thread &&
-          (isClosed ? (
+        {/* Action cluster. Star / Mark-unread / Trash are local-only (no
+            backend column — see mail-local.ts). The status button maps to the
+            real PATCH: open ↔ closed ("Move to Inbox" / "Mark done"). */}
+        {thread && (
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className={cn("gap-1.5", starred && "text-amber-700")}
+              onClick={() => id && toggleStar(id)}
+              title={starred ? "Unstar" : "Star"}
+            >
+              <Star
+                className={cn(
+                  "h-4 w-4",
+                  starred && "fill-amber-400 text-amber-500",
+                )}
+              />
+              {starred ? "Starred" : "Star"}
+            </Button>
             <Button
               variant="outline"
               size="sm"
               className="gap-1.5"
-              disabled={updatingStatus}
-              onClick={() => handleSetStatus("open")}
+              onClick={handleMarkUnread}
+              title="Mark this conversation as unread"
             >
-              {updatingStatus ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <RotateCcw className="h-4 w-4" />
-              )}
-              Move to Inbox
+              <MailWarning className="h-4 w-4" />
+              Unread
             </Button>
-          ) : (
+            {isClosed ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                disabled={updatingStatus}
+                onClick={() => handleSetStatus("open")}
+              >
+                {updatingStatus ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-4 w-4" />
+                )}
+                Move to Inbox
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                disabled={updatingStatus}
+                onClick={() => handleSetStatus("closed")}
+              >
+                {updatingStatus ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="h-4 w-4" />
+                )}
+                Mark done
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"
-              className="gap-1.5"
-              disabled={updatingStatus}
-              onClick={() => handleSetStatus("closed")}
+              className={cn("gap-1.5", trashed && "text-amber-700")}
+              onClick={handleTrash}
+              title={trashed ? "Restore from Trash" : "Move to Trash"}
             >
-              {updatingStatus ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <CheckCircle2 className="h-4 w-4" />
-              )}
-              Mark done
+              <Trash2 className="h-4 w-4" />
+              {trashed ? "Restore" : "Trash"}
             </Button>
-          ))}
+          </div>
+        )}
       </div>
 
       {error && (
@@ -310,8 +418,16 @@ export default function MailCenterDetailPage({
               <span>
                 with{" "}
                 <strong className="text-foreground/90">
-                  {thread.counterpartyName || thread.counterpartyEmail}
+                  {thread.counterpartyName ||
+                    thread.counterpartyEmail ||
+                    "(unknown sender)"}
                 </strong>
+                {thread.counterpartyName && thread.counterpartyEmail && (
+                  <span className="text-muted-foreground/80">
+                    {" "}
+                    &lt;{thread.counterpartyEmail}&gt;
+                  </span>
+                )}
               </span>
               {thread.mailboxAddress && (
                 <Badge className="text-[10px]">
@@ -321,7 +437,13 @@ export default function MailCenterDetailPage({
               {thread.status === "closed" && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
                   <Check className="h-3 w-3" />
-                  Done
+                  Archived
+                </span>
+              )}
+              {starred && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-200">
+                  <Star className="h-3 w-3 fill-amber-400 text-amber-500" />
+                  Starred
                 </span>
               )}
               {thread.assignedToName && (
@@ -330,6 +452,56 @@ export default function MailCenterDetailPage({
                   {thread.assignedToName}
                 </Badge>
               )}
+            </div>
+
+            {/* Labels — client-side categories (no backend field). Add a label
+                or remove an existing one; the inbox sidebar lists + filters
+                by these. */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                <Tag className="h-3.5 w-3.5" />
+                Labels
+              </span>
+              {chips.map((l) => (
+                <span
+                  key={l}
+                  className="inline-flex items-center gap-1 rounded-full bg-[#EFE9DD] px-2 py-0.5 text-[11px] font-medium text-[#6B5C32] ring-1 ring-inset ring-[#E2DDD8]"
+                >
+                  {l}
+                  <button
+                    type="button"
+                    onClick={() => id && removeLabel(id, l)}
+                    aria-label={`Remove label ${l}`}
+                    className="text-[#6B5C32]/70 hover:text-[#6B5C32]"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+              <div className="flex items-center gap-1">
+                <Input
+                  value={newLabel}
+                  onChange={(e) => setNewLabel(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleAddLabel();
+                    }
+                  }}
+                  placeholder="Add label…"
+                  className="h-7 w-28 px-2 text-xs"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-xs"
+                  disabled={!newLabel.trim()}
+                  onClick={handleAddLabel}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add
+                </Button>
+              </div>
             </div>
 
             {/* Assign control — wired to the EXISTING PATCH .../threads/:id
@@ -442,7 +614,10 @@ export default function MailCenterDetailPage({
                   </p>
                 </div>
                 <span className="text-xs text-muted-foreground">
-                  To {thread.counterpartyName || thread.counterpartyEmail}
+                  To{" "}
+                  {thread.counterpartyName ||
+                    thread.counterpartyEmail ||
+                    "(unknown sender)"}
                   {thread.mailboxAddress ? ` · from ${thread.mailboxAddress}` : ""}
                 </span>
               </div>
@@ -476,6 +651,8 @@ export default function MailCenterDetailPage({
           </Card>
         </>
       )}
+
+      {confirmDialog}
     </div>
   );
 }

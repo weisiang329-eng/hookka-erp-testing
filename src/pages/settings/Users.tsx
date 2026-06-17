@@ -54,6 +54,10 @@ import {
   X,
   SlidersHorizontal,
   ShieldCheck,
+  GripVertical,
+  Layers,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { copyText } from "@/lib/copy-text";
@@ -353,6 +357,23 @@ export default function UsersPage() {
   // this never masks a genuine later change from another admin.
   const [savedLevels, setSavedLevels] = useState<Map<string, string>>(new Map());
 
+  // ----- Org Chart drag-and-drop (Edit → Save, no naked edits) -----
+  // The chart is READ-ONLY until the operator clicks "Edit layout". In edit
+  // mode each person card becomes draggable; dropping it on a Department bucket
+  // queues an assigned_dept change in `orgDraft` (addressId → newDept) without
+  // touching the server. Save PATCHes every queued change
+  // (/api/mail-center/addresses/:id { assignedDept }); Cancel discards. The
+  // chart then rebuilds from the refreshed alias data — the dept lives on each
+  // person's @hookka.com alias row, the same field the Edit-details modal sets.
+  const [orgEdit, setOrgEdit] = useState(false);
+  // addressId → target department (the dragged person's alias gets this dept).
+  const [orgDraft, setOrgDraft] = useState<Map<string, string>>(new Map());
+  const [orgSaving, setOrgSaving] = useState(false);
+  // The card currently being dragged + the bucket it is hovering, so the UI
+  // can show a drop-target highlight. addressId of the dragged person's alias.
+  const [orgDragId, setOrgDragId] = useState<string | null>(null);
+  const [orgDropDept, setOrgDropDept] = useState<string | null>(null);
+
   const beginMailEdit = () => {
     // Seed drafts from the committed server values so an untouched cell stays
     // exactly where it was.
@@ -560,15 +581,29 @@ export default function UsersPage() {
   const aliasIsHeuristic = (u: UserRow, alias: MailAddress | undefined): boolean =>
     !!alias && alias.assignedUserId !== u.id;
 
+  // Effective department for a user, honouring any queued drag in edit mode
+  // (orgDraft on the user's alias id) over the alias's saved assigned_dept.
+  // Users with no alias can't carry a draft (nothing to PATCH) → "Unassigned".
+  const effectiveDept = useCallback(
+    (u: UserRow): string => {
+      const alias = aliasByUserId.get(u.id);
+      if (alias && orgDraft.has(alias.id)) return orgDraft.get(alias.id)!;
+      return alias?.assignedDept || "Unassigned";
+    },
+    [aliasByUserId, orgDraft],
+  );
+
   // Org chart — active staff grouped by department → position, using the dept/
   // position recorded on each person's @hookka.com alias (the per-user org data
-  // the owner already enters). Users without an alias fall under "Unassigned".
+  // the owner already enters). In edit mode the grouping reflects queued drags
+  // (orgDraft) so a card visibly moves the instant it's dropped, before Save.
+  // Users without an alias fall under "Unassigned".
   const orgChart = useMemo(() => {
     const byDept = new Map<string, Map<string, UserRow[]>>();
     for (const u of users) {
       if (!u.isActive) continue;
       const alias = aliasByUserId.get(u.id);
-      const dept = alias?.assignedDept || "Unassigned";
+      const dept = effectiveDept(u);
       const pos = alias?.assignedPosition || "—";
       let posMap = byDept.get(dept);
       if (!posMap) {
@@ -580,12 +615,18 @@ export default function UsersPage() {
       else posMap.set(pos, [u]);
     }
     return byDept;
-  }, [users, aliasByUserId]);
+  }, [users, aliasByUserId, effectiveDept]);
   // Stable column order: Support / Finance / HR first, other depts A–Z, then
-  // "Unassigned" last.
+  // "Unassigned" last. In edit mode ALWAYS surface the three fixed buckets +
+  // Unassigned even when empty, so there's a visible drop target to drag onto.
   const orgDepts = useMemo(() => {
     const order = ["Support", "Finance", "HR"];
-    return [...orgChart.keys()].sort((a, b) => {
+    const keys = new Set<string>(orgChart.keys());
+    if (orgEdit) {
+      for (const d of order) keys.add(d);
+      keys.add("Unassigned");
+    }
+    return [...keys].sort((a, b) => {
       if (a === "Unassigned") return 1;
       if (b === "Unassigned") return -1;
       const ia = order.indexOf(a);
@@ -594,12 +635,154 @@ export default function UsersPage() {
       const rb = ib === -1 ? 99 : ib;
       return ra === rb ? a.localeCompare(b) : ra - rb;
     });
-  }, [orgChart]);
+  }, [orgChart, orgEdit]);
+
+  // ----- Org Chart edit handlers -----
+  const beginOrgEdit = () => {
+    setOrgDraft(new Map());
+    setOrgDragId(null);
+    setOrgDropDept(null);
+    setOrgEdit(true);
+  };
+  const cancelOrgEdit = () => {
+    setOrgEdit(false);
+    setOrgDraft(new Map());
+    setOrgDragId(null);
+    setOrgDropDept(null);
+  };
+  // Drop a dragged person card onto a department bucket. Queues the move in
+  // orgDraft (alias id → dept). If it matches the alias's saved dept, the entry
+  // is dropped so Save stays a true no-op for unchanged cards.
+  const dropOnDept = (u: UserRow, dept: string) => {
+    const alias = aliasByUserId.get(u.id);
+    setOrgDragId(null);
+    setOrgDropDept(null);
+    if (!alias) return; // no alias row → nothing to persist (guarded in UI)
+    const saved = alias.assignedDept || "Unassigned";
+    setOrgDraft((prev) => {
+      const next = new Map(prev);
+      if (dept === saved) next.delete(alias.id);
+      else next.set(alias.id, dept);
+      return next;
+    });
+  };
+  // Save every queued dept move. One PATCH per changed alias; "Unassigned"
+  // clears the field (sent as empty → stored NULL by the backend).
+  const saveOrgEdit = async () => {
+    if (orgDraft.size === 0) {
+      cancelOrgEdit();
+      showFlash("ok", "No changes to save");
+      return;
+    }
+    setOrgSaving(true);
+    try {
+      const ops = [...orgDraft.entries()].map(([addressId, dept]) =>
+        fetch(`/api/mail-center/addresses/${addressId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            assignedDept: dept === "Unassigned" ? "" : dept,
+          }),
+        }),
+      );
+      const results = await Promise.all(ops);
+      const failed = results.filter((r) => !r.ok).length;
+      invalidateCachePrefix("/api/mail-center/addresses");
+      refreshAddressesHook();
+      if (failed > 0) {
+        showFlash(
+          "err",
+          `${ops.length - failed} move(s) saved, ${failed} failed. Review and retry.`,
+        );
+      } else {
+        showFlash("ok", `Org chart saved (${ops.length} move(s))`);
+        cancelOrgEdit();
+      }
+    } catch (err) {
+      showFlash(
+        "err",
+        humanizeError(err, "Couldn't save the org chart. Please retry."),
+      );
+    } finally {
+      setOrgSaving(false);
+    }
+  };
 
   const activeAddresses = useMemo(
     () => (addressesResp ?? []).filter((a) => a.active),
     [addressesResp],
   );
+
+  // ---------- View-level (L1/L2/L3) helpers --------------------------------
+  // The owner frames the three mailbox view levels as L1 / L2 / L3:
+  //   • L1 Personal   — the user's OWN mailbox(es) + any shared mailbox
+  //                     explicitly granted to them in the matrix below.
+  //   • L2 Department — L1 PLUS every active @hookka.com mailbox in the user's
+  //                     OWN department (the dept on their alias). No dept on
+  //                     file ⇒ effectively L1.
+  //   • L3 Company    — every active @hookka.com mailbox in the company.
+  // These mirror getMailScope() in src/api/routes/mail-center.ts exactly, so
+  // the "which mailboxes does this resolve to" peek matches what the server
+  // actually serves that user in Mail Center.
+  const LEVEL_META: Record<
+    string,
+    { code: string; name: string; blurb: string }
+  > = {
+    personal: {
+      code: "L1",
+      name: "Personal",
+      blurb: "Own mailbox + any shared mailbox granted below",
+    },
+    department: {
+      code: "L2",
+      name: "Department",
+      blurb: "Their department's mailboxes",
+    },
+    company: { code: "L3", name: "Company", blurb: "All company mailboxes" },
+  };
+  const levelTag = (level: string): string => {
+    const m = LEVEL_META[level];
+    return m ? `${m.code} ${m.name}` : level;
+  };
+
+  // Resolve the concrete @hookka.com addresses a given user sees at a given
+  // level — the same set getMailScope computes server-side. Returns sorted,
+  // de-duplicated addresses so the peek popover lists exactly what they'd get.
+  const resolveScopeAddresses = useCallback(
+    (u: UserRow, level: string): string[] => {
+      const set = new Set<string>();
+      if (level === "company") {
+        for (const a of activeAddresses) set.add(a.address.toLowerCase());
+        return [...set].sort();
+      }
+      // L1 base: own assigned alias(es) + granted shared mailboxes.
+      for (const a of activeAddresses) {
+        if (a.assignedUserId === u.id) set.add(a.address.toLowerCase());
+      }
+      const ownAlias = aliasByUserId.get(u.id);
+      if (ownAlias?.active) set.add(ownAlias.address.toLowerCase());
+      for (const a of activeAddresses) {
+        if (serverGrants.has(`${a.id}::${u.id}`))
+          set.add(a.address.toLowerCase());
+      }
+      // L2 adds the user's own department's active mailboxes.
+      if (level === "department") {
+        const dept = (ownAlias?.assignedDept || "").trim();
+        if (dept) {
+          for (const a of activeAddresses) {
+            if ((a.assignedDept || "").trim() === dept)
+              set.add(a.address.toLowerCase());
+          }
+        }
+      }
+      return [...set].sort();
+    },
+    [activeAddresses, aliasByUserId, serverGrants],
+  );
+
+  // Which user's mailbox-scope is currently expanded in the peek popover
+  // (Mailbox Access tab). Null = none open. Keyed by user id.
+  const [scopePeekUserId, setScopePeekUserId] = useState<string | null>(null);
 
   // ---------- User actions -------------------------------------------------
 
@@ -1395,7 +1578,13 @@ export default function UsersPage() {
                 <div>
                   <CardTitle>Active Users</CardTitle>
                   <CardDescription>
-                    {loadingUsers ? "Loading…" : `${users.length} user(s) total`}
+                    {/* Cache-first: only say "Loading…" on a genuine cold first
+                        load (no cached users yet). Once any data is cached the
+                        count shows instantly — no spinner flash over usable
+                        data. (owner: "不要有 Loading".) */}
+                    {loadingUsers && users.length === 0
+                      ? "Loading…"
+                      : `${users.length} user(s) total`}
                   </CardDescription>
                 </div>
               </div>
@@ -1404,12 +1593,15 @@ export default function UsersPage() {
               {/* Shared DataGrid — the same grid the rest of the app uses, so
                   the owner gets the Column chooser (show/hide), per-column
                   Filter + Sort, drag-reorder/resize, and a frozen Email column
-                  for free. His layout persists per browser via gridId. */}
+                  for free. His layout persists per browser via gridId.
+                  `loading` is gated on an EMPTY cache so cached rows paint
+                  instantly (no blocking skeleton over data we already have);
+                  the skeleton only shows on the very first cold load. */}
               <DataGrid<UserRow>
                 columns={userColumns}
                 data={users}
                 keyField="id"
-                loading={loadingUsers}
+                loading={loadingUsers && users.length === 0}
                 stickyHeader
                 gridId="user-management-users"
                 emptyMessage="No users yet"
@@ -1679,22 +1871,78 @@ export default function UsersPage() {
       {tab === "org" && (
         <Card>
           <CardHeader>
-            <div className="flex items-center gap-3">
-              <UsersIcon className="h-5 w-5 text-[#6B5C32]" />
-              <div>
-                <CardTitle>Org Chart</CardTitle>
-                <CardDescription>
-                  Active staff grouped by department, then position. Department
-                  and position come from each person&apos;s @hookka.com alias —
-                  set or change them with the{" "}
-                  <SlidersHorizontal className="inline h-3 w-3 -mt-0.5" /> Edit
-                  details action on the Users tab.
-                </CardDescription>
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <UsersIcon className="h-5 w-5 text-[#6B5C32]" />
+                <div>
+                  <CardTitle>Org Chart</CardTitle>
+                  <CardDescription>
+                    Active staff grouped by department, then position.
+                    {canManageUsers ? (
+                      <>
+                        {" "}
+                        Click <strong>Edit layout</strong>, then{" "}
+                        <strong>drag a person card</strong> into another
+                        department column to move them. Changes apply only after
+                        you click Save.
+                      </>
+                    ) : (
+                      <>
+                        {" "}
+                        Department and position come from each person&apos;s
+                        @hookka.com alias.
+                      </>
+                    )}
+                  </CardDescription>
+                </div>
               </div>
+              {/* Edit layout / Save / Cancel — Super Admin only (the dept lives
+                  on the alias row; PATCH /addresses is requireSuperAdmin).
+                  Mirrors the Mailbox Access bar: read-only until Edit, Save
+                  commits every queued drag, no naked edits. */}
+              {canManageUsers && (
+                <div className="flex shrink-0 gap-2">
+                  {!orgEdit ? (
+                    <Button variant="outline" size="sm" onClick={beginOrgEdit}>
+                      <Pencil className="h-3.5 w-3.5" />
+                      Edit layout
+                    </Button>
+                  ) : (
+                    <>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={cancelOrgEdit}
+                        disabled={orgSaving}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={saveOrgEdit}
+                        disabled={orgSaving}
+                      >
+                        {orgSaving ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Check className="h-3.5 w-3.5" />
+                        )}
+                        {orgSaving
+                          ? "Saving…"
+                          : orgDraft.size > 0
+                            ? `Save (${orgDraft.size})`
+                            : "Save"}
+                      </Button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           </CardHeader>
           <CardContent>
-            {orgChart.size === 0 ? (
+            {orgChart.size === 0 && !orgEdit ? (
               <div className="rounded-lg border border-dashed border-[#D6D0C8] bg-[#FAFAF9] py-10 text-center">
                 <UsersIcon className="mx-auto mb-2 h-7 w-7 text-[#C4BBA9]" />
                 <div className="text-sm font-medium text-[#6B7280]">
@@ -1702,64 +1950,125 @@ export default function UsersPage() {
                 </div>
                 <div className="mx-auto mt-1 max-w-md text-xs text-gray-500">
                   People appear here once they have a{" "}
-                  <strong>Department</strong> set. Go to the Users tab, click{" "}
-                  <SlidersHorizontal className="inline h-3 w-3 -mt-0.5" /> Edit
-                  details on a person, and choose their department (Support /
-                  Finance / HR) and position.
+                  <strong>Department</strong> set.{" "}
+                  {canManageUsers ? (
+                    <>
+                      Click <strong>Edit layout</strong> and drag each person
+                      into a department column (Support / Finance / HR), or use{" "}
+                      <SlidersHorizontal className="inline h-3 w-3 -mt-0.5" />{" "}
+                      Edit details on the Users tab.
+                    </>
+                  ) : (
+                    <>
+                      Ask a Super Admin to assign departments from the Org Chart
+                      or the Users tab.
+                    </>
+                  )}
                 </div>
               </div>
             ) : (
               <>
-                {/* When everyone is still Unassigned (no depts entered), make
-                    the path obvious — this is the owner's "unusable" state. */}
-                {orgDepts.length === 1 && orgDepts[0] === "Unassigned" && (
-                  <div className="mb-4 rounded-md border border-[#EAD9A8] bg-[#FBF6E7] px-3 py-2 text-xs text-[#8A6D1E]">
-                    Everyone is <strong>Unassigned</strong> because no
-                    departments have been set yet. Open{" "}
+                {/* Edit-mode banner: only people WITH a @hookka.com alias can be
+                    dragged (the dept is stored on that alias row). Unaliased
+                    staff show a hint to create an alias first. */}
+                {orgEdit && (
+                  <div className="mb-4 rounded-md border border-[#CFE0F3] bg-[#F2F7FD] px-3 py-2 text-xs text-[#2C5B8F]">
+                    <GripVertical className="mr-1 inline h-3.5 w-3.5 -mt-0.5" />
+                    Drag a person card onto a department column to move them.
+                    Only staff with a @hookka.com alias can be moved — create one
+                    with{" "}
                     <SlidersHorizontal className="inline h-3 w-3 -mt-0.5" /> Edit
-                    details on the Users tab to give each person a department —
-                    they&apos;ll move into the right column here automatically.
+                    details on the Users tab first.
                   </div>
                 )}
+                {/* When everyone is still Unassigned (no depts entered) and not
+                    editing, make the path obvious — the owner's "unusable"
+                    state. */}
+                {!orgEdit &&
+                  orgDepts.length === 1 &&
+                  orgDepts[0] === "Unassigned" && (
+                    <div className="mb-4 rounded-md border border-[#EAD9A8] bg-[#FBF6E7] px-3 py-2 text-xs text-[#8A6D1E]">
+                      Everyone is <strong>Unassigned</strong> because no
+                      departments have been set yet. Click{" "}
+                      <strong>Edit layout</strong> and drag each person into a
+                      department column — they&apos;ll stay there after you Save.
+                    </div>
+                  )}
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {orgDepts.map((dept) => {
                     const posMap = orgChart.get(dept);
-                    if (!posMap) return null;
-                    const count = [...posMap.values()].reduce(
-                      (s, arr) => s + arr.length,
-                      0,
-                    );
+                    const count = posMap
+                      ? [...posMap.values()].reduce((s, arr) => s + arr.length, 0)
+                      : 0;
                     const isUnassigned = dept === "Unassigned";
+                    const isDropTarget = orgEdit && orgDropDept === dept;
                     // Position groups: real positions first (A–Z), the "—"
                     // (no position) bucket last so named roles lead.
-                    const posEntries = [...posMap.entries()].sort((a, b) => {
-                      if (a[0] === "—") return 1;
-                      if (b[0] === "—") return -1;
-                      return a[0].localeCompare(b[0]);
-                    });
+                    const posEntries = posMap
+                      ? [...posMap.entries()].sort((a, b) => {
+                          if (a[0] === "—") return 1;
+                          if (b[0] === "—") return -1;
+                          return a[0].localeCompare(b[0]);
+                        })
+                      : [];
                     return (
                       <div
                         key={dept}
+                        // The whole column is a drop zone in edit mode.
+                        onDragOver={
+                          orgEdit
+                            ? (e) => {
+                                e.preventDefault();
+                                if (orgDropDept !== dept) setOrgDropDept(dept);
+                              }
+                            : undefined
+                        }
+                        onDragLeave={
+                          orgEdit
+                            ? (e) => {
+                                // Only clear when the pointer actually leaves the
+                                // column (not when moving between child cards).
+                                if (
+                                  !e.currentTarget.contains(
+                                    e.relatedTarget as Node | null,
+                                  )
+                                )
+                                  setOrgDropDept((d) => (d === dept ? null : d));
+                              }
+                            : undefined
+                        }
+                        onDrop={
+                          orgEdit
+                            ? (e) => {
+                                e.preventDefault();
+                                const uid = e.dataTransfer.getData("text/plain");
+                                const u = users.find((x) => x.id === uid);
+                                if (u) dropOnDept(u, dept);
+                              }
+                            : undefined
+                        }
                         className={
-                          "overflow-hidden rounded-lg border " +
-                          (isUnassigned
-                            ? "border-[#EAD9A8] bg-[#FCFAF3]"
-                            : "border-[#E5E7EB] bg-white")
+                          "overflow-hidden rounded-lg border transition-colors " +
+                          (isDropTarget
+                            ? "border-[#6B5C32] ring-2 ring-[#6B5C32]/40 bg-[#F7F4EC]"
+                            : isUnassigned
+                              ? "border-[#EAD9A8] bg-[#FCFAF3]"
+                              : "border-[#E5E7EB] bg-white")
                         }
                       >
                         {/* Department header band */}
                         <div
                           className={
                             "flex items-center justify-between px-3 py-2 " +
-                            (isUnassigned
-                              ? "bg-[#F6EFD9]"
-                              : "bg-[#EFEAE5]")
+                            (isUnassigned ? "bg-[#F6EFD9]" : "bg-[#EFEAE5]")
                           }
                         >
                           <h3
                             className={
                               "text-sm font-semibold " +
-                              (isUnassigned ? "text-[#8A6D1E]" : "text-[#5A4D2A]")
+                              (isUnassigned
+                                ? "text-[#8A6D1E]"
+                                : "text-[#5A4D2A]")
                             }
                           >
                             {dept}
@@ -1769,10 +2078,20 @@ export default function UsersPage() {
                           </span>
                         </div>
                         <div className="space-y-3 p-3">
-                          {isUnassigned && (
-                            <div className="text-[10px] italic text-[#A98F4E]">
-                              No department set — use Edit details on the Users
-                              tab.
+                          {count === 0 && (
+                            <div
+                              className={
+                                "rounded-md border border-dashed px-2 py-4 text-center text-[10px] " +
+                                (isDropTarget
+                                  ? "border-[#6B5C32] text-[#6B5C32]"
+                                  : "border-[#E0DAD0] text-[#A98F4E]")
+                              }
+                            >
+                              {orgEdit
+                                ? "Drop a person here"
+                                : isUnassigned
+                                  ? "No department set"
+                                  : "No one here yet"}
                             </div>
                           )}
                           {posEntries.map(([pos, members]) => (
@@ -1795,15 +2114,66 @@ export default function UsersPage() {
                                     .slice(0, 2)
                                     .map((p) => p[0]?.toUpperCase() ?? "")
                                     .join("");
+                                  const alias = aliasByUserId.get(m.id);
+                                  const canDrag = orgEdit && !!alias;
+                                  const dragging =
+                                    orgDragId === (alias?.id ?? "");
+                                  const moved =
+                                    !!alias && orgDraft.has(alias.id);
                                   return (
                                     <div
                                       key={m.id}
-                                      className="flex items-center gap-2 rounded-md border border-[#E5E7EB] bg-white px-2 py-1.5"
+                                      draggable={canDrag}
+                                      onDragStart={
+                                        canDrag
+                                          ? (e) => {
+                                              e.dataTransfer.setData(
+                                                "text/plain",
+                                                m.id,
+                                              );
+                                              e.dataTransfer.effectAllowed =
+                                                "move";
+                                              setOrgDragId(alias!.id);
+                                            }
+                                          : undefined
+                                      }
+                                      onDragEnd={
+                                        canDrag
+                                          ? () => {
+                                              setOrgDragId(null);
+                                              setOrgDropDept(null);
+                                            }
+                                          : undefined
+                                      }
+                                      title={
+                                        orgEdit && !alias
+                                          ? "No @hookka.com alias — create one on the Users tab to place this person"
+                                          : canDrag
+                                            ? "Drag to another department"
+                                            : undefined
+                                      }
+                                      className={
+                                        "flex items-center gap-2 rounded-md border px-2 py-1.5 transition-opacity " +
+                                        (dragging
+                                          ? "opacity-40 "
+                                          : "opacity-100 ") +
+                                        (moved
+                                          ? "border-[#6B5C32] bg-[#F7F4EC] "
+                                          : "border-[#E5E7EB] bg-white ") +
+                                        (canDrag
+                                          ? "cursor-grab active:cursor-grabbing"
+                                          : orgEdit
+                                            ? "cursor-not-allowed opacity-60"
+                                            : "")
+                                      }
                                     >
+                                      {canDrag && (
+                                        <GripVertical className="h-3.5 w-3.5 shrink-0 text-[#C4BBA9]" />
+                                      )}
                                       <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#EFEAE5] text-[10px] font-semibold text-[#6B5C32]">
                                         {initials || "?"}
                                       </span>
-                                      <div className="min-w-0">
+                                      <div className="min-w-0 flex-1">
                                         <div className="truncate text-xs font-medium text-[#111827]">
                                           {m.displayName || m.email}
                                         </div>
@@ -1811,6 +2181,11 @@ export default function UsersPage() {
                                           {m.email}
                                         </div>
                                       </div>
+                                      {moved && (
+                                        <span className="shrink-0 rounded bg-[#6B5C32]/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#6B5C32]">
+                                          Moved
+                                        </span>
+                                      )}
                                     </div>
                                   );
                                 })}
@@ -1845,8 +2220,15 @@ export default function UsersPage() {
                     mailbox (support@ / hr@ / finance@) to let them work that
                     inbox too.
                     <span className="mt-1 block text-[11px] text-[#9CA3AF]">
-                      View level: Personal = own mailbox · Department = their
-                      department&apos;s mailboxes · Company = all mailboxes.
+                      View level —{" "}
+                      <strong className="text-[#6B7280]">L1 Personal</strong>:
+                      own mailbox ·{" "}
+                      <strong className="text-[#6B7280]">L2 Department</strong>:
+                      their department&apos;s mailboxes ·{" "}
+                      <strong className="text-[#6B7280]">L3 Company</strong>: all
+                      mailboxes. For L2 / L3, click{" "}
+                      <Layers className="inline h-3 w-3 -mt-0.5" /> on the level
+                      to see exactly which mailboxes that resolves to.
                     </span>
                     {mailEdit && (
                       <span className="mt-1 block text-[11px] font-medium text-[#6B5C32]">
@@ -1914,14 +2296,20 @@ export default function UsersPage() {
                         key={a.id}
                         className="px-2 py-2 text-center text-[11px] font-medium text-[#374151] border-b border-[#E5E7EB] whitespace-nowrap"
                         title={
-                          a.address +
-                          (a.assignedDept ? ` · ${a.assignedDept}` : "")
+                          `Mailbox: ${a.address}` +
+                          (a.assignedDept ? ` (${a.assignedDept})` : "") +
+                          (a.assignedUserName
+                            ? ` — assigned to ${a.assignedUserName}`
+                            : "") +
+                          ". Tick a row to let that user open this mailbox in Mail Center."
                         }
                       >
                         {/* Show the FULL address, not just the truncated local-
                             part (the owner saw a bare "lim" and couldn't tell
-                            which mailbox it was). Local-part is emphasised; the
-                            @hookka.com domain trails in a lighter shade. */}
+                            which mailbox it was — owner 2026-06-17). Local-part
+                            is emphasised; the @hookka.com domain trails in a
+                            lighter shade. The tooltip spells out the full
+                            address + who it's assigned to. */}
                         <div className="font-semibold">
                           {a.address.split("@")[0]}
                           <span className="font-normal text-[#9CA3AF]">
@@ -1993,18 +2381,101 @@ export default function UsersPage() {
                               </div>
                             )}
                           </td>
-                          <td className="px-3 py-1.5 border-b border-[#F3F4F6] whitespace-nowrap">
-                            <select
-                              value={viewLevelFor(u.id)}
-                              disabled={!mailEdit}
-                              onChange={(e) => draftSetLevel(u.id, e.target.value)}
-                              title="How wide this user's Mail Center inbox is"
-                              className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-xs text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] disabled:bg-[#F5F4F2] disabled:text-[#6B7280] disabled:cursor-not-allowed"
-                            >
-                              <option value="personal">Personal</option>
-                              <option value="department">Department</option>
-                              <option value="company">Company</option>
-                            </select>
+                          <td className="px-3 py-1.5 border-b border-[#F3F4F6] align-top whitespace-nowrap">
+                            {(() => {
+                              const level = viewLevelFor(u.id);
+                              const resolved = resolveScopeAddresses(u, level);
+                              // The peek is meaningful at L2 / L3 (L1 is just
+                              // "their own + granted" already visible as the
+                              // ticked columns). Always allow it though, so the
+                              // operator can confirm L1 resolves to nothing
+                              // surprising.
+                              const peekOpen = scopePeekUserId === u.id;
+                              return (
+                                <div className="flex flex-col gap-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <select
+                                      value={level}
+                                      disabled={!mailEdit}
+                                      onChange={(e) =>
+                                        draftSetLevel(u.id, e.target.value)
+                                      }
+                                      title="How wide this user's Mail Center inbox is (L1 own · L2 department · L3 company)"
+                                      className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-xs text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] disabled:bg-[#F5F4F2] disabled:text-[#6B7280] disabled:cursor-not-allowed"
+                                    >
+                                      <option value="personal">
+                                        L1 · Personal
+                                      </option>
+                                      <option value="department">
+                                        L2 · Department
+                                      </option>
+                                      <option value="company">
+                                        L3 · Company
+                                      </option>
+                                    </select>
+                                    {/* Peek: expand the concrete mailbox list
+                                        this level resolves to (mirrors the
+                                        server's getMailScope). */}
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setScopePeekUserId((cur) =>
+                                          cur === u.id ? null : u.id,
+                                        )
+                                      }
+                                      title={
+                                        peekOpen
+                                          ? "Hide resolved mailboxes"
+                                          : `Show the ${resolved.length} mailbox(es) ${levelTag(level)} resolves to`
+                                      }
+                                      className={
+                                        "inline-flex h-8 items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors " +
+                                        (peekOpen
+                                          ? "border-[#6B5C32] bg-[#6B5C32]/10 text-[#6B5C32]"
+                                          : "border-[#E2DDD8] text-[#6B7280] hover:border-[#6B5C32] hover:text-[#6B5C32]")
+                                      }
+                                    >
+                                      <Layers className="h-3 w-3" />
+                                      {resolved.length}
+                                      {peekOpen ? (
+                                        <ChevronDown className="h-3 w-3" />
+                                      ) : (
+                                        <ChevronRight className="h-3 w-3" />
+                                      )}
+                                    </button>
+                                  </div>
+                                  {peekOpen && (
+                                    <div className="rounded-md border border-[#E5E7EB] bg-[#FAFAF9] p-2">
+                                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[#9CA3AF]">
+                                        {levelTag(level)} resolves to
+                                      </div>
+                                      {resolved.length === 0 ? (
+                                        <div className="text-[11px] italic text-[#9CA3AF]">
+                                          No mailboxes
+                                          {level === "department"
+                                            ? " — this user has no department on their alias, so L2 falls back to L1."
+                                            : "."}
+                                        </div>
+                                      ) : (
+                                        <ul className="space-y-0.5">
+                                          {resolved.map((addr) => (
+                                            <li
+                                              key={addr}
+                                              className="flex items-center gap-1 text-[11px] text-[#374151]"
+                                            >
+                                              <AtSign className="h-3 w-3 shrink-0 text-[#9CA3AF]" />
+                                              <span className="truncate">
+                                                {addr}
+                                              </span>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()}
                           </td>
                           {activeAddresses.map((a) => {
                             const isPersonal = a.assignedUserId === u.id;

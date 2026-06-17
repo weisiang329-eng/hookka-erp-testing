@@ -22,7 +22,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { csrfHeaders } from "@/lib/csrf";
-import { Mail, Send, Loader2, X } from "lucide-react";
+import { saveDraft, deleteDraft, type MailDraft } from "./mail-local";
+import { Mail, Send, Loader2, X, Save } from "lucide-react";
 
 type MailAddress = {
   id: string;
@@ -50,9 +51,17 @@ export type ComposeDialogProps = {
   // The dialog already invalidates the threads cache + navigates on its own;
   // this is an extra hook for the embedder if it wants one.
   onSent?: (threadId: string) => void;
+  // When resuming a saved draft (from the Drafts folder) the parent passes it
+  // here so the form opens pre-filled. Drafts are local-only (mail-local.ts).
+  initialDraft?: MailDraft | null;
 };
 
-export function ComposeDialog({ open, onClose, onSent }: ComposeDialogProps) {
+export function ComposeDialog({
+  open,
+  onClose,
+  onSent,
+  initialDraft = null,
+}: ComposeDialogProps) {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { data: addresses } = useCachedJson<MailAddress[]>(
@@ -74,31 +83,43 @@ export function ComposeDialog({ open, onClose, onSent }: ComposeDialogProps) {
   const [body, setBody] = useState("");
   const [touchedTo, setTouchedTo] = useState(false);
   const [sending, setSending] = useState(false);
+  // Id of the local draft being edited, if this dialog was opened by resuming a
+  // draft (so Send / re-save can clear or update the right one).
+  const [draftId, setDraftId] = useState<string | null>(null);
 
   // Reset the form each time the dialog is freshly opened. The From override is
-  // intentionally preserved across opens (operator's last chosen mailbox).
+  // intentionally preserved across opens (operator's last chosen mailbox). When
+  // opened to resume a draft, seed the fields (and the From) from it instead.
   const wasOpen = useRef(false);
   useEffect(() => {
     if (open && !wasOpen.current) {
-      setTo("");
-      setSubject("");
-      setBody("");
+      setTo(initialDraft?.to ?? "");
+      setSubject(initialDraft?.subject ?? "");
+      setBody(initialDraft?.body ?? "");
+      setDraftId(initialDraft?.id ?? null);
       setTouchedTo(false);
       setSending(false);
     }
     wasOpen.current = open;
-  }, [open]);
+  }, [open, initialDraft]);
 
   if (!open) return null;
 
   const noMailbox = activeAddresses.length === 0;
   const onlyOneMailbox = activeAddresses.length === 1;
-  // Effective From: explicit pick if it's still a valid active address, else the
-  // first active mailbox. Derived — no state sync needed.
+  // Effective From, derived (no state sync needed): the operator's explicit
+  // pick wins; otherwise, when resuming a draft, the draft's saved sender; then
+  // the first active mailbox. Each candidate must still be a valid active
+  // address to be honoured.
+  const draftFrom =
+    draftId && initialDraft?.id === draftId ? initialDraft.fromAddress : "";
   const fromAddress =
     (fromOverride &&
       activeAddresses.some((a) => a.address === fromOverride) &&
       fromOverride) ||
+    (draftFrom &&
+      activeAddresses.some((a) => a.address === draftFrom) &&
+      draftFrom) ||
     activeAddresses[0]?.address ||
     "";
   const toValid = EMAIL_RE.test(to.trim());
@@ -110,6 +131,30 @@ export function ComposeDialog({ open, onClose, onSent }: ComposeDialogProps) {
     toValid &&
     subject.trim().length > 0 &&
     body.trim().length > 0;
+  // A draft is worth saving once it has any content — no validation gate.
+  const canSaveDraft =
+    !sending &&
+    !noMailbox &&
+    (to.trim().length > 0 ||
+      subject.trim().length > 0 ||
+      body.trim().length > 0);
+
+  // Save the current form as a LOCAL draft (no backend draft store — see
+  // mail-local.ts). Reuses the existing draft id when resuming one.
+  function handleSaveDraft() {
+    if (!canSaveDraft) return;
+    const id = draftId ?? crypto.randomUUID();
+    saveDraft({
+      id,
+      to: to.trim(),
+      subject: subject.trim(),
+      body,
+      fromAddress,
+      updatedAt: Date.now(),
+    });
+    toast.success("Draft saved.");
+    onClose();
+  }
 
   async function handleSend() {
     if (!canSend) return;
@@ -137,6 +182,8 @@ export function ComposeDialog({ open, onClose, onSent }: ComposeDialogProps) {
         return;
       }
       toast.success("Email sent.");
+      // If this came from a saved draft, drop it now that it's been sent.
+      if (draftId) deleteDraft(draftId);
       invalidateCachePrefix("/api/mail-center/threads");
       onClose();
       if (payload.threadId) {
@@ -286,6 +333,19 @@ export function ComposeDialog({ open, onClose, onSent }: ComposeDialogProps) {
             >
               Cancel
             </Button>
+            {!noMailbox && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                disabled={!canSaveDraft}
+                onClick={handleSaveDraft}
+                title="Save this email as a local draft"
+              >
+                <Save className="h-4 w-4" />
+                Save draft
+              </Button>
+            )}
             <Button
               variant="primary"
               size="sm"

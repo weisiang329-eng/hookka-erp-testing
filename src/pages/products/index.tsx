@@ -1971,6 +1971,59 @@ export default function ProductsPage() {
     });
   };
 
+  // Per-column text filter for the SKU Master table. Keyed by column key
+  // (shared across categories like colWidths / baseColVis). A non-empty value
+  // means "show only rows whose value for that column contains this text"
+  // (case-insensitive substring). EVERY column — base and analytic — supports
+  // a filter via the inline filter row under the header; the matching string
+  // for each column comes from filterValueFor(). Persisted per browser so a
+  // filtered view survives reloads, matching the sort / width / visibility
+  // prefs. Empty string clears that column's filter.
+  const [colFilters, setColFiltersState] = useState<Record<string, string>>(
+    () => {
+      if (typeof window === "undefined") return {};
+      try {
+        const saved = window.localStorage.getItem("hookka.products.colFilters");
+        if (saved) return JSON.parse(saved) as Record<string, string>;
+      } catch {
+        /* ignore corrupt prefs */
+      }
+      return {};
+    },
+  );
+  const setColFilter = (key: string, value: string) => {
+    setColFiltersState((prev) => {
+      const next = { ...prev };
+      if (value) next[key] = value;
+      else delete next[key];
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(
+            "hookka.products.colFilters",
+            JSON.stringify(next),
+          );
+        } catch {
+          /* ignore quota / disabled storage */
+        }
+      }
+      return next;
+    });
+  };
+  const clearAllColFilters = () => {
+    setColFiltersState({});
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.removeItem("hookka.products.colFilters");
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  // Whether the inline per-column filter row is shown. Defaults off so the
+  // table opens clean; toggled by the "Filter" button in the toolbar. Any
+  // active filter keeps the row visible regardless.
+  const [showFilterRow, setShowFilterRow] = useState(false);
+
   const [showColMenu, setShowColMenu] = useState(false);
 
   // Master price-history dialog. Holds the product whose history is open;
@@ -2004,6 +2057,11 @@ export default function ProductsPage() {
     // behind editMode exactly like the price cells, so there are no naked
     // auto-saves on blur anymore.
     fabricUsage?: number;
+    // Unit (m³) per unit. Same story as fabricUsage — a products-row field,
+    // committed via PUT /api/products/:id on Save. Previously this cell fired
+    // an immediate PUT on blur (a "naked edit"); it now defers to the bulk
+    // Save flow and is gated behind editMode like every other cell.
+    unitM3?: number;
   };
   const [dirtyEdits, setDirtyEdits] = useState<Map<string, DirtyEdit>>(new Map());
   const [showBulkSaveDialog, setShowBulkSaveDialog] = useState(false);
@@ -2059,7 +2117,10 @@ export default function ProductsPage() {
           d.basePriceSen !== undefined ||
           d.price1Sen !== undefined ||
           d.seatHeightPrices !== undefined;
-        const hasFabricDirt = d.fabricUsage !== undefined;
+        // Fabric (m) and Unit (m³) are both products-row fields — collapse
+        // them into ONE PUT so two edits to the same row don't race.
+        const hasProductRowDirt =
+          d.fabricUsage !== undefined || d.unitM3 !== undefined;
 
         if (hasPriceDirt) {
           // Compose a complete-state body so the resolver doesn't pull a
@@ -2089,16 +2150,20 @@ export default function ProductsPage() {
           );
         }
 
-        if (hasFabricDirt) {
-          // Fabric (m) is a products-row field, committed here via the same
-          // PUT the inline cell used to fire on blur — except now it's
-          // deferred to Save so there are no naked auto-saves. PUT merges a
-          // partial body, so { fabricUsage } leaves every other field intact.
+        if (hasProductRowDirt) {
+          // Fabric (m) / Unit (m³) are products-row fields, committed here via
+          // the same PUT the inline cells used to fire on blur — except now
+          // it's deferred to Save so there are no naked auto-saves. PUT merges
+          // a partial body, so only the edited field(s) are sent and every
+          // other field stays intact.
+          const rowBody: Record<string, number> = {};
+          if (d.fabricUsage !== undefined) rowBody.fabricUsage = d.fabricUsage;
+          if (d.unitM3 !== undefined) rowBody.unitM3 = d.unitM3;
           requests.push(
             fetch(`/api/products/${d.productId}`, {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ fabricUsage: d.fabricUsage }),
+              body: JSON.stringify(rowBody),
             }).then((r) => ({ ok: r.ok, status: r.status, productId: d.productId })),
           );
         }
@@ -2213,6 +2278,73 @@ export default function ProductsPage() {
               <span className="text-[10px] text-[#9CA3AF]">· {hint}</span>
             )}
           </div>
+        )}
+      </div>
+    );
+  };
+
+  const isUnitM3Dirty = (productId: string) =>
+    dirtyEdits.get(productId)?.unitM3 !== undefined;
+
+  // ── Unit (m³) cell ─────────────────────────────────────────────────────
+  // Shared by BEDFRAME / SOFA and ACCESSORY rows. Same NO-NAKED-EDITS contract
+  // as renderFabricCell: read-only text outside editMode, click-to-edit inside
+  // it, and the commit DEFERS to the bulk Save flow via recordDirty({ unitM3 })
+  // instead of firing an immediate PUT on blur (which was the previous naked
+  // auto-save). The dirty value shadows the cfg/product display until Save.
+  const renderUnitM3Cell = (p: Product, cfg: ProductDeptConfig | undefined) => {
+    const dirty = isUnitM3Dirty(p.id);
+    const stored = cfg?.unitM3 ?? p.unitM3 ?? 0;
+    const shown = dirty ? (p.unitM3 ?? 0) : stored;
+    return (
+      <div
+        className="px-3 py-1.5 text-right"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {editMode && editingM3 === p.id ? (
+          <input
+            autoFocus
+            type="number"
+            onFocus={(e) => e.currentTarget.select()}
+            value={m3Input}
+            onChange={(e) => setM3Input(e.target.value)}
+            onBlur={() => {
+              const val = parseFloat(m3Input || "0") || 0;
+              setEditingM3(null);
+              // Local-only optimistic update + queue for the bulk Save. No
+              // server write here — Save commits via PUT /api/products/:id.
+              setProducts((prev) =>
+                prev.map((pr) => (pr.id === p.id ? { ...pr, unitM3: val } : pr)),
+              );
+              recordDirty(p.id, { unitM3: val });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              if (e.key === "Escape") setEditingM3(null);
+            }}
+            className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+            step="0.001"
+            min="0"
+          />
+        ) : editMode ? (
+          <button
+            onClick={() => {
+              setEditingM3(p.id);
+              setM3Input(shown.toFixed(3));
+            }}
+            className={`text-sm tabular-nums rounded px-1.5 transition-colors ${
+              dirty
+                ? "bg-[#FEF7E0] text-[#9C6F1E] font-semibold"
+                : "text-[#111827] hover:text-[#6B5C32] hover:underline cursor-pointer"
+            }`}
+            title="Click to edit Unit (m³)"
+          >
+            {shown.toFixed(3)}
+          </button>
+        ) : (
+          <span className="text-sm tabular-nums text-[#111827]" title={shown.toFixed(3)}>
+            {shown.toFixed(3)}
+          </span>
         )}
       </div>
     );
@@ -2395,7 +2527,6 @@ export default function ProductsPage() {
   // via the kv-config subscription below so adding a divan height in the
   // Maintenance tab makes it immediately selectable here without a
   // refresh.
-  /* eslint-disable react-hooks/set-state-in-effect -- one-shot hydrate of master config + fabrics for the variant dialog */
   useEffect(() => {
     setMaintenanceConfig(parseMaintenanceConfig(getVariantsConfigSync()));
     let cancelled = false;
@@ -2419,7 +2550,6 @@ export default function ProductsPage() {
       off();
     };
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Persist updated default variants to /api/products/:id and refresh the
   // local product row so the badge + expand panel reflect the saved state
@@ -2498,6 +2628,42 @@ export default function ProductsPage() {
     });
   }, [products, categoryFilter, searchQuery]);
 
+  // Numeric value for an analytic column (labor / margin / labor%) for a
+  // product, so the analytic columns are sortable AND filterable with the
+  // SAME maths the body cells render. Mirrors the body-cell logic: the
+  // selling price compared against is the tier-rep price for sofas, Price 1
+  // for the *P1 columns, else basePriceSen. Returns null when the value can't
+  // be computed (no minutes / no price) so the caller renders "—" and sorts
+  // it to the bottom.
+  const analyticValueFor = useCallback(
+    (p: Product, key: string): number | null => {
+      const cfg = configMap.get(p.code);
+      const totalMin =
+        p.productionTimeMinutes > 0
+          ? p.productionTimeMinutes
+          : cfg
+            ? totalConfigMinutes(cfg)
+            : 0;
+      const laborSen = laborCostSenForMinutes(totalMin);
+      if (key === "labor") return laborSen > 0 ? laborSen : null;
+      const isSofaCat = p.category === "SOFA";
+      const sofaRep = isSofaCat
+        ? ((p.seatHeightPrices || [])
+            .filter((s) => entryTier(s.tier) === sofaTier && s.priceSen > 0)
+            .sort((a, b) => a.priceSen - b.priceSen)[0]?.priceSen ?? 0)
+        : 0;
+      const mainPrice = isSofaCat ? sofaRep : (p.basePriceSen ?? p.costPriceSen ?? 0);
+      const priceFor =
+        key === "marginP1" || key === "laborPctP1" ? (p.price1Sen ?? 0) : mainPrice;
+      if (priceFor <= 0 || laborSen <= 0) return null;
+      if (key === "laborPctP2" || key === "laborPctP1")
+        return (laborSen / priceFor) * 100;
+      // marginP2 / marginP1
+      return priceFor - laborSen;
+    },
+    [configMap, sofaTier],
+  );
+
   // Per-column sort value for a product. Returns string | number; the
   // comparator below localeCompares strings and subtracts numbers. Pricing /
   // fabric / minutes read the same effective values the cells render so the
@@ -2513,6 +2679,20 @@ export default function ProductsPage() {
             String(s.height ?? "").replace('"', "").trim() === h &&
             entryTier(s.tier) === sofaTier,
         )?.priceSen ?? -1;
+      // Analytic columns (labor / margin / labor%) are sortable too. Unset
+      // ("—") values map to -Infinity so they cluster together at the start in
+      // ascending order — mirroring the sofa-height columns' existing missing=
+      // -1 convention so sort behaviour stays consistent across the table.
+      if (
+        key === "labor" ||
+        key === "marginP2" ||
+        key === "marginP1" ||
+        key === "laborPctP2" ||
+        key === "laborPctP1"
+      ) {
+        const v = analyticValueFor(p, key);
+        return v == null ? Number.NEGATIVE_INFINITY : v;
+      }
       switch (key) {
         case "code":
           return (p.code || "").toLowerCase();
@@ -2562,16 +2742,144 @@ export default function ProductsPage() {
           return 0;
       }
     },
-    [configMap, sofaTier],
+    [configMap, sofaTier, analyticValueFor],
   );
+
+  // Display string for a column used by the per-column filter row. Mirrors
+  // the rendered cell text so a filter matches what the operator sees:
+  // currency columns filter on the formatted "RM …" string, the variants
+  // column on its "N set" / "Configure" label, analytic columns on their
+  // numeric/"—" rendering. Case-insensitive substring is applied by the
+  // caller. Reuses sortValueFor / analyticValueFor where the raw value is
+  // already what's shown so there is a single source of truth per column.
+  const filterValueFor = useCallback(
+    (p: Product, key: string): string => {
+      const cfg = configMap.get(p.code);
+      switch (key) {
+        case "code":
+          return p.code || "";
+        case "description":
+          return `${p.name || ""} ${p.description || ""}`.trim();
+        case "category":
+          return p.category || "";
+        case "size":
+          return p.sizeLabel || "";
+        case "model":
+          return p.baseModel || "";
+        case "price2":
+        case "basePrice": {
+          const v = p.basePriceSen ?? p.costPriceSen ?? 0;
+          return v > 0 ? formatCurrency(v) : "";
+        }
+        case "price1": {
+          const v = p.price1Sen ?? 0;
+          return v > 0 ? formatCurrency(v) : "";
+        }
+        case "unitM3":
+          return (cfg?.unitM3 ?? p.unitM3 ?? 0).toFixed(3);
+        case "fabric":
+          return `${cfg?.fabricUsage ?? p.fabricUsage ?? 0}`;
+        case "totalMin": {
+          const m =
+            p.productionTimeMinutes > 0
+              ? p.productionTimeMinutes
+              : cfg
+                ? totalConfigMinutes(cfg)
+                : 0;
+          return `${m}`;
+        }
+        case "variants": {
+          const n =
+            (p.defaultVariants?.fabricCode ? 1 : 0) +
+            (p.defaultVariants?.divanHeight ? 1 : 0) +
+            (p.defaultVariants?.legHeight ? 1 : 0) +
+            (p.defaultVariants?.gap ? 1 : 0) +
+            (p.defaultVariants?.seatHeight ? 1 : 0) +
+            ((p.defaultVariants?.specials?.length ?? 0) > 0 ? 1 : 0);
+          return n > 0 ? `${n} set` : "Configure";
+        }
+        case "h24":
+        case "h28":
+        case "h30":
+        case "h32":
+        case "h35": {
+          const h = key.slice(1);
+          const sh = (p.seatHeightPrices || []).find(
+            (s) =>
+              String(s.height ?? "").replace('"', "").trim() === h &&
+              entryTier(s.tier) === sofaTier,
+          );
+          return sh && sh.priceSen > 0 ? formatCurrency(sh.priceSen) : "";
+        }
+        case "labor":
+        case "marginP2":
+        case "marginP1":
+        case "laborPctP2":
+        case "laborPctP1": {
+          const v = analyticValueFor(p, key);
+          if (v == null) return "";
+          if (key === "laborPctP2" || key === "laborPctP1")
+            return `${v.toFixed(1)}%`;
+          if (key === "labor") return formatCurrency(v);
+          return formatCurrency(v); // margins
+        }
+        default:
+          return "";
+      }
+    },
+    [configMap, sofaTier, analyticValueFor],
+  );
+
+  // Keys of the columns currently SHOWN for the active category — base
+  // columns that are visible plus the applicable analytic columns that are
+  // toggled on. Used to scope the per-column filter so a filter left on a
+  // column that is now hidden (or belongs to a different category) doesn't
+  // silently narrow the table. colFilters persists across category switches /
+  // column hides, so this gate keeps the visible result honest.
+  const visibleColKeys = useMemo(() => {
+    const cat: ProdCat =
+      categoryFilter === "SOFA"
+        ? "SOFA"
+        : categoryFilter === "ACCESSORY"
+          ? "ACCESSORY"
+          : "BEDFRAME";
+    const keys = new Set<string>();
+    for (const col of BASE_COLS[cat]) {
+      // Inline of isBaseColVisible so this memo depends only on baseColVis
+      // (frozen / always-on columns are always shown; others unless toggled off).
+      if (col.alwaysOn || col.frozen || baseColVis[col.key] !== false)
+        keys.add(col.key);
+    }
+    for (const c of ANALYTIC_COLS) {
+      if (c.applies(cat) && analyticColVis[c.key]) keys.add(c.key);
+    }
+    return keys;
+  }, [categoryFilter, baseColVis, analyticColVis]);
+
+  // Apply the per-column filter row on top of the category/search result.
+  // A row survives only if it matches EVERY active filter on a currently-
+  // VISIBLE column (case-insensitive substring against filterValueFor). No
+  // active filters ⇒ pass-through. Runs before sort so the count + sort
+  // reflect the filtered set.
+  const colFiltered = useMemo(() => {
+    const active = Object.entries(colFilters).filter(
+      ([key, v]) => v.trim() && visibleColKeys.has(key),
+    );
+    if (active.length === 0) return filteredRaw;
+    return filteredRaw.filter((p) =>
+      active.every(([key, term]) =>
+        filterValueFor(p, key).toLowerCase().includes(term.trim().toLowerCase()),
+      ),
+    );
+  }, [filteredRaw, colFilters, filterValueFor, visibleColKeys]);
 
   // Apply the active column sort on top of the filtered set. Stable: equal
   // keys keep their natural (load) order. When no sort is active the filtered
   // array passes through untouched so the default ordering is preserved.
   const filtered = useMemo(() => {
-    if (!sortCol) return filteredRaw;
+    if (!sortCol) return colFiltered;
     const dir = sortDir === "asc" ? 1 : -1;
-    const decorated = filteredRaw.map((p, i) => ({ p, i }));
+    const decorated = colFiltered.map((p, i) => ({ p, i }));
     decorated.sort((a, b) => {
       const av = sortValueFor(a.p, sortCol);
       const bv = sortValueFor(b.p, sortCol);
@@ -2586,7 +2894,7 @@ export default function ProductsPage() {
       return cmp !== 0 ? cmp * dir : a.i - b.i;
     });
     return decorated.map((d) => d.p);
-  }, [filteredRaw, sortCol, sortDir, sortValueFor]);
+  }, [colFiltered, sortCol, sortDir, sortValueFor]);
 
   // ── Row virtualization for the SKU-master catalog table ────────────────
   // The catalog renders one inline-edit row per product (10+ grid cells,
@@ -2772,6 +3080,47 @@ export default function ProductsPage() {
               </button>
             </>
           )}
+          {/* Filter toggle — shows/hides the per-column filter row under the
+              header. Every column (base + analytic) gets a filter input. The
+              badge shows how many columns are currently filtered; the row also
+              auto-stays-open while any filter is active so a filtered view is
+              never hidden. */}
+          <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
+          {(() => {
+            const activeFilterCount = Object.values(colFilters).filter((v) =>
+              v.trim(),
+            ).length;
+            return (
+              <button
+                onClick={() => setShowFilterRow((v) => !v)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-colors inline-flex items-center gap-1.5 ${
+                  showFilterRow || activeFilterCount > 0
+                    ? "bg-[#F4F0E8] text-[#6B5C32] border-[#D9CEB3]"
+                    : "bg-white text-[#6B7280] border-[#E5E7EB] hover:bg-[#F3F4F6]"
+                }`}
+                title="Toggle per-column filter row"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
+                  <path d="M3 4.5h14l-5.5 6.5v4l-3 1.5v-5.5L3 4.5z" strokeLinejoin="round" />
+                </svg>
+                Filter
+                {activeFilterCount > 0 && (
+                  <span className="ml-0.5 inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-[#6B5C32] text-white text-[9px] font-semibold">
+                    {activeFilterCount}
+                  </span>
+                )}
+              </button>
+            );
+          })()}
+          {Object.values(colFilters).some((v) => v.trim()) && (
+            <button
+              onClick={clearAllColFilters}
+              className="px-2 py-1.5 rounded-md text-xs font-medium text-[#9A3A2D] hover:bg-[#F9E1DA] transition-colors"
+              title="Clear all column filters"
+            >
+              Clear filters
+            </button>
+          )}
           {/* Columns chooser — show/hide ANY column (base + analytic) for the
               active category. Per-browser persistence (localStorage), like the
               Tier switcher. Frozen Code is always shown. */}
@@ -2820,13 +3169,14 @@ export default function ProductsPage() {
                         <button
                           onClick={() => {
                             // Reset layout: show all base columns, clear manual
-                            // widths and any active sort. Analytics keep their
-                            // own defaults (left as-is so a chosen analytic
-                            // layout isn't surprising-cleared).
+                            // widths, any active sort, and all column filters.
+                            // Analytics keep their own defaults (left as-is so a
+                            // chosen analytic layout isn't surprising-cleared).
                             setBaseColVis({});
                             setColWidths({});
                             persistColWidths({});
                             setSortCol(null);
+                            clearAllColFilters();
                             if (typeof window !== "undefined") {
                               try {
                                 window.localStorage.removeItem("hookka.products.baseCols");
@@ -2889,7 +3239,8 @@ export default function ProductsPage() {
                       )}
                       <div className="my-1 border-t border-[#F3F4F6]" />
                       <p className="px-2 py-1 text-[10px] text-[#9CA3AF] leading-snug">
-                        Drag a header edge to resize · click a header to sort.
+                        Drag a header edge to resize · click a header to sort ·
+                        use the Filter button for per-column filters.
                       </p>
                     </div>
                   </>
@@ -2977,7 +3328,39 @@ export default function ProductsPage() {
         const gridColsFull = analyticTracks
           ? `${baseTracks} ${analyticTracks}`
           : baseTracks;
-        const thCls = "px-3 py-1.5 text-[11px] font-medium text-[#6B7280] uppercase tracking-wider";
+        // Single ordered list of EVERY visible column (base first, then the
+        // active analytics) in the exact order their grid tracks appear. The
+        // header row, the per-column filter row, and the resize handles all
+        // iterate THIS list, so they can never drift out of lockstep with the
+        // body cells (which gate on colOn()/activeAnalyticCols in the same
+        // order). `chooserLabel` is the clean name; `frozen` marks the sticky
+        // Code column; `fallbackWidth` feeds the resize handle's start width.
+        type OrderedCol = {
+          key: string;
+          label: string;
+          frozen: boolean;
+          fallbackWidth: string;
+        };
+        const orderedCols: OrderedCol[] = [
+          ...visibleBaseCols.map((col) => ({
+            key: col.key,
+            label: BASE_COL_CHOOSER_LABEL[col.key] ?? col.label,
+            frozen: !!col.frozen,
+            fallbackWidth: col.width,
+          })),
+          ...activeAnalyticCols.map((c) => ({
+            key: c.key,
+            label: c.label(cat),
+            frozen: false,
+            fallbackWidth: c.width,
+          })),
+        ];
+        // UNIFORM header style — every header cell (base + analytic) is
+        // IDENTICAL: same padding, same left alignment, same baseline. Sort
+        // arrow + resize handle render on all of them. (Owner: headers must
+        // look the same across every column.)
+        const thCls =
+          "px-3 py-2 text-[11px] font-semibold text-[#6B7280] uppercase tracking-wider text-left";
         // Give the scroll container a min-width so columns scroll horizontally
         // instead of crushing once the table outgrows the viewport. Derived
         // from the visible columns' minmax floors (digits parsed from each
@@ -3015,30 +3398,25 @@ export default function ProductsPage() {
         >
           <table className="min-w-full divide-y divide-[#E5E7EB]">
             <thead className="bg-[#F9FAFB] sticky top-0 z-10">
+              {/* Header row — UNIFORM cells driven by the single orderedCols
+                  list so header / filter / body never drift out of lockstep.
+                  Every column: click-to-sort (asc → desc → off), a drag handle
+                  on the right edge for manual width (double-click resets), and
+                  identical padding / left-alignment / baseline. The frozen Code
+                  column stays sticky-left with an invisible chevron spacer so
+                  its label lines up with the body's code text (expand arrow in
+                  front). */}
               <tr>
                 <th colSpan={colSpanN} className="p-0">
                   <div className="grid" style={{ gridTemplateColumns: gridColsFull, minWidth: gridMinWidth }}>
-                    {/* Base columns — driven by the registry + visibility. Each
-                        header is click-to-sort (asc → desc → off) with a drag
-                        handle on the right edge for manual width (double-click
-                        to reset). The frozen Code column stays sticky-left and
-                        carries an invisible chevron spacer so its label lines up
-                        with the body cell's code text (which has an expand arrow
-                        in front of it). */}
-                    {visibleBaseCols.map((col) => {
-                      const alignCls =
-                        col.align === "right"
-                          ? "justify-end text-right"
-                          : col.align === "center"
-                            ? "justify-center text-center"
-                            : "justify-start text-left";
+                    {orderedCols.map((col) => {
                       const active = sortCol === col.key;
                       return (
                         <div
                           key={col.key}
                           onClick={() => toggleSort(col.key)}
                           title="Click to sort"
-                          className={`${thCls} relative group/th flex items-center gap-1 select-none cursor-pointer hover:text-[#374151] ${alignCls} ${
+                          className={`${thCls} relative group/th flex items-center gap-1 select-none cursor-pointer hover:text-[#374151] ${
                             col.frozen
                               ? "sticky left-0 z-20 bg-[#F9FAFB] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]"
                               : ""
@@ -3047,7 +3425,7 @@ export default function ProductsPage() {
                           {col.frozen && (
                             <span className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" />
                           )}
-                          <span className="truncate">{col.label}</span>
+                          <span className="truncate" title={col.label}>{col.label}</span>
                           <span className="text-[#9CA3AF] text-[9px] leading-none">
                             {sortIndicator(col.key)}
                           </span>
@@ -3058,7 +3436,7 @@ export default function ProductsPage() {
                               beginColResize(
                                 e,
                                 col.key,
-                                colWidths[col.key] ?? floorPx(col.width),
+                                colWidths[col.key] ?? floorPx(col.fallbackWidth),
                               )
                             }
                             onDoubleClick={(e) => {
@@ -3072,35 +3450,44 @@ export default function ProductsPage() {
                         </div>
                       );
                     })}
-                    {activeAnalyticCols.map((c) => {
-                      const active = sortCol === c.key;
-                      return (
+                  </div>
+                  {/* Per-column filter row — one input per visible column, in
+                      the SAME grid track order as the header + body. Toggled by
+                      the "Filter" button; auto-shown while any filter is active.
+                      Each input is a case-insensitive substring match against
+                      that column's displayed value (filterValueFor). The frozen
+                      Code filter cell is sticky-left to match its header/body. */}
+                  {(showFilterRow ||
+                    Object.values(colFilters).some((v) => v.trim())) && (
+                    <div
+                      className="grid border-t border-[#E5E7EB] bg-white"
+                      style={{ gridTemplateColumns: gridColsFull, minWidth: gridMinWidth }}
+                    >
+                      {orderedCols.map((col) => (
                         <div
-                          key={c.key}
-                          className={`${thCls} relative group/th flex items-center justify-end gap-1 text-right ${
-                            active ? "text-[#6B5C32]" : ""
+                          key={col.key}
+                          className={`px-2 py-1 ${
+                            col.frozen
+                              ? "sticky left-0 z-[15] bg-white shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]"
+                              : ""
                           }`}
                         >
-                          <span className="truncate">{c.label(cat)}</span>
-                          <span
-                            onMouseDown={(e) =>
-                              beginColResize(
-                                e,
-                                c.key,
-                                colWidths[c.key] ?? floorPx(c.width),
-                              )
-                            }
-                            onDoubleClick={(e) => {
-                              e.stopPropagation();
-                              clearColWidth(c.key);
-                            }}
-                            title="Drag to resize · double-click to reset"
-                            className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize opacity-0 group-hover/th:opacity-100 hover:bg-[#6B5C32]/30 transition-opacity"
+                          <input
+                            type="text"
+                            value={colFilters[col.key] ?? ""}
+                            onChange={(e) => setColFilter(col.key, e.target.value)}
+                            placeholder="Filter…"
+                            aria-label={`Filter ${col.label}`}
+                            className={`w-full min-w-0 text-[11px] rounded border px-1.5 py-1 bg-white focus:outline-none focus:border-[#6B5C32] focus:ring-1 focus:ring-[#6B5C32]/30 ${
+                              (colFilters[col.key] ?? "").trim()
+                                ? "border-[#6B5C32] bg-[#FBF8EE]"
+                                : "border-[#E5E7EB]"
+                            }`}
                           />
                         </div>
-                      );
-                    })}
-                  </div>
+                      ))}
+                    </div>
+                  )}
                 </th>
               </tr>
             </thead>
@@ -3260,8 +3647,8 @@ export default function ProductsPage() {
                         </div>
                         {colOn("description") && (
                           <div className="px-3 py-1.5 min-w-0">
-                            <span className="text-xs text-[#111827] truncate block">{p.name}</span>
-                            <span className="block text-[11px] text-[#9CA3AF] truncate">{p.description}</span>
+                            <span className="text-xs text-[#111827] truncate block" title={p.name}>{p.name}</span>
+                            <span className="block text-[11px] text-[#9CA3AF] truncate" title={p.description}>{p.description}</span>
                           </div>
                         )}
 
@@ -3269,7 +3656,7 @@ export default function ProductsPage() {
                           /* ===== SOFA columns: Model | 24 | 28 | 30 | 32 | 35 ===== */
                           <>
                             {colOn("model") && (
-                              <div className="px-3 py-1.5 text-sm text-[#111827]">{p.baseModel}</div>
+                              <div className="px-3 py-1.5 text-sm text-[#111827] truncate" title={p.baseModel}>{p.baseModel}</div>
                             )}
                             {(['24"', '28"', '30"', '32"', '35"'] as const)
                               .filter((h) => colOn(`h${h.replace('"', "")}`))
@@ -3357,8 +3744,8 @@ export default function ProductsPage() {
                           /* ===== BEDFRAME / ALL columns: Category | Size | Price 2 | Price 1 ===== */
                           <>
                             {colOn("category") && (
-                              <div className="px-3 py-1.5">
-                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                              <div className="px-3 py-1.5 min-w-0 flex items-center" title={p.category}>
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium max-w-full truncate ${
                                   p.category === "BEDFRAME" ? "bg-[#FAEFCB] text-[#9C6F1E]" : "bg-[#E0EDF0] text-[#3E6570]"
                                 }`}>
                                   {p.category}
@@ -3366,7 +3753,7 @@ export default function ProductsPage() {
                               </div>
                             )}
                             {colOn("size") && (
-                              <div className="px-3 py-1.5 text-sm text-[#111827]">{p.sizeLabel}</div>
+                              <div className="px-3 py-1.5 text-sm text-[#111827] truncate" title={p.sizeLabel}>{p.sizeLabel}</div>
                             )}
                             {/* Price 2 */}
                             {colOn("price2") && (
@@ -3463,63 +3850,20 @@ export default function ProductsPage() {
                               </span>
                             </div>
                             )}
-                            {colOn("unitM3") && (
-                            <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
-                              {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
-                            </div>
-                            )}
+                            {/* Unit (m³) — editMode-gated, defers to Save */}
+                            {colOn("unitM3") && renderUnitM3Cell(p, cfg)}
                             {/* Fabric (m) — editMode-gated, defers to Save */}
                             {colOn("fabric") && renderFabricCell(p, cfg)}
                           </>
                         ) : (
                           <>
-                            {/* Unit M3 - editable */}
-                            {colOn("unitM3") && (
-                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                              {editingM3 === p.id ? (
-                                <input
-                                  autoFocus
-                                  type="number" onFocus={(e) => e.currentTarget.select()}
-                                  value={m3Input}
-                                  onChange={(e) => setM3Input(e.target.value)}
-                                  onBlur={() => {
-                                    const val = parseFloat(m3Input || "0") || 0;
-                                    setEditingM3(null);
-                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, unitM3: val } : pr));
-                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
-                                      method: "PUT",
-                                      body: { unitM3: val },
-                                    }).then((data) => {
-                                      if (data.success && data.data) {
-                                        invalidateCachePrefix("/api/products");
-                                        invalidateCachePrefix("/api/bom");
-                                        invalidateCachePrefix("/api/bom-master-templates");
-                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
-                                      }
-                                    }).catch(() => {});
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                    if (e.key === "Escape") setEditingM3(null);
-                                  }}
-                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
-                                  step="0.001"
-                                />
-                              ) : (
-                                <button
-                                  onClick={() => { setEditingM3(p.id); setM3Input((cfg?.unitM3 ?? p.unitM3).toFixed(3)); }}
-                                  className="text-sm text-[#111827] hover:text-[#6B5C32] hover:underline"
-                                >
-                                  {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
-                                </button>
-                              )}
-                            </div>
-                            )}
+                            {/* Unit (m³) — editMode-gated, defers to Save */}
+                            {colOn("unitM3") && renderUnitM3Cell(p, cfg)}
                             {/* Fabric (m) — editMode-gated, defers to Save */}
                             {colOn("fabric") && renderFabricCell(p, cfg)}
                             {colOn("totalMin") && (
-                            <div className="px-3 py-1.5 text-right whitespace-nowrap">
-                              <div className="text-sm font-medium text-[#111827]">{totalMin} min</div>
+                            <div className="px-3 py-1.5 text-right truncate" title={`${totalMin} min`}>
+                              <div className="text-sm font-medium text-[#111827] truncate">{totalMin} min</div>
                               {/* Labor cost moved to its own "Labor (est.)"
                                   column — no longer duplicated under Total Min
                                   (owner 2026-06-17). */}
@@ -3558,7 +3902,8 @@ export default function ProductsPage() {
                           return (
                             <div
                               key={c.key}
-                              className="px-3 py-1.5 text-right text-sm tabular-nums whitespace-nowrap"
+                              className="px-3 py-1.5 text-right text-sm tabular-nums truncate"
+                              title={filterValueFor(p, c.key) || "—"}
                             >
                               {c.key === "labor" ? (
                                 laborCostSen > 0 ? (

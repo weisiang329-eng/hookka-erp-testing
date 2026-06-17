@@ -1,31 +1,41 @@
 // ---------------------------------------------------------------------------
-// Mail Center — shared inbox (2-pane Gmail-like shell + "New email" compose).
+// Mail Center — shared inbox (3-pane Gmail/Outlook-like client + compose).
 //
 // Reads /api/mail-center/threads (list) + /api/mail-center/addresses (the
 // mailbox sidebar). Bodies are rendered as plain text in the detail view,
 // never as raw customer HTML.
 //
-// LAYOUT (P3 overhaul — strictly ADDITIVE, no route changes):
-//   • LEFT RAIL  — a prominent "New email" button (opens ComposeDialog), the
-//                  mailbox list as a vertical sidebar ("All mailboxes" + each
-//                  active alias), then the Inbox/Done/All selector and the
-//                  search box.
+// LAYOUT:
+//   • LEFT RAIL  — "New email" button (opens ComposeDialog), the FOLDER list
+//                  (Inbox / Starred / Sent / Archive / Drafts / Trash / All),
+//                  a LABELS section (filter by client-side label), then the
+//                  mailbox switcher (All mailboxes + per-dept + per-person),
+//                  then the search box.
+//   • MIDDLE     — the thread list (<ThreadList>) with per-row checkbox + hover
+//                  actions, plus a bulk action bar when rows are selected.
+//   • RIGHT (lg+)— a reading pane embedding detail.tsx for the selected thread.
 //
-// LABELS vs API VALUES: the status selector and detail actions use email-native
-// labels — "Inbox" (open), "Done" (closed/resolved), "All" — but the underlying
-// API status VALUES are still 'open' / 'closed'. Only the wording changed.
-//   • MIDDLE     — the existing thread list (extracted into <ThreadList>).
-//   • RIGHT (md+)— a reading pane that embeds detail.tsx for the selected
-//                  thread (selection lives in local state, NOT the URL, so the
-//                  /mail-center and /mail-center/:id routes are untouched).
+// FOLDERS vs API STATUS: the backend only knows status 'open' / 'closed'.
+//   Inbox   → status=open (server filter)
+//   Archive → status=closed (server filter, labelled "Archive")  [= "Done"]
+//   Starred / Sent / Trash / All → fetched with status=all, narrowed client-side
+//   Drafts  → local-only compose drafts (no backend draft store)
+// Star, labels, trash and the mark-unread override have NO backend column, so
+// they live in localStorage via mail-local.ts (gap documented there + reported).
 //
-// Mobile / under-md keeps TODAY's behavior exactly: no pane, tapping a row
-// navigates to the standalone /mail-center/:id page. Deep links to
-// /mail-center/:id still hit that standalone route (unchanged in routes).
+// Mobile / under-lg: tapping a row navigates to the standalone
+// /mail-center/:id page (deep links unchanged). The reading pane is lg-only.
 // ---------------------------------------------------------------------------
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useNavigate } from "react-router-dom";
 import { useCachedJson } from "@/lib/cached-fetch";
+import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -33,6 +43,22 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ComposeDialog } from "./compose";
 import MailCenterDetailPage from "./detail";
+import {
+  subscribe as subscribeLocal,
+  getSnapshot as getLocalSnapshot,
+  toggleStar,
+  setTrashedMany,
+  setReadOverride,
+  setReadOverrideMany,
+  isStarred,
+  isTrashed,
+  labelsFor,
+  effectiveUnread,
+  allLabels,
+  deleteDraft,
+  type MailDraft,
+} from "./mail-local";
+import { patchManyStatus, patchThreadStatus } from "./mail-actions";
 import {
   Mail,
   Search,
@@ -45,6 +71,17 @@ import {
   Users,
   User as UserIcon,
   Check,
+  Star,
+  Send,
+  Archive,
+  Trash2,
+  FileText,
+  Layers,
+  Tag,
+  MailOpen,
+  MailWarning,
+  X,
+  CheckCheck,
 } from "lucide-react";
 
 type MailThread = {
@@ -71,16 +108,26 @@ type MailAddress = {
 };
 
 // Mailbox sidebar selection. "all" clears the filter (every scoped thread),
-// "dept" narrows to all mailboxes in one department (client-side filter over
-// the already-fetched threads via the dept→addresses map), and "mailbox"
-// keeps the existing single-address behaviour (drives the ?mailbox= query).
+// "dept" narrows to all mailboxes in one department, "mailbox" keeps the
+// single-address behaviour (drives the ?mailbox= query).
 type MailboxFilter =
   | { kind: "all" }
   | { kind: "dept"; value: string }
   | { kind: "mailbox"; value: string };
 
-// Department ordering for the sidebar: a few priority depts first (matching the
-// Org Chart), then the rest A–Z, with the catch-all bucket pinned last.
+// Email-client folders. Inbox/Archive map to a server status; the rest are
+// resolved client-side (Starred/Sent/Trash/All) or local-only (Drafts).
+type Folder =
+  | "inbox"
+  | "starred"
+  | "sent"
+  | "archive"
+  | "drafts"
+  | "trash"
+  | "all";
+
+// Department ordering for the sidebar: priority depts first, then A–Z, with
+// the catch-all bucket pinned last.
 const DEPT_PRIORITY = ["Support", "Finance", "HR"];
 const UNASSIGNED_DEPT = "Other";
 
@@ -88,7 +135,7 @@ function deptRank(dept: string): number {
   const i = DEPT_PRIORITY.indexOf(dept);
   if (i !== -1) return i;
   if (dept === UNASSIGNED_DEPT) return DEPT_PRIORITY.length + 1;
-  return DEPT_PRIORITY.length; // ordinary depts sort A–Z within this band
+  return DEPT_PRIORITY.length;
 }
 
 function sortDepts(a: string, b: string): number {
@@ -109,12 +156,21 @@ function fmtTime(iso: string): string {
     : d.toLocaleDateString();
 }
 
-// Track whether we're at the reading-pane breakpoint. The pane needs real
-// width for three columns, so it (and the in-pane "select instead of navigate"
-// behavior) turns on at lg (1024px) — matching the `lg:block` pane below.
-// Under lg we keep today's behavior exactly: tap a row → navigate to the
-// standalone /mail-center/:id page. Threshold and CSS MUST agree or a row
-// click could select a thread into a pane that isn't visible. SSR-safe default.
+// Best-effort display name for a thread's counterparty so the list never shows
+// a bare "(unknown sender)" when we actually hold an address. Falls back to the
+// local-part of the email, then a neutral placeholder.
+function senderLabel(t: MailThread): string {
+  const name = t.counterpartyName?.trim();
+  if (name) return name;
+  const email = t.counterpartyEmail?.trim();
+  if (email) {
+    const local = email.split("@")[0];
+    return local || email;
+  }
+  return "(no sender)";
+}
+
+// The reading pane needs real width for three columns, so it turns on at lg.
 const PANE_QUERY = "(min-width: 1024px)";
 function useIsDesktop(): boolean {
   const [isDesktop, setIsDesktop] = useState<boolean>(() => {
@@ -131,33 +187,47 @@ function useIsDesktop(): boolean {
   return isDesktop;
 }
 
+// Subscribe the whole page to the local star/label/trash/read store.
+function useLocalMail() {
+  return useSyncExternalStore(subscribeLocal, getLocalSnapshot, getLocalSnapshot);
+}
+
 // ---------------------------------------------------------------------------
-// ThreadList — the existing <ul> rows, extracted so both the middle column
-// reuses them and selection/active-row highlighting is centralised. Behaviour
-// of each row is unchanged from the single-column version; only the click
-// target is parameterised (navigate on mobile, select on desktop).
+// ThreadList — the thread rows. Each row has a leading checkbox (bulk select),
+// the unread/star column, the sender + subject + snippet, label chips, and a
+// hover action cluster (star / read-unread / archive-or-inbox / trash).
 // ---------------------------------------------------------------------------
 function ThreadList({
   threads,
   loading,
   activeId,
+  folder,
+  selectedIds,
+  onToggleSelect,
   onOpen,
   onInjectTest,
+  onRowAction,
 }: {
   threads: MailThread[];
   loading: boolean;
   activeId: string | null;
+  folder: Folder;
+  selectedIds: Set<string>;
+  onToggleSelect: (id: string) => void;
   onOpen: (id: string) => void;
   onInjectTest: () => void;
+  onRowAction: (action: RowAction, t: MailThread) => void;
 }) {
+  const local = useLocalMail();
+
   if (threads.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
         <Inbox className="h-10 w-10 text-muted-foreground/50" />
         <p className="text-sm font-medium text-muted-foreground">
-          {loading ? "Loading…" : "No mail yet"}
+          {loading ? "Loading…" : emptyLabel(folder)}
         </p>
-        {!loading && (
+        {!loading && folder === "inbox" && (
           <>
             <p className="max-w-sm text-xs text-muted-foreground/80">
               Incoming mail will appear here once the domain MX is switched to
@@ -179,23 +249,64 @@ function ThreadList({
     <ul className="divide-y divide-border">
       {threads.map((t) => {
         const active = activeId === t.id;
+        const starred = isStarred(local, t.id);
+        const unread = effectiveUnread(local, t.id, t.unread);
+        const chips = labelsFor(local, t.id);
+        const selected = selectedIds.has(t.id);
         return (
-          <li key={t.id}>
+          <li
+            key={t.id}
+            className={cn(
+              "group relative flex items-stretch border-l-2 transition",
+              active
+                ? "border-amber-500 bg-amber-50/70"
+                : selected
+                  ? "border-amber-400 bg-amber-50/40"
+                  : unread
+                    ? "border-amber-400 bg-amber-50/30"
+                    : "border-transparent hover:bg-muted/50",
+            )}
+          >
+            {/* Select checkbox — its own click target, never opens the row. */}
+            <label
+              className="flex cursor-pointer items-center pl-3 pr-1"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <input
+                type="checkbox"
+                checked={selected}
+                onChange={() => onToggleSelect(t.id)}
+                aria-label={`Select conversation with ${senderLabel(t)}`}
+                className="h-3.5 w-3.5 cursor-pointer rounded border-[#C9C2BA] text-[#6B5C32] focus:ring-[#6B5C32]/30"
+              />
+            </label>
+
+            {/* Star toggle — local only. */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleStar(t.id);
+              }}
+              aria-label={starred ? "Unstar" : "Star"}
+              title={starred ? "Unstar" : "Star"}
+              className="flex items-center px-1 text-muted-foreground/40 hover:text-amber-500"
+            >
+              <Star
+                className={cn(
+                  "h-4 w-4",
+                  starred && "fill-amber-400 text-amber-500",
+                )}
+              />
+            </button>
+
             <button
               onClick={() => onOpen(t.id)}
-              className={cn(
-                "flex w-full items-start gap-3 border-l-2 px-4 py-3 text-left transition hover:bg-muted/50",
-                active
-                  ? "border-amber-500 bg-amber-50/70 hover:bg-amber-50"
-                  : t.unread
-                    ? "border-amber-400 bg-amber-50/30"
-                    : "border-transparent",
-              )}
+              className="flex min-w-0 flex-1 items-start gap-2 py-3 pr-2 text-left"
             >
-              {/* Unread dot — a small filled dot like Gmail. Read rows keep the
-                  column for alignment but show a faint direction arrow. */}
+              {/* Unread dot / direction arrow column. */}
               <div className="mt-1.5 flex h-4 w-4 shrink-0 items-center justify-center">
-                {t.unread ? (
+                {unread ? (
                   <span className="h-2.5 w-2.5 rounded-full bg-amber-500" />
                 ) : t.lastDirection === "outbound" ? (
                   <ArrowUpRight className="h-3.5 w-3.5 text-muted-foreground/50" />
@@ -209,12 +320,12 @@ function ThreadList({
                   <span
                     className={cn(
                       "truncate text-sm",
-                      t.unread
+                      unread
                         ? "font-semibold text-foreground"
                         : "font-medium text-foreground/90",
                     )}
                   >
-                    {t.counterpartyName || t.counterpartyEmail || "(unknown sender)"}
+                    {senderLabel(t)}
                   </span>
                   <span className="shrink-0 text-xs text-muted-foreground">
                     {fmtTime(t.lastMessageAt)}
@@ -224,7 +335,7 @@ function ThreadList({
                   <span
                     className={cn(
                       "truncate text-sm",
-                      t.unread ? "text-foreground" : "text-muted-foreground",
+                      unread ? "text-foreground" : "text-muted-foreground",
                     )}
                   >
                     {t.subject}
@@ -240,24 +351,83 @@ function ThreadList({
                     {t.lastSnippet}
                   </p>
                 )}
+                {chips.length > 0 && (
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {chips.map((l) => (
+                      <span
+                        key={l}
+                        className="inline-flex items-center gap-1 rounded-full bg-[#EFE9DD] px-1.5 py-0.5 text-[10px] font-medium text-[#6B5C32] ring-1 ring-inset ring-[#E2DDD8]"
+                      >
+                        <Tag className="h-2.5 w-2.5" />
+                        {l}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
 
-              {/* Mailbox + status. Status VALUE stays 'closed'; label reads
-                  "Done" to match the Inbox/Done/All selector. */}
+              {/* Mailbox + status. Status VALUE stays 'closed'; the chip reads
+                  "Archived" to match the folder name. */}
               <div className="ml-1 flex shrink-0 flex-col items-end gap-1">
                 {t.mailboxAddress && (
-                  <Badge className="max-w-[160px] truncate text-[10px]">
+                  <Badge className="max-w-[150px] truncate text-[10px]">
                     {t.mailboxAddress}
                   </Badge>
                 )}
                 {t.status === "closed" && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
                     <Check className="h-3 w-3" />
-                    Done
+                    Archived
                   </span>
                 )}
               </div>
             </button>
+
+            {/* Hover action cluster — appears on row hover (always visible on
+                touch via focus-within). */}
+            <div className="flex shrink-0 items-center gap-0.5 pr-2 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+              <RowIconButton
+                title={unread ? "Mark as read" : "Mark as unread"}
+                onClick={() => onRowAction(unread ? "read" : "unread", t)}
+              >
+                {unread ? (
+                  <MailOpen className="h-4 w-4" />
+                ) : (
+                  <MailWarning className="h-4 w-4" />
+                )}
+              </RowIconButton>
+              {folder !== "trash" &&
+                (t.status === "closed" ? (
+                  <RowIconButton
+                    title="Move to Inbox"
+                    onClick={() => onRowAction("inbox", t)}
+                  >
+                    <Inbox className="h-4 w-4" />
+                  </RowIconButton>
+                ) : (
+                  <RowIconButton
+                    title="Archive (mark done)"
+                    onClick={() => onRowAction("archive", t)}
+                  >
+                    <Archive className="h-4 w-4" />
+                  </RowIconButton>
+                ))}
+              {folder === "trash" ? (
+                <RowIconButton
+                  title="Restore from Trash"
+                  onClick={() => onRowAction("restore", t)}
+                >
+                  <RotateIcon />
+                </RowIconButton>
+              ) : (
+                <RowIconButton
+                  title="Move to Trash"
+                  onClick={() => onRowAction("trash", t)}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </RowIconButton>
+              )}
+            </div>
           </li>
         );
       })}
@@ -265,24 +435,167 @@ function ThreadList({
   );
 }
 
+type RowAction =
+  | "read"
+  | "unread"
+  | "archive"
+  | "inbox"
+  | "trash"
+  | "restore";
+
+function RowIconButton({
+  title,
+  onClick,
+  children,
+}: {
+  title: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className="rounded p-1.5 text-muted-foreground/70 transition hover:bg-muted hover:text-foreground"
+    >
+      {children}
+    </button>
+  );
+}
+
+// Small inline "restore" glyph (reuse lucide RotateCcw look without another
+// import name clash) — a circular arrow.
+function RotateIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4"
+      aria-hidden="true"
+    >
+      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+      <path d="M3 3v5h5" />
+    </svg>
+  );
+}
+
+function emptyLabel(folder: Folder): string {
+  switch (folder) {
+    case "starred":
+      return "No starred mail";
+    case "sent":
+      return "No sent mail";
+    case "archive":
+      return "Nothing archived";
+    case "drafts":
+      return "No drafts";
+    case "trash":
+      return "Trash is empty";
+    case "all":
+      return "No mail";
+    default:
+      return "No mail yet";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Drafts list — local-only saved compose drafts (no backend draft store).
+// Resuming a draft re-opens the compose dialog pre-filled.
+// ---------------------------------------------------------------------------
+function DraftsList({
+  drafts,
+  onResume,
+}: {
+  drafts: MailDraft[];
+  onResume: (d: MailDraft) => void;
+}) {
+  if (drafts.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+        <FileText className="h-10 w-10 text-muted-foreground/50" />
+        <p className="text-sm font-medium text-muted-foreground">No drafts</p>
+        <p className="max-w-sm text-xs text-muted-foreground/80">
+          Start a new email and choose “Save draft” to keep it here. Drafts are
+          stored on this device only.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <ul className="divide-y divide-border">
+      {drafts.map((d) => (
+        <li key={d.id} className="group flex items-stretch hover:bg-muted/50">
+          <button
+            onClick={() => onResume(d)}
+            className="flex min-w-0 flex-1 items-start gap-2 px-4 py-3 text-left"
+          >
+            <FileText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground/60" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate text-sm font-medium text-foreground/90">
+                  {d.subject?.trim() || "(no subject)"}
+                </span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {fmtTime(new Date(d.updatedAt).toISOString())}
+                </span>
+              </div>
+              <p className="truncate text-xs text-muted-foreground">
+                To {d.to?.trim() || "—"}
+              </p>
+              {d.body && (
+                <p className="truncate text-xs text-muted-foreground/80">
+                  {d.body}
+                </p>
+              )}
+            </div>
+          </button>
+          <div className="flex shrink-0 items-center pr-2 opacity-0 transition group-hover:opacity-100">
+            <RowIconButton
+              title="Discard draft"
+              onClick={() => deleteDraft(d.id)}
+            >
+              <Trash2 className="h-4 w-4" />
+            </RowIconButton>
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function MailCenterPage() {
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
+  const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
+  const local = useLocalMail();
+
   const [q, setQ] = useState("");
-  const [status, setStatus] = useState<"open" | "closed" | "all">("open");
-  // Hierarchical mailbox filter: All / a whole department / a single mailbox.
-  // Only the single-mailbox case hits the backend (?mailbox=); All and dept are
-  // resolved client-side over the fetched threads (see `visible` below).
+  const [folder, setFolder] = useState<Folder>("inbox");
+  const [labelFilter, setLabelFilter] = useState<string | null>(null);
   const [filter, setFilter] = useState<MailboxFilter>({ kind: "all" });
   const [composeOpen, setComposeOpen] = useState(false);
-  // Desktop reading-pane selection. Lives in local state (NOT the URL) so the
-  // existing routes stay untouched. Null = show the empty-pane placeholder.
+  const [resumeDraft, setResumeDraft] = useState<MailDraft | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Map folder → the server status param. Inbox/Archive filter server-side;
+  // Starred/Sent/Trash/All fetch the full set and narrow client-side; Drafts
+  // doesn't hit the threads endpoint at all.
+  const apiStatus: "open" | "closed" | "all" =
+    folder === "inbox" ? "open" : folder === "archive" ? "closed" : "all";
 
   const params = new URLSearchParams();
-  if (status !== "all") params.set("status", status);
-  // Single-mailbox keeps the existing server-side filter. "all" and "dept"
-  // fetch the full scoped list and narrow client-side, so no query param.
+  if (apiStatus !== "all") params.set("status", apiStatus);
   if (filter.kind === "mailbox") params.set("mailbox", filter.value);
   const listUrl = `/api/mail-center/threads${params.toString() ? `?${params.toString()}` : ""}`;
 
@@ -302,9 +615,7 @@ export default function MailCenterPage() {
     [addresses],
   );
 
-  // Group active mailboxes by department for the hierarchical sidebar. Blank /
-  // null dept falls into the "Other" bucket. Each group keeps its mailboxes
-  // sorted by person name (falling back to the address) for a stable order.
+  // Group active mailboxes by department for the hierarchical switcher.
   const deptGroups = useMemo(() => {
     const byDept = new Map<string, MailAddress[]>();
     for (const a of activeAddresses) {
@@ -327,8 +638,6 @@ export default function MailCenterPage() {
       .sort((a, b) => sortDepts(a.dept, b.dept));
   }, [activeAddresses]);
 
-  // dept → set of mailbox addresses, used to narrow threads client-side when a
-  // whole department is selected.
   const addressesByDept = useMemo(() => {
     const m = new Map<string, Set<string>>();
     for (const g of deptGroups) {
@@ -337,42 +646,96 @@ export default function MailCenterPage() {
     return m;
   }, [deptGroups]);
 
-  // Client-side narrowing of the already-scoped list. Two passes:
-  //   1. Department filter — when a whole dept is selected, keep only threads
-  //      whose mailbox belongs to that dept (single-mailbox already narrowed
-  //      server-side; "all" keeps everything).
-  //   2. Text search over subject / sender / snippet so typing feels instant
-  //      without a roundtrip per keystroke.
+  // Client-side narrowing of the already-scoped list:
+  //   1. Trash gate — Trash shows ONLY locally-trashed threads; every other
+  //      folder HIDES them.
+  //   2. Folder semantics — Starred (local star set) / Sent (outbound) on top
+  //      of the server status the list was fetched with.
+  //   3. Department filter — when a whole dept is selected.
+  //   4. Label filter — when a sidebar label is active.
+  //   5. Text search over subject / sender name / sender email / snippet.
   const visible = useMemo(() => {
     let list = threads ?? [];
+
+    // Trash gate.
+    if (folder === "trash") {
+      list = list.filter((t) => isTrashed(local, t.id));
+    } else {
+      list = list.filter((t) => !isTrashed(local, t.id));
+    }
+
+    // Folder-specific client narrowing.
+    if (folder === "starred") {
+      list = list.filter((t) => isStarred(local, t.id));
+    } else if (folder === "sent") {
+      // Best available proxy with list-level data: the last activity was
+      // outbound. (A true Sent view would need a per-message direction roll-up
+      // from the backend — see report.)
+      list = list.filter((t) => t.lastDirection === "outbound");
+    }
+
+    // Department narrowing.
     if (filter.kind === "dept") {
       const addrs = addressesByDept.get(filter.value);
       list = addrs ? list.filter((t) => addrs.has(t.mailboxAddress)) : [];
     }
+
+    // Label filter.
+    if (labelFilter) {
+      list = list.filter((t) =>
+        labelsFor(local, t.id).some(
+          (l) => l.toLowerCase() === labelFilter.toLowerCase(),
+        ),
+      );
+    }
+
+    // Text search.
     const needle = q.trim().toLowerCase();
-    if (!needle) return list;
-    return list.filter(
+    if (needle) {
+      list = list.filter(
+        (t) =>
+          t.subject.toLowerCase().includes(needle) ||
+          t.counterpartyEmail.toLowerCase().includes(needle) ||
+          t.counterpartyName.toLowerCase().includes(needle) ||
+          t.lastSnippet.toLowerCase().includes(needle),
+      );
+    }
+
+    return list;
+  }, [threads, q, folder, filter, addressesByDept, labelFilter, local]);
+
+  // Counts for the folder list. Inbox/Archive/Starred/Sent/All/Trash are
+  // computed off the FETCHED set, so they reflect the current mailbox scope.
+  // (Inbox count = unread in Inbox, the most useful badge; others = totals.)
+  const folderCounts = useMemo(() => {
+    const all = threads ?? [];
+    const live = all.filter((t) => !isTrashed(local, t.id));
+    const inboxUnread = live.filter(
       (t) =>
-        t.subject.toLowerCase().includes(needle) ||
-        t.counterpartyEmail.toLowerCase().includes(needle) ||
-        t.counterpartyName.toLowerCase().includes(needle) ||
-        t.lastSnippet.toLowerCase().includes(needle),
-    );
-  }, [threads, q, filter, addressesByDept]);
+        t.status === "open" && effectiveUnread(local, t.id, t.unread),
+    ).length;
+    return {
+      inboxUnread,
+      starred: live.filter((t) => isStarred(local, t.id)).length,
+      trash: all.filter((t) => isTrashed(local, t.id)).length,
+    };
+  }, [threads, local]);
 
-  const unreadCount = (threads ?? []).filter((t) => t.unread).length;
+  const unreadCount = (threads ?? []).filter(
+    (t) => !isTrashed(local, t.id) && effectiveUnread(local, t.id, t.unread),
+  ).length;
 
-  // Per-mailbox unread counts for the sidebar badges.
+  // Per-mailbox + per-dept unread counts for the mailbox switcher badges.
   const unreadByMailbox = useMemo(() => {
     const m = new Map<string, number>();
     for (const t of threads ?? []) {
-      if (!t.unread) continue;
+      if (isTrashed(local, t.id)) continue;
+      if (!effectiveUnread(local, t.id, t.unread)) continue;
       m.set(t.mailboxAddress, (m.get(t.mailboxAddress) ?? 0) + 1);
     }
     return m;
-  }, [threads]);
+  }, [threads, local]);
 
-  // Per-department unread counts (sum of its mailboxes) for the dept headers.
   const unreadByDept = useMemo(() => {
     const m = new Map<string, number>();
     for (const g of deptGroups) {
@@ -383,19 +746,125 @@ export default function MailCenterPage() {
     return m;
   }, [deptGroups, unreadByMailbox]);
 
-  // Note: when the selected thread leaves the current filter (e.g. marked done
-  // while viewing "Inbox"), we intentionally KEEP showing it in the pane — the
-  // pane fetches by id directly, so the operator can still read/reopen it. The
-  // row highlight simply disappears with the row. No state sync needed.
+  const labels = allLabels(local);
+  const drafts = local.drafts;
 
-  // Row open: desktop shows it in the reading pane (no navigation); under md we
-  // keep today's behavior and navigate to the standalone page.
+  // The selection set may hold ids that are no longer visible (folder switch,
+  // search). Rather than prune it in an effect (which causes a cascading
+  // render), we DERIVE the effective selection as the intersection with the
+  // current visible list. Every consumer below uses this derived set, so a
+  // hidden-but-still-checked id never leaks into counts or bulk actions.
+  const selectedArr = useMemo(
+    () => visible.filter((t) => selectedIds.has(t.id)),
+    [visible, selectedIds],
+  );
+  const selectedVisibleIds = useMemo(
+    () => new Set(selectedArr.map((t) => t.id)),
+    [selectedArr],
+  );
+  const selectedCount = selectedArr.length;
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAllVisible() {
+    setSelectedIds(new Set(visible.map((t) => t.id)));
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
   function openThread(id: string) {
+    // Opening a thread clears any local "forced unread" override and marks it
+    // read locally so the row matches what the server does on GET.
+    setReadOverride(id, false);
     if (isDesktop) {
       setSelectedId(id);
     } else {
       navigate(`/mail-center/${id}`);
     }
+  }
+
+  // Single-row hover actions.
+  async function onRowAction(action: RowAction, t: MailThread) {
+    switch (action) {
+      case "read":
+        setReadOverride(t.id, false);
+        break;
+      case "unread":
+        setReadOverride(t.id, true);
+        break;
+      case "archive": {
+        const ok = await patchThreadStatus(t.id, "closed");
+        toast[ok ? "success" : "error"](
+          ok ? "Archived." : "Couldn’t archive. Please try again.",
+        );
+        break;
+      }
+      case "inbox": {
+        const ok = await patchThreadStatus(t.id, "open");
+        toast[ok ? "success" : "error"](
+          ok ? "Moved to Inbox." : "Couldn’t move. Please try again.",
+        );
+        break;
+      }
+      case "trash":
+        setTrashedMany([t.id], true);
+        if (selectedId === t.id) setSelectedId(null);
+        toast.info("Moved to Trash.");
+        break;
+      case "restore":
+        setTrashedMany([t.id], false);
+        toast.info("Restored from Trash.");
+        break;
+    }
+  }
+
+  // ── Bulk actions over the current selection (selectedArr is derived above
+  // as the visible-intersection, so these never touch hidden rows). ─────────
+  async function bulkStatus(status: "open" | "closed") {
+    const ids = selectedArr.map((t) => t.id);
+    if (ids.length === 0) return;
+    const ok = await patchManyStatus(ids, status);
+    const verb = status === "closed" ? "archived" : "moved to Inbox";
+    if (ok === ids.length) toast.success(`${ok} ${verb}.`);
+    else if (ok > 0) toast.warning(`${ok} of ${ids.length} ${verb}.`);
+    else toast.error(`Couldn’t update. Please try again.`);
+    clearSelection();
+  }
+
+  function bulkRead(value: boolean) {
+    const ids = selectedArr.map((t) => t.id);
+    if (ids.length === 0) return;
+    setReadOverrideMany(ids, value);
+    toast.success(
+      `${ids.length} marked as ${value ? "unread" : "read"}.`,
+    );
+    clearSelection();
+  }
+
+  async function bulkTrash() {
+    const ids = selectedArr.map((t) => t.id);
+    if (ids.length === 0) return;
+    const ok = await confirm({
+      title: `Move ${ids.length} ${ids.length === 1 ? "conversation" : "conversations"} to Trash?`,
+      message:
+        "They’ll move to the Trash folder on this device. You can restore them from there.",
+      confirmLabel: "Move to Trash",
+      tone: "danger",
+    });
+    if (!ok) return;
+    setTrashedMany(ids, true);
+    if (selectedId && ids.includes(selectedId)) setSelectedId(null);
+    toast.info(`${ids.length} moved to Trash.`);
+    clearSelection();
   }
 
   async function injectTest() {
@@ -408,6 +877,8 @@ export default function MailCenterPage() {
   }
 
   const composeDisabled = activeAddresses.length === 0;
+  const allVisibleSelected =
+    visible.length > 0 && selectedCount >= visible.length;
 
   return (
     <div className="space-y-4">
@@ -435,14 +906,17 @@ export default function MailCenterPage() {
         </div>
       )}
 
-      {/* 2-pane shell: rail / list / reading-pane. Single column under md. */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-[200px_minmax(0,1fr)] lg:grid-cols-[220px_minmax(320px,420px)_minmax(0,1fr)]">
+      {/* 3-pane shell: rail / list / reading-pane. Single column under md. */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-[210px_minmax(0,1fr)] lg:grid-cols-[230px_minmax(320px,440px)_minmax(0,1fr)]">
         {/* LEFT RAIL */}
         <aside className="space-y-3">
           <Button
             variant="primary"
             className="w-full gap-2 rounded-full bg-[#6B5C32] py-2.5 text-white shadow-sm hover:bg-[#5a4d2a]"
-            onClick={() => setComposeOpen(true)}
+            onClick={() => {
+              setResumeDraft(null);
+              setComposeOpen(true);
+            }}
             disabled={composeDisabled}
             title={
               composeDisabled
@@ -460,8 +934,116 @@ export default function MailCenterPage() {
             </p>
           )}
 
-          {/* Mailbox sidebar — hierarchical: All › Department › Person */}
+          {/* FOLDERS */}
           <nav className="space-y-0.5">
+            <FolderItem
+              icon={Inbox}
+              label="Inbox"
+              active={folder === "inbox"}
+              badge={folderCounts.inboxUnread}
+              onClick={() => {
+                setFolder("inbox");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={Star}
+              label="Starred"
+              active={folder === "starred"}
+              badge={folderCounts.starred}
+              badgeTone="muted"
+              onClick={() => {
+                setFolder("starred");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={Send}
+              label="Sent"
+              active={folder === "sent"}
+              onClick={() => {
+                setFolder("sent");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={Archive}
+              label="Archive"
+              active={folder === "archive"}
+              onClick={() => {
+                setFolder("archive");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={FileText}
+              label="Drafts"
+              active={folder === "drafts"}
+              badge={drafts.length}
+              badgeTone="muted"
+              onClick={() => {
+                setFolder("drafts");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={Trash2}
+              label="Trash"
+              active={folder === "trash"}
+              badge={folderCounts.trash}
+              badgeTone="muted"
+              onClick={() => {
+                setFolder("trash");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={Layers}
+              label="All mail"
+              active={folder === "all"}
+              onClick={() => {
+                setFolder("all");
+                setLabelFilter(null);
+              }}
+            />
+          </nav>
+
+          {/* LABELS — client-side categories. Selecting one filters the list. */}
+          {labels.length > 0 && (
+            <div className="space-y-0.5">
+              <p className="px-3 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+                Labels
+              </p>
+              {labels.map((l) => (
+                <button
+                  key={l}
+                  onClick={() => setLabelFilter(labelFilter === l ? null : l)}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition",
+                    labelFilter === l
+                      ? "bg-amber-50 font-medium text-amber-800"
+                      : "text-foreground/80 hover:bg-muted",
+                  )}
+                >
+                  <Tag
+                    className={cn(
+                      "h-3.5 w-3.5 shrink-0",
+                      labelFilter === l
+                        ? "text-amber-700"
+                        : "text-muted-foreground/60",
+                    )}
+                  />
+                  <span className="truncate">{l}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* MAILBOX SWITCHER */}
+          <div className="space-y-0.5 border-t border-border/60 pt-2">
+            <p className="px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+              Mailboxes
+            </p>
             <MailboxItem
               label="All mailboxes"
               active={filter.kind === "all"}
@@ -482,30 +1064,6 @@ export default function MailCenterPage() {
                 }
               />
             ))}
-          </nav>
-
-          {/* Status selector — email-native labels. The status VALUES sent to
-              the API are unchanged ('open' / 'closed' / 'all'); only the labels
-              are renamed: open → "Inbox", closed → "Done". */}
-          <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-0.5">
-            {([
-              { value: "open", label: "Inbox" },
-              { value: "closed", label: "Done" },
-              { value: "all", label: "All" },
-            ] as const).map((s) => (
-              <button
-                key={s.value}
-                onClick={() => setStatus(s.value)}
-                className={cn(
-                  "flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition",
-                  status === s.value
-                    ? "bg-white text-amber-800 shadow-sm ring-1 ring-amber-200"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {s.label}
-              </button>
-            ))}
           </div>
 
           {/* Search */}
@@ -520,28 +1078,73 @@ export default function MailCenterPage() {
           </div>
         </aside>
 
-        {/* MIDDLE — thread list */}
+        {/* MIDDLE — thread list (or drafts list) */}
         <Card className="overflow-hidden">
           <CardContent className="p-0">
-            <ThreadList
-              threads={visible}
-              loading={loading}
-              activeId={isDesktop ? selectedId : null}
-              onOpen={openThread}
-              onInjectTest={injectTest}
-            />
+            {/* List toolbar: select-all + bulk action bar. Hidden for Drafts. */}
+            {folder !== "drafts" && visible.length > 0 && (
+              <div className="flex items-center justify-between gap-2 border-b border-border bg-muted/30 px-3 py-1.5">
+                <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    aria-label="Select all"
+                    onChange={() =>
+                      allVisibleSelected ? clearSelection() : selectAllVisible()
+                    }
+                    className="h-3.5 w-3.5 cursor-pointer rounded border-[#C9C2BA] text-[#6B5C32] focus:ring-[#6B5C32]/30"
+                  />
+                  {selectedCount > 0 ? `${selectedCount} selected` : "Select"}
+                </label>
+                <span className="text-[11px] text-muted-foreground/70">
+                  {visible.length}{" "}
+                  {visible.length === 1 ? "conversation" : "conversations"}
+                </span>
+              </div>
+            )}
+
+            {selectedCount > 0 && folder !== "drafts" && (
+              <BulkBar
+                count={selectedCount}
+                folder={folder}
+                onArchive={() => bulkStatus("closed")}
+                onInbox={() => bulkStatus("open")}
+                onRead={() => bulkRead(false)}
+                onUnread={() => bulkRead(true)}
+                onTrash={bulkTrash}
+                onClear={clearSelection}
+              />
+            )}
+
+            {folder === "drafts" ? (
+              <DraftsList
+                drafts={drafts}
+                onResume={(d) => {
+                  setResumeDraft(d);
+                  setComposeOpen(true);
+                }}
+              />
+            ) : (
+              <ThreadList
+                threads={visible}
+                loading={loading}
+                activeId={isDesktop ? selectedId : null}
+                folder={folder}
+                selectedIds={selectedVisibleIds}
+                onToggleSelect={toggleSelect}
+                onOpen={openThread}
+                onInjectTest={injectTest}
+                onRowAction={onRowAction}
+              />
+            )}
           </CardContent>
         </Card>
 
-        {/* RIGHT — reading pane (md+ only). Embeds detail.tsx for the selected
-            thread. Under md this whole column is hidden and rows navigate to
-            the standalone /mail-center/:id page instead. */}
+        {/* RIGHT — reading pane (lg+ only). */}
         <div className="hidden min-w-0 lg:block">
           {selectedId ? (
             <Card className="min-w-0">
               <CardContent className="p-4">
-                {/* Keyed so switching threads remounts the detail view and its
-                    composer/assign state resets cleanly. */}
                 <MailCenterDetailPage key={selectedId} id={selectedId} embedded />
               </CardContent>
             </Card>
@@ -565,7 +1168,10 @@ export default function MailCenterPage() {
                     variant="outline"
                     size="sm"
                     className="mt-1 gap-1.5"
-                    onClick={() => setComposeOpen(true)}
+                    onClick={() => {
+                      setResumeDraft(null);
+                      setComposeOpen(true);
+                    }}
                   >
                     <PenSquare className="h-4 w-4" />
                     New email
@@ -580,17 +1186,143 @@ export default function MailCenterPage() {
       {/* Compose modal — additive overlay; closing returns to the inbox. */}
       <ComposeDialog
         open={composeOpen}
-        onClose={() => setComposeOpen(false)}
+        initialDraft={resumeDraft}
+        onClose={() => {
+          setComposeOpen(false);
+          setResumeDraft(null);
+        }}
         onSent={(threadId) => {
-          // On desktop, drop the freshly-sent thread straight into the pane.
           if (isDesktop) setSelectedId(threadId);
         }}
       />
+
+      {confirmDialog}
     </div>
   );
 }
 
-// Sidebar mailbox row with an optional unread count pill.
+// ── Folder row ──────────────────────────────────────────────────────────────
+function FolderItem({
+  icon: Icon,
+  label,
+  active,
+  badge,
+  badgeTone = "accent",
+  onClick,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  active: boolean;
+  badge?: number;
+  badgeTone?: "accent" | "muted";
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition",
+        active
+          ? "bg-amber-50 font-semibold text-amber-800"
+          : "text-foreground/80 hover:bg-muted",
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-2.5">
+        <Icon
+          className={cn(
+            "h-4 w-4 shrink-0",
+            active ? "text-amber-700" : "text-muted-foreground/60",
+          )}
+        />
+        <span className="truncate">{label}</span>
+      </span>
+      {badge !== undefined && badge > 0 && (
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+            badgeTone === "accent"
+              ? active
+                ? "bg-amber-200 text-amber-900"
+                : "bg-amber-100 text-amber-800"
+              : active
+                ? "bg-amber-200 text-amber-900"
+                : "bg-muted text-muted-foreground",
+          )}
+        >
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+// ── Bulk action bar ─────────────────────────────────────────────────────────
+function BulkBar({
+  count,
+  folder,
+  onArchive,
+  onInbox,
+  onRead,
+  onUnread,
+  onTrash,
+  onClear,
+}: {
+  count: number;
+  folder: Folder;
+  onArchive: () => void;
+  onInbox: () => void;
+  onRead: () => void;
+  onUnread: () => void;
+  onTrash: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1 border-b border-amber-200 bg-amber-50/70 px-3 py-2">
+      <span className="mr-1 text-xs font-medium text-amber-900">
+        {count} selected
+      </span>
+      {folder === "archive" ? (
+        <BulkButton icon={Inbox} label="Move to Inbox" onClick={onInbox} />
+      ) : folder !== "trash" ? (
+        <BulkButton icon={Archive} label="Archive" onClick={onArchive} />
+      ) : null}
+      <BulkButton icon={MailOpen} label="Read" onClick={onRead} />
+      <BulkButton icon={MailWarning} label="Unread" onClick={onUnread} />
+      {folder !== "trash" && (
+        <BulkButton icon={Trash2} label="Trash" onClick={onTrash} />
+      )}
+      <button
+        onClick={onClear}
+        className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-amber-800 transition hover:bg-amber-100"
+      >
+        <X className="h-3.5 w-3.5" />
+        Clear
+      </button>
+    </div>
+  );
+}
+
+function BulkButton({
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-white px-2 py-1 text-xs font-medium text-amber-900 transition hover:bg-amber-100"
+    >
+      <Icon className="h-3.5 w-3.5" />
+      {label}
+    </button>
+  );
+}
+
+// ── Mailbox switcher rows (unchanged behaviour) ─────────────────────────────
 function MailboxItem({
   label,
   title,
@@ -616,12 +1348,7 @@ function MailboxItem({
       )}
     >
       <span className="flex min-w-0 items-center gap-2">
-        <Inbox
-          className={cn(
-            "h-4 w-4 shrink-0",
-            active ? "text-amber-700" : "text-muted-foreground/60",
-          )}
-        />
+        <MailboxAllIcon active={active} />
         <span className="truncate">{label}</span>
       </span>
       {unread > 0 && (
@@ -638,9 +1365,17 @@ function MailboxItem({
   );
 }
 
-// One department in the hierarchical sidebar: a clickable/collapsible header
-// (selects the whole dept) plus its person/mailbox rows. Expand state is local
-// and defaults to open so the tree is browsable at a glance.
+function MailboxAllIcon({ active }: { active: boolean }) {
+  return (
+    <CheckCheck
+      className={cn(
+        "h-4 w-4 shrink-0",
+        active ? "text-amber-700" : "text-muted-foreground/60",
+      )}
+    />
+  );
+}
+
 function DeptGroup({
   dept,
   mailboxes,
@@ -663,8 +1398,6 @@ function DeptGroup({
 
   return (
     <div>
-      {/* Department header. The chevron toggles expand; the label selects the
-          whole department (all its mailboxes). Two targets, one row. */}
       <div
         className={cn(
           "flex w-full items-center gap-1 rounded-md pr-2 text-sm transition",
@@ -719,7 +1452,6 @@ function DeptGroup({
         </button>
       </div>
 
-      {/* Person rows — indented under the department. */}
       {expanded && (
         <div className="ml-3 space-y-0.5 border-l border-border/60 pl-2">
           {mailboxes.map((a) => {
@@ -742,7 +1474,6 @@ function DeptGroup({
   );
 }
 
-// A single person/mailbox leaf row under a department.
 function PersonItem({
   label,
   title,

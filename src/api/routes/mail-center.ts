@@ -364,6 +364,15 @@ type ThreadRow = {
   labels: string | null;
   trashed_at: string | null;
   created_at: string | null;
+  // The pg driver camelCases generic columns (created_at→createdAt etc.), so
+  // these snake reads would come back undefined — dual-read like rowToAddress.
+  // Same root cause as the View-level / alias bug (owner 2026-06-17). Mail
+  // receive is not live yet, but this keeps the inbox correct when it is.
+  assignedToUserId?: string | null;
+  assignedToName?: string | null;
+  lastMessageAt?: string | null;
+  messageCount?: number | string | null;
+  createdAt?: string | null;
   // Computed (not a column): EXISTS roll-up of any outbound message, so the
   // frontend's Sent folder is accurate instead of relying on last_direction.
   has_outbound?: number | boolean | null;
@@ -377,12 +386,12 @@ function rowToThread(r: ThreadRow) {
     counterpartyEmail: r.counterparty_email ?? "",
     counterpartyName: r.counterparty_name ?? "",
     status: r.status,
-    assignedToUserId: r.assigned_to_user_id ?? undefined,
-    assignedToName: r.assigned_to_name ?? undefined,
-    lastMessageAt: r.last_message_at ?? "",
+    assignedToUserId: r.assignedToUserId ?? r.assigned_to_user_id ?? undefined,
+    assignedToName: r.assignedToName ?? r.assigned_to_name ?? undefined,
+    lastMessageAt: r.lastMessageAt ?? r.last_message_at ?? "",
     lastDirection: r.last_direction ?? "inbound",
     lastSnippet: r.last_snippet ?? "",
-    messageCount: Number(r.message_count ?? 0),
+    messageCount: Number(r.messageCount ?? r.message_count ?? 0),
     unread: Number(r.unread ?? 0) === 1,
     starred: Number(r.starred ?? 0) === 1,
     labels: parseJsonArray(r.labels),
@@ -444,16 +453,29 @@ function rowToMessage(r: MessageRow) {
   };
 }
 
+// The pg driver (db-pg.ts transform.column.from) hands result columns back in
+// camelCase, so `assigned_user_id` arrives as `assignedUserId`. Reading the
+// snake_case key returned undefined → GET /addresses dropped EVERY alias's
+// owner/dept/position → the User Mgmt grid couldn't show a claimed alias and the
+// shared-mailbox column filter never excluded personal aliases (owner "Claiming
+// existing 没有反应", 2026-06-17 — same class of bug as /scope-levels). Read
+// camelCase, with the snake key kept as a fallback in case a column isn't in the
+// rename map.
 type AddressRow = {
   id: string;
   address: string;
   label: string | null;
-  assigned_user_id: string | null;
-  assigned_user_name: string | null;
-  assigned_dept: string | null;
-  assigned_position: string | null;
+  assignedUserId?: string | null;
+  assigned_user_id?: string | null;
+  assignedUserName?: string | null;
+  assigned_user_name?: string | null;
+  assignedDept?: string | null;
+  assigned_dept?: string | null;
+  assignedPosition?: string | null;
+  assigned_position?: string | null;
   active: number | boolean | null;
-  created_at: string | null;
+  createdAt?: string | null;
+  created_at?: string | null;
 };
 
 function rowToAddress(r: AddressRow) {
@@ -461,12 +483,12 @@ function rowToAddress(r: AddressRow) {
     id: r.id,
     address: r.address,
     label: r.label ?? "",
-    assignedUserId: r.assigned_user_id ?? undefined,
-    assignedUserName: r.assigned_user_name ?? undefined,
-    assignedDept: r.assigned_dept ?? undefined,
-    assignedPosition: r.assigned_position ?? undefined,
+    assignedUserId: r.assignedUserId ?? r.assigned_user_id ?? undefined,
+    assignedUserName: r.assignedUserName ?? r.assigned_user_name ?? undefined,
+    assignedDept: r.assignedDept ?? r.assigned_dept ?? undefined,
+    assignedPosition: r.assignedPosition ?? r.assigned_position ?? undefined,
     active: Number(r.active ?? 0) === 1,
-    createdAt: r.created_at ?? "",
+    createdAt: r.createdAt ?? r.created_at ?? "",
   };
 }
 

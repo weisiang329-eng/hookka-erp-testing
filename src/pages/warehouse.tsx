@@ -322,9 +322,16 @@ export default function WarehousePage() {
         }),
       });
 
-      // 2. Remove only the selected item from the rack (by productCode).
+      // 2. Remove ONLY the selected item from the rack. Per-piece rows share an
+      // empty productCode, so identify them by their description + SO-notes
+      // signature; legacy single-code racks still remove by productCode. (Never
+      // send an empty productCode — that used to wipe the whole rack.)
+      const removeQs = item.productCode
+        ? `productCode=${encodeURIComponent(item.productCode)}`
+        : `itemName=${encodeURIComponent(item.productName || "")}` +
+          `&itemNotes=${encodeURIComponent(item.notes || "")}`;
       await postOrThrow(
-        `/api/warehouse/${stockOutTarget.id}?productCode=${encodeURIComponent(item.productCode)}`,
+        `/api/warehouse/${stockOutTarget.id}?${removeQs}`,
         { method: "DELETE" }
       );
 

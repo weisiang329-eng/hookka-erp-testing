@@ -572,6 +572,12 @@ app.delete("/:id", async (c) => {
     return c.json({ success: false, error: "Rack location not found" }, 404);
   }
   const productCode = c.req.query("productCode");
+  // Per-piece rows (the rack model) all carry an EMPTY productCode — their
+  // identity is the description (productName) + SO tag (notes "SO <no>"). So a
+  // single-piece stock-out targets them by that signature. Passing neither
+  // productCode NOR itemName means "clear the whole rack".
+  const itemName = c.req.query("itemName");
+  const itemNotes = c.req.query("itemNotes");
   const itemsRes = await c.var.DB.prepare(
     "SELECT * FROM rack_items WHERE rackLocationId = ?",
   )
@@ -596,11 +602,26 @@ app.delete("/:id", async (c) => {
     ];
   }
   if (productCode) {
+    // Legacy single-code racks — remove the one matching item.
     const idx = remaining.findIndex((it) => it.productCode === productCode);
     if (idx !== -1) remaining.splice(idx, 1);
-  } else {
+  } else if (itemName !== undefined) {
+    // Per-piece — remove the first item matching the description + SO signature.
+    // Two pieces identical in both are interchangeable, so removing either is
+    // correct. No match → remove nothing (never wipe the rack on a miss).
+    const idx = remaining.findIndex(
+      (it) =>
+        (it.productName ?? "") === itemName &&
+        (it.notes ?? "") === (itemNotes ?? ""),
+    );
+    if (idx !== -1) remaining.splice(idx, 1);
+  } else if (productCode === undefined) {
+    // No item target at all → explicit "clear the whole rack".
     remaining = [];
   }
+  // Else: productCode was passed but EMPTY with no itemName — an ambiguous
+  // single-item target with no usable key. Remove nothing rather than nuking
+  // every piece in the rack (the old behaviour, which lost whole racks).
   await replaceRackItems(c.var.DB, id, remaining, existing.reserved);
 
   const [updatedRow, updatedItems] = await Promise.all([

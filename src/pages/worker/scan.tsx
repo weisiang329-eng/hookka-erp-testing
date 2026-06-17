@@ -1234,15 +1234,23 @@ export default function WorkerScanPage() {
       // quiet zones at both ends) is in the image. The earlier 86%-width crop
       // sliced the code's edges off, so ZXing never decoded → 没反应. QR mode
       // reads the same code precisely because it uses the full frame. Keep a
-      // centred HEIGHT band (~35% of the frame) so the stacked schedule rows
-      // above/below are still excluded and only the aimed row is read
-      // (Wei Siang 2026-06-17).
-      const sh = Math.max(1, Math.round(vh * 0.35));
+      // TIGHT centred HEIGHT band (~20% of the frame ≈ the 118px reticle) so the
+      // stacked schedule rows above/below are excluded and ONLY the aimed row is
+      // read. A 0.35 band leaked 2-3 stacked rows into the native
+      // BarcodeDetector acceptance window → the decoded value flip-flopped each
+      // frame → the STABLE_MS hold never completed → 没反应. This was the working
+      // value at 6b70e115; the 0.35 regression (bc998d10) is reverted here.
+      const sh = Math.max(1, Math.round(vh * 0.20));
       const sw = vw;
       const sx = 0;
       const sy = Math.round((vh - sh) / 2);
       return { sx, sy, sw, sh };
     };
+    // Tolerant stable-hold: a SINGLE stray read of a neighbouring stacked row
+    // must NOT zero the hold (that fragility, combined with an over-wide ROI, is
+    // why barcode mode kept "regressing"). Only switch the tracked value once a
+    // DIFFERENT value shows up twice in a row; one-off jitter is ignored.
+    let bcSwitchCand = "";
     const considerHit = (data: string) => {
       if (stopped || !data) return;
       if (scanMode !== "barcode") {
@@ -1251,10 +1259,16 @@ export default function WorkerScanPage() {
       }
       const t = performance.now();
       if (data === stableVal) {
+        bcSwitchCand = "";
         if (t - stableSince >= STABLE_MS) onHit(data);
-      } else {
+      } else if (data === bcSwitchCand) {
+        // same NEW value twice → a real re-aim: adopt it and start its hold
         stableVal = data;
         stableSince = t;
+        bcSwitchCand = "";
+      } else {
+        // first sighting of a different value → treat as jitter, keep the hold
+        bcSwitchCand = data;
       }
     };
 

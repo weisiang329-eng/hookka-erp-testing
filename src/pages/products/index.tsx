@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, Fragment, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
@@ -1875,6 +1875,90 @@ export default function ProductsPage() {
     });
   };
 
+  // Manual column ORDER — the owner can drag a column header left/right to
+  // reorder it. Stored PER CATEGORY (the three categories define different
+  // column sets) as an array of column keys in the desired visual order.
+  // A key missing from the saved array keeps its registry/default position
+  // (so a future-added column appears without a migration); unknown/stale
+  // keys are ignored. The frozen "Product Code" column is ALWAYS pinned first
+  // and can never be reordered past the freeze — applyColOrder() strips it
+  // from the order list and re-prepends it. The saved order is applied to the
+  // single ordered-column list (orderedCols) that drives the header row, the
+  // per-column filter row, the grid-template-columns track string, AND every
+  // body row's keyed cells — so header and body can never drift apart.
+  const [colOrder, setColOrder] = useState<Record<string, string[]>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const saved = window.localStorage.getItem("hookka.products.colOrder");
+      if (saved) return JSON.parse(saved) as Record<string, string[]>;
+    } catch {
+      /* ignore corrupt prefs */
+    }
+    return {};
+  });
+  const persistColOrder = (next: Record<string, string[]>) => {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(
+          "hookka.products.colOrder",
+          JSON.stringify(next),
+        );
+      } catch {
+        /* ignore quota / disabled storage */
+      }
+    }
+  };
+  // Reorder the visible-column key list `keys` to match the saved order for
+  // `cat`. Frozen keys (Product Code) are always emitted first, in registry
+  // order, regardless of where the saved order would place them. The rest keep
+  // the saved relative order; any visible key not in the saved order is
+  // appended in its original (registry/track) position so nothing disappears.
+  const applyColOrder = (
+    keys: string[],
+    frozenKeys: Set<string>,
+    cat: ProdCat,
+  ): string[] => {
+    const order = colOrder[cat] ?? [];
+    const frozen = keys.filter((k) => frozenKeys.has(k));
+    const movable = keys.filter((k) => !frozenKeys.has(k));
+    if (order.length === 0) return [...frozen, ...movable];
+    const inOrder = order.filter((k) => movable.includes(k));
+    const rest = movable.filter((k) => !inOrder.includes(k));
+    return [...frozen, ...inOrder, ...rest];
+  };
+  // Persist a new movable-key order for a category. `frozenKeys` are never
+  // written into the saved order (they're always pinned first by applyColOrder).
+  const setColOrderForCat = (cat: ProdCat, movableKeys: string[]) => {
+    setColOrder((prev) => {
+      const next = { ...prev, [cat]: movableKeys };
+      persistColOrder(next);
+      return next;
+    });
+  };
+  // Native HTML5 drag-and-drop state for header reordering. Holds the key of
+  // the column currently being dragged and the key it is hovering over, so the
+  // header can render a drop indicator. Cleared on drop / dragend.
+  const [draggingColKey, setDraggingColKey] = useState<string | null>(null);
+  const [dragOverColKey, setDragOverColKey] = useState<string | null>(null);
+  // Move `fromKey` to occupy `toKey`'s slot within the current ordered list of
+  // movable keys for `cat`, then persist. Frozen keys are excluded from both
+  // ends so Code stays pinned. No-op if either key is frozen or they're equal.
+  const reorderColumn = (
+    fromKey: string,
+    toKey: string,
+    orderedMovableKeys: string[],
+    cat: ProdCat,
+  ) => {
+    if (fromKey === toKey) return;
+    const from = orderedMovableKeys.indexOf(fromKey);
+    const to = orderedMovableKeys.indexOf(toKey);
+    if (from === -1 || to === -1) return;
+    const next = [...orderedMovableKeys];
+    next.splice(from, 1);
+    next.splice(to, 0, fromKey);
+    setColOrderForCat(cat, next);
+  };
+
   // Per-column manual widths (px), set by dragging a header's right edge.
   // Keyed by column key; overrides the descriptor's minmax() track when set.
   // Persisted per browser so a tuned layout survives reloads. Clearing a key
@@ -3168,11 +3252,14 @@ export default function ProductsPage() {
                         </p>
                         <button
                           onClick={() => {
-                            // Reset layout: show all base columns, clear manual
-                            // widths, any active sort, and all column filters.
-                            // Analytics keep their own defaults (left as-is so a
-                            // chosen analytic layout isn't surprising-cleared).
+                            // Reset layout: show all base columns, restore the
+                            // default column ORDER, clear manual widths, any
+                            // active sort, and all column filters. Analytics keep
+                            // their own defaults (left as-is so a chosen analytic
+                            // layout isn't surprising-cleared).
                             setBaseColVis({});
+                            setColOrder({});
+                            persistColOrder({});
                             setColWidths({});
                             persistColWidths({});
                             setSortCol(null);
@@ -3239,8 +3326,9 @@ export default function ProductsPage() {
                       )}
                       <div className="my-1 border-t border-[#F3F4F6]" />
                       <p className="px-2 py-1 text-[10px] text-[#9CA3AF] leading-snug">
-                        Drag a header edge to resize · click a header to sort ·
-                        use the Filter button for per-column filters.
+                        Drag a header to reorder · drag its right edge to resize ·
+                        click to sort · use the Filter button for per-column
+                        filters. Reset layout restores the default order.
                       </p>
                     </div>
                   </>
@@ -3301,10 +3389,10 @@ export default function ProductsPage() {
         const visibleBaseCols = BASE_COLS[cat].filter((col) =>
           isBaseColVisible(col),
         );
-        // A hidden base column drops its body cell too. colOn() is the gate
-        // every body cell below checks so header/body/track stay in lockstep.
-        const colOn = (key: string) =>
-          visibleBaseCols.some((col) => col.key === key);
+        // A hidden base / analytic column simply isn't in orderedCols (built
+        // below), so its header cell, body cell, and grid track all drop in
+        // lockstep — the body renders strictly from orderedCols, never a
+        // per-cell visibility gate, so reorder + hide stay aligned.
         // The analytic columns the chooser currently has switched on, for this
         // category. Their grid tracks are appended to gridTemplateColumns so the
         // header + body cells line up; widths come from each column's def.
@@ -3319,29 +3407,24 @@ export default function ProductsPage() {
         // crushing below its min when many columns are shown (owner: "被挤压了").
         const trackFor = (key: string, fallback: string) =>
           colWidths[key] != null ? `${colWidths[key]}px` : fallback;
-        const baseTracks = visibleBaseCols
-          .map((col) => trackFor(col.key, col.width))
-          .join(" ");
-        const analyticTracks = activeAnalyticCols
-          .map((c) => trackFor(c.key, c.width))
-          .join(" ");
-        const gridColsFull = analyticTracks
-          ? `${baseTracks} ${analyticTracks}`
-          : baseTracks;
-        // Single ordered list of EVERY visible column (base first, then the
-        // active analytics) in the exact order their grid tracks appear. The
-        // header row, the per-column filter row, and the resize handles all
-        // iterate THIS list, so they can never drift out of lockstep with the
-        // body cells (which gate on colOn()/activeAnalyticCols in the same
-        // order). `chooserLabel` is the clean name; `frozen` marks the sticky
-        // Code column; `fallbackWidth` feeds the resize handle's start width.
+        // Single ordered list of EVERY visible column (base + active analytics).
+        // The header row, the per-column filter row, the resize handles, the
+        // grid-template-columns track string, AND every body row's cells all
+        // iterate THIS one list, so they can never drift out of lockstep no
+        // matter how the owner reorders columns. `label` is the clean name;
+        // `frozen` marks the sticky Code column (always emitted first);
+        // `fallbackWidth` is the registry minmax() track, used for both the grid
+        // track (when no manual width is set) and the resize handle's start width.
         type OrderedCol = {
           key: string;
           label: string;
           frozen: boolean;
           fallbackWidth: string;
         };
-        const orderedCols: OrderedCol[] = [
+        // Build the natural (registry track) order first: base columns, then the
+        // active analytics, exactly as before. Then apply the owner's saved
+        // drag-reorder for this category (frozen Code stays pinned first).
+        const naturalCols: OrderedCol[] = [
           ...visibleBaseCols.map((col) => ({
             key: col.key,
             label: BASE_COL_CHOOSER_LABEL[col.key] ?? col.label,
@@ -3355,6 +3438,29 @@ export default function ProductsPage() {
             fallbackWidth: c.width,
           })),
         ];
+        const colByKey = new Map(naturalCols.map((c) => [c.key, c] as const));
+        const frozenKeys = new Set(
+          naturalCols.filter((c) => c.frozen).map((c) => c.key),
+        );
+        const orderedKeys = applyColOrder(
+          naturalCols.map((c) => c.key),
+          frozenKeys,
+          cat,
+        );
+        const orderedCols: OrderedCol[] = orderedKeys.map(
+          (k) => colByKey.get(k)!,
+        );
+        // The movable (non-frozen) keys in their current visual order — the drag
+        // handlers splice within this list so frozen Code is never displaced.
+        const orderedMovableKeys = orderedCols
+          .filter((c) => !c.frozen)
+          .map((c) => c.key);
+        // grid-template-columns + min-width are derived FROM orderedCols (not the
+        // raw registry order) so the tracks follow the reordered header/body in
+        // lockstep. A manual drag-width overrides the registry minmax() track.
+        const gridColsFull = orderedCols
+          .map((c) => trackFor(c.key, c.fallbackWidth))
+          .join(" ");
         // UNIFORM header style — every header cell (base + analytic) is
         // IDENTICAL: same padding, same left alignment, same baseline. Sort
         // arrow + resize handle render on all of them. (Owner: headers must
@@ -3373,15 +3479,10 @@ export default function ProductsPage() {
           const m = track.match(/minmax\((\d+)px/);
           return m ? parseInt(m[1], 10) : 90;
         };
-        const totalFloor =
-          visibleBaseCols.reduce(
-            (sum, col) => sum + floorPx(trackFor(col.key, col.width)),
-            0,
-          ) +
-          activeAnalyticCols.reduce(
-            (sum, c) => sum + floorPx(trackFor(c.key, c.width)),
-            0,
-          );
+        const totalFloor = orderedCols.reduce(
+          (sum, c) => sum + floorPx(trackFor(c.key, c.fallbackWidth)),
+          0,
+        );
         // Only force horizontal scroll once the floors exceed a comfortable
         // baseline, so a trimmed-down table still fits without a scrollbar.
         const gridMinWidth = totalFloor > 1040 ? `${totalFloor}px` : undefined;
@@ -3411,17 +3512,88 @@ export default function ProductsPage() {
                   <div className="grid" style={{ gridTemplateColumns: gridColsFull, minWidth: gridMinWidth }}>
                     {orderedCols.map((col) => {
                       const active = sortCol === col.key;
+                      // The frozen Code column is pinned first and cannot be
+                      // dragged or used as a drop target — every movable column
+                      // reorders only among themselves. While a column is being
+                      // dragged, the column under the pointer gets a left/right
+                      // accent bar showing where it would land.
+                      const isDragging = draggingColKey === col.key;
+                      const isDropTarget =
+                        !col.frozen &&
+                        dragOverColKey === col.key &&
+                        draggingColKey !== null &&
+                        draggingColKey !== col.key;
+                      // Drop bar side: if the dragged column currently sits to
+                      // the LEFT of this one it would insert AFTER (right edge),
+                      // otherwise BEFORE (left edge).
+                      const dropOnRight =
+                        isDropTarget &&
+                        orderedMovableKeys.indexOf(draggingColKey!) <
+                          orderedMovableKeys.indexOf(col.key);
                       return (
                         <div
                           key={col.key}
+                          draggable={!col.frozen}
+                          onDragStart={(e) => {
+                            if (col.frozen) return;
+                            setDraggingColKey(col.key);
+                            e.dataTransfer.effectAllowed = "move";
+                            // Firefox requires data to be set for drag to start.
+                            try {
+                              e.dataTransfer.setData("text/plain", col.key);
+                            } catch {
+                              /* some browsers disallow setData here */
+                            }
+                          }}
+                          onDragOver={(e) => {
+                            // Allow a drop only onto another movable column.
+                            if (col.frozen || draggingColKey === null) return;
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = "move";
+                            if (dragOverColKey !== col.key)
+                              setDragOverColKey(col.key);
+                          }}
+                          onDragLeave={() => {
+                            if (dragOverColKey === col.key) setDragOverColKey(null);
+                          }}
+                          onDrop={(e) => {
+                            if (col.frozen || draggingColKey === null) return;
+                            e.preventDefault();
+                            reorderColumn(
+                              draggingColKey,
+                              col.key,
+                              orderedMovableKeys,
+                              cat,
+                            );
+                            setDraggingColKey(null);
+                            setDragOverColKey(null);
+                          }}
+                          onDragEnd={() => {
+                            setDraggingColKey(null);
+                            setDragOverColKey(null);
+                          }}
                           onClick={() => toggleSort(col.key)}
-                          title="Click to sort"
-                          className={`${thCls} relative group/th flex items-center gap-1 select-none cursor-pointer hover:text-[#374151] ${
+                          title={col.frozen ? "Click to sort" : "Drag to reorder · click to sort"}
+                          className={`${thCls} relative group/th flex items-center gap-1 select-none hover:text-[#374151] ${
+                            col.frozen ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"
+                          } ${
                             col.frozen
                               ? "sticky left-0 z-20 bg-[#F9FAFB] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]"
                               : ""
-                          } ${active ? "text-[#6B5C32]" : ""}`}
+                          } ${active ? "text-[#6B5C32]" : ""} ${
+                            isDragging ? "opacity-40" : ""
+                          }`}
                         >
+                          {/* Drop-position indicator — a thin accent bar on the
+                              edge the dragged column would land against. */}
+                          {isDropTarget && (
+                            <span
+                              aria-hidden="true"
+                              className={`absolute top-0 ${
+                                dropOnRight ? "right-0" : "left-0"
+                              } h-full w-0.5 bg-[#6B5C32]`}
+                            />
+                          )}
                           {col.frozen && (
                             <span className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" />
                           )}
@@ -3430,8 +3602,17 @@ export default function ProductsPage() {
                             {sortIndicator(col.key)}
                           </span>
                           {/* Resize handle — drag to set px width, dbl-click
-                              to clear back to the responsive default. */}
+                              to clear back to the responsive default. Not a
+                              reorder handle: it must not start a column drag, so
+                              draggable is force-off here and drag events are
+                              swallowed (grabbing the edge resizes, the rest of
+                              the header drags-to-reorder). */}
                           <span
+                            draggable={false}
+                            onDragStart={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                            }}
                             onMouseDown={(e) =>
                               beginColResize(
                                 e,
@@ -3645,29 +3826,163 @@ export default function ProductsPage() {
                             </span>
                           )}
                         </div>
-                        {colOn("description") && (
-                          <div className="px-3 py-1.5 min-w-0">
-                            <span className="text-xs text-[#111827] truncate block" title={p.name}>{p.name}</span>
-                            <span className="block text-[11px] text-[#9CA3AF] truncate" title={p.description}>{p.description}</span>
-                          </div>
-                        )}
-
-                        {isSofa ? (
-                          /* ===== SOFA columns: Model | 24 | 28 | 30 | 32 | 35 ===== */
-                          <>
-                            {colOn("model") && (
+                        {/* Body cells, keyed by column key, then rendered in the
+                            SAME order as the header via orderedCols (below). The
+                            grid uses ONE ordered list, so reordering a column in
+                            the header reorders its body cell in lockstep — header
+                            and body can never misalign. Each cell's JSX (and its
+                            inline edit / dirty behaviour) is unchanged; only the
+                            iteration order is now data-driven. Hidden columns
+                            aren't in orderedCols, so their cells never render. */}
+                        {(() => {
+                          const norm = (v: unknown) => String(v ?? "").replace('"', '').trim();
+                          const bodyCellByKey: Record<string, ReactNode> = {
+                            description: (
+                              <div className="px-3 py-1.5 min-w-0">
+                                <span className="text-xs text-[#111827] truncate block" title={p.name}>{p.name}</span>
+                                <span className="block text-[11px] text-[#9CA3AF] truncate" title={p.description}>{p.description}</span>
+                              </div>
+                            ),
+                            model: (
                               <div className="px-3 py-1.5 text-sm text-[#111827] truncate" title={p.baseModel}>{p.baseModel}</div>
-                            )}
-                            {(['24"', '28"', '30"', '32"', '35"'] as const)
-                              .filter((h) => colOn(`h${h.replace('"', "")}`))
-                              .map((h) => {
+                            ),
+                            category: (
+                              <div className="px-3 py-1.5 min-w-0 flex items-center" title={p.category}>
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium max-w-full truncate ${
+                                  p.category === "BEDFRAME" ? "bg-[#FAEFCB] text-[#9C6F1E]" : "bg-[#E0EDF0] text-[#3E6570]"
+                                }`}>
+                                  {p.category}
+                                </span>
+                              </div>
+                            ),
+                            size: (
+                              <div className="px-3 py-1.5 text-sm text-[#111827] truncate" title={p.sizeLabel}>{p.sizeLabel}</div>
+                            ),
+                            price2: (
+                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                              {isEditingThisPrice ? (
+                                <input
+                                  autoFocus
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
+                                  value={priceInput}
+                                  onChange={(e) => setPriceInput(e.target.value)}
+                                  onBlur={() => {
+                                    const val = Math.round(parseFloat(priceInput || "0") * 100);
+                                    setEditingPrice(null);
+                                    // Local-only update — bulk Save batches every dirty
+                                    // cell into one product_prices row at the picked
+                                    // effective date.
+                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, basePriceSen: val } : pr));
+                                    recordDirty(p.id, { basePriceSen: val });
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                    if (e.key === "Escape") setEditingPrice(null);
+                                  }}
+                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                  step="0.01"
+                                />
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    if (!editMode) return;
+                                    setEditingPrice(p.id);
+                                    setPriceInput((basePrice / 100).toFixed(2));
+                                  }}
+                                  className={`text-sm font-medium ${
+                                    isProductDirty(p.id) && dirtyEdits.get(p.id)?.basePriceSen !== undefined
+                                      ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
+                                      : "text-[#111827]"
+                                  } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
+                                >
+                                  {basePrice > 0 ? formatCurrency(basePrice) : <span className="text-[#9CA3AF]">Set price</span>}
+                                </button>
+                              )}
+                            </div>
+                            ),
+                            price1: (
+                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                              {editingPrice1 === p.id ? (
+                                <input
+                                  autoFocus
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
+                                  value={price1Input}
+                                  onChange={(e) => setPrice1Input(e.target.value)}
+                                  onBlur={() => {
+                                    const val = Math.round(parseFloat(price1Input || "0") * 100);
+                                    setEditingPrice1(null);
+                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, price1Sen: val } : pr));
+                                    recordDirty(p.id, { price1Sen: val });
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                    if (e.key === "Escape") setEditingPrice1(null);
+                                  }}
+                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                  step="0.01"
+                                />
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    if (!editMode) return;
+                                    setEditingPrice1(p.id);
+                                    setPrice1Input((price1Val / 100).toFixed(2));
+                                  }}
+                                  className={`text-sm font-medium ${
+                                    isProductDirty(p.id) && dirtyEdits.get(p.id)?.price1Sen !== undefined
+                                      ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
+                                      : "text-[#111827]"
+                                  } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
+                                >
+                                  {price1Val > 0 ? formatCurrency(price1Val) : <span className="text-[#9CA3AF]">-</span>}
+                                </button>
+                              )}
+                            </div>
+                            ),
+                            basePrice: (
+                            <div className="px-3 py-1.5 text-right">
+                              <span className="text-sm font-medium text-[#111827]">
+                                {basePrice > 0 ? formatCurrency(basePrice) : <span className="text-[#9CA3AF]">-</span>}
+                              </span>
+                            </div>
+                            ),
+                            // Unit (m³) / Fabric (m) — editMode-gated, defers to Save
+                            unitM3: renderUnitM3Cell(p, cfg),
+                            fabric: renderFabricCell(p, cfg),
+                            totalMin: (
+                            <div className="px-3 py-1.5 text-right truncate" title={`${totalMin} min`}>
+                              <div className="text-sm font-medium text-[#111827] truncate">{totalMin} min</div>
+                              {/* Labor cost moved to its own "Labor (est.)"
+                                  column — no longer duplicated under Total Min
+                                  (owner 2026-06-17). */}
+                            </div>
+                            ),
+                            variants: (
+                            <div className="px-3 py-1.5 flex justify-center" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                onClick={() => setEditingVariant(p)}
+                                className={`text-[10px] font-medium px-2 py-1 rounded-full border transition-colors ${
+                                  hasVariantDefaults
+                                    ? "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] hover:bg-[#EEF3E4]"
+                                    : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100"
+                                }`}
+                                title={
+                                  hasVariantDefaults
+                                    ? "Edit default variants for this SKU"
+                                    : "Configure default variants — Sales Order will pre-fill from these"
+                                }
+                              >
+                                {hasVariantDefaults ? `${variantSetCount} set` : "Configure"}
+                              </button>
+                            </div>
+                            ),
+                          };
+                          // Sofa per-seat-height price cells (one per height key).
+                          // Identical edit behaviour as before; keyed h24..h35 so
+                          // they slot into orderedCols like any other column.
+                          if (isSofa) {
+                            for (const h of ['24"', '28"', '30"', '32"', '35"'] as const) {
                               const hNum = h.replace('"', '');
-                              // Match heights regardless of storage type — DB has carried
-                              // int 24, string "24", and string '24"' at different times, so
-                              // normalise both sides before comparing. Prevents the find()
-                              // miss that caused the Products page to show blank sofa prices
-                              // and produced duplicate entries on edit.
-                              const norm = (v: unknown) => String(v ?? "").replace('"', '').trim();
                               // Cell read: scope by (height, current tier). Legacy
                               // entries with no `tier` resolve to P2 via entryTier(),
                               // so an old SKU that only has flat per-height prices
@@ -3678,8 +3993,8 @@ export default function ProductsPage() {
                               );
                               const editKey = `${p.id}__${h}__${sofaTier}`;
                               const isEditingThis = editingSeatPrices === editKey;
-                              return (
-                                <div key={h} className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                              bodyCellByKey[`h${hNum}`] = (
+                                <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
                                   {isEditingThis ? (
                                     <input
                                       autoFocus
@@ -3738,205 +4053,67 @@ export default function ProductsPage() {
                                   )}
                                 </div>
                               );
-                            })}
-                          </>
-                        ) : isAccessory ? null : (
-                          /* ===== BEDFRAME / ALL columns: Category | Size | Price 2 | Price 1 ===== */
-                          <>
-                            {colOn("category") && (
-                              <div className="px-3 py-1.5 min-w-0 flex items-center" title={p.category}>
-                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium max-w-full truncate ${
-                                  p.category === "BEDFRAME" ? "bg-[#FAEFCB] text-[#9C6F1E]" : "bg-[#E0EDF0] text-[#3E6570]"
-                                }`}>
-                                  {p.category}
-                                </span>
-                              </div>
-                            )}
-                            {colOn("size") && (
-                              <div className="px-3 py-1.5 text-sm text-[#111827] truncate" title={p.sizeLabel}>{p.sizeLabel}</div>
-                            )}
-                            {/* Price 2 */}
-                            {colOn("price2") && (
-                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                              {isEditingThisPrice ? (
-                                <input
-                                  autoFocus
-                                  type="number" onFocus={(e) => e.currentTarget.select()}
-                                  value={priceInput}
-                                  onChange={(e) => setPriceInput(e.target.value)}
-                                  onBlur={() => {
-                                    const val = Math.round(parseFloat(priceInput || "0") * 100);
-                                    setEditingPrice(null);
-                                    // Local-only update — bulk Save batches every dirty
-                                    // cell into one product_prices row at the picked
-                                    // effective date.
-                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, basePriceSen: val } : pr));
-                                    recordDirty(p.id, { basePriceSen: val });
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                    if (e.key === "Escape") setEditingPrice(null);
-                                  }}
-                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
-                                  step="0.01"
-                                />
-                              ) : (
-                                <button
-                                  onClick={() => {
-                                    if (!editMode) return;
-                                    setEditingPrice(p.id);
-                                    setPriceInput((basePrice / 100).toFixed(2));
-                                  }}
-                                  className={`text-sm font-medium ${
-                                    isProductDirty(p.id) && dirtyEdits.get(p.id)?.basePriceSen !== undefined
-                                      ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
-                                      : "text-[#111827]"
-                                  } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
-                                >
-                                  {basePrice > 0 ? formatCurrency(basePrice) : <span className="text-[#9CA3AF]">Set price</span>}
-                                </button>
-                              )}
-                            </div>
-                            )}
-                            {/* Price 1 */}
-                            {colOn("price1") && (
-                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                              {editingPrice1 === p.id ? (
-                                <input
-                                  autoFocus
-                                  type="number" onFocus={(e) => e.currentTarget.select()}
-                                  value={price1Input}
-                                  onChange={(e) => setPrice1Input(e.target.value)}
-                                  onBlur={() => {
-                                    const val = Math.round(parseFloat(price1Input || "0") * 100);
-                                    setEditingPrice1(null);
-                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, price1Sen: val } : pr));
-                                    recordDirty(p.id, { price1Sen: val });
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                    if (e.key === "Escape") setEditingPrice1(null);
-                                  }}
-                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
-                                  step="0.01"
-                                />
-                              ) : (
-                                <button
-                                  onClick={() => {
-                                    if (!editMode) return;
-                                    setEditingPrice1(p.id);
-                                    setPrice1Input((price1Val / 100).toFixed(2));
-                                  }}
-                                  className={`text-sm font-medium ${
-                                    isProductDirty(p.id) && dirtyEdits.get(p.id)?.price1Sen !== undefined
-                                      ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
-                                      : "text-[#111827]"
-                                  } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
-                                >
-                                  {price1Val > 0 ? formatCurrency(price1Val) : <span className="text-[#9CA3AF]">-</span>}
-                                </button>
-                              )}
-                            </div>
-                            )}
-                          </>
-                        )}
-                        {isAccessory ? (
-                          /* ===== ACCESSORY columns: Base Price | Unit M3 | Fabric (no edit) ===== */
-                          <>
-                            {colOn("basePrice") && (
-                            <div className="px-3 py-1.5 text-right">
-                              <span className="text-sm font-medium text-[#111827]">
-                                {basePrice > 0 ? formatCurrency(basePrice) : <span className="text-[#9CA3AF]">-</span>}
-                              </span>
-                            </div>
-                            )}
-                            {/* Unit (m³) — editMode-gated, defers to Save */}
-                            {colOn("unitM3") && renderUnitM3Cell(p, cfg)}
-                            {/* Fabric (m) — editMode-gated, defers to Save */}
-                            {colOn("fabric") && renderFabricCell(p, cfg)}
-                          </>
-                        ) : (
-                          <>
-                            {/* Unit (m³) — editMode-gated, defers to Save */}
-                            {colOn("unitM3") && renderUnitM3Cell(p, cfg)}
-                            {/* Fabric (m) — editMode-gated, defers to Save */}
-                            {colOn("fabric") && renderFabricCell(p, cfg)}
-                            {colOn("totalMin") && (
-                            <div className="px-3 py-1.5 text-right truncate" title={`${totalMin} min`}>
-                              <div className="text-sm font-medium text-[#111827] truncate">{totalMin} min</div>
-                              {/* Labor cost moved to its own "Labor (est.)"
-                                  column — no longer duplicated under Total Min
-                                  (owner 2026-06-17). */}
-                            </div>
-                            )}
-                            {/* Variants badge */}
-                            {colOn("variants") && (
-                            <div className="px-3 py-1.5 flex justify-center" onClick={(e) => e.stopPropagation()}>
-                              <button
-                                onClick={() => setEditingVariant(p)}
-                                className={`text-[10px] font-medium px-2 py-1 rounded-full border transition-colors ${
-                                  hasVariantDefaults
-                                    ? "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] hover:bg-[#EEF3E4]"
-                                    : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100"
-                                }`}
-                                title={
-                                  hasVariantDefaults
-                                    ? "Edit default variants for this SKU"
-                                    : "Configure default variants — Sales Order will pre-fill from these"
-                                }
+                            }
+                          }
+                          // Analytic cells (Labor / Margin / Labor %), keyed by
+                          // each analytic column's key. Same computation as before.
+                          for (const c of activeAnalyticCols) {
+                            const mainPrice = isSofa ? sofaRepPriceSen : basePrice;
+                            const priceFor =
+                              c.key === "marginP1" || c.key === "laborPctP1"
+                                ? price1Val
+                                : mainPrice;
+                            const isPct =
+                              c.key === "laborPctP2" || c.key === "laborPctP1";
+                            bodyCellByKey[c.key] = (
+                              <div
+                                className="px-3 py-1.5 text-right text-sm tabular-nums truncate"
+                                title={filterValueFor(p, c.key) || "—"}
                               >
-                                {hasVariantDefaults ? `${variantSetCount} set` : "Configure"}
-                              </button>
-                            </div>
-                            )}
-                          </>
-                        )}
-                        {activeAnalyticCols.map((c) => {
-                          const mainPrice = isSofa ? sofaRepPriceSen : basePrice;
-                          const priceFor =
-                            c.key === "marginP1" || c.key === "laborPctP1"
-                              ? price1Val
-                              : mainPrice;
-                          const isPct =
-                            c.key === "laborPctP2" || c.key === "laborPctP1";
-                          return (
-                            <div
-                              key={c.key}
-                              className="px-3 py-1.5 text-right text-sm tabular-nums truncate"
-                              title={filterValueFor(p, c.key) || "—"}
-                            >
-                              {c.key === "labor" ? (
-                                laborCostSen > 0 ? (
-                                  formatCurrency(laborCostSen)
-                                ) : (
+                                {c.key === "labor" ? (
+                                  laborCostSen > 0 ? (
+                                    formatCurrency(laborCostSen)
+                                  ) : (
+                                    <span className="text-[#9CA3AF]">—</span>
+                                  )
+                                ) : priceFor <= 0 || laborCostSen <= 0 ? (
                                   <span className="text-[#9CA3AF]">—</span>
-                                )
-                              ) : priceFor <= 0 || laborCostSen <= 0 ? (
-                                <span className="text-[#9CA3AF]">—</span>
-                              ) : isPct ? (
-                                <span className="text-[#111827]">
-                                  {((laborCostSen / priceFor) * 100).toFixed(1)}%
-                                </span>
-                              ) : (
-                                (() => {
-                                  const m = priceFor - laborCostSen;
-                                  return (
-                                    <span
-                                      className={
-                                        m >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"
-                                      }
-                                    >
-                                      {formatCurrency(m)}
-                                      <span className="ml-1 text-[10px] text-[#9CA3AF]">
-                                        ({((m / priceFor) * 100).toFixed(1)}%)
+                                ) : isPct ? (
+                                  <span className="text-[#111827]">
+                                    {((laborCostSen / priceFor) * 100).toFixed(1)}%
+                                  </span>
+                                ) : (
+                                  (() => {
+                                    const m = priceFor - laborCostSen;
+                                    return (
+                                      <span
+                                        className={
+                                          m >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"
+                                        }
+                                      >
+                                        {formatCurrency(m)}
+                                        <span className="ml-1 text-[10px] text-[#9CA3AF]">
+                                          ({((m / priceFor) * 100).toFixed(1)}%)
+                                        </span>
                                       </span>
-                                    </span>
-                                  );
-                                })()
-                              )}
-                            </div>
-                          );
-                        })}
+                                    );
+                                  })()
+                                )}
+                              </div>
+                            );
+                          }
+                          // Render every non-frozen column's cell in the exact
+                          // header order. The frozen Code cell is rendered above
+                          // (sticky-left); here we emit the rest from orderedCols
+                          // so body order === header order === grid-track order.
+                          return orderedCols
+                            .filter((col) => !col.frozen)
+                            .map((col) => (
+                              <Fragment key={col.key}>
+                                {bodyCellByKey[col.key] ?? null}
+                              </Fragment>
+                            ));
+                        })()}
                       </div>
                       {/* Expanded section */}
                       {isExpanded && (

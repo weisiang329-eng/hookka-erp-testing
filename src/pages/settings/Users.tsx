@@ -94,6 +94,13 @@ type UserRow = {
   createdAt: string;
   lastLoginAt: string | null;
   displayName: string;
+  // User-level org placement (owner 2026-06-17, "這個是看 position，不需要 alias").
+  // Returned by GET /api/users; the Org Chart groups on these, NOT on the
+  // @hookka.com alias — so EVERY user can be placed, aliased or not. reportsTo
+  // is the upline's user id ("" = none), mirroring Houzs-Century's parentId.
+  department: string;
+  position: string;
+  reportsTo: string;
 };
 
 type InviteRow = {
@@ -360,17 +367,28 @@ export default function UsersPage() {
   // ----- Org Chart drag-and-drop (Edit → Save, no naked edits) -----
   // The chart is READ-ONLY until the operator clicks "Edit layout". In edit
   // mode each person card becomes draggable; dropping it on a Department bucket
-  // queues an assigned_dept change in `orgDraft` (addressId → newDept) without
-  // touching the server. Save PATCHes every queued change
-  // (/api/mail-center/addresses/:id { assignedDept }); Cancel discards. The
-  // chart then rebuilds from the refreshed alias data — the dept lives on each
-  // person's @hookka.com alias row, the same field the Edit-details modal sets.
+  // queues a department change in `orgDeptDraft` (userId → newDept) without
+  // touching the server. A per-card "Reports to" picker queues an upline change
+  // in `orgReportsDraft` (userId → managerUserId | ""). Save PUTs every queued
+  // change (PUT /api/users/:id { department / reportsTo }); Cancel discards.
+  //
+  // KEY CHANGE (owner 2026-06-17, "這個是看 position，不需要 alias"): department,
+  // position and the reporting line now live on the USER row, so EVERY user can
+  // be placed — no @hookka.com alias required. The chart groups on u.department
+  // / u.position straight from GET /api/users, not on the mail alias.
   const [orgEdit, setOrgEdit] = useState(false);
-  // addressId → target department (the dragged person's alias gets this dept).
-  const [orgDraft, setOrgDraft] = useState<Map<string, string>>(new Map());
+  // userId → target department (the dragged person's user row gets this dept).
+  const [orgDeptDraft, setOrgDeptDraft] = useState<Map<string, string>>(
+    new Map(),
+  );
+  // userId → upline user id ("" clears the reporting line). Mirrors Houzs's
+  // Upline picker; persisted as reportsTo on PUT /api/users/:id.
+  const [orgReportsDraft, setOrgReportsDraft] = useState<Map<string, string>>(
+    new Map(),
+  );
   const [orgSaving, setOrgSaving] = useState(false);
   // The card currently being dragged + the bucket it is hovering, so the UI
-  // can show a drop-target highlight. addressId of the dragged person's alias.
+  // can show a drop-target highlight. userId of the dragged person.
   const [orgDragId, setOrgDragId] = useState<string | null>(null);
   const [orgDropDept, setOrgDropDept] = useState<string | null>(null);
 
@@ -582,29 +600,37 @@ export default function UsersPage() {
     !!alias && alias.assignedUserId !== u.id;
 
   // Effective department for a user, honouring any queued drag in edit mode
-  // (orgDraft on the user's alias id) over the alias's saved assigned_dept.
-  // Users with no alias can't carry a draft (nothing to PATCH) → "Unassigned".
+  // (orgDeptDraft on the user id) over the user's saved department. Empty
+  // department ⇒ "Unassigned". Driven by the USER row now, so a user needs NO
+  // @hookka.com alias to be placed (owner 2026-06-17).
   const effectiveDept = useCallback(
     (u: UserRow): string => {
-      const alias = aliasByUserId.get(u.id);
-      if (alias && orgDraft.has(alias.id)) return orgDraft.get(alias.id)!;
-      return alias?.assignedDept || "Unassigned";
+      if (orgDeptDraft.has(u.id)) return orgDeptDraft.get(u.id)!;
+      return u.department || "Unassigned";
     },
-    [aliasByUserId, orgDraft],
+    [orgDeptDraft],
+  );
+  // Effective upline (reportsTo user id) for a user, honouring any queued
+  // change in edit mode over the saved reportsTo. "" ⇒ no upline.
+  const effectiveReportsTo = useCallback(
+    (u: UserRow): string => {
+      if (orgReportsDraft.has(u.id)) return orgReportsDraft.get(u.id)!;
+      return u.reportsTo || "";
+    },
+    [orgReportsDraft],
   );
 
-  // Org chart — active staff grouped by department → position, using the dept/
-  // position recorded on each person's @hookka.com alias (the per-user org data
-  // the owner already enters). In edit mode the grouping reflects queued drags
-  // (orgDraft) so a card visibly moves the instant it's dropped, before Save.
-  // Users without an alias fall under "Unassigned".
+  // Org chart — active staff grouped by department → position, using the
+  // department / position recorded on each USER row (the per-user org data the
+  // owner enters). In edit mode the grouping reflects queued drags
+  // (orgDeptDraft) so a card visibly moves the instant it's dropped, before
+  // Save. Users with no department fall under "Unassigned".
   const orgChart = useMemo(() => {
     const byDept = new Map<string, Map<string, UserRow[]>>();
     for (const u of users) {
       if (!u.isActive) continue;
-      const alias = aliasByUserId.get(u.id);
       const dept = effectiveDept(u);
-      const pos = alias?.assignedPosition || "—";
+      const pos = u.position || "—";
       let posMap = byDept.get(dept);
       if (!posMap) {
         posMap = new Map();
@@ -615,12 +641,12 @@ export default function UsersPage() {
       else posMap.set(pos, [u]);
     }
     return byDept;
-  }, [users, aliasByUserId, effectiveDept]);
+  }, [users, effectiveDept]);
   // Stable column order: Support / Finance / HR first, other depts A–Z, then
   // "Unassigned" last. In edit mode ALWAYS surface the three fixed buckets +
   // Unassigned even when empty, so there's a visible drop target to drag onto.
   const orgDepts = useMemo(() => {
-    const order = ["Support", "Finance", "HR"];
+    const order: string[] = [...DEPT_OPTIONS];
     const keys = new Set<string>(orgChart.keys());
     if (orgEdit) {
       for (const d of order) keys.add(d);
@@ -637,65 +663,111 @@ export default function UsersPage() {
     });
   }, [orgChart, orgEdit]);
 
+  // Active users, for the "Reports to" upline picker (a person can report to
+  // any other active user; the picker excludes the person themselves).
+  const activeUsers = useMemo(
+    () => users.filter((u) => u.isActive),
+    [users],
+  );
+  // userId → display label, so a card can show "Reports to <name>".
+  const userLabelById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const u of users) m.set(u.id, u.displayName || u.email);
+    return m;
+  }, [users]);
+
   // ----- Org Chart edit handlers -----
   const beginOrgEdit = () => {
-    setOrgDraft(new Map());
+    setOrgDeptDraft(new Map());
+    setOrgReportsDraft(new Map());
     setOrgDragId(null);
     setOrgDropDept(null);
     setOrgEdit(true);
   };
   const cancelOrgEdit = () => {
     setOrgEdit(false);
-    setOrgDraft(new Map());
+    setOrgDeptDraft(new Map());
+    setOrgReportsDraft(new Map());
     setOrgDragId(null);
     setOrgDropDept(null);
   };
   // Drop a dragged person card onto a department bucket. Queues the move in
-  // orgDraft (alias id → dept). If it matches the alias's saved dept, the entry
-  // is dropped so Save stays a true no-op for unchanged cards.
+  // orgDeptDraft (userId → dept). If it matches the user's saved dept, the
+  // entry is dropped so Save stays a true no-op for unchanged cards.
   const dropOnDept = (u: UserRow, dept: string) => {
-    const alias = aliasByUserId.get(u.id);
     setOrgDragId(null);
     setOrgDropDept(null);
-    if (!alias) return; // no alias row → nothing to persist (guarded in UI)
-    const saved = alias.assignedDept || "Unassigned";
-    setOrgDraft((prev) => {
+    const saved = u.department || "Unassigned";
+    setOrgDeptDraft((prev) => {
       const next = new Map(prev);
-      if (dept === saved) next.delete(alias.id);
-      else next.set(alias.id, dept);
+      if (dept === saved) next.delete(u.id);
+      else next.set(u.id, dept);
       return next;
     });
   };
-  // Save every queued dept move. One PATCH per changed alias; "Unassigned"
-  // clears the field (sent as empty → stored NULL by the backend).
+  // Queue an upline change for a user (the "Reports to" picker). Dropping it
+  // back to the saved value removes the entry so Save stays a no-op.
+  const setReportsToDraft = (u: UserRow, managerId: string) => {
+    const saved = u.reportsTo || "";
+    setOrgReportsDraft((prev) => {
+      const next = new Map(prev);
+      if (managerId === saved) next.delete(u.id);
+      else next.set(u.id, managerId);
+      return next;
+    });
+  };
+  // True when a user has any queued org change (dept drag or upline edit).
+  const userHasOrgDraft = (u: UserRow): boolean =>
+    orgDeptDraft.has(u.id) || orgReportsDraft.has(u.id);
+  // Count of distinct users with a queued change (for the Save button badge).
+  const orgDraftCount = useMemo(() => {
+    const ids = new Set<string>([
+      ...orgDeptDraft.keys(),
+      ...orgReportsDraft.keys(),
+    ]);
+    return ids.size;
+  }, [orgDeptDraft, orgReportsDraft]);
+
+  // Save every queued change. One PUT per changed user merging the queued
+  // department and/or reportsTo; "Unassigned" clears the department (sent as
+  // "" → stored NULL by the backend), "" clears the reporting line.
   const saveOrgEdit = async () => {
-    if (orgDraft.size === 0) {
+    const changedIds = new Set<string>([
+      ...orgDeptDraft.keys(),
+      ...orgReportsDraft.keys(),
+    ]);
+    if (changedIds.size === 0) {
       cancelOrgEdit();
       showFlash("ok", "No changes to save");
       return;
     }
     setOrgSaving(true);
     try {
-      const ops = [...orgDraft.entries()].map(([addressId, dept]) =>
-        fetch(`/api/mail-center/addresses/${addressId}`, {
-          method: "PATCH",
+      const ops = [...changedIds].map((userId) => {
+        const body: Record<string, string> = {};
+        if (orgDeptDraft.has(userId)) {
+          const dept = orgDeptDraft.get(userId)!;
+          body.department = dept === "Unassigned" ? "" : dept;
+        }
+        if (orgReportsDraft.has(userId)) {
+          body.reportsTo = orgReportsDraft.get(userId)!;
+        }
+        return fetch(`/api/users/${userId}`, {
+          method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            assignedDept: dept === "Unassigned" ? "" : dept,
-          }),
-        }),
-      );
+          body: JSON.stringify(body),
+        });
+      });
       const results = await Promise.all(ops);
       const failed = results.filter((r) => !r.ok).length;
-      invalidateCachePrefix("/api/mail-center/addresses");
-      refreshAddressesHook();
+      fetchUsers();
       if (failed > 0) {
         showFlash(
           "err",
-          `${ops.length - failed} move(s) saved, ${failed} failed. Review and retry.`,
+          `${ops.length - failed} change(s) saved, ${failed} failed. Review and retry.`,
         );
       } else {
-        showFlash("ok", `Org chart saved (${ops.length} move(s))`);
+        showFlash("ok", `Org chart saved (${ops.length} change(s))`);
         cancelOrgEdit();
       }
     } catch (err) {
@@ -1405,6 +1477,16 @@ export default function UsersPage() {
         if (!canManageUsers) {
           return <span className="text-xs text-gray-400">—</span>;
         }
+        // ALIAS ONE-PER-PERSON (owner): an alias is one-per-person. The branch
+        // above already returns the existing-alias chip, so by here `alias` is
+        // undefined and "Add alias" is the only create affordance. The explicit
+        // aliasByUserId guard makes that invariant impossible to break in a
+        // later refactor — if a user somehow has an alias we never render the
+        // create button. (Backend enforcement still lives in mail-center.ts —
+        // see report.)
+        if (aliasByUserId.has(u.id)) {
+          return <span className="text-xs text-gray-400">—</span>;
+        }
         return (
           <Button
             variant="ghost"
@@ -1894,23 +1976,24 @@ export default function UsersPage() {
                         {" "}
                         Click <strong>Edit layout</strong>, then{" "}
                         <strong>drag a person card</strong> into another
-                        department column to move them. Changes apply only after
-                        you click Save.
+                        department column to move them, and set who each person{" "}
+                        <strong>reports to</strong>. Changes apply only after you
+                        click Save.
                       </>
                     ) : (
                       <>
                         {" "}
-                        Department and position come from each person&apos;s
-                        @hookka.com alias.
+                        Department, position and reporting line come from each
+                        person&apos;s profile.
                       </>
                     )}
                   </CardDescription>
                 </div>
               </div>
-              {/* Edit layout / Save / Cancel — Super Admin only (the dept lives
-                  on the alias row; PATCH /addresses is requireSuperAdmin).
-                  Mirrors the Mailbox Access bar: read-only until Edit, Save
-                  commits every queued drag, no naked edits. */}
+              {/* Edit layout / Save / Cancel — Super Admin only (PUT
+                  /api/users/:id is requireSuperAdmin). Mirrors the Mailbox
+                  Access bar: read-only until Edit, Save commits every queued
+                  change (department drag + reporting line), no naked edits. */}
               {canManageUsers && (
                 <div className="flex shrink-0 gap-2">
                   {!orgEdit ? (
@@ -1942,8 +2025,8 @@ export default function UsersPage() {
                         )}
                         {orgSaving
                           ? "Saving…"
-                          : orgDraft.size > 0
-                            ? `Save (${orgDraft.size})`
+                          : orgDraftCount > 0
+                            ? `Save (${orgDraftCount})`
                             : "Save"}
                       </Button>
                     </>
@@ -1960,8 +2043,8 @@ export default function UsersPage() {
                   No staff placed on the org chart yet
                 </div>
                 <div className="mx-auto mt-1 max-w-md text-xs text-gray-500">
-                  People appear here once they have a{" "}
-                  <strong>Department</strong> set.{" "}
+                  Every active user appears here once they have a{" "}
+                  <strong>Department</strong> set — no email alias required.{" "}
                   {canManageUsers ? (
                     <>
                       Click <strong>Edit layout</strong> and drag each person
@@ -1979,17 +2062,17 @@ export default function UsersPage() {
               </div>
             ) : (
               <>
-                {/* Edit-mode banner: only people WITH a @hookka.com alias can be
-                    dragged (the dept is stored on that alias row). Unaliased
-                    staff show a hint to create an alias first. */}
+                {/* Edit-mode banner: department + reporting line live on the
+                    user record, so EVERY active person can be dragged and given
+                    an upline — no @hookka.com alias required (owner
+                    2026-06-17). */}
                 {orgEdit && (
                   <div className="mb-4 rounded-md border border-[#CFE0F3] bg-[#F2F7FD] px-3 py-2 text-xs text-[#2C5B8F]">
                     <GripVertical className="mr-1 inline h-3.5 w-3.5 -mt-0.5" />
-                    Drag a person card onto a department column to move them.
-                    Only staff with a @hookka.com alias can be moved — create one
-                    with{" "}
-                    <SlidersHorizontal className="inline h-3 w-3 -mt-0.5" /> Edit
-                    details on the Users tab first.
+                    Drag a person card onto a department column to move them, and
+                    use the <strong>Reports to</strong> picker on each card to set
+                    their upline. Every active user can be placed — no email
+                    alias needed. Changes apply only after you click Save.
                   </div>
                 )}
                 {/* When everyone is still Unassigned (no depts entered) and not
@@ -2125,77 +2208,123 @@ export default function UsersPage() {
                                     .slice(0, 2)
                                     .map((p) => p[0]?.toUpperCase() ?? "")
                                     .join("");
-                                  const alias = aliasByUserId.get(m.id);
-                                  const canDrag = orgEdit && !!alias;
-                                  const dragging =
-                                    orgDragId === (alias?.id ?? "");
-                                  const moved =
-                                    !!alias && orgDraft.has(alias.id);
+                                  // Department lives on the USER row, so EVERY
+                                  // active person is draggable in edit mode — no
+                                  // @hookka.com alias required (owner 2026-06-17).
+                                  const canDrag = orgEdit;
+                                  const dragging = orgDragId === m.id;
+                                  const moved = userHasOrgDraft(m);
+                                  const uplineId = effectiveReportsTo(m);
+                                  const uplineName = uplineId
+                                    ? (userLabelById.get(uplineId) ??
+                                      "(unknown)")
+                                    : "";
                                   return (
                                     <div
                                       key={m.id}
-                                      draggable={canDrag}
-                                      onDragStart={
-                                        canDrag
-                                          ? (e) => {
-                                              e.dataTransfer.setData(
-                                                "text/plain",
-                                                m.id,
-                                              );
-                                              e.dataTransfer.effectAllowed =
-                                                "move";
-                                              setOrgDragId(alias!.id);
-                                            }
-                                          : undefined
-                                      }
-                                      onDragEnd={
-                                        canDrag
-                                          ? () => {
-                                              setOrgDragId(null);
-                                              setOrgDropDept(null);
-                                            }
-                                          : undefined
-                                      }
-                                      title={
-                                        orgEdit && !alias
-                                          ? "No @hookka.com alias — create one on the Users tab to place this person"
-                                          : canDrag
-                                            ? "Drag to another department"
-                                            : undefined
-                                      }
                                       className={
-                                        "flex items-center gap-2 rounded-md border px-2 py-1.5 transition-opacity " +
+                                        "rounded-md border px-2 py-1.5 transition-opacity " +
                                         (dragging
                                           ? "opacity-40 "
                                           : "opacity-100 ") +
                                         (moved
                                           ? "border-[#6B5C32] bg-[#F7F4EC] "
-                                          : "border-[#E5E7EB] bg-white ") +
-                                        (canDrag
-                                          ? "cursor-grab active:cursor-grabbing"
-                                          : orgEdit
-                                            ? "cursor-not-allowed opacity-60"
-                                            : "")
+                                          : "border-[#E5E7EB] bg-white ")
                                       }
                                     >
-                                      {canDrag && (
-                                        <GripVertical className="h-3.5 w-3.5 shrink-0 text-[#C4BBA9]" />
-                                      )}
-                                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#EFEAE5] text-[10px] font-semibold text-[#6B5C32]">
-                                        {initials || "?"}
-                                      </span>
-                                      <div className="min-w-0 flex-1">
-                                        <div className="truncate text-xs font-medium text-[#111827]">
-                                          {m.displayName || m.email}
-                                        </div>
-                                        <div className="truncate text-[10px] text-[#9CA3AF]">
-                                          {m.email}
-                                        </div>
-                                      </div>
-                                      {moved && (
-                                        <span className="shrink-0 rounded bg-[#6B5C32]/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#6B5C32]">
-                                          Moved
+                                      <div
+                                        draggable={canDrag}
+                                        onDragStart={
+                                          canDrag
+                                            ? (e) => {
+                                                e.dataTransfer.setData(
+                                                  "text/plain",
+                                                  m.id,
+                                                );
+                                                e.dataTransfer.effectAllowed =
+                                                  "move";
+                                                setOrgDragId(m.id);
+                                              }
+                                            : undefined
+                                        }
+                                        onDragEnd={
+                                          canDrag
+                                            ? () => {
+                                                setOrgDragId(null);
+                                                setOrgDropDept(null);
+                                              }
+                                            : undefined
+                                        }
+                                        title={
+                                          canDrag
+                                            ? "Drag to another department"
+                                            : undefined
+                                        }
+                                        className={
+                                          "flex items-center gap-2 " +
+                                          (canDrag
+                                            ? "cursor-grab active:cursor-grabbing"
+                                            : "")
+                                        }
+                                      >
+                                        {canDrag && (
+                                          <GripVertical className="h-3.5 w-3.5 shrink-0 text-[#C4BBA9]" />
+                                        )}
+                                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#EFEAE5] text-[10px] font-semibold text-[#6B5C32]">
+                                          {initials || "?"}
                                         </span>
+                                        <div className="min-w-0 flex-1">
+                                          <div className="truncate text-xs font-medium text-[#111827]">
+                                            {m.displayName || m.email}
+                                          </div>
+                                          <div className="truncate text-[10px] text-[#9CA3AF]">
+                                            {m.email}
+                                          </div>
+                                        </div>
+                                        {moved && (
+                                          <span className="shrink-0 rounded bg-[#6B5C32]/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#6B5C32]">
+                                            Changed
+                                          </span>
+                                        )}
+                                      </div>
+                                      {/* Reporting line — read-only chip when
+                                          viewing, a picker when editing (mirrors
+                                          Houzs's Upline column + picker). */}
+                                      {orgEdit ? (
+                                        <div className="mt-1.5 flex items-center gap-1">
+                                          <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wide text-[#9CA3AF]">
+                                            Reports to
+                                          </span>
+                                          <select
+                                            value={uplineId}
+                                            onChange={(e) =>
+                                              setReportsToDraft(
+                                                m,
+                                                e.target.value,
+                                              )
+                                            }
+                                            title="Who this person reports to (their upline)"
+                                            className="h-7 min-w-0 flex-1 rounded border border-[#E2DDD8] bg-white px-1.5 text-[11px] text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+                                          >
+                                            <option value="">— None —</option>
+                                            {activeUsers
+                                              .filter((c) => c.id !== m.id)
+                                              .map((c) => (
+                                                <option key={c.id} value={c.id}>
+                                                  {c.displayName || c.email}
+                                                </option>
+                                              ))}
+                                          </select>
+                                        </div>
+                                      ) : (
+                                        uplineName && (
+                                          <div className="mt-1 truncate text-[10px] text-[#9CA3AF]">
+                                            Reports to{" "}
+                                            <span className="font-medium text-[#6B7280]">
+                                              {uplineName}
+                                            </span>
+                                          </div>
+                                        )
                                       )}
                                     </div>
                                   );

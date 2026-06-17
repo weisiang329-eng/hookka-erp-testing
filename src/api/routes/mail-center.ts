@@ -943,14 +943,17 @@ app.get("/access", async (c) => {
     `SELECT address_id, user_id FROM email_address_access WHERE org_id = ?`,
   )
     .bind(orgId)
-    .all<{ address_id: string; user_id: string }>();
-  // no-store — same read-after-write reason as /scope-levels: the matrix
-  // refetches this immediately after a grant POST/DELETE.
+    // Result columns come back camelCase (db-pg.ts transform.column.from), so
+    // address_id→addressId, user_id→userId. Reading snake_case returned
+    // undefined and silently dropped the grants (same class of bug as
+    // /scope-levels — owner 2026-06-17).
+    .all<{ addressId: string; userId: string }>();
+  // no-store — the matrix refetches this immediately after a grant POST/DELETE.
   c.header("Cache-Control", "no-store");
   return c.json(
     (res.results ?? []).map((r) => ({
-      addressId: r.address_id,
-      userId: r.user_id,
+      addressId: r.addressId,
+      userId: r.userId,
     })),
   );
 });
@@ -1036,15 +1039,18 @@ app.get("/scope-levels", async (c) => {
     `SELECT user_id, level FROM mail_user_scope WHERE org_id = ?`,
   )
     .bind(orgId)
-    .all<{ user_id: string; level: string }>();
-  // no-store: this list is read straight back after a PUT /scope-level. Any
-  // HTTP-layer caching (browser heuristic cache, edge) would serve the
-  // pre-write rows and the matrix would appear to "revert" the just-saved
-  // level (owner report 2026-06-17).
+    // THE View-level bug: the postgres client transforms result columns BACK to
+    // camelCase (db-pg.ts transform.column.from, inverse of the rename map), so
+    // a `user_id` column comes back as `userId`. Reading `r.user_id` returned
+    // undefined → the response dropped userId → the matrix couldn't map a level
+    // to its user → every row fell back to Personal even though the level WAS
+    // saved (owner "save 了还是跳回 personal", 2026-06-17). Read camelCase.
+    .all<{ userId: string; level: string }>();
+  // no-store so no HTTP-layer cache serves the pre-write list after a PUT.
   c.header("Cache-Control", "no-store");
   return c.json(
     (res.results ?? []).map((r) => ({
-      userId: r.user_id,
+      userId: r.userId,
       level: r.level,
     })),
   );

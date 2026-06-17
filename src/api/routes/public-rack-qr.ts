@@ -411,23 +411,39 @@ async function resolvePackingCard(
 
 type CurrentRack = { currentRackId: string | null; currentRackLabel: string | null };
 
-// Where (if anywhere) a production order's pieces currently sit. Most-recent
-// rack_items row for the PO. Manual HKITEM items have productionOrderId NULL →
-// never resolved here, so they are never reported as "already racked". NOT
-// org-scoped (rack_items has no orgId column — see the SCHEMA NOTE).
-async function currentRackOfPo(
+// The per-piece signature stock-in writes: rack_items.productName holds the human
+// description (the WIP label, e.g. '8" Divan- 6FT'), and notes holds "SO <no>" (or
+// "" when there's no SO). Stock-OUT matches on this same signature, so move-
+// detection MUST too — see the rack memory.
+function pieceNotes(soNo: string | null): string {
+  return soNo ? `SO ${soNo}` : "";
+}
+
+// Where (if anywhere) THIS piece currently sits — matched by the SAME per-piece
+// signature stock-in writes (productName = the WIP/description, notes = "SO <no>"),
+// NOT by productionOrderId. A bedframe PO has MANY pieces (Divan, Headboard, …)
+// across many racks, so a PO-level match returned a SIBLING piece's rack — or
+// nothing when the stored row's PO id didn't line up — and the move prompt never
+// fired (owner 2026-06-17: the piece sat in Rack 3 but a re-scan elsewhere neither
+// warned "already in Rack 3" nor offered Move). Signature-match finds the exact
+// piece and mirrors the stock-OUT contract. NOT org-scoped (rack_items has no
+// orgId column — see the SCHEMA NOTE).
+async function currentRackOfPiece(
   db: D1Database,
-  productionOrderId: string,
+  description: string,
+  soNo: string | null,
 ): Promise<CurrentRack> {
+  const name = (description || "").trim();
+  if (!name) return { currentRackId: null, currentRackLabel: null };
   const row = await db
     .prepare(
       `SELECT ri.rackLocationId AS rackLocationId, rl.rack AS rack
          FROM rack_items ri
          JOIN rack_locations rl ON rl.id = ri.rackLocationId
-        WHERE ri.productionOrderId = ?
+        WHERE ri.productName = ? AND ri.notes = ?
         ORDER BY ri.id DESC LIMIT 1`,
     )
-    .bind(productionOrderId)
+    .bind(name, pieceNotes(soNo))
     .first<{ rackLocationId: string | null; rack: string | null }>();
   return {
     currentRackId: row?.rackLocationId ?? null,
@@ -524,7 +540,7 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
         : null) ?? (await resolvePo(c.var.DB, term));
     if (!po) return c.json(notFound);
 
-    const cur = await currentRackOfPo(c.var.DB, po.productionOrderId);
+    const cur = await currentRackOfPiece(c.var.DB, po.description, po.salesOrderNo);
     return c.json({
       found: true,
       productionOrderId: po.productionOrderId,
@@ -593,27 +609,40 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
       qty: 1,
     }));
 
-    // Move-aware: for any item already racked in a DIFFERENT rack, delete its
-    // existing rack_items row(s) first so the piece is MOVED, not duplicated.
-    // Manual items (no PO) skip this. De-dup the PO ids so we issue one delete
-    // each. All deletes go into the SAME batch as the inserts → one atomic op.
+    // Move-aware, PER PIECE: for any piece already racked in a DIFFERENT rack,
+    // delete THAT one piece's row first so it is MOVED, not duplicated. Match on
+    // the per-piece signature (productName = description/WIP + notes = "SO <no>"),
+    // NOT productionOrderId — a bedframe PO has many pieces in many racks, so a
+    // PO-level delete would nuke the SIBLINGS still sitting in the old rack (owner
+    // 2026-06-17). Manual/loose items (no PO) always add, never move (many
+    // distinct pieces can share one HKITEM name, so signature-match isn't safe
+    // there). Delete exactly ONE matching row (the most recent) so two identical
+    // pieces in the old rack don't both vanish. De-dup identical signatures so we
+    // issue one delete each. All deletes go into the SAME atomic batch as the
+    // inserts.
     const moveDeletes: D1PreparedStatement[] = [];
-    const poIds = [
-      ...new Set(
-        items
-          .map((i) => i.productionOrderId)
-          .filter((x): x is string => !!x),
-      ),
-    ];
-    for (const poId of poIds) {
-      const cur = await currentRackOfPo(c.var.DB, poId);
+    const seenMove = new Set<string>();
+    for (const it of items) {
+      if (!it.productionOrderId) continue; // manual/loose piece → always add
+      const name = (it.productName || "").trim();
+      if (!name) continue;
+      const notes = pieceNotes(it.salesOrderNo ?? null);
+      const sig = `${name} ${notes}`;
+      if (seenMove.has(sig)) continue;
+      seenMove.add(sig);
+      const cur = await currentRackOfPiece(c.var.DB, name, it.salesOrderNo ?? null);
       if (cur.currentRackId && cur.currentRackId !== rackId) {
         moveDeletes.push(
           c.var.DB
             .prepare(
-              "DELETE FROM rack_items WHERE productionOrderId = ? AND rackLocationId = ?",
+              `DELETE FROM rack_items
+                 WHERE id = (
+                   SELECT ri.id FROM rack_items ri
+                    WHERE ri.productName = ? AND ri.notes = ? AND ri.rackLocationId = ?
+                    ORDER BY ri.id DESC LIMIT 1
+                 )`,
             )
-            .bind(poId, cur.currentRackId),
+            .bind(name, notes, cur.currentRackId),
         );
       }
     }

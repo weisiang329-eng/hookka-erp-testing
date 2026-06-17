@@ -1201,53 +1201,23 @@ export default function WorkerScanPage() {
       void handleDecoded(data);
     };
 
-    // "Too sensitive" guard (Wei Siang 2026-06-17): in BARCODE mode the schedule
-    // stacks many codes close together, so firing on the very first detection
-    // grabbed whatever flashed into frame before the worker had aimed. Require
-    // the SAME value to stay decoded for ~1s before locking — that's the "對準
-    // 1-2 秒先". QR mode (one sticker in view) stays instant.
-    let stableVal: string | null = null;
-    let stableSince = 0;
     let barcodeNativeMiss = 0;
     // Barcode-mode diagnostic counters (drive scanDbg).
     let bcN = 0;
     let bcLast = "";
     let bcDbgAt = 0;
-    // 600ms (was 900): still requires the SAME code held briefly so a barcode
-    // flashing through frame can't fire, but locks faster once the worker is
-    // aimed — the 900ms felt like "扫不到" when decodes were sparse.
-    // Barcode fires after the same value persists this long. Sparse iOS-Safari
-    // ZXing decodes never held 600ms → felt like 扫不到; the value is already
-    // Code128-checksum-valid AND bounded to the aim box, so a short confirm is safe.
-    const STABLE_MS = 300;
-    // Barcode mode decodes the FULL frame (no ROI/band crop) — a crop is what
-    // kept breaking it ("barcode 扫不到" while QR, which is also full-frame, read
-    // the same code fine). Isolation among stacked codes is handled by
-    // nearest-to-centre selection + the stable-hold below, NOT by cropping.
-    // Tolerant stable-hold: a SINGLE stray read of a neighbouring stacked row
-    // must NOT zero the hold (that fragility, combined with an over-wide ROI, is
-    // why barcode mode kept "regressing"). Only switch the tracked value once a
-    // DIFFERENT value shows up twice in a row; one-off jitter is ignored.
-    let bcSwitchCand = "";
+    // Barcode fires on the FIRST solid decode — exactly like QR mode. The owner
+    // was emphatic (2026-06-17): "QR code 很敏感, barcode 必須不行" — ANY hold made
+    // barcode feel dead next to QR's instant fire (the recurring "barcode 扫不到"
+    // he keeps hitting). A Code 128 decode is already checksum-valid (not noise),
+    // and the native path below picks the code NEAREST the frame centre, so the
+    // aimed code still wins WITHOUT a time-hold. Full-frame, no ROI/band crop —
+    // the crop was the original regression. If a "grabbed the neighbour" report
+    // ever recurs, fix it with nearest-centre/zoom, NOT a hold or crop (see the
+    // barcode_roi memory).
     const considerHit = (data: string) => {
       if (stopped || !data) return;
-      if (scanMode !== "barcode") {
-        onHit(data);
-        return;
-      }
-      const t = performance.now();
-      if (data === stableVal) {
-        bcSwitchCand = "";
-        if (t - stableSince >= STABLE_MS) onHit(data);
-      } else if (data === bcSwitchCand) {
-        // same NEW value twice → a real re-aim: adopt it and start its hold
-        stableVal = data;
-        stableSince = t;
-        bcSwitchCand = "";
-      } else {
-        // first sighting of a different value → treat as jitter, keep the hold
-        bcSwitchCand = data;
-      }
+      onHit(data);
     };
 
     const tick = async () => {

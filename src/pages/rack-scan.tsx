@@ -341,6 +341,13 @@ export default function RackScanPage() {
         raw === lastRawRef.current.value &&
         now - lastRawRef.current.at < DEDUP_MS
       ) {
+        // Held sticker: REFRESH the cooldown so a sticker kept in frame stays a
+        // silent no-op instead of re-firing "Already added" + 滴 every DEDUP_MS
+        // (owner 2026-06-17: "扫了一次它无限地扫、一直滴、拿走了还一直叫"). Only a
+        // real gap — the sticker leaving the frame for > DEDUP_MS — lets the same
+        // value through again (a deliberate re-scan), which shows "Already added"
+        // exactly once.
+        lastRawRef.current.at = now;
         return;
       }
       // Claim this value synchronously (no await in between) — the de-dup gate.
@@ -386,9 +393,8 @@ export default function RackScanPage() {
           jobCardId: j.jobCardId ?? null,
           qty: 1,
         };
-        // In a DIFFERENT rack → park for a Move / Skip decision. (Equal rack
-        // ids, or no current rack, just add — see below.) Lower tone: nothing
-        // was added yet, the worker must choose Move / Skip.
+        // In a DIFFERENT rack → park for a Move / Skip decision. Lower tone:
+        // nothing was added yet, the worker must choose Move / Skip.
         if (j.currentRackId && j.currentRackId !== rackId) {
           setScanMsg(null);
           setPendingMove({
@@ -398,9 +404,21 @@ export default function RackScanPage() {
           beep(false);
           return;
         }
-        // Already in THIS rack, or not racked anywhere → record ONE piece + "滴"
-        // (qty 1, keyed by the raw QR). addPiece returns false only if this
-        // exact QR is already listed → "Already added" + error tone.
+        // Already racked in THIS rack (persisted from a prior session) → tell the
+        // worker and DON'T write a duplicate row (owner 2026-06-17: "它已经在 Rack
+        // X 了却不显示"). A piece added earlier in THIS session is caught above by
+        // addedValuesRef ("Already added"); this branch covers the DB state.
+        if (j.currentRackId && j.currentRackId === rackId) {
+          setPendingMove(null);
+          setScanMsg(
+            `Already in this rack${j.currentRackLabel ? ` (${j.currentRackLabel})` : ""} — no need to scan again.`,
+          );
+          beep(false);
+          return;
+        }
+        // Not racked anywhere → record ONE piece + "滴" (qty 1, keyed by raw QR).
+        // addPiece returns false only if this exact QR is already listed →
+        // "Already added" + error tone.
         setPendingMove(null);
         if (addPiece(line)) {
           setScanMsg(`Added: ${desc}`);

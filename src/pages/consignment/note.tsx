@@ -34,6 +34,8 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { MALAYSIA_STATES, resolveStateCode } from "@/lib/malaysia-states";
+import { aggregateRacksFromPackingCards } from "@/lib/rack-format";
+import { isHbOnlySpecial } from "@/lib/delivery-pipeline";
 import {
   Package,
   PackageCheck,
@@ -368,7 +370,21 @@ type ProductionOrderApiShape = {
   completedDate?: string | null;
   targetEndDate?: string;
   rackingNumber?: string;
-  jobCards?: { departmentCode: string; status: string; completedDate?: string | null }[];
+  // Mirrored from production_orders.specialOrder so the HB-only completion
+  // gate (drop stranded DIVAN packing cards) matches the backend / DO page.
+  specialOrder?: string;
+  // wipType/wipLabel/rackingNumber are the per-PACKING-card fields the Rack
+  // column aggregates — /api/production-orders?fields=minimal&include=jobCards
+  // already emits them per card (rowToMinimalJobCard), so the per-piece rack
+  // ("Rack 3, 4") comes off the payload, not the lossy production_orders mirror.
+  jobCards?: {
+    departmentCode: string;
+    status: string;
+    completedDate?: string | null;
+    wipType?: string;
+    wipLabel?: string;
+    rackingNumber?: string;
+  }[];
 };
 
 // Shape we read from /api/consignment-orders so we can join hookkaExpectedDD
@@ -862,15 +878,29 @@ export default function ConsignmentNotePage() {
     return m;
   }, [poRaw]);
 
-  // Lookup: productionOrderId → rackingNumber. Same rationale as
-  // poToFabricMap — Detail dialog Items table needs a Rack column. The PO
-  // carries the racking assignment after upholstery completion.
+  // Lookup: productionOrderId → per-piece rack string ("Rack 3, 4"). Same
+  // rationale as poToFabricMap — the Detail dialog Items table needs a Rack
+  // column. A unit's pieces can sit on DIFFERENT racks (HB on Rack 3, DIVAN on
+  // Rack 4); production_orders.rackingNumber is a LOSSY single-rack mirror, so
+  // we aggregate the distinct racks off the PO's PACKING job cards instead
+  // (same shared helper + dedup/sort the DO PDF + DO list use). HB-only
+  // BEDFRAME specials drop their stranded DIVAN packing card.
   const poToRackMap = useMemo(() => {
     const m = new Map<string, string>();
     const arr = poRaw?.success ? poRaw.data : null;
     if (Array.isArray(arr)) {
       for (const po of arr) {
-        if (po?.id) m.set(po.id, po.rackingNumber || "");
+        if (!po?.id) continue;
+        const hbOnly =
+          (po.itemCategory || "").toUpperCase() === "BEDFRAME" &&
+          isHbOnlySpecial(po.specialOrder);
+        const packingCards = (po.jobCards ?? []).filter(
+          (j) => j.departmentCode === "PACKING",
+        );
+        m.set(
+          po.id,
+          aggregateRacksFromPackingCards(packingCards, { dropDivan: hbOnly }),
+        );
       }
     }
     return m;

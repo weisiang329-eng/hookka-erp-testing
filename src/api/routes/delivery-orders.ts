@@ -37,8 +37,10 @@ import {
   piecesFor as piecesForShared,
   deriveComponentRacks,
   buildRepairNote,
+  type PackingJcRow,
 } from "../lib/print-extras-shared";
 import { parseRepairScope, type RepairScope } from "../../lib/repair-scope";
+import { formatRacksCompact } from "../../lib/rack-format";
 import { createPackingListCore } from "./packing-lists";
 import {
   groupPosByCustomerHub,
@@ -2736,6 +2738,11 @@ async function createDeliveryOrderForPOs(
       customerName: string | null;
       customerState: string | null;
       serviceOrderId: string | null;
+      // itemCategory + specialOrder feed deriveComponentRacks so the DO-item
+      // rack snapshot is the AGGREGATED per-piece "Rack 3, 4", not the lossy
+      // production_orders.rackingNumber single-rack mirror.
+      itemCategory: string | null;
+      specialOrder: string | null;
     };
     const productionOrderIds: string[] = Array.isArray(body.productionOrderIds)
       ? (body.productionOrderIds as unknown[]).filter(
@@ -2750,7 +2757,7 @@ async function createDeliveryOrderForPOs(
         `SELECT id, poNo, salesOrderId, consignmentOrderId, companySOId,
                 serviceOrderId, productCode, productName,
                 sizeLabel, fabricCode, quantity, rackingNumber,
-                customerName, customerState
+                customerName, customerState, itemCategory, specialOrder
            FROM production_orders WHERE id IN (${placeholders})`,
       )
         .bind(...productionOrderIds)
@@ -3007,6 +3014,73 @@ async function createDeliveryOrderForPOs(
             rackingNumber: po.rackingNumber ?? "",
             packingStatus: "PENDING" as const,
           }));
+
+    // -------------------------------------------------------------------
+    // Per-piece rack snapshot. delivery_order_items.rackingNumber is frozen
+    // at DO-creation and read back by every downstream surface (DO detail,
+    // DO view modal, DO HTML print, packing-list PDF, public DO QR). A unit
+    // whose pieces span racks (HB on Rack 3, DIVAN on Rack 4) must snapshot
+    // "Rack 3, 4" — NOT the lossy production_orders.rackingNumber mirror that
+    // only ever holds one rack. We aggregate the distinct racks off each PO's
+    // PACKING job cards via deriveComponentRacks (the SAME derivation the DO
+    // /print-extras + PDF use) and flatten through formatRacksCompact (the
+    // shared dedup/sort/"Rack 3, 4" formatter). Additive: only override when
+    // an aggregated value exists; lines with no PACKING cards / no linked PO
+    // keep whatever rack they already had. Existing DOs are untouched.
+    // -------------------------------------------------------------------
+    if (poRowsForItems.length > 0) {
+      const poMetaById = new Map(
+        poRowsForItems.map((po) => [
+          po.id,
+          {
+            itemCategory: po.itemCategory ?? null,
+            specialOrder: po.specialOrder ?? null,
+          },
+        ]),
+      );
+      const packingByPo = new Map<string, PackingJcRow[]>();
+      const aggPoIds = Array.from(
+        new Set(
+          items
+            .map((it) => it.productionOrderId)
+            .filter((pid): pid is string => !!pid && poMetaById.has(pid)),
+        ),
+      );
+      if (aggPoIds.length > 0) {
+        const ph = aggPoIds.map(() => "?").join(",");
+        const jcRes = await c.var.DB.prepare(
+          `SELECT productionOrderId, wipType, wipLabel, rackingNumber,
+                  completedDate, status
+             FROM job_cards
+            WHERE departmentCode = 'PACKING' AND productionOrderId IN (${ph})`,
+        )
+          .bind(...aggPoIds)
+          .all<PackingJcRow>();
+        for (const jc of jcRes.results ?? []) {
+          const pid = jc.productionOrderId || "";
+          if (!pid) continue;
+          const list = packingByPo.get(pid);
+          if (list) list.push(jc);
+          else packingByPo.set(pid, [jc]);
+        }
+        for (const it of items) {
+          const pid = it.productionOrderId;
+          if (!pid) continue;
+          const meta = poMetaById.get(pid);
+          const cards = packingByPo.get(pid);
+          if (!meta || !cards || cards.length === 0) continue;
+          const { componentRacks } = deriveComponentRacks(
+            cards,
+            meta.itemCategory,
+            meta.specialOrder,
+          );
+          const agg = formatRacksCompact(
+            componentRacks.flatMap((cr) => cr.racks),
+          );
+          if (agg) it.rackingNumber = agg;
+        }
+      }
+    }
 
     const totalM3 =
       Math.round(items.reduce((s, i) => s + i.itemM3 * i.quantity, 0) * 100) /

@@ -50,6 +50,7 @@ import {
   buildLinkedPOIds,
 } from "@/lib/delivery-pipeline";
 import { MALAYSIA_STATES, resolveStateCode } from "@/lib/malaysia-states";
+import { aggregateRacksFromPackingCards } from "@/lib/rack-format";
 
 const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
 const SOMutationSchema = mutationWithData(SalesOrderSchema);
@@ -636,12 +637,18 @@ type ProductionOrderApiShape = {
   // poReadyForDelivery key their no-UPHOLSTERY fallback on it.
   repairScope?: string | null;
   // wipType lets us identify DIVAN UPHOLSTERY rows for the HB-only filter
-  // — see isHbOnlySpecial / pickRelevantUphCards below.
+  // — see isHbOnlySpecial / pickRelevantUphCards below. wipLabel +
+  // rackingNumber are the per-PACKING-card fields the Rack column aggregates:
+  // /api/production-orders?fields=minimal&include=jobCards already emits them
+  // per card (rowToMinimalJobCard), so the per-piece rack ("Rack 3, 4") comes
+  // straight off the payload — no reliance on the lossy production_orders mirror.
   jobCards?: {
     departmentCode: string;
     status: string;
     completedDate?: string | null;
     wipType?: string;
+    wipLabel?: string;
+    rackingNumber?: string;
   }[];
 };
 
@@ -1323,6 +1330,19 @@ export default function DeliveryPage() {
             const sib = isSofa
               ? siblingsBySo.get(po.salesOrderId || "") ?? { total: 1, ready: 1 }
               : { total: 1, ready: 1 };
+            // The relevant PACKING cards for this PO — one per top-level
+            // component, each with its own rackingNumber. HB-only BEDFRAME
+            // specials drop their stranded DIVAN card (it isn't shipping, so
+            // its rack is not a load location). Computed ONCE: both the Packed
+            // date and the per-piece Rack aggregation key off this same set.
+            const hbOnlyPacking =
+              (po.itemCategory || "").toUpperCase() === "BEDFRAME" &&
+              isHbOnlySpecial(po.specialOrder);
+            const packingCards = (po.jobCards ?? []).filter(
+              (j) =>
+                j.departmentCode === "PACKING" &&
+                (!hbOnlyPacking || (j.wipType || "").toUpperCase() !== "DIVAN"),
+            );
             return {
               id: po.id,
               poNo: po.poNo,
@@ -1368,27 +1388,25 @@ export default function DeliveryPage() {
               packingCompletedDate: (() => {
                 // Packed = EVERY PACKING card done; show the latest packing
                 // date. Any packing card still open ⇒ blank (not packed yet).
-                // HB-only BEDFRAME specials: ignore stranded DIVAN packing
-                // cards, same rule pickRelevantUphCards applies to UPH.
-                const hbOnly =
-                  (po.itemCategory || "").toUpperCase() === "BEDFRAME" &&
-                  isHbOnlySpecial(po.specialOrder);
-                const pk = (po.jobCards ?? []).filter(
-                  (j) =>
-                    j.departmentCode === "PACKING" &&
-                    (!hbOnly || (j.wipType || "").toUpperCase() !== "DIVAN"),
-                );
-                if (pk.length === 0) return null;
-                const allDone = pk.every(
+                // packingCards already drops HB-only specials' stranded DIVAN
+                // card, same rule pickRelevantUphCards applies to UPH.
+                if (packingCards.length === 0) return null;
+                const allDone = packingCards.every(
                   (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
                 );
                 if (!allDone) return null;
-                const dates = pk
+                const dates = packingCards
                   .map((j) => j.completedDate)
                   .filter((d): d is string => !!d);
                 return dates.length > 0 ? dates.sort().reverse()[0] : null;
               })(),
-              rackingNumber: po.rackingNumber || "",
+              // Per-piece rack aggregation: a unit whose HB sits on Rack 3 and
+              // DIVAN on Rack 4 shows "Rack 3, 4", not the lossy single rack
+              // from production_orders.rackingNumber. Distinct racks across the
+              // PACKING cards, numerically sorted, compact-formatted (shared
+              // helper, same dedup/sort the DO PDF manifest uses). The DIVAN
+              // drop is already baked into packingCards.
+              rackingNumber: aggregateRacksFromPackingCards(packingCards),
               hookkaExpectedDD: soInfo?.hookkaExpectedDD || po.targetEndDate || "",
               currentDepartment: po.currentDepartment || "",
               progress: po.progress || 0,

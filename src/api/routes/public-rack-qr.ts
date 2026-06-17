@@ -64,10 +64,21 @@ function genId(prefix: string): string {
 
 // Item shape posted to /stock-in and built by the helper. productionOrderId is
 // null for a manual (HKITEM) loose item — those always insert, never "move".
+//
+// PER-PIECE MODEL (owner's spec): every FG/WIP/packing QR is a UNIQUE physical
+// piece, so the page sends ONE entry per scanned sticker (qty always 1) and the
+// helper writes ONE rack_items row each — never an aggregated ×N line. Each
+// piece carries its Sales Order number (`salesOrderNo`, resolved PO→SO) and a
+// human `description` (productName + size, e.g. "1013 King Size Headboard").
 export type RackStockInItem = {
   productionOrderId: string | null;
   productName: string;
   poNo: string | null;
+  // The piece's Sales Order number (resolved from its PO). null for a manual
+  // HKITEM loose piece with no system PO. Stored in rack_items.notes as
+  // "SO <no>" so it surfaces in the warehouse rack grid / detail (that route
+  // maps rack_items.notes straight through).
+  salesOrderNo: string | null;
   qty: number;
 };
 
@@ -87,6 +98,15 @@ export type RackStockInItem = {
 //
 // rack_items.id is BIGSERIAL — NOT supplied. production_order_id is stored NULL
 // (not "") when absent so the movements-view PO JOIN reads "no document".
+//
+// ONE ROW PER PIECE: each `items` entry is one unique scanned sticker, so this
+// writes one rack_items row per entry and never sums quantities. qty defaults
+// to 1 (a piece is a piece). The piece's Sales Order number is stored in the
+// `notes` column as "SO <no>" — rack_items has no dedicated SO column, and the
+// admin warehouse route maps rack_items.notes straight through to the rack
+// grid / detail, so the SO surfaces there with no change to that (un-owned)
+// route. `salesOrderNo` is optional on the item (the worker route reuses this
+// helper without it) → treated as absent when missing.
 // ---------------------------------------------------------------------------
 export function buildRackStockInStatements(
   db: D1Database,
@@ -101,6 +121,11 @@ export function buildRackStockInStatements(
   for (const item of items) {
     const qty = item.qty ?? 1;
     const poId = item.productionOrderId || null;
+    // SO number → "SO <no>" in notes (the only spare text column on rack_items
+    // that the warehouse list/detail route already surfaces). Optional field,
+    // so guard for the worker route which calls this helper without it.
+    const soNo = (item.salesOrderNo ?? "").trim();
+    const notes = soNo ? `SO ${soNo}` : "";
     statements.push(
       db
         .prepare(
@@ -118,7 +143,7 @@ export function buildRackStockInStatements(
           "",
           qty,
           today,
-          "",
+          notes,
         ),
     );
     statements.push(
@@ -169,7 +194,28 @@ type PoMatch = {
   productionOrderId: string;
   productName: string;
   poNo: string | null;
+  // The Sales Order number this PO traces back to (production_orders.salesOrderNo),
+  // and a human description (productName + size). Both flow to the scan page so a
+  // piece shows e.g. "1013 King Size Headboard" + "SO 250114".
+  salesOrderNo: string | null;
+  description: string;
 };
+
+// Columns selected for every PoMatch lookup — id + the human + document fields
+// the per-piece scan card needs (description = productName + size, plus the SO).
+type PoRow = {
+  id: string;
+  poNo: string | null;
+  productName: string | null;
+  productCode: string | null;
+  sizeLabel: string | null;
+  salesOrderNo: string | null;
+  // Only present when resolved through a job_card (paths 2 & 3). This is the
+  // exact WIP label the production / packing sheet prints, e.g. "5530-2A(RHF)"
+  // or '8" Divan- 6FT Frame'.
+  wipLabel?: string | null;
+};
+const PO_COLS = "id, poNo, productName, productCode, sizeLabel, salesOrderNo";
 
 // Resolve a scanned/typed term to its production order, mirroring the worker
 // scan-lookup chain (routes/worker.ts GET /scan-lookup): exact poNo / PO id
@@ -179,49 +225,48 @@ async function resolvePo(
   db: D1Database,
   term: string,
 ): Promise<PoMatch | null> {
-  const toMatch = (r: {
-    id: string;
-    poNo: string | null;
-    productName: string | null;
-    productCode: string | null;
-  }): PoMatch => ({
-    productionOrderId: r.id,
-    // Fall back to productCode then poNo so the scan card always shows SOMETHING.
-    productName: (r.productName || r.productCode || r.poNo || "").trim(),
-    poNo: r.poNo ?? null,
-  });
+  const toMatch = (r: PoRow): PoMatch => {
+    const name = (r.productName || r.productCode || r.poNo || "").trim();
+    const size = (r.sizeLabel || "").trim();
+    const wip = (r.wipLabel || "").trim();
+    // Prefer the job_card's WIP label — exactly what the production / packing
+    // sheet prints (e.g. "5530-2A(RHF)", '8" Divan- 6FT Frame'), because the
+    // rack holds WIP heading into packing, so a racked piece must read as its
+    // WIP, not a spelled-out product name (owner 2026-06-17). Falls back to
+    // productName + size for a PO-level match that carries no specific piece.
+    const description = wip || (size ? `${name} ${size}`.trim() : name);
+    return {
+      productionOrderId: r.id,
+      productName: name,
+      poNo: r.poNo ?? null,
+      salesOrderNo: (r.salesOrderNo || "").trim() || null,
+      description,
+    };
+  };
 
   // 1) PO number / PO id (exact — the sticker encodes the stored poNo verbatim).
   let row = await db
     .prepare(
-      `SELECT id, poNo, productName, productCode
+      `SELECT ${PO_COLS}
          FROM production_orders WHERE poNo = ? OR id = ? LIMIT 1`,
     )
     .bind(term, term)
-    .first<{
-      id: string;
-      poNo: string | null;
-      productName: string | null;
-      productCode: string | null;
-    }>();
+    .first<PoRow>();
   if (row) return toMatch(row);
 
   // 2) Job-card id (other-dept per-piece stickers encode the jc id in op=).
+  // Pull the card's wipLabel so the racked piece reads as its WIP.
   row = await db
     .prepare(
       `SELECT po.id AS id, po.poNo AS poNo, po.productName AS productName,
-              po.productCode AS productCode
+              po.productCode AS productCode, po.sizeLabel AS sizeLabel,
+              po.salesOrderNo AS salesOrderNo, jc.wipLabel AS wipLabel
          FROM production_orders po
          JOIN job_cards jc ON jc.productionOrderId = po.id
         WHERE jc.id = ? LIMIT 1`,
     )
     .bind(term)
-    .first<{
-      id: string;
-      poNo: string | null;
-      productName: string | null;
-      productCode: string | null;
-    }>();
+    .first<PoRow>();
   if (row) return toMatch(row);
 
   // 3) SHORT schedule Code 128 token (b<deptNN><hash>) — not a stored id;
@@ -236,7 +281,7 @@ async function resolvePo(
           (
             await db
               .prepare(
-                `SELECT id, productionOrderId, departmentCode
+                `SELECT id, productionOrderId, departmentCode, wipLabel
                    FROM job_cards WHERE departmentCode = ?`,
               )
               .bind(deptCode)
@@ -244,6 +289,7 @@ async function resolvePo(
                 id: string;
                 productionOrderId: string;
                 departmentCode: string | null;
+                wipLabel: string | null;
               }>()
           ).results ?? [];
         const hit = cand.find(
@@ -253,17 +299,13 @@ async function resolvePo(
         if (hit) {
           row = await db
             .prepare(
-              `SELECT id, poNo, productName, productCode
+              `SELECT ${PO_COLS}
                  FROM production_orders WHERE id = ? LIMIT 1`,
             )
             .bind(hit.productionOrderId)
-            .first<{
-              id: string;
-              poNo: string | null;
-              productName: string | null;
-              productCode: string | null;
-            }>();
-          if (row) return toMatch(row);
+            .first<PoRow>();
+          // Carry the matched card's WIP label so the piece reads as its WIP.
+          if (row) return toMatch({ ...row, wipLabel: hit.wipLabel });
         }
       } catch (e) {
         console.warn("[public-rack-qr] barcode-token resolve failed:", e);
@@ -333,6 +375,8 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
     productionOrderId: null,
     productName: "",
     poNo: null,
+    salesOrderNo: null,
+    description: "",
     currentRackId: null,
     currentRackLabel: null,
   };
@@ -353,6 +397,10 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
         productionOrderId: null,
         productName: manual.name,
         poNo: null,
+        // A loose HKITEM piece has no system PO, hence no Sales Order; its
+        // description is just the encoded name.
+        salesOrderNo: null,
+        description: manual.name,
         currentRackId: null,
         currentRackLabel: null,
       });
@@ -374,6 +422,10 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
       productionOrderId: po.productionOrderId,
       productName: po.productName,
       poNo: po.poNo,
+      // Per-piece: the SO this piece belongs to + a clear description, so the
+      // scan list shows "1013 King Size Headboard" alongside its SO number.
+      salesOrderNo: po.salesOrderNo,
+      description: po.description,
       currentRackId: cur.currentRackId,
       currentRackLabel: cur.currentRackLabel,
     });
@@ -384,12 +436,15 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
 });
 
 // POST /api/public/rack-qr/:rackId/stock-in
-// body { items: [{ productionOrderId, productName, poNo, qty }] }
+// body { items: [{ productionOrderId, productName, description, poNo, salesOrderNo, qty }] }
+// PER-PIECE: every entry is one UNIQUE scanned sticker, so this writes ONE
+// rack_items row per entry (qty forced to 1) — never an aggregated ×N line. Each
+// row stores its description (as productName) + its SO number (in notes, "SO …").
 // Writes via buildRackStockInStatements (performedBy="Public scan", flips the
 // rack OCCUPIED). An item whose productionOrderId is already in a DIFFERENT
-// rack is MOVED — the old rack_items row is deleted first, in the SAME atomic
-// batch. Manual items (productionOrderId null) always add. Idempotent-friendly:
-// a re-post of the same items only re-stocks (and re-moves) into this rack.
+// rack is MOVED — the old rack_items row(s) are deleted first, in the SAME
+// atomic batch. Manual items (productionOrderId null) always add. The page
+// already de-dups a re-scanned sticker, so each posted piece is distinct.
 app.post("/:rackId/stock-in", async (c: Context<Env>) => {
   const rackId = (c.req.param("rackId") || "").trim();
   try {
@@ -401,6 +456,8 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
         productionOrderId?: string | null;
         productName?: string;
         poNo?: string | null;
+        salesOrderNo?: string | null;
+        description?: string;
         qty?: number;
       }>;
     };
@@ -409,11 +466,17 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
       return c.json({ error: "items array is required" }, 400);
     }
 
+    // PER-PIECE: each posted entry is one unique scanned sticker → one row,
+    // qty forced to 1 (a sticker is a single physical piece; we never trust /
+    // sum a client qty here). The row's productName stores the human
+    // `description` (productName + size) so the rack grid reads "1013 King Size
+    // Headboard"; the SO number rides along to be written into notes.
     const items: RackStockInItem[] = rawItems.map((it) => ({
       productionOrderId: it.productionOrderId || null,
-      productName: (it.productName ?? "").toString(),
+      productName: (it.description || it.productName || "").toString(),
       poNo: it.poNo || null,
-      qty: Number(it.qty) > 0 ? Number(it.qty) : 1,
+      salesOrderNo: (it.salesOrderNo ?? "").toString().trim() || null,
+      qty: 1,
     }));
 
     // Move-aware: for any item already racked in a DIFFERENT rack, delete its

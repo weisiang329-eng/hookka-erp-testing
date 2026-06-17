@@ -53,7 +53,7 @@ compatibility_flags = ["nodejs_compat"]
 #   Cloudflare dashboard -> Workers & Pages -> right sidebar "Account ID",
 # or run: `wrangler whoami`.
 # Alternatively, drop this line and export CLOUDFLARE_ACCOUNT_ID in the shell.
-account_id = "REPLACE_WITH_HOOKKA_CLOUDFLARE_ACCOUNT_ID"
+account_id = "816e457307d7fa0491c2a08a72ad5dcd"
 
 # ERP inbound endpoint. Kept as a plain [vars] entry (it's not a secret) so it
 # travels with the deploy. The matching MAIL_INBOUND_SECRET is a real secret —

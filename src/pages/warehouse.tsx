@@ -15,6 +15,13 @@ import {
 // ---------- Types ----------
 // A rack can hold any number of items — no limit (per user request
 // "正常一个 rack 都可以放好几样东西的 暂时不需要 set limitation").
+//
+// PER-PIECE: a rack item from the public QR scan is ONE physical piece. Its
+// clear description lives in `productName` (e.g. "1013 King Size Headboard") and
+// its Sales Order number is stored in `notes` as "SO <no>" (rack_items has no
+// dedicated SO column; see routes/public-rack-qr.ts). Legacy / office-stocked
+// items instead carry productCode + customerName — the display helpers below
+// unify BOTH shapes so every rack card reads the same way.
 type RackItem = {
   productionOrderId?: string;
   productCode: string;
@@ -25,6 +32,22 @@ type RackItem = {
   stockedInDate?: string;
   notes?: string;
 };
+
+// The piece's Sales Order number, if its notes hold the "SO <no>" tag the
+// public per-piece stock-in writes. Returns "" when there's no SO tag.
+function rackItemSO(it: RackItem): string {
+  const m = (it.notes || "").match(/\bSO\s+(\S+)/i);
+  return m ? m[1] : "";
+}
+
+// One clear description line for a rack item, unifying the per-piece shape
+// (productName + size) and the legacy shape (productCode). Never empty.
+function rackItemDescription(it: RackItem): string {
+  const name = (it.productName || it.productCode || "").trim();
+  const size = (it.sizeLabel || "").trim();
+  const desc = size && !name.includes(size) ? `${name} ${size}`.trim() : name;
+  return desc || "Item";
+}
 
 type RackLocation = {
   id: string;
@@ -687,14 +710,26 @@ ${tilesHtml}
                       </div>
                       {slot.status === "OCCUPIED" && (
                         <div className="mt-1 space-y-0.5">
-                          {visibleItems.map((it, i) => (
-                            <div key={i} className="leading-tight">
-                              <p className="text-[11px] truncate opacity-95">{it.productCode}</p>
-                              {it.customerName && (
-                                <p className="text-[10px] truncate opacity-75">{it.customerName}</p>
-                              )}
-                            </div>
-                          ))}
+                          {/* Unified per-item line: description + its SO number
+                              (or customer as a fallback), so every occupied rack
+                              card reads consistently regardless of how the item
+                              was stocked (per-piece scan vs legacy office). */}
+                          {visibleItems.map((it, i) => {
+                            const so = rackItemSO(it);
+                            const sub = so
+                              ? `SO ${so}`
+                              : it.customerName || "";
+                            return (
+                              <div key={i} className="leading-tight">
+                                <p className="text-[11px] truncate opacity-95">
+                                  {rackItemDescription(it)}
+                                </p>
+                                {sub && (
+                                  <p className="text-[10px] truncate opacity-75">{sub}</p>
+                                )}
+                              </div>
+                            );
+                          })}
                           {extraCount > 0 && (
                             <p className="text-[10px] opacity-80 pt-0.5">+{extraCount} more</p>
                           )}
@@ -740,20 +775,31 @@ ${tilesHtml}
                 {popupContents.length === 0 ? (
                   <p className="text-xs text-[#6B7280] text-center py-3">No items in this rack.</p>
                 ) : (
-                  popupContents.map((it, i) => (
-                    <div key={i} className="rounded-md border border-[#E2DDD8] p-3 space-y-0.5 bg-[#FAF9F7]">
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium text-[#1F1D1B]">{it.productCode}</span>
-                        {typeof it.qty === "number" && (
-                          <span className="text-xs text-[#6B7280]">Qty: {it.qty}</span>
-                        )}
+                  popupContents.map((it, i) => {
+                    const so = rackItemSO(it);
+                    // Suppress notes that are ONLY the "SO <no>" tag — the SO is
+                    // shown on its own line below — but keep any other note text.
+                    const extraNotes = (it.notes || "")
+                      .replace(/\bSO\s+\S+/i, "")
+                      .trim();
+                    // Per-piece rows are always qty 1; only surface qty when it
+                    // adds information (legacy multi-qty rows).
+                    const showQty = typeof it.qty === "number" && it.qty > 1;
+                    return (
+                      <div key={i} className="rounded-md border border-[#E2DDD8] p-3 space-y-0.5 bg-[#FAF9F7]">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-[#1F1D1B]">{rackItemDescription(it)}</span>
+                          {showQty && (
+                            <span className="text-xs text-[#6B7280] shrink-0">Qty: {it.qty}</span>
+                          )}
+                        </div>
+                        {so && <p className="text-xs text-[#4B5563]">Sales Order: {so}</p>}
+                        {it.customerName && <p className="text-xs text-[#6B7280]">Customer: {it.customerName}</p>}
+                        {it.stockedInDate && <p className="text-xs text-[#6B7280]">Stocked In: {it.stockedInDate}</p>}
+                        {extraNotes && <p className="text-xs text-[#6B7280]">Notes: {extraNotes}</p>}
                       </div>
-                      {it.productName && <p className="text-xs text-[#4B5563]">{it.productName}{it.sizeLabel ? ` - ${it.sizeLabel}` : ""}</p>}
-                      {it.customerName && <p className="text-xs text-[#6B7280]">Customer: {it.customerName}</p>}
-                      {it.stockedInDate && <p className="text-xs text-[#6B7280]">Stocked In: {it.stockedInDate}</p>}
-                      {it.notes && <p className="text-xs text-[#6B7280]">Notes: {it.notes}</p>}
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
 
@@ -1072,25 +1118,36 @@ ${tilesHtml}
                     value={stockOutItemIndex}
                     onChange={(e) => setStockOutItemIndex(Number(e.target.value))}
                   >
-                    {stockOutTarget.items.map((it, i) => (
-                      <option key={i} value={i}>
-                        {it.productCode} - {it.productName || ""} {it.sizeLabel || ""} ({it.customerName || "-"})
-                      </option>
-                    ))}
+                    {stockOutTarget.items.map((it, i) => {
+                      const so = rackItemSO(it);
+                      const tail = so
+                        ? `SO ${so}`
+                        : it.customerName || "-";
+                      return (
+                        <option key={i} value={i}>
+                          {rackItemDescription(it)} ({tail})
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
               )}
-              {stockOutTarget && stockOutTarget.items[stockOutItemIndex] && (
-                <div className="bg-[#F9E1DA] rounded-md p-3 text-sm border border-[#E8B2A1]">
-                  <p className="font-medium text-[#9A3A2D]">Item to be released:</p>
-                  <div className="mt-1 space-y-0.5 text-[#9A3A2D]">
-                    <p>Rack: {stockOutTarget.id}</p>
-                    <p>Product: {stockOutTarget.items[stockOutItemIndex].productName} - {stockOutTarget.items[stockOutItemIndex].sizeLabel}</p>
-                    <p>Customer: {stockOutTarget.items[stockOutItemIndex].customerName}</p>
-                    <p>Stocked In: {stockOutTarget.items[stockOutItemIndex].stockedInDate}</p>
+              {stockOutTarget && stockOutTarget.items[stockOutItemIndex] && (() => {
+                const it = stockOutTarget.items[stockOutItemIndex];
+                const so = rackItemSO(it);
+                return (
+                  <div className="bg-[#F9E1DA] rounded-md p-3 text-sm border border-[#E8B2A1]">
+                    <p className="font-medium text-[#9A3A2D]">Item to be released:</p>
+                    <div className="mt-1 space-y-0.5 text-[#9A3A2D]">
+                      <p>Rack: {stockOutTarget.id}</p>
+                      <p>Product: {rackItemDescription(it)}</p>
+                      {so && <p>Sales Order: {so}</p>}
+                      {it.customerName && <p>Customer: {it.customerName}</p>}
+                      {it.stockedInDate && <p>Stocked In: {it.stockedInDate}</p>}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1">Reason</label>
                 <input

@@ -9,9 +9,12 @@
 // Flow:
 //   1. On mount, GET the rack summary (label + current item count).
 //   2. Open an in-page camera scanner. Each decoded ITEM QR is looked up via
-//      the backend; a recognised item is added to a local list (qty bumps on a
-//      re-scan of the same sticker). An item that's currently in a DIFFERENT
-//      rack prompts Move-here / Skip; an item already in THIS rack just adds.
+//      the backend. PER-PIECE: every FG/WIP/packing QR is a UNIQUE token for
+//      ONE physical piece, so each NEW QR value adds ONE line (qty 1) carrying
+//      the piece's description + Sales Order number; re-scanning a QR already in
+//      the list is rejected ("Already added" + error beep), never bumped — so 9
+//      distinct stickers = 9 lines. An item currently in a DIFFERENT rack
+//      prompts Move-here / Skip; one already in THIS rack just records the piece.
 //   3. Tap the big "Stock In (N)" button (two-tap arm→confirm, like DO-scan) to
 //      POST the list. On success the list clears; on error it's kept for retry.
 //
@@ -49,19 +52,30 @@ type ItemLookup = {
   productionOrderId: string | null;
   productName: string | null;
   poNo: string | null;
+  // Per-piece (owner's model): the Sales Order this piece belongs to + a clear
+  // human description (productName + size, e.g. "1013 King Size Headboard").
+  salesOrderNo: string | null;
+  description: string | null;
   // When set AND different from the scanned rack, the item currently lives in
   // another rack — the UI offers Move-here / Skip before adding the line.
   currentRackId: string | null;
   currentRackLabel: string | null;
 };
 
-// One accumulated stock-in line. `productionOrderId` is the dedupe key for
-// system items; manual / null-PO items dedupe by productName instead.
+// One accumulated stock-in line = ONE unique physical piece.
+//
+// PER-PIECE MODEL: every FG/WIP/packing QR is a UNIQUE token for ONE piece, so
+// the list is keyed by `rawValue` (the exact decoded QR string). A new QR value
+// adds one line (qty is always 1 — a sticker is a single piece); re-scanning a
+// QR already in the list is rejected ("Already added"), never bumped. So 9
+// distinct stickers → 9 lines; the same sticker rescanned → ignored.
 type Line = {
+  rawValue: string; // the decoded QR string — the unique per-piece key
   productionOrderId: string | null;
-  productName: string;
+  productName: string; // clear description shown to the worker
   poNo: string | null;
-  qty: number;
+  salesOrderNo: string | null;
+  qty: number; // always 1 (kept for the POST contract / totals)
 };
 
 // An item found in a DIFFERENT rack, parked until the user taps Move / Skip.
@@ -281,24 +295,23 @@ export default function RackScanPage() {
   }, [load]);
 
   // ── List mutation helpers ────────────────────────────────────────────────
-  // Add a found item, bumping qty when it's already in the list. Dedupe by
-  // productionOrderId for system items; by productName for manual / null-PO ones.
-  const addLine = useCallback((line: Line) => {
+  // Synchronous membership gate for PER-PIECE de-dup. Mirrors the raw QR values
+  // currently in `lines`. We consult/claim it SYNCHRONOUSLY (state updates are
+  // async/batched, so reading `lines` here would be stale) — this is what makes
+  // "already added?" a reliable yes/no even for two back-to-back camera frames.
+  // Kept in sync on add (here), on remove, and on submit-clear.
+  const addedValuesRef = useRef<Set<string>>(new Set());
+
+  // Add ONE unique piece, keyed by its raw QR value. PER-PIECE: a QR value
+  // already recorded is a re-scan of the SAME physical sticker → NOT added and
+  // NOT bumped (returns false so the caller shows "Already added" + the error
+  // beep). A new QR value pushes one line at qty 1.
+  const addPiece = useCallback((line: Line): boolean => {
+    if (addedValuesRef.current.has(line.rawValue)) return false; // dup sticker
+    addedValuesRef.current.add(line.rawValue);
     setDoneMsg(null);
-    setLines((prev) => {
-      const next = [...prev];
-      const i = next.findIndex((x) =>
-        line.productionOrderId
-          ? x.productionOrderId === line.productionOrderId
-          : x.productionOrderId === null && x.productName === line.productName,
-      );
-      if (i >= 0) {
-        next[i] = { ...next[i], qty: next[i].qty + 1 };
-      } else {
-        next.push({ ...line, qty: 1 });
-      }
-      return next;
-    });
+    setLines((prev) => [...prev, { ...line, qty: 1 }]);
+    return true;
   }, []);
 
   // ── Decode → item lookup ─────────────────────────────────────────────────
@@ -308,12 +321,13 @@ export default function RackScanPage() {
   const handleDecoded = useCallback(
     async (raw: string) => {
       if (!rackId || !raw) return;
-      // De-dupe (PROBLEM 3 — one scan must add exactly once): ignore the same
-      // raw value fired again within DEDUP_MS (a held sticker decodes every
-      // frame). This check + the synchronous ref write below run BEFORE any
-      // await, so two back-to-back frames carrying the same code can't both get
-      // past it. A different sticker, or the same one after the cooldown,
-      // passes — qty bumps then happen via addLine, never a duplicate line.
+      // Throttle the held-sticker frame burst: ignore the same raw value fired
+      // again within DEDUP_MS (a held sticker decodes every frame). This check +
+      // the synchronous ref write below run BEFORE any await, so two back-to-
+      // back frames carrying the same code can't both reach the backend. A
+      // different sticker, or the same one after the cooldown, passes — and the
+      // permanent per-piece de-dup (addedValuesRef) then decides add vs
+      // "Already added", so a sticker is recorded exactly once regardless.
       const now = performance.now();
       if (
         raw === lastRawRef.current.value &&
@@ -328,6 +342,14 @@ export default function RackScanPage() {
       if (lookupBusyRef.current) return;
       lookupBusyRef.current = true;
       try {
+        // PER-PIECE: this exact QR is already listed → SAME sticker rescanned.
+        // Tell the worker, skip the backend, never add a duplicate / bump.
+        if (addedValuesRef.current.has(raw)) {
+          setPendingMove(null);
+          setScanMsg("Already added — this piece is already in the list.");
+          beep(false);
+          return;
+        }
         const r = await fetch(
           `/api/public/rack-qr/${encodeURIComponent(rackId)}/item?code=${encodeURIComponent(raw)}`,
           { cache: "no-store" },
@@ -343,11 +365,15 @@ export default function RackScanPage() {
           beep(false);
           return;
         }
-        const name = j.productName || j.poNo || "Item";
+        // Description (productName + size) is the clear label the owner wants;
+        // fall back through productName / poNo so a line is never blank.
+        const desc = j.description || j.productName || j.poNo || "Item";
         const line: Line = {
+          rawValue: raw, // unique per-piece key
           productionOrderId: j.productionOrderId,
-          productName: name,
+          productName: desc,
           poNo: j.poNo,
+          salesOrderNo: j.salesOrderNo,
           qty: 1,
         };
         // In a DIFFERENT rack → park for a Move / Skip decision. (Equal rack
@@ -362,11 +388,17 @@ export default function RackScanPage() {
           beep(false);
           return;
         }
-        // Already in THIS rack, or not racked anywhere → add / bump qty + "滴".
+        // Already in THIS rack, or not racked anywhere → record ONE piece + "滴"
+        // (qty 1, keyed by the raw QR). addPiece returns false only if this
+        // exact QR is already listed → "Already added" + error tone.
         setPendingMove(null);
-        addLine(line);
-        setScanMsg(`Added: ${name}`);
-        beep(true);
+        if (addPiece(line)) {
+          setScanMsg(`Added: ${desc}`);
+          beep(true);
+        } else {
+          setScanMsg("Already added — this piece is already in the list.");
+          beep(false);
+        }
       } catch {
         setScanMsg("Network error — scan again.");
         // Allow an immediate retry of this same value after a network blip.
@@ -375,7 +407,7 @@ export default function RackScanPage() {
         lookupBusyRef.current = false;
       }
     },
-    [rackId, addLine, beep],
+    [rackId, addPiece, beep],
   );
 
   // ── Camera control ───────────────────────────────────────────────────────
@@ -519,6 +551,20 @@ export default function RackScanPage() {
       void handleDecoded(data);
     };
 
+    // Barcode aim box → isolate ONE Code 128. Full WIDTH (every bar + both
+    // quiet zones) × a centred ~30% HEIGHT band, matching the rectangle reticle.
+    // Barcode mode decodes ONLY this band so the worker grabs the sticker they
+    // point at — not whichever of several stacked codes decodes first ("还没确定
+    // 要抓哪一个就 scan 了", owner 2026-06-17). QR mode keeps the full frame (a
+    // rack QR can sit anywhere). The band is tall enough for ZXing to read yet
+    // excludes the rows above/below.
+    const aimRoi = () => {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const sh = Math.max(1, Math.round(vh * 0.3));
+      return { sx: 0, sy: Math.round((vh - sh) / 2), sw: vw, sh };
+    };
+
     const tick = async () => {
       if (stopped) return;
       const now = performance.now();
@@ -540,32 +586,22 @@ export default function RackScanPage() {
             const codes = await nativeDetector.detect(video);
             if (stopped) return;
             if (mode === "barcode") {
-              // FULL FRAME (PROBLEM 4): among Code 128 codes anywhere in the
-              // frame, pick the one NEAREST the centre. No band / position
-              // rejection — exactly how QR mode reads this same code today.
-              const cx = video.videoWidth / 2;
+              // Only the Code 128 whose vertical centre falls INSIDE the aim
+              // band wins; a neighbour above/below is ignored so the worker
+              // grabs the sticker they point at, not whichever decodes first
+              // (owner 2026-06-17). Nearest-to-centre among the in-band codes.
               const cy = video.videoHeight / 2;
+              const roiHalf = aimRoi().sh / 2;
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
                 const fmt = (c as { format?: string }).format;
                 if (fmt && fmt !== "code_128") continue;
                 const bb = (
-                  c as {
-                    boundingBox?: {
-                      x: number;
-                      y: number;
-                      width: number;
-                      height: number;
-                    };
-                  }
+                  c as { boundingBox?: { y: number; height: number } }
                 ).boundingBox;
-                const d = bb
-                  ? Math.hypot(
-                      bb.x + bb.width / 2 - cx,
-                      bb.y + bb.height / 2 - cy,
-                    )
-                  : 0;
+                const d = bb ? Math.abs(bb.y + bb.height / 2 - cy) : 0;
+                if (bb && d > roiHalf) continue; // outside the aim band → ignore
                 if (!best || d < best.d) best = { v: c.rawValue, d };
               }
               if (best) hit = best.v;
@@ -581,36 +617,62 @@ export default function RackScanPage() {
           const vh = video.videoHeight;
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
-            // Both modes capture the SAME full frame. Barcode keeps a wider
-            // working width (~1280px) so Code 128 bars stay sharp; QR is fine
-            // smaller. jsQR (QR only) runs first, then ZXing (QR + Code 128).
-            const targetW = mode === "barcode" ? 1280 : 960;
-            const scale = Math.min(1, targetW / Math.max(vw, vh));
-            const cw = Math.max(1, Math.round(vw * scale));
-            const ch = Math.max(1, Math.round(vh * scale));
-            canvas.width = cw;
-            canvas.height = ch;
-            ctx.drawImage(video, 0, 0, cw, ch);
-            let imageData: ImageData | null = null;
-            try {
-              imageData = ctx.getImageData(0, 0, cw, ch);
-            } catch {
-              imageData = null;
-            }
-            if (imageData) {
-              if (mode !== "barcode") {
-                const code = jsQR(imageData.data, cw, ch, {
-                  inversionAttempts: "attemptBoth",
-                });
-                if (code && code.data) hit = code.data;
+            if (mode === "barcode") {
+              // Decode ONLY the centred aim band (full width × ~30% height) so
+              // the worker isolates the one sticker they point at out of a
+              // stacked sheet — not whichever Code 128 decodes first. ~1280px
+              // working width keeps the bars sharp. ZXing is the sole Code 128
+              // decoder on iOS (jsQR is QR-only, so it's skipped here).
+              const { sx, sy, sw, sh } = aimRoi();
+              const s = Math.min(1, 1280 / sw);
+              const cw = Math.max(1, Math.round(sw * s));
+              const ch = Math.max(1, Math.round(sh * s));
+              canvas.width = cw;
+              canvas.height = ch;
+              ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
+              let imageData: ImageData | null = null;
+              try {
+                imageData = ctx.getImageData(0, 0, cw, ch);
+              } catch {
+                imageData = null;
               }
-              if (!hit) {
+              if (imageData) {
                 const zxDecode = zxingRef.current;
                 if (!zxDecode) {
                   void ensureZxing(); // self-heal if the chunk hasn't loaded yet
                 } else {
                   const zxText = zxDecode(imageData);
                   if (zxText) hit = zxText;
+                }
+              }
+            } else {
+              // QR mode — full frame (a rack QR can sit anywhere in view).
+              // jsQR (QR only) first, then ZXing as a QR fallback.
+              const scale = Math.min(1, 960 / Math.max(vw, vh));
+              const cw = Math.max(1, Math.round(vw * scale));
+              const ch = Math.max(1, Math.round(vh * scale));
+              canvas.width = cw;
+              canvas.height = ch;
+              ctx.drawImage(video, 0, 0, cw, ch);
+              let imageData: ImageData | null = null;
+              try {
+                imageData = ctx.getImageData(0, 0, cw, ch);
+              } catch {
+                imageData = null;
+              }
+              if (imageData) {
+                const code = jsQR(imageData.data, cw, ch, {
+                  inversionAttempts: "attemptBoth",
+                });
+                if (code && code.data) hit = code.data;
+                if (!hit) {
+                  const zxDecode = zxingRef.current;
+                  if (!zxDecode) {
+                    void ensureZxing(); // self-heal if the chunk hasn't loaded yet
+                  } else {
+                    const zxText = zxDecode(imageData);
+                    if (zxText) hit = zxText;
+                  }
                 }
               }
             }
@@ -653,29 +715,31 @@ export default function RackScanPage() {
   // ── Move / Skip resolution for a cross-rack item ─────────────────────────
   const resolveMove = useCallback(
     (move: boolean) => {
-      setPendingMove((cur) => {
-        if (cur && move) {
-          // Add the line — the backend stock-in performs the actual move.
-          addLine(cur.line);
+      const cur = pendingMove;
+      if (!cur) return;
+      setPendingMove(null);
+      if (move) {
+        // Record the piece — the backend stock-in performs the actual move.
+        // addPiece de-dups by raw QR, so re-confirming the same sticker is safe.
+        if (addPiece(cur.line)) {
           setScanMsg(`Moving here: ${cur.line.productName}`);
           beep(true); // confirmed add → the same "滴"
-        } else if (cur) {
-          setScanMsg(`Skipped: ${cur.line.productName}`);
+        } else {
+          setScanMsg("Already added — this piece is already in the list.");
+          beep(false);
         }
-        return null;
-      });
+      } else {
+        setScanMsg(`Skipped: ${cur.line.productName}`);
+      }
     },
-    [addLine, beep],
+    [pendingMove, addPiece, beep],
   );
 
+  // Remove ONE piece by its raw QR key, and release that key from the
+  // per-piece de-dup Set so the SAME sticker can be re-scanned afterwards.
   const removeLine = useCallback((line: Line) => {
-    setLines((prev) =>
-      prev.filter((x) =>
-        line.productionOrderId
-          ? x.productionOrderId !== line.productionOrderId
-          : !(x.productionOrderId === null && x.productName === line.productName),
-      ),
-    );
+    addedValuesRef.current.delete(line.rawValue);
+    setLines((prev) => prev.filter((x) => x.rawValue !== line.rawValue));
   }, []);
 
   // ── Stock In (two-tap arm→confirm) ───────────────────────────────────────
@@ -700,11 +764,16 @@ export default function RackScanPage() {
           // backend then requires the echo — include it so both paths work.
           headers: csrfHeaders(),
           body: JSON.stringify({
+            // PER-PIECE: one entry per unique scanned sticker, qty 1. Send the
+            // description (what the rack row will read) + the SO number so the
+            // backend writes one row per piece carrying both.
             items: lines.map((x) => ({
               productionOrderId: x.productionOrderId,
               productName: x.productName,
+              description: x.productName,
               poNo: x.poNo,
-              qty: x.qty,
+              salesOrderNo: x.salesOrderNo,
+              qty: 1,
             })),
           }),
         },
@@ -724,6 +793,8 @@ export default function RackScanPage() {
       setDoneMsg(`✓ Stocked ${n} into ${label}`);
       setScanMsg(null);
       setLines([]);
+      // Clear the per-piece de-dup keys so a fresh batch can scan cleanly.
+      addedValuesRef.current.clear();
       // Reflect the new total in the rack header.
       setSummary((s) => (s ? { ...s, itemCount: s.itemCount + n } : s));
     } catch {
@@ -808,10 +879,11 @@ export default function RackScanPage() {
                     playsInline
                     muted
                   />
-                  {/* Aim reticle — a visual guide only; BOTH modes decode the
-                      full frame, so the worker just needs the code roughly in
-                      view. A wide box for a barcode, a square for a QR. Tapping
-                      the overlay also (re)primes the beep audio on iOS. */}
+                  {/* Aim reticle. In barcode mode this rectangle is REAL — only
+                      a Code 128 inside the band is decoded, so the worker aims
+                      at the one sticker they want. QR mode decodes the full
+                      frame (a square guide is enough). Tapping the overlay also
+                      (re)primes the beep audio on iOS. */}
                   <div
                     onClick={() => {
                       const ac = ensureAudio();
@@ -949,24 +1021,26 @@ export default function RackScanPage() {
                 </p>
               ) : (
                 <ul className="divide-y divide-[#EFEAE5]">
+                  {/* PER-PIECE: one row per unique sticker, keyed by its raw QR
+                      value. No ×qty badge — each row IS one piece. Shows the
+                      description + the piece's Sales Order number. */}
                   {lines.map((it) => (
                     <li
-                      key={it.productionOrderId ?? `name:${it.productName}`}
+                      key={it.rawValue}
                       className="flex items-center gap-2 py-2"
                     >
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium text-[#1F1D1B]">
                           {it.productName}
                         </p>
-                        {it.poNo && (
+                        {(it.salesOrderNo || it.poNo) && (
                           <p className="truncate text-xs text-gray-500">
-                            {it.poNo}
+                            {it.salesOrderNo
+                              ? `SO ${it.salesOrderNo}`
+                              : it.poNo}
                           </p>
                         )}
                       </div>
-                      <span className="shrink-0 text-sm font-semibold text-[#1F1D1B]">
-                        ×{it.qty}
-                      </span>
                       <button
                         type="button"
                         onClick={() => removeLine(it)}

@@ -23,6 +23,7 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { Tabs, type TabItem } from "@/components/ui/tabs";
+import { DataGrid, type Column } from "@/components/ui/data-grid";
 import {
   Card,
   CardContent,
@@ -51,6 +52,8 @@ import {
   AtSign,
   Link2,
   X,
+  SlidersHorizontal,
+  ShieldCheck,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { copyText } from "@/lib/copy-text";
@@ -217,10 +220,19 @@ export default function UsersPage() {
   const [editRoleSubmitting, setEditRoleSubmitting] = useState(false);
   const [editRoleError, setEditRoleError] = useState<string | null>(null);
 
-  // Email-alias modal. Creating an @hookka.com alias for a user is a
-  // SUPER_ADMIN-only account action (POST /api/mail-center/addresses is gated
-  // by requireSuperAdmin). Explicit Create button — never auto-save.
+  // "Edit details" modal. ONE modal for the user's @hookka.com Email Alias,
+  // Department and Position — all stored on the email_addresses alias row.
+  // SUPER_ADMIN only (POST/PATCH /api/mail-center/addresses are gated by
+  // requireSuperAdmin). Explicit Save — never auto-save (no naked edits).
+  //   • If the user has NO alias yet → Save POSTs a new address.
+  //   • If the user HAS an alias → Save PATCHes the changed Department /
+  //     Position (the email address itself is immutable post-create — changing
+  //     it means delete + recreate, which PATCH can't express). If that alias
+  //     was only matched heuristically (floating assigned_user_id), the PATCH
+  //     ALSO writes assigned_user_id so the link becomes the source of truth.
+  // `aliasExisting` holds the alias being edited (null when creating).
   const [aliasForUser, setAliasForUser] = useState<UserRow | null>(null);
+  const [aliasExisting, setAliasExisting] = useState<MailAddress | null>(null);
   const [aliasAddress, setAliasAddress] = useState("");
   // Department the mailbox is grouped under (owner 2026-06-17): HR people → HR,
   // Finance people → Finance, Operations + everyone else → Support. Posted as
@@ -331,6 +343,15 @@ export default function UsersPage() {
   // PATCH /api/mail-center/addresses/:id on Save.
   const [draftLinks, setDraftLinks] = useState<Map<string, string>>(new Map());
   const [mailSaving, setMailSaving] = useState(false);
+  // Optimistic view-level overrides written on a successful Save. They hold the
+  // just-saved value for each user until the server refetch catches up — fixes
+  // the "set Company, Save, dropdown jumps back to Personal" report (owner
+  // 2026-06-17). The save succeeds and persists, but the immediate /scope-levels
+  // refetch can race a read-after-write cache (browser HTTP cache / staging
+  // Hyperdrive query cache) and return the pre-write list, blanking the change.
+  // pendingLevels below drops each override the moment the server agrees, so
+  // this never masks a genuine later change from another admin.
+  const [savedLevels, setSavedLevels] = useState<Map<string, string>>(new Map());
 
   const beginMailEdit = () => {
     // Seed drafts from the committed server values so an untouched cell stays
@@ -338,6 +359,12 @@ export default function UsersPage() {
     setDraftGrants(new Map(serverGrants ? [...serverGrants].map((k) => [k, true]) : []));
     const lv = new Map<string, string>();
     for (const [uid, level] of serverLevels) lv.set(uid, level);
+    // Carry any just-saved-but-not-yet-confirmed level over the server baseline
+    // so re-entering Edit doesn't seed a stale value while the refetch catches
+    // up (same read-after-write window the pendingLevels override covers).
+    for (const [uid, level] of savedLevels) {
+      if (serverLevels.get(uid) !== level) lv.set(uid, level);
+    }
     setDraftLevels(lv);
     setDraftLinks(new Map());
     setMailEdit(true);
@@ -350,6 +377,19 @@ export default function UsersPage() {
     setDraftLinks(new Map());
   };
 
+  // Optimistic overrides that the server hasn't confirmed YET. An entry is
+  // dropped the instant serverLevels reports the same value, so a stale
+  // read-after-write refetch can't blank a just-saved change, and a genuine
+  // later server value (e.g. another admin lowered the level) still wins once
+  // it lands. Derived (not an effect) to avoid set-state-in-effect churn.
+  const pendingLevels = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const [uid, lvl] of savedLevels) {
+      if (serverLevels.get(uid) !== lvl) m.set(uid, lvl);
+    }
+    return m;
+  }, [savedLevels, serverLevels]);
+
   // Effective values — draft when editing, server when read-only.
   const isGranted = (addressId: string, userId: string): boolean => {
     const key = `${addressId}::${userId}`;
@@ -358,7 +398,7 @@ export default function UsersPage() {
   };
   const viewLevelFor = (userId: string): string => {
     if (mailEdit) return draftLevels.get(userId) ?? "personal";
-    return serverLevels.get(userId) ?? "personal";
+    return pendingLevels.get(userId) ?? serverLevels.get(userId) ?? "personal";
   };
 
   // Draft mutators (edit mode only — never touch the server).
@@ -376,7 +416,9 @@ export default function UsersPage() {
     setMailSaving(true);
     const ops: Promise<Response>[] = [];
 
-    // Level diffs.
+    // Level diffs. Remember each (uid → after) so a successful save can hold
+    // the new value optimistically until the server refetch confirms it.
+    const levelWrites: Array<[string, string]> = [];
     const levelUserIds = new Set<string>([
       ...serverLevels.keys(),
       ...draftLevels.keys(),
@@ -385,6 +427,7 @@ export default function UsersPage() {
       const before = serverLevels.get(uid) ?? "personal";
       const after = draftLevels.get(uid) ?? "personal";
       if (before === after) continue;
+      levelWrites.push([uid, after]);
       ops.push(
         fetch("/api/mail-center/scope-level", {
           method: "PUT",
@@ -451,6 +494,16 @@ export default function UsersPage() {
           `${ops.length - failed} change(s) saved, ${failed} failed. Review and retry.`,
         );
       } else {
+        // All writes landed. Hold the just-saved levels optimistically so a
+        // stale read-after-write refetch can't bounce the dropdown back to its
+        // old value; pendingLevels drops each one as serverLevels catches up.
+        if (levelWrites.length > 0) {
+          setSavedLevels((prev) => {
+            const next = new Map(prev);
+            for (const [uid, lvl] of levelWrites) next.set(uid, lvl);
+            return next;
+          });
+        }
         cancelMailEdit();
         showFlash("ok", `Mailbox access saved (${ops.length} change(s))`);
       }
@@ -705,20 +758,86 @@ export default function UsersPage() {
 
   // ---------- Email-alias actions ------------------------------------------
 
+  // Save the Edit-details modal. Branches on whether the user already has an
+  // alias: PATCH the existing row's Department / Position (and repair a
+  // floating assigned_user_id), else POST a brand-new address. Either way we
+  // invalidate + refetch /addresses so the new/changed alias appears in the
+  // grid immediately (the owner's "created an alias but it still says Add
+  // alias" was a stale-cache + floating-link miss).
   const submitAlias = async () => {
     if (!aliasForUser) return;
     const target = aliasForUser;
     setAliasError(null);
+    setAliasSubmitting(true);
+
+    // ---- EDIT path: user already has an alias → PATCH dept/position (+link) --
+    if (aliasExisting) {
+      try {
+        // Only send fields that actually changed (keeps the PATCH minimal),
+        // but ALWAYS write assigned_user_id when the alias was floating /
+        // heuristically matched so the explicit link becomes the source of
+        // truth (#4). assignedDept now persists thanks to the mail-center.ts
+        // PATCH gap fix.
+        const patch: Record<string, string | undefined> = {};
+        if ((aliasExisting.assignedDept || "") !== aliasDept) {
+          patch.assignedDept = aliasDept;
+        }
+        if ((aliasExisting.assignedPosition || "") !== (aliasPosition.trim())) {
+          patch.assignedPosition = aliasPosition.trim() || undefined;
+        }
+        if (aliasExisting.assignedUserId !== target.id) {
+          // Floating / mismatched link — bind it permanently.
+          patch.assignedUserId = target.id;
+          patch.assignedUserName = target.displayName || target.email;
+        }
+        if (Object.keys(patch).length === 0) {
+          setAliasForUser(null);
+          setAliasExisting(null);
+          showFlash("ok", "No changes to save");
+          return;
+        }
+        const res = await fetch(
+          `/api/mail-center/addresses/${aliasExisting.id}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+          },
+        );
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        if (res.ok) {
+          showFlash(
+            "ok",
+            `Details saved for ${aliasExisting.address}`,
+          );
+          setAliasForUser(null);
+          setAliasExisting(null);
+          fetchAddresses();
+        } else {
+          setAliasError(
+            json.error ?? "Couldn't save the details. Please try again.",
+          );
+        }
+      } catch (err) {
+        setAliasError(humanizeError(err, "Network problem — please try again."));
+      } finally {
+        setAliasSubmitting(false);
+      }
+      return;
+    }
+
+    // ---- CREATE path: no alias yet → POST a new address --------------------
     const address = aliasAddress.trim().toLowerCase();
     if (!address || !address.includes("@")) {
       setAliasError("Enter a valid email address");
+      setAliasSubmitting(false);
       return;
     }
     if (!address.endsWith("@hookka.com")) {
       setAliasError("Address must end with @hookka.com");
+      setAliasSubmitting(false);
       return;
     }
-    setAliasSubmitting(true);
     try {
       const res = await fetch("/api/mail-center/addresses", {
         method: "POST",
@@ -728,7 +847,7 @@ export default function UsersPage() {
           assignedUserId: target.id,
           assignedUserName: target.displayName || target.email,
           assignedDept: aliasDept,
-          assignedPosition: aliasPosition || undefined,
+          assignedPosition: aliasPosition.trim() || undefined,
         }),
       });
       // Mail Center returns the created row directly (201), or
@@ -740,6 +859,7 @@ export default function UsersPage() {
       if (res.ok) {
         showFlash("ok", `Alias ${json.address ?? address} created for ${target.email}`);
         setAliasForUser(null);
+        setAliasExisting(null);
         setAliasAddress("");
         fetchAddresses();
       } else {
@@ -884,14 +1004,335 @@ export default function UsersPage() {
     }
   };
 
-  // Open the create-alias modal for a user.
+  // Open the Edit-details modal for a user. Prefills from the user's existing
+  // @hookka.com alias when there is one (edit mode — address locked, Dept /
+  // Position editable); otherwise seeds a create with a suggested address.
   const openAliasModal = (u: UserRow) => {
+    const existing = aliasByUserId.get(u.id) ?? null;
     setAliasForUser(u);
-    setAliasAddress(suggestAlias(u));
-    setAliasDept("Support");
-    setAliasPosition("");
+    setAliasExisting(existing);
+    setAliasAddress(existing ? existing.address : suggestAlias(u));
+    setAliasDept(existing?.assignedDept || "Support");
+    setAliasPosition(existing?.assignedPosition || "");
     setAliasError(null);
   };
+
+  // One-click "Link" for a floating alias whose local-part matches this user
+  // but whose assigned_user_id is empty / stale (#4). Writes the real
+  // assigned_user_id so the explicit link becomes the source of truth, then
+  // refetches so the column flips from "(matched by name) · Link" to the solid
+  // assigned chip. Used straight from the Email Alias cell — no modal needed.
+  const [linkingAliasId, setLinkingAliasId] = useState<string | null>(null);
+  const linkAliasToUser = async (alias: MailAddress, u: UserRow) => {
+    setLinkingAliasId(alias.id);
+    try {
+      const res = await fetch(`/api/mail-center/addresses/${alias.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assignedUserId: u.id,
+          assignedUserName: u.displayName || u.email,
+        }),
+      });
+      if (res.ok) {
+        showFlash("ok", `Linked ${alias.address} to ${u.email}`);
+        fetchAddresses();
+      } else {
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        showFlash("err", json.error ?? "Couldn't link the alias. Please retry.");
+      }
+    } catch (err) {
+      showFlash("err", humanizeError(err, "Network problem — please try again."));
+    } finally {
+      setLinkingAliasId(null);
+    }
+  };
+
+  // ---------- Active Users grid columns ------------------------------------
+  // Migrated off the hand-rolled <table> onto the shared DataGrid so the owner
+  // gets the Column chooser + per-column Filter + Sort + drag-reorder/resize +
+  // freeze "for free" (gridId persists his layout per browser). Position /
+  // Department / Email Alias are computed from each user's @hookka.com alias
+  // (aliasByUserId) — those columns therefore supply an explicit `render`
+  // PLUS `sortAccessor` / `filterAccessor` so sort + the value-filter dropdown
+  // read the visible (alias-derived) value, not the absent row field.
+  const userColumns = useMemo<Column<UserRow>[]>(() => [
+    {
+      key: "email",
+      label: "Email",
+      type: "text",
+      width: "240px",
+      sortable: true,
+      sticky: true, // frozen so it stays put during horizontal scroll
+      render: (_v, u, _i, hl) => (
+        <span className="inline-flex items-center gap-2">
+          <span className="font-medium">{hl(u.email)}</span>
+          {u.id === currentUser?.id && (
+            <span className="text-[10px] font-semibold uppercase tracking-wider bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5 rounded">
+              You
+            </span>
+          )}
+        </span>
+      ),
+    },
+    {
+      key: "displayName",
+      label: "Name",
+      type: "text",
+      width: "150px",
+      sortable: true,
+      render: (_v, u, _i, hl) =>
+        u.displayName ? hl(u.displayName) : <span className="text-gray-400">—</span>,
+    },
+    {
+      key: "role",
+      label: "Role",
+      type: "text",
+      width: "120px",
+      sortable: true,
+      render: (_v, u) => (
+        <span className="text-xs font-semibold uppercase tracking-wider text-[#6B5C32]">
+          {u.role}
+        </span>
+      ),
+    },
+    {
+      key: "isActive",
+      label: "Status",
+      type: "text",
+      width: "100px",
+      sortable: true,
+      // Sort + filter on a human label ("Active" / "Disabled") rather than the
+      // raw boolean (which the dropdown would show as "true" / "false").
+      sortAccessor: (u) => (u.isActive ? "Active" : "Disabled"),
+      filterAccessor: (u) => (u.isActive ? "Active" : "Disabled"),
+      render: (_v, u) =>
+        u.isActive ? (
+          <span className="inline-flex items-center gap-1 text-xs font-medium bg-[#EEF3E4] text-[#4F7C3A] px-2 py-0.5 rounded-full">
+            <Check className="h-3 w-3" /> Active
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 text-xs font-medium bg-[#F0ECE9] text-[#6B7280] px-2 py-0.5 rounded-full">
+            <Ban className="h-3 w-3" /> Disabled
+          </span>
+        ),
+    },
+    {
+      key: "position",
+      label: "Position",
+      type: "text",
+      width: "140px",
+      sortable: true,
+      sortAccessor: (u) => aliasByUserId.get(u.id)?.assignedPosition || "",
+      filterAccessor: (u) => aliasByUserId.get(u.id)?.assignedPosition || "—",
+      render: (_v, u, _i, hl) => {
+        const pos = aliasByUserId.get(u.id)?.assignedPosition;
+        return pos ? (
+          <span className="text-gray-700">{hl(pos)}</span>
+        ) : (
+          <span className="text-gray-400">—</span>
+        );
+      },
+    },
+    {
+      key: "department",
+      label: "Department",
+      type: "text",
+      width: "130px",
+      sortable: true,
+      sortAccessor: (u) => aliasByUserId.get(u.id)?.assignedDept || "",
+      filterAccessor: (u) => aliasByUserId.get(u.id)?.assignedDept || "—",
+      render: (_v, u) => {
+        const dept = aliasByUserId.get(u.id)?.assignedDept;
+        return dept ? (
+          <span className="inline-flex items-center text-xs font-medium bg-[#EFEAE5] text-[#6B5C32] px-2 py-0.5 rounded">
+            {dept}
+          </span>
+        ) : (
+          <span className="text-gray-400">—</span>
+        );
+      },
+    },
+    {
+      key: "emailAlias",
+      label: "Email Alias",
+      type: "text",
+      width: "210px",
+      sortable: true,
+      sortAccessor: (u) => aliasByUserId.get(u.id)?.address || "",
+      filterAccessor: (u) => aliasByUserId.get(u.id)?.address || "(none)",
+      render: (_v, u) => {
+        const alias = aliasByUserId.get(u.id);
+        if (alias) {
+          // Heuristic-only match (assigned_user_id is NOT this user): show the
+          // address + a one-click Link to write the real assigned_user_id and
+          // make the link the source of truth.
+          const heuristic = aliasIsHeuristic(u, alias);
+          return (
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className={
+                  "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded " +
+                  (alias.active
+                    ? "bg-[#EEF3E4] text-[#4F7C3A]"
+                    : "bg-[#F0ECE9] text-[#6B7280]")
+                }
+                title={
+                  alias.active
+                    ? "hookka.com alias"
+                    : "hookka.com alias (inactive)"
+                }
+              >
+                <AtSign className="h-3 w-3" />
+                {alias.address}
+              </span>
+              {heuristic && canManageUsers && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    linkAliasToUser(alias, u);
+                  }}
+                  disabled={linkingAliasId === alias.id}
+                  className="inline-flex items-center gap-1 text-[10px] font-medium text-[#6B5C32] hover:underline disabled:opacity-50"
+                  title="Matched by name only — click to permanently link this alias (writes assigned_user_id)"
+                >
+                  {linkingAliasId === alias.id ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Link2 className="h-3 w-3" />
+                  )}
+                  Link
+                </button>
+              )}
+            </span>
+          );
+        }
+        if (!canManageUsers) {
+          return <span className="text-xs text-gray-400">—</span>;
+        }
+        return (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation();
+              openAliasModal(u);
+            }}
+            title="Create @hookka.com alias"
+          >
+            <AtSign className="h-3.5 w-3.5 mr-1" />
+            Add alias
+          </Button>
+        );
+      },
+    },
+    {
+      key: "lastLoginAt",
+      label: "Last Login",
+      type: "text",
+      width: "150px",
+      sortable: true,
+      // Keep the date+TIME display (DefaultCellRenderer's "date" type drops the
+      // time). Sort on the raw ISO so ordering stays chronological.
+      sortAccessor: (u) => u.lastLoginAt || "",
+      render: (_v, u) => <span className="text-gray-600">{fmtDateTime(u.lastLoginAt)}</span>,
+    },
+    {
+      key: "createdAt",
+      label: "Created",
+      type: "text",
+      width: "150px",
+      sortable: true,
+      sortAccessor: (u) => u.createdAt || "",
+      render: (_v, u) => <span className="text-gray-600">{fmtDateTime(u.createdAt)}</span>,
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      type: "text",
+      width: "200px",
+      align: "right",
+      sortable: false, // a button row has nothing to sort on
+      noClip: true, // row of buttons must not be clipped/ellipsized
+      render: (_v, u) =>
+        canManageUsers ? (
+          <div className="inline-flex gap-1">
+            {/* Edit details — Position / Department / Email Alias (Edit→Save,
+                no naked edits): opens the modal, never auto-saves. */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                openAliasModal(u);
+              }}
+              title="Edit details (position, department, email alias)"
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+            </Button>
+            {/* Change role — kept separate because a role change ends the
+                user's session (security action). */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                setEditRoleForUser(u);
+                setEditRole(u.role);
+                setEditRoleError(null);
+              }}
+              title="Change role"
+            >
+              <ShieldCheck className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleActive(u);
+              }}
+              title={u.isActive ? "Disable" : "Enable"}
+            >
+              {u.isActive ? (
+                <Ban className="h-3.5 w-3.5" />
+              ) : (
+                <Check className="h-3.5 w-3.5" />
+              )}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                setResetForUser(u);
+                setResetPassword("");
+                setResetError(null);
+              }}
+              title="Reset password"
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                deleteUser(u);
+              }}
+              title="Delete"
+              disabled={u.id === currentUser?.id}
+            >
+              <Trash2 className="h-3.5 w-3.5 text-red-600" />
+            </Button>
+          </div>
+        ) : (
+          <span className="text-xs text-[#9C8F7A]">Super Admin only</span>
+        ),
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [aliasByUserId, canManageUsers, currentUser?.id, linkingAliasId]);
 
   // ---------- Render -------------------------------------------------------
 
@@ -960,188 +1401,20 @@ export default function UsersPage() {
               </div>
             </CardHeader>
             <CardContent>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-[#E2DDD8] text-left">
-                      <Th>Email</Th>
-                      <Th>Name</Th>
-                      <Th>Role</Th>
-                      <Th>Status</Th>
-                      <Th>Position</Th>
-                      <Th>Department</Th>
-                      <Th>Email alias</Th>
-                      <Th>Last login</Th>
-                      <Th>Created</Th>
-                      <Th className="text-right pr-2">Actions</Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {loadingUsers ? (
-                      <tr>
-                        <td colSpan={10} className="py-6 text-center text-gray-500">
-                          <Loader2 className="h-4 w-4 animate-spin inline-block mr-2" />
-                          Loading users…
-                        </td>
-                      </tr>
-                    ) : users.length === 0 ? (
-                      <tr>
-                        <td colSpan={10} className="py-6 text-center text-gray-500">
-                          No users yet
-                        </td>
-                      </tr>
-                    ) : (
-                      users.map((u) => {
-                        const alias = aliasByUserId.get(u.id);
-                        return (
-                          <tr
-                            key={u.id}
-                            className="border-b border-[#F0ECE9] hover:bg-[#FAF9F8]"
-                          >
-                            <Td>
-                              <span className="font-medium">{u.email}</span>
-                              {u.id === currentUser?.id && (
-                                <span className="ml-2 text-[10px] font-semibold uppercase tracking-wider bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5 rounded">
-                                  You
-                                </span>
-                              )}
-                            </Td>
-                            <Td>{u.displayName || "—"}</Td>
-                            <Td>
-                              <span className="text-xs font-semibold uppercase tracking-wider text-[#6B5C32]">
-                                {u.role}
-                              </span>
-                            </Td>
-                            <Td>
-                              {u.isActive ? (
-                                <span className="inline-flex items-center gap-1 text-xs font-medium bg-[#EEF3E4] text-[#4F7C3A] px-2 py-0.5 rounded-full">
-                                  <Check className="h-3 w-3" /> Active
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 text-xs font-medium bg-[#F0ECE9] text-[#6B7280] px-2 py-0.5 rounded-full">
-                                  <Ban className="h-3 w-3" /> Disabled
-                                </span>
-                              )}
-                            </Td>
-                            {/* Position — from the user's @hookka.com alias. */}
-                            <Td className="text-gray-700">
-                              {alias?.assignedPosition || (
-                                <span className="text-gray-400">—</span>
-                              )}
-                            </Td>
-                            {/* Department — from the user's @hookka.com alias. */}
-                            <Td>
-                              {alias?.assignedDept ? (
-                                <span className="inline-flex items-center text-xs font-medium bg-[#EFEAE5] text-[#6B5C32] px-2 py-0.5 rounded">
-                                  {alias.assignedDept}
-                                </span>
-                              ) : (
-                                <span className="text-gray-400">—</span>
-                              )}
-                            </Td>
-                            {/* Email alias — the address when set, else an
-                                explicit "Add alias" action (Edit→Save: opens
-                                the create-alias modal, never auto-creates). */}
-                            <Td>
-                              {alias ? (
-                                <span
-                                  className={
-                                    "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded " +
-                                    (alias.active
-                                      ? "bg-[#EEF3E4] text-[#4F7C3A]"
-                                      : "bg-[#F0ECE9] text-[#6B7280]")
-                                  }
-                                  title={
-                                    alias.active
-                                      ? "hookka.com alias"
-                                      : "hookka.com alias (inactive)"
-                                  }
-                                >
-                                  <AtSign className="h-3 w-3" />
-                                  {alias.address}
-                                </span>
-                              ) : !canManageUsers ? (
-                                <span className="text-xs text-gray-400">—</span>
-                              ) : (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => openAliasModal(u)}
-                                  title="Create @hookka.com alias"
-                                >
-                                  <AtSign className="h-3.5 w-3.5 mr-1" />
-                                  Add alias
-                                </Button>
-                              )}
-                            </Td>
-                            <Td className="text-gray-600">
-                              {fmtDateTime(u.lastLoginAt)}
-                            </Td>
-                            <Td className="text-gray-600">
-                              {fmtDateTime(u.createdAt)}
-                            </Td>
-                            <Td className="text-right pr-2">
-                              {canManageUsers ? (
-                                <div className="inline-flex gap-1">
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => {
-                                      setEditRoleForUser(u);
-                                      setEditRole(u.role);
-                                      setEditRoleError(null);
-                                    }}
-                                    title="Change role"
-                                  >
-                                    <Pencil className="h-3.5 w-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => toggleActive(u)}
-                                    title={u.isActive ? "Disable" : "Enable"}
-                                  >
-                                    {u.isActive ? (
-                                      <Ban className="h-3.5 w-3.5" />
-                                    ) : (
-                                      <Check className="h-3.5 w-3.5" />
-                                    )}
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => {
-                                      setResetForUser(u);
-                                      setResetPassword("");
-                                      setResetError(null);
-                                    }}
-                                    title="Reset password"
-                                  >
-                                    <KeyRound className="h-3.5 w-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => deleteUser(u)}
-                                    title="Delete"
-                                    disabled={u.id === currentUser?.id}
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                                  </Button>
-                                </div>
-                              ) : (
-                                <span className="text-xs text-[#9C8F7A]">
-                                  Super Admin only
-                                </span>
-                              )}
-                            </Td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
+              {/* Shared DataGrid — the same grid the rest of the app uses, so
+                  the owner gets the Column chooser (show/hide), per-column
+                  Filter + Sort, drag-reorder/resize, and a frozen Email column
+                  for free. His layout persists per browser via gridId. */}
+              <DataGrid<UserRow>
+                columns={userColumns}
+                data={users}
+                keyField="id"
+                loading={loadingUsers}
+                stickyHeader
+                gridId="user-management-users"
+                emptyMessage="No users yet"
+                maxHeight="calc(100vh - 320px)"
+              />
             </CardContent>
           </Card>
 
@@ -1411,70 +1684,145 @@ export default function UsersPage() {
               <div>
                 <CardTitle>Org Chart</CardTitle>
                 <CardDescription>
-                  Active staff grouped by department and position. The
-                  department / position come from each person&apos;s @hookka.com
-                  alias — set them when you create the alias on the Users tab.
+                  Active staff grouped by department, then position. Department
+                  and position come from each person&apos;s @hookka.com alias —
+                  set or change them with the{" "}
+                  <SlidersHorizontal className="inline h-3 w-3 -mt-0.5" /> Edit
+                  details action on the Users tab.
                 </CardDescription>
               </div>
             </div>
           </CardHeader>
           <CardContent>
             {orgChart.size === 0 ? (
-              <div className="py-8 text-center text-sm text-gray-500">
-                No active staff with an assigned mailbox yet. Create an
-                @hookka.com alias for a user (Users tab) to place them on the org
-                chart.
+              <div className="rounded-lg border border-dashed border-[#D6D0C8] bg-[#FAFAF9] py-10 text-center">
+                <UsersIcon className="mx-auto mb-2 h-7 w-7 text-[#C4BBA9]" />
+                <div className="text-sm font-medium text-[#6B7280]">
+                  No staff placed on the org chart yet
+                </div>
+                <div className="mx-auto mt-1 max-w-md text-xs text-gray-500">
+                  People appear here once they have a{" "}
+                  <strong>Department</strong> set. Go to the Users tab, click{" "}
+                  <SlidersHorizontal className="inline h-3 w-3 -mt-0.5" /> Edit
+                  details on a person, and choose their department (Support /
+                  Finance / HR) and position.
+                </div>
               </div>
             ) : (
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {orgDepts.map((dept) => {
-                  const posMap = orgChart.get(dept);
-                  if (!posMap) return null;
-                  const count = [...posMap.values()].reduce(
-                    (s, arr) => s + arr.length,
-                    0,
-                  );
-                  return (
-                    <div
-                      key={dept}
-                      className="rounded-lg border border-[#E5E7EB] bg-[#FAFAF9] p-3"
-                    >
-                      <div className="mb-2 flex items-center justify-between">
-                        <h3 className="text-sm font-semibold text-[#111827]">
-                          {dept}
-                        </h3>
-                        <span className="rounded-full bg-[#EFEAE5] px-2 py-0.5 text-[10px] font-medium text-[#6B5C32]">
-                          {count}
-                        </span>
-                      </div>
-                      <div className="space-y-2.5">
-                        {[...posMap.entries()].map(([pos, members]) => (
-                          <div key={pos}>
-                            <div className="text-[10px] font-medium uppercase tracking-wide text-[#9CA3AF]">
-                              {pos}
+              <>
+                {/* When everyone is still Unassigned (no depts entered), make
+                    the path obvious — this is the owner's "unusable" state. */}
+                {orgDepts.length === 1 && orgDepts[0] === "Unassigned" && (
+                  <div className="mb-4 rounded-md border border-[#EAD9A8] bg-[#FBF6E7] px-3 py-2 text-xs text-[#8A6D1E]">
+                    Everyone is <strong>Unassigned</strong> because no
+                    departments have been set yet. Open{" "}
+                    <SlidersHorizontal className="inline h-3 w-3 -mt-0.5" /> Edit
+                    details on the Users tab to give each person a department —
+                    they&apos;ll move into the right column here automatically.
+                  </div>
+                )}
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {orgDepts.map((dept) => {
+                    const posMap = orgChart.get(dept);
+                    if (!posMap) return null;
+                    const count = [...posMap.values()].reduce(
+                      (s, arr) => s + arr.length,
+                      0,
+                    );
+                    const isUnassigned = dept === "Unassigned";
+                    // Position groups: real positions first (A–Z), the "—"
+                    // (no position) bucket last so named roles lead.
+                    const posEntries = [...posMap.entries()].sort((a, b) => {
+                      if (a[0] === "—") return 1;
+                      if (b[0] === "—") return -1;
+                      return a[0].localeCompare(b[0]);
+                    });
+                    return (
+                      <div
+                        key={dept}
+                        className={
+                          "overflow-hidden rounded-lg border " +
+                          (isUnassigned
+                            ? "border-[#EAD9A8] bg-[#FCFAF3]"
+                            : "border-[#E5E7EB] bg-white")
+                        }
+                      >
+                        {/* Department header band */}
+                        <div
+                          className={
+                            "flex items-center justify-between px-3 py-2 " +
+                            (isUnassigned
+                              ? "bg-[#F6EFD9]"
+                              : "bg-[#EFEAE5]")
+                          }
+                        >
+                          <h3
+                            className={
+                              "text-sm font-semibold " +
+                              (isUnassigned ? "text-[#8A6D1E]" : "text-[#5A4D2A]")
+                            }
+                          >
+                            {dept}
+                          </h3>
+                          <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-semibold text-[#6B5C32]">
+                            {count} {count === 1 ? "person" : "people"}
+                          </span>
+                        </div>
+                        <div className="space-y-3 p-3">
+                          {isUnassigned && (
+                            <div className="text-[10px] italic text-[#A98F4E]">
+                              No department set — use Edit details on the Users
+                              tab.
                             </div>
-                            <div className="mt-1 space-y-1">
-                              {members.map((m) => (
-                                <div
-                                  key={m.id}
-                                  className="rounded-md border border-[#E5E7EB] bg-white px-2 py-1"
-                                >
-                                  <div className="text-xs font-medium text-[#111827]">
-                                    {m.displayName || m.email}
-                                  </div>
-                                  <div className="text-[10px] text-[#9CA3AF]">
-                                    {m.email}
-                                  </div>
-                                </div>
-                              ))}
+                          )}
+                          {posEntries.map(([pos, members]) => (
+                            <div key={pos}>
+                              <div className="mb-1 flex items-center gap-2">
+                                <span className="text-[10px] font-semibold uppercase tracking-wide text-[#9CA3AF]">
+                                  {pos === "—" ? "No position" : pos}
+                                </span>
+                                <span className="text-[10px] text-[#C4BBA9]">
+                                  {members.length}
+                                </span>
+                                <span className="h-px flex-1 bg-[#F0ECE9]" />
+                              </div>
+                              <div className="space-y-1">
+                                {members.map((m) => {
+                                  const name = m.displayName || m.email;
+                                  const initials = name
+                                    .trim()
+                                    .split(/\s+/)
+                                    .slice(0, 2)
+                                    .map((p) => p[0]?.toUpperCase() ?? "")
+                                    .join("");
+                                  return (
+                                    <div
+                                      key={m.id}
+                                      className="flex items-center gap-2 rounded-md border border-[#E5E7EB] bg-white px-2 py-1.5"
+                                    >
+                                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#EFEAE5] text-[10px] font-semibold text-[#6B5C32]">
+                                        {initials || "?"}
+                                      </span>
+                                      <div className="min-w-0">
+                                        <div className="truncate text-xs font-medium text-[#111827]">
+                                          {m.displayName || m.email}
+                                        </div>
+                                        <div className="truncate text-[10px] text-[#9CA3AF]">
+                                          {m.email}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
                             </div>
-                          </div>
-                        ))}
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
@@ -1570,8 +1918,15 @@ export default function UsersPage() {
                           (a.assignedDept ? ` · ${a.assignedDept}` : "")
                         }
                       >
+                        {/* Show the FULL address, not just the truncated local-
+                            part (the owner saw a bare "lim" and couldn't tell
+                            which mailbox it was). Local-part is emphasised; the
+                            @hookka.com domain trails in a lighter shade. */}
                         <div className="font-semibold">
                           {a.address.split("@")[0]}
+                          <span className="font-normal text-[#9CA3AF]">
+                            @{a.address.split("@")[1] ?? "hookka.com"}
+                          </span>
                         </div>
                         {a.assignedDept && (
                           <div className="text-[9px] uppercase text-[#9CA3AF]">
@@ -1881,52 +2236,84 @@ export default function UsersPage() {
       )}
 
       {/* =========================================================== */}
-      {/* Email-alias modal — create a hookka.com address for a user.
-          SUPER_ADMIN only (POST /api/mail-center/addresses is gated by
-          requireSuperAdmin). This creates an in-ERP address record that
-          receives mail in the Mail Center once the domain MX points at
-          Cloudflare Email Routing — it is NOT a Google/Gmail account. */}
+      {/* Edit-details modal — the user's @hookka.com Email Alias, Department
+          and Position (all stored on the email_addresses alias row).
+          SUPER_ADMIN only (POST/PATCH /api/mail-center/addresses are gated by
+          requireSuperAdmin). Edit→Save, no naked edits.
+            • No alias yet  → Save POSTs a new address.
+            • Has an alias  → address is LOCKED (PATCH can't rename an address —
+              that's a delete + recreate); Department / Position save via PATCH.
+          The address is an in-ERP record that receives mail in the Mail Center
+          once the domain MX points at Cloudflare Email Routing — NOT a Gmail
+          login. */}
       {/* =========================================================== */}
       {aliasForUser && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => !aliasSubmitting && setAliasForUser(null)}
+          onClick={() => {
+            if (!aliasSubmitting) {
+              setAliasForUser(null);
+              setAliasExisting(null);
+            }
+          }}
         >
           <div
             className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="text-lg font-semibold text-[#1F1D1B] flex items-center gap-2">
-              <AtSign className="h-5 w-5 text-[#6B5C32]" />
-              Create email alias
+              {aliasExisting ? (
+                <SlidersHorizontal className="h-5 w-5 text-[#6B5C32]" />
+              ) : (
+                <AtSign className="h-5 w-5 text-[#6B5C32]" />
+              )}
+              {aliasExisting ? "Edit details" : "Create email alias"}
             </h2>
             <p className="text-sm text-gray-500 mt-1">
-              Create a <strong>@hookka.com</strong> address for{" "}
-              <strong>{aliasForUser.email}</strong>. Mail to and from it shows
-              up in the Mail Center. This is a company address received into the
-              ERP — not a separate Gmail login.
+              {aliasExisting ? (
+                <>
+                  Set the <strong>department</strong> and{" "}
+                  <strong>position</strong> for{" "}
+                  <strong>{aliasForUser.email}</strong>. These are stored on
+                  their @hookka.com mailbox and feed the org chart.
+                </>
+              ) : (
+                <>
+                  Create a <strong>@hookka.com</strong> address for{" "}
+                  <strong>{aliasForUser.email}</strong>, and set its department
+                  and position. Mail to and from it shows up in the Mail Center.
+                  This is a company address received into the ERP — not a
+                  separate Gmail login.
+                </>
+              )}
             </p>
             <div className="mt-4 space-y-2">
               <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide">
-                Alias address
+                Email alias
               </label>
               <div className="relative">
                 <AtSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
                 <Input
                   type="email"
-                  autoFocus
+                  autoFocus={!aliasExisting}
                   value={aliasAddress}
                   onChange={(e) => setAliasAddress(e.target.value)}
                   placeholder="name@hookka.com"
-                  className="pl-9"
+                  className="pl-9 disabled:bg-[#F5F4F2] disabled:text-[#6B7280] disabled:cursor-not-allowed"
                   autoComplete="off"
+                  // Address is immutable once the alias exists — PATCH has no
+                  // way to rename it (that's a delete + recreate). Editing here
+                  // is only for the create path.
+                  disabled={!!aliasExisting}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") submitAlias();
                   }}
                 />
               </div>
               <p className="text-xs text-gray-500">
-                Must end with @hookka.com. Edit the suggestion if needed.
+                {aliasExisting
+                  ? "The address can't be changed after creation. To use a different address, delete this alias and create a new one."
+                  : "Must end with @hookka.com. Edit the suggestion if needed."}
               </p>
               <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide pt-2">
                 Department
@@ -1966,7 +2353,10 @@ export default function UsersPage() {
             <div className="mt-6 flex justify-end gap-2">
               <Button
                 variant="outline"
-                onClick={() => setAliasForUser(null)}
+                onClick={() => {
+                  setAliasForUser(null);
+                  setAliasExisting(null);
+                }}
                 disabled={aliasSubmitting}
               >
                 Cancel
@@ -1974,14 +2364,16 @@ export default function UsersPage() {
               <Button
                 variant="primary"
                 onClick={submitAlias}
-                disabled={aliasSubmitting || !aliasAddress.trim()}
+                disabled={
+                  aliasSubmitting || (!aliasExisting && !aliasAddress.trim())
+                }
               >
                 {aliasSubmitting ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
                   <Check className="h-4 w-4" />
                 )}
-                Create alias
+                {aliasExisting ? "Save" : "Create alias"}
               </Button>
             </div>
           </div>

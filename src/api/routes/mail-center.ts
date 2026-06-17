@@ -673,6 +673,9 @@ app.get("/threads/:id", async (c) => {
 app.get("/addresses", async (c) => {
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
+  // no-store — the User Management matrix refetches this right after creating
+  // or linking an alias; a cached copy would hide the just-made change.
+  c.header("Cache-Control", "no-store");
   const scope = await getMailScope(c, orgId);
   if (scope.isAdmin) {
     const res = await c.var.DB.prepare(
@@ -829,6 +832,7 @@ app.patch("/addresses/:id", async (c) => {
     label?: string;
     assignedUserId?: string | null;
     assignedUserName?: string | null;
+    assignedDept?: string | null;
     assignedPosition?: string | null;
     active?: boolean;
   };
@@ -849,6 +853,10 @@ app.patch("/addresses/:id", async (c) => {
   if (body.assignedUserName !== undefined) {
     sets.push("assigned_user_name = ?");
     binds.push(body.assignedUserName ?? null);
+  }
+  if (body.assignedDept !== undefined) {
+    sets.push("assigned_dept = ?");
+    binds.push(body.assignedDept?.trim() || null);
   }
   if (body.assignedPosition !== undefined) {
     sets.push("assigned_position = ?");
@@ -898,6 +906,9 @@ app.get("/access", async (c) => {
   )
     .bind(orgId)
     .all<{ address_id: string; user_id: string }>();
+  // no-store — same read-after-write reason as /scope-levels: the matrix
+  // refetches this immediately after a grant POST/DELETE.
+  c.header("Cache-Control", "no-store");
   return c.json(
     (res.results ?? []).map((r) => ({
       addressId: r.address_id,
@@ -988,6 +999,11 @@ app.get("/scope-levels", async (c) => {
   )
     .bind(orgId)
     .all<{ user_id: string; level: string }>();
+  // no-store: this list is read straight back after a PUT /scope-level. Any
+  // HTTP-layer caching (browser heuristic cache, edge) would serve the
+  // pre-write rows and the matrix would appear to "revert" the just-saved
+  // level (owner report 2026-06-17).
+  c.header("Cache-Control", "no-store");
   return c.json(
     (res.results ?? []).map((r) => ({
       userId: r.user_id,

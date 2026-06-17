@@ -1227,9 +1227,23 @@ export default function WorkerScanPage() {
     // not line up with the white box, so barcode mode read a neighbouring stacked
     // row or nothing (Wei Siang 2026-06-17). The box dims here MUST match the
     // reticle JSX (86vw, max 440px, 118px tall).
-    // (Barcode mode now decodes the FULL frame — same as QR mode, which the owner
-    // confirmed reads the Code 128 — so the old centred-ROI crop helper was
-    // removed. The on-screen reticle is now just a visual aim guide.)
+    // Aim box → isolate ONE barcode. Full WIDTH (Code 128 needs every bar + both
+    // quiet zones) × a centred ~30% HEIGHT band. Barcode mode decodes ONLY this
+    // band so it reads the one code the worker aims at — not a neighbour — AND the
+    // decoded value stays STABLE (one code) so the brief stable-hold can lock.
+    // Full-frame let 3 codes flip-flop frame-to-frame so the hold never completed
+    // ("barcode 扫不到" while QR worked — QR fires on the FIRST decode, so it
+    // "worked" but grabbed whatever/whichever code, too eagerly). The band is tall
+    // enough for ZXing to read yet excludes the rows above/below.
+    const aimRoi = () => {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const sh = Math.max(1, Math.round(vh * 0.3));
+      const sw = vw;
+      const sx = 0;
+      const sy = Math.round((vh - sh) / 2);
+      return { sx, sy, sw, sh };
+    };
     // Tolerant stable-hold: a SINGLE stray read of a neighbouring stacked row
     // must NOT zero the hold (that fragility, combined with an over-wide ROI, is
     // why barcode mode kept "regressing"). Only switch the tracked value once a
@@ -1277,6 +1291,10 @@ export default function WorkerScanPage() {
               // owner's code whenever it wasn't dead-centre ("barcode 扫不到"
               // while QR mode worked). Nearest-to-centre still isolates the aimed
               // row out of a stacked schedule (owner 2026-06-17).
+              // Only the code INSIDE the aim box (its vertical centre within the
+              // band) wins — a neighbouring barcode above/below is ignored, AND
+              // the decoded value stays stable (one code) so the hold can lock.
+              const roiHalf = aimRoi().sh / 2;
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
@@ -1285,6 +1303,7 @@ export default function WorkerScanPage() {
                 const bb = (c as { boundingBox?: { y: number; height: number } })
                   .boundingBox;
                 const d = bb ? Math.abs(bb.y + bb.height / 2 - cy) : 0;
+                if (bb && d > roiHalf) continue; // outside the aim box → ignore
                 if (!best || d < best.d) best = { v: c.rawValue, d };
               }
               if (best) {
@@ -1315,17 +1334,17 @@ export default function WorkerScanPage() {
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
             if (scanMode === "barcode") {
-              // FULL FRAME (no crop). The owner confirmed QR mode reads the same
-              // Code 128 — so the centred-ROI crop was exactly what kept barcode
-              // mode from decoding. Decode the whole frame with ZXing (Code 128 +
-              // QR), keeping ~1280px across so the bars stay sharp, then route
-              // through considerHit's brief stable-hold (owner 2026-06-17).
-              const s = Math.min(1, 1280 / Math.max(vw, vh));
-              const cw = Math.max(1, Math.round(vw * s));
-              const ch = Math.max(1, Math.round(vh * s));
+              // Decode ONLY the aim box (full width × the centred band) so it
+              // isolates the one barcode the worker aims at. Full-frame let 3
+              // codes flip-flop so the stable-hold never locked. The band is tall
+              // (~30%) so ZXing still reads it, yet excludes the rows above/below.
+              const { sx, sy, sw, sh } = aimRoi();
+              const s = Math.min(1, 1280 / sw);
+              const cw = Math.max(1, Math.round(sw * s));
+              const ch = Math.max(1, Math.round(sh * s));
               canvas.width = cw;
               canvas.height = ch;
-              ctx.drawImage(video, 0, 0, cw, ch);
+              ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
               let imageData: ImageData | null = null;
               try {
                 imageData = ctx.getImageData(0, 0, cw, ch);

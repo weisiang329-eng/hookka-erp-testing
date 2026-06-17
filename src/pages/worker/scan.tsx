@@ -44,7 +44,7 @@ import {
 import jsQR from "jsqr";
 import { useT } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
-import { parseStickerData, parseJobCardBarcode } from "@/lib/qr-utils";
+import { parseStickerData, parseJobCardBarcode, parseRackQr } from "@/lib/qr-utils";
 import { deriveBarcodeToken } from "@/lib/job-card-id";
 import { deriveWipName } from "@/lib/wip-name";
 import { z } from "zod";
@@ -395,6 +395,27 @@ export default function WorkerScanPage() {
   const [rackChoice, setRackChoice] = useState("");
   const [savingRack, setSavingRack] = useState(false);
   const [rackSaved, setRackSaved] = useState(false);
+  // Bulk rack stock-in (#52): scan a rack QR (HKRACK:) to enter the mode, then
+  // each FG/packing/PO scan accumulates into a list; one "Stock In" puts them
+  // all into that rack. Additive — never touches the decode loop or the normal
+  // WIP lookup. rackStockInRef mirrors the state so the memoised handleDecoded
+  // reads the current value without being re-created on every scan.
+  const [rackStockIn, setRackStockIn] = useState<{
+    rackId: string;
+    items: Array<{
+      poId: string;
+      poNo: string;
+      productCode: string;
+      productName: string;
+      qty: number;
+    }>;
+  } | null>(null);
+  const rackStockInRef = useRef(rackStockIn);
+  useEffect(() => {
+    rackStockInRef.current = rackStockIn;
+  }, [rackStockIn]);
+  const [rackStockingIn, setRackStockingIn] = useState(false);
+  const [rackStockMsg, setRackStockMsg] = useState("");
 
   // Pull worker ID + home department from cached /me so we can auto-attribute
   // the scan AND show the card for the worker's OWN section on a shared
@@ -484,6 +505,43 @@ export default function WorkerScanPage() {
       /* leave unsaved — the worker can tap Save again */
     } finally {
       setSavingRack(false);
+    }
+  }, []);
+
+  // #52 — submit the accumulated rack stock-in list to the worker bulk endpoint.
+  const submitRackStockIn = useCallback(async () => {
+    const rs = rackStockInRef.current;
+    if (!rs || rs.items.length === 0) return;
+    setRackStockingIn(true);
+    setRackStockMsg("");
+    try {
+      const res = await workerFetch("/api/worker/rack-bulk-stock-in", {
+        method: "POST",
+        body: JSON.stringify({
+          rackLocationId: rs.rackId,
+          items: rs.items.map((x) => ({
+            productCode: x.productCode,
+            productName: x.productName,
+            productionOrderId: x.poId,
+            qty: x.qty,
+          })),
+        }),
+      });
+      const j = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        count?: number;
+        error?: string;
+      };
+      if (res.ok && j.ok) {
+        setRackStockMsg(`✓ 已入库 ${j.count ?? rs.items.length} 项到 ${rs.rackId}`);
+        setRackStockIn({ rackId: rs.rackId, items: [] });
+      } else {
+        setRackStockMsg(j.error || "入库失败,请重试");
+      }
+    } catch {
+      setRackStockMsg("入库失败,请重试");
+    } finally {
+      setRackStockingIn(false);
     }
   }, []);
 
@@ -591,6 +649,55 @@ export default function WorkerScanPage() {
   // 2/2 on a qty=2 job card is otherwise indistinguishable.
   const handleDecoded = useCallback(
     async (raw: string) => {
+      // Rack bulk stock-in (#52). A rack QR (HKRACK:<id>) enters/keeps the mode;
+      // while in it, every subsequent FG/packing/PO scan is ADDED to that rack's
+      // list instead of doing a normal WIP lookup. Checked first so a rack scan
+      // never falls into the job-card path.
+      const scannedRackId = parseRackQr(raw);
+      if (scannedRackId) {
+        setRackStockMsg("");
+        setRackStockIn((prev) =>
+          prev && prev.rackId === scannedRackId
+            ? prev
+            : { rackId: scannedRackId, items: prev?.items ?? [] },
+        );
+        setResult({ kind: "idle" });
+        return;
+      }
+      if (rackStockInRef.current) {
+        const rs0 = parseStickerData(raw);
+        const term = rs0?.poNo || parseJobCardBarcode(raw) || raw;
+        let order: Order | undefined;
+        try {
+          order = (await findMatches(term))[0]?.order;
+        } catch {
+          order = undefined;
+        }
+        if (!order) {
+          setRackStockMsg(`未识别: ${term}`);
+          return;
+        }
+        const matched = order;
+        setRackStockMsg("");
+        setRackStockIn((prev) => {
+          if (!prev) return prev;
+          const items = [...prev.items];
+          const i = items.findIndex((x) => x.poId === matched.id);
+          if (i >= 0) {
+            items[i] = { ...items[i], qty: items[i].qty + 1 };
+          } else {
+            items.push({
+              poId: matched.id,
+              poNo: matched.poNo,
+              productCode: matched.productCode,
+              productName: matched.productName || matched.productCode,
+              qty: 1,
+            });
+          }
+          return { ...prev, items };
+        });
+        return;
+      }
       // Department QR (deptscan=<CODE> in the QR's URL) — not a job card.
       // Tells payroll "I am now working in this department"; handled before
       // any sticker parsing so it can never fall into the JC lookup.
@@ -1784,6 +1891,63 @@ export default function WorkerScanPage() {
               )}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* #52 — Rack bulk stock-in panel. Visible whenever a rack QR has been
+          scanned; the worker keeps scanning FG/packing stickers (each adds a
+          line) then taps Stock In to put them all into this rack. */}
+      {rackStockIn && (
+        <div className="bg-white rounded-xl p-4 border border-amber-300 space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-bold text-[#1F1D1B]">
+              📦 入库到货架 {rackStockIn.rackId}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setRackStockIn(null);
+                setRackStockMsg("");
+              }}
+              className="text-xs text-[#6B5C32] underline"
+            >
+              退出
+            </button>
+          </div>
+          <p className="text-xs text-[#6B7280]">
+            继续扫 FG / 包装贴纸,每扫一个加一件;扫完点「入库」。
+          </p>
+          {rackStockIn.items.length === 0 ? (
+            <p className="text-sm text-[#6B7280] py-2">还没扫到东西。</p>
+          ) : (
+            <ul className="divide-y divide-[#EFEAE5]">
+              {rackStockIn.items.map((it) => (
+                <li
+                  key={it.poId}
+                  className="flex items-center justify-between py-1.5 text-sm"
+                >
+                  <span className="truncate">
+                    {it.productName}
+                    <span className="text-xs text-[#6B7280]"> · {it.poNo}</span>
+                  </span>
+                  <span className="shrink-0 font-semibold">× {it.qty}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {rackStockMsg && (
+            <p className="text-sm font-medium text-[#6B5C32]">{rackStockMsg}</p>
+          )}
+          <button
+            type="button"
+            disabled={rackStockIn.items.length === 0 || rackStockingIn}
+            onClick={submitRackStockIn}
+            className="w-full h-12 rounded-full bg-[#6B5C32] text-white font-bold text-base active:bg-[#5a4d2a] disabled:opacity-40"
+          >
+            {rackStockingIn
+              ? "入库中…"
+              : `入库 (${rackStockIn.items.reduce((s, x) => s + x.qty, 0)} 件)`}
+          </button>
         </div>
       )}
 

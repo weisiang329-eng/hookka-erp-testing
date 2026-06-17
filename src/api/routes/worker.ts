@@ -2759,4 +2759,103 @@ app.get("/department-performance", async (c) => {
   });
 });
 
+// ============================================================
+// POST /api/worker/rack-bulk-stock-in
+//
+// Worker-portal bulk RACK STOCK-IN. The phone scans a rack + a batch of
+// pieces, then posts them all at once. For each item we write one rack_items
+// row AND one STOCK_IN stock_movements row, then flip the rack to OCCUPIED.
+//
+// Mirrors the admin-side stock-in write in routes/warehouse.ts: the SQL uses
+// the same camelCase identifiers (rackLocationId / productionOrderId /
+// productCode / productName / sizeLabel / customerName / rackLabel /
+// performedBy) that the supabase-compat rename map translates to snake_case.
+// rack_items.id is BIGSERIAL, so the INSERT does NOT supply id.
+//
+// Body: { rackLocationId, items: [{ productCode, productName?,
+//          productionOrderId?, sizeLabel?, customerName?, qty? }] }
+// ============================================================
+app.post("/rack-bulk-stock-in", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const { worker } = auth;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const { rackLocationId, items } = body as {
+      rackLocationId?: string;
+      items?: Array<{
+        productCode?: string;
+        productName?: string;
+        productionOrderId?: string;
+        sizeLabel?: string;
+        customerName?: string;
+        qty?: number;
+      }>;
+    };
+    if (!rackLocationId || !Array.isArray(items) || items.length === 0) {
+      return c.json(
+        { ok: false, error: "rackLocationId and a non-empty items array are required" },
+        400,
+      );
+    }
+
+    const today = new Date().toISOString().split("T")[0];
+    for (const item of items) {
+      const qty = item.qty ?? 1;
+      // rack_items.id is BIGSERIAL — not supplied here.
+      await c.var.DB.prepare(
+        `INSERT INTO rack_items (rackLocationId, productionOrderId,
+           productCode, productName, sizeLabel, customerName, qty,
+           stockedInDate, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          rackLocationId,
+          item.productionOrderId ?? "",
+          item.productCode ?? "",
+          item.productName ?? "",
+          item.sizeLabel ?? "",
+          item.customerName ?? "",
+          qty,
+          today,
+          "",
+        )
+        .run();
+
+      await c.var.DB.prepare(
+        `INSERT INTO stock_movements (id, type, rackLocationId, rackLabel,
+           productionOrderId, productCode, productName, quantity, reason,
+           performedBy, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          genId("sm"),
+          "STOCK_IN",
+          rackLocationId,
+          rackLocationId,
+          // NULL (not "") when there's no PO link, so the production_orders
+          // JOIN on the movements view reads as "no document".
+          item.productionOrderId || null,
+          item.productCode ?? "",
+          item.productName ?? "",
+          qty,
+          "Bulk stock-in (scan)",
+          worker.name,
+          new Date().toISOString(),
+        )
+        .run();
+    }
+
+    await c.var.DB.prepare(
+      "UPDATE rack_locations SET status = 'OCCUPIED' WHERE id = ?",
+    )
+      .bind(rackLocationId)
+      .run();
+
+    return c.json({ ok: true, count: items.length });
+  } catch (error) {
+    return c.json({ ok: false, error: String(error) }, 500);
+  }
+});
+
 export default app;

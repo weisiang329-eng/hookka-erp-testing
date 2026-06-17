@@ -513,7 +513,31 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
       items,
       "Public scan",
     );
-    await c.var.DB.batch([...moveDeletes, ...writes]);
+
+    // Auto-stamp each scanned piece's Rack onto its job card so the Packing
+    // sheet, packing list, and DO show the rack WITHOUT anyone picking it from
+    // the dropdown — and a re-scan into a different rack auto-changes it (owner
+    // 2026-06-17: "我 record 了进什么 Rack，packing 那边的 Rack Number 就自动显
+    // 示并更换"). Match the piece by productionOrderId + its WIP label — here
+    // `productName` IS the wipLabel-derived description from resolvePo, the same
+    // signature the rack rows use. `updated_at = NOW()` bumps the JC so the
+    // production_orders snapshot cache invalidates and the sheet re-reads (same
+    // reason the JC PATCH stamps it). Same atomic batch as the rack writes.
+    const rackLabel = rack.rack ?? "";
+    const rackingUpdates: D1PreparedStatement[] = [];
+    for (const it of items) {
+      const wip = (it.productName || "").trim();
+      if (!it.productionOrderId || !wip || !rackLabel) continue;
+      rackingUpdates.push(
+        c.var.DB
+          .prepare(
+            `UPDATE job_cards SET rackingNumber = ?, updated_at = NOW()
+               WHERE productionOrderId = ? AND wipLabel = ?`,
+          )
+          .bind(rackLabel, it.productionOrderId, wip),
+      );
+    }
+    await c.var.DB.batch([...moveDeletes, ...writes, ...rackingUpdates]);
 
     return c.json({ ok: true, count: items.length });
   } catch (err) {

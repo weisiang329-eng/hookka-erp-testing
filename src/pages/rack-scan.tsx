@@ -551,20 +551,6 @@ export default function RackScanPage() {
       void handleDecoded(data);
     };
 
-    // Barcode aim box → isolate ONE Code 128. Full WIDTH (every bar + both
-    // quiet zones) × a centred ~30% HEIGHT band, matching the rectangle reticle.
-    // Barcode mode decodes ONLY this band so the worker grabs the sticker they
-    // point at — not whichever of several stacked codes decodes first ("还没确定
-    // 要抓哪一个就 scan 了", owner 2026-06-17). QR mode keeps the full frame (a
-    // rack QR can sit anywhere). The band is tall enough for ZXing to read yet
-    // excludes the rows above/below.
-    const aimRoi = () => {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      const sh = Math.max(1, Math.round(vh * 0.3));
-      return { sx: 0, sy: Math.round((vh - sh) / 2), sw: vw, sh };
-    };
-
     const tick = async () => {
       if (stopped) return;
       const now = performance.now();
@@ -586,22 +572,32 @@ export default function RackScanPage() {
             const codes = await nativeDetector.detect(video);
             if (stopped) return;
             if (mode === "barcode") {
-              // Only the Code 128 whose vertical centre falls INSIDE the aim
-              // band wins; a neighbour above/below is ignored so the worker
-              // grabs the sticker they point at, not whichever decodes first
-              // (owner 2026-06-17). Nearest-to-centre among the in-band codes.
+              // FULL FRAME, like QR mode — QR mode reads this very Code 128 fine
+              // (it never rejects on position), so barcode mode must too. Among
+              // code_128 anywhere in frame pick the one NEAREST centre so a
+              // multi-code sheet still resolves to the aimed one, but NEVER
+              // reject on position — the band-reject made barcode mode "scan
+              // 不到" while QR worked (owner 2026-06-17, the recurring bug).
+              const cx = video.videoWidth / 2;
               const cy = video.videoHeight / 2;
-              const roiHalf = aimRoi().sh / 2;
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
                 const fmt = (c as { format?: string }).format;
                 if (fmt && fmt !== "code_128") continue;
                 const bb = (
-                  c as { boundingBox?: { y: number; height: number } }
+                  c as {
+                    boundingBox?: {
+                      x: number;
+                      y: number;
+                      width: number;
+                      height: number;
+                    };
+                  }
                 ).boundingBox;
-                const d = bb ? Math.abs(bb.y + bb.height / 2 - cy) : 0;
-                if (bb && d > roiHalf) continue; // outside the aim band → ignore
+                const d = bb
+                  ? Math.hypot(bb.x + bb.width / 2 - cx, bb.y + bb.height / 2 - cy)
+                  : 0;
                 if (!best || d < best.d) best = { v: c.rawValue, d };
               }
               if (best) hit = best.v;
@@ -617,62 +613,39 @@ export default function RackScanPage() {
           const vh = video.videoHeight;
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
-            if (mode === "barcode") {
-              // Decode ONLY the centred aim band (full width × ~30% height) so
-              // the worker isolates the one sticker they point at out of a
-              // stacked sheet — not whichever Code 128 decodes first. ~1280px
-              // working width keeps the bars sharp. ZXing is the sole Code 128
-              // decoder on iOS (jsQR is QR-only, so it's skipped here).
-              const { sx, sy, sw, sh } = aimRoi();
-              const s = Math.min(1, 1280 / sw);
-              const cw = Math.max(1, Math.round(sw * s));
-              const ch = Math.max(1, Math.round(sh * s));
-              canvas.width = cw;
-              canvas.height = ch;
-              ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
-              let imageData: ImageData | null = null;
-              try {
-                imageData = ctx.getImageData(0, 0, cw, ch);
-              } catch {
-                imageData = null;
+            // Both modes capture the SAME full frame — QR mode reads a Code 128
+            // fine precisely because it's full-frame, so barcode mode matches it
+            // (no cropped ROI; the crop is what broke barcode scanning). Barcode
+            // keeps a wider working width (~1280px) so Code 128 bars stay sharp;
+            // QR is fine smaller. jsQR (QR only) runs first in QR mode, then
+            // ZXing (QR + Code 128) for both.
+            const targetW = mode === "barcode" ? 1280 : 960;
+            const scale = Math.min(1, targetW / Math.max(vw, vh));
+            const cw = Math.max(1, Math.round(vw * scale));
+            const ch = Math.max(1, Math.round(vh * scale));
+            canvas.width = cw;
+            canvas.height = ch;
+            ctx.drawImage(video, 0, 0, cw, ch);
+            let imageData: ImageData | null = null;
+            try {
+              imageData = ctx.getImageData(0, 0, cw, ch);
+            } catch {
+              imageData = null;
+            }
+            if (imageData) {
+              if (mode !== "barcode") {
+                const code = jsQR(imageData.data, cw, ch, {
+                  inversionAttempts: "attemptBoth",
+                });
+                if (code && code.data) hit = code.data;
               }
-              if (imageData) {
+              if (!hit) {
                 const zxDecode = zxingRef.current;
                 if (!zxDecode) {
                   void ensureZxing(); // self-heal if the chunk hasn't loaded yet
                 } else {
                   const zxText = zxDecode(imageData);
                   if (zxText) hit = zxText;
-                }
-              }
-            } else {
-              // QR mode — full frame (a rack QR can sit anywhere in view).
-              // jsQR (QR only) first, then ZXing as a QR fallback.
-              const scale = Math.min(1, 960 / Math.max(vw, vh));
-              const cw = Math.max(1, Math.round(vw * scale));
-              const ch = Math.max(1, Math.round(vh * scale));
-              canvas.width = cw;
-              canvas.height = ch;
-              ctx.drawImage(video, 0, 0, cw, ch);
-              let imageData: ImageData | null = null;
-              try {
-                imageData = ctx.getImageData(0, 0, cw, ch);
-              } catch {
-                imageData = null;
-              }
-              if (imageData) {
-                const code = jsQR(imageData.data, cw, ch, {
-                  inversionAttempts: "attemptBoth",
-                });
-                if (code && code.data) hit = code.data;
-                if (!hit) {
-                  const zxDecode = zxingRef.current;
-                  if (!zxDecode) {
-                    void ensureZxing(); // self-heal if the chunk hasn't loaded yet
-                  } else {
-                    const zxText = zxDecode(imageData);
-                    if (zxText) hit = zxText;
-                  }
                 }
               }
             }
@@ -879,11 +852,10 @@ export default function RackScanPage() {
                     playsInline
                     muted
                   />
-                  {/* Aim reticle. In barcode mode this rectangle is REAL — only
-                      a Code 128 inside the band is decoded, so the worker aims
-                      at the one sticker they want. QR mode decodes the full
-                      frame (a square guide is enough). Tapping the overlay also
-                      (re)primes the beep audio on iOS. */}
+                  {/* Aim reticle — a visual guide only; BOTH modes decode the
+                      full frame, so the worker just needs the code roughly in
+                      view. A wide box for a barcode, a square for a QR. Tapping
+                      the overlay also (re)primes the beep audio on iOS. */}
                   <div
                     onClick={() => {
                       const ac = ensureAudio();

@@ -305,7 +305,9 @@ export default function WorkerScanPage() {
   // until ready the ref is null and jsQR carries QR. The ref holds a closure
   // that turns an ImageData into the decoded text (or null) so no ZXing types
   // leak into the hot tick loop.
-  const zxingRef = useRef<((img: ImageData) => string | null) | null>(null);
+  const zxingRef = useRef<
+    ((img: ImageData) => { text: string; cy: number } | null) | null
+  >(null);
   const zxingLoadingRef = useRef<Promise<void> | null>(null);
   // Lens zoom state lifted to refs so a tap-to-reset control (outside the scan
   // loop) can zoom back out — the QR auto-zoom-on-fail would otherwise leave the
@@ -346,7 +348,24 @@ export default function WorkerScanPage() {
                 ),
               ),
             );
-            return res ? res.getText() : null;
+            if (!res) return null;
+            // Vertical centre of the decoded code (normalised 0..1) from its
+            // result points, so barcode mode can ACCEPT only the code the worker
+            // centred in the aim band WITHOUT cropping the decoder input (the
+            // crop is what made barcode "扫不到"; we filter the RESULT instead).
+            // No points → 0.5 (treat as centred, never reject).
+            let cy = 0.5;
+            try {
+              const pts = res.getResultPoints?.() ?? [];
+              if (pts.length) {
+                let sum = 0;
+                for (const p of pts) sum += p.getY();
+                cy = sum / pts.length / height;
+              }
+            } catch {
+              cy = 0.5;
+            }
+            return { text: res.getText(), cy };
           } catch {
             return null; // NotFoundException — no code in this frame
           }
@@ -1206,18 +1225,44 @@ export default function WorkerScanPage() {
     let bcN = 0;
     let bcLast = "";
     let bcDbgAt = 0;
-    // Barcode fires on the FIRST solid decode — exactly like QR mode. The owner
-    // was emphatic (2026-06-17): "QR code 很敏感, barcode 必須不行" — ANY hold made
-    // barcode feel dead next to QR's instant fire (the recurring "barcode 扫不到"
-    // he keeps hitting). A Code 128 decode is already checksum-valid (not noise),
-    // and the native path below picks the code NEAREST the frame centre, so the
-    // aimed code still wins WITHOUT a time-hold. Full-frame, no ROI/band crop —
-    // the crop was the original regression. If a "grabbed the neighbour" report
-    // ever recurs, fix it with nearest-centre/zoom, NOT a hold or crop (see the
-    // barcode_roi memory).
-    const considerHit = (data: string) => {
+    // Barcode AIM BOX (owner 2026-06-18). The printed schedule stacks Code 128s
+    // close together, so firing the instant ANY code decoded grabbed a NEIGHBOUR
+    // before the worker could aim ("我要扫 2A Base,它却扫了 Right Arm"). Barcode
+    // mode now ACCEPTS a code only when BOTH: (1) its vertical centre is inside
+    // the middle aim band (|cy-0.5| ≤ BC_AIM_HALF — matches the on-screen band),
+    // and (2) it has stayed the same for BC_HOLD_MS (time to aim). CRUCIAL: the
+    // FULL frame is still DECODED — we filter the RESULT's position, we do NOT
+    // crop the decoder input. That is exactly why this does NOT bring back the
+    // "扫不到" crop regression. QR mode stays instant + full-frame, no aim box.
+    // (Native passes the bbox centre; ZXing passes its result-points centre.)
+    // BC_AIM_HALF / BC_HOLD_MS are the tuning knobs: looser band or shorter hold
+    // = snappier but grabs neighbours; tighter = more aiming. Never go back to a
+    // pixel crop. See [[project_hookka_barcode_roi]].
+    const BC_AIM_HALF = 0.16; // accept the middle ~32% of frame height
+    const BC_HOLD_MS = 400; // hold the centred code this long before it fires
+    let stableVal = "";
+    let stableSince = 0;
+    let bcSwitchCand = "";
+    const considerHit = (data: string, cy = 0.5) => {
       if (stopped || !data) return;
-      onHit(data);
+      if (scanMode !== "barcode") {
+        onHit(data); // QR: instant, full-frame, no aim box
+        return;
+      }
+      if (Math.abs(cy - 0.5) > BC_AIM_HALF) return; // off the aim band → not aimed
+      const t = performance.now();
+      if (data === stableVal) {
+        bcSwitchCand = "";
+        if (t - stableSince >= BC_HOLD_MS) onHit(data);
+      } else if (data === bcSwitchCand) {
+        // same NEW value twice inside the box → a real re-aim: adopt + hold
+        stableVal = data;
+        stableSince = t;
+        bcSwitchCand = "";
+      } else {
+        // first sighting of a different value → jitter; keep the current hold
+        bcSwitchCand = data;
+      }
     };
 
     const tick = async () => {
@@ -1235,15 +1280,15 @@ export default function WorkerScanPage() {
             if (stopped) return;
             if (scanMode === "barcode") {
               // FULL FRAME, NEAREST code_128 to centre wins — NO band/position
-              // rejection. QR mode reads the SAME barcode fine because it never
-              // rejects on position; ANY ROI/band crop silently dropped the
-              // owner's code ("barcode 扫不到" while QR worked — the recurring
-              // regression, owner 2026-06-17). Nearest-to-centre still resolves a
-              // stacked schedule to the aimed code while ALWAYS decoding; the
-              // stable-hold (considerHit) still requires aiming before it fires.
+              // rejection at decode time. We DECODE the full frame (so it never
+              // goes "扫不到"), then hand each code's NORMALISED vertical centre to
+              // considerHit, which accepts only the one in the centre aim band and
+              // held steady — resolving a stacked schedule to the row the worker
+              // aimed at, not the first in frame (owner 2026-06-18).
+              const vh0 = video.videoHeight || 1;
               const cx = video.videoWidth / 2;
-              const cy = video.videoHeight / 2;
-              let best: { v: string; d: number } | null = null;
+              const cyMid = video.videoHeight / 2;
+              let best: { v: string; d: number; ncy: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
                 const fmt = (c as { format?: string }).format;
@@ -1258,14 +1303,16 @@ export default function WorkerScanPage() {
                     };
                   }
                 ).boundingBox;
+                const bcy = bb ? bb.y + bb.height / 2 : cyMid;
                 const d = bb
-                  ? Math.hypot(bb.x + bb.width / 2 - cx, bb.y + bb.height / 2 - cy)
+                  ? Math.hypot(bb.x + bb.width / 2 - cx, bcy - cyMid)
                   : 0;
-                if (!best || d < best.d) best = { v: c.rawValue, d };
+                if (!best || d < best.d)
+                  best = { v: c.rawValue, d, ncy: bcy / vh0 };
               }
               if (best) {
                 barcodeNativeMiss = 0;
-                considerHit(best.v);
+                considerHit(best.v, best.ncy);
                 return;
               }
               // Native BarcodeDetector saw nothing usable. Some phones ship one
@@ -1320,17 +1367,19 @@ export default function WorkerScanPage() {
                   setScanDbg(`v:${vw}×${vh} zx:loading… n:${bcN}`);
                 }
               } else if (imageData) {
-                const zxText = zxDecode(imageData);
+                const zx = zxDecode(imageData);
                 bcN++;
-                if (zxText) bcLast = zxText;
+                if (zx) bcLast = zx.text;
                 if (now - bcDbgAt > 600) {
                   bcDbgAt = now;
                   setScanDbg(
                     `v:${vw}×${vh} full zx:✓ n:${bcN} ${bcLast ? bcLast.slice(0, 14) : "—"}`,
                   );
                 }
-                if (zxText) {
-                  considerHit(zxText);
+                if (zx) {
+                  // considerHit applies the centre aim band + hold; zx.cy is the
+                  // code's normalised vertical centre from ZXing result points.
+                  considerHit(zx.text, zx.cy);
                   return;
                 }
               }
@@ -1366,9 +1415,9 @@ export default function WorkerScanPage() {
                 // path (iOS/older browsers). Loaded lazily; null until ready.
                 const zxDecode = zxingRef.current;
                 if (zxDecode) {
-                  const zxText = zxDecode(imageData);
-                  if (zxText) {
-                    onHit(zxText);
+                  const zx = zxDecode(imageData);
+                  if (zx) {
+                    onHit(zx.text); // QR mode: instant, no aim box
                     return;
                   }
                 }
@@ -1482,7 +1531,8 @@ export default function WorkerScanPage() {
           // jsQR is QR-only — try ZXing (QR + Code 128) for an uploaded
           // barcode photo (the Code 128 printed on the Production Schedule).
           await ensureZxing();
-          decoded = zxingRef.current ? zxingRef.current(imageData) : null;
+          // Uploaded photo: no aim box (single code per photo) — take the text.
+          decoded = zxingRef.current?.(imageData)?.text ?? null;
         }
         if (!decoded) {
           setResult({ kind: "error", message: t("scan.decodeFail") });

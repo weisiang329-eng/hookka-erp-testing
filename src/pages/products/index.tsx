@@ -2470,6 +2470,13 @@ export default function ProductsPage() {
         const gridColsFull = activeAnalyticCols.length
           ? `${gridCols} ${activeAnalyticCols.map((c) => c.width).join(" ")}`
           : gridCols;
+        // With analytic columns on, the table outgrows the viewport — give it a
+        // min-width so the scroll container scrolls horizontally instead of
+        // crushing every column (the "挤压/歪" the owner saw). No min-width when
+        // there are no analytic columns, so the base table still fits as before.
+        const gridMinWidth = activeAnalyticCols.length
+          ? `${(isSofa ? 1250 : isAccessory ? 720 : 1040) + activeAnalyticCols.length * 135}px`
+          : undefined;
         return (
       <div className="bg-white rounded-lg border border-[#E5E7EB] overflow-hidden">
         <div
@@ -2481,7 +2488,7 @@ export default function ProductsPage() {
             <thead className="bg-[#F9FAFB] sticky top-0 z-10">
               <tr>
                 <th colSpan={colSpanN} className="p-0">
-                  <div className="grid" style={{ gridTemplateColumns: gridColsFull }}>
+                  <div className="grid" style={{ gridTemplateColumns: gridColsFull, minWidth: gridMinWidth }}>
                     {/* Product Code header carries an invisible chevron
                       * spacer so the "Product Code" label lines up with
                       * the body cell's code text — the body row renders
@@ -2606,7 +2613,7 @@ export default function ProductsPage() {
                       {/* Main row */}
                       <div
                         className="grid cursor-pointer hover:bg-[#F9FAFB] transition-colors"
-                        style={{ gridTemplateColumns: gridColsFull }}
+                        style={{ gridTemplateColumns: gridColsFull, minWidth: gridMinWidth }}
                         onClick={() => setExpandedId(isExpanded ? null : p.id)}
                       >
                         <div className="px-3 py-1.5 flex items-center gap-1.5">
@@ -2616,7 +2623,7 @@ export default function ProductsPage() {
                           >
                             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                           </svg>
-                          <span className="text-xs font-mono font-medium text-[#111827] whitespace-nowrap">{p.code}</span>
+                          <span className="text-xs font-medium text-[#111827] whitespace-nowrap">{p.code}</span>
                           {/* Schedule master price change. Same dialog drives the whole
                               row (works for BF Price 2/Price 1 and Sofa seat tiers).
                               stopPropagation so the click doesn't toggle the row's
@@ -2996,16 +3003,9 @@ export default function ProductsPage() {
                             </div>
                             <div className="px-3 py-1.5 text-right whitespace-nowrap">
                               <div className="text-sm font-medium text-[#111827]">{totalMin} min</div>
-                              {/* Estimated labor cost (display-only) — total
-                                  minutes × flat-average rate. See
-                                  LABOR_RATE_PER_MIN_SEN for the RM2,200/26d/9h
-                                  basis. */}
-                              <div
-                                className="text-[10px] text-[#9CA3AF] tabular-nums"
-                                title="Estimated labor cost = total minutes × flat-average rate (RM 2,200/mo ÷ 26 days ÷ 9 h ÷ 60)"
-                              >
-                                {laborCostSen > 0 ? `Labor ${formatCurrency(laborCostSen)}` : "—"}
-                              </div>
+                              {/* Labor cost moved to its own "Labor (est.)"
+                                  column — no longer duplicated under Total Min
+                                  (owner 2026-06-17). */}
                             </div>
                             {/* Variants badge */}
                             <div className="px-3 py-1.5 flex justify-center" onClick={(e) => e.stopPropagation()}>

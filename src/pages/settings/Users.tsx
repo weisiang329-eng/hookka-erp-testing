@@ -251,6 +251,54 @@ export default function UsersPage() {
     refreshAddressesHook();
   }, [refreshAddressesHook]);
 
+  // ---------- Mailbox access matrix (SUPER_ADMIN) --------------------------
+  // Grants that let a user open a SHARED mailbox (support@/hr@/finance@) on top
+  // of their own assigned alias. The server list is the base truth; a small
+  // overrides map carries optimistic toggles (so a checkbox flips instantly)
+  // and is reverted on a failed write. Deriving the base via useMemo — instead
+  // of mirroring it into state in an effect — keeps the lint rule happy.
+  const { data: accessResp } = useCachedJson<
+    { addressId: string; userId: string }[]
+  >(canManageUsers ? "/api/mail-center/access" : null);
+  const serverGrants = useMemo(
+    () => new Set((accessResp ?? []).map((g) => `${g.addressId}::${g.userId}`)),
+    [accessResp],
+  );
+  const [grantOverrides, setGrantOverrides] = useState<Map<string, boolean>>(
+    new Map(),
+  );
+  const isGranted = (addressId: string, userId: string): boolean => {
+    const key = `${addressId}::${userId}`;
+    const ov = grantOverrides.get(key);
+    return ov !== undefined ? ov : serverGrants.has(key);
+  };
+  const toggleGrant = async (
+    addressId: string,
+    userId: string,
+    on: boolean,
+  ) => {
+    const key = `${addressId}::${userId}`;
+    setGrantOverrides((prev) => new Map(prev).set(key, on));
+    try {
+      const res = await fetch("/api/mail-center/access", {
+        method: on ? "POST" : "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ addressId, userId }),
+      });
+      if (!res.ok) throw new Error("access update failed");
+      invalidateCachePrefix("/api/mail-center/access");
+      // The granted user's own Mail Center mailbox chips read /addresses.
+      invalidateCachePrefix("/api/mail-center/addresses");
+    } catch {
+      setGrantOverrides((prev) => {
+        const next = new Map(prev);
+        next.delete(key);
+        return next;
+      });
+      showFlash("err", "Failed to update mailbox access. Please retry.");
+    }
+  };
+
   const users: UserRow[] = useMemo(
     () => (usersResp?.success ? usersResp.data ?? [] : []),
     [usersResp],
@@ -830,6 +878,109 @@ export default function UsersPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* =========================================================== */}
+      {/* MAILBOX ACCESS MATRIX (SUPER_ADMIN) */}
+      {/* =========================================================== */}
+      {canManageUsers &&
+        (addressesResp ?? []).filter((a) => a.active).length > 0 && (
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-3">
+                <AtSign className="h-5 w-5 text-[#6B5C32]" />
+                <div>
+                  <CardTitle>Mailbox Access</CardTitle>
+                  <CardDescription>
+                    Who can open which @hookka.com mailbox in Mail Center. A
+                    user always has their own alias (locked ✓); tick a shared
+                    mailbox (support@ / hr@ / finance@) to let them work that
+                    inbox too.
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-x-auto">
+                <table className="border-collapse text-sm">
+                  <thead>
+                    <tr>
+                      <th className="sticky left-0 z-10 bg-white px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-[#6B7280] border-b border-[#E5E7EB]">
+                        User
+                      </th>
+                      {(addressesResp ?? [])
+                        .filter((a) => a.active)
+                        .map((a) => (
+                          <th
+                            key={a.id}
+                            className="px-2 py-2 text-center text-[11px] font-medium text-[#374151] border-b border-[#E5E7EB] whitespace-nowrap"
+                            title={
+                              a.address +
+                              (a.assignedDept ? ` · ${a.assignedDept}` : "")
+                            }
+                          >
+                            <div className="font-semibold">
+                              {a.address.split("@")[0]}
+                            </div>
+                            {a.assignedDept && (
+                              <div className="text-[9px] uppercase text-[#9CA3AF]">
+                                {a.assignedDept}
+                              </div>
+                            )}
+                          </th>
+                        ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users
+                      .filter((u) => u.isActive)
+                      .map((u) => (
+                        <tr key={u.id} className="hover:bg-[#F9FAFB]">
+                          <td className="sticky left-0 z-10 bg-white px-3 py-1.5 border-b border-[#F3F4F6] whitespace-nowrap">
+                            <div className="font-medium text-[#111827]">
+                              {u.displayName || u.email}
+                            </div>
+                            <div className="text-[10px] text-[#9CA3AF]">
+                              {u.email}
+                            </div>
+                          </td>
+                          {(addressesResp ?? [])
+                            .filter((a) => a.active)
+                            .map((a) => {
+                              const isPersonal = a.assignedUserId === u.id;
+                              const granted = isGranted(a.id, u.id);
+                              const on = isPersonal || granted;
+                              return (
+                                <td
+                                  key={a.id}
+                                  className="px-2 py-1.5 text-center border-b border-[#F3F4F6]"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={on}
+                                    disabled={isPersonal}
+                                    onChange={() =>
+                                      toggleGrant(a.id, u.id, !granted)
+                                    }
+                                    title={
+                                      isPersonal
+                                        ? "Their own mailbox (always accessible)"
+                                        : granted
+                                          ? "Click to revoke access"
+                                          : "Click to grant access"
+                                    }
+                                    className="h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32] disabled:opacity-50"
+                                  />
+                                </td>
+                              );
+                            })}
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
       {/* =========================================================== */}
       {/* 2. PENDING INVITES */}

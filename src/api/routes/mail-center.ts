@@ -60,6 +60,22 @@ export function ensureMailSchema(db: D1Database): Promise<void> {
       `ALTER TABLE email_addresses ADD COLUMN IF NOT EXISTS assigned_position TEXT`,
       `CREATE UNIQUE INDEX IF NOT EXISTS ux_email_addresses_org_addr
          ON email_addresses (org_id, address)`,
+      // Mailbox access grants (the "mailbox matrix" — owner 2026-06-17). A user
+      // always has their own assigned alias; these rows ADDITIONALLY grant
+      // access to shared mailboxes (support@/hr@/finance@) so several people
+      // can work one inbox. Managed from the User Management matrix.
+      `CREATE TABLE IF NOT EXISTS email_address_access (
+         id TEXT PRIMARY KEY,
+         org_id TEXT NOT NULL DEFAULT 'hookka',
+         address_id TEXT NOT NULL,
+         user_id TEXT NOT NULL,
+         created_at TEXT,
+         created_by TEXT
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS ux_email_access_addr_user
+         ON email_address_access (org_id, address_id, user_id)`,
+      `CREATE INDEX IF NOT EXISTS ix_email_access_user
+         ON email_address_access (org_id, user_id)`,
       // One conversation with an external party, grouped by RFC threading.
       `CREATE TABLE IF NOT EXISTS email_threads (
          id TEXT PRIMARY KEY,
@@ -439,10 +455,17 @@ async function getMailScope(
   const userId = get("userId") ?? "";
   if (role === "SUPER_ADMIN") return { isAdmin: true, userId, addresses: [] };
   if (!userId) return { isAdmin: false, userId: "", addresses: [] };
+  // A user sees their own assigned alias(es) PLUS any shared mailbox granted to
+  // them via the mailbox-access matrix (email_address_access).
   const res = await c.var.DB.prepare(
-    `SELECT address FROM email_addresses WHERE org_id = ? AND assigned_user_id = ? AND active = 1`,
+    `SELECT address FROM email_addresses
+       WHERE org_id = ? AND active = 1 AND (
+         assigned_user_id = ?
+         OR id IN (SELECT address_id FROM email_address_access
+                     WHERE org_id = ? AND user_id = ?)
+       )`,
   )
-    .bind(orgId, userId)
+    .bind(orgId, userId, orgId, userId)
     .all<{ address: string }>();
   return {
     isAdmin: false,
@@ -558,9 +581,15 @@ app.get("/addresses", async (c) => {
         .bind(orgId)
         .all<AddressRow>()
     : await c.var.DB.prepare(
-        `SELECT * FROM email_addresses WHERE org_id = ? AND assigned_user_id = ? ORDER BY address ASC`,
+        `SELECT * FROM email_addresses
+           WHERE org_id = ? AND (
+             assigned_user_id = ?
+             OR id IN (SELECT address_id FROM email_address_access
+                         WHERE org_id = ? AND user_id = ?)
+           )
+           ORDER BY address ASC`,
       )
-        .bind(orgId, scope.userId)
+        .bind(orgId, scope.userId, orgId, scope.userId)
         .all<AddressRow>();
   return c.json((res.results ?? []).map(rowToAddress));
 });
@@ -747,6 +776,95 @@ app.patch("/addresses/:id", async (c) => {
     .bind(orgId, id)
     .first<AddressRow>();
   return c.json(row ? rowToAddress(row) : { id });
+});
+
+// ---------------------------------------------------------------------------
+// Mailbox access matrix (owner 2026-06-17). A user always has their own
+// assigned alias; these grants ADDITIONALLY let them open a SHARED mailbox
+// (support@/hr@/finance@). SUPER_ADMIN-only; the matrix UI lives in User
+// Management. getMailScope + GET /addresses already fold these grants in.
+// ---------------------------------------------------------------------------
+
+// GET /api/mail-center/access — every (addressId,userId) grant in the org, for
+// rendering the matrix checkboxes.
+app.get("/access", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  const res = await c.var.DB.prepare(
+    `SELECT address_id, user_id FROM email_address_access WHERE org_id = ?`,
+  )
+    .bind(orgId)
+    .all<{ address_id: string; user_id: string }>();
+  return c.json(
+    (res.results ?? []).map((r) => ({
+      addressId: r.address_id,
+      userId: r.user_id,
+    })),
+  );
+});
+
+// POST /api/mail-center/access {addressId,userId} — grant a user access to a
+// mailbox. Idempotent: the unique index makes a repeat a harmless no-op.
+app.post("/access", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  const body = await c.req
+    .json<{ addressId?: string; userId?: string }>()
+    .catch(() => ({}) as { addressId?: string; userId?: string });
+  const addressId = (body.addressId ?? "").trim();
+  const userId = (body.userId ?? "").trim();
+  if (!addressId || !userId) {
+    return c.json({ error: "addressId and userId are required" }, 400);
+  }
+  const grantedBy =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ??
+    null;
+  try {
+    await c.var.DB.prepare(
+      `INSERT INTO email_address_access
+         (id, org_id, address_id, user_id, created_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        crypto.randomUUID(),
+        orgId,
+        addressId,
+        userId,
+        new Date().toISOString(),
+        grantedBy,
+      )
+      .run();
+  } catch {
+    // Unique (org_id,address_id,user_id) collision → the grant already exists.
+  }
+  return c.json({ ok: true, addressId, userId }, 201);
+});
+
+// DELETE /api/mail-center/access {addressId,userId} — revoke a grant.
+app.delete("/access", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  const body = await c.req
+    .json<{ addressId?: string; userId?: string }>()
+    .catch(() => ({}) as { addressId?: string; userId?: string });
+  const addressId = (body.addressId ?? c.req.query("addressId") ?? "").trim();
+  const userId = (body.userId ?? c.req.query("userId") ?? "").trim();
+  if (!addressId || !userId) {
+    return c.json({ error: "addressId and userId are required" }, 400);
+  }
+  await c.var.DB.prepare(
+    `DELETE FROM email_address_access
+       WHERE org_id = ? AND address_id = ? AND user_id = ?`,
+  )
+    .bind(orgId, addressId, userId)
+    .run();
+  return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------

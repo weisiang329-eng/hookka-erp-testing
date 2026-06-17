@@ -44,7 +44,12 @@ import {
 import jsQR from "jsqr";
 import { useT } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
-import { parseStickerData, parseJobCardBarcode, parseRackQr } from "@/lib/qr-utils";
+import {
+  parseStickerData,
+  parseJobCardBarcode,
+  parseRackQr,
+  parseItemQr,
+} from "@/lib/qr-utils";
 import { deriveBarcodeToken } from "@/lib/job-card-id";
 import { deriveWipName } from "@/lib/wip-name";
 import { z } from "zod";
@@ -408,6 +413,7 @@ export default function WorkerScanPage() {
       productCode: string;
       productName: string;
       qty: number;
+      manual?: boolean;
     }>;
   } | null>(null);
   const rackStockInRef = useRef(rackStockIn);
@@ -522,7 +528,7 @@ export default function WorkerScanPage() {
           items: rs.items.map((x) => ({
             productCode: x.productCode,
             productName: x.productName,
-            productionOrderId: x.poId,
+            productionOrderId: x.manual ? undefined : x.poId,
             qty: x.qty,
           })),
         }),
@@ -665,6 +671,32 @@ export default function WorkerScanPage() {
         return;
       }
       if (rackStockInRef.current) {
+        // Manual item QR (HKITEM:<name>[|<code>]) — a non-system item; add it by
+        // its name, no PO lookup.
+        const manualItem = parseItemQr(raw);
+        if (manualItem) {
+          const key = `manual:${manualItem.code || manualItem.name}`;
+          setRackStockMsg("");
+          setRackStockIn((prev) => {
+            if (!prev) return prev;
+            const items = [...prev.items];
+            const i = items.findIndex((x) => x.poId === key);
+            if (i >= 0) {
+              items[i] = { ...items[i], qty: items[i].qty + 1 };
+            } else {
+              items.push({
+                poId: key,
+                poNo: "手动",
+                productCode: manualItem.code || manualItem.name,
+                productName: manualItem.name,
+                qty: 1,
+                manual: true,
+              });
+            }
+            return { ...prev, items };
+          });
+          return;
+        }
         const rs0 = parseStickerData(raw);
         const term = rs0?.poNo || parseJobCardBarcode(raw) || raw;
         let order: Order | undefined;

@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { getQRCodeDataURL, rackQrValue } from "@/lib/qr-utils";
+import { getQRCodeDataURL, rackQrValue, itemQrValue } from "@/lib/qr-utils";
 import {
   Warehouse, Grid3X3, Package, MapPin, LayoutGrid,
   ArrowDownToLine, ArrowUpFromLine, History, X, ArrowRightLeft,
@@ -106,6 +106,12 @@ export default function WarehousePage() {
   const [stockOutTarget, setStockOutTarget] = useState<RackLocation | null>(null);
   const [stockOutItemIndex, setStockOutItemIndex] = useState<number>(0);
   const [stockOutReason, setStockOutReason] = useState("");
+
+  // "Create Item QR" — print a QR for a NON-system / loose item by name, with no
+  // backend record (the name lives in the QR itself; see itemQrValue/parseItemQr).
+  const [showItemQrForm, setShowItemQrForm] = useState(false);
+  const [itemQrName, setItemQrName] = useState("");
+  const [itemQrCode, setItemQrCode] = useState("");
 
   // Stock In form fields
   const [selectedPO, setSelectedPO] = useState("");
@@ -356,6 +362,64 @@ export default function WarehousePage() {
     setTimeout(() => w.print(), 500);
   };
 
+  // Print a QR sticker for a NON-system / loose item, naming it. There is NO
+  // backend record — the name (and optional linked product code) is encoded
+  // directly in the QR (`HKITEM:<name>` / `HKITEM:<name>|<code>`) so it can be
+  // scanned later during rack stock-in. Same print mechanics as
+  // handlePrintRackQr: build a hi-res data URL, open a blank window, write a
+  // self-contained sticker, then print() after a short settle delay (runs from
+  // a click gesture, so no pop-up-blocker trip).
+  const handlePrintItemQr = async () => {
+    const name = itemQrName.trim();
+    const code = itemQrCode.trim();
+    if (!name) {
+      toast.error("请输入物品名称 / item name required");
+      return;
+    }
+    const qrDataUrl = await getQRCodeDataURL(itemQrValue(name, code || undefined), 600).catch(
+      () => null,
+    );
+    if (!qrDataUrl) {
+      toast.error("Failed to generate item QR");
+      return;
+    }
+    const w = window.open("", "_blank");
+    if (!w) {
+      toast.error("请允许弹窗以打印 / popup blocked");
+      return;
+    }
+    const esc = (s: string) =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Item QR — ${esc(name)}</title>
+<style>
+  @page { margin: 14mm; }
+  body { font-family: Helvetica, Arial, sans-serif; color: #111; text-align: center; }
+  .kind { font-size: 13px; text-transform: uppercase; letter-spacing: 3px; color: #555; }
+  .item-name { font-size: 28px; font-weight: 800; letter-spacing: 1px; margin: 10mm 0 2mm; }
+  .code { font-size: 14px; color: #555; margin-bottom: 2mm; }
+  img { width: 90mm; height: 90mm; margin-top: 6mm; }
+  .hint { font-size: 13px; color: #333; margin-top: 8mm; }
+  .sub { font-size: 11px; color: #777; margin-top: 2mm; }
+</style></head><body>
+  <div class="kind">Non-System Item</div>
+  <div class="item-name">${esc(name)}</div>
+  ${code ? `<div class="code">${esc(code)}</div>` : ""}
+  <img src="${qrDataUrl}" alt="Item QR code" />
+  <div class="hint">Scan to select this item</div>
+  <div class="sub">HOOKKA INDUSTRIES — non-system item QR</div>
+</body></html>`);
+    w.document.close();
+    w.focus();
+    // Give the new window time to lay out before invoking print(). Click
+    // handler, not React lifecycle — useTimeout doesn't apply.
+    // eslint-disable-next-line no-restricted-syntax -- print-window settle delay from event handler
+    setTimeout(() => w.print(), 500);
+    setShowItemQrForm(false);
+    setItemQrName("");
+    setItemQrCode("");
+  };
+
   // Completed POs that are not yet stocked in
   const availablePOs = productionOrders.filter(
     (po) => po.status === "COMPLETED" && !po.stockedIn
@@ -382,9 +446,14 @@ export default function WarehousePage() {
           <h1 className="text-xl font-bold text-[#1F1D1B]">Warehouse</h1>
           <p className="text-xs text-[#6B7280]">Rack location management, stock-in/out tracking</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => { fetchRackLocations(); fetchMovements(); }}>
-          <RefreshCw className="h-4 w-4" /> Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => setShowItemQrForm(true)}>
+            <QrCode className="h-4 w-4" /> Create Item QR
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => { fetchRackLocations(); fetchMovements(); }}>
+            <RefreshCw className="h-4 w-4" /> Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Summary Cards */}
@@ -682,6 +751,62 @@ export default function WarehousePage() {
                   Close
                 </Button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== Create Item QR Modal ===== */}
+      {/* Print a QR for a NON-system / loose item by name. No backend record —
+          the name is encoded in the QR (itemQrValue) and can be scanned later
+          during rack stock-in. */}
+      {showItemQrForm && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowItemQrForm(false)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#1F1D1B]">Create Item QR</h3>
+              <button onClick={() => setShowItemQrForm(false)} className="text-[#6B7280] hover:text-[#1F1D1B] cursor-pointer">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="text-xs text-[#6B7280] mb-4">
+              Print a QR label for an item that isn't in the system. The name is
+              stored in the QR itself — scan it later during rack stock-in.
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Item Name</label>
+                <input
+                  type="text"
+                  autoFocus
+                  className="w-full border border-[#E2DDD8] rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  value={itemQrName}
+                  onChange={(e) => setItemQrName(e.target.value)}
+                  placeholder="e.g. Loose timber leg"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Link to product code (optional)</label>
+                <input
+                  type="text"
+                  className="w-full border border-[#E2DDD8] rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  value={itemQrCode}
+                  onChange={(e) => setItemQrCode(e.target.value)}
+                  placeholder="e.g. WD-LEG-01"
+                />
+              </div>
+            </div>
+            <div className="mt-6 flex gap-2 justify-end">
+              <Button variant="outline" size="sm" onClick={() => setShowItemQrForm(false)}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                disabled={!itemQrName.trim()}
+                onClick={() => void handlePrintItemQr()}
+              >
+                <QrCode className="h-4 w-4" /> Generate &amp; Print
+              </Button>
             </div>
           </div>
         </div>

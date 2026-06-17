@@ -270,9 +270,17 @@ export async function ingestInboundEmail(
         `SELECT id, thread_id FROM email_messages WHERE org_id = ? AND message_id = ? LIMIT 1`,
       )
       .bind(orgId, payload.messageId)
-      .first<{ id: string; thread_id: string }>();
+      // The pg driver camelCases result columns (db-pg.ts transform.column.from),
+      // so thread_id arrives as threadId. Dual-read so dedupe returns the real
+      // threadId instead of undefined on a retry.
+      .first<{ id: string; threadId?: string; thread_id?: string }>();
     if (dup?.id) {
-      return { ok: true, threadId: dup.thread_id, messageId: dup.id, deduped: true };
+      return {
+        ok: true,
+        threadId: dup.threadId ?? dup.thread_id ?? "",
+        messageId: dup.id,
+        deduped: true,
+      };
     }
   }
 
@@ -289,8 +297,12 @@ export async function ingestInboundEmail(
         `SELECT thread_id FROM email_messages WHERE org_id = ? AND message_id IN (${placeholders}) LIMIT 1`,
       )
       .bind(orgId, ...refs)
-      .first<{ thread_id: string }>();
-    if (ref?.thread_id) threadId = ref.thread_id;
+      // Result columns come back camelCase (db-pg.ts transform.column.from), so
+      // thread_id → threadId. Reading the snake key returned undefined → every
+      // reply started a NEW thread instead of joining the referenced one.
+      .first<{ threadId?: string; thread_id?: string }>();
+    const refThreadId = ref?.threadId ?? ref?.thread_id;
+    if (refThreadId) threadId = refThreadId;
   }
 
   if (!threadId) {
@@ -383,40 +395,53 @@ type ThreadRow = {
   labels: string | null;
   trashed_at: string | null;
   created_at: string | null;
-  // The pg driver camelCases generic columns (created_at→createdAt etc.), so
-  // these snake reads would come back undefined — dual-read like rowToAddress.
-  // Same root cause as the View-level / alias bug (owner 2026-06-17). Mail
-  // receive is not live yet, but this keeps the inbox correct when it is.
+  // The pg driver camelCases EVERY result column (db-pg.ts transform.column.from
+  // — rename-map lookup, else postgres.toCamel), so every multi-word snake read
+  // below arrives camelCased and the snake key is undefined. Dual-read like
+  // rowToAddress: camelCase first, snake kept as a fallback in case a column
+  // isn't in the rename map. Same root cause as the View-level / alias bug
+  // (owner 2026-06-17). Mail receive is not live yet, but this keeps the inbox
+  // correct when it is — without these, the Sent folder is永远空 (has_outbound)
+  // and Trash is inert (trashed_at).
+  mailboxAddress?: string | null;
+  counterpartyEmail?: string | null;
+  counterpartyName?: string | null;
   assignedToUserId?: string | null;
   assignedToName?: string | null;
   lastMessageAt?: string | null;
+  lastDirection?: string | null;
+  lastSnippet?: string | null;
   messageCount?: number | string | null;
+  trashedAt?: string | null;
   createdAt?: string | null;
   // Computed (not a column): EXISTS roll-up of any outbound message, so the
   // frontend's Sent folder is accurate instead of relying on last_direction.
+  // The SQL alias `has_outbound` isn't in the rename map, so postgres.toCamel
+  // turns it into `hasOutbound` — dual-read both.
   has_outbound?: number | boolean | null;
+  hasOutbound?: number | boolean | null;
 };
 
 function rowToThread(r: ThreadRow) {
   return {
     id: r.id,
-    mailboxAddress: r.mailbox_address ?? "",
+    mailboxAddress: r.mailboxAddress ?? r.mailbox_address ?? "",
     subject: r.subject ?? "(no subject)",
-    counterpartyEmail: r.counterparty_email ?? "",
-    counterpartyName: r.counterparty_name ?? "",
+    counterpartyEmail: r.counterpartyEmail ?? r.counterparty_email ?? "",
+    counterpartyName: r.counterpartyName ?? r.counterparty_name ?? "",
     status: r.status,
     assignedToUserId: r.assignedToUserId ?? r.assigned_to_user_id ?? undefined,
     assignedToName: r.assignedToName ?? r.assigned_to_name ?? undefined,
     lastMessageAt: r.lastMessageAt ?? r.last_message_at ?? "",
-    lastDirection: r.last_direction ?? "inbound",
-    lastSnippet: r.last_snippet ?? "",
+    lastDirection: r.lastDirection ?? r.last_direction ?? "inbound",
+    lastSnippet: r.lastSnippet ?? r.last_snippet ?? "",
     messageCount: Number(r.messageCount ?? r.message_count ?? 0),
     unread: Number(r.unread ?? 0) === 1,
     starred: Number(r.starred ?? 0) === 1,
     labels: parseJsonArray(r.labels),
-    trashedAt: r.trashed_at ?? null,
-    hasOutbound: Number(r.has_outbound ?? 0) === 1,
-    createdAt: r.created_at ?? "",
+    trashedAt: r.trashedAt ?? r.trashed_at ?? null,
+    hasOutbound: Number(r.hasOutbound ?? r.has_outbound ?? 0) === 1,
+    createdAt: r.createdAt ?? r.created_at ?? "",
   };
 }
 
@@ -438,6 +463,24 @@ type MessageRow = {
   sent_by_user_id: string | null;
   sent_by_name: string | null;
   created_at: string | null;
+  // The pg driver camelCases EVERY result column (db-pg.ts transform.column.from),
+  // so the snake reads above arrive camelCased and the snake key is undefined.
+  // Without dual-reads the detail view shows EMPTY messages. Dual-read like
+  // rowToAddress: camelCase first, snake kept as a fallback.
+  threadId?: string;
+  messageId?: string | null;
+  inReplyTo?: string | null;
+  fromAddress?: string | null;
+  fromName?: string | null;
+  toAddresses?: string | null;
+  ccAddresses?: string | null;
+  textBody?: string | null;
+  htmlBody?: string | null;
+  sentAt?: string | null;
+  receivedAt?: string | null;
+  sentByUserId?: string | null;
+  sentByName?: string | null;
+  createdAt?: string | null;
 };
 
 function parseJsonArray(s: string | null): string[] {
@@ -453,22 +496,22 @@ function parseJsonArray(s: string | null): string[] {
 function rowToMessage(r: MessageRow) {
   return {
     id: r.id,
-    threadId: r.thread_id,
+    threadId: r.threadId ?? r.thread_id,
     direction: r.direction,
-    messageId: r.message_id ?? undefined,
-    inReplyTo: r.in_reply_to ?? undefined,
-    fromAddress: r.from_address ?? "",
-    fromName: r.from_name ?? "",
-    toAddresses: parseJsonArray(r.to_addresses),
-    ccAddresses: parseJsonArray(r.cc_addresses),
+    messageId: r.messageId ?? r.message_id ?? undefined,
+    inReplyTo: r.inReplyTo ?? r.in_reply_to ?? undefined,
+    fromAddress: r.fromAddress ?? r.from_address ?? "",
+    fromName: r.fromName ?? r.from_name ?? "",
+    toAddresses: parseJsonArray(r.toAddresses ?? r.to_addresses),
+    ccAddresses: parseJsonArray(r.ccAddresses ?? r.cc_addresses),
     subject: r.subject ?? "",
-    textBody: r.text_body ?? "",
-    htmlBody: r.html_body ?? "",
-    sentAt: r.sent_at ?? "",
-    receivedAt: r.received_at ?? "",
-    sentByUserId: r.sent_by_user_id ?? undefined,
-    sentByName: r.sent_by_name ?? undefined,
-    createdAt: r.created_at ?? "",
+    textBody: r.textBody ?? r.text_body ?? "",
+    htmlBody: r.htmlBody ?? r.html_body ?? "",
+    sentAt: r.sentAt ?? r.sent_at ?? "",
+    receivedAt: r.receivedAt ?? r.received_at ?? "",
+    sentByUserId: r.sentByUserId ?? r.sent_by_user_id ?? undefined,
+    sentByName: r.sentByName ?? r.sent_by_name ?? undefined,
+    createdAt: r.createdAt ?? r.created_at ?? "",
   };
 }
 
@@ -616,8 +659,12 @@ async function getMailScope(
            AND assigned_dept IS NOT NULL AND assigned_dept <> '' LIMIT 1`,
     )
       .bind(orgId, userId)
-      .first<{ assigned_dept: string | null }>();
-    const dept = (deptRow?.assigned_dept ?? "").trim();
+      // The pg driver camelCases result columns (db-pg.ts transform.column.from),
+      // so assigned_dept arrives as assignedDept. Reading the snake key returned
+      // undefined → the 'department' visibility level silently degraded to
+      // 'personal' (owner 2026-06-17, same class as /scope-levels). Dual-read.
+      .first<{ assignedDept?: string | null; assigned_dept?: string | null }>();
+    const dept = (deptRow?.assignedDept ?? deptRow?.assigned_dept ?? "").trim();
     if (dept) {
       const deptRows = await c.var.DB.prepare(
         `SELECT address FROM email_addresses
@@ -737,9 +784,13 @@ app.get("/threads/:id", async (c) => {
     .first<ThreadRow>();
   if (!thread) return c.json({ error: "Thread not found" }, 404);
   // Per-user scope: a non-admin can only open a thread on their own address.
+  // Dual-read mailbox_address — the pg driver hands it back as mailboxAddress,
+  // so the snake key is undefined and a non-admin owner was wrongly 404'd.
   if (
     !scope.isAdmin &&
-    !scope.addresses.includes((thread.mailbox_address ?? "").toLowerCase())
+    !scope.addresses.includes(
+      (thread.mailboxAddress ?? thread.mailbox_address ?? "").toLowerCase(),
+    )
   ) {
     return c.json({ error: "Thread not found" }, 404);
   }
@@ -1471,20 +1522,25 @@ app.post("/threads/:id/reply", async (c) => {
     .bind(orgId, id)
     .first<ThreadRow>();
   if (!thread) return c.json({ error: "Thread not found" }, 404);
-  // Per-user scope: only the mailbox owner (or an admin) can reply.
+  // Per-user scope: only the mailbox owner (or an admin) can reply. Dual-read —
+  // the pg driver camelCases result columns, so the snake keys are undefined.
+  // Without this the owner was 404'd and the reply recipient (counterparty_email)
+  // read empty → "thread has no counterparty email to reply to".
   if (
     !scope.isAdmin &&
-    !scope.addresses.includes((thread.mailbox_address ?? "").toLowerCase())
+    !scope.addresses.includes(
+      (thread.mailboxAddress ?? thread.mailbox_address ?? "").toLowerCase(),
+    )
   ) {
     return c.json({ error: "Thread not found" }, 404);
   }
 
-  const to = (thread.counterparty_email ?? "").trim();
+  const to = (thread.counterpartyEmail ?? thread.counterparty_email ?? "").trim();
   if (!to) {
     return c.json({ error: "thread has no counterparty email to reply to" }, 400);
   }
 
-  const mailbox = (thread.mailbox_address ?? "").trim();
+  const mailbox = (thread.mailboxAddress ?? thread.mailbox_address ?? "").trim();
   const from = mailbox || DEFAULT_REPLY_FROM;
   const baseSubject = thread.subject ?? "(no subject)";
   const subject = /^re:/i.test(baseSubject) ? baseSubject : `Re: ${baseSubject}`;
@@ -1717,11 +1773,17 @@ app.patch("/threads/:id", async (c) => {
     `SELECT mailbox_address FROM email_threads WHERE org_id = ? AND id = ? LIMIT 1`,
   )
     .bind(orgId, id)
-    .first<{ mailbox_address: string | null }>();
+    // Result columns come back camelCase (db-pg.ts transform.column.from), so
+    // mailbox_address → mailboxAddress. Reading the snake key returned undefined
+    // → a non-admin mailbox OWNER was wrongly 404'd on star/label/trash of their
+    // own thread. Dual-read.
+    .first<{ mailboxAddress?: string | null; mailbox_address?: string | null }>();
   if (!owned) return c.json({ error: "Thread not found" }, 404);
   if (
     !scope.isAdmin &&
-    !scope.addresses.includes((owned.mailbox_address ?? "").toLowerCase())
+    !scope.addresses.includes(
+      (owned.mailboxAddress ?? owned.mailbox_address ?? "").toLowerCase(),
+    )
   ) {
     return c.json({ error: "Thread not found" }, 404);
   }

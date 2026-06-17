@@ -40,6 +40,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { getCurrentUser } from "@/lib/auth";
+import { csrfHeaders } from "@/lib/csrf";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent } from "@/components/ui/card";
@@ -1066,7 +1067,11 @@ export default function MailCenterPage() {
 
   async function injectTest() {
     try {
-      await fetch("/api/mail-center/test-inject", { method: "POST" });
+      await fetch("/api/mail-center/test-inject", {
+        method: "POST",
+        headers: csrfHeaders(),
+        credentials: "include",
+      });
     } catch {
       /* ignore — refresh just shows nothing changed */
     }

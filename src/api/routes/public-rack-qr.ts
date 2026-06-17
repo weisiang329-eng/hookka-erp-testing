@@ -627,7 +627,7 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
       const name = (it.productName || "").trim();
       if (!name) continue;
       const notes = pieceNotes(it.salesOrderNo ?? null);
-      const sig = `${name} ${notes}`;
+      const sig = `${name} | ${notes}`;
       if (seenMove.has(sig)) continue;
       seenMove.add(sig);
       const cur = await currentRackOfPiece(c.var.DB, name, it.salesOrderNo ?? null);

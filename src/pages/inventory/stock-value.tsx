@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useToast } from "@/components/ui/toast";
 import { formatCurrency } from "@/lib/utils";
 import {
   Calculator,
@@ -18,6 +19,8 @@ import {
   Boxes,
   CheckCircle2,
   RotateCcw,
+  Pencil,
+  X,
 } from "lucide-react";
 import type { MonthlyStockValue, StockAccount } from "@/types";
 
@@ -187,7 +190,10 @@ function EntryTab({
   onPeriodChange: (period: string) => void;
   onRefresh: () => void;
 }) {
+  const { toast } = useToast();
   const [editingPhysical, setEditingPhysical] = useState<Record<string, string>>({});
+  const [editMode, setEditMode] = useState(false);
+  const [savingPhysical, setSavingPhysical] = useState(false);
   const [posting, setPosting] = useState(false);
   const [reopening, setReopening] = useState(false);
   const [initializingMonth, setInitializingMonth] = useState(false);
@@ -202,33 +208,78 @@ function EntryTab({
     setEditingPhysical((prev) => ({ ...prev, [id]: val }));
   };
 
-  const handlePhysicalBlur = async (sv: MonthlyStockValue) => {
-    const rawVal = editingPhysical[sv.id];
-    if (rawVal === undefined) return;
+  const enterEditPhysical = () => {
+    setEditingPhysical({});
+    setEditMode(true);
+  };
 
-    const senValue = Math.round(parseFloat(rawVal) * 100);
-    if (isNaN(senValue)) {
-      setEditingPhysical((prev) => {
-        const next = { ...prev };
-        delete next[sv.id];
-        return next;
-      });
+  const cancelEditPhysical = () => {
+    setEditingPhysical({});
+    setEditMode(false);
+  };
+
+  const physicalDirtyCount = Object.keys(editingPhysical).length;
+
+  // Edit→Save (owner rule: no naked auto-save). Previously each physical-count
+  // cell committed on blur; now edits collect into `editingPhysical` and only
+  // commit when the operator presses Save. Errors surface as a toast (the old
+  // blur handler swallowed them silently).
+  const handleSavePhysical = async () => {
+    // Resolve each draft to a { sv, senValue } change, skipping blanks and
+    // rows whose value didn't actually change. A blank input clears the count
+    // (null); a non-numeric entry is rejected with a toast.
+    const changes: { sv: MonthlyStockValue; value: number | null }[] = [];
+    for (const [id, raw] of Object.entries(editingPhysical)) {
+      const sv = stockValues.find((v) => v.id === id);
+      if (!sv) continue;
+      const trimmed = raw.trim();
+      let value: number | null;
+      if (trimmed === "") {
+        value = null;
+      } else {
+        const parsed = parseFloat(trimmed);
+        if (isNaN(parsed)) {
+          toast.error(`"${sv.accountDescription}": enter a valid number.`);
+          return;
+        }
+        value = Math.round(parsed * 100);
+      }
+      if (value !== sv.physicalCountValue) changes.push({ sv, value });
+    }
+
+    if (changes.length === 0) {
+      setEditMode(false);
+      setEditingPhysical({});
       return;
     }
 
-    await fetch(`/api/stock-value/${sv.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ physicalCountValue: senValue }),
-    });
-    invalidateCachePrefix("/api/stock-value");
-
-    setEditingPhysical((prev) => {
-      const next = { ...prev };
-      delete next[sv.id];
-      return next;
-    });
-    onRefresh();
+    setSavingPhysical(true);
+    try {
+      for (const c of changes) {
+        const res = await fetch(`/api/stock-value/${c.sv.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ physicalCountValue: c.value }),
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(body?.error || `HTTP ${res.status}`);
+        }
+      }
+      invalidateCachePrefix("/api/stock-value");
+      toast.success(
+        `Saved ${changes.length} physical count${changes.length === 1 ? "" : "s"}`,
+      );
+      setEditingPhysical({});
+      setEditMode(false);
+      onRefresh();
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "try again";
+      toast.error(`Failed to save physical count: ${detail}`);
+      console.error(err);
+    } finally {
+      setSavingPhysical(false);
+    }
   };
 
   const handlePostAll = async () => {
@@ -336,7 +387,40 @@ function EntryTab({
               {initializingMonth ? "Initializing..." : "Initialize Month"}
             </Button>
           )}
-          {hasDraftEntries && (
+          {/* Edit → Save / Cancel for physical counts (owner rule: no naked
+              auto-save). Physical Count cells are read-only until "Edit
+              Counts"; edits collect into a draft and commit only on "Save". */}
+          {hasDraftEntries && !editMode && (
+            <Button variant="outline" onClick={enterEditPhysical}>
+              <Pencil className="h-4 w-4" />
+              Edit Counts
+            </Button>
+          )}
+          {hasDraftEntries && editMode && (
+            <>
+              <Button
+                variant="primary"
+                onClick={handleSavePhysical}
+                disabled={savingPhysical}
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                {savingPhysical
+                  ? "Saving..."
+                  : physicalDirtyCount > 0
+                    ? `Save (${physicalDirtyCount})`
+                    : "Save"}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={cancelEditPhysical}
+                disabled={savingPhysical}
+              >
+                <X className="h-4 w-4" />
+                Cancel
+              </Button>
+            </>
+          )}
+          {hasDraftEntries && !editMode && (
             <Button
               variant="primary"
               onClick={handlePostAll}
@@ -426,7 +510,10 @@ function EntryTab({
                         </td>
                         <td className="px-4 py-3 text-right">
                           {value ? (
-                            isEditable ? (
+                            // Editable only in edit mode AND while the entry is
+                            // DRAFT. No onBlur commit — edits stay in the draft
+                            // and are written only by the Save button above.
+                            isEditable && editMode ? (
                               <Input
                                 type="number" onFocus={(e) => e.currentTarget.select()}
                                 step="0.01"
@@ -442,7 +529,6 @@ function EntryTab({
                                 onChange={(e) =>
                                   handlePhysicalChange(value.id, e.target.value)
                                 }
-                                onBlur={() => handlePhysicalBlur(value)}
                               />
                             ) : (
                               <span className="font-mono text-xs">

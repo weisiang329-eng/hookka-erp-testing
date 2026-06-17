@@ -40,6 +40,7 @@ import {
   Truck,
   Send,
   CheckCircle2,
+  Check,
   Eye,
   Printer,
   RefreshCw,
@@ -540,8 +541,13 @@ export default function ConsignmentNotePage() {
   const [plCreating, setPlCreating] = useState(false);
 
   // ----- Inline Expected DD editing on Planning / Pending CN -----
+  // No-naked-edits: the cell is read-only until the operator clicks the
+  // pencil to edit a LOCAL draft, then commits via an explicit ✓ Save
+  // (✕ cancels). Blur never commits. savingDD guards against double-fire
+  // and shows the in-flight state on the Save button.
   const [editingDDId, setEditingDDId] = useState<string | null>(null);
   const [editingDDValue, setEditingDDValue] = useState("");
+  const [savingDD, setSavingDD] = useState(false);
 
   // ----- Mark-Dispatched dialog (mirrors DO's Create-DO 3PL section) -----
   // Opens when the operator picks "Mark Dispatched" from the context menu
@@ -2264,30 +2270,166 @@ export default function ConsignmentNotePage() {
   // ---------- Inline Expected DD update on the CO ----------
   // DO updates SO.hookkaExpectedDD via PUT /api/sales-orders/:id; same
   // pattern here against /api/consignment-orders/:id.
+  //
+  // No-naked-edits: this is only ever called from a DELIBERATE ✓ Save on
+  // the inline cell — never on blur. We apply the new date optimistically,
+  // and on any failure we REVERT the optimistic value and surface a visible
+  // toast (the previous empty catch silently swallowed errors). The editor
+  // stays open on failure so the operator can retry or cancel; it closes
+  // only after a confirmed success.
   const updateExpectedDD = useCallback(
     async (consignmentOrderId: string, newDate: string, rowId: string) => {
-      if (!consignmentOrderId) return;
+      if (!consignmentOrderId || savingDD) return;
+      // Snapshot the current value so we can roll back on failure. The row
+      // model stores "" (never null) for an unset date, so we mirror that.
+      let prevDate = "";
+      let foundPrev = false;
+      setPlanningPOs((prev) => {
+        const found = prev.find((r) => r.id === rowId);
+        if (found) {
+          prevDate = found.hookkaExpectedDD ?? "";
+          foundPrev = true;
+        }
+        return prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r));
+      });
+      setReadyPOs((prev) => {
+        const found = prev.find((r) => r.id === rowId);
+        if (found && !foundPrev) {
+          prevDate = found.hookkaExpectedDD ?? "";
+          foundPrev = true;
+        }
+        return prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r));
+      });
+      setSavingDD(true);
       try {
         const res = await fetch(`/api/consignment-orders/${consignmentOrderId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ hookkaExpectedDD: newDate }),
         });
-        if (res.ok) {
-          setPlanningPOs((prev) =>
-            prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r)),
-          );
-          setReadyPOs((prev) =>
-            prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r)),
-          );
+        if (!res.ok) {
+          let msg = "Failed to update Expected DD";
+          try {
+            const body = (await res.json()) as { error?: string };
+            if (body?.error) msg = body.error;
+          } catch {
+            /* non-JSON error body — keep the default message */
+          }
+          throw new Error(msg);
         }
-      } catch {
-        /* swallow — same pattern as DO */
-      } finally {
+        // Confirmed — close the editor.
         setEditingDDId(null);
+      } catch (e) {
+        // Revert the optimistic value on both lists and keep the editor open.
+        setPlanningPOs((prev) =>
+          prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: prevDate } : r)),
+        );
+        setReadyPOs((prev) =>
+          prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: prevDate } : r)),
+        );
+        toast.error(e instanceof Error ? e.message : "Failed to update Expected DD");
+      } finally {
+        setSavingDD(false);
       }
     },
-    [],
+    [savingDD, toast],
+  );
+
+  // ---------- Shared inline Expected DD cell (no naked edits) ----------
+  // Read-only by default with a pencil to enter edit mode against a LOCAL
+  // draft. Committing requires a deliberate ✓ Save; ✕ cancels and restores
+  // the original value. Blur does NOT commit — clicking away simply leaves
+  // the draft in place so an accidental focus-loss can't write the date.
+  // Used identically by the Planning and Pending-CN grids.
+  const ExpectedDDCell = useCallback(
+    ({ row }: { row: ReadyPORow }) => {
+      const isEditing = editingDDId === row.id;
+
+      if (isEditing) {
+        const commit = () => {
+          if (!editingDDValue || savingDD) return;
+          updateExpectedDD(row.consignmentOrderId, editingDDValue, row.id);
+        };
+        const cancel = () => {
+          if (savingDD) return;
+          setEditingDDId(null);
+        };
+        return (
+          <div
+            className="flex items-center gap-1"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              type="date"
+              autoFocus
+              value={editingDDValue}
+              disabled={savingDD}
+              className="h-7 w-[120px] text-xs rounded border border-[#E2DDD8] px-1.5 focus:outline-none focus:border-[#6B5C32] disabled:opacity-60"
+              onChange={(e) => setEditingDDValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commit();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  cancel();
+                }
+              }}
+            />
+            <button
+              type="button"
+              title="Save"
+              aria-label="Save Expected DD"
+              disabled={savingDD || !editingDDValue}
+              onClick={commit}
+              className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#4F7C3A] text-[#4F7C3A] hover:bg-[#4F7C3A] hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[#4F7C3A]"
+            >
+              <Check className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              title="Cancel"
+              aria-label="Cancel editing Expected DD"
+              disabled={savingDD}
+              onClick={cancel}
+              className="inline-flex h-7 w-7 items-center justify-center rounded border border-[#E2DDD8] text-[#6B7280] hover:bg-[#F3F1EE] disabled:opacity-40"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        );
+      }
+
+      const isOverdue =
+        row.hookkaExpectedDD && new Date(row.hookkaExpectedDD) < new Date();
+      return (
+        <div className="flex items-center gap-1.5">
+          <span className={isOverdue ? "text-[#9A3A2D] font-medium" : ""}>
+            {row.hookkaExpectedDD ? (
+              formatDate(row.hookkaExpectedDD)
+            ) : (
+              <span className="text-[#9CA3AF]">—</span>
+            )}
+          </span>
+          <button
+            type="button"
+            title="Edit Expected DD"
+            aria-label="Edit Expected DD"
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditingDDId(row.id);
+              setEditingDDValue(
+                row.hookkaExpectedDD ? row.hookkaExpectedDD.slice(0, 10) : "",
+              );
+            }}
+            className="inline-flex h-6 w-6 items-center justify-center rounded text-[#9CA3AF] hover:text-[#6B5C32] hover:bg-[#F3F1EE]"
+          >
+            <Pencil className="h-3 w-3" />
+          </button>
+        </div>
+      );
+    },
+    [editingDDId, editingDDValue, savingDD, updateExpectedDD],
   );
 
   // ---------- Planning columns (CO-origin POs in production) ----------
@@ -2344,55 +2486,10 @@ export default function ConsignmentNotePage() {
         type: "date",
         width: "110px",
         sortable: true,
-        render: (_v, row) => {
-          if (editingDDId === row.id) {
-            return (
-              <input
-                type="date"
-                autoFocus
-                value={editingDDValue}
-                className="h-7 w-[120px] text-xs rounded border border-[#E2DDD8] px-1.5 focus:outline-none focus:border-[#6B5C32]"
-                onChange={(e) => setEditingDDValue(e.target.value)}
-                onBlur={() => {
-                  if (editingDDValue) {
-                    updateExpectedDD(row.consignmentOrderId, editingDDValue, row.id);
-                  } else {
-                    setEditingDDId(null);
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    if (editingDDValue) {
-                      updateExpectedDD(row.consignmentOrderId, editingDDValue, row.id);
-                    } else {
-                      setEditingDDId(null);
-                    }
-                  } else if (e.key === "Escape") {
-                    setEditingDDId(null);
-                  }
-                }}
-                onClick={(e) => e.stopPropagation()}
-              />
-            );
-          }
-          const isOverdue = row.hookkaExpectedDD && new Date(row.hookkaExpectedDD) < new Date();
-          return (
-            <span
-              className={`cursor-pointer hover:underline hover:text-[#6B5C32] ${isOverdue ? "text-[#9A3A2D] font-medium" : ""}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                setEditingDDId(row.id);
-                setEditingDDValue(row.hookkaExpectedDD ? row.hookkaExpectedDD.slice(0, 10) : "");
-              }}
-            >
-              {row.hookkaExpectedDD ? formatDate(row.hookkaExpectedDD) : <span className="text-[#9CA3AF]">—</span>}
-            </span>
-          );
-        },
+        render: (_v, row) => <ExpectedDDCell row={row} />,
       },
     ],
-    [editingDDId, editingDDValue, updateExpectedDD],
+    [ExpectedDDCell],
   );
 
   // ---------- Pending CN columns (CO-origin POs ready for CN) ----------
@@ -2443,55 +2540,10 @@ export default function ConsignmentNotePage() {
         type: "date",
         width: "110px",
         sortable: true,
-        render: (_v, row) => {
-          if (editingDDId === row.id) {
-            return (
-              <input
-                type="date"
-                autoFocus
-                value={editingDDValue}
-                className="h-7 w-[120px] text-xs rounded border border-[#E2DDD8] px-1.5 focus:outline-none focus:border-[#6B5C32]"
-                onChange={(e) => setEditingDDValue(e.target.value)}
-                onBlur={() => {
-                  if (editingDDValue) {
-                    updateExpectedDD(row.consignmentOrderId, editingDDValue, row.id);
-                  } else {
-                    setEditingDDId(null);
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    if (editingDDValue) {
-                      updateExpectedDD(row.consignmentOrderId, editingDDValue, row.id);
-                    } else {
-                      setEditingDDId(null);
-                    }
-                  } else if (e.key === "Escape") {
-                    setEditingDDId(null);
-                  }
-                }}
-                onClick={(e) => e.stopPropagation()}
-              />
-            );
-          }
-          const isOverdue = row.hookkaExpectedDD && new Date(row.hookkaExpectedDD) < new Date();
-          return (
-            <span
-              className={`cursor-pointer hover:underline hover:text-[#6B5C32] ${isOverdue ? "text-[#9A3A2D] font-medium" : ""}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                setEditingDDId(row.id);
-                setEditingDDValue(row.hookkaExpectedDD ? row.hookkaExpectedDD.slice(0, 10) : "");
-              }}
-            >
-              {row.hookkaExpectedDD ? formatDate(row.hookkaExpectedDD) : <span className="text-[#9CA3AF]">—</span>}
-            </span>
-          );
-        },
+        render: (_v, row) => <ExpectedDDCell row={row} />,
       },
     ],
-    [editingDDId, editingDDValue, updateExpectedDD],
+    [ExpectedDDCell],
   );
 
   // ---------- CN columns (bottom DataGrid for CN list tabs) ----------

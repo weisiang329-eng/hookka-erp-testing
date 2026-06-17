@@ -55,6 +55,111 @@ const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
 const SOMutationSchema = mutationWithData(SalesOrderSchema);
 
 // ---------------------------------------------------------------------------
+// EditableExpectedDD — shared inline cell for the "Expected DD" (Hookka
+// Expected Delivery Date) column on the Planning and Pending Delivery boards.
+//
+// NO naked edits: the cell shows the date read-only with a pencil affordance.
+// Clicking it enters an edit state holding a LOCAL draft; the PUT only fires on
+// an explicit ✓ Save (✕ cancels, Escape cancels). It never commits on blur, so
+// a stray click-away can't silently mutate a delivery date. Errors are surfaced
+// by the parent's onSave (toast + optimistic revert).
+// ---------------------------------------------------------------------------
+function EditableExpectedDD({
+  row,
+  onSave,
+}: {
+  row: { id: string; salesOrderId: string; hookkaExpectedDD: string | null };
+  onSave: (salesOrderId: string, newDate: string, rowId: string, prevDate: string | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const startEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDraft(row.hookkaExpectedDD ? row.hookkaExpectedDD.slice(0, 10) : "");
+    setEditing(true);
+  };
+  const cancel = () => {
+    setEditing(false);
+    setSaving(false);
+  };
+  const commit = () => {
+    // Deliberate Save only. No-op when blank or unchanged.
+    if (!draft || draft === (row.hookkaExpectedDD ? row.hookkaExpectedDD.slice(0, 10) : "")) {
+      cancel();
+      return;
+    }
+    setSaving(true);
+    onSave(row.salesOrderId, draft, row.id, row.hookkaExpectedDD ?? null);
+    setEditing(false);
+    setSaving(false);
+  };
+
+  if (editing) {
+    return (
+      <span className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+        <input
+          type="date"
+          autoFocus
+          value={draft}
+          disabled={saving}
+          className="h-7 w-[120px] text-xs rounded border border-[#E2DDD8] px-1.5 focus:outline-none focus:border-[#6B5C32]"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              cancel();
+            }
+          }}
+        />
+        <button
+          type="button"
+          title="Save"
+          aria-label="Save Expected DD"
+          disabled={saving}
+          className="inline-flex h-6 w-6 items-center justify-center rounded text-[#3F7D3A] hover:bg-[#EAF3EA] disabled:opacity-50"
+          onClick={commit}
+        >
+          <Save className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          title="Cancel"
+          aria-label="Cancel editing Expected DD"
+          disabled={saving}
+          className="inline-flex h-6 w-6 items-center justify-center rounded text-[#6B7280] hover:bg-[#F0EDEA] disabled:opacity-50"
+          onClick={cancel}
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </span>
+    );
+  }
+
+  const isOverdue = row.hookkaExpectedDD && new Date(row.hookkaExpectedDD) < new Date();
+  return (
+    <span className="group inline-flex items-center gap-1">
+      <span className={isOverdue ? "text-[#9A3A2D] font-medium" : "text-[#1F1D1B]"}>
+        {row.hookkaExpectedDD ? formatDate(row.hookkaExpectedDD) : <span className="text-[#9CA3AF]">—</span>}
+      </span>
+      <button
+        type="button"
+        title="Edit Expected DD"
+        aria-label="Edit Expected DD"
+        className="inline-flex h-6 w-6 items-center justify-center rounded text-[#9CA3AF] opacity-0 transition-opacity hover:bg-[#F0EDEA] hover:text-[#6B5C32] group-hover:opacity-100 focus:opacity-100"
+        onClick={startEdit}
+      >
+        <Pencil className="h-3 w-3" />
+      </button>
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -890,8 +995,8 @@ export default function DeliveryPage() {
   const [customersData, setCustomersData] = useState<Customer[]>([]);
 
   // ----- Inline Expected DD editing -----
-  const [editingDDId, setEditingDDId] = useState<string | null>(null);
-  const [editingDDValue, setEditingDDValue] = useState("");
+  // Per-cell draft + edit state now lives inside EditableExpectedDD (no naked
+  // edits: it commits only on an explicit Save). Nothing shared at this level.
 
   // ---------- Pagination (DO list only) ----------
   // Server-side pagination for the DO fetch; PO-based tabs (planning,
@@ -3203,27 +3308,42 @@ export default function DeliveryPage() {
   };
 
   // ---------- Expected DD inline update ----------
-  const updateExpectedDD = useCallback(async (salesOrderId: string, newDate: string, rowId: string) => {
+  // NO naked edits: the date cell (EditableExpectedDD) holds a local draft and
+  // only calls this on an explicit Save click — never on blur. We optimistically
+  // patch both boards, then surface any failure via toast and revert.
+  const updateExpectedDD = useCallback(async (salesOrderId: string, newDate: string, rowId: string, prevDate: string | null) => {
     if (!salesOrderId) return;
+    // Optimistic patch on both boards (the row may live in either list).
+    setPlanningPOs((prev) =>
+      prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r))
+    );
+    setReadyPOs((prev) =>
+      prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r))
+    );
     try {
       const json = await fetchJson(`/api/sales-orders/${salesOrderId}`, SOMutationSchema, {
         method: "PUT",
         body: { hookkaExpectedDD: newDate },
       });
-      if (json.success) {
-        setPlanningPOs((prev) =>
-          prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r))
-        );
-        setReadyPOs((prev) =>
-          prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r))
-        );
-      }
-    } catch {
-      // silently ignore network errors
-    } finally {
-      setEditingDDId(null);
+      if (!json.success) throw new Error("Save was rejected by the server");
+      toast.success("Expected DD updated");
+    } catch (e) {
+      // Surface the error and revert the optimistic value.
+      setPlanningPOs((prev) =>
+        prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: prevDate ?? "" } : r))
+      );
+      setReadyPOs((prev) =>
+        prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: prevDate ?? "" } : r))
+      );
+      const msg =
+        e instanceof FetchJsonError
+          ? (e.body as { error?: string } | undefined)?.error || e.message
+          : e instanceof Error
+            ? e.message
+            : "Network error";
+      toast.error(`Failed to update Expected DD: ${msg}`);
     }
-  }, []);
+  }, [toast]);
 
   // ---------- Planning columns ----------
   const planningColumns: Column<ReadyPORow>[] = useMemo(
@@ -3338,57 +3458,12 @@ export default function DeliveryPage() {
         key: "hookkaExpectedDD",
         label: "Expected DD",
         type: "date",
-        width: "110px",
+        width: "150px",
         sortable: true,
-        render: (_v, row) => {
-          if (editingDDId === row.id) {
-            return (
-              <input
-                type="date"
-                autoFocus
-                value={editingDDValue}
-                className="h-7 w-[120px] text-xs rounded border border-[#E2DDD8] px-1.5 focus:outline-none focus:border-[#6B5C32]"
-                onChange={(e) => setEditingDDValue(e.target.value)}
-                onBlur={() => {
-                  if (editingDDValue) {
-                    updateExpectedDD(row.salesOrderId, editingDDValue, row.id);
-                  } else {
-                    setEditingDDId(null);
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    if (editingDDValue) {
-                      updateExpectedDD(row.salesOrderId, editingDDValue, row.id);
-                    } else {
-                      setEditingDDId(null);
-                    }
-                  } else if (e.key === "Escape") {
-                    setEditingDDId(null);
-                  }
-                }}
-                onClick={(e) => e.stopPropagation()}
-              />
-            );
-          }
-          const isOverdue = row.hookkaExpectedDD && new Date(row.hookkaExpectedDD) < new Date();
-          return (
-            <span
-              className={`cursor-pointer hover:underline hover:text-[#6B5C32] ${isOverdue ? "text-[#9A3A2D] font-medium" : ""}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                setEditingDDId(row.id);
-                setEditingDDValue(row.hookkaExpectedDD ? row.hookkaExpectedDD.slice(0, 10) : "");
-              }}
-            >
-              {row.hookkaExpectedDD ? formatDate(row.hookkaExpectedDD) : <span className="text-[#9CA3AF]">—</span>}
-            </span>
-          );
-        },
+        render: (_v, row) => <EditableExpectedDD row={row} onSave={updateExpectedDD} />,
       },
     ],
-    [editingDDId, editingDDValue, updateExpectedDD]
+    [updateExpectedDD]
   );
 
   // ---------- Pending Delivery columns ----------
@@ -3554,57 +3629,12 @@ export default function DeliveryPage() {
         key: "hookkaExpectedDD",
         label: "Expected DD",
         type: "date",
-        width: "110px",
+        width: "150px",
         sortable: true,
-        render: (_v, row) => {
-          if (editingDDId === row.id) {
-            return (
-              <input
-                type="date"
-                autoFocus
-                value={editingDDValue}
-                className="h-7 w-[120px] text-xs rounded border border-[#E2DDD8] px-1.5 focus:outline-none focus:border-[#6B5C32]"
-                onChange={(e) => setEditingDDValue(e.target.value)}
-                onBlur={() => {
-                  if (editingDDValue) {
-                    updateExpectedDD(row.salesOrderId, editingDDValue, row.id);
-                  } else {
-                    setEditingDDId(null);
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    if (editingDDValue) {
-                      updateExpectedDD(row.salesOrderId, editingDDValue, row.id);
-                    } else {
-                      setEditingDDId(null);
-                    }
-                  } else if (e.key === "Escape") {
-                    setEditingDDId(null);
-                  }
-                }}
-                onClick={(e) => e.stopPropagation()}
-              />
-            );
-          }
-          const isOverdue = row.hookkaExpectedDD && new Date(row.hookkaExpectedDD) < new Date();
-          return (
-            <span
-              className={`cursor-pointer hover:underline hover:text-[#6B5C32] ${isOverdue ? "text-[#9A3A2D] font-medium" : ""}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                setEditingDDId(row.id);
-                setEditingDDValue(row.hookkaExpectedDD ? row.hookkaExpectedDD.slice(0, 10) : "");
-              }}
-            >
-              {row.hookkaExpectedDD ? formatDate(row.hookkaExpectedDD) : <span className="text-[#9CA3AF]">—</span>}
-            </span>
-          );
-        },
+        render: (_v, row) => <EditableExpectedDD row={row} onSave={updateExpectedDD} />,
       },
     ],
-    [selectedReadyPOs, editingDDId, editingDDValue, updateExpectedDD]
+    [selectedReadyPOs, updateExpectedDD]
   );
 
   // ---------- DO Columns ----------

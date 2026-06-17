@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1129,6 +1130,7 @@ function AgingCard({
 
 function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh: () => void }) {
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
   const [showForm, setShowForm] = useState(false);
   const [formData, setFormData] = useState({
     code: "",
@@ -1318,7 +1320,33 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
 
   // Phase 1 — quick per-row P&L category tagging (FIXED / VARIABLE /
   // OTHERS). Drives the expense grouping on the Phase-5 reports.
+  // Owner rule ([[feedback_no_naked_edits]]): no naked auto-save — the
+  // dropdown's onChange must ask an in-app Confirm before the PUT fires.
+  // On cancel we re-fetch so the controlled <select> snaps back to the
+  // stored category (the change was never written).
   const handleSetPnl = async (code: string, value: string) => {
+    const PNL_LABEL: Record<string, string> = {
+      "": "— (none)",
+      FIXED: "Fixed",
+      VARIABLE: "Variable",
+      OTHERS: "Others",
+    };
+    const ok = await confirm({
+      title: "Change P&L category?",
+      message: (
+        <>
+          Set account{" "}
+          <span className="font-semibold text-[#6B5C32]">{code}</span> P&L
+          category to{" "}
+          <span className="font-semibold text-[#6B5C32]">{PNL_LABEL[value] ?? value}</span>?
+        </>
+      ),
+      confirmLabel: "Change",
+    });
+    if (!ok) {
+      onRefresh();
+      return;
+    }
     const res = await fetch("/api/accounting/coa", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -1354,6 +1382,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
 
   return (
     <div className="space-y-4">
+      {confirmDialog}
       <div className="flex justify-between items-center">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Chart of Accounts</h2>
         <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>

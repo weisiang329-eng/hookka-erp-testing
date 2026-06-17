@@ -17,6 +17,7 @@ import {
   type PayRulesConfig,
 } from "@/lib/pay-rules";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
@@ -634,6 +635,7 @@ function WorkingHoursTab({
   // dept added via the Manage Departments UI on Labor Cost shows up here too.
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
+  const { confirm, confirmDialog } = useConfirm();
   // Effective-dated pay rules — punch→Hours uses the shift/grace/blocks in
   // force ON each row's date (no versions → built-in defaults).
   const payRuleVersions = usePayRuleVersions();
@@ -902,6 +904,17 @@ function WorkingHoursTab({
     const row = rows[idx];
     if (!row) return;
     if (row.id) {
+      // Persisted entry — ask before the destructive server DELETE.
+      if (
+        !(await confirm({
+          title: "Delete this working-hour entry?",
+          message: "This permanently removes the saved working-hour entry. This cannot be undone.",
+          confirmLabel: "Delete",
+          tone: "danger",
+        }))
+      ) {
+        return;
+      }
       // Persisted — DELETE on server first; pop from local state on success.
       try {
         const res = await fetch(`/api/working-hour-entries/${row.id}`, { method: "DELETE" });
@@ -915,7 +928,7 @@ function WorkingHoursTab({
       }
     }
     setRows((prev) => prev.filter((_, i) => i !== idx));
-  }, [rows, patchRow]);
+  }, [rows, patchRow, confirm]);
 
   const saveRow = useCallback(async (idx: number) => {
     const row = rows[idx];
@@ -1166,6 +1179,7 @@ function WorkingHoursTab({
 
   return (
     <div className="space-y-4">
+      {confirmDialog}
       <PublicHolidaysCard />
     <Card>
       <CardHeader className="pb-3">
@@ -1632,6 +1646,7 @@ function PublicHolidaysCard() {
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState("");
   const [saving, setSaving] = useState(false);
+  const { confirm, confirmDialog } = useConfirm();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1686,13 +1701,23 @@ function PublicHolidaysCard() {
     save([...dates, adding].sort()).then(() => setAdding(""));
   };
 
-  const removeOne = (d: string) => {
-    if (!confirm(`Remove ${d} from public holidays?`)) return;
+  const removeOne = async (d: string) => {
+    if (
+      !(await confirm({
+        title: "Remove public holiday?",
+        message: `Remove ${d} from public holidays? Workers may then be deducted for not working that day.`,
+        confirmLabel: "Remove",
+        tone: "danger",
+      }))
+    ) {
+      return;
+    }
     save(dates.filter((x) => x !== d));
   };
 
   return (
     <Card>
+      {confirmDialog}
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
           Public Holidays
@@ -1970,6 +1995,7 @@ function EmployeeMasterTab({
   // production. Falls back to seed if API hasn't loaded.
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
   const [showAddForm, setShowAddForm] = useState(false);
   const [form, setForm] = useState<WorkerFormData>({ ...emptyForm });
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -2349,7 +2375,19 @@ function EmployeeMasterTab({
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this employee?")) return;
+    const name = workers.find((w) => w.id === id)?.name;
+    if (
+      !(await confirm({
+        title: "Delete this employee?",
+        message: name
+          ? `Delete employee "${name}"? This cannot be undone.`
+          : "Are you sure you want to delete this employee? This cannot be undone.",
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
+    ) {
+      return;
+    }
     try {
       const res = await fetch(`/api/workers/${id}`, { method: "DELETE" });
       if (!res.ok) {
@@ -2929,6 +2967,7 @@ function EmployeeMasterTab({
 
   return (
     <Card>
+      {confirmDialog}
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <CardTitle className="flex items-center gap-2">
@@ -6226,6 +6265,7 @@ function RuleDraftExplainer({ d }: { d: Record<string, string> }) {
 
 function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
   const now = new Date();
   const [selectedYear, setSelectedYear] = useState(now.getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(now.getMonth() + 1);
@@ -6325,6 +6365,17 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     }
   };
   const deleteRuleVersion = async (id: string) => {
+    if (
+      !(await confirm({
+        title: "Delete this pay-rule version?",
+        message:
+          "Already-generated payslips are unaffected. Future payroll runs and any re-generation will fall back to the previous version in effect on each date.",
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
+    ) {
+      return;
+    }
     await fetch(`/api/pay-rules/${id}`, { method: "DELETE" });
     invalidateCachePrefix("/api/pay-rules");
     refreshPayRules?.();
@@ -6389,9 +6440,13 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   // enforces). Confirm dialog because operator loses any per-row tweaks.
   const regeneratePayslips = async () => {
     if (
-      !confirm(
-        `Re-generate payslips for ${months[selectedMonth - 1]} ${selectedYear}?\n\nAll current DRAFT rows for this period will be deleted and recomputed from the latest worker master-data (statutory toggles, salary, OT multiplier). APPROVED rows stay untouched.`,
-      )
+      !(await confirm({
+        title: `Re-generate payslips for ${months[selectedMonth - 1]} ${selectedYear}?`,
+        message:
+          "All current DRAFT rows for this period will be deleted and recomputed from the latest worker master-data (statutory toggles, salary, OT multiplier). APPROVED rows stay untouched.",
+        confirmLabel: "Re-generate",
+        tone: "danger",
+      }))
     ) {
       return;
     }
@@ -6721,6 +6776,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
 
   return (
     <div className="space-y-4">
+      {confirmDialog}
       {/* Summary Cards */}
       {payslipData.length > 0 && (
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-5">
@@ -7507,6 +7563,7 @@ function DepartmentsManager({
   refresh: () => void;
 }) {
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
   const [creating, setCreating] = useState(false);
   // Hrs/Day is a legacy schema column kept at default 9 — not surfaced in
   // this UI because the runtime never reads it (worker-level
@@ -7586,7 +7643,16 @@ function DepartmentsManager({
   };
 
   const remove = async (d: DepartmentLite) => {
-    if (!confirm(`Delete department "${d.name}" (${d.code})?\n\nThis only succeeds if no worker is assigned to it. Cannot be undone.`)) return;
+    if (
+      !(await confirm({
+        title: `Delete department "${d.name}" (${d.code})?`,
+        message: "This only succeeds if no worker is assigned to it. Cannot be undone.",
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
+    ) {
+      return;
+    }
     setBusy(true);
     try {
       const res = await fetch(`/api/departments/${d.id}`, { method: "DELETE" });
@@ -7608,6 +7674,7 @@ function DepartmentsManager({
 
   return (
     <div className="mb-4 rounded-md border border-[#E2DDD8] bg-[#FAF7F1] p-3">
+      {confirmDialog}
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-sm font-semibold text-[#1F1D1B]">Manage Departments</h4>
         <Button variant="outline" size="sm" onClick={() => setCreating((v) => !v)}>
@@ -7746,6 +7813,7 @@ function LaborCostTab({
 }) {
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
+  const { confirm, confirmDialog } = useConfirm();
   // Department CRUD lives on the Department Labor tab now (per user request -
   // a "Department Cost" management view). Labor Cost just consumes the
   // department list.
@@ -7971,6 +8039,21 @@ function LaborCostTab({
     ) => {
       const hrs = Math.round(shortHours * 100) / 100;
       if (!workerId || !/^\d{4}-\d{2}-\d{2}$/.test(date) || hrs <= 0) return;
+      // "deduct" docks pay + regenerates the payslip — confirm before the write.
+      // ("idle" only logs idle hours with no pay change, so it stays one-click.)
+      if (action === "deduct") {
+        const who = workersById.get(workerId)?.name ?? workerId;
+        if (
+          !(await confirm({
+            title: "Dock pay and regenerate payslip?",
+            message: `Dock ${hrs.toFixed(2)} h from ${who} on ${date} and regenerate this person's payslip for the period? This lowers their pay.`,
+            confirmLabel: "Dock pay",
+            tone: "danger",
+          }))
+        ) {
+          return;
+        }
+      }
       setUnderActionBusy(`${workerId}|${date}|${action}`);
       try {
         if (action === "idle") {
@@ -8017,12 +8100,22 @@ function LaborCostTab({
         setUnderActionBusy(null);
       }
     },
-    [payrollPeriod, refreshEntries, refreshRecon, refreshDeductions],
+    [payrollPeriod, refreshEntries, refreshRecon, refreshDeductions, confirm, workersById],
   );
 
   // Undo a dock → delete it + regenerate so the worker's pay is restored.
   const handleUndoDeduction = useCallback(
     async (id: string) => {
+      if (
+        !(await confirm({
+          title: "Undo this deduction?",
+          message: "Delete this short-hour dock and regenerate the payslip? This restores the worker's pay for the period.",
+          confirmLabel: "Undo deduction",
+          tone: "danger",
+        }))
+      ) {
+        return;
+      }
       setUnderActionBusy(`undo|${id}`);
       try {
         const r = await fetch(`/api/payroll-hour-deductions/${id}`, {
@@ -8044,7 +8137,7 @@ function LaborCostTab({
         setUnderActionBusy(null);
       }
     },
-    [payrollPeriod, refreshRecon, refreshDeductions],
+    [payrollPeriod, refreshRecon, refreshDeductions, confirm],
   );
 
   // Index departments by code once so the per-row / per-worker reconciliation
@@ -9076,6 +9169,7 @@ function LaborCostTab({
 
   return (
     <Card>
+      {confirmDialog}
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <CardTitle className="flex items-center gap-2">

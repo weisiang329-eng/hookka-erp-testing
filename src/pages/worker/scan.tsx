@@ -422,6 +422,11 @@ export default function WorkerScanPage() {
   }, [rackStockIn]);
   const [rackStockingIn, setRackStockingIn] = useState(false);
   const [rackStockMsg, setRackStockMsg] = useState("");
+  // Tiny on-screen diagnostic for barcode mode (Wei Siang 2026-06-17, after
+  // several "没反应" rounds): shows video dims, ROI, ZXing-loaded, decode
+  // attempts + last raw read, so a failure is observable on the phone instead
+  // of guessed at. Updated ~1.5x/sec from the scan loop; QR mode never sets it.
+  const [scanDbg, setScanDbg] = useState("");
 
   // Pull worker ID + home department from cached /me so we can auto-attribute
   // the scan AND show the card for the worker's OWN section on a shared
@@ -1184,6 +1189,10 @@ export default function WorkerScanPage() {
     let stableVal: string | null = null;
     let stableSince = 0;
     let barcodeNativeMiss = 0;
+    // Barcode-mode diagnostic counters (drive scanDbg).
+    let bcN = 0;
+    let bcLast = "";
+    let bcDbgAt = 0;
     // 600ms (was 900): still requires the SAME code held briefly so a barcode
     // flashing through frame can't fire, but locks faster once the worker is
     // aimed — the 900ms felt like "扫不到" when decodes were sparse.
@@ -1201,14 +1210,16 @@ export default function WorkerScanPage() {
     const aimRoi = () => {
       const vw = video.videoWidth;
       const vh = video.videoHeight;
-      const cw = video.clientWidth || vw;
-      const ch = video.clientHeight || vh;
-      const cover = Math.max(cw / vw, ch / vh) || 1;
-      const boxWcss = Math.min(0.86 * cw, 440);
-      const boxHcss = 118;
-      const sw = Math.max(1, Math.min(vw, Math.round(boxWcss / cover)));
-      const sh = Math.max(1, Math.min(vh, Math.round(boxHcss / cover)));
-      const sx = Math.round((vw - sw) / 2);
+      // Full WIDTH: a Code 128 only decodes if its ENTIRE width (every bar + the
+      // quiet zones at both ends) is in the image. The earlier 86%-width crop
+      // sliced the code's edges off, so ZXing never decoded → 没反应. QR mode
+      // reads the same code precisely because it uses the full frame. Keep a
+      // centred HEIGHT band (~35% of the frame) so the stacked schedule rows
+      // above/below are still excluded and only the aimed row is read
+      // (Wei Siang 2026-06-17).
+      const sh = Math.max(1, Math.round(vh * 0.35));
+      const sw = vw;
+      const sx = 0;
       const sy = Math.round((vh - sh) / 2);
       return { sx, sy, sw, sh };
     };
@@ -1321,8 +1332,20 @@ export default function WorkerScanPage() {
               const zxDecode = zxingRef.current;
               if (!zxDecode) {
                 void ensureZxing();
+                if (now - bcDbgAt > 600) {
+                  bcDbgAt = now;
+                  setScanDbg(`v:${vw}×${vh} zx:loading… n:${bcN}`);
+                }
               } else if (imageData) {
                 const zxText = zxDecode(imageData);
+                bcN++;
+                if (zxText) bcLast = zxText;
+                if (now - bcDbgAt > 600) {
+                  bcDbgAt = now;
+                  setScanDbg(
+                    `v:${vw}×${vh} roi:${sw}×${sh} zx:✓ n:${bcN} ${bcLast ? bcLast.slice(0, 14) : "—"}`,
+                  );
+                }
                 if (zxText) {
                   considerHit(zxText);
                   return;
@@ -2384,6 +2407,11 @@ export default function WorkerScanPage() {
                 ? t("scan.aimHintBarcode")
                 : t("scan.aimHint")}
             </p>
+            {scanMode === "barcode" && scanDbg && (
+              <p className="font-mono text-[10px] leading-tight text-white/40">
+                {scanDbg}
+              </p>
+            )}
             {/* Big mode toggle at the BOTTOM-centre so it's in thumb reach
                 (Wei Siang 2026-06-16: the top one was too high to tap). */}
             <button

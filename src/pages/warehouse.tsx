@@ -101,6 +101,9 @@ export default function WarehousePage() {
 
   // Popup / modals
   const [selectedSlot, setSelectedSlot] = useState<RackLocation | null>(null);
+  // Small action menu shown when an EMPTY rack tile is clicked, so the owner can
+  // print the rack's QR (to stick on, then scan to stock in) OR jump to stock-in.
+  const [emptyRackMenu, setEmptyRackMenu] = useState<RackLocation | null>(null);
   const [showStockInForm, setShowStockInForm] = useState(false);
   const [stockInTarget, setStockInTarget] = useState<string>(""); // rackLocationId
   const [stockOutTarget, setStockOutTarget] = useState<RackLocation | null>(null);
@@ -167,10 +170,17 @@ export default function WarehousePage() {
     selectedSlot ? `/api/warehouse/${encodeURIComponent(selectedSlot.id)}/details` : null
   );
 
-  const rackLocations: RackLocation[] = useMemo(
-    () => (rackResp?.success ? rackResp.data ?? [] : Array.isArray(rackResp) ? rackResp : []),
-    [rackResp]
-  );
+  const rackLocations: RackLocation[] = useMemo(() => {
+    const list = rackResp?.success ? rackResp.data ?? [] : Array.isArray(rackResp) ? rackResp : [];
+    // Natural numeric sort by the trailing rack number so dropdowns + lists read
+    // Rack 1, 2, 3 … 9, 10, 11 … 20 instead of the string order Rack 1, 10, 11,
+    // 2, 20 … (server returns ORDER BY rack = lexical). Tie-break on the raw
+    // string so racks without a number stay stable.
+    const rackNo = (s: string) => parseInt(s.match(/\d+/)?.[0] ?? "0", 10);
+    return [...list].sort(
+      (a, b) => rackNo(a.rack) - rackNo(b.rack) || a.rack.localeCompare(b.rack)
+    );
+  }, [rackResp]);
   const summary: Summary = useMemo(
     () => rackResp?.summary ?? { total: 0, occupied: 0, empty: 0, reserved: 0, occupancyRate: 0 },
     [rackResp]
@@ -582,9 +592,10 @@ export default function WarehousePage() {
                         if (slot.status === "OCCUPIED") {
                           setSelectedSlot(slot);
                         } else if (slot.status === "EMPTY") {
-                          setStockInTarget(slot.id);
-                          setShowStockInForm(true);
-                          setActiveTab("stockio");
+                          // Empty rack: offer Print Rack QR + Stock in here rather
+                          // than jumping straight to the form, so QR labels can be
+                          // printed for empty racks too (stick on → scan to stock in).
+                          setEmptyRackMenu(slot);
                         }
                       }}
                     >
@@ -751,6 +762,52 @@ export default function WarehousePage() {
                   Close
                 </Button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== Empty Rack Action Menu ===== */}
+      {/* Shown when an EMPTY rack tile is clicked. Lets the owner print the rack's
+          QR label (the whole point: stick it on an empty rack, then scan to stock
+          in) or jump straight to the stock-in form. Reuses handlePrintRackQr and
+          the same stock-in navigation the tile used to trigger directly. */}
+      {emptyRackMenu && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setEmptyRackMenu(null)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-sm w-full p-6" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#1F1D1B]">{emptyRackMenu.rack}</h3>
+              <button onClick={() => setEmptyRackMenu(null)} className="text-[#6B7280] hover:text-[#1F1D1B] cursor-pointer">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm text-[#6B7280]">Status</span>
+              <Badge>{emptyRackMenu.status}</Badge>
+            </div>
+            <div className="space-y-2">
+              <Button
+                variant="outline"
+                className="w-full justify-start"
+                onClick={() => {
+                  void handlePrintRackQr(emptyRackMenu);
+                  setEmptyRackMenu(null);
+                }}
+              >
+                <QrCode className="h-4 w-4" /> Print Rack QR
+              </Button>
+              <Button
+                variant="primary"
+                className="w-full justify-start"
+                onClick={() => {
+                  setStockInTarget(emptyRackMenu.id);
+                  setShowStockInForm(true);
+                  setActiveTab("stockio");
+                  setEmptyRackMenu(null);
+                }}
+              >
+                <ArrowDownToLine className="h-4 w-4" /> Stock in here
+              </Button>
             </div>
           </div>
         </div>

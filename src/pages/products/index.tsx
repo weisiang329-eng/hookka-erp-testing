@@ -111,6 +111,62 @@ function laborCostSenForMinutes(totalMinutes: number): number {
   return Math.round(totalMinutes * LABOR_RATE_PER_MIN_SEN);
 }
 
+// Optional analytic columns the owner can show/hide via the catalog "Columns"
+// chooser: estimated Labor cost, Margin (price − labor) and Labor-as-% of each
+// selling price. Kept as one data list so the header cells, the body cells and
+// the chooser checkboxes all iterate the same single source of truth. The
+// margin/labour columns compare against:
+//   BEDFRAME  → Price 2 (basePriceSen) for the "P2" column, Price 1 for "P1"
+//   ACCESSORY → Base Price (basePriceSen)
+//   SOFA      → the lowest positive seat-height price in the selected tier
+type ProdCat = "SOFA" | "ACCESSORY" | "BEDFRAME";
+type AnalyticCol = {
+  key: string;
+  width: string; // grid track appended to gridTemplateColumns when visible
+  defaultOn: boolean;
+  applies: (cat: ProdCat) => boolean;
+  label: (cat: ProdCat) => string;
+};
+const ANALYTIC_COLS: AnalyticCol[] = [
+  {
+    key: "labor",
+    width: "0.95fr",
+    defaultOn: true,
+    applies: () => true,
+    label: () => "Labor (est.)",
+  },
+  {
+    key: "marginP2",
+    width: "1.15fr",
+    defaultOn: true,
+    applies: () => true,
+    label: (c) =>
+      c === "SOFA" ? "Margin (tier)" : c === "ACCESSORY" ? "Margin (Base)" : "Margin (P2)",
+  },
+  {
+    key: "laborPctP2",
+    width: "0.85fr",
+    defaultOn: true,
+    applies: () => true,
+    label: (c) =>
+      c === "SOFA" ? "Labor % (tier)" : c === "ACCESSORY" ? "Labor % (Base)" : "Labor % (P2)",
+  },
+  {
+    key: "marginP1",
+    width: "1.15fr",
+    defaultOn: false,
+    applies: (c) => c === "BEDFRAME",
+    label: () => "Margin (P1)",
+  },
+  {
+    key: "laborPctP1",
+    width: "0.85fr",
+    defaultOn: false,
+    applies: (c) => c === "BEDFRAME",
+    label: () => "Labor % (P1)",
+  },
+];
+
 type DeptWorkingTime = {
   departmentCode: string;
   minutes: number;
@@ -1670,6 +1726,43 @@ export default function ProductsPage() {
     }
   };
 
+  // Analytic columns (Labor / Margin / Labor%) the owner toggles via the
+  // catalog "Columns" chooser. Persisted per browser like sofaTier above so a
+  // chosen layout survives reloads. Defaults from ANALYTIC_COLS[].defaultOn.
+  const [analyticColVis, setAnalyticColVis] = useState<Record<string, boolean>>(
+    () => {
+      const base: Record<string, boolean> = {};
+      for (const c of ANALYTIC_COLS) base[c.key] = c.defaultOn;
+      if (typeof window === "undefined") return base;
+      try {
+        const saved = window.localStorage.getItem(
+          "hookka.products.analyticCols",
+        );
+        if (saved) Object.assign(base, JSON.parse(saved) as Record<string, boolean>);
+      } catch {
+        /* ignore corrupt prefs — fall back to defaults */
+      }
+      return base;
+    },
+  );
+  const toggleAnalyticCol = (key: string) => {
+    setAnalyticColVis((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(
+            "hookka.products.analyticCols",
+            JSON.stringify(next),
+          );
+        } catch {
+          /* ignore quota / disabled storage */
+        }
+      }
+      return next;
+    });
+  };
+  const [showColMenu, setShowColMenu] = useState(false);
+
   // Master price-history dialog. Holds the product whose history is open;
   // null when the dialog is closed.
   const [scheduleProductId, setScheduleProductId] = useState<string | null>(
@@ -2246,6 +2339,65 @@ export default function ProductsPage() {
               </button>
             </>
           )}
+          {/* Columns chooser — show/hide the Labor / Margin / Labor% analytic
+              columns. Per-browser persistence, like the Tier switcher. */}
+          <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
+          <div className="relative">
+            <button
+              onClick={() => setShowColMenu((v) => !v)}
+              className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] transition-colors inline-flex items-center gap-1"
+            >
+              Columns
+              <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path d="M5.8 7.5h8.4L10 12z" />
+              </svg>
+            </button>
+            {showColMenu && (
+              <>
+                <div
+                  className="fixed inset-0 z-20"
+                  onClick={() => setShowColMenu(false)}
+                />
+                <div className="absolute right-0 mt-1 z-30 w-56 bg-white border border-[#E5E7EB] rounded-lg shadow-lg p-2">
+                  <p className="px-2 py-1 text-[10px] font-semibold text-[#9CA3AF] uppercase tracking-wide">
+                    Analytic columns
+                  </p>
+                  {ANALYTIC_COLS.filter((c) =>
+                    c.applies(
+                      categoryFilter === "SOFA"
+                        ? "SOFA"
+                        : categoryFilter === "ACCESSORY"
+                          ? "ACCESSORY"
+                          : "BEDFRAME",
+                    ),
+                  ).map((c) => {
+                    const catX: ProdCat =
+                      categoryFilter === "SOFA"
+                        ? "SOFA"
+                        : categoryFilter === "ACCESSORY"
+                          ? "ACCESSORY"
+                          : "BEDFRAME";
+                    return (
+                      <label
+                        key={c.key}
+                        className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[#F9FAFB] cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!!analyticColVis[c.key]}
+                          onChange={() => toggleAnalyticCol(c.key)}
+                          className="rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
+                        />
+                        <span className="text-xs text-[#374151]">
+                          {c.label(catX)}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
           {/* Tier switcher — only meaningful for sofas (5 height columns
               are tier-aware). Renders as a single segmented control so the
               row-per-row table layout is preserved; clicking a tier re-renders
@@ -2308,6 +2460,16 @@ export default function ProductsPage() {
           // Bedframe: Total Min bumped 0.7→0.9 for the same reason as sofa.
           : "1.3fr 1.8fr 0.8fr 0.8fr 1fr 1fr 0.7fr 0.7fr 0.9fr 0.8fr";
         const thCls = "px-3 py-1.5 text-[11px] font-medium text-[#6B7280] uppercase tracking-wider";
+        const cat: ProdCat = isSofa ? "SOFA" : isAccessory ? "ACCESSORY" : "BEDFRAME";
+        // The analytic columns the chooser currently has switched on, for this
+        // category. Their grid tracks are appended to gridTemplateColumns so the
+        // header + body cells line up; widths come from each column's def.
+        const activeAnalyticCols = ANALYTIC_COLS.filter(
+          (c) => c.applies(cat) && analyticColVis[c.key],
+        );
+        const gridColsFull = activeAnalyticCols.length
+          ? `${gridCols} ${activeAnalyticCols.map((c) => c.width).join(" ")}`
+          : gridCols;
         return (
       <div className="bg-white rounded-lg border border-[#E5E7EB] overflow-hidden">
         <div
@@ -2319,7 +2481,7 @@ export default function ProductsPage() {
             <thead className="bg-[#F9FAFB] sticky top-0 z-10">
               <tr>
                 <th colSpan={colSpanN} className="p-0">
-                  <div className="grid" style={{ gridTemplateColumns: gridCols }}>
+                  <div className="grid" style={{ gridTemplateColumns: gridColsFull }}>
                     {/* Product Code header carries an invisible chevron
                       * spacer so the "Product Code" label lines up with
                       * the body cell's code text — the body row renders
@@ -2362,6 +2524,11 @@ export default function ProductsPage() {
                         <div className={`${thCls} text-center`}>Variants</div>
                       </>
                     )}
+                    {activeAnalyticCols.map((c) => (
+                      <div key={c.key} className={`${thCls} text-right`}>
+                        {c.label(cat)}
+                      </div>
+                    ))}
                   </div>
                 </th>
               </tr>
@@ -2404,6 +2571,15 @@ export default function ProductsPage() {
                 // × flat-average labor rate (see LABOR_RATE_PER_MIN_SEN). 0 when
                 // the SKU has no minutes yet — rendered as "—" downstream.
                 const laborCostSen = laborCostSenForMinutes(totalMin);
+                // Sofa selling price for the analytic columns = lowest positive
+                // seat-height price in the selected tier (mirrors the expand
+                // panel's representative-price logic). 0 for non-sofas, which
+                // fall back to basePriceSen / price1Sen below.
+                const sofaRepPriceSen = isSofa
+                  ? ((p.seatHeightPrices || [])
+                      .filter((s) => entryTier(s.tier) === sofaTier && s.priceSen > 0)
+                      .sort((a, b) => a.priceSen - b.priceSen)[0]?.priceSen ?? 0)
+                  : 0;
                 // Per-SKU default variants — read straight from the product
                 // row. The badge shows "✓ Configured" when ANY default field
                 // is set, otherwise "Configure". Counting the number of set
@@ -2430,7 +2606,7 @@ export default function ProductsPage() {
                       {/* Main row */}
                       <div
                         className="grid cursor-pointer hover:bg-[#F9FAFB] transition-colors"
-                        style={{ gridTemplateColumns: gridCols }}
+                        style={{ gridTemplateColumns: gridColsFull }}
                         onClick={() => setExpandedId(isExpanded ? null : p.id)}
                       >
                         <div className="px-3 py-1.5 flex items-center gap-1.5">
@@ -2851,6 +3027,51 @@ export default function ProductsPage() {
                             </div>
                           </>
                         )}
+                        {activeAnalyticCols.map((c) => {
+                          const mainPrice = isSofa ? sofaRepPriceSen : basePrice;
+                          const priceFor =
+                            c.key === "marginP1" || c.key === "laborPctP1"
+                              ? price1Val
+                              : mainPrice;
+                          const isPct =
+                            c.key === "laborPctP2" || c.key === "laborPctP1";
+                          return (
+                            <div
+                              key={c.key}
+                              className="px-3 py-1.5 text-right text-sm tabular-nums whitespace-nowrap"
+                            >
+                              {c.key === "labor" ? (
+                                laborCostSen > 0 ? (
+                                  formatCurrency(laborCostSen)
+                                ) : (
+                                  <span className="text-[#9CA3AF]">—</span>
+                                )
+                              ) : priceFor <= 0 || laborCostSen <= 0 ? (
+                                <span className="text-[#9CA3AF]">—</span>
+                              ) : isPct ? (
+                                <span className="text-[#111827]">
+                                  {((laborCostSen / priceFor) * 100).toFixed(1)}%
+                                </span>
+                              ) : (
+                                (() => {
+                                  const m = priceFor - laborCostSen;
+                                  return (
+                                    <span
+                                      className={
+                                        m >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"
+                                      }
+                                    >
+                                      {formatCurrency(m)}
+                                      <span className="ml-1 text-[10px] text-[#9CA3AF]">
+                                        ({((m / priceFor) * 100).toFixed(1)}%)
+                                      </span>
+                                    </span>
+                                  );
+                                })()
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                       {/* Expanded section */}
                       {isExpanded && (

@@ -1,0 +1,61 @@
+name: Mail Sync (Hostinger IMAP -> ERP)
+
+# Pulls new mail from the Hostinger @hookka.com mailboxes into the ERP Mail
+# Center. Read-only on the mailboxes; the ERP dedups by Message-ID so re-runs
+# never duplicate. See mail-sync/README.md for the secrets to set.
+#
+# NOTE: scheduled runs only fire from the repo's DEFAULT branch. To test on the
+# staging branch first, use "Run workflow" (workflow_dispatch) and pick the
+# staging branch — that runs this file from whatever branch you select.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *" # every 10 minutes
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: "Import ALL history (first run) instead of just recent"
+        type: boolean
+        default: false
+      since_days:
+        description: "Incremental look-back window in days (ignored if backfill)"
+        default: "3"
+
+# Never let two syncs overlap (a slow backfill + a cron tick).
+concurrency:
+  group: mail-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install deps
+        working-directory: mail-sync
+        run: npm install --no-audit --no-fund
+      - name: Sync
+        working-directory: mail-sync
+        env:
+          # URL of the ERP inbound endpoint. Set repo variable MAIL_ERP_INBOUND_URL
+          # for prod; otherwise the script defaults to the staging URL.
+          ERP_INBOUND_URL: ${{ vars.MAIL_ERP_INBOUND_URL }}
+          # Must equal the ERP's MAIL_INBOUND_SECRET (Cloudflare Pages env).
+          MAIL_INBOUND_SECRET: ${{ secrets.MAIL_INBOUND_SECRET }}
+          # Optional overrides (script defaults: imap.hostinger.com:993, the 5 boxes).
+          MAILBOXES: ${{ vars.MAIL_MAILBOXES }}
+          IMAP_HOST: ${{ vars.MAIL_IMAP_HOST }}
+          IMAP_PORT: ${{ vars.MAIL_IMAP_PORT }}
+          # One IMAP password per mailbox.
+          HOSTINGER_PW_SUPPORT: ${{ secrets.HOSTINGER_PW_SUPPORT }}
+          HOSTINGER_PW_FINANCE: ${{ secrets.HOSTINGER_PW_FINANCE }}
+          HOSTINGER_PW_HR: ${{ secrets.HOSTINGER_PW_HR }}
+          HOSTINGER_PW_LIM: ${{ secrets.HOSTINGER_PW_LIM }}
+          HOSTINGER_PW_VIOLET: ${{ secrets.HOSTINGER_PW_VIOLET }}
+          BACKFILL: ${{ inputs.backfill }}
+          SINCE_DAYS: ${{ inputs.since_days }}
+        run: npm run sync

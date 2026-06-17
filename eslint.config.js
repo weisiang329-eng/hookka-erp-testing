@@ -6,7 +6,7 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'mail-inbound-worker']),
+  globalIgnores(['dist', 'mail-inbound-worker', 'mail-sync']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

@@ -1627,7 +1627,11 @@ app.post("/compose", async (c) => {
     html: htmlBody,
   });
   if (!result.ok) {
-    return c.json({ error: "send failed" }, 502);
+    // Surface the REAL provider error instead of a blank "send failed" — the
+    // owner needs to see WHY (e.g. "No email provider configured" when staging
+    // has no BREVO_API_KEY, or a Brevo "sender not authenticated" after the
+    // domain moved to Hostinger). Same transparency as the reply path.
+    return c.json({ error: result.error || "send failed" }, 502);
   }
 
   const userId = getUserId(

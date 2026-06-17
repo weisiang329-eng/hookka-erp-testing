@@ -1,0 +1,13 @@
+{
+  "name": "hookka-mail-sync",
+  "private": true,
+  "type": "module",
+  "description": "Polls Hostinger IMAP mailboxes (read-only) and pushes new mail into the ERP POST /api/mail-center/inbound. Runs on a GitHub Actions cron; NOT part of the Cloudflare Worker bundle.",
+  "scripts": {
+    "sync": "node sync.mjs"
+  },
+  "dependencies": {
+    "imapflow": "^1.0.171",
+    "postal-mime": "^2.3.2"
+  }
+}

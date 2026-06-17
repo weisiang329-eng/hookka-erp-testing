@@ -20,7 +20,7 @@
 // 0049). Authenticated reads scope by getOrgId(c); the userless inbound path
 // defaults to DEFAULT_ORG_ID.
 // ---------------------------------------------------------------------------
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 import { requireSuperAdmin } from "../lib/rbac";
 import { getOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
@@ -417,15 +417,46 @@ function rowToAddress(r: AddressRow) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-user mailbox visibility (owner 2026-06-17: "每个 account 在 ERP 里有他自己
+// 的 mailbox"). SUPER_ADMIN sees every thread/address in the org; every other
+// authenticated user sees ONLY the threads/addresses on the @hookka.com
+// address(es) assigned to them in email_addresses. Inherently scoped to the
+// caller, so it needs no mail-center:* RBAC grant (which was never seeded).
+// ---------------------------------------------------------------------------
+async function getMailScope(
+  c: Context<Env>,
+  orgId: string,
+): Promise<{ isAdmin: boolean; userId: string; addresses: string[] }> {
+  const get = (c as unknown as { get: (k: string) => string | undefined }).get;
+  const role = get("userRole")?.toUpperCase();
+  const userId = get("userId") ?? "";
+  if (role === "SUPER_ADMIN") return { isAdmin: true, userId, addresses: [] };
+  if (!userId) return { isAdmin: false, userId: "", addresses: [] };
+  const res = await c.var.DB.prepare(
+    `SELECT address FROM email_addresses WHERE org_id = ? AND assigned_user_id = ? AND active = 1`,
+  )
+    .bind(orgId, userId)
+    .all<{ address: string }>();
+  return {
+    isAdmin: false,
+    userId,
+    addresses: (res.results ?? []).map((r) => r.address.toLowerCase()),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Authenticated read endpoints (mounted at /api/mail-center, AFTER auth).
+// Per-user scoped via getMailScope — every logged-in user reads THEIR OWN
+// mailbox; SUPER_ADMIN reads all. (No requireSuperAdmin gate on reads/reply.)
 // ---------------------------------------------------------------------------
 
 // GET /api/mail-center/threads?mailbox=&status=&q=
 app.get("/threads", async (c) => {
-  const denied = requireSuperAdmin(c);
-  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
+  const scope = await getMailScope(c, orgId);
+  // A non-admin with no assigned address has no mailbox → sees nothing.
+  if (!scope.isAdmin && scope.addresses.length === 0) return c.json([]);
 
   const mailbox = c.req.query("mailbox");
   const status = c.req.query("status");
@@ -433,6 +464,12 @@ app.get("/threads", async (c) => {
 
   const where: string[] = ["org_id = ?"];
   const binds: (string | number)[] = [orgId];
+  // Per-user scope: non-admins only see threads on their own address(es).
+  if (!scope.isAdmin) {
+    const ph = scope.addresses.map(() => "?").join(", ");
+    where.push(`LOWER(mailbox_address) IN (${ph})`);
+    binds.push(...scope.addresses);
+  }
   if (mailbox) {
     where.push("mailbox_address = ?");
     binds.push(mailbox);
@@ -460,11 +497,10 @@ app.get("/threads", async (c) => {
 
 // GET /api/mail-center/threads/:id — thread + its messages (marks read).
 app.get("/threads/:id", async (c) => {
-  const denied = requireSuperAdmin(c);
-  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   const id = c.req.param("id");
+  const scope = await getMailScope(c, orgId);
 
   const thread = await c.var.DB.prepare(
     `SELECT * FROM email_threads WHERE org_id = ? AND id = ? LIMIT 1`,
@@ -472,6 +508,13 @@ app.get("/threads/:id", async (c) => {
     .bind(orgId, id)
     .first<ThreadRow>();
   if (!thread) return c.json({ error: "Thread not found" }, 404);
+  // Per-user scope: a non-admin can only open a thread on their own address.
+  if (
+    !scope.isAdmin &&
+    !scope.addresses.includes((thread.mailbox_address ?? "").toLowerCase())
+  ) {
+    return c.json({ error: "Thread not found" }, 404);
+  }
 
   const msgs = await c.var.DB.prepare(
     `SELECT * FROM email_messages WHERE org_id = ? AND thread_id = ? ORDER BY created_at ASC`,
@@ -496,15 +539,22 @@ app.get("/threads/:id", async (c) => {
 
 // GET /api/mail-center/addresses — our @hookka.com addresses / aliases.
 app.get("/addresses", async (c) => {
-  const denied = requireSuperAdmin(c);
-  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
-  const res = await c.var.DB.prepare(
-    `SELECT * FROM email_addresses WHERE org_id = ? ORDER BY address ASC`,
-  )
-    .bind(orgId)
-    .all<AddressRow>();
+  const scope = await getMailScope(c, orgId);
+  // SUPER_ADMIN sees every address; a regular user sees only the ones assigned
+  // to them (their own mailbox).
+  const res = scope.isAdmin
+    ? await c.var.DB.prepare(
+        `SELECT * FROM email_addresses WHERE org_id = ? ORDER BY address ASC`,
+      )
+        .bind(orgId)
+        .all<AddressRow>()
+    : await c.var.DB.prepare(
+        `SELECT * FROM email_addresses WHERE org_id = ? AND assigned_user_id = ? ORDER BY address ASC`,
+      )
+        .bind(orgId, scope.userId)
+        .all<AddressRow>();
   return c.json((res.results ?? []).map(rowToAddress));
 });
 
@@ -711,11 +761,10 @@ const DEFAULT_REPLY_FROM = "Hookka <support@hookka.com>";
 // thread is still updated correctly; cross-client threading headers are a
 // follow-up once the sender helper grows a headers option.
 app.post("/threads/:id/reply", async (c) => {
-  const denied = requireSuperAdmin(c);
-  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   const id = c.req.param("id");
+  const scope = await getMailScope(c, orgId);
 
   type ReplyBody = { text?: string; html?: string };
   const body: ReplyBody = await c.req
@@ -734,6 +783,13 @@ app.post("/threads/:id/reply", async (c) => {
     .bind(orgId, id)
     .first<ThreadRow>();
   if (!thread) return c.json({ error: "Thread not found" }, 404);
+  // Per-user scope: only the mailbox owner (or an admin) can reply.
+  if (
+    !scope.isAdmin &&
+    !scope.addresses.includes((thread.mailbox_address ?? "").toLowerCase())
+  ) {
+    return c.json({ error: "Thread not found" }, 404);
+  }
 
   const to = (thread.counterparty_email ?? "").trim();
   if (!to) {

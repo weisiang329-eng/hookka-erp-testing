@@ -15,6 +15,11 @@ const Track = lazy(() => import('./pages/track'))
 // token in /d/:token is the credential; see routes/public-do-qr.ts)
 const DoScan = lazy(() => import('./pages/do-scan'))
 
+// Public rack stock-in page (standalone, no auth — the rack id in /r/:rackId
+// is the entry point; staff scan a rack QR then scan items into it. Backend
+// /api/public/rack-qr only performs the forward stock-in. See routes/public-rack-qr.ts)
+const RackScan = lazy(() => import('./pages/rack-scan'))
+
 // Auth
 const Login = lazy(() => import('./pages/login'))
 const InviteAccept = lazy(() => import('./pages/InviteAccept'))
@@ -78,6 +83,10 @@ export const router = createBrowserRouter([
   // Public DO/PL QR scan page (standalone, no auth, mobile-friendly —
   // drivers mark Dispatched/Delivered here; token is the credential)
   { path: '/d/:token', element: <S><DoScan /></S> },
+
+  // Public rack stock-in page (standalone, no auth, mobile-friendly — staff
+  // scan a physical rack's QR to open /r/:rackId, then scan items into it)
+  { path: '/r/:rackId', element: <S><RackScan /></S> },
 
   // Dashboard layout — gated behind RequireAuth. All dashboard routes share
   // the one `TabbedOutlet` inside DashboardLayout, which renders its own

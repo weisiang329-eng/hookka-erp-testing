@@ -70,6 +70,13 @@ const EXPECTED_PREFIXES = [
   // office transition path. See routes/public-do-qr.ts and
   // tests/do-qr-public.test.mjs.
   "/api/public/do-qr/",
+  // 2026-06-17 — public rack STOCK-IN scan flow. A worker scans a printed rack
+  // QR (HKRACK:<rack id>) with a normal phone camera, so no session exists. The
+  // token is the plain rack_locations.id (stock-in is additive/low-risk; the
+  // worker endpoint already accepts a bare rack id). GET exposes only the rack
+  // label + item count; POST /stock-in writes via the shared
+  // buildRackStockInStatements helper. See routes/public-rack-qr.ts.
+  "/api/public/rack-qr/",
 ];
 
 test("public endpoint allowlist (exact paths) is locked in", () => {

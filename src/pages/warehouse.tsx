@@ -5,11 +5,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { getQRCodeDataURL, rackQrValue, itemQrValue } from "@/lib/qr-utils";
+import { getQRCodeDataURL, rackScanUrl, itemQrValue } from "@/lib/qr-utils";
 import {
   Warehouse, Grid3X3, Package, MapPin, LayoutGrid,
   ArrowDownToLine, ArrowUpFromLine, History, X, ArrowRightLeft,
-  Loader2, RefreshCw, QrCode,
+  Loader2, RefreshCw, QrCode, Download,
 } from "lucide-react";
 
 // ---------- Types ----------
@@ -323,13 +323,14 @@ export default function WarehousePage() {
     }
   };
 
-  // Print a single rack's QR sticker. Encodes the rack IDENTITY (`HKRACK:<id>`)
-  // — not a URL — so it can be scanned later to select this rack. Mirrors the
-  // delivery-QR / department-poster print pattern: build a hi-res data URL, open
-  // a blank window, write a self-contained sticker, then print() after a short
-  // settle delay (runs from a click gesture, so no pop-up-blocker trip).
+  // Print a single rack's QR sticker. Encodes the PUBLIC scan URL (`/r/<id>`)
+  // so a NORMAL phone camera opens this rack's stock-in page — no in-app scanner
+  // needed. Mirrors the delivery-QR / department-poster print pattern: build a
+  // hi-res data URL, open a blank window, write a self-contained sticker, then
+  // print() after a short settle delay (runs from a click gesture, so no
+  // pop-up-blocker trip).
   const handlePrintRackQr = async (slot: RackLocation) => {
-    const qrDataUrl = await getQRCodeDataURL(rackQrValue(slot.id), 600).catch(() => null);
+    const qrDataUrl = await getQRCodeDataURL(rackScanUrl(slot.id), 600).catch(() => null);
     if (!qrDataUrl) {
       toast.error("Failed to generate rack QR");
       return;
@@ -361,7 +362,7 @@ export default function WarehousePage() {
   <div class="rack-no">${esc(slot.rack)}</div>
   ${locationLabel ? `<div class="loc">${esc(locationLabel)}</div>` : ""}
   <img src="${qrDataUrl}" alt="Rack QR code" />
-  <div class="hint">Scan to select this rack</div>
+  <div class="hint">Scan with any phone camera to stock in</div>
   <div class="sub">HOOKKA INDUSTRIES — warehouse rack QR</div>
 </body></html>`);
     w.document.close();
@@ -370,6 +371,75 @@ export default function WarehousePage() {
     // handler, not React lifecycle — useTimeout doesn't apply.
     // eslint-disable-next-line no-restricted-syntax -- print-window settle delay from event handler
     setTimeout(() => w.print(), 500);
+  };
+
+  // Batch-print EVERY rack's public-scan QR onto one sheet (a CSS-grid of
+  // tiles, each = rack label + its `/r/<id>` QR). Same print mechanics as
+  // handlePrintRackQr — local data URLs (no network round-trip), blank window,
+  // self-contained doc, print() after a short settle delay — looped over the
+  // already-loaded rackLocations so the owner can label every rack in one go.
+  const [allRackQrLoading, setAllRackQrLoading] = useState(false);
+  const handleDownloadAllRackQrs = async () => {
+    if (allRackQrLoading) return;
+    if (rackLocations.length === 0) {
+      toast.error("No racks to print");
+      return;
+    }
+    setAllRackQrLoading(true);
+    try {
+      // Generate all QRs locally FIRST (getQRCodeDataURL never hits the network,
+      // so a 20-rack batch is fine), then write one sheet with every tile.
+      const tiles = await Promise.all(
+        rackLocations.map(async (l) => ({
+          rack: l.rack,
+          qr: await getQRCodeDataURL(rackScanUrl(l.id), 600).catch(() => null),
+        })),
+      );
+      const ready = tiles.filter((t) => t.qr);
+      if (ready.length === 0) {
+        toast.error("Failed to generate rack QRs");
+        return;
+      }
+      const w = window.open("", "_blank");
+      if (!w) {
+        toast.error("Please allow pop-ups to print");
+        return;
+      }
+      const esc = (s: string) =>
+        s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const tilesHtml = ready
+        .map(
+          (t) => `  <div class="tile">
+    <div class="rack-no">${esc(t.rack)}</div>
+    <img src="${t.qr}" alt="Rack QR code" />
+    <div class="hint">Scan with any phone camera to stock in</div>
+  </div>`,
+        )
+        .join("\n");
+      w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>All Rack QRs</title>
+<style>
+  @page { margin: 12mm; }
+  body { font-family: Helvetica, Arial, sans-serif; color: #111; margin: 0; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10mm; }
+  .tile { border: 1px solid #ddd; border-radius: 6px; padding: 6mm; text-align: center; break-inside: avoid; page-break-inside: avoid; }
+  .rack-no { font-size: 22px; font-weight: 800; letter-spacing: 1px; margin-bottom: 3mm; }
+  .tile img { width: 60mm; height: 60mm; }
+  .hint { font-size: 11px; color: #333; margin-top: 3mm; }
+</style></head><body>
+  <div class="grid">
+${tilesHtml}
+  </div>
+</body></html>`);
+      w.document.close();
+      w.focus();
+      // Give the new window time to lay out (all images decode) before print().
+      // Click handler, not React lifecycle — useTimeout doesn't apply.
+      // eslint-disable-next-line no-restricted-syntax -- print-window settle delay from event handler
+      setTimeout(() => w.print(), 500);
+    } finally {
+      setAllRackQrLoading(false);
+    }
   };
 
   // Print a QR sticker for a NON-system / loose item, naming it. There is NO
@@ -459,6 +529,14 @@ export default function WarehousePage() {
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => setShowItemQrForm(true)}>
             <QrCode className="h-4 w-4" /> Create Item QR
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={allRackQrLoading || rackLocations.length === 0}
+            onClick={() => void handleDownloadAllRackQrs()}
+          >
+            {allRackQrLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} Download all rack QRs
           </Button>
           <Button variant="outline" size="sm" onClick={() => { fetchRackLocations(); fetchMovements(); }}>
             <RefreshCw className="h-4 w-4" /> Refresh

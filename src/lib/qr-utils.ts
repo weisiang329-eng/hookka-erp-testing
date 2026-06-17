@@ -121,6 +121,18 @@ export function parseRackQr(value: string): string | null {
   return id || null;
 }
 
+/**
+ * The PUBLIC URL a rack QR should encode so a NORMAL phone camera (not the
+ * in-app scanner) opens the stock-in page for this rack — route `/r/:rackId`.
+ * Unlike `rackQrValue` (the `HKRACK:` identity token the in-app worker scanner
+ * decodes), this is a real https URL the OS camera recognises and offers to
+ * open. `origin` defaults to the current page origin in the browser, and falls
+ * back to "" when rendered without a window so the path stays relative.
+ */
+export function rackScanUrl(rackId: string, origin?: string): string {
+  return `${origin ?? (typeof window !== "undefined" ? window.location.origin : "")}/r/${encodeURIComponent(rackId)}`;
+}
+
 // ============================================================
 // Item QR — a self-contained QR for a NON-system / loose item.
 //

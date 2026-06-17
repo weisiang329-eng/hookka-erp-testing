@@ -791,10 +791,19 @@ export default function UsersPage() {
   // 2026-06-17: "那個 lim 可以移除"). Their own mailbox is already covered by
   // View Level L1. With no shared mailbox yet, the matrix is just User + View
   // level (no confusing personal-alias columns).
-  const matrixMailboxes = useMemo(
-    () => activeAddresses.filter((a) => !(a.assignedUserId ?? "").trim()),
-    [activeAddresses],
-  );
+  const matrixMailboxes = useMemo(() => {
+    // The grant matrix lists only SHARED mailboxes (support@/hr@/finance@). A
+    // PERSONAL alias — one assigned to a user OR name-matched to one
+    // (aliasByUserId) — is that person's own box, not something you grant, so
+    // it must NOT be a column (owner "那個 lim 可以移除"). Their own mailbox is
+    // already covered by View Level L1. With no shared mailbox yet, the matrix
+    // is just User + View level.
+    const personalIds = new Set<string>();
+    for (const al of aliasByUserId.values()) if (al?.id) personalIds.add(al.id);
+    return activeAddresses.filter(
+      (a) => !(a.assignedUserId ?? "").trim() && !personalIds.has(a.id),
+    );
+  }, [activeAddresses, aliasByUserId]);
 
   // ---------- View-level (L1/L2/L3) helpers --------------------------------
   // The owner frames the three mailbox view levels as L1 / L2 / L3:

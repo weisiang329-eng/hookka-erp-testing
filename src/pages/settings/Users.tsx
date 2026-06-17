@@ -103,6 +103,7 @@ type MailAddress = {
   assignedUserId?: string;
   assignedUserName?: string;
   assignedDept?: string;
+  assignedPosition?: string;
   active: boolean;
   createdAt: string;
 };
@@ -316,6 +317,42 @@ export default function UsersPage() {
     }
     return m;
   }, [addressesResp]);
+
+  // Org chart — active staff grouped by department → position, using the dept/
+  // position recorded on each person's @hookka.com alias (the per-user org data
+  // the owner already enters). Users without an alias fall under "Unassigned".
+  const orgChart = useMemo(() => {
+    const byDept = new Map<string, Map<string, UserRow[]>>();
+    for (const u of users) {
+      if (!u.isActive) continue;
+      const alias = aliasByUserId.get(u.id);
+      const dept = alias?.assignedDept || "Unassigned";
+      const pos = alias?.assignedPosition || "—";
+      let posMap = byDept.get(dept);
+      if (!posMap) {
+        posMap = new Map();
+        byDept.set(dept, posMap);
+      }
+      const arr = posMap.get(pos);
+      if (arr) arr.push(u);
+      else posMap.set(pos, [u]);
+    }
+    return byDept;
+  }, [users, aliasByUserId]);
+  // Stable column order: Support / Finance / HR first, other depts A–Z, then
+  // "Unassigned" last.
+  const orgDepts = useMemo(() => {
+    const order = ["Support", "Finance", "HR"];
+    return [...orgChart.keys()].sort((a, b) => {
+      if (a === "Unassigned") return 1;
+      if (b === "Unassigned") return -1;
+      const ia = order.indexOf(a);
+      const ib = order.indexOf(b);
+      const ra = ia === -1 ? 99 : ia;
+      const rb = ib === -1 ? 99 : ib;
+      return ra === rb ? a.localeCompare(b) : ra - rb;
+    });
+  }, [orgChart]);
 
   // ---------- User actions -------------------------------------------------
 
@@ -688,6 +725,78 @@ export default function UsersPage() {
           </div>
         )}
       </div>
+
+      {/* =========================================================== */}
+      {/* ORG CHART */}
+      {/* =========================================================== */}
+      {orgChart.size > 0 && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-3">
+              <UsersIcon className="h-5 w-5 text-[#6B5C32]" />
+              <div>
+                <CardTitle>Org Chart</CardTitle>
+                <CardDescription>
+                  Active staff grouped by department and position. The
+                  department / position come from each person&apos;s @hookka.com
+                  alias — set them when you create or edit the alias below.
+                </CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {orgDepts.map((dept) => {
+                const posMap = orgChart.get(dept);
+                if (!posMap) return null;
+                const count = [...posMap.values()].reduce(
+                  (s, arr) => s + arr.length,
+                  0,
+                );
+                return (
+                  <div
+                    key={dept}
+                    className="rounded-lg border border-[#E5E7EB] bg-[#FAFAF9] p-3"
+                  >
+                    <div className="mb-2 flex items-center justify-between">
+                      <h3 className="text-sm font-semibold text-[#111827]">
+                        {dept}
+                      </h3>
+                      <span className="rounded-full bg-[#EFEAE5] px-2 py-0.5 text-[10px] font-medium text-[#6B5C32]">
+                        {count}
+                      </span>
+                    </div>
+                    <div className="space-y-2.5">
+                      {[...posMap.entries()].map(([pos, members]) => (
+                        <div key={pos}>
+                          <div className="text-[10px] font-medium uppercase tracking-wide text-[#9CA3AF]">
+                            {pos}
+                          </div>
+                          <div className="mt-1 space-y-1">
+                            {members.map((m) => (
+                              <div
+                                key={m.id}
+                                className="rounded-md border border-[#E5E7EB] bg-white px-2 py-1"
+                              >
+                                <div className="text-xs font-medium text-[#111827]">
+                                  {m.displayName || m.email}
+                                </div>
+                                <div className="text-[10px] text-[#9CA3AF]">
+                                  {m.email}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* =========================================================== */}
       {/* 1. ACTIVE USERS */}

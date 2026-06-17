@@ -544,13 +544,13 @@ export default function WorkerScanPage() {
         error?: string;
       };
       if (res.ok && j.ok) {
-        setRackStockMsg(`✓ 已入库 ${j.count ?? rs.items.length} 项到 ${rs.rackId}`);
+        setRackStockMsg(`✓ Stocked ${j.count ?? rs.items.length} into ${rs.rackId}`);
         setRackStockIn({ rackId: rs.rackId, items: [] });
       } else {
-        setRackStockMsg(j.error || "入库失败,请重试");
+        setRackStockMsg(j.error || "Stock-in failed, please retry");
       }
     } catch {
-      setRackStockMsg("入库失败,请重试");
+      setRackStockMsg("Stock-in failed, please retry");
     } finally {
       setRackStockingIn(false);
     }
@@ -691,7 +691,7 @@ export default function WorkerScanPage() {
             } else {
               items.push({
                 poId: key,
-                poNo: "手动",
+                poNo: "Manual",
                 productCode: manualItem.code || manualItem.name,
                 productName: manualItem.name,
                 qty: 1,
@@ -718,7 +718,7 @@ export default function WorkerScanPage() {
             order = undefined;
           }
           if (!order) {
-            setRackStockMsg(`未识别: ${rs0.poNo}`);
+            setRackStockMsg(`Not recognised: ${rs0.poNo}`);
             return;
           }
           const matched = order;
@@ -743,6 +743,17 @@ export default function WorkerScanPage() {
           return;
         }
         // Not a stock-in item → fall through to dept-scan / WIP / normal lookup.
+      }
+      // A manual item QR (HKITEM:) scanned OUTSIDE rack stock-in mode has no PO
+      // to look up — show what it is + how to use it, not a blank "not found".
+      const manualOutside = parseItemQr(raw);
+      if (manualOutside) {
+        setResult({
+          kind: "error",
+          message: `Manual item: ${manualOutside.name}. Scan a rack QR first to stock it in.`,
+          decoded: raw,
+        });
+        return;
       }
       // Department QR (deptscan=<CODE> in the QR's URL) — not a job card.
       // Tells payroll "I am now working in this department"; handled before
@@ -1965,7 +1976,7 @@ export default function WorkerScanPage() {
         <div className="bg-white rounded-xl p-4 border border-amber-300 space-y-3">
           <div className="flex items-center justify-between">
             <p className="text-sm font-bold text-[#1F1D1B]">
-              📦 入库到货架 {rackStockIn.rackId}
+              📦 Stock in to {rackStockIn.rackId}
             </p>
             <button
               type="button"
@@ -1975,14 +1986,15 @@ export default function WorkerScanPage() {
               }}
               className="text-xs text-[#6B5C32] underline"
             >
-              退出
+              Exit
             </button>
           </div>
           <p className="text-xs text-[#6B7280]">
-            继续扫 FG / 包装贴纸,每扫一个加一件;扫完点「入库」。
+            Keep scanning FG / packing stickers — each adds one. Tap Stock In
+            when done.
           </p>
           {rackStockIn.items.length === 0 ? (
-            <p className="text-sm text-[#6B7280] py-2">还没扫到东西。</p>
+            <p className="text-sm text-[#6B7280] py-2">Nothing scanned yet.</p>
           ) : (
             <ul className="divide-y divide-[#EFEAE5]">
               {rackStockIn.items.map((it) => (
@@ -2009,8 +2021,8 @@ export default function WorkerScanPage() {
             className="w-full h-12 rounded-full bg-[#6B5C32] text-white font-bold text-base active:bg-[#5a4d2a] disabled:opacity-40"
           >
             {rackStockingIn
-              ? "入库中…"
-              : `入库 (${rackStockIn.items.reduce((s, x) => s + x.qty, 0)} 件)`}
+              ? "Stocking in…"
+              : `Stock In (${rackStockIn.items.reduce((s, x) => s + x.qty, 0)})`}
           </button>
         </div>
       )}

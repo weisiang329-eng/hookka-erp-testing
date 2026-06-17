@@ -108,7 +108,7 @@ export default function MailCenterDetailPage() {
         body: JSON.stringify({ text }),
       });
       if (!res.ok) {
-        let msg = "回复发送失败,请重试。";
+        let msg = "Failed to send reply. Please try again.";
         try {
           const body = (await res.json()) as { error?: string };
           if (body?.error) msg = body.error;
@@ -119,10 +119,10 @@ export default function MailCenterDetailPage() {
         return;
       }
       setReplyText("");
-      toast.success("回复已发送。");
+      toast.success("Reply sent.");
       invalidateCache(url);
     } catch {
-      toast.error("回复发送失败,请检查网络后重试。");
+      toast.error("Failed to send reply. Check your connection and try again.");
     } finally {
       setSending(false);
     }
@@ -140,13 +140,13 @@ export default function MailCenterDetailPage() {
         body: JSON.stringify({ status }),
       });
       if (!res.ok) {
-        toast.error("更新状态失败,请重试。");
+        toast.error("Failed to update status. Please try again.");
         return;
       }
-      toast.success(status === "closed" ? "已标记为已处理。" : "已重新打开。");
+      toast.success(status === "closed" ? "Marked as resolved." : "Reopened.");
       invalidateCache(url);
     } catch {
-      toast.error("更新状态失败,请检查网络后重试。");
+      toast.error("Failed to update status. Check your connection and try again.");
     } finally {
       setUpdatingStatus(false);
     }
@@ -164,7 +164,7 @@ export default function MailCenterDetailPage() {
           className="gap-1.5"
         >
           <ArrowLeft className="h-4 w-4" />
-          返回收件箱
+          Back to inbox
         </Button>
         {thread &&
           (isClosed ? (
@@ -180,7 +180,7 @@ export default function MailCenterDetailPage() {
               ) : (
                 <RotateCcw className="h-4 w-4" />
               )}
-              重新打开
+              Reopen
             </Button>
           ) : (
             <Button
@@ -195,7 +195,7 @@ export default function MailCenterDetailPage() {
               ) : (
                 <CheckCircle2 className="h-4 w-4" />
               )}
-              标记为已处理
+              Mark resolved
             </Button>
           ))}
       </div>
@@ -207,12 +207,12 @@ export default function MailCenterDetailPage() {
       )}
 
       {!thread && loading && (
-        <p className="py-12 text-center text-sm text-muted-foreground">加载中…</p>
+        <p className="py-12 text-center text-sm text-muted-foreground">Loading…</p>
       )}
 
       {!thread && !loading && !error && (
         <p className="py-12 text-center text-sm text-muted-foreground">
-          找不到这封邮件。
+          Thread not found.
         </p>
       )}
 
@@ -221,11 +221,11 @@ export default function MailCenterDetailPage() {
           {/* Subject header */}
           <div className="space-y-1">
             <h1 className="text-lg font-semibold leading-snug">
-              {thread.subject || "(无主题)"}
+              {thread.subject || "(no subject)"}
             </h1>
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <span>
-                与 <strong>{thread.counterpartyName || thread.counterpartyEmail}</strong>
+                with <strong>{thread.counterpartyName || thread.counterpartyEmail}</strong>
               </span>
               {thread.mailboxAddress && (
                 <Badge className="text-[10px]">
@@ -234,7 +234,7 @@ export default function MailCenterDetailPage() {
               )}
               {thread.status === "closed" && (
                 <Badge className="text-[10px]">
-                  已处理
+                  Resolved
                 </Badge>
               )}
             </div>
@@ -271,11 +271,11 @@ export default function MailCenterDetailPage() {
                     </div>
                     {m.toAddresses.length > 0 && (
                       <p className="text-[11px] text-muted-foreground">
-                        收件: {m.toAddresses.join(", ")}
+                        To: {m.toAddresses.join(", ")}
                       </p>
                     )}
                     <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-foreground/90">
-                      {body || "(空内容)"}
+                      {body || "(empty)"}
                     </pre>
                   </CardContent>
                 </Card>
@@ -283,7 +283,7 @@ export default function MailCenterDetailPage() {
             })}
             {messages.length === 0 && !loading && (
               <p className="py-8 text-center text-sm text-muted-foreground">
-                这串对话还没有邮件内容。
+                No messages in this thread yet.
               </p>
             )}
           </div>
@@ -292,23 +292,23 @@ export default function MailCenterDetailPage() {
           <Card>
             <CardContent className="space-y-3 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-medium">回复</p>
+                <p className="text-sm font-medium">Reply</p>
                 <span className="text-xs text-muted-foreground">
-                  发送至 {thread.counterpartyName || thread.counterpartyEmail}
-                  {thread.mailboxAddress ? ` · 来自 ${thread.mailboxAddress}` : ""}
+                  To {thread.counterpartyName || thread.counterpartyEmail}
+                  {thread.mailboxAddress ? ` · from ${thread.mailboxAddress}` : ""}
                 </span>
               </div>
               <textarea
                 value={replyText}
                 onChange={(e) => setReplyText(e.target.value)}
                 rows={6}
-                placeholder="输入回复内容…"
+                placeholder="Type your reply…"
                 disabled={sending}
                 className="w-full resize-y rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32] disabled:cursor-not-allowed disabled:opacity-60"
               />
               <div className="flex items-center justify-between gap-2">
                 <p className="text-[11px] text-muted-foreground">
-                  通过 Brevo 从 {thread.mailboxAddress || "Hookka"} 发出。
+                  Sent via Brevo from {thread.mailboxAddress || "Hookka"}.
                 </p>
                 <Button
                   size="sm"
@@ -321,7 +321,7 @@ export default function MailCenterDetailPage() {
                   ) : (
                     <Send className="h-4 w-4" />
                   )}
-                  发送回复
+                  Send reply
                 </Button>
               </div>
             </CardContent>

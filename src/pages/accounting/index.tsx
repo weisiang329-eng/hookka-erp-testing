@@ -438,7 +438,7 @@ function ContraCard() {
     <Card>
       <CardContent className="p-4 space-y-3">
         <h3 className="text-sm font-semibold text-[#1F1D1B]">
-          Contra (互抵) <span className="font-normal text-[#6B7280]">— customer who is also a supplier: offset payables against receivables via 490-0000</span>
+          Contra <span className="font-normal text-[#6B7280]">— customer who is also a supplier: offset payables against receivables via 490-0000</span>
         </h3>
         <div className="flex flex-wrap items-end gap-3">
           <div>
@@ -3349,7 +3349,7 @@ function PLStatementTab() {
           )}
         </div>
       </div>
-      {edit && <p className="text-[11px] text-[#6B5C32]">拖科目行到目标组改归类（同类内：收入↔其他收入；人工/制造费用/营业费用/薪资互拖）· 所有月份按新规则现算 · Net Profit 不变 · 拖回可还原</p>}
+      {edit && <p className="text-[11px] text-[#6B5C32]">Drag an account row onto a target group to reclassify it (within the same side: Revenue ↔ Other Income; Labour / Manufacturing / Operating Expenses / Payroll are interchangeable) · all months recompute under the new rule · Net Profit unchanged · drag back to undo</p>}
 
       <Card>
         <CardContent className="p-4">
@@ -3596,7 +3596,7 @@ function OtherPartiesTab() {
               <input type="text" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
             </div>
             <div>
-              <label className="text-xs font-medium text-[#6B7280] mb-1 block">TIN (税号)</label>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">TIN</label>
               <input type="text" value={form.tin} onChange={(e) => setForm({ ...form, tin: e.target.value })} placeholder="e.g. C12345678900 / IG…" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
             </div>
             <div>
@@ -4440,7 +4440,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   onChange={(e) => setForm({ ...form, accrued: e.target.checked })}
                   className="h-4 w-4 accent-[#6B5C32]"
                 />
-                先挂账 (accrue now, pay later)
+                Accrue now, pay later
               </label>
               {form.accrued ? (
                 <div>
@@ -5864,7 +5864,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
       )}
       {account && data && !data.migrationMissing && (
         <p className="text-[11px] text-[#9CA3AF]">
-          未达账项 = the red rows: "not in bank" (book has it, statement doesn't — uncleared cheques etc.) and
+          Unreconciled items = the red rows: "not in bank" (book has it, statement doesn't — uncleared cheques etc.) and
           "no book entry" (bank has it, book doesn't — record it via Payments / Receipts, then match).
         </p>
       )}
@@ -6071,7 +6071,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
       <Card>
         <CardContent className="p-4 flex flex-wrap items-end gap-4">
           <div>
-            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Opening date (开账日)</label>
+            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Opening date</label>
             <input
               type="date"
               value={openingDate}
@@ -6466,7 +6466,7 @@ function BalanceSheetTab() {
           className={`ml-2 rounded-md border px-3 py-1.5 text-sm cursor-pointer ${edit ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>
           {edit ? "Done" : "Edit"}
         </button>
-        {edit && <span className="text-[11px] text-[#6B5C32]">拖科目行到目标段改归类 · 资产↔负债也可（搬过去符号反、表仍平衡）· 所有月份按新规则现算 · 拖回可还原</span>}
+        {edit && <span className="text-[11px] text-[#6B5C32]">Drag an account row onto a target section to reclassify it · Assets ↔ Liabilities is allowed too (the sign flips on the move, the statement still balances) · all months recompute under the new rule · drag back to undo</span>}
       </div>
       {/* Balance equation */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
@@ -6678,7 +6678,7 @@ function CashFlowTab() {
           <ExportButtons build={buildExport} filenameBase={`CashFlow-${period}`} title="Statement of Cash Flow" subtitle={`Period: ${period}`} />
         </div>
       </div>
-      {edit && <p className="text-[11px] text-[#6B5C32]">拖科目行到目标段标题改归类 · 改的是规则、所有月份按新规则现算 · Bank c/f 总额不变 · 拖回可还原</p>}
+      {edit && <p className="text-[11px] text-[#6B5C32]">Drag an account row onto a target section heading to reclassify it · this changes the rule, so all months recompute under it · Bank c/f total unchanged · drag back to undo</p>}
       <Card>
         <CardContent className="p-4 overflow-x-auto">
           {!data ? (

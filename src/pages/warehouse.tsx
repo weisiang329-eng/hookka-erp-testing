@@ -336,7 +336,7 @@ export default function WarehousePage() {
     }
     const w = window.open("", "_blank");
     if (!w) {
-      toast.error("请允许弹窗以打印 / popup blocked");
+      toast.error("Please allow pop-ups to print");
       return;
     }
     // position is the rack's location label (e.g. a row/bay); only show the row
@@ -383,7 +383,7 @@ export default function WarehousePage() {
     const name = itemQrName.trim();
     const code = itemQrCode.trim();
     if (!name) {
-      toast.error("请输入物品名称 / item name required");
+      toast.error("Please enter an item name");
       return;
     }
     const qrDataUrl = await getQRCodeDataURL(itemQrValue(name, code || undefined), 600).catch(
@@ -395,7 +395,7 @@ export default function WarehousePage() {
     }
     const w = window.open("", "_blank");
     if (!w) {
-      toast.error("请允许弹窗以打印 / popup blocked");
+      toast.error("Please allow pop-ups to print");
       return;
     }
     const esc = (s: string) =>

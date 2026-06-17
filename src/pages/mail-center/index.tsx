@@ -104,14 +104,14 @@ export default function MailCenterPage() {
           <div>
             <h1 className="text-xl font-semibold leading-tight">Mail Center</h1>
             <p className="text-xs text-muted-foreground">
-              共享收件箱 · 客户邮件统一在 ERP 里查看
-              {unreadCount > 0 ? ` · ${unreadCount} 封未读` : ""}
+              Shared inbox · all customer email in one place
+              {unreadCount > 0 ? ` · ${unreadCount} unread` : ""}
             </p>
           </div>
         </div>
         <Button variant="outline" size="sm" onClick={refresh} className="gap-1.5">
           <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
-          刷新
+          Refresh
         </Button>
       </div>
 
@@ -127,7 +127,7 @@ export default function MailCenterPage() {
                 : "border-border bg-background text-muted-foreground hover:bg-muted",
             )}
           >
-            全部信箱
+            All mailboxes
           </button>
           {addresses
             .filter((a) => a.active)
@@ -156,7 +156,7 @@ export default function MailCenterPage() {
           <Input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="搜索主题 / 寄件人 / 内容…"
+            placeholder="Search subject / sender / content…"
             className="pl-8"
           />
         </div>
@@ -172,7 +172,7 @@ export default function MailCenterPage() {
                   : "border-border bg-background text-muted-foreground hover:bg-muted",
               )}
             >
-              {s === "open" ? "进行中" : s === "closed" ? "已处理" : "全部"}
+              {s === "open" ? "Open" : s === "closed" ? "Resolved" : "All"}
             </button>
           ))}
         </div>
@@ -191,13 +191,13 @@ export default function MailCenterPage() {
             <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
               <Inbox className="h-10 w-10 text-muted-foreground/50" />
               <p className="text-sm font-medium text-muted-foreground">
-                {loading ? "加载中…" : "还没有邮件"}
+                {loading ? "Loading…" : "No mail yet"}
               </p>
               {!loading && (
                 <>
                   <p className="max-w-sm text-xs text-muted-foreground/80">
-                    邮件接进来后会显示在这里。等域名邮件路由(MX)切到
-                    Cloudflare、收件 Worker 上线后,客户邮件就会自动落到这个收件箱。
+                    Incoming mail will appear here once the domain MX is
+                    switched to Cloudflare and the inbound Worker is live.
                   </p>
                   <button
                     onClick={async () => {
@@ -212,7 +212,7 @@ export default function MailCenterPage() {
                     }}
                     className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
                   >
-                    注入一封测试邮件(验证收件箱)
+                    Inject a test email (verify inbox)
                   </button>
                 </>
               )}
@@ -246,7 +246,7 @@ export default function MailCenterPage() {
                               : "font-medium text-foreground/90",
                           )}
                         >
-                          {t.counterpartyName || t.counterpartyEmail || "(未知寄件人)"}
+                          {t.counterpartyName || t.counterpartyEmail || "(unknown sender)"}
                         </span>
                         <span className="shrink-0 text-xs text-muted-foreground">
                           {fmtTime(t.lastMessageAt)}
@@ -282,7 +282,7 @@ export default function MailCenterPage() {
                         </Badge>
                       )}
                       {t.status === "closed" && (
-                        <span className="text-[10px] text-muted-foreground">已处理</span>
+                        <span className="text-[10px] text-muted-foreground">Resolved</span>
                       )}
                     </div>
                   </button>

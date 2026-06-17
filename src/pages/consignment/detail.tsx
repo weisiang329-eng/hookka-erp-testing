@@ -495,7 +495,7 @@ export default function SalesOrderDetailPage() {
     if (!order) return;
     if (
       !confirm(
-        "取消此订单? 取消后无法恢复,但订单记录会保留。\n(Cancel this order? Cannot be undone, but the order record stays for audit.)",
+        "Cancel this order? Cannot be undone, but the order record stays for audit.",
       )
     )
       return;

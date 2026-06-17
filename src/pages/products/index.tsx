@@ -2960,7 +2960,7 @@ export default function ProductsPage() {
                                               {formatCurrency(repPriceSen)}
                                               {repHeight && (
                                                 <span className="ml-1 text-[10px] font-normal text-[#9CA3AF]">
-                                                  座高 {repHeight}"
+                                                  Seat {repHeight}"
                                                 </span>
                                               )}
                                             </>
@@ -2985,7 +2985,7 @@ export default function ProductsPage() {
                                       {laborCard}
                                     </div>
                                     <p className="mt-2 text-[10px] text-[#9CA3AF] italic">
-                                      Sofa 价格按座高,见上方每个高度的价格。此处 Margin 用当前 {tierLabel} 档最低座高价做对比。
+                                      Sofa price varies by seat height — see each height's price above. Margin here compares against the lowest seat-height price in the current {tierLabel} tier.
                                     </p>
                                   </>
                                 );

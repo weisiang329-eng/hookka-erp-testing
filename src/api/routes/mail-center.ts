@@ -53,6 +53,11 @@ export function ensureMailSchema(db: D1Database): Promise<void> {
          created_at TEXT,
          created_by TEXT
        )`,
+      // Lazy idempotent add — the per-statement try/catch above swallows the
+      // "duplicate column" error on isolates where this already ran, so it is
+      // safe whether or not the column exists. Records the person's job title
+      // alongside assigned_dept (owner 2026-06-17).
+      `ALTER TABLE email_addresses ADD COLUMN IF NOT EXISTS assigned_position TEXT`,
       `CREATE UNIQUE INDEX IF NOT EXISTS ux_email_addresses_org_addr
          ON email_addresses (org_id, address)`,
       // One conversation with an external party, grouped by RFC threading.
@@ -399,6 +404,7 @@ type AddressRow = {
   assigned_user_id: string | null;
   assigned_user_name: string | null;
   assigned_dept: string | null;
+  assigned_position: string | null;
   active: number | boolean | null;
   created_at: string | null;
 };
@@ -411,6 +417,7 @@ function rowToAddress(r: AddressRow) {
     assignedUserId: r.assigned_user_id ?? undefined,
     assignedUserName: r.assigned_user_name ?? undefined,
     assignedDept: r.assigned_dept ?? undefined,
+    assignedPosition: r.assigned_position ?? undefined,
     active: Number(r.active ?? 0) === 1,
     createdAt: r.created_at ?? "",
   };
@@ -576,10 +583,10 @@ app.post("/test-inject", async (c) => {
   const mailbox = addr?.address || "support@hookka.com";
   const result = await ingestInboundEmail(c.var.DB, {
     from: "customer@example.com",
-    fromName: "测试客户 Test Customer",
+    fromName: "Test Customer",
     to: [mailbox],
-    subject: "测试:可以做一张 5 尺床架吗?",
-    text: "你好,我想订一张 5 尺床架,请问价格和交期?\n\n(这是一封测试邮件,可以删除。)\n\nThanks,\nTest Customer",
+    subject: "Test: can you make a 5ft bed frame?",
+    text: "Hi, I'd like to order a 5ft bed frame. Could you let me know the price and lead time?\n\n(This is a test email — feel free to delete it.)\n\nThanks,\nTest Customer",
     messageId: `test-${crypto.randomUUID()}@example.com`,
     date: new Date().toISOString(),
   });
@@ -615,6 +622,7 @@ app.post("/addresses", async (c) => {
     assignedUserId?: string;
     assignedUserName?: string;
     assignedDept?: string;
+    assignedPosition?: string;
   };
   const body: CreateBody = await c.req
     .json<CreateBody>()
@@ -639,8 +647,8 @@ app.post("/addresses", async (c) => {
     await c.var.DB.prepare(
       `INSERT INTO email_addresses
          (id, org_id, address, label, assigned_user_id, assigned_user_name,
-          assigned_dept, active, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+          assigned_dept, assigned_position, active, created_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
     )
       .bind(
         id,
@@ -650,6 +658,7 @@ app.post("/addresses", async (c) => {
         body.assignedUserId ?? null,
         body.assignedUserName ?? null,
         body.assignedDept ?? null,
+        body.assignedPosition?.trim() || null,
         now,
         userId,
       )
@@ -690,6 +699,7 @@ app.patch("/addresses/:id", async (c) => {
     label?: string;
     assignedUserId?: string | null;
     assignedUserName?: string | null;
+    assignedPosition?: string | null;
     active?: boolean;
   };
   const body: PatchBody = await c.req
@@ -709,6 +719,10 @@ app.patch("/addresses/:id", async (c) => {
   if (body.assignedUserName !== undefined) {
     sets.push("assigned_user_name = ?");
     binds.push(body.assignedUserName ?? null);
+  }
+  if (body.assignedPosition !== undefined) {
+    sets.push("assigned_position = ?");
+    binds.push(body.assignedPosition?.trim() || null);
   }
   if (body.active !== undefined) {
     sets.push("active = ?");

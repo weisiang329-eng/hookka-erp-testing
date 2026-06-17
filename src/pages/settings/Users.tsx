@@ -196,6 +196,10 @@ export default function UsersPage() {
   // Finance people → Finance, Operations + everyone else → Support. Posted as
   // assignedDept (the email_addresses table has an assigned_dept column).
   const [aliasDept, setAliasDept] = useState("Support");
+  // Free-text job title recorded on the mailbox alongside the department
+  // (owner 2026-06-17). Optional; posted as assignedPosition (the
+  // email_addresses table has an assigned_position column).
+  const [aliasPosition, setAliasPosition] = useState("");
   const [aliasSubmitting, setAliasSubmitting] = useState(false);
   const [aliasError, setAliasError] = useState<string | null>(null);
 
@@ -445,6 +449,7 @@ export default function UsersPage() {
           assignedUserId: target.id,
           assignedUserName: target.displayName || target.email,
           assignedDept: aliasDept,
+          assignedPosition: aliasPosition || undefined,
         }),
       });
       // Mail Center returns the created row directly (201), or
@@ -745,6 +750,7 @@ export default function UsersPage() {
                                 setAliasForUser(u);
                                 setAliasAddress(suggestAlias(u));
                                 setAliasDept("Support");
+                                setAliasPosition("");
                                 setAliasError(null);
                               }}
                               title="Create @hookka.com alias"
@@ -1318,17 +1324,33 @@ export default function UsersPage() {
                 Must end with @hookka.com. Edit the suggestion if needed.
               </p>
               <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide pt-2">
-                部门 / Department
+                Department
               </label>
               <select
                 value={aliasDept}
                 onChange={(e) => setAliasDept(e.target.value)}
                 className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
               >
-                <option value="Support">Support (Operations &amp; 其他)</option>
+                <option value="Support">Support (Operations &amp; others)</option>
                 <option value="Finance">Finance</option>
                 <option value="HR">HR</option>
               </select>
+              <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide pt-2">
+                Position
+              </label>
+              <Input
+                type="text"
+                value={aliasPosition}
+                onChange={(e) => setAliasPosition(e.target.value)}
+                placeholder="e.g. Sales Manager"
+                autoComplete="off"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submitAlias();
+                }}
+              />
+              <p className="text-xs text-gray-500">
+                Optional — the person&apos;s job title.
+              </p>
               {aliasError && (
                 <p className="text-xs text-red-600">{aliasError}</p>
               )}

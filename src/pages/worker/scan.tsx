@@ -1227,25 +1227,9 @@ export default function WorkerScanPage() {
     // not line up with the white box, so barcode mode read a neighbouring stacked
     // row or nothing (Wei Siang 2026-06-17). The box dims here MUST match the
     // reticle JSX (86vw, max 440px, 118px tall).
-    const aimRoi = () => {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      // Full WIDTH: a Code 128 only decodes if its ENTIRE width (every bar + the
-      // quiet zones at both ends) is in the image. The earlier 86%-width crop
-      // sliced the code's edges off, so ZXing never decoded → 没反应. QR mode
-      // reads the same code precisely because it uses the full frame. Keep a
-      // TIGHT centred HEIGHT band (~20% of the frame ≈ the 118px reticle) so the
-      // stacked schedule rows above/below are excluded and ONLY the aimed row is
-      // read. A 0.35 band leaked 2-3 stacked rows into the native
-      // BarcodeDetector acceptance window → the decoded value flip-flopped each
-      // frame → the STABLE_MS hold never completed → 没反应. This was the working
-      // value at 6b70e115; the 0.35 regression (bc998d10) is reverted here.
-      const sh = Math.max(1, Math.round(vh * 0.20));
-      const sw = vw;
-      const sx = 0;
-      const sy = Math.round((vh - sh) / 2);
-      return { sx, sy, sw, sh };
-    };
+    // (Barcode mode now decodes the FULL frame — same as QR mode, which the owner
+    // confirmed reads the Code 128 — so the old centred-ROI crop helper was
+    // removed. The on-screen reticle is now just a visual aim guide.)
     // Tolerant stable-hold: a SINGLE stray read of a neighbouring stacked row
     // must NOT zero the hold (that fragility, combined with an over-wide ROI, is
     // why barcode mode kept "regressing"). Only switch the tracked value once a
@@ -1286,17 +1270,13 @@ export default function WorkerScanPage() {
             const codes = await nativeDetector.detect(video);
             if (stopped) return;
             if (scanMode === "barcode") {
-              // Only a Code 128 whose vertical centre sits in the aim band, and
-              // the nearest one to centre wins — so 2-3 stacked schedule barcodes
-              // in view don't all fire; the row the worker aimed at is taken.
               const cy = video.videoHeight / 2;
-              // Accept only a Code 128 whose centre sits inside the aim box band
-              // (mapped to video px via aimRoi so it matches the on-screen box),
-              // and among those the one NEAREST the centre wins — stacked schedule
-              // barcodes above/below are ignored. A code with no boundingBox is
-              // treated as centred so it still fires (dropping those was the
-              // earlier "完全没反应" bug).
-              const roiHalf = aimRoi().sh / 2;
+              // FULL FRAME, NEAREST code_128 to centre wins — NO band rejection.
+              // QR mode reads the SAME barcode fine precisely because it never
+              // rejects on position; the aim-band reject was silently dropping the
+              // owner's code whenever it wasn't dead-centre ("barcode 扫不到"
+              // while QR mode worked). Nearest-to-centre still isolates the aimed
+              // row out of a stacked schedule (owner 2026-06-17).
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
@@ -1305,7 +1285,6 @@ export default function WorkerScanPage() {
                 const bb = (c as { boundingBox?: { y: number; height: number } })
                   .boundingBox;
                 const d = bb ? Math.abs(bb.y + bb.height / 2 - cy) : 0;
-                if (bb && d > roiHalf) continue; // outside the aim band → ignore
                 if (!best || d < best.d) best = { v: c.rawValue, d };
               }
               if (best) {
@@ -1336,23 +1315,17 @@ export default function WorkerScanPage() {
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
             if (scanMode === "barcode") {
-              // Decode ONLY the centred rectangle ROI (matches the on-screen aim
-              // box). The full frame was ~2MP — grayscale + HybridBinarizer +
-              // TRY_HARDER every tick was too slow on iOS Safari (felt like "没反应"),
-              // AND it contained the stacked schedule barcodes above/below, so
-              // ZXing's single-decoder could grab a code the worker didn't aim at.
-              // Cropping to the centred band is ~5x fewer pixels (fast) and leaves
-              // only the aimed code (accurate). Wei Siang 2026-06-17: "只扫中间的
-              // 长方形,不要扫到别的 barcode".
-              const { sx, sy, sw, sh } = aimRoi();
-              // Downscale only if the ROI is huge; Code 128 density runs
-              // horizontally so keep ~1280px across for sharp bars.
-              const s = Math.min(1, 1280 / sw);
-              const cw = Math.max(1, Math.round(sw * s));
-              const ch = Math.max(1, Math.round(sh * s));
+              // FULL FRAME (no crop). The owner confirmed QR mode reads the same
+              // Code 128 — so the centred-ROI crop was exactly what kept barcode
+              // mode from decoding. Decode the whole frame with ZXing (Code 128 +
+              // QR), keeping ~1280px across so the bars stay sharp, then route
+              // through considerHit's brief stable-hold (owner 2026-06-17).
+              const s = Math.min(1, 1280 / Math.max(vw, vh));
+              const cw = Math.max(1, Math.round(vw * s));
+              const ch = Math.max(1, Math.round(vh * s));
               canvas.width = cw;
               canvas.height = ch;
-              ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
+              ctx.drawImage(video, 0, 0, cw, ch);
               let imageData: ImageData | null = null;
               try {
                 imageData = ctx.getImageData(0, 0, cw, ch);
@@ -1377,7 +1350,7 @@ export default function WorkerScanPage() {
                 if (now - bcDbgAt > 600) {
                   bcDbgAt = now;
                   setScanDbg(
-                    `v:${vw}×${vh} roi:${sw}×${sh} zx:✓ n:${bcN} ${bcLast ? bcLast.slice(0, 14) : "—"}`,
+                    `v:${vw}×${vh} full zx:✓ n:${bcN} ${bcLast ? bcLast.slice(0, 14) : "—"}`,
                   );
                 }
                 if (zxText) {

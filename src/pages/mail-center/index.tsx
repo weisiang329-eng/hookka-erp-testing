@@ -1,15 +1,19 @@
 // ---------------------------------------------------------------------------
-// Mail Center — shared inbox (2-pane Gmail-like shell + Compose).
+// Mail Center — shared inbox (2-pane Gmail-like shell + "New email" compose).
 //
 // Reads /api/mail-center/threads (list) + /api/mail-center/addresses (the
 // mailbox sidebar). Bodies are rendered as plain text in the detail view,
 // never as raw customer HTML.
 //
 // LAYOUT (P3 overhaul — strictly ADDITIVE, no route changes):
-//   • LEFT RAIL  — a prominent "Compose" button (opens ComposeDialog), the
+//   • LEFT RAIL  — a prominent "New email" button (opens ComposeDialog), the
 //                  mailbox list as a vertical sidebar ("All mailboxes" + each
-//                  active alias), then the Open/Resolved/All selector and the
+//                  active alias), then the Inbox/Done/All selector and the
 //                  search box.
+//
+// LABELS vs API VALUES: the status selector and detail actions use email-native
+// labels — "Inbox" (open), "Done" (closed/resolved), "All" — but the underlying
+// API status VALUES are still 'open' / 'closed'. Only the wording changed.
 //   • MIDDLE     — the existing thread list (extracted into <ThreadList>).
 //   • RIGHT (md+)— a reading pane that embeds detail.tsx for the selected
 //                  thread (selection lives in local state, NOT the URL, so the
@@ -36,12 +40,11 @@ import {
   Inbox,
   ArrowDownLeft,
   ArrowUpRight,
-  CircleDot,
   PenSquare,
-  Inbox as InboxIcon,
   ChevronRight,
   Users,
   User as UserIcon,
+  Check,
 } from "lucide-react";
 
 type MailThread = {
@@ -181,18 +184,23 @@ function ThreadList({
             <button
               onClick={() => onOpen(t.id)}
               className={cn(
-                "flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-muted/50",
-                active && "bg-amber-50/70 hover:bg-amber-50",
+                "flex w-full items-start gap-3 border-l-2 px-4 py-3 text-left transition hover:bg-muted/50",
+                active
+                  ? "border-amber-500 bg-amber-50/70 hover:bg-amber-50"
+                  : t.unread
+                    ? "border-amber-400 bg-amber-50/30"
+                    : "border-transparent",
               )}
             >
-              {/* Unread dot / direction */}
-              <div className="mt-1 shrink-0">
+              {/* Unread dot — a small filled dot like Gmail. Read rows keep the
+                  column for alignment but show a faint direction arrow. */}
+              <div className="mt-1.5 flex h-4 w-4 shrink-0 items-center justify-center">
                 {t.unread ? (
-                  <CircleDot className="h-4 w-4 text-amber-600" />
+                  <span className="h-2.5 w-2.5 rounded-full bg-amber-500" />
                 ) : t.lastDirection === "outbound" ? (
-                  <ArrowUpRight className="h-4 w-4 text-muted-foreground/60" />
+                  <ArrowUpRight className="h-3.5 w-3.5 text-muted-foreground/50" />
                 ) : (
-                  <ArrowDownLeft className="h-4 w-4 text-muted-foreground/60" />
+                  <ArrowDownLeft className="h-3.5 w-3.5 text-muted-foreground/50" />
                 )}
               </div>
 
@@ -234,7 +242,8 @@ function ThreadList({
                 )}
               </div>
 
-              {/* Mailbox + status */}
+              {/* Mailbox + status. Status VALUE stays 'closed'; label reads
+                  "Done" to match the Inbox/Done/All selector. */}
               <div className="ml-1 flex shrink-0 flex-col items-end gap-1">
                 {t.mailboxAddress && (
                   <Badge className="max-w-[160px] truncate text-[10px]">
@@ -242,7 +251,10 @@ function ThreadList({
                   </Badge>
                 )}
                 {t.status === "closed" && (
-                  <span className="text-[10px] text-muted-foreground">Resolved</span>
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
+                    <Check className="h-3 w-3" />
+                    Done
+                  </span>
                 )}
               </div>
             </button>
@@ -371,8 +383,8 @@ export default function MailCenterPage() {
     return m;
   }, [deptGroups, unreadByMailbox]);
 
-  // Note: when the selected thread leaves the current filter (e.g. resolved
-  // while viewing "Open"), we intentionally KEEP showing it in the pane — the
+  // Note: when the selected thread leaves the current filter (e.g. marked done
+  // while viewing "Inbox"), we intentionally KEEP showing it in the pane — the
   // pane fetches by id directly, so the operator can still read/reopen it. The
   // row highlight simply disappears with the row. No state sync needed.
 
@@ -429,7 +441,7 @@ export default function MailCenterPage() {
         <aside className="space-y-3">
           <Button
             variant="primary"
-            className="w-full gap-2 bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+            className="w-full gap-2 rounded-full bg-[#6B5C32] py-2.5 text-white shadow-sm hover:bg-[#5a4d2a]"
             onClick={() => setComposeOpen(true)}
             disabled={composeDisabled}
             title={
@@ -439,12 +451,12 @@ export default function MailCenterPage() {
             }
           >
             <PenSquare className="h-4 w-4" />
-            Compose
+            New email
           </Button>
           {composeDisabled && (
             <p className="text-[11px] leading-snug text-muted-foreground">
-              No mailbox assigned yet — Compose unlocks once an admin assigns you
-              an @hookka.com address.
+              No mailbox assigned yet — "New email" unlocks once an admin assigns
+              you an @hookka.com address.
             </p>
           )}
 
@@ -472,20 +484,26 @@ export default function MailCenterPage() {
             ))}
           </nav>
 
-          {/* Status selector */}
-          <div className="flex items-center gap-1">
-            {(["open", "all", "closed"] as const).map((s) => (
+          {/* Status selector — email-native labels. The status VALUES sent to
+              the API are unchanged ('open' / 'closed' / 'all'); only the labels
+              are renamed: open → "Inbox", closed → "Done". */}
+          <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-0.5">
+            {([
+              { value: "open", label: "Inbox" },
+              { value: "closed", label: "Done" },
+              { value: "all", label: "All" },
+            ] as const).map((s) => (
               <button
-                key={s}
-                onClick={() => setStatus(s)}
+                key={s.value}
+                onClick={() => setStatus(s.value)}
                 className={cn(
-                  "flex-1 rounded-md border px-2 py-1.5 text-xs font-medium transition",
-                  status === s
-                    ? "border-amber-300 bg-amber-50 text-amber-800"
-                    : "border-border bg-background text-muted-foreground hover:bg-muted",
+                  "flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition",
+                  status === s.value
+                    ? "bg-white text-amber-800 shadow-sm ring-1 ring-amber-200"
+                    : "text-muted-foreground hover:text-foreground",
                 )}
               >
-                {s === "open" ? "Open" : s === "closed" ? "Resolved" : "All"}
+                {s.label}
               </button>
             ))}
           </div>
@@ -529,15 +547,30 @@ export default function MailCenterPage() {
             </Card>
           ) : (
             <Card className="min-w-0">
-              <CardContent className="flex h-full min-h-[320px] flex-col items-center justify-center gap-2 py-16 text-center">
-                <InboxIcon className="h-10 w-10 text-muted-foreground/40" />
-                <p className="text-sm font-medium text-muted-foreground">
-                  Select a conversation
-                </p>
-                <p className="max-w-xs text-xs text-muted-foreground/80">
-                  Pick a thread on the left to read it here, or hit Compose to
-                  start a new email.
-                </p>
+              <CardContent className="flex h-full min-h-[360px] flex-col items-center justify-center gap-3 py-16 text-center">
+                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted/60">
+                  <Mail className="h-8 w-8 text-muted-foreground/50" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-base font-medium text-foreground/80">
+                    Select a conversation
+                  </p>
+                  <p className="mx-auto max-w-xs text-sm text-muted-foreground">
+                    Choose an email from the list to read the full conversation
+                    here.
+                  </p>
+                </div>
+                {!composeDisabled && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-1 gap-1.5"
+                    onClick={() => setComposeOpen(true)}
+                  >
+                    <PenSquare className="h-4 w-4" />
+                    New email
+                  </Button>
+                )}
               </CardContent>
             </Card>
           )}

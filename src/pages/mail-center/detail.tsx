@@ -33,6 +33,7 @@ import {
   RotateCcw,
   Loader2,
   UserPlus,
+  Check,
 } from "lucide-react";
 
 type UserOption = {
@@ -166,7 +167,8 @@ export default function MailCenterDetailPage({
     }
   }
 
-  // Mark resolved / reopen via PATCH status, then refresh the thread.
+  // Mark done / move to Inbox via PATCH status, then refresh the thread.
+  // (UI labels only — the API status values are still "open" / "closed".)
   async function handleSetStatus(status: "open" | "closed") {
     if (!url || updatingStatus) return;
     setUpdatingStatus(true);
@@ -181,7 +183,7 @@ export default function MailCenterDetailPage({
         toast.error("Failed to update status. Please try again.");
         return;
       }
-      toast.success(status === "closed" ? "Marked as resolved." : "Reopened.");
+      toast.success(status === "closed" ? "Marked as done." : "Moved to Inbox.");
       invalidateCache(url);
     } catch {
       toast.error("Failed to update status. Check your connection and try again.");
@@ -244,6 +246,9 @@ export default function MailCenterDetailPage({
         ) : (
           <span />
         )}
+        {/* Status action. Labels are email-native ("Move to Inbox" / "Mark
+            done") but the status VALUES sent to the API are unchanged:
+            open ↔ closed. */}
         {thread &&
           (isClosed ? (
             <Button
@@ -258,7 +263,7 @@ export default function MailCenterDetailPage({
               ) : (
                 <RotateCcw className="h-4 w-4" />
               )}
-              Reopen
+              Move to Inbox
             </Button>
           ) : (
             <Button
@@ -273,7 +278,7 @@ export default function MailCenterDetailPage({
               ) : (
                 <CheckCircle2 className="h-4 w-4" />
               )}
-              Mark resolved
+              Mark done
             </Button>
           ))}
       </div>
@@ -297,13 +302,16 @@ export default function MailCenterDetailPage({
       {thread && (
         <>
           {/* Subject header */}
-          <div className="space-y-2">
-            <h1 className="text-lg font-semibold leading-snug">
+          <div className="space-y-2 border-b border-border pb-3">
+            <h1 className="text-xl font-semibold leading-snug text-foreground">
               {thread.subject || "(no subject)"}
             </h1>
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <span>
-                with <strong>{thread.counterpartyName || thread.counterpartyEmail}</strong>
+                with{" "}
+                <strong className="text-foreground/90">
+                  {thread.counterpartyName || thread.counterpartyEmail}
+                </strong>
               </span>
               {thread.mailboxAddress && (
                 <Badge className="text-[10px]">
@@ -311,9 +319,10 @@ export default function MailCenterDetailPage({
                 </Badge>
               )}
               {thread.status === "closed" && (
-                <Badge className="text-[10px]">
-                  Resolved
-                </Badge>
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
+                  <Check className="h-3 w-3" />
+                  Done
+                </span>
               )}
               {thread.assignedToName && (
                 <Badge className="gap-1 text-[10px]">
@@ -351,43 +360,65 @@ export default function MailCenterDetailPage({
             </div>
           </div>
 
-          {/* Messages */}
+          {/* Messages — laid out as a mail conversation: an avatar with the
+              sender's initial, a from/to header line, the timestamp on the
+              right, then the message body as a readable text block. */}
           <div className="space-y-3">
             {messages.map((m) => {
               const outbound = m.direction === "outbound";
               const body = m.textBody?.trim() || htmlToText(m.htmlBody || "");
+              const senderName = m.fromName || m.fromAddress;
+              const initial = (senderName || "?").trim().charAt(0).toUpperCase();
               return (
                 <Card
                   key={m.id}
                   className={cn(outbound && "border-amber-200 bg-amber-50/40")}
                 >
-                  <CardContent className="space-y-2 p-4">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-1.5 text-sm">
-                        {outbound ? (
-                          <ArrowUpRight className="h-3.5 w-3.5 text-amber-600" />
-                        ) : (
-                          <ArrowDownLeft className="h-3.5 w-3.5 text-muted-foreground" />
+                  <CardContent className="p-4">
+                    <div className="flex items-start gap-3">
+                      {/* Avatar — outbound (us) uses the brand tone, inbound
+                          (customer) a neutral tone. */}
+                      <div
+                        className={cn(
+                          "flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-semibold",
+                          outbound
+                            ? "bg-[#6B5C32] text-white"
+                            : "bg-muted text-foreground/70",
                         )}
-                        <span className="font-medium">
-                          {m.fromName || m.fromAddress}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          &lt;{m.fromAddress}&gt;
-                        </span>
+                      >
+                        {initial}
                       </div>
-                      <span className="shrink-0 text-xs text-muted-foreground">
-                        {fmtFull(m.sentAt || m.createdAt)}
-                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate text-sm font-semibold text-foreground">
+                                {senderName}
+                              </span>
+                              {outbound ? (
+                                <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                              ) : (
+                                <ArrowDownLeft className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                              )}
+                            </div>
+                            <p className="truncate text-xs text-muted-foreground">
+                              &lt;{m.fromAddress}&gt;
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            {fmtFull(m.sentAt || m.createdAt)}
+                          </span>
+                        </div>
+                        {m.toAddresses.length > 0 && (
+                          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                            To: {m.toAddresses.join(", ")}
+                          </p>
+                        )}
+                        <pre className="mt-2 whitespace-pre-wrap break-words border-t border-border/60 pt-2 font-sans text-sm leading-relaxed text-foreground/90">
+                          {body || "(empty)"}
+                        </pre>
+                      </div>
                     </div>
-                    {m.toAddresses.length > 0 && (
-                      <p className="text-[11px] text-muted-foreground">
-                        To: {m.toAddresses.join(", ")}
-                      </p>
-                    )}
-                    <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-foreground/90">
-                      {body || "(empty)"}
-                    </pre>
                   </CardContent>
                 </Card>
               );
@@ -399,11 +430,17 @@ export default function MailCenterDetailPage({
             )}
           </div>
 
-          {/* Reply composer */}
-          <Card>
+          {/* Reply composer — the always-visible mail reply box at the bottom
+              of the conversation. */}
+          <Card className="border-amber-200/70 shadow-sm">
             <CardContent className="space-y-3 p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-medium">Reply</p>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-2">
+                <div className="flex items-center gap-1.5">
+                  <Send className="h-3.5 w-3.5 text-amber-600" />
+                  <p className="text-sm font-semibold text-foreground">
+                    Reply
+                  </p>
+                </div>
                 <span className="text-xs text-muted-foreground">
                   To {thread.counterpartyName || thread.counterpartyEmail}
                   {thread.mailboxAddress ? ` · from ${thread.mailboxAddress}` : ""}
@@ -423,7 +460,7 @@ export default function MailCenterDetailPage({
                 </p>
                 <Button
                   size="sm"
-                  className="gap-1.5"
+                  className="gap-1.5 bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
                   disabled={sending || !replyText.trim()}
                   onClick={handleSend}
                 >

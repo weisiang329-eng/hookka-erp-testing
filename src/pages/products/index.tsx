@@ -130,14 +130,14 @@ type AnalyticCol = {
 const ANALYTIC_COLS: AnalyticCol[] = [
   {
     key: "labor",
-    width: "0.95fr",
+    width: "minmax(100px,0.95fr)",
     defaultOn: true,
     applies: () => true,
     label: () => "Labor (est.)",
   },
   {
     key: "marginP2",
-    width: "1.15fr",
+    width: "minmax(120px,1.15fr)",
     defaultOn: true,
     applies: () => true,
     label: (c) =>
@@ -145,7 +145,7 @@ const ANALYTIC_COLS: AnalyticCol[] = [
   },
   {
     key: "laborPctP2",
-    width: "0.85fr",
+    width: "minmax(90px,0.85fr)",
     defaultOn: true,
     applies: () => true,
     label: (c) =>
@@ -153,14 +153,14 @@ const ANALYTIC_COLS: AnalyticCol[] = [
   },
   {
     key: "marginP1",
-    width: "1.15fr",
+    width: "minmax(120px,1.15fr)",
     defaultOn: false,
     applies: (c) => c === "BEDFRAME",
     label: () => "Margin (P1)",
   },
   {
     key: "laborPctP1",
-    width: "0.85fr",
+    width: "minmax(90px,0.85fr)",
     defaultOn: false,
     applies: (c) => c === "BEDFRAME",
     label: () => "Labor % (P1)",
@@ -2451,14 +2451,17 @@ export default function ProductsPage() {
           // Total Min column was too narrow (0.6fr) — "1405 min" wrapped to
           // two lines. Widened to 0.9fr and trimmed Description by 0.3fr to
           // compensate (descriptions echo the SKU code, plenty of headroom).
-          ? "1.3fr 1.2fr 0.55fr 0.95fr 0.95fr 0.95fr 0.95fr 0.95fr 0.6fr 0.5fr 0.9fr 0.7fr"
+          // minmax(MINpx, FRfr) per column so a column NEVER crushes below its
+          // min — when the total exceeds the viewport the scroll container
+          // scrolls horizontally instead of squeezing everything (owner:
+          // "被挤压了"). Below the floor the table grows + scrolls; above it the
+          // fr ratios share the slack as before.
+          ? "minmax(120px,1.3fr) minmax(150px,1.2fr) minmax(80px,0.55fr) minmax(95px,0.95fr) minmax(95px,0.95fr) minmax(95px,0.95fr) minmax(95px,0.95fr) minmax(95px,0.95fr) minmax(72px,0.6fr) minmax(72px,0.5fr) minmax(84px,0.9fr) minmax(84px,0.7fr)"
           : isAccessory
-          // ACCESSORY: Code | Description | Base Price | Unit M3 | Fabric
-          // (no Category/Size/Price2 — pillows don't carry those), and
-          // no Total Min / Variants / seat-height columns either.
-          ? "1.3fr 2.5fr 1fr 0.7fr 1fr"
-          // Bedframe: Total Min bumped 0.7→0.9 for the same reason as sofa.
-          : "1.3fr 1.8fr 0.8fr 0.8fr 1fr 1fr 0.7fr 0.7fr 0.9fr 0.8fr";
+          // ACCESSORY: Code | Description | Base Price | Unit M3 | Fabric.
+          ? "minmax(120px,1.3fr) minmax(180px,2.5fr) minmax(100px,1fr) minmax(80px,0.7fr) minmax(95px,1fr)"
+          // Bedframe.
+          : "minmax(120px,1.3fr) minmax(160px,1.8fr) minmax(90px,0.8fr) minmax(90px,0.8fr) minmax(100px,1fr) minmax(100px,1fr) minmax(80px,0.7fr) minmax(80px,0.7fr) minmax(84px,0.9fr) minmax(84px,0.8fr)";
         const thCls = "px-3 py-1.5 text-[11px] font-medium text-[#6B7280] uppercase tracking-wider";
         const cat: ProdCat = isSofa ? "SOFA" : isAccessory ? "ACCESSORY" : "BEDFRAME";
         // The analytic columns the chooser currently has switched on, for this

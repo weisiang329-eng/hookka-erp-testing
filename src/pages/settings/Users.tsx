@@ -1,18 +1,28 @@
 // ---------------------------------------------------------------------------
-// User Management (SUPER_ADMIN only) — three sections stacked vertically:
+// User Management (SUPER_ADMIN only) — split into THREE tabs (mirrors the
+// Products "SKU Master / Maintenance" top-level toggle, via the shared Tabs
+// component):
 //
-//   1. Active Users   — list + toggle, reset password, delete
-//   2. Pending Invites — list + resend, copy link, revoke
-//   3. Send New Invite — form (email, displayName, role)
+//   • Users          — Active Users table (+ Position / Department / Email
+//                       alias columns) + Pending Invites + Send New Invite.
+//   • Org Chart       — active staff grouped by department → position.
+//   • Mailbox Access  — the @hookka.com mailbox matrix + per-user view level.
 //
-// All data comes from /api/users and /api/users/invite* — no client-side
-// caching library, plain fetch + useState so the page matches the rest of
-// the dashboard.
+// "No naked edits" ([[feedback_no_naked_edits]]): the Mailbox Access matrix is
+// READ-ONLY until you click Edit. Edits go to a local draft (view-level selects
+// + access checkboxes + alias→user links); Save commits EVERY changed cell in
+// one go (PUT /scope-level, POST/DELETE /access, PATCH /addresses for links);
+// Cancel discards the draft. Nothing auto-saves on change.
+//
+// All data comes from /api/users, /api/users/invite* and /api/mail-center/* —
+// no client-side caching library, plain fetch + useCachedJson so the page
+// matches the rest of the dashboard.
 // ---------------------------------------------------------------------------
 import { useCallback, useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
+import { Tabs, type TabItem } from "@/components/ui/tabs";
 import {
   Card,
   CardContent,
@@ -39,6 +49,8 @@ import {
   Loader2,
   Pencil,
   AtSign,
+  Link2,
+  X,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { copyText } from "@/lib/copy-text";
@@ -60,6 +72,10 @@ const ROLE_OPTIONS: { value: string; label: string }[] = [
 function roleLabel(role: string): string {
   return ROLE_OPTIONS.find((o) => o.value === role)?.label ?? role;
 }
+
+// Department options for an @hookka.com mailbox (owner 2026-06-17). Used by the
+// create-alias modal; the same three buckets the org chart sorts first.
+const DEPT_OPTIONS = ["Support", "Finance", "HR"] as const;
 
 // ---------- Row types ------------------------------------------------------
 
@@ -108,6 +124,8 @@ type MailAddress = {
   createdAt: string;
 };
 
+type TabKey = "users" | "org" | "mailbox";
+
 // ---------- Small helpers --------------------------------------------------
 
 function fmtDateTime(iso: string | null): string {
@@ -139,6 +157,14 @@ function fmtRelativeExpiry(iso: string): string {
   return `${days}d ${hours % 24}h left`;
 }
 
+// Lowercased local-part (before the @) of an email/alias, stripped to
+// [a-z0-9]. Used to associate a floating alias to a user when its
+// assigned_user_id is missing (see aliasByUserId below).
+function localKey(addr: string | undefined): string {
+  if (!addr) return "";
+  return (addr.split("@")[0] || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 // Suggest a default @hookka.com alias for a user: first name (or the email
 // local-part) lowercased and stripped to [a-z0-9]. The admin can always edit
 // it before creating.
@@ -161,6 +187,9 @@ export default function UsersPage() {
   // requireSuperAdmin gate on every user-management route server-side, so a
   // stray Admin can never disable the owner's account. (owner 2026-06-12)
   const canManageUsers = currentUser?.role?.toUpperCase() === "SUPER_ADMIN";
+
+  // Which tab is showing. Default = Users.
+  const [tab, setTab] = useState<TabKey>("users");
 
   // Invite form
   const [inviteEmail, setInviteEmail] = useState("");
@@ -196,7 +225,7 @@ export default function UsersPage() {
   // Department the mailbox is grouped under (owner 2026-06-17): HR people → HR,
   // Finance people → Finance, Operations + everyone else → Support. Posted as
   // assignedDept (the email_addresses table has an assigned_dept column).
-  const [aliasDept, setAliasDept] = useState("Support");
+  const [aliasDept, setAliasDept] = useState<string>("Support");
   // Free-text job title recorded on the mailbox alongside the department
   // (owner 2026-06-17). Optional; posted as assignedPosition (the
   // email_addresses table has an assigned_position column).
@@ -254,101 +283,32 @@ export default function UsersPage() {
 
   // ---------- Mailbox access matrix (SUPER_ADMIN) --------------------------
   // Grants that let a user open a SHARED mailbox (support@/hr@/finance@) on top
-  // of their own assigned alias. The server list is the base truth; a small
-  // overrides map carries optimistic toggles (so a checkbox flips instantly)
-  // and is reverted on a failed write. Deriving the base via useMemo — instead
-  // of mirroring it into state in an effect — keeps the lint rule happy.
-  const { data: accessResp } = useCachedJson<
+  // of their own assigned alias. The server list is the base truth. Per-user
+  // view-level rows (personal/department/company) decide how WIDE their inbox
+  // is. BOTH are READ-ONLY on screen until the operator clicks Edit — then the
+  // changes accumulate in local DRAFT maps and only hit the API on Save.
+  const { data: accessResp, refresh: refreshAccessHook } = useCachedJson<
     { addressId: string; userId: string }[]
   >(canManageUsers ? "/api/mail-center/access" : null);
+  const { data: levelsResp, refresh: refreshLevelsHook } = useCachedJson<
+    { userId: string; level: string }[]
+  >(canManageUsers ? "/api/mail-center/scope-levels" : null);
+
+  // Committed server state (the read-only baseline).
   const serverGrants = useMemo(
     () => new Set((accessResp ?? []).map((g) => `${g.addressId}::${g.userId}`)),
     [accessResp],
   );
-  const [grantOverrides, setGrantOverrides] = useState<Map<string, boolean>>(
-    new Map(),
-  );
-  const isGranted = (addressId: string, userId: string): boolean => {
-    const key = `${addressId}::${userId}`;
-    const ov = grantOverrides.get(key);
-    return ov !== undefined ? ov : serverGrants.has(key);
-  };
-  const toggleGrant = async (
-    addressId: string,
-    userId: string,
-    on: boolean,
-  ) => {
-    const key = `${addressId}::${userId}`;
-    setGrantOverrides((prev) => new Map(prev).set(key, on));
-    try {
-      const res = await fetch("/api/mail-center/access", {
-        method: on ? "POST" : "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ addressId, userId }),
-      });
-      if (!res.ok) throw new Error("access update failed");
-      invalidateCachePrefix("/api/mail-center/access");
-      // The granted user's own Mail Center mailbox chips read /addresses.
-      invalidateCachePrefix("/api/mail-center/addresses");
-    } catch {
-      setGrantOverrides((prev) => {
-        const next = new Map(prev);
-        next.delete(key);
-        return next;
-      });
-      showFlash("err", "Failed to update mailbox access. Please retry.");
-    }
-  };
-
-  // ---------- Mail view level (SUPER_ADMIN) --------------------------------
-  // Per-user scope that decides how WIDE their Mail Center inbox is:
-  //   personal   — only their own assigned alias
-  //   department — every mailbox in their department
-  //   company    — every mailbox
-  // Same optimistic pattern as the access matrix above: the server list is the
-  // base truth (derived via useMemo, never mirrored into state in an effect —
-  // that's an eslint error here), and a small overrides Map carries the
-  // in-flight change so the <select> reflects the click instantly, reverting on
-  // a failed write. Default 'personal' when the server has no row for a user.
-  const { data: levelsResp } = useCachedJson<
-    { userId: string; level: string }[]
-  >(canManageUsers ? "/api/mail-center/scope-levels" : null);
   const serverLevels = useMemo(() => {
     const m = new Map<string, string>();
     for (const r of levelsResp ?? []) m.set(r.userId, r.level);
     return m;
   }, [levelsResp]);
-  const [levelOverrides, setLevelOverrides] = useState<Map<string, string>>(
-    new Map(),
-  );
-  const viewLevelFor = (userId: string): string => {
-    const ov = levelOverrides.get(userId);
-    if (ov !== undefined) return ov;
-    return serverLevels.get(userId) ?? "personal";
-  };
-  const setViewLevel = async (userId: string, level: string) => {
-    const prevLevel = viewLevelFor(userId);
-    if (level === prevLevel) return;
-    setLevelOverrides((prev) => new Map(prev).set(userId, level));
-    try {
-      const res = await fetch("/api/mail-center/scope-level", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, level }),
-      });
-      if (!res.ok) throw new Error("scope-level update failed");
-      invalidateCachePrefix("/api/mail-center/scope-levels");
-      // The user's own scoped mailbox list (/addresses) widens or narrows.
-      invalidateCachePrefix("/api/mail-center/addresses");
-    } catch {
-      // Revert to the previous value rather than dropping the override —
-      // dropping it would briefly flash the server default before the cache
-      // settles. Re-pin the known-good prior level instead.
-      setLevelOverrides((prev) => new Map(prev).set(userId, prevLevel));
-      showFlash("err", "Failed to update mail view level. Please retry.");
-    }
-  };
 
+  // Parsed lists. Declared here (above the Mailbox Access edit handlers) so
+  // saveMailEdit can close over an already-defined `users` binding — the React
+  // Compiler refuses to preserve a memo that's referenced before its
+  // declaration.
   const users: UserRow[] = useMemo(
     () => (usersResp?.success ? usersResp.data ?? [] : []),
     [usersResp],
@@ -357,15 +317,195 @@ export default function UsersPage() {
     () => (invitesResp?.success ? invitesResp.data ?? [] : []),
     [invitesResp],
   );
-  // Map each user id → their (first) alias, so the row can show the existing
-  // address instead of the "Add alias" control.
+
+  // ----- Edit mode + draft state for the Mailbox Access tab -----
+  // When mailEdit is false the matrix shows the committed server values and
+  // every control is disabled. Entering edit copies the server state into the
+  // draft maps; Save diffs draft↔server and fires one write per changed cell;
+  // Cancel throws the drafts away.
+  const [mailEdit, setMailEdit] = useState(false);
+  const [draftGrants, setDraftGrants] = useState<Map<string, boolean>>(new Map());
+  const [draftLevels, setDraftLevels] = useState<Map<string, string>>(new Map());
+  // Alias→user links queued during edit (fixes a floating alias whose
+  // assigned_user_id is empty). Keyed by addressId → userId. Committed via
+  // PATCH /api/mail-center/addresses/:id on Save.
+  const [draftLinks, setDraftLinks] = useState<Map<string, string>>(new Map());
+  const [mailSaving, setMailSaving] = useState(false);
+
+  const beginMailEdit = () => {
+    // Seed drafts from the committed server values so an untouched cell stays
+    // exactly where it was.
+    setDraftGrants(new Map(serverGrants ? [...serverGrants].map((k) => [k, true]) : []));
+    const lv = new Map<string, string>();
+    for (const [uid, level] of serverLevels) lv.set(uid, level);
+    setDraftLevels(lv);
+    setDraftLinks(new Map());
+    setMailEdit(true);
+  };
+
+  const cancelMailEdit = () => {
+    setMailEdit(false);
+    setDraftGrants(new Map());
+    setDraftLevels(new Map());
+    setDraftLinks(new Map());
+  };
+
+  // Effective values — draft when editing, server when read-only.
+  const isGranted = (addressId: string, userId: string): boolean => {
+    const key = `${addressId}::${userId}`;
+    if (mailEdit) return draftGrants.get(key) ?? false;
+    return serverGrants.has(key);
+  };
+  const viewLevelFor = (userId: string): string => {
+    if (mailEdit) return draftLevels.get(userId) ?? "personal";
+    return serverLevels.get(userId) ?? "personal";
+  };
+
+  // Draft mutators (edit mode only — never touch the server).
+  const draftToggleGrant = (addressId: string, userId: string, on: boolean) => {
+    setDraftGrants((prev) => new Map(prev).set(`${addressId}::${userId}`, on));
+  };
+  const draftSetLevel = (userId: string, level: string) => {
+    setDraftLevels((prev) => new Map(prev).set(userId, level));
+  };
+
+  // Save EVERY changed cell. One PUT per changed level, one POST/DELETE per
+  // changed grant, one PATCH per queued alias link. Any failure is surfaced and
+  // we re-pull the server state so the matrix re-syncs to the truth.
+  const saveMailEdit = async () => {
+    setMailSaving(true);
+    const ops: Promise<Response>[] = [];
+
+    // Level diffs.
+    const levelUserIds = new Set<string>([
+      ...serverLevels.keys(),
+      ...draftLevels.keys(),
+    ]);
+    for (const uid of levelUserIds) {
+      const before = serverLevels.get(uid) ?? "personal";
+      const after = draftLevels.get(uid) ?? "personal";
+      if (before === after) continue;
+      ops.push(
+        fetch("/api/mail-center/scope-level", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: uid, level: after }),
+        }),
+      );
+    }
+
+    // Grant diffs.
+    const grantKeys = new Set<string>([
+      ...serverGrants,
+      ...draftGrants.keys(),
+    ]);
+    for (const key of grantKeys) {
+      const before = serverGrants.has(key);
+      const after = draftGrants.get(key) ?? false;
+      if (before === after) continue;
+      const [addressId, userId] = key.split("::");
+      ops.push(
+        fetch("/api/mail-center/access", {
+          method: after ? "POST" : "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ addressId, userId }),
+        }),
+      );
+    }
+
+    // Alias→user link diffs (PATCH the address's assigned_user_id + name).
+    for (const [addressId, userId] of draftLinks) {
+      const u = users.find((x) => x.id === userId);
+      ops.push(
+        fetch(`/api/mail-center/addresses/${addressId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            assignedUserId: userId,
+            assignedUserName: u ? u.displayName || u.email : undefined,
+          }),
+        }),
+      );
+    }
+
+    try {
+      if (ops.length === 0) {
+        cancelMailEdit();
+        showFlash("ok", "No changes to save");
+        return;
+      }
+      const results = await Promise.all(ops);
+      const failed = results.filter((r) => !r.ok).length;
+      // Re-pull every list this page derived state from.
+      invalidateCachePrefix("/api/mail-center/access");
+      invalidateCachePrefix("/api/mail-center/scope-levels");
+      invalidateCachePrefix("/api/mail-center/addresses");
+      refreshAccessHook();
+      refreshLevelsHook();
+      refreshAddressesHook();
+      if (failed > 0) {
+        // Stay in edit mode so the operator can retry the ones that didn't
+        // stick — the refreshed server state already reverted those cells.
+        showFlash(
+          "err",
+          `${ops.length - failed} change(s) saved, ${failed} failed. Review and retry.`,
+        );
+      } else {
+        cancelMailEdit();
+        showFlash("ok", `Mailbox access saved (${ops.length} change(s))`);
+      }
+    } catch (err) {
+      showFlash("err", humanizeError(err, "Couldn't save mailbox access. Please retry."));
+    } finally {
+      setMailSaving(false);
+    }
+  };
+
+  // Map each user id → their (first) alias, so a row can show the existing
+  // address + its dept/position instead of the "Add alias" control.
+  //
+  // ALIAS-VISIBILITY FIX (owner 2026-06-17): the primary key is the alias's
+  // assigned_user_id. But an alias created OUTSIDE this modal (seeded, or made
+  // before assigned_user_id existed) can be "floating" — assigned_user_id NULL
+  // or pointing at a stale id — so it shows in the matrix (every active address
+  // is a column) and the Mail Center sidebar (it's a real address) yet never
+  // lands on its owner's row. To make the row reliably show it WITHOUT a
+  // backend change, fall back to matching the alias local-part against the
+  // user's own email local-part, then against the suggested alias. The explicit
+  // assigned_user_id link always wins; the heuristic only fills gaps. (A
+  // permanent fix is to PATCH assigned_user_id — see the "Link" action in the
+  // Mailbox Access tab, which writes it for real.)
   const aliasByUserId = useMemo(() => {
+    const all = addressesResp ?? [];
     const m = new Map<string, MailAddress>();
-    for (const a of addressesResp ?? []) {
+    // Pass 1 — explicit assigned_user_id (authoritative).
+    for (const a of all) {
       if (a.assignedUserId && !m.has(a.assignedUserId)) m.set(a.assignedUserId, a);
     }
+    // Pass 2 — heuristic local-part match for users still without an alias.
+    // Only consider addresses NOT already claimed by an explicit assignment.
+    const claimed = new Set<string>();
+    for (const a of m.values()) claimed.add(a.id);
+    const floating = all.filter((a) => !claimed.has(a.id));
+    for (const u of users) {
+      if (m.has(u.id)) continue;
+      const wantEmail = localKey(u.email);
+      const wantSuggest = localKey(suggestAlias(u));
+      const hit = floating.find((a) => {
+        const k = localKey(a.address);
+        return k && (k === wantEmail || k === wantSuggest);
+      });
+      if (hit) m.set(u.id, hit);
+    }
     return m;
-  }, [addressesResp]);
+  }, [addressesResp, users]);
+
+  // Whether an alias row is only matched to its user by the local-part
+  // heuristic (i.e. assigned_user_id is NOT this user). Such a row gets a
+  // "Link" affordance in edit mode so the owner can write the real
+  // assigned_user_id and stop relying on the heuristic.
+  const aliasIsHeuristic = (u: UserRow, alias: MailAddress | undefined): boolean =>
+    !!alias && alias.assignedUserId !== u.id;
 
   // Org chart — active staff grouped by department → position, using the dept/
   // position recorded on each person's @hookka.com alias (the per-user org data
@@ -402,6 +542,11 @@ export default function UsersPage() {
       return ra === rb ? a.localeCompare(b) : ra - rb;
     });
   }, [orgChart]);
+
+  const activeAddresses = useMemo(
+    () => (addressesResp ?? []).filter((a) => a.active),
+    [addressesResp],
+  );
 
   // ---------- User actions -------------------------------------------------
 
@@ -739,7 +884,24 @@ export default function UsersPage() {
     }
   };
 
+  // Open the create-alias modal for a user.
+  const openAliasModal = (u: UserRow) => {
+    setAliasForUser(u);
+    setAliasAddress(suggestAlias(u));
+    setAliasDept("Support");
+    setAliasPosition("");
+    setAliasError(null);
+  };
+
   // ---------- Render -------------------------------------------------------
+
+  const TABS: TabItem<TabKey>[] = [
+    { key: "users", label: "Users", count: users.length },
+    { key: "org", label: "Org Chart" },
+    ...(canManageUsers && activeAddresses.length > 0
+      ? [{ key: "mailbox" as TabKey, label: "Mailbox Access" }]
+      : []),
+  ];
 
   return (
     <div className="space-y-6">
@@ -775,10 +937,473 @@ export default function UsersPage() {
         )}
       </div>
 
+      {/* Tab bar — Users / Org Chart / Mailbox Access (mirrors the Products
+          top-level toggle via the shared Tabs component). */}
+      <Tabs<TabKey> tabs={TABS} value={tab} onChange={setTab} />
+
       {/* =========================================================== */}
-      {/* ORG CHART */}
+      {/* TAB: USERS — Active Users + Pending Invites + Send Invite    */}
       {/* =========================================================== */}
-      {orgChart.size > 0 && (
+      {tab === "users" && (
+        <>
+          {/* ----- Active Users ----- */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-3">
+                <UsersIcon className="h-5 w-5 text-[#6B5C32]" />
+                <div>
+                  <CardTitle>Active Users</CardTitle>
+                  <CardDescription>
+                    {loadingUsers ? "Loading…" : `${users.length} user(s) total`}
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[#E2DDD8] text-left">
+                      <Th>Email</Th>
+                      <Th>Name</Th>
+                      <Th>Role</Th>
+                      <Th>Status</Th>
+                      <Th>Position</Th>
+                      <Th>Department</Th>
+                      <Th>Email alias</Th>
+                      <Th>Last login</Th>
+                      <Th>Created</Th>
+                      <Th className="text-right pr-2">Actions</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loadingUsers ? (
+                      <tr>
+                        <td colSpan={10} className="py-6 text-center text-gray-500">
+                          <Loader2 className="h-4 w-4 animate-spin inline-block mr-2" />
+                          Loading users…
+                        </td>
+                      </tr>
+                    ) : users.length === 0 ? (
+                      <tr>
+                        <td colSpan={10} className="py-6 text-center text-gray-500">
+                          No users yet
+                        </td>
+                      </tr>
+                    ) : (
+                      users.map((u) => {
+                        const alias = aliasByUserId.get(u.id);
+                        return (
+                          <tr
+                            key={u.id}
+                            className="border-b border-[#F0ECE9] hover:bg-[#FAF9F8]"
+                          >
+                            <Td>
+                              <span className="font-medium">{u.email}</span>
+                              {u.id === currentUser?.id && (
+                                <span className="ml-2 text-[10px] font-semibold uppercase tracking-wider bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5 rounded">
+                                  You
+                                </span>
+                              )}
+                            </Td>
+                            <Td>{u.displayName || "—"}</Td>
+                            <Td>
+                              <span className="text-xs font-semibold uppercase tracking-wider text-[#6B5C32]">
+                                {u.role}
+                              </span>
+                            </Td>
+                            <Td>
+                              {u.isActive ? (
+                                <span className="inline-flex items-center gap-1 text-xs font-medium bg-[#EEF3E4] text-[#4F7C3A] px-2 py-0.5 rounded-full">
+                                  <Check className="h-3 w-3" /> Active
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-xs font-medium bg-[#F0ECE9] text-[#6B7280] px-2 py-0.5 rounded-full">
+                                  <Ban className="h-3 w-3" /> Disabled
+                                </span>
+                              )}
+                            </Td>
+                            {/* Position — from the user's @hookka.com alias. */}
+                            <Td className="text-gray-700">
+                              {alias?.assignedPosition || (
+                                <span className="text-gray-400">—</span>
+                              )}
+                            </Td>
+                            {/* Department — from the user's @hookka.com alias. */}
+                            <Td>
+                              {alias?.assignedDept ? (
+                                <span className="inline-flex items-center text-xs font-medium bg-[#EFEAE5] text-[#6B5C32] px-2 py-0.5 rounded">
+                                  {alias.assignedDept}
+                                </span>
+                              ) : (
+                                <span className="text-gray-400">—</span>
+                              )}
+                            </Td>
+                            {/* Email alias — the address when set, else an
+                                explicit "Add alias" action (Edit→Save: opens
+                                the create-alias modal, never auto-creates). */}
+                            <Td>
+                              {alias ? (
+                                <span
+                                  className={
+                                    "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded " +
+                                    (alias.active
+                                      ? "bg-[#EEF3E4] text-[#4F7C3A]"
+                                      : "bg-[#F0ECE9] text-[#6B7280]")
+                                  }
+                                  title={
+                                    alias.active
+                                      ? "hookka.com alias"
+                                      : "hookka.com alias (inactive)"
+                                  }
+                                >
+                                  <AtSign className="h-3 w-3" />
+                                  {alias.address}
+                                </span>
+                              ) : !canManageUsers ? (
+                                <span className="text-xs text-gray-400">—</span>
+                              ) : (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => openAliasModal(u)}
+                                  title="Create @hookka.com alias"
+                                >
+                                  <AtSign className="h-3.5 w-3.5 mr-1" />
+                                  Add alias
+                                </Button>
+                              )}
+                            </Td>
+                            <Td className="text-gray-600">
+                              {fmtDateTime(u.lastLoginAt)}
+                            </Td>
+                            <Td className="text-gray-600">
+                              {fmtDateTime(u.createdAt)}
+                            </Td>
+                            <Td className="text-right pr-2">
+                              {canManageUsers ? (
+                                <div className="inline-flex gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => {
+                                      setEditRoleForUser(u);
+                                      setEditRole(u.role);
+                                      setEditRoleError(null);
+                                    }}
+                                    title="Change role"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => toggleActive(u)}
+                                    title={u.isActive ? "Disable" : "Enable"}
+                                  >
+                                    {u.isActive ? (
+                                      <Ban className="h-3.5 w-3.5" />
+                                    ) : (
+                                      <Check className="h-3.5 w-3.5" />
+                                    )}
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => {
+                                      setResetForUser(u);
+                                      setResetPassword("");
+                                      setResetError(null);
+                                    }}
+                                    title="Reset password"
+                                  >
+                                    <KeyRound className="h-3.5 w-3.5" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => deleteUser(u)}
+                                    title="Delete"
+                                    disabled={u.id === currentUser?.id}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                                  </Button>
+                                </div>
+                              ) : (
+                                <span className="text-xs text-[#9C8F7A]">
+                                  Super Admin only
+                                </span>
+                              )}
+                            </Td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* ----- Pending Invites ----- */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-3">
+                <Clock className="h-5 w-5 text-[#6B5C32]" />
+                <div>
+                  <CardTitle>Pending Invites</CardTitle>
+                  <CardDescription>
+                    {loadingInvites
+                      ? "Loading…"
+                      : invites.length === 0
+                        ? "No pending invites"
+                        : `${invites.length} invite(s) awaiting acceptance`}
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[#E2DDD8] text-left">
+                      <Th>Email</Th>
+                      <Th>Invited by</Th>
+                      <Th>Sent</Th>
+                      <Th>Expires</Th>
+                      <Th className="text-right pr-2">Actions</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loadingInvites ? (
+                      <tr>
+                        <td colSpan={5} className="py-6 text-center text-gray-500">
+                          <Loader2 className="h-4 w-4 animate-spin inline-block mr-2" />
+                          Loading…
+                        </td>
+                      </tr>
+                    ) : invites.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="py-6 text-center text-gray-500">
+                          No pending invites — use the form below to invite
+                          someone.
+                        </td>
+                      </tr>
+                    ) : (
+                      invites.map((inv) => (
+                        <tr
+                          key={inv.token}
+                          className="border-b border-[#F0ECE9] hover:bg-[#FAF9F8]"
+                        >
+                          <Td>
+                            <div className="flex flex-col">
+                              <span className="font-medium">{inv.email}</span>
+                              {inv.displayName && (
+                                <span className="text-xs text-gray-500">
+                                  {inv.displayName}
+                                </span>
+                              )}
+                            </div>
+                          </Td>
+                          <Td>{inv.inviterName || "—"}</Td>
+                          <Td className="text-gray-600">
+                            {inv.emailSentAt ? (
+                              fmtDateTime(inv.emailSentAt)
+                            ) : (
+                              <span className="text-xs text-amber-700">
+                                not sent
+                              </span>
+                            )}
+                          </Td>
+                          <Td className="text-gray-600">
+                            {fmtRelativeExpiry(inv.expiresAt)}
+                          </Td>
+                          <Td className="text-right pr-2">
+                            <div className="inline-flex gap-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => copyInviteLink(inv.token)}
+                                title="Copy invite link"
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                              </Button>
+                              {canManageUsers && (
+                                <>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => resendInvite(inv)}
+                                    disabled={resendingToken === inv.token}
+                                    title="Resend email"
+                                  >
+                                    <RefreshCw
+                                      className={
+                                        "h-3.5 w-3.5" +
+                                        (resendingToken === inv.token
+                                          ? " animate-spin"
+                                          : "")
+                                      }
+                                    />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => revokeInvite(inv)}
+                                    title="Revoke"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                                  </Button>
+                                </>
+                              )}
+                            </div>
+                          </Td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* ----- Send New Invite — Super Admin only (POST /invite is gated
+              by requireSuperAdmin). An Admin never sees the form. ----- */}
+          {canManageUsers && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center gap-3">
+                  <UserPlus className="h-5 w-5 text-[#6B5C32]" />
+                  <div>
+                    <CardTitle>Send New Invite</CardTitle>
+                    <CardDescription>
+                      Recipient receives an email with a 72-hour acceptance link.
+                    </CardDescription>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={submitInvite} className="space-y-4 max-w-2xl">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1 uppercase tracking-wide">
+                        Email
+                      </label>
+                      <div className="relative">
+                        <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+                        <Input
+                          type="email"
+                          placeholder="new-admin@hookka.com"
+                          value={inviteEmail}
+                          onChange={(e) => setInviteEmail(e.target.value)}
+                          className="pl-9"
+                          autoComplete="off"
+                          required
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1 uppercase tracking-wide">
+                        Display Name
+                      </label>
+                      <Input
+                        type="text"
+                        placeholder="Jane Doe"
+                        value={inviteDisplayName}
+                        onChange={(e) => setInviteDisplayName(e.target.value)}
+                        autoComplete="off"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1 uppercase tracking-wide">
+                        Role
+                      </label>
+                      <select
+                        value={inviteRole}
+                        onChange={(e) => setInviteRole(e.target.value)}
+                        className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+                      >
+                        {ROLE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {inviteResult && (
+                    <div
+                      className={
+                        "rounded-md px-4 py-3 text-sm space-y-2 " +
+                        (inviteResult.kind === "ok"
+                          ? "bg-[#EEF3E4] border border-[#C6DBA8] text-[#4F7C3A]"
+                          : "bg-[#FCE4E4] border border-[#E8B2A1] text-[#9A3A2D]")
+                      }
+                    >
+                      <div className="flex items-center gap-2 font-medium">
+                        {inviteResult.kind === "ok" ? (
+                          <CheckCircle2 className="h-4 w-4" />
+                        ) : (
+                          <XCircle className="h-4 w-4" />
+                        )}
+                        {inviteResult.message}
+                      </div>
+                      {inviteResult.inviteUrl && !inviteResult.emailSent && (
+                        <div className="flex items-center gap-2">
+                          <input
+                            readOnly
+                            value={inviteResult.inviteUrl}
+                            onFocus={(e) => e.currentTarget.select()}
+                            className="flex-1 rounded border border-[#C6DBA8] bg-white px-2 py-1 text-xs text-[#1F1D1B]"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(
+                                  inviteResult.inviteUrl!,
+                                );
+                                showFlash("ok", "Link copied");
+                              } catch {
+                                showFlash("err", "Clipboard blocked");
+                              }
+                            }}
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex justify-end pt-2">
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      disabled={inviteSubmitting}
+                    >
+                      {inviteSubmitting ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Send className="h-4 w-4" />
+                      )}
+                      {inviteSubmitting ? "Sending…" : "Send Invite"}
+                    </Button>
+                  </div>
+                </form>
+              </CardContent>
+            </Card>
+          )}
+        </>
+      )}
+
+      {/* =========================================================== */}
+      {/* TAB: ORG CHART                                               */}
+      {/* =========================================================== */}
+      {tab === "org" && (
         <Card>
           <CardHeader>
             <div className="flex items-center gap-3">
@@ -788,262 +1413,80 @@ export default function UsersPage() {
                 <CardDescription>
                   Active staff grouped by department and position. The
                   department / position come from each person&apos;s @hookka.com
-                  alias — set them when you create or edit the alias below.
+                  alias — set them when you create the alias on the Users tab.
                 </CardDescription>
               </div>
             </div>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {orgDepts.map((dept) => {
-                const posMap = orgChart.get(dept);
-                if (!posMap) return null;
-                const count = [...posMap.values()].reduce(
-                  (s, arr) => s + arr.length,
-                  0,
-                );
-                return (
-                  <div
-                    key={dept}
-                    className="rounded-lg border border-[#E5E7EB] bg-[#FAFAF9] p-3"
-                  >
-                    <div className="mb-2 flex items-center justify-between">
-                      <h3 className="text-sm font-semibold text-[#111827]">
-                        {dept}
-                      </h3>
-                      <span className="rounded-full bg-[#EFEAE5] px-2 py-0.5 text-[10px] font-medium text-[#6B5C32]">
-                        {count}
-                      </span>
-                    </div>
-                    <div className="space-y-2.5">
-                      {[...posMap.entries()].map(([pos, members]) => (
-                        <div key={pos}>
-                          <div className="text-[10px] font-medium uppercase tracking-wide text-[#9CA3AF]">
-                            {pos}
-                          </div>
-                          <div className="mt-1 space-y-1">
-                            {members.map((m) => (
-                              <div
-                                key={m.id}
-                                className="rounded-md border border-[#E5E7EB] bg-white px-2 py-1"
-                              >
-                                <div className="text-xs font-medium text-[#111827]">
-                                  {m.displayName || m.email}
+            {orgChart.size === 0 ? (
+              <div className="py-8 text-center text-sm text-gray-500">
+                No active staff with an assigned mailbox yet. Create an
+                @hookka.com alias for a user (Users tab) to place them on the org
+                chart.
+              </div>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {orgDepts.map((dept) => {
+                  const posMap = orgChart.get(dept);
+                  if (!posMap) return null;
+                  const count = [...posMap.values()].reduce(
+                    (s, arr) => s + arr.length,
+                    0,
+                  );
+                  return (
+                    <div
+                      key={dept}
+                      className="rounded-lg border border-[#E5E7EB] bg-[#FAFAF9] p-3"
+                    >
+                      <div className="mb-2 flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-[#111827]">
+                          {dept}
+                        </h3>
+                        <span className="rounded-full bg-[#EFEAE5] px-2 py-0.5 text-[10px] font-medium text-[#6B5C32]">
+                          {count}
+                        </span>
+                      </div>
+                      <div className="space-y-2.5">
+                        {[...posMap.entries()].map(([pos, members]) => (
+                          <div key={pos}>
+                            <div className="text-[10px] font-medium uppercase tracking-wide text-[#9CA3AF]">
+                              {pos}
+                            </div>
+                            <div className="mt-1 space-y-1">
+                              {members.map((m) => (
+                                <div
+                                  key={m.id}
+                                  className="rounded-md border border-[#E5E7EB] bg-white px-2 py-1"
+                                >
+                                  <div className="text-xs font-medium text-[#111827]">
+                                    {m.displayName || m.email}
+                                  </div>
+                                  <div className="text-[10px] text-[#9CA3AF]">
+                                    {m.email}
+                                  </div>
                                 </div>
-                                <div className="text-[10px] text-[#9CA3AF]">
-                                  {m.email}
-                                </div>
-                              </div>
-                            ))}
+                              ))}
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
 
       {/* =========================================================== */}
-      {/* 1. ACTIVE USERS */}
+      {/* TAB: MAILBOX ACCESS (SUPER_ADMIN) — Edit→Save, no naked edits */}
       {/* =========================================================== */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-3">
-            <UsersIcon className="h-5 w-5 text-[#6B5C32]" />
-            <div>
-              <CardTitle>Active Users</CardTitle>
-              <CardDescription>
-                {loadingUsers ? "Loading…" : `${users.length} user(s) total`}
-              </CardDescription>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-[#E2DDD8] text-left">
-                  <Th>Email</Th>
-                  <Th>Name</Th>
-                  <Th>Role</Th>
-                  <Th>Status</Th>
-                  <Th>Email alias</Th>
-                  <Th>Last login</Th>
-                  <Th>Created</Th>
-                  <Th className="text-right pr-2">Actions</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {loadingUsers ? (
-                  <tr>
-                    <td colSpan={8} className="py-6 text-center text-gray-500">
-                      <Loader2 className="h-4 w-4 animate-spin inline-block mr-2" />
-                      Loading users…
-                    </td>
-                  </tr>
-                ) : users.length === 0 ? (
-                  <tr>
-                    <td colSpan={8} className="py-6 text-center text-gray-500">
-                      No users yet
-                    </td>
-                  </tr>
-                ) : (
-                  users.map((u) => (
-                    <tr
-                      key={u.id}
-                      className="border-b border-[#F0ECE9] hover:bg-[#FAF9F8]"
-                    >
-                      <Td>
-                        <span className="font-medium">{u.email}</span>
-                        {u.id === currentUser?.id && (
-                          <span className="ml-2 text-[10px] font-semibold uppercase tracking-wider bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5 rounded">
-                            You
-                          </span>
-                        )}
-                      </Td>
-                      <Td>{u.displayName || "—"}</Td>
-                      <Td>
-                        <span className="text-xs font-semibold uppercase tracking-wider text-[#6B5C32]">
-                          {u.role}
-                        </span>
-                      </Td>
-                      <Td>
-                        {u.isActive ? (
-                          <span className="inline-flex items-center gap-1 text-xs font-medium bg-[#EEF3E4] text-[#4F7C3A] px-2 py-0.5 rounded-full">
-                            <Check className="h-3 w-3" /> Active
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-xs font-medium bg-[#F0ECE9] text-[#6B7280] px-2 py-0.5 rounded-full">
-                            <Ban className="h-3 w-3" /> Disabled
-                          </span>
-                        )}
-                      </Td>
-                      <Td>
-                        {(() => {
-                          const alias = aliasByUserId.get(u.id);
-                          if (alias) {
-                            return (
-                              <span
-                                className={
-                                  "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded " +
-                                  (alias.active
-                                    ? "bg-[#EEF3E4] text-[#4F7C3A]"
-                                    : "bg-[#F0ECE9] text-[#6B7280]")
-                                }
-                                title={
-                                  alias.active
-                                    ? "hookka.com alias"
-                                    : "hookka.com alias (inactive)"
-                                }
-                              >
-                                <AtSign className="h-3 w-3" />
-                                {alias.address}
-                              </span>
-                            );
-                          }
-                          if (!canManageUsers) {
-                            return <span className="text-xs text-gray-400">—</span>;
-                          }
-                          return (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => {
-                                setAliasForUser(u);
-                                setAliasAddress(suggestAlias(u));
-                                setAliasDept("Support");
-                                setAliasPosition("");
-                                setAliasError(null);
-                              }}
-                              title="Create @hookka.com alias"
-                            >
-                              <AtSign className="h-3.5 w-3.5 mr-1" />
-                              Add alias
-                            </Button>
-                          );
-                        })()}
-                      </Td>
-                      <Td className="text-gray-600">
-                        {fmtDateTime(u.lastLoginAt)}
-                      </Td>
-                      <Td className="text-gray-600">
-                        {fmtDateTime(u.createdAt)}
-                      </Td>
-                      <Td className="text-right pr-2">
-                        {canManageUsers ? (
-                          <div className="inline-flex gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => {
-                                setEditRoleForUser(u);
-                                setEditRole(u.role);
-                                setEditRoleError(null);
-                              }}
-                              title="Change role"
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => toggleActive(u)}
-                              title={u.isActive ? "Disable" : "Enable"}
-                            >
-                              {u.isActive ? (
-                                <Ban className="h-3.5 w-3.5" />
-                              ) : (
-                                <Check className="h-3.5 w-3.5" />
-                              )}
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => {
-                                setResetForUser(u);
-                                setResetPassword("");
-                                setResetError(null);
-                              }}
-                              title="Reset password"
-                            >
-                              <KeyRound className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => deleteUser(u)}
-                              title="Delete"
-                              disabled={u.id === currentUser?.id}
-                            >
-                              <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                            </Button>
-                          </div>
-                        ) : (
-                          <span className="text-xs text-[#9C8F7A]">
-                            Super Admin only
-                          </span>
-                        )}
-                      </Td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* =========================================================== */}
-      {/* MAILBOX ACCESS MATRIX (SUPER_ADMIN) */}
-      {/* =========================================================== */}
-      {canManageUsers &&
-        (addressesResp ?? []).filter((a) => a.active).length > 0 && (
-          <Card>
-            <CardHeader>
+      {tab === "mailbox" && canManageUsers && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-start justify-between gap-3">
               <div className="flex items-center gap-3">
                 <AtSign className="h-5 w-5 text-[#6B5C32]" />
                 <div>
@@ -1057,48 +1500,96 @@ export default function UsersPage() {
                       View level: Personal = own mailbox · Department = their
                       department&apos;s mailboxes · Company = all mailboxes.
                     </span>
+                    {mailEdit && (
+                      <span className="mt-1 block text-[11px] font-medium text-[#6B5C32]">
+                        Editing — changes apply only after you click Save.
+                      </span>
+                    )}
                   </CardDescription>
                 </div>
               </div>
-            </CardHeader>
-            <CardContent>
-              <div className="overflow-x-auto">
-                <table className="border-collapse text-sm">
-                  <thead>
-                    <tr>
-                      <th className="sticky left-0 z-10 bg-white px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-[#6B7280] border-b border-[#E5E7EB]">
-                        User
+              {/* Edit / Save / Cancel — mirrors the Products SKU-Master bar.
+                  Read-only until Edit; Save commits every changed cell. */}
+              <div className="flex shrink-0 gap-2">
+                {!mailEdit ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={beginMailEdit}
+                    disabled={activeAddresses.length === 0}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                    Edit
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={cancelMailEdit}
+                      disabled={mailSaving}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={saveMailEdit}
+                      disabled={mailSaving}
+                    >
+                      {mailSaving ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Check className="h-3.5 w-3.5" />
+                      )}
+                      {mailSaving ? "Saving…" : "Save"}
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="border-collapse text-sm">
+                <thead>
+                  <tr>
+                    <th className="sticky left-0 z-10 bg-white px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-[#6B7280] border-b border-[#E5E7EB]">
+                      User
+                    </th>
+                    <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-[#6B7280] border-b border-[#E5E7EB] whitespace-nowrap">
+                      View level
+                    </th>
+                    {activeAddresses.map((a) => (
+                      <th
+                        key={a.id}
+                        className="px-2 py-2 text-center text-[11px] font-medium text-[#374151] border-b border-[#E5E7EB] whitespace-nowrap"
+                        title={
+                          a.address +
+                          (a.assignedDept ? ` · ${a.assignedDept}` : "")
+                        }
+                      >
+                        <div className="font-semibold">
+                          {a.address.split("@")[0]}
+                        </div>
+                        {a.assignedDept && (
+                          <div className="text-[9px] uppercase text-[#9CA3AF]">
+                            {a.assignedDept}
+                          </div>
+                        )}
                       </th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-[#6B7280] border-b border-[#E5E7EB] whitespace-nowrap">
-                        View level
-                      </th>
-                      {(addressesResp ?? [])
-                        .filter((a) => a.active)
-                        .map((a) => (
-                          <th
-                            key={a.id}
-                            className="px-2 py-2 text-center text-[11px] font-medium text-[#374151] border-b border-[#E5E7EB] whitespace-nowrap"
-                            title={
-                              a.address +
-                              (a.assignedDept ? ` · ${a.assignedDept}` : "")
-                            }
-                          >
-                            <div className="font-semibold">
-                              {a.address.split("@")[0]}
-                            </div>
-                            {a.assignedDept && (
-                              <div className="text-[9px] uppercase text-[#9CA3AF]">
-                                {a.assignedDept}
-                              </div>
-                            )}
-                          </th>
-                        ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {users
-                      .filter((u) => u.isActive)
-                      .map((u) => (
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {users
+                    .filter((u) => u.isActive)
+                    .map((u) => {
+                      const alias = aliasByUserId.get(u.id);
+                      const heuristic = aliasIsHeuristic(u, alias);
+                      const linkedTo = alias ? draftLinks.get(alias.id) : undefined;
+                      return (
                         <tr key={u.id} className="hover:bg-[#F9FAFB]">
                           <td className="sticky left-0 z-10 bg-white px-3 py-1.5 border-b border-[#F3F4F6] whitespace-nowrap">
                             <div className="font-medium text-[#111827]">
@@ -1107,313 +1598,99 @@ export default function UsersPage() {
                             <div className="text-[10px] text-[#9CA3AF]">
                               {u.email}
                             </div>
+                            {/* Floating-alias repair: when this user's alias is
+                                matched only by the local-part heuristic (its
+                                assigned_user_id is NOT this user), offer a Link
+                                action in edit mode that PATCHes the real
+                                assigned_user_id on Save. */}
+                            {alias && heuristic && (
+                              <div className="mt-0.5">
+                                {mailEdit ? (
+                                  linkedTo === u.id ? (
+                                    <span className="inline-flex items-center gap-1 text-[10px] font-medium text-[#4F7C3A]">
+                                      <Link2 className="h-3 w-3" />
+                                      Will link {alias.address} on Save
+                                    </span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setDraftLinks((prev) =>
+                                          new Map(prev).set(alias.id, u.id),
+                                        )
+                                      }
+                                      className="inline-flex items-center gap-1 text-[10px] font-medium text-[#6B5C32] hover:underline"
+                                      title={`Permanently link ${alias.address} to this user (writes assigned_user_id)`}
+                                    >
+                                      <Link2 className="h-3 w-3" />
+                                      Link {alias.address}
+                                    </button>
+                                  )
+                                ) : (
+                                  <span
+                                    className="inline-flex items-center gap-1 text-[10px] text-[#B45309]"
+                                    title="Alias matched by name only — its assigned_user_id is not set. Click Edit to link it permanently."
+                                  >
+                                    <Link2 className="h-3 w-3" />
+                                    {alias.address} (matched by name)
+                                  </span>
+                                )}
+                              </div>
+                            )}
                           </td>
                           <td className="px-3 py-1.5 border-b border-[#F3F4F6] whitespace-nowrap">
                             <select
                               value={viewLevelFor(u.id)}
-                              onChange={(e) => setViewLevel(u.id, e.target.value)}
+                              disabled={!mailEdit}
+                              onChange={(e) => draftSetLevel(u.id, e.target.value)}
                               title="How wide this user's Mail Center inbox is"
-                              className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-xs text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+                              className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-xs text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] disabled:bg-[#F5F4F2] disabled:text-[#6B7280] disabled:cursor-not-allowed"
                             >
                               <option value="personal">Personal</option>
                               <option value="department">Department</option>
                               <option value="company">Company</option>
                             </select>
                           </td>
-                          {(addressesResp ?? [])
-                            .filter((a) => a.active)
-                            .map((a) => {
-                              const isPersonal = a.assignedUserId === u.id;
-                              const granted = isGranted(a.id, u.id);
-                              const on = isPersonal || granted;
-                              return (
-                                <td
-                                  key={a.id}
-                                  className="px-2 py-1.5 text-center border-b border-[#F3F4F6]"
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={on}
-                                    disabled={isPersonal}
-                                    onChange={() =>
-                                      toggleGrant(a.id, u.id, !granted)
-                                    }
-                                    title={
-                                      isPersonal
-                                        ? "Their own mailbox (always accessible)"
+                          {activeAddresses.map((a) => {
+                            const isPersonal = a.assignedUserId === u.id;
+                            const granted = isGranted(a.id, u.id);
+                            const on = isPersonal || granted;
+                            return (
+                              <td
+                                key={a.id}
+                                className="px-2 py-1.5 text-center border-b border-[#F3F4F6]"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={on}
+                                  disabled={isPersonal || !mailEdit}
+                                  onChange={() =>
+                                    draftToggleGrant(a.id, u.id, !granted)
+                                  }
+                                  title={
+                                    isPersonal
+                                      ? "Their own mailbox (always accessible)"
+                                      : !mailEdit
+                                        ? granted
+                                          ? "Has access — click Edit to change"
+                                          : "No access — click Edit to change"
                                         : granted
                                           ? "Click to revoke access"
                                           : "Click to grant access"
-                                    }
-                                    className="h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32] disabled:opacity-50"
-                                  />
-                                </td>
-                              );
-                            })}
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-      {/* =========================================================== */}
-      {/* 2. PENDING INVITES */}
-      {/* =========================================================== */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-3">
-            <Clock className="h-5 w-5 text-[#6B5C32]" />
-            <div>
-              <CardTitle>Pending Invites</CardTitle>
-              <CardDescription>
-                {loadingInvites
-                  ? "Loading…"
-                  : invites.length === 0
-                    ? "No pending invites"
-                    : `${invites.length} invite(s) awaiting acceptance`}
-              </CardDescription>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-[#E2DDD8] text-left">
-                  <Th>Email</Th>
-                  <Th>Invited by</Th>
-                  <Th>Sent</Th>
-                  <Th>Expires</Th>
-                  <Th className="text-right pr-2">Actions</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {loadingInvites ? (
-                  <tr>
-                    <td colSpan={5} className="py-6 text-center text-gray-500">
-                      <Loader2 className="h-4 w-4 animate-spin inline-block mr-2" />
-                      Loading…
-                    </td>
-                  </tr>
-                ) : invites.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="py-6 text-center text-gray-500">
-                      No pending invites — use the form below to invite
-                      someone.
-                    </td>
-                  </tr>
-                ) : (
-                  invites.map((inv) => (
-                    <tr
-                      key={inv.token}
-                      className="border-b border-[#F0ECE9] hover:bg-[#FAF9F8]"
-                    >
-                      <Td>
-                        <div className="flex flex-col">
-                          <span className="font-medium">{inv.email}</span>
-                          {inv.displayName && (
-                            <span className="text-xs text-gray-500">
-                              {inv.displayName}
-                            </span>
-                          )}
-                        </div>
-                      </Td>
-                      <Td>{inv.inviterName || "—"}</Td>
-                      <Td className="text-gray-600">
-                        {inv.emailSentAt ? (
-                          fmtDateTime(inv.emailSentAt)
-                        ) : (
-                          <span className="text-xs text-amber-700">
-                            not sent
-                          </span>
-                        )}
-                      </Td>
-                      <Td className="text-gray-600">
-                        {fmtRelativeExpiry(inv.expiresAt)}
-                      </Td>
-                      <Td className="text-right pr-2">
-                        <div className="inline-flex gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => copyInviteLink(inv.token)}
-                            title="Copy invite link"
-                          >
-                            <Copy className="h-3.5 w-3.5" />
-                          </Button>
-                          {canManageUsers && (
-                            <>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => resendInvite(inv)}
-                                disabled={resendingToken === inv.token}
-                                title="Resend email"
-                              >
-                                <RefreshCw
-                                  className={
-                                    "h-3.5 w-3.5" +
-                                    (resendingToken === inv.token
-                                      ? " animate-spin"
-                                      : "")
                                   }
+                                  className="h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32] disabled:opacity-50 disabled:cursor-not-allowed"
                                 />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => revokeInvite(inv)}
-                                title="Revoke"
-                              >
-                                <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                              </Button>
-                            </>
-                          )}
-                        </div>
-                      </Td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* =========================================================== */}
-      {/* 3. SEND NEW INVITE — Super Admin only (POST /invite is gated by
-          requireSuperAdmin). An Admin never sees the form. */}
-      {/* =========================================================== */}
-      {canManageUsers && (
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-3">
-            <UserPlus className="h-5 w-5 text-[#6B5C32]" />
-            <div>
-              <CardTitle>Send New Invite</CardTitle>
-              <CardDescription>
-                Recipient receives an email with a 72-hour acceptance link.
-              </CardDescription>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
             </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={submitInvite} className="space-y-4 max-w-2xl">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1 uppercase tracking-wide">
-                  Email
-                </label>
-                <div className="relative">
-                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
-                  <Input
-                    type="email"
-                    placeholder="new-admin@hookka.com"
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.target.value)}
-                    className="pl-9"
-                    autoComplete="off"
-                    required
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1 uppercase tracking-wide">
-                  Display Name
-                </label>
-                <Input
-                  type="text"
-                  placeholder="Jane Doe"
-                  value={inviteDisplayName}
-                  onChange={(e) => setInviteDisplayName(e.target.value)}
-                  autoComplete="off"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1 uppercase tracking-wide">
-                  Role
-                </label>
-                <select
-                  value={inviteRole}
-                  onChange={(e) => setInviteRole(e.target.value)}
-                  className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
-                >
-                  {ROLE_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {inviteResult && (
-              <div
-                className={
-                  "rounded-md px-4 py-3 text-sm space-y-2 " +
-                  (inviteResult.kind === "ok"
-                    ? "bg-[#EEF3E4] border border-[#C6DBA8] text-[#4F7C3A]"
-                    : "bg-[#FCE4E4] border border-[#E8B2A1] text-[#9A3A2D]")
-                }
-              >
-                <div className="flex items-center gap-2 font-medium">
-                  {inviteResult.kind === "ok" ? (
-                    <CheckCircle2 className="h-4 w-4" />
-                  ) : (
-                    <XCircle className="h-4 w-4" />
-                  )}
-                  {inviteResult.message}
-                </div>
-                {inviteResult.inviteUrl && !inviteResult.emailSent && (
-                  <div className="flex items-center gap-2">
-                    <input
-                      readOnly
-                      value={inviteResult.inviteUrl}
-                      onFocus={(e) => e.currentTarget.select()}
-                      className="flex-1 rounded border border-[#C6DBA8] bg-white px-2 py-1 text-xs text-[#1F1D1B]"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={async () => {
-                        try {
-                          await navigator.clipboard.writeText(
-                            inviteResult.inviteUrl!,
-                          );
-                          showFlash("ok", "Link copied");
-                        } catch {
-                          showFlash("err", "Clipboard blocked");
-                        }
-                      }}
-                    >
-                      <Copy className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="flex justify-end pt-2">
-              <Button
-                type="submit"
-                variant="primary"
-                disabled={inviteSubmitting}
-              >
-                {inviteSubmitting ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Send className="h-4 w-4" />
-                )}
-                {inviteSubmitting ? "Sending…" : "Send Invite"}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
       )}
 
       {/* =========================================================== */}
@@ -1660,8 +1937,11 @@ export default function UsersPage() {
                 className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
               >
                 <option value="Support">Support (Operations &amp; others)</option>
-                <option value="Finance">Finance</option>
-                <option value="HR">HR</option>
+                {DEPT_OPTIONS.filter((d) => d !== "Support").map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
               </select>
               <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide pt-2">
                 Position

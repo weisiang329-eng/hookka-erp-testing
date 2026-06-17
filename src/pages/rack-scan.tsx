@@ -19,8 +19,12 @@
 // tick that feeds frames to the phone's native BarcodeDetector when present,
 // else jsQR (QR) + a lazily dynamic-imported ZXing decoder (QR + Code 128).
 // No auto-zoom (kept simple); an optional torch toggle where the lens supports
-// it. The barcode ROI keeps the ~0.20 height-band invariant from the worker
-// page — a taller band breaks Code 128 decoding.
+// it. BOTH modes decode the FULL frame — QR reads a Code 128 fine precisely
+// because it is full-frame, so barcode mode matches it (no cropped ROI). A
+// short ~80ms WebAudio blip confirms every successful add ("滴"); a lower
+// double tone signals not-recognised / wrong-rack. The scanner stays open and
+// keeps decoding after each hit so items are scanned continuously, with a
+// per-value de-dup so one held sticker adds exactly once.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
@@ -67,10 +71,11 @@ type PendingMove = {
 };
 
 // ── Camera scanner (trimmed copy of /worker/scan) ─────────────────────────
-// Decode-mode toggle: "qr" reads a square sticker full-frame; "barcode" draws a
-// wide, short reticle and decodes ONLY the row centred in that band so stacked
-// Code 128 rows don't all fire. The 0.20 ROI-height band is a known invariant —
-// a too-tall band breaks Code 128 decoding (see worker/scan.tsx).
+// Decode-mode toggle: "qr" reads a square sticker, "barcode" a Code 128. BOTH
+// decode the FULL video frame — QR mode reads a Code 128 today only because it
+// is full-frame, and a cropped ROI was what stopped barcode mode decoding, so
+// barcode mode matches QR exactly. The toggle now only swaps the reticle shape
+// + the native-detector format hint; the captured pixels are identical.
 type ScanMode = "qr" | "barcode";
 
 export default function RackScanPage() {
@@ -112,17 +117,86 @@ export default function RackScanPage() {
   // De-dupe the decode→lookup pipeline: a single sticker held in frame fires
   // many frames; remember the last raw value + when, so we don't spam the
   // backend or double-count. A different value, or the same value after a short
-  // cooldown, is allowed through.
+  // cooldown (DEDUP_MS), is allowed through. Set SYNCHRONOUSLY on the very first
+  // hit (before any await) so two back-to-back frames can't both pass — this is
+  // the guard that stops one physical scan adding a line twice.
   const lastRawRef = useRef<{ value: string; at: number }>({ value: "", at: 0 });
-  // A lookup is in flight — gate the loop so frames don't pile up requests.
+  // A lookup is in flight — gate so frames decoded during the async round-trip
+  // don't pile up requests (belt-and-braces with the value de-dup).
   const lookupBusyRef = useRef(false);
+  // Lazily-created WebAudio context for the scan "滴" blip. Created on the first
+  // user gesture (Start / tapping the video) so autoplay policy lets it sound;
+  // null until then. Reused for every beep thereafter.
+  const audioCtxRef = useRef<AudioContext | null>(null);
   // scanMode mirrored to a ref so the long-lived tick loop reads the current
-  // mode without being torn down on every toggle (the effect still re-runs on
-  // scanMode to swap the reticle, but the closure stays in sync regardless).
+  // mode without being torn down on every toggle. The loop effect deliberately
+  // omits scanMode from its deps; this ref keeps the running closure in sync so
+  // QR/Barcode switches take effect on the very next frame, camera uninterrupted.
   const scanModeRef = useRef<ScanMode>(scanMode);
   useEffect(() => {
     scanModeRef.current = scanMode;
   }, [scanMode]);
+
+  // Ignore the SAME decoded string for this long so one barcode held in frame
+  // adds exactly once; a DIFFERENT item passes immediately.
+  const DEDUP_MS = 1500;
+
+  // ── Scan feedback beep ("滴") ─────────────────────────────────────────────
+  // Lazily create one AudioContext on a user gesture, then play a short tone.
+  // `ok` → a single bright ~880Hz blip (the "滴" the owner wants on every add);
+  // not-ok → a lower, doubled tone for "not recognised" / "wrong rack". Wrapped
+  // in try/catch so audio never breaks scanning on a locked-down browser.
+  const ensureAudio = useCallback(() => {
+    if (audioCtxRef.current) return audioCtxRef.current;
+    try {
+      const Ctor =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+      if (!Ctor) return null;
+      audioCtxRef.current = new Ctor();
+    } catch {
+      audioCtxRef.current = null;
+    }
+    return audioCtxRef.current;
+  }, []);
+
+  const beep = useCallback(
+    (ok: boolean) => {
+      try {
+        const ctx = ensureAudio();
+        if (!ctx) return;
+        // A gesture-created context can still be suspended on iOS — resume it.
+        if (ctx.state === "suspended") void ctx.resume();
+        const play = (freq: number, startAt: number, durMs: number) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.value = freq;
+          // Tiny attack/decay envelope so the blip doesn't click.
+          gain.gain.setValueAtTime(0.0001, startAt);
+          gain.gain.exponentialRampToValueAtTime(0.32, startAt + 0.008);
+          gain.gain.exponentialRampToValueAtTime(
+            0.0001,
+            startAt + durMs / 1000,
+          );
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(startAt);
+          osc.stop(startAt + durMs / 1000 + 0.02);
+        };
+        const t0 = ctx.currentTime;
+        if (ok) {
+          play(880, t0, 80); // single bright "滴"
+        } else {
+          play(300, t0, 110); // lower, doubled → clearly "not added"
+          play(300, t0 + 0.16, 110);
+        }
+      } catch {
+        /* audio is best-effort — never break the scan over it */
+      }
+    },
+    [ensureAudio],
+  );
 
   const ensureZxing = useCallback((): Promise<void> => {
     if (zxingRef.current) return Promise.resolve();
@@ -234,17 +308,23 @@ export default function RackScanPage() {
   const handleDecoded = useCallback(
     async (raw: string) => {
       if (!rackId || !raw) return;
-      // De-dupe: ignore the same raw value fired again within 1.2s (a sticker
-      // sits in frame for many ticks). A genuine re-scan after the cooldown,
-      // or a different sticker, passes — qty bumps happen via addLine, not here.
+      // De-dupe (PROBLEM 3 — one scan must add exactly once): ignore the same
+      // raw value fired again within DEDUP_MS (a held sticker decodes every
+      // frame). This check + the synchronous ref write below run BEFORE any
+      // await, so two back-to-back frames carrying the same code can't both get
+      // past it. A different sticker, or the same one after the cooldown,
+      // passes — qty bumps then happen via addLine, never a duplicate line.
       const now = performance.now();
       if (
         raw === lastRawRef.current.value &&
-        now - lastRawRef.current.at < 1200
+        now - lastRawRef.current.at < DEDUP_MS
       ) {
         return;
       }
+      // Claim this value synchronously (no await in between) — the de-dup gate.
       lastRawRef.current = { value: raw, at: now };
+      // Second guard: a lookup already in flight (the async round-trip) — drop
+      // this frame entirely so requests can't pile up.
       if (lookupBusyRef.current) return;
       lookupBusyRef.current = true;
       try {
@@ -260,6 +340,7 @@ export default function RackScanPage() {
           // Keep the message short — show the human label if the raw is long.
           const shown = raw.length > 28 ? `${raw.slice(0, 28)}…` : raw;
           setScanMsg(`Not recognised: ${shown}`);
+          beep(false);
           return;
         }
         const name = j.productName || j.poNo || "Item";
@@ -270,26 +351,31 @@ export default function RackScanPage() {
           qty: 1,
         };
         // In a DIFFERENT rack → park for a Move / Skip decision. (Equal rack
-        // ids, or no current rack, just add — see below.)
+        // ids, or no current rack, just add — see below.) Lower tone: nothing
+        // was added yet, the worker must choose Move / Skip.
         if (j.currentRackId && j.currentRackId !== rackId) {
           setScanMsg(null);
           setPendingMove({
             line,
             currentRackLabel: j.currentRackLabel || j.currentRackId,
           });
+          beep(false);
           return;
         }
-        // Already in THIS rack, or not racked anywhere → add / bump qty.
+        // Already in THIS rack, or not racked anywhere → add / bump qty + "滴".
         setPendingMove(null);
         addLine(line);
         setScanMsg(`Added: ${name}`);
+        beep(true);
       } catch {
         setScanMsg("Network error — scan again.");
+        // Allow an immediate retry of this same value after a network blip.
+        lastRawRef.current = { value: "", at: 0 };
       } finally {
         lookupBusyRef.current = false;
       }
     },
-    [rackId, addLine],
+    [rackId, addLine, beep],
   );
 
   // ── Camera control ───────────────────────────────────────────────────────
@@ -335,6 +421,10 @@ export default function RackScanPage() {
     if (scanning) return;
     setCameraError(null);
     setScanMsg(null);
+    // Prime the AudioContext on this user gesture so the scan "滴" can sound
+    // (browser autoplay policy blocks audio created outside a gesture).
+    const ac = ensureAudio();
+    if (ac && ac.state === "suspended") void ac.resume();
     try {
       // Rear camera, sharp feed — small / arm's-length stickers need the detail.
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -376,10 +466,12 @@ export default function RackScanPage() {
           : "Could not open the camera. Make sure no other app is using it and that this page is on https.",
       );
     }
-  }, [scanning]);
+  }, [scanning, ensureAudio]);
 
   // Wire the stream into <video> and run the per-frame decode loop while
-  // scanning. Re-runs on scanMode to swap the reticle / decode path.
+  // scanning. Deliberately does NOT depend on scanMode — the loop reads the
+  // live mode via scanModeRef, so toggling QR/Barcode never tears down the
+  // camera (a teardown would drop the in-flight scan and re-prompt).
   useEffect(() => {
     if (!scanning) return;
     const video = videoRef.current;
@@ -418,25 +510,12 @@ export default function RackScanPage() {
     let lastDecode = 0;
     const THROTTLE_MS = nativeDetector ? 60 : 90;
 
-    // Map the on-screen aim box to a crop rect in RAW VIDEO pixels for barcode
-    // mode. FULL WIDTH (a Code 128 only decodes with its entire width + quiet
-    // zones present), TIGHT centred HEIGHT band (~0.20 of the frame) so stacked
-    // rows above/below are excluded. The 0.20 band is a known invariant — a
-    // taller band breaks Code 128 decoding (worker/scan.tsx).
-    const aimRoi = () => {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      const sh = Math.max(1, Math.round(vh * 0.2));
-      const sw = vw;
-      const sx = 0;
-      const sy = Math.round((vh - sh) / 2);
-      return { sx, sy, sw, sh };
-    };
-
+    // Feed a decoded value to the lookup. The scanner stays OPEN — each hit
+    // adds an item and the loop keeps decoding so the next item scans straight
+    // away (PROBLEM 1: continuous scan). handleDecoded de-dupes a held sticker
+    // so one physical scan adds exactly once (PROBLEM 3).
     const onHit = (data: string) => {
       if (stopped || !data) return;
-      // The scanner stays OPEN — each hit feeds the lookup and the worker keeps
-      // scanning more items into the rack. handleDecoded de-dupes a held sticker.
       void handleDecoded(data);
     };
 
@@ -444,6 +523,12 @@ export default function RackScanPage() {
       if (stopped) return;
       const now = performance.now();
       const mode = scanModeRef.current;
+      // The decoded value for THIS frame, if any. We set it then fall through
+      // to the single RAF reschedule at the bottom — crucially we never early-
+      // `return` on a hit, which is exactly what used to kill the loop after
+      // the first item (PROBLEM 1). onHit + the de-dup window make a repeat of
+      // the same frame's value a no-op, so falling through is safe.
+      let hit: string | null = null;
       if (
         now - lastDecode >= THROTTLE_MS &&
         video.videoWidth > 0 &&
@@ -455,28 +540,37 @@ export default function RackScanPage() {
             const codes = await nativeDetector.detect(video);
             if (stopped) return;
             if (mode === "barcode") {
-              // Only a Code 128 whose vertical centre sits in the aim band, and
-              // among those the one nearest centre wins — stacked rows ignored.
+              // FULL FRAME (PROBLEM 4): among Code 128 codes anywhere in the
+              // frame, pick the one NEAREST the centre. No band / position
+              // rejection — exactly how QR mode reads this same code today.
+              const cx = video.videoWidth / 2;
               const cy = video.videoHeight / 2;
-              const roiHalf = aimRoi().sh / 2;
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
                 const fmt = (c as { format?: string }).format;
                 if (fmt && fmt !== "code_128") continue;
-                const bb = (c as { boundingBox?: { y: number; height: number } })
-                  .boundingBox;
-                const d = bb ? Math.abs(bb.y + bb.height / 2 - cy) : 0;
-                if (bb && d > roiHalf) continue; // outside the aim band → ignore
+                const bb = (
+                  c as {
+                    boundingBox?: {
+                      x: number;
+                      y: number;
+                      width: number;
+                      height: number;
+                    };
+                  }
+                ).boundingBox;
+                const d = bb
+                  ? Math.hypot(
+                      bb.x + bb.width / 2 - cx,
+                      bb.y + bb.height / 2 - cy,
+                    )
+                  : 0;
                 if (!best || d < best.d) best = { v: c.rawValue, d };
               }
-              if (best) {
-                onHit(best.v);
-                return;
-              }
+              if (best) hit = best.v;
             } else if (codes.length > 0 && codes[0].rawValue) {
-              onHit(codes[0].rawValue);
-              return;
+              hit = codes[0].rawValue;
             }
           } catch {
             // Exposed but flaky — drop to the canvas path for the rest of the session.
@@ -487,68 +581,45 @@ export default function RackScanPage() {
           const vh = video.videoHeight;
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
-            if (mode === "barcode") {
-              // Decode ONLY the centred ROI band (matches the on-screen box):
-              // full width, ~0.20 height. ~5x fewer pixels than the full frame
-              // (fast on iOS Safari) and excludes neighbouring stacked rows.
-              const { sx, sy, sw, sh } = aimRoi();
-              const s = Math.min(1, 1280 / sw);
-              const cw = Math.max(1, Math.round(sw * s));
-              const ch = Math.max(1, Math.round(sh * s));
-              canvas.width = cw;
-              canvas.height = ch;
-              ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
-              let imageData: ImageData | null = null;
-              try {
-                imageData = ctx.getImageData(0, 0, cw, ch);
-              } catch {
-                imageData = null;
-              }
-              const zxDecode = zxingRef.current;
-              if (!zxDecode) {
-                void ensureZxing(); // self-heal if the chunk hasn't loaded yet
-              } else if (imageData) {
-                const zxText = zxDecode(imageData);
-                if (zxText) {
-                  onHit(zxText);
-                  return;
-                }
-              }
-            } else {
-              // QR mode: full frame, jsQR first then ZXing (QR + Code 128).
-              const scale = Math.min(1, 960 / Math.max(vw, vh));
-              const cw = Math.max(1, Math.round(vw * scale));
-              const ch = Math.max(1, Math.round(vh * scale));
-              canvas.width = cw;
-              canvas.height = ch;
-              ctx.drawImage(video, 0, 0, cw, ch);
-              let imageData: ImageData | null = null;
-              try {
-                imageData = ctx.getImageData(0, 0, cw, ch);
-              } catch {
-                imageData = null;
-              }
-              if (imageData) {
+            // Both modes capture the SAME full frame. Barcode keeps a wider
+            // working width (~1280px) so Code 128 bars stay sharp; QR is fine
+            // smaller. jsQR (QR only) runs first, then ZXing (QR + Code 128).
+            const targetW = mode === "barcode" ? 1280 : 960;
+            const scale = Math.min(1, targetW / Math.max(vw, vh));
+            const cw = Math.max(1, Math.round(vw * scale));
+            const ch = Math.max(1, Math.round(vh * scale));
+            canvas.width = cw;
+            canvas.height = ch;
+            ctx.drawImage(video, 0, 0, cw, ch);
+            let imageData: ImageData | null = null;
+            try {
+              imageData = ctx.getImageData(0, 0, cw, ch);
+            } catch {
+              imageData = null;
+            }
+            if (imageData) {
+              if (mode !== "barcode") {
                 const code = jsQR(imageData.data, cw, ch, {
                   inversionAttempts: "attemptBoth",
                 });
-                if (code && code.data) {
-                  onHit(code.data);
-                  return;
-                }
+                if (code && code.data) hit = code.data;
+              }
+              if (!hit) {
                 const zxDecode = zxingRef.current;
-                if (zxDecode) {
+                if (!zxDecode) {
+                  void ensureZxing(); // self-heal if the chunk hasn't loaded yet
+                } else {
                   const zxText = zxDecode(imageData);
-                  if (zxText) {
-                    onHit(zxText);
-                    return;
-                  }
+                  if (zxText) hit = zxText;
                 }
               }
             }
           }
         }
       }
+      if (hit) onHit(hit);
+      // ALWAYS reschedule — the loop must keep running after a hit so the next
+      // item scans immediately (PROBLEM 1).
       rafRef.current = requestAnimationFrame(() => void tick());
     };
     rafRef.current = requestAnimationFrame(() => void tick());
@@ -566,6 +637,16 @@ export default function RackScanPage() {
   useEffect(() => {
     return () => {
       stopScan();
+      // Release the WebAudio context on unmount (browsers cap how many exist).
+      const ac = audioCtxRef.current;
+      if (ac) {
+        audioCtxRef.current = null;
+        try {
+          void ac.close();
+        } catch {
+          /* */
+        }
+      }
     };
   }, [stopScan]);
 
@@ -577,13 +658,14 @@ export default function RackScanPage() {
           // Add the line — the backend stock-in performs the actual move.
           addLine(cur.line);
           setScanMsg(`Moving here: ${cur.line.productName}`);
+          beep(true); // confirmed add → the same "滴"
         } else if (cur) {
           setScanMsg(`Skipped: ${cur.line.productName}`);
         }
         return null;
       });
     },
-    [addLine],
+    [addLine, beep],
   );
 
   const removeLine = useCallback((line: Line) => {
@@ -726,13 +808,21 @@ export default function RackScanPage() {
                     playsInline
                     muted
                   />
-                  {/* Aim reticle. The barcode box dims (full-width feel + short
-                      band) cue the ~0.20 ROI; QR shows a centred square. */}
-                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                  {/* Aim reticle — a visual guide only; BOTH modes decode the
+                      full frame, so the worker just needs the code roughly in
+                      view. A wide box for a barcode, a square for a QR. Tapping
+                      the overlay also (re)primes the beep audio on iOS. */}
+                  <div
+                    onClick={() => {
+                      const ac = ensureAudio();
+                      if (ac && ac.state === "suspended") void ac.resume();
+                    }}
+                    className="absolute inset-0 flex items-center justify-center"
+                  >
                     {scanMode === "barcode" ? (
-                      <div className="w-[86vw] max-w-[440px] h-[88px] rounded-lg border-2 border-white/90 shadow-[0_0_0_2000px_rgba(0,0,0,0.35)]" />
+                      <div className="pointer-events-none w-[86vw] max-w-[440px] h-[88px] rounded-lg border-2 border-white/90 shadow-[0_0_0_2000px_rgba(0,0,0,0.35)]" />
                     ) : (
-                      <div className="w-[66vw] max-w-[300px] aspect-square rounded-lg border-2 border-white/90 shadow-[0_0_0_2000px_rgba(0,0,0,0.35)]" />
+                      <div className="pointer-events-none w-[66vw] max-w-[300px] aspect-square rounded-lg border-2 border-white/90 shadow-[0_0_0_2000px_rgba(0,0,0,0.35)]" />
                     )}
                   </div>
                   {/* Top controls: close + torch. */}

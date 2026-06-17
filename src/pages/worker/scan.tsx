@@ -702,38 +702,47 @@ export default function WorkerScanPage() {
           });
           return;
         }
+        // Only FG/packing stickers (op=FG-*) stock IN here. A dept-changeover QR
+        // or a WIP job-card barcode must STILL do its normal action even with the
+        // rack panel open — otherwise a worker who forgot to tap 退出 silently
+        // loses a dept clock-in or a WIP completion (audit C1, 2026-06-17). So if
+        // this isn't an FG sticker, DON'T return — fall through to the handlers
+        // below.
         const rs0 = parseStickerData(raw);
-        const term = rs0?.poNo || parseJobCardBarcode(raw) || raw;
-        let order: Order | undefined;
-        try {
-          order = (await findMatches(term))[0]?.order;
-        } catch {
-          order = undefined;
-        }
-        if (!order) {
-          setRackStockMsg(`未识别: ${term}`);
+        const isFgSticker = !!rs0?.opId && /^FG-/i.test(rs0.opId);
+        if (isFgSticker && rs0?.poNo) {
+          let order: Order | undefined;
+          try {
+            order = (await findMatches(rs0.poNo))[0]?.order;
+          } catch {
+            order = undefined;
+          }
+          if (!order) {
+            setRackStockMsg(`未识别: ${rs0.poNo}`);
+            return;
+          }
+          const matched = order;
+          setRackStockMsg("");
+          setRackStockIn((prev) => {
+            if (!prev) return prev;
+            const items = [...prev.items];
+            const i = items.findIndex((x) => x.poId === matched.id);
+            if (i >= 0) {
+              items[i] = { ...items[i], qty: items[i].qty + 1 };
+            } else {
+              items.push({
+                poId: matched.id,
+                poNo: matched.poNo,
+                productCode: matched.productCode,
+                productName: matched.productName || matched.productCode,
+                qty: 1,
+              });
+            }
+            return { ...prev, items };
+          });
           return;
         }
-        const matched = order;
-        setRackStockMsg("");
-        setRackStockIn((prev) => {
-          if (!prev) return prev;
-          const items = [...prev.items];
-          const i = items.findIndex((x) => x.poId === matched.id);
-          if (i >= 0) {
-            items[i] = { ...items[i], qty: items[i].qty + 1 };
-          } else {
-            items.push({
-              poId: matched.id,
-              poNo: matched.poNo,
-              productCode: matched.productCode,
-              productName: matched.productName || matched.productCode,
-              qty: 1,
-            });
-          }
-          return { ...prev, items };
-        });
-        return;
+        // Not a stock-in item → fall through to dept-scan / WIP / normal lookup.
       }
       // Department QR (deptscan=<CODE> in the QR's URL) — not a job card.
       // Tells payroll "I am now working in this department"; handled before

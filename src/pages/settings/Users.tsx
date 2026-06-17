@@ -192,6 +192,10 @@ export default function UsersPage() {
   // by requireSuperAdmin). Explicit Create button — never auto-save.
   const [aliasForUser, setAliasForUser] = useState<UserRow | null>(null);
   const [aliasAddress, setAliasAddress] = useState("");
+  // Department the mailbox is grouped under (owner 2026-06-17): HR people → HR,
+  // Finance people → Finance, Operations + everyone else → Support. Posted as
+  // assignedDept (the email_addresses table has an assigned_dept column).
+  const [aliasDept, setAliasDept] = useState("Support");
   const [aliasSubmitting, setAliasSubmitting] = useState(false);
   const [aliasError, setAliasError] = useState<string | null>(null);
 
@@ -440,6 +444,7 @@ export default function UsersPage() {
           address,
           assignedUserId: target.id,
           assignedUserName: target.displayName || target.email,
+          assignedDept: aliasDept,
         }),
       });
       // Mail Center returns the created row directly (201), or
@@ -739,6 +744,7 @@ export default function UsersPage() {
                               onClick={() => {
                                 setAliasForUser(u);
                                 setAliasAddress(suggestAlias(u));
+                                setAliasDept("Support");
                                 setAliasError(null);
                               }}
                               title="Create @hookka.com alias"
@@ -1311,6 +1317,18 @@ export default function UsersPage() {
               <p className="text-xs text-gray-500">
                 Must end with @hookka.com. Edit the suggestion if needed.
               </p>
+              <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide pt-2">
+                部门 / Department
+              </label>
+              <select
+                value={aliasDept}
+                onChange={(e) => setAliasDept(e.target.value)}
+                className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+              >
+                <option value="Support">Support (Operations &amp; 其他)</option>
+                <option value="Finance">Finance</option>
+                <option value="HR">HR</option>
+              </select>
               {aliasError && (
                 <p className="text-xs text-red-600">{aliasError}</p>
               )}

@@ -2799,19 +2799,39 @@ app.post("/rack-bulk-stock-in", async (c) => {
       );
     }
 
+    // Rack existence check (audit M1) — a stale/deleted HKRACK token would
+    // otherwise 500 on the rack_items FK; return a clean 404 instead.
+    const rack = await c.var.DB.prepare(
+      "SELECT id FROM rack_locations WHERE id = ? LIMIT 1",
+    )
+      .bind(rackLocationId)
+      .first<{ id: string }>();
+    if (!rack) {
+      return c.json({ ok: false, error: "rack not found" }, 404);
+    }
+
     const today = new Date().toISOString().split("T")[0];
+    const now = new Date().toISOString();
+    // Atomic (audit H1): build EVERY write into one db.batch() so a mid-loop
+    // failure can't half-stock the rack, and a retry can't double-insert
+    // (inflating inventory). Mirrors the admin replaceRackItems pattern
+    // (routes/warehouse.ts), which uses the same transactional batch.
+    const statements: D1PreparedStatement[] = [];
     for (const item of items) {
       const qty = item.qty ?? 1;
+      // production_order_id stored NULL (not "") when absent, consistent with the
+      // movement row + so the movements-view PO JOIN reads "no document".
+      const poId = item.productionOrderId || null;
       // rack_items.id is BIGSERIAL — not supplied here.
-      await c.var.DB.prepare(
-        `INSERT INTO rack_items (rackLocationId, productionOrderId,
-           productCode, productName, sizeLabel, customerName, qty,
-           stockedInDate, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(
+      statements.push(
+        c.var.DB.prepare(
+          `INSERT INTO rack_items (rackLocationId, productionOrderId,
+             productCode, productName, sizeLabel, customerName, qty,
+             stockedInDate, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
           rackLocationId,
-          item.productionOrderId ?? "",
+          poId,
           item.productCode ?? "",
           item.productName ?? "",
           item.sizeLabel ?? "",
@@ -2819,38 +2839,35 @@ app.post("/rack-bulk-stock-in", async (c) => {
           qty,
           today,
           "",
-        )
-        .run();
-
-      await c.var.DB.prepare(
-        `INSERT INTO stock_movements (id, type, rackLocationId, rackLabel,
-           productionOrderId, productCode, productName, quantity, reason,
-           performedBy, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(
+        ),
+      );
+      statements.push(
+        c.var.DB.prepare(
+          `INSERT INTO stock_movements (id, type, rackLocationId, rackLabel,
+             productionOrderId, productCode, productName, quantity, reason,
+             performedBy, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
           genId("sm"),
           "STOCK_IN",
           rackLocationId,
           rackLocationId,
-          // NULL (not "") when there's no PO link, so the production_orders
-          // JOIN on the movements view reads as "no document".
-          item.productionOrderId || null,
+          poId,
           item.productCode ?? "",
           item.productName ?? "",
           qty,
           "Bulk stock-in (scan)",
           worker.name,
-          new Date().toISOString(),
-        )
-        .run();
+          now,
+        ),
+      );
     }
-
-    await c.var.DB.prepare(
-      "UPDATE rack_locations SET status = 'OCCUPIED' WHERE id = ?",
-    )
-      .bind(rackLocationId)
-      .run();
+    statements.push(
+      c.var.DB
+        .prepare("UPDATE rack_locations SET status = 'OCCUPIED' WHERE id = ?")
+        .bind(rackLocationId),
+    );
+    await c.var.DB.batch(statements);
 
     return c.json({ ok: true, count: items.length });
   } catch (error) {

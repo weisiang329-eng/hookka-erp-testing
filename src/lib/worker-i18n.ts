@@ -274,10 +274,10 @@ const dict: Dict = {
     my: 'ကင်မရာကို QR သို့မဟုတ် ဘားကုဒ်ပေါ် ချိန်ပါ — နှစ်မျိုးလုံး အလိုအလျောက် ဖတ်သည်။',
   },
   'scan.aimHintBarcode': {
-    en: 'Line up ONE barcode inside the box — only the centred one is read.',
-    ms: 'Jajarkan SATU barkod dalam kotak — hanya yang di tengah dibaca.',
-    zh: '把一个条形码对进框里 —— 只读中间那一条。',
-    my: 'ဘားကုဒ် တစ်ခုကို ဘောင်ထဲ ချိန်ပါ — အလယ်ကသာ ဖတ်သည်။',
+    en: 'Tap the barcode row you want — only that row is read.',
+    ms: 'Ketik baris barkod yang anda mahu — hanya baris itu dibaca.',
+    zh: '点你要扫的那一行 —— 只读你点的那一条。',
+    my: 'သင်လိုချင်သော ဘားကုဒ်လိုင်းကို တို့ပါ — ထိုလိုင်းကိုသာ ဖတ်သည်။',
   },
   'scan.modeQr': {
     en: 'QR mode',

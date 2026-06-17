@@ -1226,42 +1226,22 @@ export default function WorkerScanPage() {
     let bcN = 0;
     let bcLast = "";
     let bcDbgAt = 0;
-    // Barcode aim model (owner 2026-06-18, FINAL — ends the 20-round cycle).
-    // The printed schedule stacks Code 128s ~1cm apart. The aim bias toward the
-    // worker's row is done by SELECTION ONLY, never by rejection:
-    //   - Native: the loop below picks the SINGLE code whose bbox centre is
-    //     nearest the frame centre and hands ONLY that one to considerHit.
-    //   - ZXing: returns the one code it locked.
-    // considerHit then fires it INSTANTLY — same as QR mode. There is no band
-    // reject and no same-value hold anywhere on the barcode path, so a valid
-    // decode can NEVER be zeroed out → it is structurally impossible to regress
-    // to "扫不到". Selection biases toward centre but always yields a code when
-    // one is decoded, so it cannot starve either. If the wrong neighbour is ever
-    // grabbed, the worker simply moves the centre over the right row (selection
-    // re-targets next tick) and the human Complete-confirm step catches it. The
-    // FULL frame is still DECODED on both paths (never crop the input — that was
-    // every "扫不到" regression). See [[project_hookka_barcode_roi]].
-    // considerHit fires onHit IMMEDIATELY for the code it is given — in BOTH
-    // modes. It NEVER rejects, never waits, never holds. This is the deliberate,
-    // final end to the 20-round "barcode 扫不到 vs grabs-neighbour" oscillation
-    // (owner 2026-06-18). The two old gates here — a hard `|cy-0.5|>0.16` reject
-    // and a 400ms same-value hold — could each zero out a perfectly valid decode:
-    // on the stacked printed schedule the nearest-centre winner FLICKERS between
-    // adjacent ~1cm rows every tick, so the hold's same-value clock never reached
-    // 400ms and onHit never fired → "完全没有反应". QR mode never had either gate,
-    // which is the ENTIRE reason QR read the same Code 128 in <0.5s and barcode
-    // was dead. So we delete both gates and fire instantly, exactly like QR.
-    //
-    // Aim bias is NOT lost: it is now done purely by SELECTION upstream — the
-    // native loop (below) hands considerHit only the SINGLE code nearest the
-    // frame centre, and ZXing returns the one code it locked. Selecting the
-    // centre-most code can bias toward the aimed row but can NEVER reject every
-    // code, so it is structurally impossible to regress to "扫不到". Final
-    // correctness leans on the human Complete-confirm step after the scan.
-    // `cy` is accepted for signature compatibility but intentionally unused.
+    // Barcode = TAP-TO-PICK (owner 2026-06-18). The printed schedule stacks 3-4
+    // Code 128s ~1cm apart, ALL near frame centre — so NO automatic rule can win:
+    // instant-fire grabbed a NEIGHBOUR before the worker aimed, and any hold never
+    // completed because the nearest-centre winner FLICKERS between the stacked rows
+    // (→ "完全没有反应"). Both poles are unwinnable for AUTO selection on a dense
+    // stack. So barcode mode does NOT auto-fire from this loop at all: the worker
+    // TAPS the exact row he wants and `tapScanBarcode` decodes a FULL-WIDTH band
+    // around the tap (one-shot — a thin band on a deliberate tap can NEVER cause
+    // the continuous "扫不到" an always-on crop did; a miss just buzzes for a
+    // re-tap). The loop below still decodes but considerHit ignores it in barcode
+    // mode. QR mode is unchanged: one sticker in view → fire on first decode.
+    // See [[project_hookka_barcode_roi]].
     const considerHit = (data: string, _cy = 0.5) => {
       if (stopped || !data) return;
-      onHit(data); // instant, full-frame, no band reject, no hold — both modes
+      if (scanMode === "barcode") return; // barcode fires ONLY via tapScanBarcode
+      onHit(data); // QR: instant, full-frame
     };
 
     const tick = async () => {
@@ -1547,6 +1527,102 @@ export default function WorkerScanPage() {
       }
     },
     [handleDecoded, t, ensureZxing],
+  );
+
+  // Barcode TAP-TO-PICK: the worker taps the exact barcode row he wants on a
+  // stacked schedule; we decode a FULL-WIDTH band (~22% height) around the tap so
+  // ONLY that row is read (the rows above/below are excluded), then fire it. It is
+  // a ONE-SHOT on the tap — a band that misses just buzzes for a re-tap, so it can
+  // NEVER cause the continuous "扫不到" an always-on crop did (owner 2026-06-18).
+  const tapScanBarcode = useCallback(
+    async (e: React.PointerEvent<HTMLVideoElement>) => {
+      if (scanMode !== "barcode") return;
+      const video = videoRef.current;
+      if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
+      const rect = video.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      // object-cover: the frame is scaled to COVER the element, overflow cropped +
+      // centred. Map the tap's Y back to the intrinsic frame so the band lands on
+      // the exact row the worker pointed at.
+      const scale = Math.max(rect.width / vw, rect.height / vh);
+      const offsetY = (vh * scale - rect.height) / 2;
+      const intrinsicY = Math.min(
+        Math.max(0, (e.clientY - rect.top + offsetY) / scale),
+        vh,
+      );
+      const bandH = Math.max(48, Math.round(vh * 0.22));
+      const bandTop = Math.min(
+        Math.max(0, Math.round(intrinsicY - bandH / 2)),
+        Math.max(0, vh - bandH),
+      );
+      // A SEPARATE canvas (not the tick loop's scanCanvasRef) so the live decode
+      // loop and this tap decode never race on the same buffer.
+      const canvas = document.createElement("canvas");
+      canvas.width = vw;
+      canvas.height = bandH;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(video, 0, bandTop, vw, bandH, 0, 0, vw, bandH);
+      let decoded: string | null = null;
+      // Native detector first (fast); among any codes inside the band pick the one
+      // nearest the band centre = the row the worker tapped.
+      if (typeof window !== "undefined" && window.BarcodeDetector) {
+        try {
+          const det = new window.BarcodeDetector({
+            formats: ["code_128", "qr_code"],
+          });
+          const codes = await det.detect(canvas);
+          let best: { v: string; d: number } | null = null;
+          for (const c of codes) {
+            if (!c.rawValue) continue;
+            const bb = (
+              c as { boundingBox?: { y: number; height: number } }
+            ).boundingBox;
+            const d = bb ? Math.abs(bb.y + bb.height / 2 - bandH / 2) : 0;
+            if (!best || d < best.d) best = { v: c.rawValue, d };
+          }
+          if (best) decoded = best.v;
+        } catch {
+          /* native flaky → fall through to ZXing */
+        }
+      }
+      if (!decoded) {
+        await ensureZxing();
+        const zx = zxingRef.current;
+        if (zx) {
+          let img: ImageData | null = null;
+          try {
+            img = ctx.getImageData(0, 0, vw, bandH);
+          } catch {
+            img = null;
+          }
+          if (img) {
+            const r = zx(img);
+            if (r) decoded = r.text;
+          }
+        }
+      }
+      if (decoded) {
+        try {
+          navigator.vibrate?.(30);
+        } catch {
+          /* haptics best-effort */
+        }
+        stopLiveScan();
+        void handleDecoded(decoded);
+      } else {
+        // No bars on the tapped row — buzz so the worker re-taps ON the barcode.
+        // One-shot, so this is NEVER the continuous "扫不到".
+        try {
+          navigator.vibrate?.([15, 35, 15]);
+        } catch {
+          /* */
+        }
+      }
+    },
+    [scanMode, stopLiveScan, handleDecoded, ensureZxing],
   );
 
   // Pop the next file from the queue and decode it. Called after each
@@ -2397,6 +2473,7 @@ export default function WorkerScanPage() {
           <div className="relative flex-1 overflow-hidden">
             <video
               ref={videoRef}
+              onPointerUp={tapScanBarcode}
               className="absolute inset-0 w-full h-full object-cover"
               playsInline
               muted
@@ -2414,10 +2491,10 @@ export default function WorkerScanPage() {
                 <ZoomOut className="h-5 w-5" />
               </button>
             )}
-            {/* Aiming frame — square for QR, wide + short for a 1D barcode (with a
-                centre aim line). The band is a VISUAL aim hint ONLY: the FULL frame
-                is decoded; on native the code nearest the centre is selected, but
-                nothing is cropped or rejected (a band/crop was the "扫不到" bug). */}
+            {/* Aiming frame — a square for QR. In BARCODE mode it's just a loose
+                "barcodes here" guide: the worker TAPS the exact row he wants
+                (tapScanBarcode reads a band around the tap), so there's no centre
+                to line up against — hence no centre line. */}
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div
                 className="relative"
@@ -2431,9 +2508,7 @@ export default function WorkerScanPage() {
                 <span className="absolute right-0 top-0 h-10 w-10 border-t-4 border-r-4 border-white rounded-tr-lg" />
                 <span className="absolute left-0 bottom-0 h-10 w-10 border-b-4 border-l-4 border-white rounded-bl-lg" />
                 <span className="absolute right-0 bottom-0 h-10 w-10 border-b-4 border-r-4 border-white rounded-br-lg" />
-                {scanMode === "barcode" && (
-                  <span className="absolute left-3 right-3 top-1/2 -translate-y-1/2 h-0.5 bg-red-500/80" />
-                )}
+                {/* no centre line — barcode is tap-to-pick now */}
               </div>
             </div>
           </div>

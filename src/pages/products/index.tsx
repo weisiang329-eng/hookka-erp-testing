@@ -2495,7 +2495,7 @@ export default function ProductsPage() {
                       * an expand arrow before the code, and without this
                       * placeholder the header text sat ~20px to the left
                       * of the code values below. */}
-                    <div className={`${thCls} text-left flex items-center gap-1.5`}>
+                    <div className={`${thCls} text-left flex items-center gap-1.5 sticky left-0 z-20 bg-[#F9FAFB] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]`}>
                       <span className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" />
                       Product Code
                     </div>
@@ -2616,7 +2616,7 @@ export default function ProductsPage() {
                         style={{ gridTemplateColumns: gridColsFull, minWidth: gridMinWidth }}
                         onClick={() => setExpandedId(isExpanded ? null : p.id)}
                       >
-                        <div className="px-3 py-1.5 flex items-center gap-1.5">
+                        <div className="px-3 py-1.5 flex items-center gap-1.5 sticky left-0 z-[5] bg-white group-hover:bg-[#F9FAFB] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]">
                           <svg
                             className={`w-3.5 h-3.5 text-[#9CA3AF] transition-transform flex-shrink-0 ${isExpanded ? "rotate-90" : ""}`}
                             fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}

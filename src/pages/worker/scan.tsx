@@ -350,10 +350,11 @@ export default function WorkerScanPage() {
             );
             if (!res) return null;
             // Vertical centre of the decoded code (normalised 0..1) from its
-            // result points, so barcode mode can ACCEPT only the code the worker
-            // centred in the aim band WITHOUT cropping the decoder input (the
-            // crop is what made barcode "扫不到"; we filter the RESULT instead).
-            // No points → 0.5 (treat as centred, never reject).
+            // result points. NOTE: considerHit no longer gates on this — barcode
+            // fires INSTANTLY like QR (2026-06-18). cy is kept only for signature
+            // parity / a possible future nearest-centre SELECTION tie-break. It
+            // must NEVER be used to REJECT a decode — a cy/band reject was the
+            // "扫不到" regression. No points → 0.5.
             let cy = 0.5;
             try {
               const pts = res.getResultPoints?.() ?? [];
@@ -1225,44 +1226,42 @@ export default function WorkerScanPage() {
     let bcN = 0;
     let bcLast = "";
     let bcDbgAt = 0;
-    // Barcode AIM BOX (owner 2026-06-18). The printed schedule stacks Code 128s
-    // close together, so firing the instant ANY code decoded grabbed a NEIGHBOUR
-    // before the worker could aim ("我要扫 2A Base,它却扫了 Right Arm"). Barcode
-    // mode now ACCEPTS a code only when BOTH: (1) its vertical centre is inside
-    // the middle aim band (|cy-0.5| ≤ BC_AIM_HALF — matches the on-screen band),
-    // and (2) it has stayed the same for BC_HOLD_MS (time to aim). CRUCIAL: the
-    // FULL frame is still DECODED — we filter the RESULT's position, we do NOT
-    // crop the decoder input. That is exactly why this does NOT bring back the
-    // "扫不到" crop regression. QR mode stays instant + full-frame, no aim box.
-    // (Native passes the bbox centre; ZXing passes its result-points centre.)
-    // BC_AIM_HALF / BC_HOLD_MS are the tuning knobs: looser band or shorter hold
-    // = snappier but grabs neighbours; tighter = more aiming. Never go back to a
-    // pixel crop. See [[project_hookka_barcode_roi]].
-    const BC_AIM_HALF = 0.16; // accept the middle ~32% of frame height
-    const BC_HOLD_MS = 400; // hold the centred code this long before it fires
-    let stableVal = "";
-    let stableSince = 0;
-    let bcSwitchCand = "";
-    const considerHit = (data: string, cy = 0.5) => {
+    // Barcode aim model (owner 2026-06-18, FINAL — ends the 20-round cycle).
+    // The printed schedule stacks Code 128s ~1cm apart. The aim bias toward the
+    // worker's row is done by SELECTION ONLY, never by rejection:
+    //   - Native: the loop below picks the SINGLE code whose bbox centre is
+    //     nearest the frame centre and hands ONLY that one to considerHit.
+    //   - ZXing: returns the one code it locked.
+    // considerHit then fires it INSTANTLY — same as QR mode. There is no band
+    // reject and no same-value hold anywhere on the barcode path, so a valid
+    // decode can NEVER be zeroed out → it is structurally impossible to regress
+    // to "扫不到". Selection biases toward centre but always yields a code when
+    // one is decoded, so it cannot starve either. If the wrong neighbour is ever
+    // grabbed, the worker simply moves the centre over the right row (selection
+    // re-targets next tick) and the human Complete-confirm step catches it. The
+    // FULL frame is still DECODED on both paths (never crop the input — that was
+    // every "扫不到" regression). See [[project_hookka_barcode_roi]].
+    // considerHit fires onHit IMMEDIATELY for the code it is given — in BOTH
+    // modes. It NEVER rejects, never waits, never holds. This is the deliberate,
+    // final end to the 20-round "barcode 扫不到 vs grabs-neighbour" oscillation
+    // (owner 2026-06-18). The two old gates here — a hard `|cy-0.5|>0.16` reject
+    // and a 400ms same-value hold — could each zero out a perfectly valid decode:
+    // on the stacked printed schedule the nearest-centre winner FLICKERS between
+    // adjacent ~1cm rows every tick, so the hold's same-value clock never reached
+    // 400ms and onHit never fired → "完全没有反应". QR mode never had either gate,
+    // which is the ENTIRE reason QR read the same Code 128 in <0.5s and barcode
+    // was dead. So we delete both gates and fire instantly, exactly like QR.
+    //
+    // Aim bias is NOT lost: it is now done purely by SELECTION upstream — the
+    // native loop (below) hands considerHit only the SINGLE code nearest the
+    // frame centre, and ZXing returns the one code it locked. Selecting the
+    // centre-most code can bias toward the aimed row but can NEVER reject every
+    // code, so it is structurally impossible to regress to "扫不到". Final
+    // correctness leans on the human Complete-confirm step after the scan.
+    // `cy` is accepted for signature compatibility but intentionally unused.
+    const considerHit = (data: string, _cy = 0.5) => {
       if (stopped || !data) return;
-      if (scanMode !== "barcode") {
-        onHit(data); // QR: instant, full-frame, no aim box
-        return;
-      }
-      if (Math.abs(cy - 0.5) > BC_AIM_HALF) return; // off the aim band → not aimed
-      const t = performance.now();
-      if (data === stableVal) {
-        bcSwitchCand = "";
-        if (t - stableSince >= BC_HOLD_MS) onHit(data);
-      } else if (data === bcSwitchCand) {
-        // same NEW value twice inside the box → a real re-aim: adopt + hold
-        stableVal = data;
-        stableSince = t;
-        bcSwitchCand = "";
-      } else {
-        // first sighting of a different value → jitter; keep the current hold
-        bcSwitchCand = data;
-      }
+      onHit(data); // instant, full-frame, no band reject, no hold — both modes
     };
 
     const tick = async () => {
@@ -1281,10 +1280,10 @@ export default function WorkerScanPage() {
             if (scanMode === "barcode") {
               // FULL FRAME, NEAREST code_128 to centre wins — NO band/position
               // rejection at decode time. We DECODE the full frame (so it never
-              // goes "扫不到"), then hand each code's NORMALISED vertical centre to
-              // considerHit, which accepts only the one in the centre aim band and
-              // held steady — resolving a stacked schedule to the row the worker
-              // aimed at, not the first in frame (owner 2026-06-18).
+              // goes "扫不到") and pick the SINGLE code whose bbox centre is nearest
+              // the frame centre — a SELECTION that biases toward the row the worker
+              // aimed at but can NEVER reject all. considerHit then fires it
+              // INSTANTLY (no band, no hold) — same as QR (owner 2026-06-18).
               const vh0 = video.videoHeight || 1;
               const cx = video.videoWidth / 2;
               const cyMid = video.videoHeight / 2;
@@ -1377,8 +1376,10 @@ export default function WorkerScanPage() {
                   );
                 }
                 if (zx) {
-                  // considerHit applies the centre aim band + hold; zx.cy is the
-                  // code's normalised vertical centre from ZXing result points.
+                  // considerHit fires instantly (no band, no hold) — same as QR.
+                  // zx.cy is passed for signature parity only; it is NOT gated on
+                  // (a cy/band reject was the "扫不到" regression). ZXing has no
+                  // centre selection, so on iOS the worker confirms via the card.
                   considerHit(zx.text, zx.cy);
                   return;
                 }
@@ -2414,8 +2415,9 @@ export default function WorkerScanPage() {
               </button>
             )}
             {/* Aiming frame — square for QR, wide + short for a 1D barcode (with a
-                centre aim line). In barcode mode the decoder reads ONLY the code
-                centred in this band, so the other stacked rows are ignored. */}
+                centre aim line). The band is a VISUAL aim hint ONLY: the FULL frame
+                is decoded; on native the code nearest the centre is selected, but
+                nothing is cropped or rejected (a band/crop was the "扫不到" bug). */}
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div
                 className="relative"

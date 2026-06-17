@@ -558,6 +558,34 @@ app.get("/addresses", async (c) => {
   return c.json((res.results ?? []).map(rowToAddress));
 });
 
+// POST /api/mail-center/test-inject — admin-only: seed ONE sample inbound email
+// so the owner can verify the inbox + reply UI BEFORE switching MX (zero infra,
+// no secret needed — it calls ingestInboundEmail directly). The thread is a
+// normal one and can be deleted later.
+app.post("/test-inject", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  // Land it on a real configured address if one exists, else support@.
+  const addr = await c.var.DB.prepare(
+    `SELECT address FROM email_addresses WHERE org_id = ? AND active = 1 ORDER BY created_at ASC LIMIT 1`,
+  )
+    .bind(orgId)
+    .first<{ address: string }>();
+  const mailbox = addr?.address || "support@hookka.com";
+  const result = await ingestInboundEmail(c.var.DB, {
+    from: "customer@example.com",
+    fromName: "测试客户 Test Customer",
+    to: [mailbox],
+    subject: "测试:可以做一张 5 尺床架吗?",
+    text: "你好,我想订一张 5 尺床架,请问价格和交期?\n\n(这是一封测试邮件,可以删除。)\n\nThanks,\nTest Customer",
+    messageId: `test-${crypto.randomUUID()}@example.com`,
+    date: new Date().toISOString(),
+  });
+  return c.json(result);
+});
+
 // ---------------------------------------------------------------------------
 // Address admin endpoints — creating / managing someone's @hookka.com alias
 // is an ACCOUNT-level action, so these are fenced with requireSuperAdmin (the

@@ -194,10 +194,27 @@ export default function MailCenterPage() {
                 {loading ? "加载中…" : "还没有邮件"}
               </p>
               {!loading && (
-                <p className="max-w-sm text-xs text-muted-foreground/80">
-                  邮件接进来后会显示在这里。等域名邮件路由(MX)切到
-                  Cloudflare、收件 Worker 上线后,客户邮件就会自动落到这个收件箱。
-                </p>
+                <>
+                  <p className="max-w-sm text-xs text-muted-foreground/80">
+                    邮件接进来后会显示在这里。等域名邮件路由(MX)切到
+                    Cloudflare、收件 Worker 上线后,客户邮件就会自动落到这个收件箱。
+                  </p>
+                  <button
+                    onClick={async () => {
+                      try {
+                        await fetch("/api/mail-center/test-inject", {
+                          method: "POST",
+                        });
+                      } catch {
+                        /* ignore — refresh just shows nothing changed */
+                      }
+                      refresh();
+                    }}
+                    className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+                  >
+                    注入一封测试邮件(验证收件箱)
+                  </button>
+                </>
               )}
             </div>
           ) : (

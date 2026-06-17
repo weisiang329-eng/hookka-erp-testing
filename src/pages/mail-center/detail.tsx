@@ -1,11 +1,19 @@
 // ---------------------------------------------------------------------------
-// Mail Center — thread detail (P2: reply + resolve/reopen).
+// Mail Center — thread detail (P2: reply + resolve/reopen; P3: assign).
 //
 // Renders a conversation's messages. Bodies are shown as PLAIN TEXT
 // (textBody, or HTML stripped to text) — we never inject untrusted customer
 // HTML into the DOM. P2 adds an in-ERP reply composer (POST .../reply, sent
 // via Brevo from the thread's mailbox) and a resolve/reopen control
 // (PATCH .../:id status). Both refresh the thread via cache invalidation.
+//
+// DUAL-MODE (P3 UI overhaul): this same component powers BOTH
+//   • the standalone /mail-center/:id route  (id from useParams), and
+//   • the desktop reading pane embedded inside index.tsx (id passed as a
+//     prop, embedded=true to drop the page wrapper + the "Back to inbox"
+//     button that only makes sense on the full-page route).
+// Pass an optional `id` prop; it falls back to useParams when absent, so the
+// standalone route keeps working unchanged.
 // ---------------------------------------------------------------------------
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
@@ -24,7 +32,16 @@ import {
   CheckCircle2,
   RotateCcw,
   Loader2,
+  UserPlus,
 } from "lucide-react";
+
+type UserOption = {
+  id: string;
+  email: string;
+  displayName: string;
+};
+
+type UsersEnvelope = { success?: boolean; data?: UserOption[] };
 
 type MailMessage = {
   id: string;
@@ -48,6 +65,8 @@ type MailThread = {
   counterpartyEmail: string;
   counterpartyName: string;
   status: string;
+  assignedToUserId?: string;
+  assignedToName?: string;
 };
 
 type ThreadDetail = {
@@ -78,12 +97,30 @@ function htmlToText(html: string): string {
     .trim();
 }
 
-export default function MailCenterDetailPage() {
-  const { id } = useParams<{ id: string }>();
+export type MailCenterDetailProps = {
+  // When embedded in the desktop reading pane, the parent passes the route id
+  // as a prop. On the standalone /mail-center/:id route this is omitted and we
+  // fall back to useParams. `embedded` drops the page-level max-width wrapper
+  // and the "Back to inbox" button (both only make sense full-page).
+  id?: string;
+  embedded?: boolean;
+};
+
+export default function MailCenterDetailPage({
+  id: idProp,
+  embedded = false,
+}: MailCenterDetailProps = {}) {
+  const params = useParams<{ id: string }>();
+  const id = idProp ?? params.id;
   const navigate = useNavigate();
   const { toast } = useToast();
   const url = id ? `/api/mail-center/threads/${id}` : null;
   const { data, loading, error } = useCachedJson<ThreadDetail>(url, 30);
+
+  // Users for the Assign dropdown. Envelope is { success, data:[] } (see
+  // routes/users.ts). Loaded lazily; the select degrades to disabled if empty.
+  const { data: usersResp } = useCachedJson<UsersEnvelope>("/api/users", 300);
+  const users = usersResp?.data ?? [];
 
   const thread = data?.thread;
   const messages = data?.messages ?? [];
@@ -91,6 +128,7 @@ export default function MailCenterDetailPage() {
   const [replyText, setReplyText] = useState("");
   const [sending, setSending] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState(false);
+  const [assigning, setAssigning] = useState(false);
 
   // Send the composed reply, then invalidate this thread's cache so the new
   // outbound message + updated status flag refetch immediately (the hook
@@ -152,20 +190,60 @@ export default function MailCenterDetailPage() {
     }
   }
 
+  // Assign this thread to a user (or clear assignment) via the EXISTING PATCH
+  // endpoint that already handles status — { assignedToUserId, assignedToName }.
+  // No backend change. An empty selection clears the assignee (null on both
+  // fields). Refreshes the thread so the assignee Badge updates immediately.
+  async function handleAssign(userId: string) {
+    if (!url || assigning) return;
+    const picked = users.find((u) => u.id === userId);
+    const assignedToUserId = userId || null;
+    const assignedToName = picked
+      ? picked.displayName || picked.email
+      : null;
+    setAssigning(true);
+    try {
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: csrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify({ assignedToUserId, assignedToName }),
+      });
+      if (!res.ok) {
+        toast.error("Failed to assign. Please try again.");
+        return;
+      }
+      toast.success(
+        assignedToName ? `Assigned to ${assignedToName}.` : "Assignment cleared.",
+      );
+      invalidateCache(url);
+    } catch {
+      toast.error("Failed to assign. Check your connection and try again.");
+    } finally {
+      setAssigning(false);
+    }
+  }
+
   const isClosed = thread?.status === "closed";
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4">
-      <div className="flex items-center justify-between gap-2">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => navigate("/mail-center")}
-          className="gap-1.5"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Back to inbox
-        </Button>
+    <div className={cn("space-y-4", !embedded && "mx-auto max-w-3xl")}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {/* "Back to inbox" only belongs on the full-page route. In the desktop
+            reading pane the list is right there, so we hide it (embedded). */}
+        {!embedded ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => navigate("/mail-center")}
+            className="gap-1.5"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to inbox
+          </Button>
+        ) : (
+          <span />
+        )}
         {thread &&
           (isClosed ? (
             <Button
@@ -219,7 +297,7 @@ export default function MailCenterDetailPage() {
       {thread && (
         <>
           {/* Subject header */}
-          <div className="space-y-1">
+          <div className="space-y-2">
             <h1 className="text-lg font-semibold leading-snug">
               {thread.subject || "(no subject)"}
             </h1>
@@ -237,6 +315,39 @@ export default function MailCenterDetailPage() {
                   Resolved
                 </Badge>
               )}
+              {thread.assignedToName && (
+                <Badge className="gap-1 text-[10px]">
+                  <UserPlus className="h-3 w-3" />
+                  {thread.assignedToName}
+                </Badge>
+              )}
+            </div>
+
+            {/* Assign control — wired to the EXISTING PATCH .../threads/:id
+                with { assignedToUserId, assignedToName }. No backend change. */}
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <UserPlus className="h-3.5 w-3.5" />
+                Assign to
+              </label>
+              <div className="relative">
+                <select
+                  value={thread.assignedToUserId ?? ""}
+                  onChange={(e) => handleAssign(e.target.value)}
+                  disabled={assigning || users.length === 0}
+                  className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 pr-7 text-xs text-[#1F1D1B] focus:border-[#6B5C32] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <option value="">Unassigned</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.displayName || u.email}
+                    </option>
+                  ))}
+                </select>
+                {assigning && (
+                  <Loader2 className="pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-muted-foreground" />
+                )}
+              </div>
             </div>
           </div>
 

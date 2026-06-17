@@ -1023,6 +1023,136 @@ app.post("/threads/:id/reply", async (c) => {
   return c.json({ ok: true, messageId });
 });
 
+// POST /api/mail-center/compose — start a NEW outbound conversation (the reply
+// path requires an existing thread; this one creates the thread + first
+// message from scratch). Sends via the shared sender (Brevo when configured —
+// hookka.com is verified there, so this SENDS today without any MX change),
+// then records a fresh thread + outbound message. Mirrors the reply handler's
+// send → record structure.
+//
+// Per-user scope: a non-admin may only send FROM an @hookka.com address that
+// is assigned/granted to them (getMailScope). SUPER_ADMIN may send from any.
+app.post("/compose", async (c) => {
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  const scope = await getMailScope(c, orgId);
+
+  type ComposeBody = {
+    fromAddress?: string;
+    to?: string;
+    subject?: string;
+    text?: string;
+  };
+  const body: ComposeBody = await c.req
+    .json<ComposeBody>()
+    .catch(() => ({} as ComposeBody));
+
+  const fromAddress = (body.fromAddress ?? "").trim();
+  const to = (body.to ?? "").trim();
+  const subject = (body.subject ?? "").trim();
+  const text = (body.text ?? "").trim();
+
+  if (!fromAddress) {
+    return c.json({ error: "fromAddress is required" }, 400);
+  }
+  if (!EMAIL_RE.test(to)) {
+    return c.json({ error: "a valid recipient (to) is required" }, 400);
+  }
+  if (!subject) {
+    return c.json({ error: "subject is required" }, 400);
+  }
+  if (!text) {
+    return c.json({ error: "message body is required" }, 400);
+  }
+
+  // Authorize the From: non-admins may only send from a mailbox they own or
+  // have been granted. addresses are already lowercased in getMailScope.
+  if (!scope.isAdmin && !scope.addresses.includes(fromAddress.toLowerCase())) {
+    return c.json({ error: "not allowed to send from " + fromAddress }, 403);
+  }
+
+  // Resolve the display name for the From — "<label> <addr>" when the address
+  // record carries a label, else the bare address. Lookup failure must not
+  // block the send, so fall back to the bare address.
+  let from = fromAddress;
+  try {
+    const addrRow = await c.var.DB.prepare(
+      `SELECT label FROM email_addresses
+         WHERE org_id = ? AND address = ? LIMIT 1`,
+    )
+      .bind(orgId, fromAddress)
+      .first<{ label: string | null }>();
+    const label = addrRow?.label?.trim();
+    if (label) from = `${label} <${fromAddress}>`;
+  } catch {
+    // Keep the bare address — a display-name lookup is not worth failing over.
+  }
+
+  // Wrap the plain-text body in a minimal HTML part so the email carries both
+  // (same approach as the reply handler).
+  const htmlBody = `<p>${escapeHtml(text).replace(/\n/g, "<br/>")}</p>`;
+
+  const result = await sendMail(c.env, from, {
+    to,
+    subject,
+    text,
+    html: htmlBody,
+  });
+  if (!result.ok) {
+    return c.json({ error: "send failed" }, 502);
+  }
+
+  const userId = getUserId(
+    c as unknown as { get: (k: string) => string | undefined },
+  );
+  const fromName = await senderName(c.var.DB, userId);
+
+  const now = new Date().toISOString();
+  const snippet = text.slice(0, 200);
+  const threadId = crypto.randomUUID();
+  const messageId = crypto.randomUUID();
+
+  // NEW thread row — outbound-initiated, so last_direction='outbound',
+  // message_count=1, unread=0 (we sent it; nothing for us to read).
+  await c.var.DB.prepare(
+    `INSERT INTO email_threads
+       (id, org_id, mailbox_address, subject, counterparty_email,
+        counterparty_name, status, last_message_at, last_direction,
+        last_snippet, message_count, unread, created_at)
+     VALUES (?, ?, ?, ?, ?, '', 'open', ?, 'outbound', ?, 1, 0, ?)`,
+  )
+    .bind(threadId, orgId, fromAddress, subject, to, now, snippet, now)
+    .run();
+
+  // First message row — the outbound email we just sent.
+  await c.var.DB.prepare(
+    `INSERT INTO email_messages
+       (id, org_id, thread_id, direction, from_address, from_name,
+        to_addresses, cc_addresses, subject, text_body, html_body, sent_at,
+        sent_by_user_id, sent_by_name, provider_message_id, created_at)
+     VALUES (?, ?, ?, 'outbound', ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      messageId,
+      orgId,
+      threadId,
+      fromAddress,
+      fromName || null,
+      JSON.stringify([to]),
+      subject,
+      text,
+      htmlBody,
+      now,
+      userId,
+      fromName || null,
+      result.id ?? null,
+      now,
+    )
+    .run();
+
+  return c.json({ ok: true, threadId, messageId }, 201);
+});
+
 // PATCH /api/mail-center/threads/:id — assign / resolve / reopen a thread.
 app.patch("/threads/:id", async (c) => {
   const denied = requireSuperAdmin(c);

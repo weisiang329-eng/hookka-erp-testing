@@ -80,6 +80,14 @@ export type RackStockInItem = {
   // maps rack_items.notes straight through).
   salesOrderNo: string | null;
   qty: number;
+  // The EXACT job_card this scanned piece resolved to (from the /item response).
+  // When present, stock-in stamps THIS card's rackingNumber by id — the only way
+  // to hit the right one of a bedframe PO's many PACKING cards (Divan vs
+  // Headboard). Optional: the worker route reuses buildRackStockInStatements
+  // without it, and a manual/PO-level piece carries none → falls back to the
+  // productionOrderId + wipLabel match. NOT used by the rack_items / movements
+  // writes below (those are unchanged); only the rackingNumber stamp reads it.
+  jobCardId?: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -199,6 +207,13 @@ type PoMatch = {
   // piece shows e.g. "1013 King Size Headboard" + "SO 250114".
   salesOrderNo: string | null;
   description: string;
+  // The id of the SPECIFIC job_card this scan resolved to, when it was resolved
+  // through a card (the PACKING-sentinel path below, or a job-card-id sticker).
+  // null for a PO-level match that carries no single card. The scan page threads
+  // this back into stock-in so the stamp hits EXACTLY that card's rackingNumber
+  // (a bedframe PO has one PACKING card per compartment — Divan vs Headboard —
+  // and only the resolved id picks the right one).
+  jobCardId: string | null;
 };
 
 // Columns selected for every PoMatch lookup — id + the human + document fields
@@ -224,6 +239,10 @@ const PO_COLS = "id, poNo, productName, productCode, sizeLabel, salesOrderNo";
 async function resolvePo(
   db: D1Database,
   term: string,
+  // The job_card this match was resolved through (paths 2 & 3 below carry one).
+  // Threaded into the response as `jobCardId` so stock-in can stamp the EXACT
+  // card. null for a bare PO-level match (path 1).
+  jobCardId: string | null = null,
 ): Promise<PoMatch | null> {
   const toMatch = (r: PoRow): PoMatch => {
     const name = (r.productName || r.productCode || r.poNo || "").trim();
@@ -241,6 +260,7 @@ async function resolvePo(
       poNo: r.poNo ?? null,
       salesOrderNo: (r.salesOrderNo || "").trim() || null,
       description,
+      jobCardId,
     };
   };
 
@@ -267,7 +287,8 @@ async function resolvePo(
     )
     .bind(term)
     .first<PoRow>();
-  if (row) return toMatch(row);
+  // The job-card-id sticker IS this card, so stamp it by id: term is the jc id.
+  if (row) return { ...toMatch(row), jobCardId: term };
 
   // 3) SHORT schedule Code 128 token (b<deptNN><hash>) — not a stored id;
   // re-derive deriveBarcodeToken across EVERY card in the token's department
@@ -304,8 +325,10 @@ async function resolvePo(
             )
             .bind(hit.productionOrderId)
             .first<PoRow>();
-          // Carry the matched card's WIP label so the piece reads as its WIP.
-          if (row) return toMatch({ ...row, wipLabel: hit.wipLabel });
+          // Carry the matched card's WIP label so the piece reads as its WIP,
+          // and its id so stock-in stamps that exact card.
+          if (row)
+            return { ...toMatch({ ...row, wipLabel: hit.wipLabel }), jobCardId: hit.id };
         }
       } catch (e) {
         console.warn("[public-rack-qr] barcode-token resolve failed:", e);
@@ -313,6 +336,77 @@ async function resolvePo(
     }
   }
   return null;
+}
+
+// Resolve a PACKING-sentinel sticker (op=FG-PACKING&po=<poNo>&pn=<label>) to the
+// ONE PACKING job_card it belongs to — so the rack reads that card's WIP label
+// (what the Packing sheet prints, e.g. '8" Divan- 6FT') and stock-in can stamp
+// that exact card's rackingNumber, NOT the whole FG.
+//
+// A bedframe PO has MULTIPLE PACKING cards (one per compartment: Divan,
+// Headboard, …), each with its own wipLabel; only po + pieceLabel identifies the
+// right one. This mirrors the worker scanner's narrowing EXACTLY (pages/worker/
+// scan.tsx ~L946: `matches.filter(m => m.wipLabel.toUpperCase().includes(
+// pieceLabel.trim().toUpperCase()))`, kept only if it lands on exactly one). The
+// `pn` value is the SHORT box label ("HB" / "Divan" / a fabric name — production/
+// index.tsx ~L8189 sets pn=<pieceName>), a SUBSTRING of the longer wipLabel, so
+// the match is `includes`, never equality. Falls back to the sole PACKING card
+// when the PO has exactly one (single-compartment), and to null otherwise (the
+// caller then drops through to resolvePo's PO-level match — safe + unchanged).
+async function resolvePackingCard(
+  db: D1Database,
+  poNo: string,
+  pieceLabel: string | undefined,
+): Promise<PoMatch | null> {
+  // PO header (for SO + product fallback) plus its PACKING cards (id + wipLabel).
+  const po = await db
+    .prepare(
+      `SELECT ${PO_COLS} FROM production_orders WHERE poNo = ? OR id = ? LIMIT 1`,
+    )
+    .bind(poNo, poNo)
+    .first<PoRow>();
+  if (!po) return null;
+
+  const cards =
+    (
+      await db
+        .prepare(
+          `SELECT id, wipLabel FROM job_cards
+            WHERE productionOrderId = ? AND departmentCode = 'PACKING'`,
+        )
+        .bind(po.id)
+        .all<{ id: string; wipLabel: string | null }>()
+    ).results ?? [];
+  if (cards.length === 0) return null;
+
+  // Narrow to the ONE card whose wipLabel contains the box label (mirrors the
+  // worker scanner). Only accept an unambiguous single match; otherwise fall
+  // back to the lone PACKING card (single-compartment PO).
+  let pick: { id: string; wipLabel: string | null } | null = null;
+  const want = (pieceLabel || "").trim().toUpperCase();
+  if (want) {
+    const narrowed = cards.filter((cd) =>
+      (cd.wipLabel ?? "").toUpperCase().includes(want),
+    );
+    if (narrowed.length === 1) pick = narrowed[0];
+  }
+  if (!pick && cards.length === 1) pick = cards[0];
+  if (!pick) return null;
+
+  const name = (po.productName || po.productCode || po.poNo || "").trim();
+  const size = (po.sizeLabel || "").trim();
+  const wip = (pick.wipLabel || "").trim();
+  // description = the resolved PACKING card's WIP label (what the Packing sheet
+  // prints); fall back to productName + size only when the card has no wipLabel.
+  const description = wip || (size ? `${name} ${size}`.trim() : name);
+  return {
+    productionOrderId: po.id,
+    productName: name,
+    poNo: po.poNo ?? null,
+    salesOrderNo: (po.salesOrderNo || "").trim() || null,
+    description,
+    jobCardId: pick.id,
+  };
 }
 
 type CurrentRack = { currentRackId: string | null; currentRackLabel: string | null };
@@ -377,6 +471,7 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
     poNo: null,
     salesOrderNo: null,
     description: "",
+    jobCardId: null,
     currentRackId: null,
     currentRackLabel: null,
   };
@@ -401,6 +496,8 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
         // description is just the encoded name.
         salesOrderNo: null,
         description: manual.name,
+        // No system PO → no job_card to stamp.
+        jobCardId: null,
         currentRackId: null,
         currentRackLabel: null,
       });
@@ -413,7 +510,18 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
     const term = (sticker?.poNo || code).trim();
     if (!term) return c.json(notFound);
 
-    const po = await resolvePo(c.var.DB, term);
+    // PACKING-sentinel sticker (op=FG-PACKING&po=…&pn=<label>): resolve to the
+    // ONE PACKING job_card for this PO+label, so the rack reads that card's WIP
+    // label and stock-in stamps that exact card — NOT the whole FG (the bug:
+    // the old PO-level resolvePo returned the spelled-out product name with no
+    // wipLabel, and ignored pn / the compartment). Only the FG-PACKING shape
+    // takes this branch; every other scan keeps the resolvePo chain unchanged.
+    const isPackingSticker =
+      sticker?.deptCode === "PACKING" || /^FG-PACKING$/.test(sticker?.opId ?? "");
+    const po =
+      (isPackingSticker
+        ? await resolvePackingCard(c.var.DB, term, sticker?.pieceLabel)
+        : null) ?? (await resolvePo(c.var.DB, term));
     if (!po) return c.json(notFound);
 
     const cur = await currentRackOfPo(c.var.DB, po.productionOrderId);
@@ -426,6 +534,10 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
       // scan list shows "1013 King Size Headboard" alongside its SO number.
       salesOrderNo: po.salesOrderNo,
       description: po.description,
+      // The exact job_card this piece resolved to (PACKING-sentinel or job-card
+      // sticker). The scan page threads it back into stock-in so the rack stamp
+      // hits this card's rackingNumber precisely. null for a PO-level match.
+      jobCardId: po.jobCardId,
       currentRackId: cur.currentRackId,
       currentRackLabel: cur.currentRackLabel,
     });
@@ -458,6 +570,7 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
         poNo?: string | null;
         salesOrderNo?: string | null;
         description?: string;
+        jobCardId?: string | null;
         qty?: number;
       }>;
     };
@@ -476,6 +589,7 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
       productName: (it.description || it.productName || "").toString(),
       poNo: it.poNo || null,
       salesOrderNo: (it.salesOrderNo ?? "").toString().trim() || null,
+      jobCardId: it.jobCardId || null,
       qty: 1,
     }));
 
@@ -518,16 +632,35 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
     // sheet, packing list, and DO show the rack WITHOUT anyone picking it from
     // the dropdown — and a re-scan into a different rack auto-changes it (owner
     // 2026-06-17: "我 record 了进什么 Rack，packing 那边的 Rack Number 就自动显
-    // 示并更换"). Match the piece by productionOrderId + its WIP label — here
-    // `productName` IS the wipLabel-derived description from resolvePo, the same
-    // signature the rack rows use. `updated_at = NOW()` bumps the JC so the
-    // production_orders snapshot cache invalidates and the sheet re-reads (same
-    // reason the JC PATCH stamps it). Same atomic batch as the rack writes.
+    // 示并更换"). `updated_at = NOW()` bumps the JC so the production_orders
+    // snapshot cache invalidates and the sheet re-reads (same reason the JC
+    // PATCH stamps it). Same atomic batch as the rack writes.
+    //
+    // PREFER the exact jobCardId from the /item resolution: a bedframe PO has
+    // many PACKING cards (Divan, Headboard, …) and only the resolved id picks
+    // the one that was scanned — the DO/packing Rack column reads THAT card's
+    // rackingNumber. Stamping by productionOrderId + wipLabel can't identify it
+    // (and was the bug: the FG-level description was the product name, not a
+    // wipLabel, so it matched no card). Fall back to that signature match only
+    // for a legacy/PO-level piece that carries no jobCardId (here `productName`
+    // IS the wipLabel-derived description from resolvePo).
     const rackLabel = rack.rack ?? "";
     const rackingUpdates: D1PreparedStatement[] = [];
     for (const it of items) {
+      if (!rackLabel) continue;
+      if (it.jobCardId) {
+        rackingUpdates.push(
+          c.var.DB
+            .prepare(
+              `UPDATE job_cards SET rackingNumber = ?, updated_at = NOW()
+                 WHERE id = ?`,
+            )
+            .bind(rackLabel, it.jobCardId),
+        );
+        continue;
+      }
       const wip = (it.productName || "").trim();
-      if (!it.productionOrderId || !wip || !rackLabel) continue;
+      if (!it.productionOrderId || !wip) continue;
       rackingUpdates.push(
         c.var.DB
           .prepare(

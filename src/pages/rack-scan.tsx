@@ -56,6 +56,11 @@ type ItemLookup = {
   // human description (productName + size, e.g. "1013 King Size Headboard").
   salesOrderNo: string | null;
   description: string | null;
+  // The EXACT job_card this piece resolved to (PACKING-sentinel or job-card
+  // sticker). Threaded back into stock-in so the rack stamp hits THIS card's
+  // rackingNumber — the only way to pick the right one of a bedframe PO's many
+  // PACKING cards. null for a manual / PO-level match.
+  jobCardId: string | null;
   // When set AND different from the scanned rack, the item currently lives in
   // another rack — the UI offers Move-here / Skip before adding the line.
   currentRackId: string | null;
@@ -75,6 +80,9 @@ type Line = {
   productName: string; // clear description shown to the worker
   poNo: string | null;
   salesOrderNo: string | null;
+  // The exact job_card this piece resolved to (from the /item response); posted
+  // back to stock-in so the rack stamp lands on THIS card. null when none.
+  jobCardId: string | null;
   qty: number; // always 1 (kept for the POST contract / totals)
 };
 
@@ -374,6 +382,8 @@ export default function RackScanPage() {
           productName: desc,
           poNo: j.poNo,
           salesOrderNo: j.salesOrderNo,
+          // Carry the resolved card id so stock-in stamps that exact card.
+          jobCardId: j.jobCardId ?? null,
           qty: 1,
         };
         // In a DIFFERENT rack → park for a Move / Skip decision. (Equal rack
@@ -746,6 +756,8 @@ export default function RackScanPage() {
               description: x.productName,
               poNo: x.poNo,
               salesOrderNo: x.salesOrderNo,
+              // The exact card to stamp the rack onto (resolved at /item time).
+              jobCardId: x.jobCardId,
               qty: 1,
             })),
           }),

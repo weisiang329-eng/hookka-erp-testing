@@ -229,21 +229,23 @@ function ThreadList({
   onRowAction: (action: RowAction, t: MailThread) => void;
 }) {
   if (threads.length === 0) {
+    // Quiet, compact empty state — a normal list column that happens to be
+    // empty, NOT a giant card. Gmail/Outlook show a small muted line here.
     return (
-      <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
-        <Inbox className="h-10 w-10 text-muted-foreground/50" />
-        <p className="text-sm font-medium text-muted-foreground">
+      <div className="flex flex-col items-center justify-center gap-1.5 px-4 py-10 text-center">
+        <Inbox className="h-6 w-6 text-muted-foreground/40" />
+        <p className="text-xs font-medium text-muted-foreground">
           {loading ? "Loading…" : emptyLabel(folder)}
         </p>
         {!loading && folder === "inbox" && (
           <>
-            <p className="max-w-sm text-xs text-muted-foreground/80">
+            <p className="max-w-xs text-[11px] leading-snug text-muted-foreground/70">
               Incoming mail will appear here once the domain MX is switched to
               Cloudflare and the inbound Worker is live.
             </p>
             <button
               onClick={onInjectTest}
-              className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+              className="mt-1 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 hover:bg-amber-100"
             >
               Inject a test email (verify inbox)
             </button>
@@ -529,11 +531,12 @@ function DraftsList({
   onResume: (d: MailDraft) => void;
 }) {
   if (drafts.length === 0) {
+    // Compact, quiet empty state to match the thread list (no giant card).
     return (
-      <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
-        <FileText className="h-10 w-10 text-muted-foreground/50" />
-        <p className="text-sm font-medium text-muted-foreground">No drafts</p>
-        <p className="max-w-sm text-xs text-muted-foreground/80">
+      <div className="flex flex-col items-center justify-center gap-1.5 px-4 py-10 text-center">
+        <FileText className="h-6 w-6 text-muted-foreground/40" />
+        <p className="text-xs font-medium text-muted-foreground">No drafts</p>
+        <p className="max-w-xs text-[11px] leading-snug text-muted-foreground/70">
           Start a new email and choose “Save draft” to keep it here. Drafts are
           stored on this device only.
         </p>
@@ -959,8 +962,10 @@ export default function MailCenterPage() {
         </div>
       )}
 
-      {/* 3-pane shell: rail / list / reading-pane. Single column under md. */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-[210px_minmax(0,1fr)] lg:grid-cols-[230px_minmax(320px,440px)_minmax(0,1fr)]">
+      {/* 3-pane shell: rail / list / reading-pane (Gmail/Outlook proportions —
+          folders rail, a fixed-ish list column ~360-400px, then a flex-1
+          reading pane). Single column under md. */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-[210px_minmax(0,1fr)] lg:grid-cols-[230px_minmax(360px,400px)_minmax(0,1fr)]">
         {/* LEFT RAIL */}
         <aside className="space-y-3">
           <Button
@@ -1193,7 +1198,11 @@ export default function MailCenterPage() {
           </CardContent>
         </Card>
 
-        {/* RIGHT — reading pane (lg+ only). */}
+        {/* RIGHT — reading pane (lg+ only). When a thread is selected it shows
+            the conversation in a card; when nothing is selected it's a simple
+            borderless, centered placeholder (no card, no compose button — the
+            sidebar "New email" is the single compose entry, Gmail/Outlook
+            style). */}
         <div className="hidden min-w-0 lg:block">
           {selectedId ? (
             <Card className="min-w-0">
@@ -1202,36 +1211,12 @@ export default function MailCenterPage() {
               </CardContent>
             </Card>
           ) : (
-            <Card className="min-w-0">
-              <CardContent className="flex h-full min-h-[360px] flex-col items-center justify-center gap-3 py-16 text-center">
-                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted/60">
-                  <Mail className="h-8 w-8 text-muted-foreground/50" />
-                </div>
-                <div className="space-y-1">
-                  <p className="text-base font-medium text-foreground/80">
-                    Select a conversation
-                  </p>
-                  <p className="mx-auto max-w-xs text-sm text-muted-foreground">
-                    Choose an email from the list to read the full conversation
-                    here.
-                  </p>
-                </div>
-                {!composeDisabled && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="mt-1 gap-1.5"
-                    onClick={() => {
-                      setResumeDraft(null);
-                      setComposeOpen(true);
-                    }}
-                  >
-                    <PenSquare className="h-4 w-4" />
-                    New email
-                  </Button>
-                )}
-              </CardContent>
-            </Card>
+            <div className="flex h-full min-h-[360px] flex-col items-center justify-center gap-2 px-6 text-center">
+              <Mail className="h-8 w-8 text-muted-foreground/30" />
+              <p className="text-sm text-muted-foreground">
+                Select a conversation to read it here
+              </p>
+            </div>
           )}
         </div>
       </div>

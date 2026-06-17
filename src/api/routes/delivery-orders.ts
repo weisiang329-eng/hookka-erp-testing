@@ -772,7 +772,7 @@ async function buildDoDeliveredSoAndInvoice(
           "System",
           now,
           "DO delivered",
-          JSON.stringify([`DO ${doRow.doNo} marked DELIVERED`]),
+          JSON.stringify([`${doRow.doNo} marked DELIVERED`]),
         ),
     );
   }
@@ -5857,7 +5857,7 @@ export async function applyDeliveryOrderUpdate(
             po.productCode ?? "",
             po.productName ?? "",
             Number(po.quantity) || 0,
-            `DO ${existing.doNo} reverted to DRAFT`,
+            `${existing.doNo} reverted to DRAFT`,
             now,
           ),
         );
@@ -5908,7 +5908,7 @@ export async function applyDeliveryOrderUpdate(
               "System",
               now,
               "DO reverted to DRAFT",
-              JSON.stringify([`DO ${existing.doNo} un-dispatched (LOADED→DRAFT)`]),
+              JSON.stringify([`${existing.doNo} un-dispatched (LOADED→DRAFT)`]),
             ),
           );
         }

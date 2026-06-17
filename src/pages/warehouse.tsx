@@ -1283,7 +1283,7 @@ function MovementTable({ movements }: { movements: StockMovement[] }) {
                 </td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.productName}</td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.quantity}</td>
-                <td className="h-10 px-4 text-[#4B5563] max-w-[200px] truncate">{m.reason}</td>
+                <td className="h-10 px-4 text-[#4B5563] max-w-[200px] truncate">{m.reason.replace(/\bDO (DO-)/g, "$1")}</td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.performedBy}</td>
               </tr>
                     );

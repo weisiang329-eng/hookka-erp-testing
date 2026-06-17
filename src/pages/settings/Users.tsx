@@ -2392,6 +2392,9 @@ export default function UsersPage() {
                         <th className="px-3 py-2 text-left font-semibold">
                           Reports to
                         </th>
+                        <th className="px-3 py-2 text-right font-semibold">
+                          Actions
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2560,6 +2563,56 @@ export default function UsersPage() {
                               ) : (
                                 <span className="text-gray-400">—</span>
                               )}
+                            </td>
+
+                            {/* Account actions — same three as the Users tab
+                                (Disable/Enable · Reset password · Delete). They
+                                reuse the component-level handlers and modals and
+                                are independent of the inline Edit mode, so they
+                                stay visible whether or not orgEdit is on. */}
+                            <td className="px-3 py-2 text-right whitespace-nowrap">
+                              <div className="inline-flex gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleActive(m);
+                                  }}
+                                  title={m.isActive ? "Disable" : "Enable"}
+                                >
+                                  {m.isActive ? (
+                                    <Ban className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <Check className="h-3.5 w-3.5" />
+                                  )}
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setResetForUser(m);
+                                    setResetPassword("");
+                                    setResetError(null);
+                                  }}
+                                  title="Reset password"
+                                >
+                                  <KeyRound className="h-3.5 w-3.5" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteUser(m);
+                                  }}
+                                  title="Delete"
+                                  disabled={m.id === currentUser?.id}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                                </Button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -2750,6 +2803,52 @@ export default function UsersPage() {
                                 )}
                               </div>
                             )}
+                            {/* Account actions — same three as the Users tab
+                                (Disable/Enable · Reset password · Delete),
+                                reusing the component-level handlers and modals.
+                                Independent of the mailbox-grid Edit mode. */}
+                            <div className="mt-1 inline-flex gap-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleActive(u);
+                                }}
+                                title={u.isActive ? "Disable" : "Enable"}
+                              >
+                                {u.isActive ? (
+                                  <Ban className="h-3.5 w-3.5" />
+                                ) : (
+                                  <Check className="h-3.5 w-3.5" />
+                                )}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setResetForUser(u);
+                                  setResetPassword("");
+                                  setResetError(null);
+                                }}
+                                title="Reset password"
+                              >
+                                <KeyRound className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  deleteUser(u);
+                                }}
+                                title="Delete"
+                                disabled={u.id === currentUser?.id}
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                              </Button>
+                            </div>
                           </td>
                           <td className="px-3 py-1.5 border-b border-[#F3F4F6] align-top whitespace-nowrap">
                             {(() => {

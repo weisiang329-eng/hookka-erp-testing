@@ -53,7 +53,6 @@ import {
   Link2,
   X,
   SlidersHorizontal,
-  ShieldCheck,
   Layers,
   ChevronDown,
   ChevronRight,
@@ -286,10 +285,11 @@ export default function UsersPage() {
   const [resetSubmitting, setResetSubmitting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
 
-  // Change-role modal (SUPER_ADMIN only). Role drives access, so the save goes
-  // through verifiedSave — the read-back confirms the role actually changed
-  // (a stale-cache 200 that didn't really re-role someone is a security smell).
-  const [editRoleForUser, setEditRoleForUser] = useState<UserRow | null>(null);
+  // Role-change state (now driven from the Edit-details modal). Role drives
+  // access, so the save goes through verifiedSave — the read-back confirms the
+  // role actually changed (a stale-cache 200 that didn't really re-role someone
+  // is a security smell). editRole is the role draft seeded from the user's
+  // current role when the Edit-details modal opens.
   const [editRole, setEditRole] = useState("");
   const [editRoleSubmitting, setEditRoleSubmitting] = useState(false);
   const [editRoleError, setEditRoleError] = useState<string | null>(null);
@@ -1129,32 +1129,39 @@ export default function UsersPage() {
     }
   };
 
-  const submitRoleChange = async () => {
-    if (!editRoleForUser) return;
-    const target = editRoleForUser;
+  // Apply a role change through the verifiedSave (re-confirm + read-back) path.
+  // This is the SAME security-critical path the old standalone Change-role modal
+  // used (confirm + self-demotion note + verifiedSave read-back); it's now
+  // driven from the Edit-details modal's Save. Returns true when the role was
+  // actually committed (or was a no-op), false when the operator cancelled the
+  // confirm or the save failed — the caller uses this to decide whether to keep
+  // the Edit-details modal open.
+  const applyRoleChange = async (
+    subject: UserRow,
+    nextRole: string,
+  ): Promise<boolean> => {
     setEditRoleError(null);
-    if (editRole === target.role) {
-      setEditRoleForUser(null);
-      return;
+    if (nextRole === subject.role) {
+      return true;
     }
     // A role change ends their current session (they re-sign-in with the new
     // access). Spell that out — and flag the self-demotion foot-gun.
     const selfNote =
-      target.id === currentUser?.id
+      subject.id === currentUser?.id
         ? "\n\nThis is YOUR OWN account — moving away from Super Admin signs you out and you may lose access to this page."
         : "";
     if (
       !confirm(
-        `Change ${target.email} to ${roleLabel(editRole)}?\n\nTheir current session ends immediately; they sign back in with the new access.${selfNote}`,
+        `Change ${subject.email} to ${roleLabel(nextRole)}?\n\nTheir current session ends immediately; they sign back in with the new access.${selfNote}`,
       )
     )
-      return;
+      return false;
     setEditRoleSubmitting(true);
     try {
       const result = await verifiedSave<UserRow>({
-        endpoint: `/api/users/${target.id}`,
+        endpoint: `/api/users/${subject.id}`,
         method: "PUT",
-        body: { role: editRole },
+        body: { role: nextRole },
         readback: async () => {
           const r = await fetch(`/api/users?_v=${Date.now()}`, {
             credentials: "include",
@@ -1162,14 +1169,14 @@ export default function UsersPage() {
           });
           if (!r.ok) return null;
           const j = (await r.json()) as { success?: boolean; data?: UserRow[] };
-          return (j?.data ?? []).find((row) => row.id === target.id) ?? null;
+          return (j?.data ?? []).find((row) => row.id === subject.id) ?? null;
         },
-        expect: { role: editRole },
+        expect: { role: nextRole },
       });
       if (result.ok) {
-        showFlash("ok", `${target.email} is now ${roleLabel(editRole)}`);
-        setEditRoleForUser(null);
+        showFlash("ok", `${subject.email} is now ${roleLabel(nextRole)}`);
         fetchUsers();
+        return true;
       } else if (result.reason === "mismatch") {
         setEditRoleError(formatMismatchError(result.diffs));
       } else if (result.reason === "http") {
@@ -1191,6 +1198,7 @@ export default function UsersPage() {
           humanizeError(result.details, "Couldn't save. Please try again."),
         );
       }
+      return false;
     } finally {
       setEditRoleSubmitting(false);
     }
@@ -1209,6 +1217,11 @@ export default function UsersPage() {
     const target = aliasForUser;
     setAliasError(null);
     setAliasSubmitting(true);
+
+    // Role is changed through the SAME verifiedSave (re-confirm) path the
+    // standalone Change-role modal used — only when it actually changed, so
+    // dept/position-only saves stay normal (no re-confirm prompt).
+    const roleChanged = editRole !== target.role;
 
     // ---- EDIT path: user already has an alias → PATCH dept/position (+link) --
     if (aliasExisting) {
@@ -1230,34 +1243,43 @@ export default function UsersPage() {
           patch.assignedUserId = target.id;
           patch.assignedUserName = target.displayName || target.email;
         }
-        if (Object.keys(patch).length === 0) {
+        if (Object.keys(patch).length === 0 && !roleChanged) {
           setAliasForUser(null);
           setAliasExisting(null);
           showFlash("ok", "No changes to save");
           return;
         }
-        const res = await fetch(
-          `/api/mail-center/addresses/${aliasExisting.id}`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(patch),
-          },
-        );
-        const json = (await res.json().catch(() => ({}))) as { error?: string };
-        if (res.ok) {
-          showFlash(
-            "ok",
-            `Details saved for ${aliasExisting.address}`,
+        // Save dept/position first (when any changed), then the role.
+        if (Object.keys(patch).length > 0) {
+          const res = await fetch(
+            `/api/mail-center/addresses/${aliasExisting.id}`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(patch),
+            },
           );
-          setAliasForUser(null);
-          setAliasExisting(null);
+          const json = (await res.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          if (!res.ok) {
+            setAliasError(
+              json.error ?? "Couldn't save the details. Please try again.",
+            );
+            return;
+          }
+          showFlash("ok", `Details saved for ${aliasExisting.address}`);
           fetchAddresses();
-        } else {
-          setAliasError(
-            json.error ?? "Couldn't save the details. Please try again.",
-          );
         }
+        // Apply the role change (security-critical: confirm + verifiedSave
+        // read-back). Keep the modal open if it was cancelled/failed so the
+        // operator sees the role error and can retry.
+        if (roleChanged) {
+          const roleOk = await applyRoleChange(target, editRole);
+          if (!roleOk) return;
+        }
+        setAliasForUser(null);
+        setAliasExisting(null);
       } catch (err) {
         setAliasError(humanizeError(err, "Network problem — please try again."));
       } finally {
@@ -1298,10 +1320,17 @@ export default function UsersPage() {
       };
       if (res.ok) {
         showFlash("ok", `Alias ${json.address ?? address} created for ${target.email}`);
+        fetchAddresses();
+        // Apply the role change too (same verifiedSave re-confirm path), only
+        // when it actually changed. Keep the modal open if it was
+        // cancelled/failed so the role error is visible.
+        if (roleChanged) {
+          const roleOk = await applyRoleChange(target, editRole);
+          if (!roleOk) return;
+        }
         setAliasForUser(null);
         setAliasExisting(null);
         setAliasAddress("");
-        fetchAddresses();
       } else {
         setAliasError(
           json.error ??
@@ -1455,6 +1484,12 @@ export default function UsersPage() {
     setAliasDept(existing?.assignedDept || "Support");
     setAliasPosition(existing?.assignedPosition || "");
     setAliasError(null);
+    // Role-change folded into Edit details: seed the role draft from the user's
+    // current role and clear any prior role error. Reuses the editRole /
+    // editRoleError state the standalone Change-role modal used; on Save we run
+    // the change through applyRoleChange (same verifiedSave re-confirm path).
+    setEditRole(u.role);
+    setEditRoleError(null);
   };
 
   // One-click "Link" for a floating alias whose local-part matches this user
@@ -1801,8 +1836,10 @@ export default function UsersPage() {
       render: (_v, u) =>
         canManageUsers ? (
           <div className="inline-flex gap-1">
-            {/* Edit details — Position / Department / Email Alias (Edit→Save,
-                no naked edits): opens the modal, never auto-saves. */}
+            {/* Edit details — Position / Department / Email Alias / Role
+                (Edit→Save, no naked edits): opens the modal, never auto-saves.
+                Role-change is folded in here (was a separate ShieldCheck icon)
+                and still runs through the verifiedSave re-confirm path. */}
             <Button
               variant="ghost"
               size="sm"
@@ -1810,24 +1847,9 @@ export default function UsersPage() {
                 e.stopPropagation();
                 openAliasModal(u);
               }}
-              title="Edit details (position, department, email alias)"
+              title="Edit details (position, department, email alias, role)"
             >
               <SlidersHorizontal className="h-3.5 w-3.5" />
-            </Button>
-            {/* Change role — kept separate because a role change ends the
-                user's session (security action). */}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={(e) => {
-                e.stopPropagation();
-                setEditRoleForUser(u);
-                setEditRole(u.role);
-                setEditRoleError(null);
-              }}
-              title="Change role"
-            >
-              <ShieldCheck className="h-3.5 w-3.5" />
             </Button>
             <Button
               variant="ghost"
@@ -2803,52 +2825,12 @@ export default function UsersPage() {
                                 )}
                               </div>
                             )}
-                            {/* Account actions — same three as the Users tab
-                                (Disable/Enable · Reset password · Delete),
-                                reusing the component-level handlers and modals.
-                                Independent of the mailbox-grid Edit mode. */}
-                            <div className="mt-1 inline-flex gap-1">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleActive(u);
-                                }}
-                                title={u.isActive ? "Disable" : "Enable"}
-                              >
-                                {u.isActive ? (
-                                  <Ban className="h-3.5 w-3.5" />
-                                ) : (
-                                  <Check className="h-3.5 w-3.5" />
-                                )}
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setResetForUser(u);
-                                  setResetPassword("");
-                                  setResetError(null);
-                                }}
-                                title="Reset password"
-                              >
-                                <KeyRound className="h-3.5 w-3.5" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  deleteUser(u);
-                                }}
-                                title="Delete"
-                                disabled={u.id === currentUser?.id}
-                              >
-                                <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                              </Button>
-                            </div>
+                            {/* Account actions (Disable/Enable · Reset password ·
+                                Delete) intentionally do NOT live here — the
+                                Mailbox Access tab is about WHO can open which
+                                mailbox, not account management. Those actions
+                                stay on the Users / Org Chart tabs (owner
+                                2026-06-18). */}
                           </td>
                           <td className="px-3 py-1.5 border-b border-[#F3F4F6] align-top whitespace-nowrap">
                             {(() => {
@@ -3098,82 +3080,9 @@ export default function UsersPage() {
         </div>
       )}
 
-      {/* =========================================================== */}
-      {/* Change-role modal (SUPER_ADMIN only) */}
-      {/* =========================================================== */}
-      {editRoleForUser && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => !editRoleSubmitting && setEditRoleForUser(null)}
-        >
-          <div
-            className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="text-lg font-semibold text-[#1F1D1B] flex items-center gap-2">
-              <Pencil className="h-5 w-5 text-[#6B5C32]" />
-              Change role
-            </h2>
-            <p className="text-sm text-gray-500 mt-1">
-              Set the role for <strong>{editRoleForUser.email}</strong>. Saving
-              ends their current session — they sign back in with the new
-              access.
-            </p>
-            <div className="mt-4 space-y-2">
-              <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide">
-                Role
-              </label>
-              <select
-                value={editRole}
-                onChange={(e) => setEditRole(e.target.value)}
-                className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
-              >
-                {ROLE_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-                {/* Preserve any legacy/non-standard role the account already
-                    carries so the picker never silently blanks it. */}
-                {!ROLE_OPTIONS.some((o) => o.value === editRoleForUser.role) && (
-                  <option value={editRoleForUser.role}>
-                    {editRoleForUser.role} (current)
-                  </option>
-                )}
-              </select>
-              <p className="text-xs text-gray-500">
-                {roleLabel(editRole)}
-              </p>
-              {editRoleError && (
-                <p className="text-xs text-red-600">{editRoleError}</p>
-              )}
-            </div>
-            <div className="mt-6 flex justify-end gap-2">
-              <Button
-                variant="outline"
-                onClick={() => setEditRoleForUser(null)}
-                disabled={editRoleSubmitting}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                onClick={submitRoleChange}
-                disabled={
-                  editRoleSubmitting || editRole === editRoleForUser.role
-                }
-              >
-                {editRoleSubmitting ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Check className="h-4 w-4" />
-                )}
-                Save role
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* The standalone Change-role modal was removed — role-change now lives
+          inside the Edit-details modal (it runs through the same verifiedSave
+          re-confirm path via applyRoleChange). */}
 
       {/* =========================================================== */}
       {/* Edit-details modal — the user's @hookka.com Email Alias, Department
@@ -3191,7 +3100,7 @@ export default function UsersPage() {
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
           onClick={() => {
-            if (!aliasSubmitting) {
+            if (!aliasSubmitting && !editRoleSubmitting) {
               setAliasForUser(null);
               setAliasExisting(null);
             }
@@ -3212,10 +3121,11 @@ export default function UsersPage() {
             <p className="text-sm text-gray-500 mt-1">
               {aliasExisting ? (
                 <>
-                  Set the <strong>department</strong> and{" "}
-                  <strong>position</strong> for{" "}
-                  <strong>{aliasForUser.email}</strong>. These are stored on
-                  their @hookka.com mailbox and feed the org chart.
+                  Set the <strong>department</strong>,{" "}
+                  <strong>position</strong> and <strong>role</strong> for{" "}
+                  <strong>{aliasForUser.email}</strong>. Department and position
+                  are stored on their @hookka.com mailbox and feed the org
+                  chart; the role controls their access.
                 </>
               ) : (
                 <>
@@ -3326,6 +3236,44 @@ export default function UsersPage() {
               <p className="text-xs text-gray-500">
                 Optional — the person&apos;s job title.
               </p>
+              {/* Role — folded in from the old standalone Change-role modal.
+                  Changing it on Save runs through the SAME verifiedSave
+                  re-confirm path (security-critical), and only when it actually
+                  changed; dept/position-only saves stay normal. */}
+              <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide pt-2">
+                Role
+              </label>
+              <select
+                value={editRole}
+                onChange={(e) => setEditRole(e.target.value)}
+                className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+              >
+                {ROLE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+                {/* Preserve any legacy/non-standard role the account already
+                    carries so the picker never silently blanks it. */}
+                {!ROLE_OPTIONS.some((o) => o.value === aliasForUser.role) && (
+                  <option value={aliasForUser.role}>
+                    {aliasForUser.role} (current)
+                  </option>
+                )}
+              </select>
+              <p className="text-xs text-gray-500">
+                {roleLabel(editRole)}
+                {editRole !== aliasForUser.role && (
+                  <span className="text-[#B45309]">
+                    {" "}
+                    — changing the role ends their current session; they sign
+                    back in with the new access.
+                  </span>
+                )}
+              </p>
+              {editRoleError && (
+                <p className="text-xs text-red-600">{editRoleError}</p>
+              )}
               {aliasError && (
                 <p className="text-xs text-red-600">{aliasError}</p>
               )}
@@ -3337,7 +3285,7 @@ export default function UsersPage() {
                   setAliasForUser(null);
                   setAliasExisting(null);
                 }}
-                disabled={aliasSubmitting}
+                disabled={aliasSubmitting || editRoleSubmitting}
               >
                 Cancel
               </Button>
@@ -3345,10 +3293,12 @@ export default function UsersPage() {
                 variant="primary"
                 onClick={submitAlias}
                 disabled={
-                  aliasSubmitting || (!aliasExisting && !aliasAddress.trim())
+                  aliasSubmitting ||
+                  editRoleSubmitting ||
+                  (!aliasExisting && !aliasAddress.trim())
                 }
               >
-                {aliasSubmitting ? (
+                {aliasSubmitting || editRoleSubmitting ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
                   <Check className="h-4 w-4" />

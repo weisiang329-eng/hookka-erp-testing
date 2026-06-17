@@ -12,11 +12,12 @@
 // rack or none when a unit spans several.
 //
 // The DO/CN PDFs already aggregate correctly via deriveComponentRacks
-// (print-extras-shared.ts) → fmtComponentRacks (generate-do-pdf.ts), but those
-// produce the per-component manifest "HB: Rack 3 · DIVAN: Rack 4". For the
-// narrow on-screen Rack columns and the DO snapshot we want the COMPACT grid
-// form: the distinct racks across all pieces, numerically sorted, joined as
-// "Rack 3, 4".
+// (print-extras-shared.ts). The CN PDF prints the per-component MANIFEST
+// "HB: Rack 3 · DIVAN: Rack 4" (fmtComponentRacks, generate-do-pdf.ts); the DO
+// PDF prints the LABEL-LESS per-component form "Rack 3 · Rack 4"
+// (formatComponentRacksNoLabel here). For the narrow on-screen Rack columns and
+// the DO snapshot we want the COMPACT grid form: the distinct racks across all
+// pieces, numerically sorted, joined as "Rack 3, 4".
 //
 // This module is DEPENDENCY-FREE on purpose (no Hono / BOM / repair-scope
 // imports) so it can be imported by BOTH the frontend pages (delivery list,
@@ -78,6 +79,28 @@ export function formatRacksCompact(racks: ReadonlyArray<string>): string {
     return `Rack ${nums.join(", ")}`;
   }
   return [...distinct].sort(compareRackLabels).join(", ");
+}
+
+// ---------------------------------------------------------------------------
+// formatComponentRacksNoLabel — the DO-DOCUMENT rack line. Owner's spec
+// (Wei Siang 2026-06-18): DROP the component label prefixes the manifest form
+// (fmtComponentRacks) carries. Each component's racks become ONE compact group
+// via formatRacksCompact ("Rack 3", or "Rack 2, 3" when a component spans
+// racks); groups join with " · " BETWEEN components. So a single-component
+// line prints just its bare group ("Rack 3"); a multi-component line prints
+// per-component groups joined by " · " ("Rack 1 · Rack 2, 3"). Comma WITHIN a
+// component, " · " BETWEEN components. Empty components are dropped; no
+// components ⇒ "". Reuses formatRacksCompact (which owns the dedup + numeric
+// sort via compareRackLabels) so this can never drift from the grid form.
+// ---------------------------------------------------------------------------
+export function formatComponentRacksNoLabel(
+  components?: ReadonlyArray<{ racks?: ReadonlyArray<string> | null }> | null,
+): string {
+  if (!components || components.length === 0) return "";
+  return components
+    .map((c) => formatRacksCompact(c.racks ?? []))
+    .filter(Boolean)
+    .join(" · ");
 }
 
 // ---------------------------------------------------------------------------

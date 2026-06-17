@@ -33,11 +33,13 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCachedJson } from "@/lib/cached-fetch";
+import { getCurrentUser } from "@/lib/auth";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent } from "@/components/ui/card";
@@ -57,11 +59,23 @@ import {
   patchManyStatus,
   patchManyTrashed,
   patchManyUnread,
+  patchManyAddLabel,
   patchThreadStatus,
   patchThreadStarred,
   patchThreadUnread,
   patchThreadTrashed,
+  createLabel,
+  updateLabel,
+  deleteLabel,
+  createDeptMailbox,
 } from "./mail-actions";
+import {
+  type MailLabel,
+  LABEL_PALETTE,
+  labelColorMap,
+  colorForLabel,
+  chipStyle,
+} from "./mail-labels";
 import {
   Mail,
   Search,
@@ -85,6 +99,9 @@ import {
   MailWarning,
   X,
   CheckCheck,
+  Plus,
+  Building2,
+  Settings2,
 } from "lucide-react";
 
 type MailThread = {
@@ -124,6 +141,13 @@ type MailboxFilter =
   | { kind: "dept"; value: string }
   | { kind: "mailbox"; value: string };
 
+// A mailbox row in a department group: either a REAL address row, or a MISSING
+// canonical shared mailbox (support@/finance@/hr@ that hasn't been created yet)
+// shown as a placeholder the admin can one-click set up.
+type MailboxEntry =
+  | { kind: "real"; address: MailAddress }
+  | { kind: "missing"; address: string; dept: string };
+
 // Email-client folders. Inbox/Archive map to a server status; the rest are
 // resolved client-side (Starred/Sent/Trash/All) or local-only (Drafts).
 type Folder =
@@ -139,6 +163,18 @@ type Folder =
 // the catch-all bucket pinned last.
 const DEPT_PRIORITY = ["Support", "Finance", "HR"];
 const UNASSIGNED_DEPT = "Other";
+
+// Canonical SHARED department mailboxes (owner 2026-06-17 — "I can't see
+// support@/finance@/hr@"). These ALWAYS appear in the Departments section even
+// before anyone creates the address row, so the owner sees them; a SUPER_ADMIN
+// gets a one-click "Set up" that provisions the row (assignedDept set, no user)
+// via the existing POST /addresses. Until inbound RECEIVE is live (MX cutover,
+// #51) they correctly show an empty thread list — that's expected, not a bug.
+const CANONICAL_DEPT_MAILBOXES: { dept: string; address: string }[] = [
+  { dept: "Support", address: "support@hookka.com" },
+  { dept: "Finance", address: "finance@hookka.com" },
+  { dept: "HR", address: "hr@hookka.com" },
+];
 
 function deptRank(dept: string): number {
   const i = DEPT_PRIORITY.indexOf(dept);
@@ -213,6 +249,7 @@ function ThreadList({
   activeId,
   folder,
   selectedIds,
+  colorMap,
   onToggleSelect,
   onOpen,
   onInjectTest,
@@ -223,6 +260,7 @@ function ThreadList({
   activeId: string | null;
   folder: Folder;
   selectedIds: Set<string>;
+  colorMap: Map<string, string>;
   onToggleSelect: (id: string) => void;
   onOpen: (id: string) => void;
   onInjectTest: () => void;
@@ -363,15 +401,23 @@ function ThreadList({
                 )}
                 {chips.length > 0 && (
                   <div className="mt-1 flex flex-wrap gap-1">
-                    {chips.map((l) => (
-                      <span
-                        key={l}
-                        className="inline-flex items-center gap-1 rounded-full bg-[#EFE9DD] px-1.5 py-0.5 text-[10px] font-medium text-[#6B5C32] ring-1 ring-inset ring-[#E2DDD8]"
-                      >
-                        <Tag className="h-2.5 w-2.5" />
-                        {l}
-                      </span>
-                    ))}
+                    {chips.map((l) => {
+                      const color = colorForLabel(l, colorMap);
+                      return (
+                        <span
+                          key={l}
+                          style={chipStyle(color)}
+                          className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ring-black/5"
+                        >
+                          <span
+                            className="h-1.5 w-1.5 rounded-full"
+                            style={{ backgroundColor: color }}
+                            aria-hidden="true"
+                          />
+                          {l}
+                        </span>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -591,6 +637,10 @@ export default function MailCenterPage() {
   const { toast } = useToast();
   const { confirm, confirmDialog } = useConfirm();
   const local = useLocalMail();
+  // SUPER_ADMIN sees every mailbox (the backend scope returns all) AND gets the
+  // one-click "Set up" for a missing canonical department mailbox.
+  const isSuperAdmin =
+    (getCurrentUser()?.role ?? "").toUpperCase() === "SUPER_ADMIN";
 
   const [q, setQ] = useState("");
   const [folder, setFolder] = useState<Folder>("inbox");
@@ -600,6 +650,8 @@ export default function MailCenterPage() {
   const [resumeDraft, setResumeDraft] = useState<MailDraft | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // Label manager dialog (create / rename / recolour / delete catalogue labels).
+  const [labelManagerOpen, setLabelManagerOpen] = useState(false);
 
   // Map folder → the server status param. Inbox/Archive/Trash filter
   // server-side; Starred/Sent/All fetch the full (non-trashed) set and narrow
@@ -628,6 +680,13 @@ export default function MailCenterPage() {
   const { data: addresses } = useCachedJson<MailAddress[]>(
     "/api/mail-center/addresses",
     300,
+  );
+  // Label catalogue (name → colour). Drives the coloured dots in the sidebar +
+  // thread-list chips and the label menus. Short TTL so a create/recolour shows
+  // promptly; the mutation helpers also invalidate this prefix.
+  const { data: labelCatalog } = useCachedJson<MailLabel[]>(
+    "/api/mail-center/labels",
+    60,
   );
   // Dedicated trashed fetch — drives the Trash folder badge from ANY folder
   // (the main list excludes trashed rows server-side, so it can't be counted
@@ -675,6 +734,53 @@ export default function MailCenterPage() {
       m.set(g.dept, new Set(g.mailboxes.map((a) => a.address)));
     }
     return m;
+  }, [deptGroups]);
+
+  // DEPARTMENT vs PERSONAL split (owner 2026-06-17). The Mailboxes sidebar now
+  // shows a "Departments" section and a separate "Other" (personal) section so
+  // shared mailboxes are never lost among personal aliases:
+  //   • departmentGroups — every real department (≠ "Other"), MERGED with the
+  //     canonical Support/Finance/HR so they ALWAYS appear even when no address
+  //     row exists yet. A canonical dept with no row carries a synthetic
+  //     placeholder entry (a missing shared mailbox) the admin can one-click set
+  //     up. This is why the owner couldn't see support@/finance@/hr@: they were
+  //     never created as rows, so the address-driven list had nothing to show.
+  //   • personalGroup — the "Other" bucket (active aliases with no department,
+  //     e.g. lim@ / violet@), shown under its own "Other" header.
+  const departmentGroups = useMemo(() => {
+    // Real department buckets keyed by dept name (excludes the personal "Other").
+    const real = new Map<string, MailAddress[]>();
+    for (const g of deptGroups) {
+      if (g.dept === UNASSIGNED_DEPT) continue;
+      real.set(g.dept, g.mailboxes);
+    }
+    // Ensure every canonical department is present even with zero mailboxes.
+    const deptNames = new Set<string>(real.keys());
+    for (const c of CANONICAL_DEPT_MAILBOXES) deptNames.add(c.dept);
+
+    const groups: { dept: string; entries: MailboxEntry[] }[] = [];
+    for (const dept of Array.from(deptNames).sort(sortDepts)) {
+      const existing = real.get(dept) ?? [];
+      const haveAddrs = new Set(existing.map((a) => a.address.toLowerCase()));
+      const entries: MailboxEntry[] = existing.map((address) => ({
+        kind: "real",
+        address,
+      }));
+      // Add any canonical shared mailbox for this dept that has no row yet.
+      for (const c of CANONICAL_DEPT_MAILBOXES) {
+        if (c.dept === dept && !haveAddrs.has(c.address.toLowerCase())) {
+          entries.push({ kind: "missing", address: c.address, dept });
+        }
+      }
+      groups.push({ dept, entries });
+    }
+    return groups;
+  }, [deptGroups]);
+
+  // The personal "Other" bucket (aliases with no department).
+  const personalMailboxes = useMemo(() => {
+    const other = deptGroups.find((g) => g.dept === UNASSIGNED_DEPT);
+    return other?.mailboxes ?? [];
   }, [deptGroups]);
 
   // Client-side narrowing of the already-scoped list. Trash and status are now
@@ -769,13 +875,29 @@ export default function MailCenterPage() {
     return m;
   }, [deptGroups, unreadByMailbox]);
 
-  // Distinct labels across the loaded (live) threads, sorted, for the sidebar
-  // filter list. Derived from the DB-backed per-thread labels.
+  // Catalogue colour lookup (name → colour), shared by the sidebar dots and the
+  // thread-list chips.
+  const colorMap = useMemo(
+    () => labelColorMap(labelCatalog ?? []),
+    [labelCatalog],
+  );
+
+  // Sidebar label list = the CATALOGUE (so a freshly created label shows even
+  // before it's applied to any thread) UNIONED with any label name found on a
+  // loaded thread but missing from the catalogue (legacy free-text labels keep
+  // working). Each entry carries its resolved colour for the dot.
   const labels = useMemo(() => {
-    const set = new Set<string>();
-    for (const t of liveThreads) for (const l of t.labels) set.add(l);
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [liveThreads]);
+    const names = new Map<string, string>(); // lowerName → displayName
+    for (const l of labelCatalog ?? []) names.set(l.name.toLowerCase(), l.name);
+    for (const t of liveThreads) {
+      for (const l of t.labels) {
+        if (!names.has(l.toLowerCase())) names.set(l.toLowerCase(), l);
+      }
+    }
+    return Array.from(names.values())
+      .sort((a, b) => a.localeCompare(b))
+      .map((name) => ({ name, color: colorForLabel(name, colorMap) }));
+  }, [labelCatalog, liveThreads, colorMap]);
   const drafts = local.drafts;
 
   // The selection set may hold ids that are no longer visible (folder switch,
@@ -923,6 +1045,25 @@ export default function MailCenterPage() {
     clearSelection();
   }
 
+  // Bulk-apply ONE label to the selection. Ensures the catalogue carries the
+  // name (so it gets a colour + shows in the sidebar), then merges it into each
+  // selected thread's label set. `name` comes from the catalogue or is typed new.
+  async function bulkApplyLabel(name: string) {
+    const clean = name.trim();
+    if (!clean) return;
+    const items = selectedArr.map((t) => ({ id: t.id, labels: t.labels }));
+    if (items.length === 0) return;
+    // Create the catalogue entry if it's brand new (idempotent server-side).
+    if (!colorMap.has(clean.toLowerCase())) {
+      await createLabel(clean, LABEL_PALETTE[0].value);
+    }
+    const ok = await patchManyAddLabel(items, clean);
+    if (ok === items.length) toast.success(`Labeled ${ok} as “${clean}”.`);
+    else if (ok > 0) toast.warning(`Labeled ${ok} of ${items.length}.`);
+    else toast.error("Couldn’t label. Please try again.");
+    clearSelection();
+  }
+
   async function injectTest() {
     try {
       await fetch("/api/mail-center/test-inject", { method: "POST" });
@@ -930,6 +1071,25 @@ export default function MailCenterPage() {
       /* ignore — refresh just shows nothing changed */
     }
     refresh();
+  }
+
+  // SUPER_ADMIN: provision a missing canonical department mailbox (support@/
+  // finance@/hr@) as a SHARED address (assignedDept set, no user). Confirmed
+  // first ("no naked edits"), then created via the existing POST /addresses.
+  async function setupDeptMailbox(address: string, dept: string) {
+    const confirmed = await confirm({
+      title: `Set up ${address}?`,
+      message: `Creates the shared ${dept} mailbox so the team can receive and reply from it. You can grant people access in User Management → Mailbox Access.`,
+      confirmLabel: "Set up mailbox",
+    });
+    if (!confirmed) return;
+    const id = await createDeptMailbox(address, dept, `${dept} Team`);
+    if (id !== null) {
+      toast.success(`${address} is ready.`);
+      setFilter({ kind: "mailbox", value: address });
+    } else {
+      toast.error("Couldn’t set up the mailbox. Please try again.");
+    }
   }
 
   const composeDisabled = activeAddresses.length === 0;
@@ -1066,38 +1226,61 @@ export default function MailCenterPage() {
             />
           </nav>
 
-          {/* LABELS — client-side categories. Selecting one filters the list. */}
-          {labels.length > 0 && (
-            <div className="space-y-0.5">
-              <p className="px-3 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+          {/* LABELS — DB-backed categories with Gmail-style coloured dots.
+              Selecting one filters the list; "Manage" opens the editor to
+              create / rename / recolour / delete catalogue labels. */}
+          <div className="space-y-0.5">
+            <div className="flex items-center justify-between px-3 pb-0.5 pt-1">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
                 Labels
               </p>
-              {labels.map((l) => (
+              <button
+                type="button"
+                onClick={() => setLabelManagerOpen(true)}
+                title="Manage labels"
+                aria-label="Manage labels"
+                className="rounded p-0.5 text-muted-foreground/60 transition hover:bg-muted hover:text-foreground"
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            {labels.length === 0 ? (
+              <button
+                type="button"
+                onClick={() => setLabelManagerOpen(true)}
+                className="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-xs text-muted-foreground/70 transition hover:bg-muted"
+              >
+                <Plus className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">Create a label</span>
+              </button>
+            ) : (
+              labels.map((l) => (
                 <button
-                  key={l}
-                  onClick={() => setLabelFilter(labelFilter === l ? null : l)}
+                  key={l.name}
+                  onClick={() =>
+                    setLabelFilter(labelFilter === l.name ? null : l.name)
+                  }
                   className={cn(
                     "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition",
-                    labelFilter === l
+                    labelFilter === l.name
                       ? "bg-amber-50 font-medium text-amber-800"
                       : "text-foreground/80 hover:bg-muted",
                   )}
                 >
-                  <Tag
-                    className={cn(
-                      "h-3.5 w-3.5 shrink-0",
-                      labelFilter === l
-                        ? "text-amber-700"
-                        : "text-muted-foreground/60",
-                    )}
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-inset ring-black/10"
+                    style={{ backgroundColor: l.color }}
+                    aria-hidden="true"
                   />
-                  <span className="truncate">{l}</span>
+                  <span className="truncate">{l.name}</span>
                 </button>
-              ))}
-            </div>
-          )}
+              ))
+            )}
+          </div>
 
-          {/* MAILBOX SWITCHER */}
+          {/* MAILBOX SWITCHER — All mailboxes, then a DEPARTMENTS section
+              (shared support@/finance@/hr@ etc., always shown) and a separate
+              OTHER section for personal aliases. */}
           <div className="space-y-0.5 border-t border-border/60 pt-2">
             <p className="px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
               Mailboxes
@@ -1108,20 +1291,56 @@ export default function MailCenterPage() {
               unread={unreadCount}
               onClick={() => setFilter({ kind: "all" })}
             />
-            {deptGroups.map((g) => (
+
+            {/* DEPARTMENTS — shared department mailboxes. Canonical
+                Support/Finance/HR always appear; a missing one offers a "Set
+                up" (SUPER_ADMIN) or a quiet "not set up yet" note. */}
+            <p className="flex items-center gap-1.5 px-3 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+              <Building2 className="h-3 w-3" />
+              Departments
+            </p>
+            {departmentGroups.map((g) => (
               <DeptGroup
                 key={g.dept}
                 dept={g.dept}
-                mailboxes={g.mailboxes}
+                entries={g.entries}
                 filter={filter}
+                isSuperAdmin={isSuperAdmin}
                 unreadByMailbox={unreadByMailbox}
                 unreadForDept={unreadByDept.get(g.dept) ?? 0}
                 onSelectDept={() => setFilter({ kind: "dept", value: g.dept })}
                 onSelectMailbox={(address) =>
                   setFilter({ kind: "mailbox", value: address })
                 }
+                onSetupMailbox={setupDeptMailbox}
               />
             ))}
+
+            {/* OTHER — personal aliases with no department (e.g. lim@/violet@). */}
+            {personalMailboxes.length > 0 && (
+              <>
+                <p className="flex items-center gap-1.5 px-3 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+                  <UserIcon className="h-3 w-3" />
+                  Other
+                </p>
+                <div className="space-y-0.5">
+                  {personalMailboxes.map((a) => (
+                    <PersonItem
+                      key={a.id}
+                      label={a.assignedUserName || a.address}
+                      title={a.address}
+                      active={
+                        filter.kind === "mailbox" && filter.value === a.address
+                      }
+                      unread={unreadByMailbox.get(a.address) ?? 0}
+                      onClick={() =>
+                        setFilter({ kind: "mailbox", value: a.address })
+                      }
+                    />
+                  ))}
+                </div>
+              </>
+            )}
           </div>
 
           {/* Search */}
@@ -1165,11 +1384,13 @@ export default function MailCenterPage() {
               <BulkBar
                 count={selectedCount}
                 folder={folder}
+                labels={labels}
                 onArchive={() => bulkStatus("closed")}
                 onInbox={() => bulkStatus("open")}
                 onRead={() => bulkRead(false)}
                 onUnread={() => bulkRead(true)}
                 onTrash={bulkTrash}
+                onApplyLabel={bulkApplyLabel}
                 onClear={clearSelection}
               />
             )}
@@ -1189,6 +1410,7 @@ export default function MailCenterPage() {
                 activeId={isDesktop ? selectedId : null}
                 folder={folder}
                 selectedIds={selectedVisibleIds}
+                colorMap={colorMap}
                 onToggleSelect={toggleSelect}
                 onOpen={openThread}
                 onInjectTest={injectTest}
@@ -1220,6 +1442,13 @@ export default function MailCenterPage() {
           )}
         </div>
       </div>
+
+      {/* Label manager — create / rename / recolour / delete catalogue labels. */}
+      <LabelManagerDialog
+        open={labelManagerOpen}
+        labels={labelCatalog ?? []}
+        onClose={() => setLabelManagerOpen(false)}
+      />
 
       {/* Compose modal — additive overlay; closing returns to the inbox. */}
       <ComposeDialog
@@ -1298,20 +1527,24 @@ function FolderItem({
 function BulkBar({
   count,
   folder,
+  labels,
   onArchive,
   onInbox,
   onRead,
   onUnread,
   onTrash,
+  onApplyLabel,
   onClear,
 }: {
   count: number;
   folder: Folder;
+  labels: { name: string; color: string }[];
   onArchive: () => void;
   onInbox: () => void;
   onRead: () => void;
   onUnread: () => void;
   onTrash: () => void;
+  onApplyLabel: (name: string) => void;
   onClear: () => void;
 }) {
   return (
@@ -1326,6 +1559,7 @@ function BulkBar({
       ) : null}
       <BulkButton icon={MailOpen} label="Read" onClick={onRead} />
       <BulkButton icon={MailWarning} label="Unread" onClick={onUnread} />
+      <BulkLabelMenu labels={labels} onApplyLabel={onApplyLabel} />
       {folder !== "trash" && (
         <BulkButton icon={Trash2} label="Trash" onClick={onTrash} />
       )}
@@ -1336,6 +1570,115 @@ function BulkBar({
         <X className="h-3.5 w-3.5" />
         Clear
       </button>
+    </div>
+  );
+}
+
+// Bulk "Label" control — a small dropdown listing catalogue labels (with their
+// colour dot) plus a free-text "New label…" row. Picking one applies it to the
+// whole selection (creating the catalogue entry first if it's new). Closes on
+// outside click / Escape.
+function BulkLabelMenu({
+  labels,
+  onApplyLabel,
+}: {
+  labels: { name: string; color: string }[];
+  onApplyLabel: (name: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  function apply(name: string) {
+    const clean = name.trim();
+    if (!clean) return;
+    onApplyLabel(clean);
+    setDraft("");
+    setOpen(false);
+  }
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-white px-2 py-1 text-xs font-medium text-amber-900 transition hover:bg-amber-100"
+      >
+        <Tag className="h-3.5 w-3.5" />
+        Label
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute left-0 top-full z-20 mt-1 w-52 rounded-md border border-[#E2DDD8] bg-white p-1 shadow-lg"
+        >
+          <div className="max-h-48 overflow-y-auto">
+            {labels.length === 0 ? (
+              <p className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                No labels yet — type one below.
+              </p>
+            ) : (
+              labels.map((l) => (
+                <button
+                  key={l.name}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => apply(l.name)}
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-foreground/80 transition hover:bg-muted"
+                >
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-inset ring-black/10"
+                    style={{ backgroundColor: l.color }}
+                    aria-hidden="true"
+                  />
+                  <span className="truncate">{l.name}</span>
+                </button>
+              ))
+            )}
+          </div>
+          <div className="mt-1 flex items-center gap-1 border-t border-border/60 pt-1">
+            <Input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  apply(draft);
+                }
+              }}
+              placeholder="New label…"
+              className="h-7 flex-1 px-2 text-xs"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={!draft.trim()}
+              onClick={() => apply(draft)}
+            >
+              Add
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1416,23 +1759,30 @@ function MailboxAllIcon({ active }: { active: boolean }) {
 
 function DeptGroup({
   dept,
-  mailboxes,
+  entries,
   filter,
+  isSuperAdmin,
   unreadByMailbox,
   unreadForDept,
   onSelectDept,
   onSelectMailbox,
+  onSetupMailbox,
 }: {
   dept: string;
-  mailboxes: MailAddress[];
+  entries: MailboxEntry[];
   filter: MailboxFilter;
+  isSuperAdmin: boolean;
   unreadByMailbox: Map<string, number>;
   unreadForDept: number;
   onSelectDept: () => void;
   onSelectMailbox: (address: string) => void;
+  onSetupMailbox: (address: string, dept: string) => void;
 }) {
   const [expanded, setExpanded] = useState(true);
   const deptActive = filter.kind === "dept" && filter.value === dept;
+  // Count only REAL mailboxes for the badge; "missing" canonical entries are
+  // placeholders, not live mailboxes.
+  const realCount = entries.filter((e) => e.kind === "real").length;
 
   return (
     <div>
@@ -1472,7 +1822,7 @@ function DeptGroup({
             />
             <span className="truncate font-medium">{dept}</span>
             <span className="shrink-0 text-[11px] font-normal text-muted-foreground/70">
-              {mailboxes.length}
+              {realCount}
             </span>
           </span>
           {unreadForDept > 0 && (
@@ -1492,15 +1842,30 @@ function DeptGroup({
 
       {expanded && (
         <div className="ml-3 space-y-0.5 border-l border-border/60 pl-2">
-          {mailboxes.map((a) => {
+          {entries.map((e) => {
+            if (e.kind === "missing") {
+              return (
+                <MissingMailboxItem
+                  key={e.address}
+                  address={e.address}
+                  canSetup={isSuperAdmin}
+                  onSetup={() => onSetupMailbox(e.address, e.dept)}
+                />
+              );
+            }
+            const a = e.address;
             const mailboxActive =
               filter.kind === "mailbox" && filter.value === a.address;
+            // A shared mailbox (no assigned user) shows its address; a personal
+            // alias misfiled into a dept shows the owner's name.
+            const shared = !(a.assignedUserName ?? "").trim();
             return (
               <PersonItem
                 key={a.id}
                 label={a.assignedUserName || a.address}
                 title={a.address}
                 active={mailboxActive}
+                shared={shared}
                 unread={unreadByMailbox.get(a.address) ?? 0}
                 onClick={() => onSelectMailbox(a.address)}
               />
@@ -1512,19 +1877,65 @@ function DeptGroup({
   );
 }
 
+// A canonical shared mailbox that has no address row yet. For a SUPER_ADMIN it
+// offers a one-click "Set up"; for everyone else it's a quiet, disabled note so
+// they know the mailbox exists but isn't provisioned.
+function MissingMailboxItem({
+  address,
+  canSetup,
+  onSetup,
+}: {
+  address: string;
+  canSetup: boolean;
+  onSetup: () => void;
+}) {
+  if (!canSetup) {
+    return (
+      <div
+        title={`${address} — not set up yet`}
+        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground/50"
+      >
+        <Mail className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">{address}</span>
+        <span className="ml-auto shrink-0 text-[10px] italic">not set up</span>
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onSetup}
+      title={`Set up the shared mailbox ${address}`}
+      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground/70 transition hover:bg-muted hover:text-foreground"
+    >
+      <Mail className="h-3.5 w-3.5 shrink-0" />
+      <span className="truncate">{address}</span>
+      <span className="ml-auto inline-flex shrink-0 items-center gap-0.5 rounded-full bg-[#EFE9DD] px-1.5 py-0.5 text-[10px] font-medium text-[#6B5C32]">
+        <Plus className="h-2.5 w-2.5" />
+        Set up
+      </span>
+    </button>
+  );
+}
+
 function PersonItem({
   label,
   title,
   active,
   unread,
+  shared = false,
   onClick,
 }: {
   label: string;
   title?: string;
   active: boolean;
   unread: number;
+  // A shared mailbox (no assigned user) gets the multi-user glyph; a personal
+  // alias gets the single-user glyph. Defaults to personal.
+  shared?: boolean;
   onClick: () => void;
 }) {
+  const Icon = shared ? Users : UserIcon;
   return (
     <button
       onClick={onClick}
@@ -1537,7 +1948,7 @@ function PersonItem({
       )}
     >
       <span className="flex min-w-0 items-center gap-2">
-        <UserIcon
+        <Icon
           className={cn(
             "h-3.5 w-3.5 shrink-0",
             active ? "text-amber-700" : "text-muted-foreground/50",
@@ -1556,5 +1967,297 @@ function PersonItem({
         </span>
       )}
     </button>
+  );
+}
+
+// ── Label manager dialog ─────────────────────────────────────────────────────
+// Gmail-style "Manage labels": a create row (name + colour swatches) and a list
+// of existing catalogue labels, each editable inline (rename, recolour, delete).
+// All mutations go through mail-actions (createLabel/updateLabel/deleteLabel),
+// which invalidate the catalogue + thread caches so the sidebar/chips refresh.
+// Rendered as a fixed overlay the house way (same shape as ComposeDialog).
+function LabelManagerDialog({
+  open,
+  labels,
+  onClose,
+}: {
+  open: boolean;
+  labels: MailLabel[];
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
+  const [newName, setNewName] = useState("");
+  const [newColor, setNewColor] = useState(LABEL_PALETTE[0].value);
+  const [busy, setBusy] = useState(false);
+
+  if (!open) return null;
+
+  async function handleCreate() {
+    const clean = newName.trim();
+    if (!clean || busy) return;
+    if (labels.some((l) => l.name.toLowerCase() === clean.toLowerCase())) {
+      toast.error("A label with that name already exists.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const ok = await createLabel(clean, newColor);
+      if (ok) {
+        setNewName("");
+        setNewColor(LABEL_PALETTE[0].value);
+        toast.success("Label created.");
+      } else {
+        toast.error("Couldn’t create the label. Please try again.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRecolor(id: string, color: string) {
+    setBusy(true);
+    try {
+      const ok = await updateLabel(id, { color });
+      if (!ok) toast.error("Couldn’t update the colour. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRename(id: string, name: string, prev: string) {
+    const clean = name.trim();
+    if (!clean || clean === prev) return;
+    if (
+      labels.some(
+        (l) => l.id !== id && l.name.toLowerCase() === clean.toLowerCase(),
+      )
+    ) {
+      toast.error("A label with that name already exists.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const ok = await updateLabel(id, { name: clean });
+      if (ok) toast.success("Label renamed.");
+      else toast.error("Couldn’t rename the label. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(id: string, name: string) {
+    const confirmed = await confirm({
+      title: `Delete “${name}”?`,
+      message:
+        "The label is removed from every conversation that carries it. This can’t be undone.",
+      confirmLabel: "Delete label",
+      tone: "danger",
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      const ok = await deleteLabel(id);
+      if (ok) toast.success("Label deleted.");
+      else toast.error("Couldn’t delete the label. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center">
+      <div className="fixed inset-0 bg-black/40" onClick={onClose} />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Manage labels"
+        className="relative mx-4 flex max-h-[90vh] w-full max-w-md flex-col rounded-lg border border-[#E2DDD8] bg-white shadow-xl"
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-[#E2DDD8] px-4 py-3">
+          <div className="flex items-center gap-2">
+            <Tag className="h-4 w-4 text-amber-700" />
+            <h3 className="text-sm font-semibold text-[#1F1D1B]">
+              Manage labels
+            </h3>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-md p-1 text-[#6B7280] transition hover:bg-[#F0ECE9]"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-3 overflow-y-auto p-4">
+          {/* Create row */}
+          <div className="space-y-2 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-3">
+            <label className="text-xs font-medium text-[#6B7280]">
+              New label
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleCreate();
+                  }
+                }}
+                placeholder="Label name"
+                className="h-8 flex-1 text-sm"
+              />
+              <Button
+                variant="primary"
+                size="sm"
+                className="h-8 gap-1 bg-[#6B5C32] px-2.5 text-white hover:bg-[#5a4d2a]"
+                disabled={!newName.trim() || busy}
+                onClick={handleCreate}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add
+              </Button>
+            </div>
+            <ColorSwatches value={newColor} onPick={setNewColor} />
+          </div>
+
+          {/* Existing labels */}
+          {labels.length === 0 ? (
+            <p className="px-1 py-2 text-center text-xs text-muted-foreground">
+              No labels yet. Create one above to colour-code conversations.
+            </p>
+          ) : (
+            <ul className="space-y-1.5">
+              {labels
+                .slice()
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((l) => (
+                  <LabelManagerRow
+                    key={`${l.id}:${l.name}`}
+                    label={l}
+                    busy={busy}
+                    onRecolor={handleRecolor}
+                    onRename={handleRename}
+                    onDelete={handleDelete}
+                  />
+                ))}
+            </ul>
+          )}
+        </div>
+      </div>
+      {confirmDialog}
+    </div>
+  );
+}
+
+// A row in the label manager: the colour dot + an inline-editable name, a colour
+// picker popover, and a delete button.
+function LabelManagerRow({
+  label,
+  busy,
+  onRecolor,
+  onRename,
+  onDelete,
+}: {
+  label: MailLabel;
+  busy: boolean;
+  onRecolor: (id: string, color: string) => void;
+  onRename: (id: string, name: string, prev: string) => void;
+  onDelete: (id: string, name: string) => void;
+}) {
+  // Local editable draft of the name. The PARENT keys this row on id+name, so a
+  // committed rename remounts the row with a fresh draft — no sync effect needed
+  // (which would trip react-hooks/set-state-in-effect).
+  const [name, setName] = useState(label.name);
+  const [editingColor, setEditingColor] = useState(false);
+  const color = label.color || LABEL_PALETTE[0].value;
+
+  return (
+    <li className="relative flex items-center gap-2 rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5">
+      <button
+        type="button"
+        onClick={() => setEditingColor((v) => !v)}
+        title="Change colour"
+        aria-label="Change colour"
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-muted"
+      >
+        <span
+          className="h-3.5 w-3.5 rounded-full ring-1 ring-inset ring-black/10"
+          style={{ backgroundColor: color }}
+        />
+      </button>
+      <Input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onBlur={() => onRename(label.id, name, label.name)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        disabled={busy}
+        className="h-7 flex-1 px-2 text-sm"
+        aria-label={`Rename ${label.name}`}
+      />
+      <button
+        type="button"
+        onClick={() => onDelete(label.id, label.name)}
+        disabled={busy}
+        title="Delete label"
+        aria-label={`Delete ${label.name}`}
+        className="rounded p-1 text-muted-foreground/70 transition hover:bg-muted hover:text-red-600 disabled:opacity-50"
+      >
+        <Trash2 className="h-4 w-4" />
+      </button>
+      {editingColor && (
+        <div className="absolute left-2 top-full z-10 mt-1 rounded-md border border-[#E2DDD8] bg-white p-2 shadow-lg">
+          <ColorSwatches
+            value={color}
+            onPick={(c2) => {
+              onRecolor(label.id, c2);
+              setEditingColor(false);
+            }}
+          />
+        </div>
+      )}
+    </li>
+  );
+}
+
+// The shared colour-swatch row used by the create form and each label's colour
+// popover. Renders the curated palette; the active swatch gets a ring.
+function ColorSwatches({
+  value,
+  onPick,
+}: {
+  value: string;
+  onPick: (color: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {LABEL_PALETTE.map((c2) => {
+        const active = c2.value.toUpperCase() === (value || "").toUpperCase();
+        return (
+          <button
+            key={c2.value}
+            type="button"
+            onClick={() => onPick(c2.value)}
+            title={c2.name}
+            aria-label={c2.name}
+            aria-pressed={active}
+            className={cn(
+              "flex h-6 w-6 items-center justify-center rounded-full ring-1 ring-inset ring-black/10 transition",
+              active && "ring-2 ring-offset-1 ring-[#1F1D1B]",
+            )}
+            style={{ backgroundColor: c2.value }}
+          >
+            {active && <Check className="h-3.5 w-3.5 text-white" />}
+          </button>
+        );
+      })}
+    </div>
   );
 }

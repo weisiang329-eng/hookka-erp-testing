@@ -15,7 +15,7 @@
 // Pass an optional `id` prop; it falls back to useParams when absent, so the
 // standalone route keeps working unchanged.
 // ---------------------------------------------------------------------------
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
 import { Card, CardContent } from "@/components/ui/card";
@@ -33,12 +33,23 @@ import {
   patchThreadTrashed,
 } from "./mail-actions";
 import {
+  type MailLabel,
+  LABEL_PALETTE,
+  labelColorMap,
+  colorForLabel,
+  chipStyle,
+} from "./mail-labels";
+import { createLabel } from "./mail-actions";
+import { ComposeDialog } from "./compose";
+import {
   ArrowLeft,
   ArrowDownLeft,
   ArrowUpRight,
   Send,
-  CheckCircle2,
-  RotateCcw,
+  Reply,
+  Forward,
+  Archive,
+  Inbox,
   Loader2,
   UserPlus,
   Check,
@@ -141,6 +152,12 @@ export default function MailCenterDetailPage({
   // routes/users.ts). Loaded lazily; the select degrades to disabled if empty.
   const { data: usersResp } = useCachedJson<UsersEnvelope>("/api/users", 300);
   const users = usersResp?.data ?? [];
+  // Label catalogue (name → colour) for the chip colours + the add-label menu.
+  const { data: labelCatalog } = useCachedJson<MailLabel[]>(
+    "/api/mail-center/labels",
+    60,
+  );
+  const colorMap = labelColorMap(labelCatalog ?? []);
 
   const thread = data?.thread;
   const messages = data?.messages ?? [];
@@ -151,6 +168,10 @@ export default function MailCenterDetailPage({
   const [assigning, setAssigning] = useState(false);
   const [mutating, setMutating] = useState(false);
   const [newLabel, setNewLabel] = useState("");
+  // Forward dialog (opens ComposeDialog prefilled). Reply scrolls to + focuses
+  // the always-visible reply composer at the bottom of the conversation.
+  const [forwardOpen, setForwardOpen] = useState(false);
+  const replyRef = useRef<HTMLTextAreaElement>(null);
 
   // Star / labels / trashed are DB-backed and arrive on the thread itself.
   const starred = thread?.starred ?? false;
@@ -231,12 +252,25 @@ export default function MailCenterDetailPage({
     }
     setMutating(true);
     try {
+      // Ensure the catalogue carries this name so it gets a colour + shows in
+      // the sidebar (idempotent server-side; a known name is a no-op).
+      if (!colorMap.has(clean.toLowerCase())) {
+        await createLabel(clean, LABEL_PALETTE[0].value);
+      }
       const ok = await patchThreadLabels(id, [...chips, clean]);
       if (ok) setNewLabel("");
       else toast.error("Couldn’t add label. Please try again.");
     } finally {
       setMutating(false);
     }
+  }
+
+  // Reply — scroll the always-visible reply composer into view and focus it.
+  function focusReply() {
+    const el = replyRef.current;
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.focus({ preventScroll: true });
   }
 
   // Remove a label by replacing the set without it (PATCH labels).
@@ -306,7 +340,7 @@ export default function MailCenterDetailPage({
         toast.error("Failed to update status. Please try again.");
         return;
       }
-      toast.success(status === "closed" ? "Marked as done." : "Moved to Inbox.");
+      toast.success(status === "closed" ? "Archived." : "Moved to Inbox.");
       invalidateCache(url);
     } catch {
       toast.error("Failed to update status. Check your connection and try again.");
@@ -369,11 +403,33 @@ export default function MailCenterDetailPage({
         ) : (
           <span />
         )}
-        {/* Action cluster. Star / Mark-unread / Trash are DB-backed via
-            PATCH /threads/:id. The status button maps to the same PATCH:
-            open ↔ closed ("Move to Inbox" / "Mark done"). */}
+        {/* Gmail-style action toolbar. Reply / Forward drive the compose flow;
+            Archive / Star / Unread / Trash are DB-backed via PATCH /threads/:id
+            (Archive = status closed, "Move to Inbox" = status open). The reply
+            composer lives at the bottom of the conversation; Reply scrolls to +
+            focuses it. */}
         {thread && (
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button
+              variant="primary"
+              size="sm"
+              className="gap-1.5 bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+              onClick={focusReply}
+              title="Reply to this conversation"
+            >
+              <Reply className="h-4 w-4" />
+              Reply
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => setForwardOpen(true)}
+              title="Forward this conversation as a new email"
+            >
+              <Forward className="h-4 w-4" />
+              Forward
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -412,7 +468,7 @@ export default function MailCenterDetailPage({
                 {updatingStatus ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
-                  <RotateCcw className="h-4 w-4" />
+                  <Inbox className="h-4 w-4" />
                 )}
                 Move to Inbox
               </Button>
@@ -423,13 +479,14 @@ export default function MailCenterDetailPage({
                 className="gap-1.5"
                 disabled={updatingStatus}
                 onClick={() => handleSetStatus("closed")}
+                title="Archive (mark done)"
               >
                 {updatingStatus ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
-                  <CheckCircle2 className="h-4 w-4" />
+                  <Archive className="h-4 w-4" />
                 )}
-                Mark done
+                Archive
               </Button>
             )}
             <Button
@@ -518,23 +575,32 @@ export default function MailCenterDetailPage({
                 <Tag className="h-3.5 w-3.5" />
                 Labels
               </span>
-              {chips.map((l) => (
-                <span
-                  key={l}
-                  className="inline-flex items-center gap-1 rounded-full bg-[#EFE9DD] px-2 py-0.5 text-[11px] font-medium text-[#6B5C32] ring-1 ring-inset ring-[#E2DDD8]"
-                >
-                  {l}
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveLabel(l)}
-                    disabled={mutating}
-                    aria-label={`Remove label ${l}`}
-                    className="text-[#6B5C32]/70 hover:text-[#6B5C32] disabled:opacity-50"
+              {chips.map((l) => {
+                const color = colorForLabel(l, colorMap);
+                return (
+                  <span
+                    key={l}
+                    style={chipStyle(color)}
+                    className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset ring-black/5"
                   >
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
-              ))}
+                    <span
+                      className="h-1.5 w-1.5 rounded-full"
+                      style={{ backgroundColor: color }}
+                      aria-hidden="true"
+                    />
+                    {l}
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveLabel(l)}
+                      disabled={mutating}
+                      aria-label={`Remove label ${l}`}
+                      className="opacity-70 hover:opacity-100 disabled:opacity-50"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                );
+              })}
               <div className="flex items-center gap-1">
                 <Input
                   value={newLabel}
@@ -679,6 +745,7 @@ export default function MailCenterDetailPage({
                 </span>
               </div>
               <textarea
+                ref={replyRef}
                 value={replyText}
                 onChange={(e) => setReplyText(e.target.value)}
                 rows={6}
@@ -709,7 +776,60 @@ export default function MailCenterDetailPage({
         </>
       )}
 
+      {/* Forward — reuses the compose flow (POST /compose, sent via Brevo). The
+          dialog opens prefilled with the conversation quoted; the operator fills
+          in the recipient. To: is intentionally left blank for them to choose. */}
+      {thread && (
+        <ComposeDialog
+          open={forwardOpen}
+          onClose={() => setForwardOpen(false)}
+          initialDraft={{
+            id: `fwd-${thread.id}`,
+            to: "",
+            subject: forwardSubject(thread.subject),
+            body: forwardBody(thread, messages),
+            fromAddress: thread.mailboxAddress || "",
+            // Not persisted to the drafts store (only "Save draft" does that),
+            // so updatedAt is unused here — keep it stable to stay render-pure.
+            updatedAt: 0,
+          }}
+        />
+      )}
+
       {confirmDialog}
     </div>
   );
+}
+
+// "Fwd: <subject>" without double-prefixing an already-forwarded subject.
+function forwardSubject(subject: string): string {
+  const s = subject || "(no subject)";
+  return /^fwd:/i.test(s) ? s : `Fwd: ${s}`;
+}
+
+// Build a quoted forward body from the conversation's messages (most recent
+// first), each prefixed with a small header line. Plain text only — never raw
+// customer HTML (consistent with how the thread is rendered).
+function forwardBody(thread: MailThread, messages: MailMessage[]): string {
+  const lines: string[] = ["", "---------- Forwarded message ----------"];
+  // Newest first reads best at the top of a forward.
+  const ordered = messages
+    .slice()
+    .sort((a, b) =>
+      (b.sentAt || b.createdAt).localeCompare(a.sentAt || a.createdAt),
+    );
+  for (const m of ordered) {
+    const who = m.fromName ? `${m.fromName} <${m.fromAddress}>` : m.fromAddress;
+    const when = fmtFull(m.sentAt || m.createdAt);
+    const body = m.textBody?.trim() || htmlToText(m.htmlBody || "");
+    lines.push("");
+    lines.push(`From: ${who}`);
+    if (when) lines.push(`Date: ${when}`);
+    if (m.subject) lines.push(`Subject: ${m.subject}`);
+    lines.push("");
+    lines.push(body || "(empty)");
+    lines.push("");
+    lines.push("--");
+  }
+  return lines.join("\n");
 }

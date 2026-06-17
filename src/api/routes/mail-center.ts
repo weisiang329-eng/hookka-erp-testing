@@ -144,6 +144,25 @@ export function ensureMailSchema(db: D1Database): Promise<void> {
          ON email_messages (thread_id, created_at)`,
       `CREATE INDEX IF NOT EXISTS ix_email_messages_msgid
          ON email_messages (message_id)`,
+      // Label registry (owner 2026-06-17 — "labels with colours like Gmail").
+      // Thread labels themselves stay as a JSON name array on email_threads
+      // (above); THIS table is the canonical name→colour catalogue so the
+      // sidebar can render a coloured dot per label and offer a managed list.
+      // Joined to thread labels by lower(name); a thread label with no catalogue
+      // row just renders in the neutral brand tone. created_at is written via
+      // new Date().toISOString() so it MUST stay TEXT (never timestamptz) for
+      // the SupabaseAdapter to round-trip it unchanged — same rule as the
+      // timestamp columns above.
+      `CREATE TABLE IF NOT EXISTS email_labels (
+         id TEXT PRIMARY KEY,
+         org_id TEXT NOT NULL DEFAULT 'hookka',
+         name TEXT NOT NULL,
+         color TEXT,
+         created_at TEXT,
+         created_by TEXT
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS ux_email_labels_org_name
+         ON email_labels (org_id, name)`,
     ];
     for (const stmt of stmts) {
       try {
@@ -492,6 +511,26 @@ function rowToAddress(r: AddressRow) {
   };
 }
 
+// Label catalogue row → API shape. Like every other read here the pg driver
+// hands generic columns back camelCased (created_at→createdAt), so dual-read
+// the snake key as a fallback (same class of bug as rowToAddress).
+type LabelRow = {
+  id: string;
+  name: string;
+  color: string | null;
+  createdAt?: string | null;
+  created_at?: string | null;
+};
+
+function rowToLabel(r: LabelRow) {
+  return {
+    id: r.id,
+    name: r.name,
+    color: r.color ?? "",
+    createdAt: r.createdAt ?? r.created_at ?? "",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Hierarchical mailbox visibility (owner 2026-06-17). SUPER_ADMIN always sees
 // every thread/address in the org. Every other authenticated user has a
@@ -757,6 +796,252 @@ app.get("/addresses", async (c) => {
     .all<AddressRow>();
   return c.json((res.results ?? []).map(rowToAddress));
 });
+
+// ---------------------------------------------------------------------------
+// Label catalogue (owner 2026-06-17 — "labels with colours like Gmail"). The
+// PER-THREAD label set stays a JSON name array on email_threads; THIS catalogue
+// only adds a canonical name→colour mapping so the sidebar shows a coloured dot
+// and offers a managed list. Reads are open to any authenticated mailbox user
+// (the sidebar needs colours); create/edit/delete require a mailbox in scope —
+// the SAME gate as labelling a thread — NOT requireSuperAdmin, since labels are
+// an everyday triage affordance for whoever works a mailbox.
+// ---------------------------------------------------------------------------
+
+// A small curated palette (hex) the picker offers. Stored verbatim; an unknown
+// value coming back from the DB is tolerated by the UI, but writes are clamped
+// to this set so colours stay legible against the warm-neutral surfaces.
+const LABEL_COLORS = [
+  "#6B5C32", // brand brown (default)
+  "#B45309", // amber-700
+  "#15803D", // green-700
+  "#0E7490", // cyan-700
+  "#1D4ED8", // blue-700
+  "#6D28D9", // violet-700
+  "#BE185D", // pink-700
+  "#B91C1C", // red-700
+  "#475569", // slate-600
+] as const;
+const DEFAULT_LABEL_COLOR = LABEL_COLORS[0];
+
+function normalizeColor(input: string | undefined | null): string {
+  const v = (input ?? "").trim();
+  if (!v) return DEFAULT_LABEL_COLOR;
+  const up = v.toUpperCase();
+  const hit = (LABEL_COLORS as readonly string[]).find(
+    (c2) => c2.toUpperCase() === up,
+  );
+  return hit ?? DEFAULT_LABEL_COLOR;
+}
+
+// Whether the caller may manage the label catalogue: SUPER_ADMIN, or any user
+// with at least one mailbox in scope (same bar as labelling a thread).
+async function canManageLabels(
+  c: Context<Env>,
+  orgId: string,
+): Promise<boolean> {
+  const scope = await getMailScope(c, orgId);
+  return scope.isAdmin || scope.addresses.length > 0;
+}
+
+// GET /api/mail-center/labels — the catalogue (name + colour), for the sidebar
+// dots and the label menu. Open to any authenticated user in the org.
+app.get("/labels", async (c) => {
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  c.header("Cache-Control", "no-store");
+  const res = await c.var.DB.prepare(
+    `SELECT * FROM email_labels WHERE org_id = ? ORDER BY name ASC`,
+  )
+    .bind(orgId)
+    .all<LabelRow>();
+  return c.json((res.results ?? []).map(rowToLabel));
+});
+
+// POST /api/mail-center/labels {name,color} — create a catalogue label. Name is
+// unique per org (case-insensitive via the lowercased unique index); a repeat
+// returns the existing row as a 200 so the picker is idempotent.
+app.post("/labels", async (c) => {
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  if (!(await canManageLabels(c, orgId))) {
+    return c.json({ error: "no mailbox in scope" }, 403);
+  }
+  const body = await c.req
+    .json<{ name?: string; color?: string }>()
+    .catch(() => ({}) as { name?: string; color?: string });
+  const name = (body.name ?? "").trim().slice(0, 60);
+  if (!name) return c.json({ error: "name is required" }, 400);
+  const color = normalizeColor(body.color);
+
+  // Pre-check (case-insensitive) so a repeat returns the existing row instead
+  // of a 409 — the picker calls this freely when assigning a label by name.
+  const existing = await c.var.DB.prepare(
+    `SELECT * FROM email_labels WHERE org_id = ? AND lower(name) = lower(?) LIMIT 1`,
+  )
+    .bind(orgId, name)
+    .first<LabelRow>();
+  if (existing) return c.json(rowToLabel(existing));
+
+  const id = crypto.randomUUID();
+  const userId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ??
+    null;
+  try {
+    await c.var.DB.prepare(
+      `INSERT INTO email_labels (id, org_id, name, color, created_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(id, orgId, name, color, new Date().toISOString(), userId)
+      .run();
+  } catch {
+    // Unique (org_id, name) collision under a race — return whatever's there.
+    const row = await c.var.DB.prepare(
+      `SELECT * FROM email_labels WHERE org_id = ? AND lower(name) = lower(?) LIMIT 1`,
+    )
+      .bind(orgId, name)
+      .first<LabelRow>();
+    return c.json(row ? rowToLabel(row) : { id, name, color });
+  }
+  const row = await c.var.DB.prepare(
+    `SELECT * FROM email_labels WHERE org_id = ? AND id = ? LIMIT 1`,
+  )
+    .bind(orgId, id)
+    .first<LabelRow>();
+  return c.json(row ? rowToLabel(row) : { id, name, color }, 201);
+});
+
+// PATCH /api/mail-center/labels/:id {name?,color?} — rename / recolour. A
+// rename cascades to every thread carrying the OLD name so the per-thread JSON
+// label arrays stay in sync with the catalogue.
+app.patch("/labels/:id", async (c) => {
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  if (!(await canManageLabels(c, orgId))) {
+    return c.json({ error: "no mailbox in scope" }, 403);
+  }
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<{ name?: string; color?: string }>()
+    .catch(() => ({}) as { name?: string; color?: string });
+
+  const current = await c.var.DB.prepare(
+    `SELECT * FROM email_labels WHERE org_id = ? AND id = ? LIMIT 1`,
+  )
+    .bind(orgId, id)
+    .first<LabelRow>();
+  if (!current) return c.json({ error: "label not found" }, 404);
+
+  const sets: string[] = [];
+  const binds: (string | null)[] = [];
+  let renameFrom = "";
+  let renameTo = "";
+  if (body.name !== undefined) {
+    const name = body.name.trim().slice(0, 60);
+    if (!name) return c.json({ error: "name cannot be empty" }, 400);
+    if (name.toLowerCase() !== current.name.toLowerCase()) {
+      // Block a rename onto an existing label name (would merge ambiguously).
+      const clash = await c.var.DB.prepare(
+        `SELECT id FROM email_labels WHERE org_id = ? AND lower(name) = lower(?) AND id <> ? LIMIT 1`,
+      )
+        .bind(orgId, name, id)
+        .first<{ id: string }>();
+      if (clash) return c.json({ error: "a label with that name exists" }, 409);
+      renameFrom = current.name;
+      renameTo = name;
+    }
+    sets.push("name = ?");
+    binds.push(name);
+  }
+  if (body.color !== undefined) {
+    sets.push("color = ?");
+    binds.push(normalizeColor(body.color));
+  }
+  if (sets.length === 0) return c.json({ error: "no fields to update" }, 400);
+
+  await c.var.DB.prepare(
+    `UPDATE email_labels SET ${sets.join(", ")} WHERE org_id = ? AND id = ?`,
+  )
+    .bind(...binds, orgId, id)
+    .run();
+
+  // Cascade the rename into the per-thread JSON label arrays. These are stored
+  // as a JSON string of names; rewrite each affected thread's array in JS (the
+  // set is small) so a renamed label keeps filtering + showing correctly.
+  if (renameFrom && renameTo) {
+    await renameThreadLabel(c, orgId, renameFrom, renameTo);
+  }
+
+  const row = await c.var.DB.prepare(
+    `SELECT * FROM email_labels WHERE org_id = ? AND id = ? LIMIT 1`,
+  )
+    .bind(orgId, id)
+    .first<LabelRow>();
+  return c.json(row ? rowToLabel(row) : { id });
+});
+
+// DELETE /api/mail-center/labels/:id — remove a catalogue label and strip it
+// from every thread that carried it (keeps the sidebar list and thread chips
+// consistent — a deleted label shouldn't linger on threads).
+app.delete("/labels/:id", async (c) => {
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  if (!(await canManageLabels(c, orgId))) {
+    return c.json({ error: "no mailbox in scope" }, 403);
+  }
+  const id = c.req.param("id");
+  const current = await c.var.DB.prepare(
+    `SELECT * FROM email_labels WHERE org_id = ? AND id = ? LIMIT 1`,
+  )
+    .bind(orgId, id)
+    .first<LabelRow>();
+  if (!current) return c.json({ error: "label not found" }, 404);
+
+  await c.var.DB.prepare(`DELETE FROM email_labels WHERE org_id = ? AND id = ?`)
+    .bind(orgId, id)
+    .run();
+  // Strip the name from any thread carrying it (rename to "" = remove).
+  await renameThreadLabel(c, orgId, current.name, "");
+  return c.json({ ok: true });
+});
+
+// Rewrite one label name across every thread's JSON label array. renameTo=""
+// REMOVES the label (delete path); otherwise it's renamed in place, de-duped
+// case-insensitively. Scans only threads whose labels JSON mentions the old
+// name (LIKE pre-filter), then rewrites each in JS — the per-thread arrays are
+// tiny and the affected set is small, so this stays cheap.
+async function renameThreadLabel(
+  c: Context<Env>,
+  orgId: string,
+  from: string,
+  to: string,
+): Promise<void> {
+  const like = `%${from}%`;
+  const rows = await c.var.DB.prepare(
+    `SELECT id, labels FROM email_threads
+       WHERE org_id = ? AND labels IS NOT NULL AND labels LIKE ?`,
+  )
+    .bind(orgId, like)
+    .all<{ id: string; labels: string | null }>();
+  for (const r of rows.results ?? []) {
+    const arr = parseJsonArray(r.labels);
+    if (!arr.some((l) => l.toLowerCase() === from.toLowerCase())) continue;
+    const next: string[] = [];
+    for (const l of arr) {
+      if (l.toLowerCase() === from.toLowerCase()) {
+        if (to && !next.some((n) => n.toLowerCase() === to.toLowerCase())) {
+          next.push(to);
+        }
+      } else if (!next.some((n) => n.toLowerCase() === l.toLowerCase())) {
+        next.push(l);
+      }
+    }
+    await c.var.DB.prepare(
+      `UPDATE email_threads SET labels = ? WHERE org_id = ? AND id = ?`,
+    )
+      .bind(JSON.stringify(next), orgId, r.id)
+      .run();
+  }
+}
 
 // POST /api/mail-center/test-inject — admin-only: seed ONE sample inbound email
 // so the owner can verify the inbox + reply UI BEFORE switching MX (zero infra,

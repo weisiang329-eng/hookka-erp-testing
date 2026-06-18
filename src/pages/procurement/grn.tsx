@@ -555,6 +555,44 @@ export default function GRNPage() {
         disabled: row.status === "CONFIRMED" || row.status === "POSTED",
       },
       {
+        // Post to Stock — the move to POSTED that actually commits inventory
+        // (rm_batches / cost_ledger / balanceQty) and cascades the PO. Was
+        // previously only reachable via the PO-list bulk convert, so GRNs made
+        // here got stuck at CONFIRMED and could never be invoiced.
+        label: "Post to Stock",
+        icon: <CheckCircle2 className="h-3.5 w-3.5" />,
+        action: async () => {
+          try {
+            const res = await fetch(`/api/grn/${row.id}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "POSTED" }),
+            });
+            const j = (await res.json().catch(() => null)) as
+              | { success?: boolean; error?: string; data?: { costing?: { unresolvedLines?: number } } }
+              | null;
+            if (!res.ok || !j?.success) {
+              toast.error(j?.error || `Post to Stock failed (${res.status})`);
+              return;
+            }
+            const unresolved = j.data?.costing?.unresolvedLines ?? 0;
+            if (unresolved > 0) {
+              toast.error(`Posted, but ${unresolved} line(s) had no matching raw material — that stock did NOT land.`);
+            } else {
+              toast.success(`GRN ${row.grnNumber} posted to stock`);
+            }
+            invalidateCachePrefix("/api/grn");
+            invalidateCachePrefix("/api/purchase-orders");
+            invalidateCachePrefix("/api/inventory");
+            invalidateCachePrefix("/api/raw-materials");
+            fetchData();
+          } catch {
+            toast.error("Post to Stock failed — network error");
+          }
+        },
+        disabled: row.status === "POSTED",
+      },
+      {
         // POSTED-only: a non-POSTED GRN hasn't yet committed inventory and
         // shouldn't be billed. Mirrors the manual flow on the PI list which
         // pulls amount from the GRN's totalAmount and reuses the GRN items

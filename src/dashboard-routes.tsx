@@ -65,6 +65,7 @@ const Procurement = lazy(() => import('./pages/procurement'))
 const ProcurementCreate = lazy(() => import('./pages/procurement/create'))
 const ProcurementDetail = lazy(() => import('./pages/procurement/detail'))
 const GRN = lazy(() => import('./pages/procurement/grn'))
+const GRNDetail = lazy(() => import('./pages/procurement/grn-detail'))
 const InTransit = lazy(() => import('./pages/procurement/in-transit'))
 const ProcurementMaintenance = lazy(() => import('./pages/procurement/maintenance'))
 const PI = lazy(() => import('./pages/procurement/pi'))
@@ -327,6 +328,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/procurement/create', element: <S><ProcurementCreate /></S> },
   { path: '/procurement/:id', element: <S><ProcurementDetail /></S> },
   { path: '/procurement/grn', element: <S><GRN /></S> },
+  { path: '/procurement/grn/:id', element: <S><GRNDetail /></S> },
   { path: '/procurement/in-transit', element: <S><InTransit /></S> },
   { path: '/procurement/maintenance', element: <S><ProcurementMaintenance /></S> },
   { path: '/procurement/pi', element: <S><PI /></S> },

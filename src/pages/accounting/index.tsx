@@ -3749,6 +3749,9 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
         <h3 className="text-sm font-semibold text-[#3E6570] mb-3">Bills</h3>
         <OtherPartyBillsManager parties={parties ?? []} accounts={accounts} side={side} />
       </div>
+      <div className="pt-4 mt-2 border-t border-[#E2DDD8]">
+        <OtherPartyPaymentsManager parties={parties ?? []} accounts={accounts} side={side} />
+      </div>
     </div>
   );
 }
@@ -3926,6 +3929,178 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
                       <button onClick={() => del(b.billNo)} className="text-[#9A3A2D] text-xs hover:underline">Delete</button>
                     )}
                   </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </CardContent></Card>
+    </div>
+  );
+}
+
+type OpenBill = { id: string; billNo: string; outstandingSen: number };
+type PaymentGroup = {
+  paymentNo: string; partyId: string; partyType: "DEBTOR" | "CREDITOR"; partyName: string;
+  date: string; bankAccount: string; totalSen: number;
+  lines: { billId: string; billNo: string; amountSen: number }[];
+};
+
+function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: OtherParty[]; accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
+  const { toast } = useToast();
+  const today = new Date().toISOString().slice(0, 10);
+  const banks = accounts.filter((a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH");
+  const [partyId, setPartyId] = useState("");
+  const [bankAccountSel, setBankAccountSel] = useState("");
+  const bankAccount = bankAccountSel || banks[0]?.code || "";
+  const [date, setDate] = useState(today);
+  const [reference, setReference] = useState("");
+  const [openBills, setOpenBills] = useState<OpenBill[]>([]);
+  const [rows, setRows] = useState<Record<string, { amountStr: string; full: boolean }>>({});
+  const [history, setHistory] = useState<PaymentGroup[] | null>(null);
+  const [posting, setPosting] = useState(false);
+
+  const sideParties = parties.filter((p) => p.type === side && p.isActive);
+  const verb = side === "CREDITOR" ? "Payment" : "Receipt";
+
+  const loadHistory = () => {
+    fetch(`/api/accounting/other-party-payments?type=${side}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: PaymentGroup[] }>)
+      .then((j) => { if (j?.success) setHistory(j.data ?? []); })
+      .catch(() => {});
+  };
+  useEffect(loadHistory, [side]);
+
+  const loadOpenBills = (pid: string) => {
+    setPartyId(pid); setRows({});
+    if (!pid) { setOpenBills([]); return; }
+    fetch(`/api/accounting/other-party-bills?type=${side}&partyId=${pid}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; billNo: string; outstandingSen: number }[] }>)
+      .then((j) => { if (j?.success) setOpenBills((j.data ?? []).filter((b) => b.outstandingSen > 0).map((b) => ({ id: b.id, billNo: b.billNo, outstandingSen: b.outstandingSen }))); })
+      .catch(() => {});
+  };
+
+  const toSen = (s: string) => Math.round((parseFloat(s) || 0) * 100);
+  const getRow = (id: string) => rows[id] ?? { amountStr: "", full: false };
+  const setRow = (id: string, patch: Partial<{ amountStr: string; full: boolean }>) =>
+    setRows((r) => ({ ...r, [id]: { ...getRow(id), ...patch } }));
+  const allocSen = (b: OpenBill) => { const row = getRow(b.id); return row.full ? b.outstandingSen : toSen(row.amountStr); };
+  const totalSen = openBills.reduce((s, b) => s + allocSen(b), 0);
+
+  const post = async () => {
+    if (!partyId) { toast.error("Select a party"); return; }
+    if (!bankAccount) { toast.error("Select a bank/cash account"); return; }
+    const allocations = openBills
+      .map((b) => ({ billId: b.id, amountSen: allocSen(b) }))
+      .filter((a) => a.amountSen > 0);
+    if (allocations.length === 0) { toast.error("Enter at least one amount"); return; }
+    setPosting(true);
+    const res = await fetch("/api/accounting/other-party-payments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ partyId, bankAccount, date, reference: reference || undefined, allocations }),
+    });
+    setPosting(false);
+    const j = asMutationResponse(await res.json());
+    if (j?.success) { setReference(""); loadOpenBills(partyId); loadHistory(); toast.success(`${verb} posted`); }
+    else toast.error(j?.error || `Failed to post ${verb.toLowerCase()}`);
+  };
+
+  const voidPayment = async (paymentNo: string) => {
+    const res = await fetch(`/api/accounting/other-party-payments/${encodeURIComponent(paymentNo)}/void`, { method: "POST" });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) { loadHistory(); if (partyId) loadOpenBills(partyId); }
+    else toast.error(j?.error || "Failed to void");
+  };
+
+  return (
+    <div className="space-y-3">
+      <h3 className="text-sm font-semibold text-[#3E6570]">{side === "CREDITOR" ? "Payments" : "Receipts"}</h3>
+      <Card><CardContent className="p-4 space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">{side === "CREDITOR" ? "Creditor" : "Debtor"}</label>
+            <select value={partyId} onChange={(e) => loadOpenBills(e.target.value)} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm">
+              <option value="">Select…</option>
+              {sideParties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">{side === "CREDITOR" ? "Pay from" : "Deposit to"} (bank / cash)</label>
+            <select value={bankAccount} onChange={(e) => setBankAccountSel(e.target.value)} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm">
+              {banks.map((b) => <option key={b.code} value={b.code}>{b.code} {b.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">Date</label>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">Reference (optional)</label>
+            <input type="text" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="cheque / transfer no" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+          </div>
+        </div>
+
+        {partyId && (openBills.length === 0 ? (
+          <p className="text-xs text-[#9CA3AF]">No outstanding bills for this party.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead><tr className="text-xs text-[#6B7280] text-left">
+              <th className="py-1">Bill No</th><th className="py-1 text-right">Outstanding</th>
+              <th className="py-1 text-right">{side === "CREDITOR" ? "Pay" : "Receive"} (RM)</th><th className="py-1 text-center">Full</th>
+            </tr></thead>
+            <tbody>
+              {openBills.map((b) => {
+                const row = getRow(b.id);
+                return (
+                  <tr key={b.id} className="border-t border-[#F0ECE9]">
+                    <td className="py-1 font-mono text-xs">{b.billNo}</td>
+                    <td className="py-1 text-right tabular-nums">{formatCurrency(b.outstandingSen)}</td>
+                    <td className="py-1 text-right">
+                      <input type="text" inputMode="decimal" disabled={row.full}
+                        value={row.full ? (b.outstandingSen / 100).toFixed(2) : row.amountStr}
+                        onChange={(e) => setRow(b.id, { amountStr: e.target.value })}
+                        className="w-28 rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm text-right tabular-nums disabled:bg-[#F0ECE9]" />
+                    </td>
+                    <td className="py-1 text-center">
+                      <input type="checkbox" checked={row.full} onChange={(e) => setRow(b.id, { full: e.target.checked })} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ))}
+
+        <div className="flex items-center justify-end gap-4 pt-2 border-t border-[#F0ECE9]">
+          <span className="text-xs text-[#6B7280]">Total (RM)</span>
+          <span className="text-lg font-bold text-[#3E6570] tabular-nums">{formatCurrency(totalSen)}</span>
+          <Button variant="primary" size="sm" disabled={posting || !partyId || !bankAccount || totalSen <= 0} onClick={post}>
+            Post {verb.toLowerCase()}
+          </Button>
+        </div>
+      </CardContent></Card>
+
+      <Card><CardContent className="p-0 overflow-x-auto">
+        {history === null ? (
+          <div className="py-8 text-center text-[#6B7280] text-sm">Loading…</div>
+        ) : history.length === 0 ? (
+          <div className="py-8 text-center text-[#6B7280] text-sm">No {verb.toLowerCase()}s yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead><tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280] text-left">
+              <th className="px-4 py-2">No</th><th className="px-4 py-2">Party</th><th className="px-4 py-2">Date</th>
+              <th className="px-4 py-2 text-right">Total</th><th className="px-4 py-2 text-center">Bills</th><th className="px-4 py-2 text-right"></th>
+            </tr></thead>
+            <tbody>
+              {history.map((g) => (
+                <tr key={g.paymentNo} className="border-b border-[#F0ECE9]">
+                  <td className="px-4 py-1.5 font-mono text-xs">{g.paymentNo}</td>
+                  <td className="px-4 py-1.5">{g.partyName}</td>
+                  <td className="px-4 py-1.5">{g.date}</td>
+                  <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(g.totalSen)}</td>
+                  <td className="px-4 py-1.5 text-center">{g.lines.length}</td>
+                  <td className="px-4 py-1.5 text-right"><button onClick={() => voidPayment(g.paymentNo)} className="text-[#9A3A2D] text-xs hover:underline">Void</button></td>
                 </tr>
               ))}
             </tbody>

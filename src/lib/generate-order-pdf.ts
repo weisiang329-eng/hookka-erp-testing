@@ -480,16 +480,16 @@ export function generateOrderPdf(
   doc.setFont("helvetica", "normal");
   doc.setTextColor(80, 80, 80);
   doc.setFontSize(6.5);
+  // Title-case the header title ("SALES ORDER" → "Sales Order", "CONSIGNMENT
+  // ORDER" → "Consignment Order") so term #5 names the right document (was
+  // hardcoded "Sales Order" even on the CO PDF).
+  const docLabel = variant.title.replace(/\b\w+/g, (w) => w.charAt(0) + w.slice(1).toLowerCase());
   const terms = [
     "1. Goods sold are not returnable or exchangeable.",
     "2. Interest of 1.5% per month will be charged on overdue accounts.",
     `3. All cheques should be crossed and made payable to ${CO.name}.`,
     "4. Goods remain the property of the seller until full payment is received.",
-    // TODO 2026-05-09: pre-existing CO bug — term #5 hardcoded "Sales Order"
-    // even on the CO PDF (verified: identical text in both source files
-    // before this refactor). Preserved for byte-identical behavior of this
-    // refactor commit. Fix in a follow-up by templating off variant.
-    "5. Any discrepancy in this Sales Order must be reported within 7 days.",
+    `5. Any discrepancy in this ${docLabel} must be reported within 7 days.`,
   ];
   for (const t of terms) { doc.text(t, m, y); y += 3; }
 

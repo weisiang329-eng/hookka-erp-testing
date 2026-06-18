@@ -1,6 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { addHookkaLetterhead } from "@/lib/pdf-utils";
+import { COMPANY } from "@/lib/constants";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -45,11 +46,13 @@ function amountInWords(sen: number): string {
 // Company constants
 // ---------------------------------------------------------------------------
 
-const COMPANY_NAME = "HOOKKA INDUSTRIES SDN BHD";
-const COMPANY_REG = "202201012345 (1234567-X)";
-const COMPANY_ADDRESS = "Lot 1234, Jalan Perindustrian 5, Kawasan Perindustrian Bukit Minyak, 14000 Bukit Mertajam, Pulau Pinang";
-const COMPANY_TEL = "04-508 1234";
-const COMPANY_FAX = "04-508 1235";
+// Single source of truth — was hardcoded to a WRONG Penang entity. Use the real
+// HOOKKA constant so quotations print the correct legal company.
+const COMPANY_NAME = COMPANY.HOOKKA.name;
+const COMPANY_REG = COMPANY.HOOKKA.regNo;
+const COMPANY_ADDRESS = COMPANY.HOOKKA.address;
+const COMPANY_TEL = COMPANY.HOOKKA.phone;
+const COMPANY_FAX = "";
 
 // ---------------------------------------------------------------------------
 // Main

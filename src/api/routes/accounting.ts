@@ -46,6 +46,7 @@ import {
   buildPaymentLegs,
   type PaymentAllocInput,
 } from "../../lib/other-party-payment";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 
 const app = new Hono<Env>();
 
@@ -2536,97 +2537,101 @@ app.delete("/other-party-bills/:billNo", async (c) => {
 app.post("/other-party-payments", async (c) => {
   const denied = await requirePermission(c, "accounting", "create");
   if (denied) return denied;
-  try {
-    const body = (await c.req.json()) as {
-      partyId?: string; bankAccount?: string; date?: string; reference?: string;
-      allocations?: { billId?: string; amountSen?: number }[];
-    };
-    const orgId = getOrgId(c);
 
-    const party = await c.var.DB.prepare("SELECT * FROM other_parties WHERE id = ? AND orgId = ?")
-      .bind(String(body.partyId ?? ""), orgId).first<OtherPartyRow>();
-    if (!party) return c.json({ success: false, error: "Party not found" }, 400);
-
-    const date = String(body.date ?? "").slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
-      return c.json({ success: false, error: "date must be YYYY-MM-DD" }, 400);
-
-    const bankAccount = String(body.bankAccount ?? "");
-    const bank = await c.var.DB.prepare("SELECT code, specialAccountType FROM chart_of_accounts WHERE code = ?")
-      .bind(bankAccount).first<{ code: string; specialAccountType: string | null }>();
-    if (!bank || (bank.specialAccountType !== "SBK" && bank.specialAccountType !== "SCH"))
-      return c.json({ success: false, error: "bankAccount must be a bank (SBK) or cash (SCH) account" }, 400);
-
-    const allocs: PaymentAllocInput[] = (body.allocations ?? []).map((a) => ({
-      billId: String(a.billId ?? ""), amountSen: Math.round(Number(a.amountSen ?? 0)),
-    }));
-    if (allocs.length === 0) return c.json({ success: false, error: "Select at least one bill" }, 400);
-
-    const partyType = party.type as PartyType;
-    const outstandingByBill: Record<string, number> = {};
-    for (const a of allocs) {
-      const bill = await c.var.DB.prepare("SELECT * FROM other_party_bills WHERE id = ? AND orgId = ?")
-        .bind(a.billId, orgId).first<OtherPartyBillRow>();
-      if (!bill) return c.json({ success: false, error: `Bill ${a.billId} not found` }, 400);
-      if (bill.partyId !== party.id) return c.json({ success: false, error: "Bill does not belong to this party" }, 400);
-      if (bill.partyType !== partyType) return c.json({ success: false, error: "Bill side mismatch" }, 400);
-      if (bill.status !== "OPEN" && bill.status !== "PARTIAL_PAID")
-        return c.json({ success: false, error: `Bill ${bill.billNo} is not open` }, 400);
-      outstandingByBill[a.billId] = bill.totalSen - bill.paidAmountSen;
-    }
-    const allocErr = validateAllocations(allocs, outstandingByBill);
-    if (allocErr) return c.json({ success: false, error: allocErr }, 400);
-
-    const totalSen = computePaymentTotal(allocs);
-    const payNo = await issueDocNumber(c.var.DB, {
-      bankAccountCode: bankAccount,
-      direction: partyType === "CREDITOR" ? "out" : "in",
-      dateIso: date,
-    });
-    const now = new Date().toISOString();
-    const actorUserId = (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
-
-    const statements: D1PreparedStatement[] = [];
-    for (const a of allocs) {
-      statements.push(
-        c.var.DB.prepare(
-          `INSERT INTO other_party_payments
-             (id, paymentNo, partyId, partyType, partyName, billId, date, amountSen, bankAccount, reference, orgId, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).bind(
-          `opp-${crypto.randomUUID().slice(0, 10)}`, payNo, party.id, partyType, party.name,
-          a.billId, date, a.amountSen, bankAccount, body.reference ?? null, orgId, now,
-        ),
-      );
-      statements.push(
-        c.var.DB.prepare(
-          `UPDATE other_party_bills
-             SET paidAmountSen = paidAmountSen + ?,
-                 status = CASE WHEN paidAmountSen + ? >= totalSen THEN 'PAID'
-                               WHEN paidAmountSen + ? > 0 THEN 'PARTIAL_PAID' ELSE status END,
-                 updatedAt = ?
-           WHERE id = ?`,
-        ).bind(a.amountSen, a.amountSen, a.amountSen, now, a.billId),
-      );
-    }
-
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "other-party-payments", idemKey, async () => {
     try {
-      const legs: LedgerEntryInput[] = buildPaymentLegs({ partyType, paymentNo: payNo, partyName: party.name, bankAccount, totalSen }).map((l) => ({
-        id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "other_party_payment", sourceId: payNo,
-        legNo: l.legNo, accountCode: l.accountCode, debitSen: l.debitSen, creditSen: l.creditSen, description: l.description, actorUserId, orgId,
-      }));
-      const { statements: ledgerStmts } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
-      statements.push(...ledgerStmts);
-    } catch (e) {
-      console.error(`[ledger] other_party_payment ${payNo} GL build failed — aborting:`, e);
-      return c.json({ success: false, error: "Failed to build the ledger posting — nothing was saved." }, 500);
-    }
+      const body = (await c.req.json()) as {
+        partyId?: string; bankAccount?: string; date?: string; reference?: string;
+        allocations?: { billId?: string; amountSen?: number }[];
+      };
+      const orgId = getOrgId(c);
 
-    await c.var.DB.batch(statements);
-    return c.json({ success: true, data: { paymentNo: payNo, totalSen } }, 201);
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
-  }
+      const party = await c.var.DB.prepare("SELECT * FROM other_parties WHERE id = ? AND orgId = ?")
+        .bind(String(body.partyId ?? ""), orgId).first<OtherPartyRow>();
+      if (!party) return c.json({ success: false, error: "Party not found" }, 400);
+
+      const date = String(body.date ?? "").slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
+        return c.json({ success: false, error: "date must be YYYY-MM-DD" }, 400);
+
+      const bankAccount = String(body.bankAccount ?? "");
+      const bank = await c.var.DB.prepare("SELECT code, specialAccountType FROM chart_of_accounts WHERE code = ?")
+        .bind(bankAccount).first<{ code: string; specialAccountType: string | null }>();
+      if (!bank || (bank.specialAccountType !== "SBK" && bank.specialAccountType !== "SCH"))
+        return c.json({ success: false, error: "bankAccount must be a bank (SBK) or cash (SCH) account" }, 400);
+
+      const allocs: PaymentAllocInput[] = (body.allocations ?? []).map((a) => ({
+        billId: String(a.billId ?? ""), amountSen: Math.round(Number(a.amountSen ?? 0)),
+      }));
+      if (allocs.length === 0) return c.json({ success: false, error: "Select at least one bill" }, 400);
+
+      const partyType = party.type as PartyType;
+      const outstandingByBill: Record<string, number> = {};
+      for (const a of allocs) {
+        const bill = await c.var.DB.prepare("SELECT * FROM other_party_bills WHERE id = ? AND orgId = ?")
+          .bind(a.billId, orgId).first<OtherPartyBillRow>();
+        if (!bill) return c.json({ success: false, error: `Bill ${a.billId} not found` }, 400);
+        if (bill.partyId !== party.id) return c.json({ success: false, error: "Bill does not belong to this party" }, 400);
+        if (bill.partyType !== partyType) return c.json({ success: false, error: "Bill side mismatch" }, 400);
+        if (bill.status !== "OPEN" && bill.status !== "PARTIAL_PAID")
+          return c.json({ success: false, error: `Bill ${bill.billNo} is not open` }, 400);
+        outstandingByBill[a.billId] = bill.totalSen - bill.paidAmountSen;
+      }
+      const allocErr = validateAllocations(allocs, outstandingByBill);
+      if (allocErr) return c.json({ success: false, error: allocErr }, 400);
+
+      const totalSen = computePaymentTotal(allocs);
+      const payNo = await issueDocNumber(c.var.DB, {
+        bankAccountCode: bankAccount,
+        direction: partyType === "CREDITOR" ? "out" : "in",
+        dateIso: date,
+      });
+      const now = new Date().toISOString();
+      const actorUserId = (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+
+      const statements: D1PreparedStatement[] = [];
+      for (const a of allocs) {
+        statements.push(
+          c.var.DB.prepare(
+            `INSERT INTO other_party_payments
+               (id, paymentNo, partyId, partyType, partyName, billId, date, amountSen, bankAccount, reference, orgId, createdAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(
+            `opp-${crypto.randomUUID().slice(0, 10)}`, payNo, party.id, partyType, party.name,
+            a.billId, date, a.amountSen, bankAccount, body.reference ?? null, orgId, now,
+          ),
+        );
+        statements.push(
+          c.var.DB.prepare(
+            `UPDATE other_party_bills
+               SET paidAmountSen = paidAmountSen + ?,
+                   status = CASE WHEN paidAmountSen + ? >= totalSen THEN 'PAID'
+                                 WHEN paidAmountSen + ? > 0 THEN 'PARTIAL_PAID' ELSE status END,
+                   updatedAt = ?
+             WHERE id = ?`,
+          ).bind(a.amountSen, a.amountSen, a.amountSen, now, a.billId),
+        );
+      }
+
+      try {
+        const legs: LedgerEntryInput[] = buildPaymentLegs({ partyType, paymentNo: payNo, partyName: party.name, bankAccount, totalSen }).map((l) => ({
+          id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "other_party_payment", sourceId: payNo,
+          legNo: l.legNo, accountCode: l.accountCode, debitSen: l.debitSen, creditSen: l.creditSen, description: l.description, actorUserId, orgId,
+        }));
+        const { statements: ledgerStmts } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+        statements.push(...ledgerStmts);
+      } catch (e) {
+        console.error(`[ledger] other_party_payment ${payNo} GL build failed — aborting:`, e);
+        return c.json({ success: false, error: "Failed to build the ledger posting — nothing was saved." }, 500);
+      }
+
+      await c.var.DB.batch(statements);
+      return c.json({ success: true, data: { paymentNo: payNo, totalSen } }, 201);
+    } catch {
+      return c.json({ success: false, error: "Invalid request body" }, 400);
+    }
+  });
 });
 
 app.get("/other-party-payments", async (c) => {

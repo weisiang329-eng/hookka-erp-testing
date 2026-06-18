@@ -3,22 +3,41 @@
 //
 // Shows a single PI with its line breakdown. Mirrors the structure of
 // procurement/detail.tsx (the PO detail page) — back link, header card,
-// details + items grid, audit history. No status-transition buttons yet —
-// the PAID flow is a separate AP-module change. Display-only for now.
+// details + items grid, audit history. Phase B1: status-transition buttons
+// (DRAFT→PENDING_APPROVAL→APPROVED→PAID, per backend VALID_TRANSITIONS) +
+// Delete (DRAFT-only). Failures (incl. GL-posting errors on APPROVED/PAID) are
+// surfaced via toast, never optimistically flipped. Line-item editing is B2.
 //
 // Line items come from purchase_invoice_items (migration 0107). Each line
 // has a line_type tag: STOCKED items show their material code; non-stocked
 // lines (FEE / TAX / REBATE / DISCOUNT / OTHER) show "—" plus a small
 // badge so users can see at a glance what kind of charge it is.
 // ---------------------------------------------------------------------------
-import { useMemo } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useMemo, useState } from "react";
+import { Link, useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, FileText, Package } from "lucide-react";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useToast } from "@/components/ui/toast";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency, formatDate } from "@/lib/utils";
+
+// Status lifecycle (matches backend VALID_TRANSITIONS in purchase-invoices.ts).
+// Each current status → the action buttons it offers.
+const PI_STATUS_ACTIONS: Record<string, Array<{ label: string; next: string }>> = {
+  DRAFT: [
+    { label: "Submit for Approval", next: "PENDING_APPROVAL" },
+    { label: "Approve", next: "APPROVED" },
+  ],
+  PENDING_APPROVAL: [
+    { label: "Approve", next: "APPROVED" },
+    { label: "Back to Draft", next: "DRAFT" },
+  ],
+  APPROVED: [{ label: "Mark Paid", next: "PAID" }],
+  PAID: [],
+};
 
 type LineType = "STOCKED" | "FEE" | "TAX" | "REBATE" | "DISCOUNT" | "OTHER";
 
@@ -64,7 +83,10 @@ const LINE_TYPE_BADGE: Record<LineType, string> = {
 
 export default function PurchaseInvoiceDetailPage() {
   const { id } = useParams();
-  const { data: resp, loading, error: fetchError } = useCachedJson<{
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const { data: resp, loading, error: fetchError, refresh } = useCachedJson<{
     success?: boolean;
     data?: PurchaseInvoiceDetail;
     error?: string;
@@ -80,6 +102,54 @@ export default function PurchaseInvoiceDetailPage() {
   const items = pi?.items ?? [];
   const totalQty = items.reduce((s, it) => s + (Number(it.qty) || 0), 0);
   const totalAmount = items.reduce((s, it) => s + (Number(it.lineTotalSen) || 0), 0);
+
+  // Status transition (PUT {status}) — surfaces failures incl. the backend's
+  // GL-posting errors on APPROVED/PAID (do NOT optimistically flip the badge).
+  async function changeStatus(next: string, label: string) {
+    if (!pi) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/purchase-invoices/${pi.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: next }),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || `${label} failed (${res.status})`);
+        return;
+      }
+      toast.success(`${label} — done`);
+      invalidateCachePrefix("/api/purchase-invoices");
+      refresh();
+    } catch {
+      toast.error(`${label} failed — network error`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Delete (DRAFT-only; backend 409s otherwise — surfaced).
+  async function deletePI() {
+    if (!pi) return;
+    if (!window.confirm(`Delete draft invoice ${pi.piNo}? This cannot be undone.`)) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/purchase-invoices/${pi.id}`, { method: "DELETE" });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || `Delete failed (${res.status})`);
+        return;
+      }
+      invalidateCachePrefix("/api/purchase-invoices");
+      toast.success("Invoice deleted");
+      navigate("/procurement/pi");
+    } catch {
+      toast.error("Delete failed — network error");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -127,6 +197,33 @@ export default function PurchaseInvoiceDetailPage() {
           <p className="text-xs text-[#6B7280] mt-0.5">
             Supplier: <span className="font-medium text-[#1F1D1B]">{pi.supplierName}</span>
           </p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {(PI_STATUS_ACTIONS[pi.status] ?? []).map((a) => (
+            <Button
+              key={a.next}
+              type="button"
+              variant={a.next === "DRAFT" ? "outline" : "primary"}
+              size="sm"
+              onClick={() => changeStatus(a.next, a.label)}
+              disabled={busy}
+              className={a.next === "DRAFT" ? "" : "bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"}
+            >
+              {a.label}
+            </Button>
+          ))}
+          {pi.status === "DRAFT" && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={deletePI}
+              disabled={busy}
+              className="text-[#9A3A2D] hover:bg-[#9A3A2D]/5"
+            >
+              Delete
+            </Button>
+          )}
         </div>
       </div>
 

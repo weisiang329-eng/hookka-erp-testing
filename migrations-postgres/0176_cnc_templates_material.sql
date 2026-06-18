@@ -1,0 +1,12 @@
+-- CNC Template fabric/wood split.
+--
+-- Adds a `material` tag so the CNC Template library can separate the BUYI
+-- fabric-cutter files ('fabric') from wood router files ('wood'). All existing
+-- rows are the fabric cutter, so the column defaults to 'fabric'; wood
+-- templates are tagged via PATCH /api/cnc-templates/:id.
+--
+-- The route (src/api/routes/cnc-templates.ts) also self-applies this column at
+-- runtime (ensureMaterialColumn middleware), so prod works before this
+-- migration is applied; this file makes it permanent. `material` is a single
+-- lowercase word — no column-rename-map entry needed.
+ALTER TABLE cnc_templates ADD COLUMN IF NOT EXISTS material TEXT DEFAULT 'fabric';

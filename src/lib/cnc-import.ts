@@ -77,6 +77,7 @@ export type CncTemplateEdit = {
   fabricWidth?: string;
   pieceLabel?: string;
   totalHeight?: string;
+  material?: string; // "fabric" | "wood"
   displayName?: string;
 };
 

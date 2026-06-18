@@ -235,6 +235,7 @@ type EditDraft = {
   pieceLabel: string;
   totalHeight: string;
   fabricWidth: string;
+  material: "fabric" | "wood";
 };
 
 type CreateDraft = {
@@ -255,6 +256,8 @@ export default function CncTemplatesPage() {
   const [navModel, setNavModel] = useState<string | null>(null);
   const [navBucket, setNavBucket] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // Fabric/wood view filter for the current bucket's template list.
+  const [materialFilter, setMaterialFilter] = useState<"all" | "fabric" | "wood">("all");
 
   const { data, loading, refresh } = useCachedJson<CncTemplatesResponse>(
     "/api/cnc-templates",
@@ -438,8 +441,10 @@ export default function CncTemplatesPage() {
   const currentBucketTemplates = useMemo(() => {
     if (!currentModel || navBucket == null) return [];
     const b = buckets.find((x) => x.key === navBucket);
-    return b ? b.templates : [];
-  }, [currentModel, navBucket, buckets]);
+    const list = b ? b.templates : [];
+    if (materialFilter === "all") return list;
+    return list.filter((t) => (t.material === "wood" ? "wood" : "fabric") === materialFilter);
+  }, [currentModel, navBucket, buckets, materialFilter]);
 
   // -------------------------------------------------------------------------
   // Bulk upload (filename-parsed, optionally scoped to a model).
@@ -475,6 +480,7 @@ export default function CncTemplatesPage() {
       pieceLabel: t.pieceLabel || "",
       totalHeight: t.totalHeight || "",
       fabricWidth: t.fabricWidth || "",
+      material: t.material === "wood" ? "wood" : "fabric",
     });
   };
   const cancelEdit = () => {
@@ -494,6 +500,7 @@ export default function CncTemplatesPage() {
         pieceLabel: edit.pieceLabel.trim(),
         totalHeight: edit.totalHeight.trim(),
         fabricWidth: edit.fabricWidth.trim(),
+        material: edit.material,
       });
       toast.success("Template updated.");
       cancelEdit();
@@ -1024,6 +1031,27 @@ export default function CncTemplatesPage() {
             </Card>
           )}
 
+          {/* Fabric / Wood view filter */}
+          {navBucket != null && (
+            <div className="flex items-center gap-1.5 mb-3">
+              <span className="text-[11px] font-medium text-[#6B7280] mr-1">Show:</span>
+              {(["all", "fabric", "wood"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setMaterialFilter(m)}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium border transition-colors ${
+                    materialFilter === m
+                      ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                      : "bg-white text-[#6B7280] border-[#E2DDD8] hover:bg-[#F3F0EA]"
+                  }`}
+                >
+                  {m === "all" ? "All" : m === "fabric" ? "Fabric" : "Wood"}
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Templates table */}
           {currentBucketTemplates.length === 0 && !createDraft ? (
             <Card>
@@ -1053,7 +1081,18 @@ export default function CncTemplatesPage() {
                     {currentBucketTemplates.map((t) => (
                       <Fragment key={t.id}>
                         <tr className="border-b border-[#F3F4F6] last:border-0">
-                          <td className="px-3 py-2 text-[#111827]">{t.displayName}</td>
+                          <td className="px-3 py-2 text-[#111827]">
+                            {t.displayName}
+                            <span
+                              className={`ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                t.material === "wood"
+                                  ? "bg-[#EFE6DA] text-[#7A5C3A]"
+                                  : "bg-[#E0EDF0] text-[#3E6570]"
+                              }`}
+                            >
+                              {t.material === "wood" ? "Wood" : "Fabric"}
+                            </span>
+                          </td>
                           <td className="px-3 py-2 text-[#6B7280]">{t.sizeLabel || "—"}</td>
                           <td className="px-3 py-2 text-[#6B7280]">{t.pieceLabel || "—"}</td>
                           <td className="px-3 py-2 text-[#6B7280]">
@@ -1128,6 +1167,21 @@ export default function CncTemplatesPage() {
                                     />
                                   </label>
                                 ))}
+                              </div>
+                              <div className="mt-3">
+                                <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280] max-w-[220px]">
+                                  Material (fabric / wood)
+                                  <select
+                                    value={edit.material}
+                                    onChange={(e) =>
+                                      setEdit({ ...edit, material: e.target.value === "wood" ? "wood" : "fabric" })
+                                    }
+                                    className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                                  >
+                                    <option value="fabric">Fabric</option>
+                                    <option value="wood">Wood</option>
+                                  </select>
+                                </label>
                               </div>
                               <div className="mt-3 flex items-center justify-end gap-2">
                                 <button

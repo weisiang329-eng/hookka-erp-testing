@@ -41,6 +41,13 @@ import {
 
 const app = new Hono<Env>();
 
+// Guarantee the `material` column exists before any handler reads SELECT_COLS
+// (which lists it). Cached → one ALTER per worker instance, then a no-op await.
+app.use("*", async (c, next) => {
+  await ensureMaterialColumn(c.var.DB);
+  await next();
+});
+
 // The three file kinds a template can carry, and the row column each maps to.
 type FileKind = "dgt" | "prj" | "emf";
 const FILE_KINDS: FileKind[] = ["dgt", "prj", "emf"];
@@ -59,6 +66,7 @@ type CncTemplateRow = {
   prjKey: string | null;
   emfKey: string | null;
   totalHeight: string | null;
+  material: string | null;
   driveFolderId: string | null;
   sizeBytes: number | null;
   createdAt: string | null;
@@ -70,12 +78,14 @@ type CncTemplateRow = {
 // hasn't been applied — the column simply doesn't appear and we fall through
 // the catch below.
 const SELECT_COLS =
-  "id, org_id, product_code, size_label, fabric_width, piece_label, display_name, folder, dgt_key, prj_key, emf_key, total_height, drive_folder_id, size_bytes, created_at, updated_at";
+  "id, org_id, product_code, size_label, fabric_width, piece_label, display_name, folder, dgt_key, prj_key, emf_key, total_height, material, drive_folder_id, size_bytes, created_at, updated_at";
 
 // Fallback SELECT used when total_height is missing — same columns minus
 // total_height (the adapter will return undefined for the field on the row).
+// `material` is self-applied at runtime (route middleware) so it's always
+// present here; only total_height can be absent (pre-0141 migration).
 const SELECT_COLS_NO_HEIGHT =
-  "id, org_id, product_code, size_label, fabric_width, piece_label, display_name, folder, dgt_key, prj_key, emf_key, drive_folder_id, size_bytes, created_at, updated_at";
+  "id, org_id, product_code, size_label, fabric_width, piece_label, display_name, folder, dgt_key, prj_key, emf_key, material, drive_folder_id, size_bytes, created_at, updated_at";
 
 // Client-facing shape. The raw storage keys (dgt_key/prj_key/emf_key) are
 // deliberately NOT leaked — only the presence booleans are.
@@ -87,6 +97,9 @@ function rowToCncTemplate(r: CncTemplateRow) {
     fabricWidth: r.fabricWidth ?? "",
     pieceLabel: r.pieceLabel ?? "",
     totalHeight: r.totalHeight ?? "",
+    // 'fabric' | 'wood' — all legacy rows are the BUYI fabric cutter, so null
+    // defaults to fabric. Wood templates are tagged via PATCH.
+    material: r.material === "wood" ? "wood" : "fabric",
     displayName: r.displayName ?? "",
     folder: r.folder ?? "",
     hasDgt: Boolean(r.dgtKey && r.dgtKey.length > 0),
@@ -108,6 +121,29 @@ function isMissingTable(e: unknown): boolean {
 function isMissingTotalHeightColumn(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
   return /column .*total_height.* does not exist/i.test(msg);
+}
+
+// Runtime self-apply of the `material` column ('fabric' | 'wood'), so the
+// fabric/wood split works on prod without waiting for a manual migration
+// (same pattern as ensureBindingColumns in supplier-materials.ts). Idempotent,
+// once per worker instance; the route middleware below calls it before every
+// request so SELECT_COLS (which lists `material`) always has the column.
+// `material` is a single lowercase word — no rename-map entry needed.
+let materialColEnsured: Promise<void> | null = null;
+function ensureMaterialColumn(db: DbLike): Promise<void> {
+  if (materialColEnsured) return materialColEnsured;
+  materialColEnsured = (async () => {
+    try {
+      await db
+        .prepare("ALTER TABLE cnc_templates ADD COLUMN IF NOT EXISTS material TEXT")
+        .bind()
+        .run();
+    } catch {
+      // already exists / transient DDL reject — ignore (rowToCncTemplate
+      // defaults a missing value to 'fabric').
+    }
+  })();
+  return materialColEnsured;
 }
 
 // Minimal D1-style prepared-statement contract this route relies on. Avoids
@@ -336,6 +372,7 @@ async function updateTemplateMeta(
     fabricWidth: string;
     pieceLabel: string;
     totalHeight: string;
+    material: string;
     displayName: string;
     now: string;
   },
@@ -345,7 +382,7 @@ async function updateTemplateMeta(
       .prepare(
         `UPDATE cnc_templates
            SET product_code = ?, size_label = ?, fabric_width = ?,
-               piece_label = ?, total_height = ?, display_name = ?,
+               piece_label = ?, total_height = ?, material = ?, display_name = ?,
                updated_at = ?
          WHERE id = ? AND org_id = ?`,
       )
@@ -355,6 +392,7 @@ async function updateTemplateMeta(
         row.fabricWidth,
         row.pieceLabel,
         row.totalHeight,
+        row.material,
         row.displayName,
         row.now,
         row.id,
@@ -366,11 +404,12 @@ async function updateTemplateMeta(
     if (!isMissingTotalHeightColumn(e)) throw e;
   }
   // Fallback: legacy shape without total_height (migration 0141 not applied).
+  // `material` is self-applied (middleware) so it's safe to set here.
   await db
     .prepare(
       `UPDATE cnc_templates
          SET product_code = ?, size_label = ?, fabric_width = ?,
-             piece_label = ?, display_name = ?, updated_at = ?
+             piece_label = ?, material = ?, display_name = ?, updated_at = ?
        WHERE id = ? AND org_id = ?`,
     )
     .bind(
@@ -378,6 +417,7 @@ async function updateTemplateMeta(
       row.sizeLabel,
       row.fabricWidth,
       row.pieceLabel,
+      row.material,
       row.displayName,
       row.now,
       row.id,
@@ -1172,6 +1212,9 @@ app.patch("/:id", async (c) => {
   const pieceLabel = pick("pieceLabel", existing.pieceLabel ?? "");
   const totalHeight = pick("totalHeight", existing.totalHeight ?? "");
   const displayName = pick("displayName", existing.displayName ?? "");
+  // Fabric/wood tag — only ever 'fabric' or 'wood'; anything else → fabric.
+  const materialRaw = pick("material", existing.material ?? "fabric").toLowerCase();
+  const material = materialRaw === "wood" ? "wood" : "fabric";
 
   if (!productCode) {
     return c.json(
@@ -1193,6 +1236,7 @@ app.patch("/:id", async (c) => {
       fabricWidth,
       pieceLabel,
       totalHeight,
+      material,
       displayName,
       now,
     });
@@ -1212,9 +1256,10 @@ app.patch("/:id", async (c) => {
       fabricWidth: existing.fabricWidth,
       pieceLabel: existing.pieceLabel,
       totalHeight: existing.totalHeight,
+      material: existing.material,
       displayName: existing.displayName,
     },
-    after: { productCode, sizeLabel, fabricWidth, pieceLabel, totalHeight, displayName },
+    after: { productCode, sizeLabel, fabricWidth, pieceLabel, totalHeight, material, displayName },
   }).catch(() => {});
 
   const updated = await selectOneTemplate(c.var.DB, id, orgId);

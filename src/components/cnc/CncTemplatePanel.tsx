@@ -21,6 +21,7 @@ export type CncTemplate = {
   fabricWidth: string;
   pieceLabel: string;
   totalHeight: string;
+  material: "fabric" | "wood";
   displayName: string;
   folder: string;
   hasDgt: boolean;

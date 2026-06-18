@@ -393,7 +393,15 @@ app.get("/:id/download", async (c) => {
 
   try {
     const url = await signedDownloadUrl(c.env, row.r2Key, 300);
-    if (url) return c.redirect(url, 302);
+    if (url) {
+      // Force the browser to save with the real filename. Without this the
+      // presigned URL serves the object under its storage key, so the file
+      // downloaded as a raw UUID (e.g. "a8793c72-…") instead of its name.
+      // Supabase signed URLs honour a `download` query param.
+      const sep = url.includes("?") ? "&" : "?";
+      const named = `${url}${sep}download=${encodeURIComponent(row.filename || "download")}`;
+      return c.redirect(named, 302);
+    }
     // Presigning unavailable on this runtime — fall through to stream proxy.
     return c.redirect(`/api/files/${id}/stream`, 302);
   } catch (err) {

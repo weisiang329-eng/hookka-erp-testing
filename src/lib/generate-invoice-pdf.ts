@@ -658,7 +658,9 @@ export function generateInvoicePdf(
   mode: "download" | "view" = "download",
 ) {
   const doc = buildInvoiceDoc(invoice, extras);
-  const fileName = `INV-${invoice.invoiceNo || "INVOICE"}.pdf`;
+  // invoiceNo already carries the "INV-" prefix (e.g. INV-2606-115) — don't
+  // double it (was producing "INV-INV-2606-115.pdf"). Matches SO/PO/PI naming.
+  const fileName = `${invoice.invoiceNo || "INVOICE"}.pdf`;
   if (mode === "view") {
     try {
       const url = doc.output("bloburl");

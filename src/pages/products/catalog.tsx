@@ -16,9 +16,21 @@ import { Box, Images, Upload, Trash2, Loader2, X, FileText } from "lucide-react"
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
-import type { Product } from "@/types";
 
 const RT_MODULAR = "modular";
+
+// Minimal product shape this catalog reads. Kept structural (NOT the shared
+// @/types Product) so the Products page can pass its own local CatalogProduct[] —
+// whose `category` is a plain string — without a type-identity clash under the
+// strict build.
+type CatalogProduct = {
+  id: string;
+  code: string;
+  name: string;
+  category: string;
+  baseModel: string;
+  sizeLabel: string;
+};
 
 type FileAsset = {
   id: string;
@@ -36,13 +48,13 @@ type ModelGroup = {
   name: string;
   variantCount: number;
   sizeLabels: string[];
-  products: Product[];
+  products: CatalogProduct[];
 };
 
 // One Modular per baseModel. Falls back to the product code when a product has
 // no baseModel so a stray SKU still surfaces (never silently dropped).
-function buildModelGroups(products: Product[]): ModelGroup[] {
-  const map = new Map<string, Product[]>();
+function buildModelGroups(products: CatalogProduct[]): ModelGroup[] {
+  const map = new Map<string, CatalogProduct[]>();
   for (const p of products) {
     const key = p.baseModel || p.code;
     const arr = map.get(key);
@@ -75,7 +87,7 @@ function titleCase(s: string): string {
   return s.charAt(0) + s.slice(1).toLowerCase();
 }
 
-export function ProductCatalog({ products }: { products: Product[] }) {
+export function ProductCatalog({ products }: { products: CatalogProduct[] }) {
   const { toast } = useToast();
   const [photos, setPhotos] = useState<Record<string, FileAsset[]>>({});
   const [loadingPhotos, setLoadingPhotos] = useState(true);

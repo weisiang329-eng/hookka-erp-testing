@@ -34,6 +34,26 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-18-011 — Silent save failures across 5 manual-save surfaces ("save fail 也沒跟我們說")
+
+**Status:** 🟢 Fixed (2026-06-18), prod; tsc + eslint clean, 988 tests pass.
+**Category:** ui-frontend
+
+**Symptom:** several forms showed success (or nothing) on a FAILED save, so the operator thought a change saved when it didn't — the owner's recurring "edit 了沒 save 到 / save fail 也沒跟我們說" class.
+
+**Root cause (per-surface):** an audit of every manual-save surface in `src/pages` (334 mutations across 84 files) found the codebase overwhelmingly safe (the 2026-05-27 `verifiedSave` write-then-readback migration + a `res.ok` + `toast.error`-without-closing idiom). Five genuine holdouts remained:
+- `src/pages/settings/index.tsx` — `kvSave()` returns `res.ok`, but every caller discarded it and called `flash()` which always showed green "Settings saved successfully". Biggest blast radius (Company Profile / Numbering / Production / System tabs).
+- `src/pages/planning/index.tsx` `persistLeadTimes` — no `res.ok` check; set the "Saved {time}" indicator even on a failed PUT (lead times drive due-date scheduling factory-wide).
+- `src/pages/maintenance.tsx` (Equipment) — `handleAddEquipment` + `handleLogMaintenance` had `if (result.success){}` with no `else` (the sibling `handleEditEquipment` was migrated to `verifiedSave`; these two were missed).
+- `src/pages/worker/me.tsx` `handleSavePhone` — `if (j?.success){}` with no else; on failure the Save button just stayed, looking like nothing happened.
+- `src/pages/procurement/grn.tsx` "Approve" row action — `await fetch(...)` with no `res.ok` check; a non-2xx doesn't reject fetch, so it skipped the catch and ran the success path (the adjacent "Post to Stock" checked correctly).
+
+**Fix:** each now surfaces failure honestly — settings shows an explicit red "Save failed — settings were NOT saved" toast (the 4 Save buttons + init pass the real `kvSave` result); planning shows `toast.error` instead of a false "Saved"; the two equipment forms `alert(humanizeError(...))`; worker phone shows "Couldn't save"; GRN Approve checks `res.ok || json.success`. Plus the owner's "切頁也提醒" unsaved-nav guard (`useNavGuard`) added to the customers + products maintenance config panels (single guard per route, no `useBlocker` conflict). Commit `3ca1863e`.
+
+**Verification:** tsc + eslint clean; 988 tests pass; deployed to prod.
+
+---
+
 ## BUG-2026-06-18-010 — Owner/Admin got 403 on a resource never seeded as a permission (couldn't delete a supplier SKU mapping)
 
 **Status:** 🟢 Fixed (2026-06-18), prod.

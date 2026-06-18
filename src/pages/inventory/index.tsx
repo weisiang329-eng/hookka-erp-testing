@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from "react";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
@@ -1086,6 +1087,85 @@ let invSnapshot: {
 
 export default function InventoryPage() {
   const { toast } = useToast();
+  // Aliased: a native window.confirm is used elsewhere in this component, so
+  // don't shadow the global `confirm`.
+  const { confirm: askConfirm, confirmDialog } = useConfirm();
+  const [mergingDuplicates, setMergingDuplicates] = useState(false);
+  // Find duplicate raw-material item codes (same code, 2+ rows left over from the
+  // item-code consolidation) and SAFELY merge them: the backend keeps the row
+  // that carries data/stock and deletes only the EMPTY duplicates; any
+  // data-bearing duplicate is reported, never auto-deleted (owner 2026-06-18).
+  const handleMergeDuplicates = async () => {
+    setMergingDuplicates(true);
+    try {
+      const res = await fetch("/api/raw-materials/duplicates");
+      const json = (await res.json().catch(() => ({}))) as {
+        data?: {
+          groups?: {
+            recommendedKeepId: string;
+            rows: { id: string; isEmpty: boolean }[];
+          }[];
+        };
+      };
+      const groups = json?.data?.groups ?? [];
+      if (groups.length === 0) {
+        toast.success("No duplicate item codes found.");
+        return;
+      }
+      let emptyCount = 0;
+      let dataCount = 0;
+      for (const g of groups) {
+        for (const r of g.rows) {
+          if (r.id === g.recommendedKeepId) continue;
+          if (r.isEmpty) emptyCount++;
+          else dataCount++;
+        }
+      }
+      const ok = await askConfirm({
+        title: "Merge duplicate raw materials",
+        message: `${groups.length} item code(s) have duplicates. ${emptyCount} empty duplicate row(s) will be removed (the row with data / stock is always kept).${dataCount ? ` ${dataCount} duplicate(s) still carry data and will be SKIPPED — repoint those by hand first.` : ""}`,
+        confirmLabel: emptyCount
+          ? `Remove ${emptyCount} empty duplicate(s)`
+          : "Close",
+        tone: "danger",
+      });
+      if (!ok || emptyCount === 0) return;
+      const applyRes = await fetch("/api/raw-materials/merge-duplicates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apply: true }),
+      });
+      const applyJson = (await applyRes.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+        data?: {
+          deletedCount?: number;
+          skippedDataBearing?: unknown[];
+          plan?: { deleteIds?: string[] }[];
+        };
+      };
+      if (applyRes.ok && applyJson.success) {
+        const skipped = applyJson.data?.skippedDataBearing?.length ?? 0;
+        const deletedIds = new Set(
+          (applyJson.data?.plan ?? []).flatMap((p) => p.deleteIds ?? []),
+        );
+        toast.success(
+          `Merged: ${applyJson.data?.deletedCount ?? 0} empty duplicate(s) removed.${skipped ? ` ${skipped} skipped (still have data).` : ""}`,
+        );
+        // Optimistically drop the removed rows + invalidate caches (mirrors the
+        // single-RM delete path so other pages refresh on next mount).
+        setLiveRawMaterials((prev) => prev.filter((r) => !deletedIds.has(r.id)));
+        invalidateCachePrefix("/api/raw-materials");
+        invalidateCachePrefix("/api/inventory");
+      } else {
+        toast.error(applyJson.error || "Merge failed — please retry.");
+      }
+    } catch {
+      toast.error("Merge failed — please retry.");
+    } finally {
+      setMergingDuplicates(false);
+    }
+  };
   const [activeTab, setActiveTab] = useState<Tab>("FINISHED");
 
   // Search & filter state
@@ -2221,10 +2301,21 @@ export default function InventoryPage() {
             <Button variant="outline" size="sm" onClick={() => setShowBatchImportRM(true)}>
               <Upload className="h-4 w-4" /> Batch Import
             </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleMergeDuplicates}
+              disabled={mergingDuplicates}
+              title="Find item codes with duplicate rows and remove the empty duplicates"
+            >
+              <Layers className="h-4 w-4" />{" "}
+              {mergingDuplicates ? "Checking…" : "Merge Dups"}
+            </Button>
             <Button variant="primary" size="sm" onClick={() => setShowCreateRM(true)}>
               <Plus className="h-4 w-4" /> Add RM
             </Button>
           </div>
+          {confirmDialog}
 
           {/* Create RM modal */}
           {showCreateRM && (

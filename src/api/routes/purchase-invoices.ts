@@ -18,6 +18,7 @@ import {
   ledgerHasSource,
 } from "../lib/journal-hash";
 import { nextMonthDueDate } from "../../lib/terms";
+import { issueDocNumber } from "../lib/doc-number-service";
 
 const AP_CONTROL = "400-0000"; // Trade Creditors
 const FX_GAIN_ACCT = "530-0000"; // GAIN ON FOREIGN EXCHANGE (realised; debit = loss)
@@ -850,15 +851,19 @@ app.put("/:id", async (c) => {
           );
         }
         const spId = `sp-${crypto.randomUUID().slice(0, 8)}`;
-        const payNo = `SP-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
         const today = new Date().toISOString().slice(0, 10);
+        const payNo = await issueDocNumber(db, {
+          bankAccountCode: apBankAcct("BANK_TRANSFER"),
+          direction: "out",
+          dateIso: today,
+        });
         statements.push(
           db
             .prepare(
               `INSERT INTO supplier_payments (
                  id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
-                 date, amountSen, method, reference, notes, orgId
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 date, amountSen, bookedSen, method, reference, notes, orgId
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .bind(
               spId,
@@ -868,11 +873,15 @@ app.put("/:id", async (c) => {
               id,
               today,
               paidSen,
+              bookedSen,
               "BANK_TRANSFER",
               piNo,
               `Auto on PI ${piNo} PAID`,
               orgId,
             ),
+        );
+        statements.push(
+          db.prepare("UPDATE purchase_invoices SET paid_amount_sen = amount_sen WHERE id = ?").bind(id),
         );
         if (bookedSen > 0) {
           const legs: Parameters<typeof buildJournalEntryStatements>[2] = [

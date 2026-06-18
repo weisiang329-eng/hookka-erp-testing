@@ -1,7 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { PurchaseOrder } from "@/lib/mock-data";
-import { addHookkaLetterhead } from "@/lib/pdf-utils";
+import { drawLetterhead } from "@/lib/pdf-utils";
 import { COMPANY } from "@/lib/constants";
 
 // Letterhead info passed in from the caller. Mirrors the COMPANY constant's
@@ -94,57 +94,23 @@ export function generatePurchaseOrderPdf(
   const margin = 15;
   let y = margin;
 
-  // --- Header ---
-  // The bundled Hookka logo only makes sense when the letterhead actually
-  // belongs to Hookka. For sister-company prints we skip the logo so we
-  // don't mis-brand OHANA / HOUZS docs. Text-only letterhead still looks
-  // clean.
-  if (isHookkaLetterhead) {
-    addHookkaLetterhead(doc, margin, 5, 10);
-  }
-  const textX = isHookkaLetterhead ? margin + 26 : margin;
-
-  doc.setTextColor(0, 0, 0);
-  doc.setFontSize(12);
-  doc.setFont("helvetica", "bold");
-  doc.text(co.name, textX, 14);
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  if (co.tagline) {
-    doc.text(co.tagline, textX, 20);
-  }
-  const contactLine = [
-    co.phone ? `Tel: ${co.phone}` : "",
-    co.email ? `Email: ${co.email}` : "",
-  ]
-    .filter(Boolean)
-    .join("  |  ");
-  if (contactLine) {
-    doc.text(contactLine, textX, 25);
-  }
-
-  // PO Title on right
-  doc.setFontSize(14);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("PURCHASE ORDER", pageW - margin, 14, { align: "right" });
-  doc.setFontSize(11);
-  doc.text(po.poNo, pageW - margin, 22, { align: "right" });
-
-  // Status as plain text
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(80, 80, 80);
-  const statusText = po.status.replace(/_/g, " ");
-  doc.text(`Status: ${statusText}`, pageW - margin, 28, { align: "right" });
-
-  // Divider line
-  doc.setDrawColor(180, 180, 180);
-  doc.setLineWidth(0.5);
-  doc.line(margin, 32, pageW - margin, 32);
-
-  y = 38;
+  // --- Header (shared letterhead — single source of truth across all docs).
+  // Logo is skipped for sister companies so we don't mis-brand OHANA/HOUZS. ---
+  y = drawLetterhead(doc, {
+    docTitle: "PURCHASE ORDER",
+    docNo: po.poNo,
+    docDate: fmtDate(po.orderDate),
+    statusText: `Status: ${po.status.replace(/_/g, " ")}`,
+    logo: isHookkaLetterhead,
+    companyInfo: {
+      name: co.name,
+      regNo: co.regNo ?? "",
+      tin: co.tin ?? "",
+      address: co.address ?? "",
+      phone: co.phone ?? "",
+      email: co.email ?? "",
+    },
+  });
   doc.setTextColor(31, 29, 27);
 
   // --- Two-column: Supplier (left) + PO Details (right) ---
@@ -177,7 +143,7 @@ export function generatePurchaseOrderPdf(
   }
 
   // Right column - PO Info
-  let yRight = 38;
+  let yRight = y;
   doc.setFontSize(9);
   doc.setFont("helvetica", "bold");
   doc.setTextColor(0, 0, 0);

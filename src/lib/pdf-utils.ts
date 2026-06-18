@@ -40,6 +40,18 @@ export const PDF = {
  * fine rule finished with a thin bronze accent bar. Returns the Y (mm) the
  * caller should continue body content from.
  */
+// A company's printed identity. COMPANY entries satisfy this; a sister company
+// from the organisations registry (HOUZS, …) can be passed as `companyInfo`
+// without being in the COMPANY constant.
+export type LetterheadCompany = {
+  name: string;
+  regNo: string;
+  tin: string;
+  address: string;
+  phone: string;
+  email: string;
+};
+
 export function drawLetterhead(
   doc: jsPDF,
   opts: {
@@ -48,18 +60,26 @@ export function drawLetterhead(
     docDate?: string;
     statusText?: string;
     company?: CompanyCode;
+    // Explicit identity override (sister companies / registry-resolved). Wins
+    // over `company`. Lets every generator route its letterhead through this
+    // one function instead of hand-rolling a company text block.
+    companyInfo?: LetterheadCompany;
+    // The bundled logo is HOOKKA's — pass false for sister-company prints
+    // (OHANA/HOUZS) so we don't stamp the HOOKKA logo on their letterhead.
+    logo?: boolean;
   },
 ): number {
-  const co = COMPANY[opts.company ?? "HOOKKA"];
+  const co = opts.companyInfo ?? COMPANY[opts.company ?? "HOOKKA"];
   const m = PDF.margin;
   const pageW = doc.internal.pageSize.getWidth();
+  const showLogo = opts.logo ?? true;
 
-  // Logo
+  // Logo (HOOKKA-branded docs only)
   const logoH = 13;
-  doc.addImage(logoDataUrl, "PNG", m, 12, logoH * LOGO_ASPECT, logoH);
+  if (showLogo) doc.addImage(logoDataUrl, "PNG", m, 12, logoH * LOGO_ASPECT, logoH);
 
-  // Company block (beside logo)
-  const tx = m + logoH * LOGO_ASPECT + 5;
+  // Company block (beside the logo, or at the margin when there's no logo)
+  const tx = showLogo ? m + logoH * LOGO_ASPECT + 5 : m;
   doc.setTextColor(...PDF.ink);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(12.5);

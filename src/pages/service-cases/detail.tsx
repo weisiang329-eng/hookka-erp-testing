@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useNavGuard } from "@/lib/use-nav-guard";
 import { computeCasePipeline, CASE_PIPELINE_STEPS } from "@/lib/case-pipeline";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -825,6 +826,49 @@ function RootCausePanel({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Re-seed from the SERVER snapshot whenever the saved value changes (e.g.
+  // after a successful save refetches the parent), but NEVER clobber an
+  // in-progress edit. Before this, `blocks` was a one-time init that never
+  // re-seeded — so a failed/un-clicked save kept showing the operator's pick
+  // (looked saved) while the server still held the old value (and the PDF
+  // printed the old value). Now a non-persisted edit visibly reconciles.
+  const savedKey = JSON.stringify([
+    caseDetail.rootCauses,
+    caseDetail.preventionAction,
+    caseDetail.preventionOwner,
+  ]);
+  /* eslint-disable react-hooks/set-state-in-effect -- reconcile local panel to fresh server snapshot when not mid-edit */
+  useEffect(() => {
+    if (dirty) return;
+    setBlocks(
+      (caseDetail.rootCauses ?? []).map((rc) => ({
+        category: rc.category ?? "",
+        details: rc.details ?? {},
+      })),
+    );
+    setAction(caseDetail.preventionAction);
+    setOwner(caseDetail.preventionOwner);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- key on the server snapshot only; dirty guard handles edits
+  }, [savedKey]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Warn before leaving (tab close / refresh / in-app page switch) with
+  // unsaved Root Cause edits — the panel does not auto-save.
+  useNavGuard(dirty, "You have unsaved Root Cause edits. Leave without saving?");
+
+  // Cancel = discard local edits, revert to the last saved server value.
+  function cancelEdits() {
+    setBlocks(
+      (caseDetail.rootCauses ?? []).map((rc) => ({
+        category: rc.category ?? "",
+        details: rc.details ?? {},
+      })),
+    );
+    setAction(caseDetail.preventionAction);
+    setOwner(caseDetail.preventionOwner);
+    setDirty(false);
+  }
+
   function addBlock() {
     setBlocks((prev) => [...prev, { category: "", details: {} }]);
     setDirty(true);
@@ -987,7 +1031,8 @@ function RootCausePanel({
         </p>
 
         {/* Save bar — explicit persist (the panel no longer auto-saves).
-            Edit mode only. */}
+            Edit mode only. Cancel discards edits + reverts to the saved value;
+            leaving the page with unsaved edits is guarded by useNavGuard. */}
         {editing && (
           <div className="flex items-center justify-between gap-2 border-t border-[#F0ECE9] pt-3">
             <span
@@ -995,16 +1040,27 @@ function RootCausePanel({
             >
               {dirty ? "Unsaved changes" : "All changes saved"}
             </span>
-            <Button
-              type="button"
-              variant="primary"
-              size="sm"
-              onClick={handleSave}
-              disabled={!dirty || saving}
-              className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-            >
-              {saving ? "Saving…" : "Save"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={cancelEdits}
+                disabled={!dirty || saving}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={handleSave}
+                disabled={!dirty || saving}
+                className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+              >
+                {saving ? "Saving…" : "Save"}
+              </Button>
+            </div>
           </div>
         )}
       </CardContent>

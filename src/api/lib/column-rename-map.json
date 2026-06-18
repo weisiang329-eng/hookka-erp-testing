@@ -666,6 +666,7 @@
   "receiptId": "receipt_id",
   "receiptNumber": "receipt_number",
   "receiveDate": "receive_date",
+  "receivedAt": "received_at",
   "receivedBy": "received_by",
   "receivedByName": "received_by_name",
   "receivedDate": "received_date",

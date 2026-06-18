@@ -55,6 +55,7 @@ const DeliveryDetail = lazy(() => import('./pages/delivery/detail'))
 const Invoices = lazy(() => import('./pages/invoices'))
 const InvoiceDetail = lazy(() => import('./pages/invoices/detail'))
 const Payments = lazy(() => import('./pages/invoices/payments'))
+const SupplierPayments = lazy(() => import('./pages/invoices/supplier-payments'))
 const CreditNotes = lazy(() => import('./pages/invoices/credit-notes'))
 const DebitNotes = lazy(() => import('./pages/invoices/debit-notes'))
 const EInvoice = lazy(() => import('./pages/invoices/e-invoice'))
@@ -287,6 +288,14 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
     ),
   },
   {
+    path: '/invoices/supplier-payments',
+    element: (
+      <RequirePermission resource="invoices" action="read">
+        <S><SupplierPayments /></S>
+      </RequirePermission>
+    ),
+  },
+  {
     path: '/invoices/credit-notes',
     element: (
       <RequirePermission resource="invoices" action="read">
@@ -486,6 +495,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/invoices/credit-notes': () => import('./pages/invoices/credit-notes'),
   '/invoices/debit-notes': () => import('./pages/invoices/debit-notes'),
   '/invoices/payments': () => import('./pages/invoices/payments'),
+  '/invoices/supplier-payments': () => import('./pages/invoices/supplier-payments'),
   '/invoices/e-invoice': () => import('./pages/invoices/e-invoice'),
   '/consignment': () => import('./pages/consignment'),
   '/consignment/note': () => import('./pages/consignment/note'),

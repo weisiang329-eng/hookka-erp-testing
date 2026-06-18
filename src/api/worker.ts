@@ -701,6 +701,7 @@ import publicDoQr from "./routes/public-do-qr";
 import cncTemplates from "./routes/cnc-templates";
 import invoices from "./routes/invoices";
 import payments from "./routes/payments";
+import supplierPayments from "./routes/supplier-payments";
 // Phase 4 — production / inventory / supplier
 import productionOrders from "./routes/production-orders";
 import productionFolders from "./routes/production-folders";
@@ -857,6 +858,7 @@ app.route("/api/public/do-qr", publicDoQr);
 app.route("/api/cnc-templates", cncTemplates);
 app.route("/api/invoices", invoices);
 app.route("/api/payments", payments);
+app.route("/api/supplier-payments", supplierPayments);
 // Phase 4
 app.route("/api/production-orders", productionOrders);
 // Phase 5 — Production Folders: archive paper-schedule snapshots for later

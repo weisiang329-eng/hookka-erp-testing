@@ -46,7 +46,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "trend" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odebtor" | "ocreditor" | "pl" | "trend" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -192,7 +192,8 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   // Debtor / Creditor
   { key: "ar", label: "Debtor Aging", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "ap", label: "Creditor Aging", icon: <Building2 className="h-4 w-4" />, group: "Debtor / Creditor" },
-  { key: "odc", label: "Other Debtor / Creditor", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "odebtor", label: "Other Debtor", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "ocreditor", label: "Other Creditor", icon: <Building2 className="h-4 w-4" />, group: "Debtor / Creditor" },
   // Maintenance
   { key: "coa", label: "Chart of Accounts", icon: <List className="h-4 w-4" />, group: "Maintenance" },
   { key: "labor", label: "Labour", icon: <Users className="h-4 w-4" />, group: "Maintenance" },
@@ -269,7 +270,8 @@ export default function AccountingPage() {
               <APTab apData={apData} onRefresh={fetchAll} />
             </div>
           )}
-          {tab === "odc" && <OtherPartiesTab accounts={accounts} />}
+          {tab === "odebtor" && <OtherPartiesTab accounts={accounts} side="DEBTOR" />}
+          {tab === "ocreditor" && <OtherPartiesTab accounts={accounts} side="CREDITOR" />}
           {tab === "payments" && <PaymentsTab accounts={accounts} />}
           {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
           {tab === "transfer" && <FundTransferTab accounts={accounts} />}
@@ -3560,13 +3562,12 @@ type OtherParty = {
   isActive: boolean;
 };
 
-function OtherPartiesTab({ accounts }: { accounts: ChartOfAccount[] }) {
+function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
   const { toast } = useToast();
   const [parties, setParties] = useState<OtherParty[] | null>(null);
-  const [filter, setFilter] = useState<"ALL" | "DEBTOR" | "CREDITOR">("ALL");
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({
-    type: "CREDITOR" as "DEBTOR" | "CREDITOR",
+    type: side as "DEBTOR" | "CREDITOR",
     name: "",
     contactPerson: "",
     phone: "",
@@ -3609,7 +3610,7 @@ function OtherPartiesTab({ accounts }: { accounts: ChartOfAccount[] }) {
     const j = asMutationResponse(await res.json());
     if (j?.success) {
       setShowForm(false);
-      setForm({ type: "CREDITOR", name: "", contactPerson: "", phone: "", email: "", tin: "", registrationNo: "", address: "", notes: "" });
+      setForm({ type: side, name: "", contactPerson: "", phone: "", email: "", tin: "", registrationNo: "", address: "", notes: "" });
       load();
     } else toast.error(j?.error || "Failed to create party");
   };
@@ -3625,37 +3626,30 @@ function OtherPartiesTab({ accounts }: { accounts: ChartOfAccount[] }) {
     else toast.error(j?.error || "Failed to update party");
   };
 
-  const visible = (parties ?? []).filter((p) => filter === "ALL" || p.type === filter);
+  const visible = (parties ?? []).filter((p) => p.type === side);
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
-        <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-[#6B7280]">305-0000 OTHER DEBTOR — control balance</p>
-            <p className="text-xl font-bold text-[#3E6570]">{controls ? formatCurrency(controls.od) : "—"}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-[#6B7280]">405-0000 OTHER CREDITORS — control balance</p>
-            <p className="text-xl font-bold text-[#9A3A2D]">{controls ? formatCurrency(controls.oc) : "—"}</p>
-          </CardContent>
-        </Card>
+      <h2 className="text-lg font-semibold text-[#3E6570]">{side === "DEBTOR" ? "Other Debtor" : "Other Creditor"}</h2>
+      <div className="grid gap-4 grid-cols-1">
+        {side === "DEBTOR" ? (
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-xs text-[#6B7280]">305-0000 OTHER DEBTOR — control balance</p>
+              <p className="text-xl font-bold text-[#3E6570]">{controls ? formatCurrency(controls.od) : "—"}</p>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-xs text-[#6B7280]">405-0000 OTHER CREDITORS — control balance</p>
+              <p className="text-xl font-bold text-[#9A3A2D]">{controls ? formatCurrency(controls.oc) : "—"}</p>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex gap-1">
-          {(["ALL", "DEBTOR", "CREDITOR"] as const).map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium border ${filter === f ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}
-            >
-              {f === "ALL" ? "All" : f === "DEBTOR" ? "Other Debtors" : "Other Creditors"}
-            </button>
-          ))}
-        </div>
+      <div className="flex flex-wrap items-center justify-end gap-3">
         <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
           <Plus className="h-4 w-4" /> Add Party
         </Button>
@@ -3664,17 +3658,6 @@ function OtherPartiesTab({ accounts }: { accounts: ChartOfAccount[] }) {
       {showForm && (
         <Card>
           <CardContent className="p-4 grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
-            <div>
-              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Type</label>
-              <select
-                value={form.type}
-                onChange={(e) => setForm({ ...form, type: e.target.value as "DEBTOR" | "CREDITOR" })}
-                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-              >
-                <option value="CREDITOR">Other Creditor (we owe them)</option>
-                <option value="DEBTOR">Other Debtor (they owe us)</option>
-              </select>
-            </div>
             <div>
               <label className="text-xs font-medium text-[#6B7280] mb-1 block">Name</label>
               <input type="text" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. ABC Transport Sdn Bhd" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
@@ -3764,7 +3747,7 @@ function OtherPartiesTab({ accounts }: { accounts: ChartOfAccount[] }) {
       </Card>
       <div className="pt-4 mt-2 border-t border-[#E2DDD8]">
         <h3 className="text-sm font-semibold text-[#3E6570] mb-3">Bills</h3>
-        <OtherPartyBillsManager parties={parties ?? []} accounts={accounts} />
+        <OtherPartyBillsManager parties={parties ?? []} accounts={accounts} side={side} />
       </div>
     </div>
   );
@@ -3779,9 +3762,8 @@ type OtherPartyBill = {
   items: { counterAccount: string; amountSen: number; description: string; lineNo: number }[];
 };
 
-function OtherPartyBillsManager({ parties, accounts }: { parties: OtherParty[]; accounts: ChartOfAccount[] }) {
+function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherParty[]; accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
   const { toast } = useToast();
-  const [side, setSide] = useState<"CREDITOR" | "DEBTOR">("CREDITOR");
   const [bills, setBills] = useState<OtherPartyBill[] | null>(null);
   const [showForm, setShowForm] = useState(false);
   const today = new Date().toISOString().slice(0, 10);
@@ -3835,15 +3817,7 @@ function OtherPartyBillsManager({ parties, accounts }: { parties: OtherParty[]; 
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex gap-1">
-          {(["CREDITOR", "DEBTOR"] as const).map((s) => (
-            <button key={s} onClick={() => { setSide(s); setShowForm(false); }}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium border ${side === s ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>
-              {s === "CREDITOR" ? "Other Creditor Bills (we owe)" : "Other Debtor Bills (owed to us)"}
-            </button>
-          ))}
-        </div>
+      <div className="flex flex-wrap items-center justify-end gap-3">
         <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
           <Plus className="h-4 w-4" /> New Bill
         </Button>

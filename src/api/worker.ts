@@ -622,6 +622,9 @@ app.post("/api/mail-center/inbound", async (c) => {
     const result = await ingestInboundEmail(
       c.var.DB,
       payload as Parameters<typeof ingestInboundEmail>[1],
+      // Pass storage env so inbound attachments are uploaded to Supabase Storage
+      // and indexed in email_attachments (skipped when creds are absent).
+      c.env,
     );
     return c.json(result, result.ok ? 200 : 400);
   } catch (err) {

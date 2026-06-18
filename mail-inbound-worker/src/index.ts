@@ -60,6 +60,16 @@ interface EmailMessage {
   forward(rcptTo: string, headers?: Headers): Promise<void>;
 }
 
+// One inbound attachment in the ERP payload (kept in sync with
+// src/api/routes/mail-center.ts -> InboundAttachmentPayload). The ERP base64-
+// decodes contentBase64 and uploads the bytes to Supabase Storage.
+interface InboundAttachmentPayload {
+  filename?: string;
+  contentType?: string;
+  contentId?: string;
+  contentBase64?: string;
+}
+
 // The ERP InboundEmailPayload (kept in sync with src/api/routes/mail-center.ts).
 interface InboundEmailPayload {
   from?: string;
@@ -73,6 +83,84 @@ interface InboundEmailPayload {
   inReplyTo?: string;
   references?: string[];
   date?: string;
+  attachments?: InboundAttachmentPayload[];
+}
+
+// A postal-mime attachment. `content` is an ArrayBuffer (or a view) of the raw
+// decoded bytes in the Workers runtime.
+interface ParsedAttachment {
+  filename?: string;
+  mimeType?: string;
+  contentType?: string;
+  contentId?: string;
+  disposition?: string;
+  content?: ArrayBuffer | ArrayBufferView | string;
+}
+
+// Per-file (~8 MB) and per-message (~15 MB) attachment caps. We base64-encode
+// the bytes into the JSON POST, so cap individual files and the running total to
+// keep the request body sane. Oversized files are dropped (logged); the email
+// is still ingested without them.
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+
+// Coerce a postal-mime attachment.content into a Uint8Array of raw bytes.
+function attachmentBytes(
+  content: ArrayBuffer | ArrayBufferView | string | undefined,
+): Uint8Array | null {
+  if (content == null) return null;
+  if (content instanceof ArrayBuffer) return new Uint8Array(content);
+  if (ArrayBuffer.isView(content)) {
+    return new Uint8Array(content.buffer, content.byteOffset, content.byteLength);
+  }
+  if (typeof content === "string") return new TextEncoder().encode(content);
+  return null;
+}
+
+// Standard base64-encode raw bytes (Workers has btoa but it takes a binary
+// string). Chunk to stay under the argument-length limit for large files.
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+// Build the ERP attachments array from postal-mime's parsed.attachments,
+// enforcing the per-file + per-message size caps.
+function toAttachments(
+  list: ParsedAttachment[] | undefined,
+): InboundAttachmentPayload[] | undefined {
+  if (!Array.isArray(list) || list.length === 0) return undefined;
+  const out: InboundAttachmentPayload[] = [];
+  let total = 0;
+  for (const att of list) {
+    const bytes = attachmentBytes(att?.content);
+    if (!bytes || bytes.length === 0) continue;
+    const filename = att?.filename || "attachment";
+    if (bytes.length > MAX_ATTACHMENT_BYTES) {
+      console.warn(
+        `[hookka-mail-inbound] SKIP attachment "${filename}" — ${bytes.length} bytes > ${MAX_ATTACHMENT_BYTES} cap`,
+      );
+      continue;
+    }
+    if (total + bytes.length > MAX_TOTAL_ATTACHMENT_BYTES) {
+      console.warn(
+        `[hookka-mail-inbound] SKIP attachment "${filename}" — message total would exceed ${MAX_TOTAL_ATTACHMENT_BYTES} cap`,
+      );
+      continue;
+    }
+    total += bytes.length;
+    out.push({
+      filename,
+      contentType: att?.mimeType || att?.contentType || "application/octet-stream",
+      contentId: att?.contentId || undefined,
+      contentBase64: bytesToBase64(bytes),
+    });
+  }
+  return out.length ? out : undefined;
 }
 
 // Pull bare "user@host" addresses out of postal-mime's address objects,
@@ -129,6 +217,11 @@ export default {
       // postal-mime gives `date` as an ISO-ish string; the ERP re-parses and
       // safely falls back to "now" if it can't.
       date: parsed.date || undefined,
+      // Attachments — base64-encoded, size-capped. The ERP uploads them to
+      // Supabase Storage and indexes them in email_attachments.
+      attachments: toAttachments(
+        parsed.attachments as ParsedAttachment[] | undefined,
+      ),
     };
 
     // Best-effort safety-net copy. Forward BEFORE the POST and outside its

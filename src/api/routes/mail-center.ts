@@ -25,6 +25,11 @@ import type { Env } from "../worker";
 import { requireSuperAdmin } from "../lib/rbac";
 import { getOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 import { sendMail } from "../lib/email";
+import {
+  DEFAULT_BUCKET,
+  putFile,
+  signedDownloadUrl,
+} from "../lib/supabase-storage";
 
 const app = new Hono<Env>();
 
@@ -144,6 +149,28 @@ export function ensureMailSchema(db: D1Database): Promise<void> {
          ON email_messages (thread_id, created_at)`,
       `CREATE INDEX IF NOT EXISTS ix_email_messages_msgid
          ON email_messages (message_id)`,
+      // Inbound attachments (owner 2026-06-18 — "e-invoices/photos must show").
+      // One row per file on an inbound email. The bytes live in Supabase Storage
+      // (bucket hookka-files, same as file_assets) under storage_path; this row
+      // is the index the detail view reads to render a download chip + thumbnail.
+      // size_bytes is the byte count; content_id is the MIME Content-ID (for a
+      // future v2 that inlines cid: images inside the HTML body). created_at is
+      // written via new Date().toISOString() so it MUST stay TEXT (never
+      // timestamptz) for the SupabaseAdapter to round-trip it unchanged — same
+      // rule as every timestamp column above.
+      `CREATE TABLE IF NOT EXISTS email_attachments (
+         id TEXT PRIMARY KEY,
+         org_id TEXT NOT NULL DEFAULT 'hookka',
+         message_id TEXT NOT NULL,
+         filename TEXT,
+         content_type TEXT,
+         size_bytes INTEGER,
+         storage_path TEXT,
+         content_id TEXT,
+         created_at TEXT
+       )`,
+      `CREATE INDEX IF NOT EXISTS ix_email_attachments_msg
+         ON email_attachments (message_id)`,
       // Label registry (owner 2026-06-17 — "labels with colours like Gmail").
       // Thread labels themselves stay as a JSON name array on email_threads
       // (above); THIS table is the canonical name→colour catalogue so the
@@ -178,6 +205,18 @@ export function ensureMailSchema(db: D1Database): Promise<void> {
 // ---------------------------------------------------------------------------
 // Inbound ingestion — called by the worker.ts pre-auth handler.
 // ---------------------------------------------------------------------------
+// One inbound attachment as it arrives on the /inbound payload. The sync layer
+// (mail-sync/sync.mjs + mail-inbound-worker) base64-encodes the raw bytes so the
+// JSON POST stays credential-free; the ERP owns storage (uploads to Supabase
+// Storage here). Oversized files are dropped at the sync layer (see the size
+// caps there) so contentBase64 is always sane to decode in the Worker.
+export interface InboundAttachmentPayload {
+  filename?: string;
+  contentType?: string;
+  contentId?: string;
+  contentBase64?: string;
+}
+
 export interface InboundEmailPayload {
   from?: string;
   fromName?: string;
@@ -190,6 +229,7 @@ export interface InboundEmailPayload {
   inReplyTo?: string;
   references?: string[] | string;
   date?: string;
+  attachments?: InboundAttachmentPayload[];
 }
 
 export type IngestResult =
@@ -222,9 +262,115 @@ function safeIso(input: string | undefined, fallback: string): string {
   return new Date(t).toISOString();
 }
 
+// Minimal env shape needed to upload attachment bytes to Supabase Storage.
+// Kept optional end-to-end so an ingest with no storage credentials (e.g. an
+// older deploy, or a unit test) still stores the message — attachments are just
+// skipped, never fatal.
+type StorageEnv = {
+  SUPABASE_PROJECT_REF?: string;
+  SUPABASE_SERVICE_KEY?: string;
+};
+
+// Decode standard base64 into raw bytes. Tolerant of base64url and stray
+// whitespace/newlines (postal-mime hands clean base64, but the JSON transport
+// may wrap it). Returns null on anything that doesn't decode so a single bad
+// attachment never aborts the whole email.
+function base64ToBytes(b64: string): Uint8Array | null {
+  try {
+    const clean = b64.replace(/[\r\n\s]+/g, "").replace(/-/g, "+").replace(/_/g, "/");
+    const bin = atob(clean);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+// Sanitise a filename for use inside a storage object key: strip any path
+// segments (no traversal), keep a readable ASCII-ish basename, and bound the
+// length. Empty/garbage names fall back to a generic "file".
+function safeFilename(name: string | undefined): string {
+  const base = (name ?? "").split(/[\\/]/).pop() || "";
+  const cleaned = base
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 120);
+  return cleaned || "file";
+}
+
+// Persist the attachments for one freshly-stored (or backfilled) message:
+// upload each file's bytes to Supabase Storage and INSERT an email_attachments
+// row. Best-effort per attachment — a single failed upload/insert is logged and
+// skipped so the rest of the email is unaffected. No-op when storage creds are
+// absent or there are no attachments. storagePath scheme: mail/{messageId}/{n}-{safeFilename}.
+async function storeAttachments(
+  db: D1Database,
+  env: StorageEnv | undefined,
+  orgId: string,
+  msgRowId: string,
+  attachments: InboundAttachmentPayload[] | undefined,
+): Promise<void> {
+  if (!attachments || attachments.length === 0) return;
+  if (!env?.SUPABASE_PROJECT_REF || !env?.SUPABASE_SERVICE_KEY) {
+    console.warn(
+      "[mail-center] attachments present but Supabase Storage not configured — skipping",
+    );
+    return;
+  }
+  const now = new Date().toISOString();
+  let idx = 0;
+  for (const att of attachments) {
+    idx++;
+    const bytes = base64ToBytes(att.contentBase64 ?? "");
+    if (!bytes || bytes.length === 0) {
+      console.warn(
+        `[mail-center] attachment ${idx} on ${msgRowId} had no decodable content — skipping`,
+      );
+      continue;
+    }
+    const fname = safeFilename(att.filename);
+    const contentType = (att.contentType || "application/octet-stream").slice(0, 200);
+    // Prefix each file with its index so two same-named files on one email don't
+    // collide on the same storage key.
+    const storagePath = `mail/${msgRowId}/${idx}-${fname}`;
+    try {
+      await putFile(env, DEFAULT_BUCKET, storagePath, bytes, contentType);
+      await db
+        .prepare(
+          `INSERT INTO email_attachments
+             (id, org_id, message_id, filename, content_type, size_bytes,
+              storage_path, content_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          orgId,
+          msgRowId,
+          att.filename ?? fname,
+          contentType,
+          bytes.length,
+          storagePath,
+          att.contentId ?? null,
+          now,
+        )
+        .run();
+    } catch (e) {
+      console.error(
+        `[mail-center] failed to store attachment ${idx} on ${msgRowId}:`,
+        e,
+      );
+    }
+  }
+}
+
 export async function ingestInboundEmail(
   db: D1Database,
   payload: InboundEmailPayload,
+  // Optional storage env. When present (and the message carries attachments)
+  // the bytes are uploaded to Supabase Storage and indexed in email_attachments.
+  // Absent ⇒ attachments are silently skipped — the message itself still stores.
+  env?: StorageEnv,
 ): Promise<IngestResult> {
   await ensureMailSchema(db);
 
@@ -263,7 +409,11 @@ export async function ingestInboundEmail(
     .slice(0, 240);
 
   // Idempotency — the email worker may retry. Skip if we already stored this
-  // Message-ID.
+  // Message-ID. BUT: if the existing message has NO attachments yet and this
+  // (re)delivery carries some, backfill them onto the already-ingested message.
+  // This is what lets a re-run of the sync (with the new attachments-capable
+  // payload) add attachments to emails that were first ingested before this
+  // feature existed — see the "re-backfill" note in the PR description.
   if (payload.messageId) {
     const dup = await db
       .prepare(
@@ -275,6 +425,27 @@ export async function ingestInboundEmail(
       // threadId instead of undefined on a retry.
       .first<{ id: string; threadId?: string; thread_id?: string }>();
     if (dup?.id) {
+      // Backfill attachments onto an existing message that has none yet.
+      if (payload.attachments && payload.attachments.length > 0) {
+        const existing = await db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM email_attachments WHERE org_id = ? AND message_id = ?`,
+          )
+          .bind(orgId, dup.id)
+          // Aggregate alias `n` round-trips unchanged, but a COUNT(*) without an
+          // alias can come back as different keys across engines; read defensively.
+          .first<{ n?: number | string; count?: number | string }>();
+        const have = Number(existing?.n ?? existing?.count ?? 0);
+        if (have === 0) {
+          await storeAttachments(
+            db,
+            env,
+            orgId,
+            dup.id,
+            payload.attachments,
+          );
+        }
+      }
       return {
         ok: true,
         threadId: dup.threadId ?? dup.thread_id ?? "",
@@ -370,6 +541,11 @@ export async function ingestInboundEmail(
       now,
     )
     .run();
+
+  // Upload + index any attachments for this newly-stored message. Best-effort:
+  // a storage failure is logged inside and never fails the ingest (the message
+  // is already persisted).
+  await storeAttachments(db, env, orgId, msgId, payload.attachments);
 
   return { ok: true, threadId, messageId: msgId };
 }
@@ -512,6 +688,40 @@ function rowToMessage(r: MessageRow) {
     sentByUserId: r.sentByUserId ?? r.sent_by_user_id ?? undefined,
     sentByName: r.sentByName ?? r.sent_by_name ?? undefined,
     createdAt: r.createdAt ?? r.created_at ?? "",
+  };
+}
+
+// Attachment row → API shape. The pg driver hands every column back camelCased
+// (db-pg.ts transform.column.from), so content_type→contentType,
+// size_bytes→sizeBytes, storage_path→storagePath, content_id→contentId. Dual-read
+// the snake key as a fallback (same class of bug as rowToAddress) so an
+// attachment never renders with empty metadata. `url` is NOT a column — it's a
+// short-lived signed Storage URL stamped in by the /threads/:id handler.
+type AttachmentRow = {
+  id: string;
+  filename: string | null;
+  contentType?: string | null;
+  content_type?: string | null;
+  sizeBytes?: number | string | null;
+  size_bytes?: number | string | null;
+  storagePath?: string | null;
+  storage_path?: string | null;
+  contentId?: string | null;
+  content_id?: string | null;
+  messageId?: string | null;
+  message_id?: string | null;
+};
+
+// Attachment row → API shape served on each message. `url` is the short-lived
+// signed Storage URL (or null when signing failed). Dual-read every snake key.
+function attachmentToApi(r: AttachmentRow, url: string | null) {
+  return {
+    id: r.id,
+    filename: r.filename ?? "file",
+    contentType: r.contentType ?? r.content_type ?? "application/octet-stream",
+    sizeBytes: Number(r.sizeBytes ?? r.size_bytes ?? 0),
+    contentId: r.contentId ?? r.content_id ?? undefined,
+    url,
   };
 }
 
@@ -800,6 +1010,49 @@ app.get("/threads/:id", async (c) => {
   )
     .bind(orgId, id)
     .all<MessageRow>();
+  const mappedMsgs = (msgs.results ?? []).map(rowToMessage);
+
+  // Attachments — load every attachment for THIS thread's messages, then stamp
+  // a short-lived SIGNED Storage URL onto each and group them under their
+  // message. The service key never reaches the client; only the time-boxed
+  // signed URL does (mirrors files.ts download). A signing failure on one file
+  // just drops its url (the chip still shows but can't open) rather than failing
+  // the whole read.
+  const attByMsg = new Map<string, ReturnType<typeof attachmentToApi>[]>();
+  try {
+    const msgIds = mappedMsgs.map((m) => m.id);
+    if (msgIds.length > 0) {
+      const ph = msgIds.map(() => "?").join(", ");
+      const attRows = await c.var.DB.prepare(
+        `SELECT * FROM email_attachments
+           WHERE org_id = ? AND message_id IN (${ph})
+           ORDER BY created_at ASC`,
+      )
+        .bind(orgId, ...msgIds)
+        .all<AttachmentRow>();
+      for (const r of attRows.results ?? []) {
+        const storagePath = r.storagePath ?? r.storage_path ?? "";
+        const msgKey = r.messageId ?? r.message_id ?? "";
+        if (!storagePath || !msgKey) continue;
+        // 10-minute TTL — long enough to click through to a download/preview,
+        // short enough that a leaked URL is harmless (same rationale as files.ts).
+        const url = await signedDownloadUrl(
+          c.env,
+          DEFAULT_BUCKET,
+          storagePath,
+          600,
+        );
+        const item = attachmentToApi(r, url);
+        const list = attByMsg.get(msgKey) ?? [];
+        list.push(item);
+        attByMsg.set(msgKey, list);
+      }
+    }
+  } catch (e) {
+    // Attachments are an enhancement — never let a storage/signing blip 500 the
+    // whole thread read. Messages render without their chips in that case.
+    console.error("[mail-center] loading attachments failed:", e);
+  }
 
   // Clear the unread flag on open.
   try {
@@ -812,7 +1065,10 @@ app.get("/threads/:id", async (c) => {
 
   return c.json({
     thread: rowToThread(thread),
-    messages: (msgs.results ?? []).map(rowToMessage),
+    messages: mappedMsgs.map((m) => ({
+      ...m,
+      attachments: attByMsg.get(m.id) ?? [],
+    })),
   });
 });
 
@@ -1118,7 +1374,7 @@ app.post("/test-inject", async (c) => {
     text: "Hi, I'd like to order a 5ft bed frame. Could you let me know the price and lead time?\n\n(This is a test email — feel free to delete it.)\n\nThanks,\nTest Customer",
     messageId: `test-${crypto.randomUUID()}@example.com`,
     date: new Date().toISOString(),
-  });
+  }, c.env);
   return c.json(result);
 });
 

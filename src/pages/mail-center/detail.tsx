@@ -59,6 +59,7 @@ import {
   Tag,
   X,
   Plus,
+  Paperclip,
 } from "lucide-react";
 
 type UserOption = {
@@ -68,6 +69,20 @@ type UserOption = {
 };
 
 type UsersEnvelope = { success?: boolean; data?: UserOption[] };
+
+// One attachment served on a message. `url` is a short-lived SIGNED Supabase
+// Storage URL (or null when signing failed server-side); sizeBytes is the byte
+// count for the "(size)" hint. Inline cid: images inside the HTML body are a v2
+// concern — here every attachment is listed as a downloadable chip (image types
+// additionally get a thumbnail preview).
+type MailAttachment = {
+  id: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  contentId?: string;
+  url: string | null;
+};
 
 type MailMessage = {
   id: string;
@@ -82,6 +97,7 @@ type MailMessage = {
   sentAt: string;
   receivedAt: string;
   createdAt: string;
+  attachments?: MailAttachment[];
 };
 
 type MailThread = {
@@ -109,6 +125,21 @@ function fmtFull(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleString();
+}
+
+// Human-readable byte size for the attachment chip hint, e.g. "12 KB", "3.4 MB".
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+}
+
+// Whether an attachment is an image we can preview as a thumbnail.
+function isImageAttachment(a: MailAttachment): boolean {
+  return /^image\//i.test(a.contentType || "");
 }
 
 // Strip HTML to readable text as a fallback when a message has no plain-text
@@ -741,6 +772,82 @@ export default function MailCenterDetailPage({
                           <pre className="mt-2 whitespace-pre-wrap break-words border-t border-border/60 pt-2 font-sans text-sm leading-relaxed text-foreground/90">
                             {plain || "(empty)"}
                           </pre>
+                        )}
+
+                        {/* Attachments — one download chip per file (opens the
+                            short-lived signed Storage URL in a new tab). Image
+                            attachments additionally show a thumbnail. Inline cid:
+                            images inside the HTML body are a v2 concern; here
+                            every attachment is just listed as downloadable. */}
+                        {(m.attachments?.length ?? 0) > 0 && (
+                          <div className="mt-3 border-t border-border/60 pt-2">
+                            <div className="mb-1.5 flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                              <Paperclip className="h-3 w-3" />
+                              {m.attachments!.length} attachment
+                              {m.attachments!.length === 1 ? "" : "s"}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {m.attachments!.map((a) =>
+                                isImageAttachment(a) && a.url ? (
+                                  <a
+                                    key={a.id}
+                                    href={a.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title={`${a.filename}${
+                                      a.sizeBytes
+                                        ? ` (${formatBytes(a.sizeBytes)})`
+                                        : ""
+                                    }`}
+                                    className="group relative block overflow-hidden rounded-md border border-border bg-white"
+                                  >
+                                    <img
+                                      src={a.url}
+                                      alt={a.filename}
+                                      loading="lazy"
+                                      className="h-20 w-20 object-cover transition-opacity group-hover:opacity-90"
+                                    />
+                                    <span className="absolute inset-x-0 bottom-0 truncate bg-black/55 px-1 py-0.5 text-[10px] text-white">
+                                      {a.filename}
+                                    </span>
+                                  </a>
+                                ) : a.url ? (
+                                  <a
+                                    key={a.id}
+                                    href={a.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2.5 py-1 text-xs text-foreground/90 transition-colors hover:bg-muted"
+                                    title={a.filename}
+                                  >
+                                    <Paperclip className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                    <span className="truncate">{a.filename}</span>
+                                    {a.sizeBytes > 0 && (
+                                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                                        ({formatBytes(a.sizeBytes)})
+                                      </span>
+                                    )}
+                                  </a>
+                                ) : (
+                                  // No signed URL (signing failed) — show the
+                                  // file but make clear it can't be opened.
+                                  <span
+                                    key={a.id}
+                                    className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted/30 px-2.5 py-1 text-xs text-muted-foreground"
+                                    title={`${a.filename} (unavailable)`}
+                                  >
+                                    <Paperclip className="h-3 w-3 shrink-0" />
+                                    <span className="truncate">{a.filename}</span>
+                                    {a.sizeBytes > 0 && (
+                                      <span className="shrink-0 text-[10px]">
+                                        ({formatBytes(a.sizeBytes)})
+                                      </span>
+                                    )}
+                                  </span>
+                                ),
+                              )}
+                            </div>
+                          </div>
                         )}
                       </div>
                     </div>

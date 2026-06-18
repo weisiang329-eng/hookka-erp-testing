@@ -175,6 +175,7 @@ export default function WorkerMePage() {
   const [phone, setPhone] = useState(me?.phone || "");
   const [phoneDirty, setPhoneDirty] = useState(false);
   const [phoneSaving, setPhoneSaving] = useState(false);
+  const [phoneError, setPhoneError] = useState<string | null>(null);
 
   // Leave request form state
   const [showLeaveForm, setShowLeaveForm] = useState(false);
@@ -219,13 +220,14 @@ export default function WorkerMePage() {
 
   async function handleSavePhone() {
     setPhoneSaving(true);
+    setPhoneError(null);
     try {
       const res = await workerFetch("/api/worker/profile", {
         method: "PATCH",
         body: JSON.stringify({ phone: phone.trim() }),
       });
       const j = asWorkerActionResponse(await res.json());
-      if (j?.success) {
+      if (res.ok && j?.success) {
         setPhoneDirty(false);
         if (me) {
           const next = { ...me, phone: phone.trim() };
@@ -236,7 +238,13 @@ export default function WorkerMePage() {
             /* ignore */
           }
         }
+      } else {
+        // Was silent on failure — the Save button just stayed, looking like
+        // nothing happened. Tell the worker it did NOT save.
+        setPhoneError("Couldn't save — please try again.");
       }
+    } catch {
+      setPhoneError("Couldn't save — check your connection.");
     } finally {
       setPhoneSaving(false);
     }
@@ -335,6 +343,7 @@ export default function WorkerMePage() {
               </button>
             )}
           </div>
+          {phoneError && <p className="mt-1 text-xs text-[#9A3A2D]">{phoneError}</p>}
         </label>
       </div>
 

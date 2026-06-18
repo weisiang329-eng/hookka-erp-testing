@@ -10,6 +10,7 @@ import { humanizeError } from "@/lib/humanize-error";
 import { parseDebtorCode } from "@/lib/debtor";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
+import { useNavGuard } from "@/lib/use-nav-guard";
 import type { Customer } from "@/types";
 // generateCustomerQuotationPdf is dynamic-imported at the click handler so
 // the 1MB jspdf vendor chunk only ships when the user actually exports.
@@ -1392,6 +1393,9 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
     () => config != null && JSON.stringify(config) !== JSON.stringify(savedConfig),
     [config, savedConfig],
   );
+  // Warn before leaving (browser close + in-app nav) with unsaved config edits
+  // — owner's "切頁也提醒". Single guard on this route, no useBlocker conflict.
+  useNavGuard(editMode && isDirty, "You have unsaved customer settings. Leave without saving?");
 
   const meta = CUST_MAINT_TABS.find((t) => t.key === tab)!;
   const isFabricsTab = tab === "fabrics";

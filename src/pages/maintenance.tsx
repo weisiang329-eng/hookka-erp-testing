@@ -169,14 +169,18 @@ export default function MaintenancePage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const result = (await res.json()) as { success?: boolean; data: Equipment; log: MaintenanceLog };
-    if (result.success) {
-      invalidateCachePrefix("/api/equipment");
-      invalidateCachePrefix("/api/maintenance");
-      refreshEq();
-      refreshLogs();
-      setShowAddForm(false);
+    const result = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+    // Surface failures instead of silently leaving the form open (the bug:
+    // a failed add showed nothing — "save fail 也沒跟我們說").
+    if (!res.ok || !result?.success) {
+      alert(humanizeError({ status: res.status, message: result?.error }, "Couldn't add equipment. Please try again."));
+      return;
     }
+    invalidateCachePrefix("/api/equipment");
+    invalidateCachePrefix("/api/maintenance");
+    refreshEq();
+    refreshLogs();
+    setShowAddForm(false);
   }
 
   // Log maintenance handler
@@ -200,14 +204,16 @@ export default function MaintenancePage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const result = (await res.json()) as { success?: boolean; data: Equipment; log: MaintenanceLog };
-    if (result.success) {
-      invalidateCachePrefix("/api/equipment");
-      invalidateCachePrefix("/api/maintenance");
-      refreshEq();
-      refreshLogs();
-      setShowLogForm(null);
+    const result = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+    if (!res.ok || !result?.success) {
+      alert(humanizeError({ status: res.status, message: result?.error }, "Couldn't log maintenance. Please try again."));
+      return;
     }
+    invalidateCachePrefix("/api/equipment");
+    invalidateCachePrefix("/api/maintenance");
+    refreshEq();
+    refreshLogs();
+    setShowLogForm(null);
   }
 
   // Edit equipment handler

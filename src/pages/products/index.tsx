@@ -9,6 +9,7 @@ import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { ProductSchema } from "@/lib/schemas/product";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
+import { useNavGuard } from "@/lib/use-nav-guard";
 import { MasterPriceHistoryDialog } from "./MasterPriceHistoryDialog";
 import {
   EffectiveDateConfirmModal,
@@ -1144,6 +1145,9 @@ function MaintenanceView() {
     () => JSON.stringify(config) !== JSON.stringify(savedConfig),
     [config, savedConfig],
   );
+  // Warn before leaving with unsaved master-config edits (owner's "切頁也提醒").
+  // Single guard on this route, no useBlocker conflict.
+  useNavGuard(editMode && isDirty, "You have unsaved master settings. Leave without saving?");
 
   const isFabricsTab = tab === "fabrics";
   const meta = MAINTENANCE_TABS.find((t) => t.key === tab)!;

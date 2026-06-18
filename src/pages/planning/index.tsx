@@ -668,7 +668,7 @@ export default function PlanningPage() {
   const persistLeadTimes = async (effectiveFrom: string, notes: string) => {
     setLtSaving(true);
     try {
-      await fetch("/api/production/leadtimes", {
+      const res = await fetch("/api/production/leadtimes", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -678,9 +678,18 @@ export default function PlanningPage() {
           notes: notes || null,
         }),
       });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      // Don't show "Saved {time}" on a failed PUT — that was the silent-failure
+      // bug (lead times drive due-date scheduling factory-wide).
+      if (!res.ok || (j && j.success === false)) {
+        toast.error(j?.error || `Save failed (${res.status}) — lead times NOT saved.`);
+        return;
+      }
       invalidateCachePrefix("/api/production/leadtimes");
       refreshLeadTimes();
       setLtSavedAt(new Date().toLocaleTimeString());
+    } catch {
+      toast.error("Save failed — network error. Lead times NOT saved.");
     } finally {
       setLtSaving(false);
     }

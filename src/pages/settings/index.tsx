@@ -9,6 +9,7 @@ import {
   Monitor,
   Save,
   Check,
+  AlertTriangle,
   Clock,
   Calendar,
   DollarSign,
@@ -237,8 +238,19 @@ type TabId = (typeof tabs)[number]["id"];
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 // ---- Helper Component: Toast ----
-function SaveToast({ show }: { show: boolean }) {
-  if (!show) return null;
+// Honest result toast: green only on a fully-successful save, red when ANY
+// kv-config PUT failed (was previously always green — "saved successfully" even
+// on a silent failure; BUG-2026-06-18, owner's "save fail 也沒跟我們說" class).
+function SaveToast({ state }: { state: "success" | "error" | null }) {
+  if (!state) return null;
+  if (state === "error") {
+    return (
+      <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-lg bg-[#9A3A2D] px-4 py-3 text-sm text-white shadow-lg animate-in fade-in slide-in-from-bottom-2">
+        <AlertTriangle className="h-4 w-4 text-amber-200" />
+        Save failed — settings were NOT saved. Check your connection and try again.
+      </div>
+    );
+  }
   return (
     <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-lg bg-[#1F1D1B] px-4 py-3 text-sm text-white shadow-lg animate-in fade-in slide-in-from-bottom-2">
       <Check className="h-4 w-4 text-emerald-400" />
@@ -265,7 +277,7 @@ type LoadState = "loading" | "uninitialized" | "ready";
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabId>("company");
-  const [showToast, setShowToast] = useState(false);
+  const [toastState, setToastState] = useState<"success" | "error" | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
 
   // Company Profile state
@@ -337,11 +349,14 @@ export default function SettingsPage() {
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const flash = useCallback(() => {
-    setShowToast(true);
+  // ok=true → green "saved"; ok=false → red "save failed" (stays longer so the
+  // operator actually notices the failure). The save buttons MUST pass the
+  // real result of their kvSave() calls — never flash(true) unconditionally.
+  const flash = useCallback((ok: boolean) => {
+    setToastState(ok ? "success" : "error");
     // Fire-and-forget toast hide; called from save-button click handler.
     // eslint-disable-next-line no-restricted-syntax -- one-shot toast timer from event handler
-    setTimeout(() => setShowToast(false), 2000);
+    setTimeout(() => setToastState(null), ok ? 2000 : 5000);
   }, []);
 
   /**
@@ -351,7 +366,7 @@ export default function SettingsPage() {
    * the normal tab UI renders with the freshly seeded values.
    */
   const initializeDefaults = useCallback(async () => {
-    await Promise.all([
+    const results = await Promise.all([
       kvSave(KV_HOOKKA, defaultHookka),
       kvSave(KV_OHANA, defaultOhana),
       kvSave(KV_NUMBERING, defaultNumbering),
@@ -362,7 +377,7 @@ export default function SettingsPage() {
       kvSave(KV_SYSTEM, defaultSystem),
     ]);
     setLoadState("ready");
-    flash();
+    flash(results.every(Boolean));
   }, [flash]);
 
   // Generate preview number
@@ -429,11 +444,11 @@ export default function SettingsPage() {
         <Button
           variant="primary"
           onClick={async () => {
-            await Promise.all([
+            const results = await Promise.all([
               kvSave(KV_HOOKKA, hookka),
               kvSave(KV_OHANA, ohana),
             ]);
-            flash();
+            flash(results.every(Boolean));
           }}
         >
           <Save className="h-4 w-4" />
@@ -503,8 +518,8 @@ export default function SettingsPage() {
                         variant="outline"
                         size="sm"
                         onClick={async () => {
-                          await kvSave(KV_NUMBERING, numbering);
-                          flash();
+                          const ok = await kvSave(KV_NUMBERING, numbering);
+                          flash(ok);
                         }}
                       >
                         <Save className="h-3 w-3" />
@@ -796,13 +811,13 @@ export default function SettingsPage() {
         <Button
           variant="primary"
           onClick={async () => {
-            await Promise.all([
+            const results = await Promise.all([
               kvSave(KV_DEPARTMENTS, deptConfig),
               kvSave(KV_WORK_CALENDAR, workCalendar),
               kvSave(KV_LEAD_TIMES, leadTimes),
               kvSave(KV_SURCHARGES, surcharges),
             ]);
-            flash();
+            flash(results.every(Boolean));
           }}
         >
           <Save className="h-4 w-4" />
@@ -956,8 +971,8 @@ export default function SettingsPage() {
           <Button
             variant="primary"
             onClick={async () => {
-              await kvSave(KV_SYSTEM, systemSettings);
-              flash();
+              const ok = await kvSave(KV_SYSTEM, systemSettings);
+              flash(ok);
             }}
           >
             <Save className="h-4 w-4" />
@@ -1015,7 +1030,7 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <SaveToast show={showToast} />
+      <SaveToast state={toastState} />
 
       {/* Header */}
       <div>

@@ -561,11 +561,18 @@ export default function GRNPage() {
         icon: <CheckCircle2 className="h-3.5 w-3.5" />,
         action: async () => {
           try {
-            await fetch(`/api/grn/${row.id}`, {
+            const res = await fetch(`/api/grn/${row.id}`, {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ status: "CONFIRMED" }),
             });
+            // A non-2xx doesn't reject fetch — check res.ok or the approve
+            // silently "succeeds" (matches the adjacent Post-to-Stock action).
+            const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+            if (!res.ok || !j?.success) {
+              toast.error(j?.error || `Failed to approve GRN (${res.status})`);
+              return;
+            }
             invalidateCachePrefix("/api/grn");
             invalidateCachePrefix("/api/purchase-orders");
             invalidateCachePrefix("/api/inventory");

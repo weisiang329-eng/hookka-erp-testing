@@ -4338,6 +4338,15 @@ export default function ProductsPage() {
                               </svg>
                               View BOM
                             </Link>
+                            <Link to={`/products/${p.id}/documents`}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#6B5C32] bg-[#F0ECE9] border border-[#D8CFC0] rounded-md hover:bg-[#E8E2D9] transition-colors"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5-3H12m-8.25-9v15.75c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9H4.875C4.254 2.25 3.75 2.754 3.75 3.375z" />
+                              </svg>
+                              Docs
+                            </Link>
                             <button
                               onClick={() => setEditingVariant(p)}
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#6B5C32] bg-[#FAEFCB] border border-[#E8D597] rounded-md hover:bg-[#FAEFCB] transition-colors"

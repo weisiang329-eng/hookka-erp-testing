@@ -85,6 +85,7 @@ const BOM = lazy(() => import('./pages/bom'))
 // Products
 const Products = lazy(() => import('./pages/products'))
 const ProductBOM = lazy(() => import('./pages/products/bom'))
+const ProductDocuments = lazy(() => import('./pages/products/documents'))
 
 // CNC Cutting Templates — fabric-cutting file library for the BUYI E-DIGIT
 // cutter, grouped by product code.
@@ -355,6 +356,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // Products
   { path: '/products', element: <S><Products /></S> },
   { path: '/products/:id/bom', element: <S><ProductBOM /></S> },
+  { path: '/products/:id/documents', element: <S><ProductDocuments /></S> },
 
   // CNC Cutting Templates — fabric-cutting file library (BUYI E-DIGIT cutter).
   { path: '/cnc-templates', element: <S><CncTemplates /></S> },

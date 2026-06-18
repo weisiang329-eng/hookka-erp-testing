@@ -7,6 +7,9 @@ import { fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
 // Lives in its own dependency-free module so the page can import the same
 // comparator without pulling jsPDF into the page bundle.
 import { compareDoLinesByCustomerPO } from "@/lib/do-item-order";
+// DO-document rack line: per-component rack groups, NO label prefix, joined by
+// " · " (owner's spec). Shares formatRacksCompact's dedup + numeric sort.
+import { formatComponentRacksNoLabel } from "@/lib/rack-format";
 
 // Read-only print-extras from GET /api/delivery-orders/:id/print-extras.
 // All optional — the PDF still renders if not supplied.
@@ -1049,7 +1052,7 @@ function renderPackingSummary(
       const LH_RACK = 2.55; // 6.2pt × 1.15 line height, in mm
       const rowExtras = items.map((it) => {
         const ex = exDo?.items?.[it.id];
-        const rackTxt = fmtComponentRacks(ex?.componentRacks);
+        const rackTxt = formatComponentRacksNoLabel(ex?.componentRacks);
         if (!rackTxt) return null;
         const rackLines = doc.splitTextToSize(rackTxt, QTY_WRAP_W, {
           fontSize: 6.2,

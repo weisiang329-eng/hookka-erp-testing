@@ -21,6 +21,7 @@ import {
   LANG_LABELS,
   type WorkerLang,
 } from "@/lib/worker-i18n";
+import { useVersionCheck } from "@/lib/use-version-check";
 
 // Keys used across the portal. Single source of truth so other
 // pages (e.g. login) can clear / set them consistently.
@@ -107,6 +108,15 @@ export default function WorkerLayout() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
   useApplyHtmlLang();
+
+  // Auto-update: ONLY the admin DashboardLayout had a version check, so the
+  // worker portal never refreshed when a new deploy landed — a worker's phone
+  // stayed stuck on whatever build it cached (owner 2026-06-18: a NEW phone,
+  // refreshed, still showed the old aim-box barcode build instead of tap-to-pick,
+  // because nothing told it to update). Poll for a new deploy and reload silently:
+  // workers have no unsaved form state, so a refresh just gets them the latest
+  // scanner. No loop risk — after reload the loaded hash == the deployed hash.
+  useVersionCheck({ onNewVersion: () => window.location.reload() });
 
   // Reactive token check — redirect to login if missing.
   const [token, setToken] = useState<string | null>(getWorkerToken());

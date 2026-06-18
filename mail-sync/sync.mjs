@@ -65,6 +65,69 @@ function addrList(list) {
   return out.filter(Boolean);
 }
 
+// Per-attachment and per-message size caps. We base64-encode attachment bytes
+// into the JSON POST, so we cap individual files at ~8 MB and the TOTAL across
+// one message at ~15 MB to keep the request body sane. Anything over is dropped
+// (logged) — the ERP stores the email regardless; only the oversized file is
+// skipped. (e-invoices/photos are well under these limits in practice.)
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+
+// Coerce postal-mime's attachment.content (ArrayBuffer | Uint8Array | string)
+// to a Node Buffer so we can size-check it and base64-encode it uniformly.
+function attachmentBuffer(content) {
+  if (content == null) return null;
+  if (Buffer.isBuffer(content)) return content;
+  if (content instanceof ArrayBuffer) return Buffer.from(content);
+  if (ArrayBuffer.isView(content)) {
+    return Buffer.from(content.buffer, content.byteOffset, content.byteLength);
+  }
+  if (typeof content === "string") return Buffer.from(content);
+  try {
+    return Buffer.from(content);
+  } catch {
+    return null;
+  }
+}
+
+// Build the ERP attachments payload from postal-mime's parsed.attachments.
+// Each item: { filename, contentType, contentId, contentBase64 }. Drops files
+// over MAX_ATTACHMENT_BYTES or once the running total exceeds the message cap.
+function toAttachments(parsed, sourceMailbox) {
+  const list = Array.isArray(parsed.attachments) ? parsed.attachments : [];
+  if (list.length === 0) return undefined;
+  const out = [];
+  let total = 0;
+  for (const att of list) {
+    const buf = attachmentBuffer(att && att.content);
+    if (!buf || buf.length === 0) continue;
+    const filename =
+      (att && (att.filename || att.fileName)) || "attachment";
+    if (buf.length > MAX_ATTACHMENT_BYTES) {
+      console.warn(
+        `  ${sourceMailbox} SKIP attachment "${filename}" — ${buf.length} bytes > ${MAX_ATTACHMENT_BYTES} cap`,
+      );
+      continue;
+    }
+    if (total + buf.length > MAX_TOTAL_ATTACHMENT_BYTES) {
+      console.warn(
+        `  ${sourceMailbox} SKIP attachment "${filename}" — message total would exceed ${MAX_TOTAL_ATTACHMENT_BYTES} cap`,
+      );
+      continue;
+    }
+    total += buf.length;
+    out.push({
+      filename,
+      contentType:
+        (att && (att.mimeType || att.contentType)) ||
+        "application/octet-stream",
+      contentId: (att && att.contentId) || undefined,
+      contentBase64: buf.toString("base64"),
+    });
+  }
+  return out.length ? out : undefined;
+}
+
 async function postToErp(payload) {
   const res = await fetch(ERP_INBOUND_URL, {
     method: "POST",
@@ -114,6 +177,7 @@ function toPayload(parsed, sourceMailbox) {
     inReplyTo: parsed.inReplyTo || undefined,
     references,
     date: parsed.date || undefined,
+    attachments: toAttachments(parsed, sourceMailbox),
   };
 }
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, Fragment, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
@@ -110,6 +110,139 @@ function laborCostSenForMinutes(totalMinutes: number): number {
   if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return 0;
   return Math.round(totalMinutes * LABOR_RATE_PER_MIN_SEN);
 }
+
+// Optional analytic columns the owner can show/hide via the catalog "Columns"
+// chooser: estimated Labor cost, Margin (price − labor) and Labor-as-% of each
+// selling price. Kept as one data list so the header cells, the body cells and
+// the chooser checkboxes all iterate the same single source of truth. The
+// margin/labour columns compare against:
+//   BEDFRAME  → Price 2 (basePriceSen) for the "P2" column, Price 1 for "P1"
+//   ACCESSORY → Base Price (basePriceSen)
+//   SOFA      → the lowest positive seat-height price in the selected tier
+type ProdCat = "SOFA" | "ACCESSORY" | "BEDFRAME";
+type AnalyticCol = {
+  key: string;
+  width: string; // grid track appended to gridTemplateColumns when visible
+  defaultOn: boolean;
+  applies: (cat: ProdCat) => boolean;
+  label: (cat: ProdCat) => string;
+};
+const ANALYTIC_COLS: AnalyticCol[] = [
+  {
+    key: "labor",
+    width: "minmax(100px,0.95fr)",
+    defaultOn: true,
+    applies: () => true,
+    label: () => "Labor (est.)",
+  },
+  {
+    key: "marginP2",
+    width: "minmax(120px,1.15fr)",
+    defaultOn: true,
+    applies: () => true,
+    label: (c) =>
+      c === "SOFA" ? "Margin (tier)" : c === "ACCESSORY" ? "Margin (Base)" : "Margin (P2)",
+  },
+  {
+    key: "laborPctP2",
+    width: "minmax(90px,0.85fr)",
+    defaultOn: true,
+    applies: () => true,
+    label: (c) =>
+      c === "SOFA" ? "Labor % (tier)" : c === "ACCESSORY" ? "Labor % (Base)" : "Labor % (P2)",
+  },
+  {
+    key: "marginP1",
+    width: "minmax(120px,1.15fr)",
+    defaultOn: false,
+    applies: (c) => c === "BEDFRAME",
+    label: () => "Margin (P1)",
+  },
+  {
+    key: "laborPctP1",
+    width: "minmax(90px,0.85fr)",
+    defaultOn: false,
+    applies: (c) => c === "BEDFRAME",
+    label: () => "Labor % (P1)",
+  },
+];
+
+// ── Base (non-analytic) column registry ────────────────────────────────────
+// The SKU Master table historically hard-coded three positional column
+// layouts (sofa / accessory / bedframe). To let the owner show/hide ANY
+// column — not just the analytic ones — every base column is described here as
+// a single source of truth: the grid track width, the header label + align,
+// and whether it can be hidden. The header iterates this list, the body cells
+// gate on colOn(key), and gridTemplateColumns is built from the visible subset
+// — so a hidden column drops its header cell, its body cell, AND its grid
+// track in lockstep (no misaligned rows). `frozen` marks the sticky Code
+// column, which is always visible and pinned left. Widths keep the original
+// minmax() floors so a column never crushes below its min.
+type BaseColAlign = "left" | "right" | "center";
+type BaseCol = {
+  key: string;
+  label: string;
+  width: string; // grid track (minmax) when visible
+  align: BaseColAlign;
+  frozen?: boolean; // Code column — always on, sticky-left
+  alwaysOn?: boolean; // cannot be hidden via the chooser
+};
+const BASE_COLS: Record<ProdCat, BaseCol[]> = {
+  BEDFRAME: [
+    { key: "code", label: "Product Code", width: "minmax(120px,1.3fr)", align: "left", frozen: true, alwaysOn: true },
+    { key: "description", label: "Description", width: "minmax(160px,1.8fr)", align: "left" },
+    { key: "category", label: "Category", width: "minmax(90px,0.8fr)", align: "left" },
+    { key: "size", label: "Size", width: "minmax(90px,0.8fr)", align: "left" },
+    { key: "price2", label: "Price 2", width: "minmax(100px,1fr)", align: "right" },
+    { key: "price1", label: "Price 1", width: "minmax(100px,1fr)", align: "right" },
+    { key: "unitM3", label: "Unit (m³)", width: "minmax(80px,0.7fr)", align: "right" },
+    { key: "fabric", label: "Fabric (m)", width: "minmax(80px,0.7fr)", align: "right" },
+    { key: "totalMin", label: "Total Min", width: "minmax(84px,0.9fr)", align: "right" },
+    { key: "variants", label: "Variants", width: "minmax(84px,0.8fr)", align: "center" },
+  ],
+  SOFA: [
+    { key: "code", label: "Product Code", width: "minmax(120px,1.3fr)", align: "left", frozen: true, alwaysOn: true },
+    { key: "description", label: "Description", width: "minmax(150px,1.2fr)", align: "left" },
+    { key: "model", label: "Model", width: "minmax(80px,0.55fr)", align: "left" },
+    { key: "h24", label: '24"', width: "minmax(95px,0.95fr)", align: "right" },
+    { key: "h28", label: '28"', width: "minmax(95px,0.95fr)", align: "right" },
+    { key: "h30", label: '30"', width: "minmax(95px,0.95fr)", align: "right" },
+    { key: "h32", label: '32"', width: "minmax(95px,0.95fr)", align: "right" },
+    { key: "h35", label: '35"', width: "minmax(95px,0.95fr)", align: "right" },
+    { key: "unitM3", label: "Unit (m³)", width: "minmax(72px,0.6fr)", align: "right" },
+    { key: "fabric", label: "Fabric (m)", width: "minmax(72px,0.5fr)", align: "right" },
+    { key: "totalMin", label: "Total Min", width: "minmax(84px,0.9fr)", align: "right" },
+    { key: "variants", label: "Variants", width: "minmax(84px,0.7fr)", align: "center" },
+  ],
+  ACCESSORY: [
+    { key: "code", label: "Product Code", width: "minmax(120px,1.3fr)", align: "left", frozen: true, alwaysOn: true },
+    { key: "description", label: "Description", width: "minmax(180px,2.5fr)", align: "left" },
+    { key: "basePrice", label: "Base Price", width: "minmax(100px,1fr)", align: "right" },
+    { key: "unitM3", label: "Unit (m³)", width: "minmax(80px,0.7fr)", align: "right" },
+    { key: "fabric", label: "Fabric (m)", width: "minmax(95px,1fr)", align: "right" },
+  ],
+};
+// Human labels for the column chooser, keyed by column key. Shared across
+// categories so the chooser shows a clean name even where a category renders
+// the column slightly differently (e.g. sofa height cells).
+const BASE_COL_CHOOSER_LABEL: Record<string, string> = {
+  description: "Description",
+  category: "Category",
+  size: "Size",
+  model: "Model",
+  price2: "Price 2",
+  price1: "Price 1",
+  basePrice: "Base Price",
+  h24: 'Seat 24"',
+  h28: 'Seat 28"',
+  h30: 'Seat 30"',
+  h32: 'Seat 32"',
+  h35: 'Seat 35"',
+  unitM3: "Unit (m³)",
+  fabric: "Fabric (m)",
+  totalMin: "Total Min",
+  variants: "Variants",
+};
 
 type DeptWorkingTime = {
   departmentCode: string;
@@ -1670,6 +1803,313 @@ export default function ProductsPage() {
     }
   };
 
+  // Analytic columns (Labor / Margin / Labor%) the owner toggles via the
+  // catalog "Columns" chooser. Persisted per browser like sofaTier above so a
+  // chosen layout survives reloads. Defaults from ANALYTIC_COLS[].defaultOn.
+  const [analyticColVis, setAnalyticColVis] = useState<Record<string, boolean>>(
+    () => {
+      const base: Record<string, boolean> = {};
+      for (const c of ANALYTIC_COLS) base[c.key] = c.defaultOn;
+      if (typeof window === "undefined") return base;
+      try {
+        const saved = window.localStorage.getItem(
+          "hookka.products.analyticCols",
+        );
+        if (saved) Object.assign(base, JSON.parse(saved) as Record<string, boolean>);
+      } catch {
+        /* ignore corrupt prefs — fall back to defaults */
+      }
+      return base;
+    },
+  );
+  const toggleAnalyticCol = (key: string) => {
+    setAnalyticColVis((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(
+            "hookka.products.analyticCols",
+            JSON.stringify(next),
+          );
+        } catch {
+          /* ignore quota / disabled storage */
+        }
+      }
+      return next;
+    });
+  };
+
+  // Base-column visibility — the owner can hide ANY non-frozen base column
+  // (Description, Category, Size, Price 1/2, Unit, Fabric, Total Min, Variants,
+  // sofa seat columns). Keyed by column key across all categories (keys are
+  // unique enough to share one map). Missing key ⇒ visible (default-on), so a
+  // future-added column shows up without a migration. Persisted per browser.
+  const [baseColVis, setBaseColVis] = useState<Record<string, boolean>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const saved = window.localStorage.getItem("hookka.products.baseCols");
+      if (saved) return JSON.parse(saved) as Record<string, boolean>;
+    } catch {
+      /* ignore corrupt prefs */
+    }
+    return {};
+  });
+  // A column is shown unless it has been explicitly toggled off. Frozen /
+  // always-on columns (Code) can never be hidden.
+  const isBaseColVisible = (col: BaseCol) =>
+    col.alwaysOn || col.frozen || baseColVis[col.key] !== false;
+  const toggleBaseCol = (key: string) => {
+    setBaseColVis((prev) => {
+      const next = { ...prev, [key]: prev[key] === false ? true : false };
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(
+            "hookka.products.baseCols",
+            JSON.stringify(next),
+          );
+        } catch {
+          /* ignore quota / disabled storage */
+        }
+      }
+      return next;
+    });
+  };
+
+  // Manual column ORDER — the owner can drag a column header left/right to
+  // reorder it. Stored PER CATEGORY (the three categories define different
+  // column sets) as an array of column keys in the desired visual order.
+  // A key missing from the saved array keeps its registry/default position
+  // (so a future-added column appears without a migration); unknown/stale
+  // keys are ignored. The frozen "Product Code" column is ALWAYS pinned first
+  // and can never be reordered past the freeze — applyColOrder() strips it
+  // from the order list and re-prepends it. The saved order is applied to the
+  // single ordered-column list (orderedCols) that drives the header row, the
+  // per-column filter row, the grid-template-columns track string, AND every
+  // body row's keyed cells — so header and body can never drift apart.
+  const [colOrder, setColOrder] = useState<Record<string, string[]>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const saved = window.localStorage.getItem("hookka.products.colOrder");
+      if (saved) return JSON.parse(saved) as Record<string, string[]>;
+    } catch {
+      /* ignore corrupt prefs */
+    }
+    return {};
+  });
+  const persistColOrder = (next: Record<string, string[]>) => {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(
+          "hookka.products.colOrder",
+          JSON.stringify(next),
+        );
+      } catch {
+        /* ignore quota / disabled storage */
+      }
+    }
+  };
+  // Reorder the visible-column key list `keys` to match the saved order for
+  // `cat`. Frozen keys (Product Code) are always emitted first, in registry
+  // order, regardless of where the saved order would place them. The rest keep
+  // the saved relative order; any visible key not in the saved order is
+  // appended in its original (registry/track) position so nothing disappears.
+  const applyColOrder = (
+    keys: string[],
+    frozenKeys: Set<string>,
+    cat: ProdCat,
+  ): string[] => {
+    const order = colOrder[cat] ?? [];
+    const frozen = keys.filter((k) => frozenKeys.has(k));
+    const movable = keys.filter((k) => !frozenKeys.has(k));
+    if (order.length === 0) return [...frozen, ...movable];
+    const inOrder = order.filter((k) => movable.includes(k));
+    const rest = movable.filter((k) => !inOrder.includes(k));
+    return [...frozen, ...inOrder, ...rest];
+  };
+  // Persist a new movable-key order for a category. `frozenKeys` are never
+  // written into the saved order (they're always pinned first by applyColOrder).
+  const setColOrderForCat = (cat: ProdCat, movableKeys: string[]) => {
+    setColOrder((prev) => {
+      const next = { ...prev, [cat]: movableKeys };
+      persistColOrder(next);
+      return next;
+    });
+  };
+  // Native HTML5 drag-and-drop state for header reordering. Holds the key of
+  // the column currently being dragged and the key it is hovering over, so the
+  // header can render a drop indicator. Cleared on drop / dragend.
+  const [draggingColKey, setDraggingColKey] = useState<string | null>(null);
+  const [dragOverColKey, setDragOverColKey] = useState<string | null>(null);
+  // Move `fromKey` to occupy `toKey`'s slot within the current ordered list of
+  // movable keys for `cat`, then persist. Frozen keys are excluded from both
+  // ends so Code stays pinned. No-op if either key is frozen or they're equal.
+  const reorderColumn = (
+    fromKey: string,
+    toKey: string,
+    orderedMovableKeys: string[],
+    cat: ProdCat,
+  ) => {
+    if (fromKey === toKey) return;
+    const from = orderedMovableKeys.indexOf(fromKey);
+    const to = orderedMovableKeys.indexOf(toKey);
+    if (from === -1 || to === -1) return;
+    const next = [...orderedMovableKeys];
+    next.splice(from, 1);
+    next.splice(to, 0, fromKey);
+    setColOrderForCat(cat, next);
+  };
+
+  // Per-column manual widths (px), set by dragging a header's right edge.
+  // Keyed by column key; overrides the descriptor's minmax() track when set.
+  // Persisted per browser so a tuned layout survives reloads. Clearing a key
+  // (double-click the handle) restores the responsive minmax() default.
+  const [colWidths, setColWidths] = useState<Record<string, number>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const saved = window.localStorage.getItem("hookka.products.colWidths");
+      if (saved) return JSON.parse(saved) as Record<string, number>;
+    } catch {
+      /* ignore corrupt prefs */
+    }
+    return {};
+  });
+  const persistColWidths = (next: Record<string, number>) => {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(
+          "hookka.products.colWidths",
+          JSON.stringify(next),
+        );
+      } catch {
+        /* ignore quota / disabled storage */
+      }
+    }
+  };
+  // Track which column is being resized so a body-wide overlay can capture the
+  // drag (and so we can suppress the row click while dragging a handle).
+  const colResizeRef = useRef<{
+    key: string;
+    startX: number;
+    startW: number;
+  } | null>(null);
+  const beginColResize = (
+    e: React.MouseEvent,
+    key: string,
+    currentW: number,
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    colResizeRef.current = { key, startX: e.clientX, startW: currentW };
+    const onMove = (ev: MouseEvent) => {
+      const st = colResizeRef.current;
+      if (!st) return;
+      const w = Math.max(48, Math.round(st.startW + (ev.clientX - st.startX)));
+      setColWidths((prev) => ({ ...prev, [st.key]: w }));
+    };
+    const onUp = () => {
+      const st = colResizeRef.current;
+      colResizeRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      if (st) {
+        setColWidths((prev) => {
+          persistColWidths(prev);
+          return prev;
+        });
+      }
+    };
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+  // Double-click a resize handle to clear the manual width and return the
+  // column to its responsive minmax() default.
+  const clearColWidth = (key: string) => {
+    setColWidths((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      persistColWidths(next);
+      return next;
+    });
+  };
+
+  // Per-column client-side sort for the SKU Master table. null = natural
+  // (load) order. Only a safe subset of columns is sortable — see sortValueFor.
+  const [sortCol, setSortCol] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const toggleSort = (key: string) => {
+    setSortCol((prevCol) => {
+      if (prevCol !== key) {
+        setSortDir("asc");
+        return key;
+      }
+      // same column: asc → desc → off
+      if (sortDir === "asc") {
+        setSortDir("desc");
+        return key;
+      }
+      setSortDir("asc");
+      return null;
+    });
+  };
+
+  // Per-column text filter for the SKU Master table. Keyed by column key
+  // (shared across categories like colWidths / baseColVis). A non-empty value
+  // means "show only rows whose value for that column contains this text"
+  // (case-insensitive substring). EVERY column — base and analytic — supports
+  // a filter via the inline filter row under the header; the matching string
+  // for each column comes from filterValueFor(). Persisted per browser so a
+  // filtered view survives reloads, matching the sort / width / visibility
+  // prefs. Empty string clears that column's filter.
+  const [colFilters, setColFiltersState] = useState<Record<string, string>>(
+    () => {
+      if (typeof window === "undefined") return {};
+      try {
+        const saved = window.localStorage.getItem("hookka.products.colFilters");
+        if (saved) return JSON.parse(saved) as Record<string, string>;
+      } catch {
+        /* ignore corrupt prefs */
+      }
+      return {};
+    },
+  );
+  const setColFilter = (key: string, value: string) => {
+    setColFiltersState((prev) => {
+      const next = { ...prev };
+      if (value) next[key] = value;
+      else delete next[key];
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(
+            "hookka.products.colFilters",
+            JSON.stringify(next),
+          );
+        } catch {
+          /* ignore quota / disabled storage */
+        }
+      }
+      return next;
+    });
+  };
+  const clearAllColFilters = () => {
+    setColFiltersState({});
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.removeItem("hookka.products.colFilters");
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  // Whether the inline per-column filter row is shown. Defaults off so the
+  // table opens clean; toggled by the "Filter" button in the toolbar. Any
+  // active filter keeps the row visible regardless.
+  const [showFilterRow, setShowFilterRow] = useState(false);
+
+  const [showColMenu, setShowColMenu] = useState(false);
+
   // Master price-history dialog. Holds the product whose history is open;
   // null when the dialog is closed.
   const [scheduleProductId, setScheduleProductId] = useState<string | null>(
@@ -1695,6 +2135,17 @@ export default function ProductsPage() {
     // semantics (= inherit from products) don't accidentally clear cells
     // that weren't edited.
     seatHeightPrices?: { height: string; priceSen: number; tier?: SofaTier }[];
+    // Fabric (m) per unit. NOT a price-history concept — it lives on the
+    // products row, so the bulk Save flow commits it via PUT /api/products/:id
+    // (no effective-date), separate from the price_prices history POST. Gated
+    // behind editMode exactly like the price cells, so there are no naked
+    // auto-saves on blur anymore.
+    fabricUsage?: number;
+    // Unit (m³) per unit. Same story as fabricUsage — a products-row field,
+    // committed via PUT /api/products/:id on Save. Previously this cell fired
+    // an immediate PUT on blur (a "naked edit"); it now defers to the bulk
+    // Save flow and is gated behind editMode like every other cell.
+    unitM3?: number;
   };
   const [dirtyEdits, setDirtyEdits] = useState<Map<string, DirtyEdit>>(new Map());
   const [showBulkSaveDialog, setShowBulkSaveDialog] = useState(false);
@@ -1739,32 +2190,70 @@ export default function ProductsPage() {
     if (dirtyEdits.size === 0) return;
     setBulkSaving(true);
     try {
-      const requests = Array.from(dirtyEdits.values()).map((d) => {
+      const requests: Promise<{ ok: boolean; status: number; productId: string }>[] = [];
+      for (const d of dirtyEdits.values()) {
         const prod = products.find((p) => p.id === d.productId);
-        // Compose a complete-state body so the resolver doesn't pull a
-        // missing field from the products table at a stale moment.
-        const body: Record<string, unknown> = {
-          effectiveFrom: bulkEffectiveFrom,
-          notes: bulkNotes || null,
-          basePriceSen:
-            d.basePriceSen !== undefined
-              ? d.basePriceSen
-              : (prod?.basePriceSen ?? null),
-          price1Sen:
-            d.price1Sen !== undefined
-              ? d.price1Sen
-              : (prod?.price1Sen ?? null),
-          seatHeightPrices:
-            d.seatHeightPrices !== undefined
-              ? d.seatHeightPrices
-              : (prod?.seatHeightPrices ?? null),
-        };
-        return fetch(`/api/products/${d.productId}/prices`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }).then((r) => ({ ok: r.ok, status: r.status, productId: d.productId }));
-      });
+        // A row can be dirty for price fields, for fabric, or both. Price
+        // fields land in product_prices history (effective-dated); fabric
+        // lives on the products row. Dispatch each independently so a
+        // fabric-only edit doesn't manufacture a spurious price-history row.
+        const hasPriceDirt =
+          d.basePriceSen !== undefined ||
+          d.price1Sen !== undefined ||
+          d.seatHeightPrices !== undefined;
+        // Fabric (m) and Unit (m³) are both products-row fields — collapse
+        // them into ONE PUT so two edits to the same row don't race.
+        const hasProductRowDirt =
+          d.fabricUsage !== undefined || d.unitM3 !== undefined;
+
+        if (hasPriceDirt) {
+          // Compose a complete-state body so the resolver doesn't pull a
+          // missing field from the products table at a stale moment.
+          const body: Record<string, unknown> = {
+            effectiveFrom: bulkEffectiveFrom,
+            notes: bulkNotes || null,
+            basePriceSen:
+              d.basePriceSen !== undefined
+                ? d.basePriceSen
+                : (prod?.basePriceSen ?? null),
+            price1Sen:
+              d.price1Sen !== undefined
+                ? d.price1Sen
+                : (prod?.price1Sen ?? null),
+            seatHeightPrices:
+              d.seatHeightPrices !== undefined
+                ? d.seatHeightPrices
+                : (prod?.seatHeightPrices ?? null),
+          };
+          requests.push(
+            fetch(`/api/products/${d.productId}/prices`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            }).then((r) => ({ ok: r.ok, status: r.status, productId: d.productId })),
+          );
+        }
+
+        if (hasProductRowDirt) {
+          // Fabric (m) / Unit (m³) are products-row fields, committed here via
+          // the same PUT the inline cells used to fire on blur — except now
+          // it's deferred to Save so there are no naked auto-saves. PUT merges
+          // a partial body, so only the edited field(s) are sent and every
+          // other field stays intact.
+          const rowBody: Record<string, number> = {};
+          if (d.fabricUsage !== undefined) rowBody.fabricUsage = d.fabricUsage;
+          if (d.unitM3 !== undefined) rowBody.unitM3 = d.unitM3;
+          requests.push(
+            fetch(`/api/products/${d.productId}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(rowBody),
+            }).then((r) => ({ ok: r.ok, status: r.status, productId: d.productId })),
+          );
+        }
+      }
+      // No-op guard: if every dirty entry somehow carried no committable
+      // field, fall through to the cleanup below rather than awaiting nothing.
       const results = await Promise.all(requests);
       const failed = results.filter((r) => !r.ok);
       if (failed.length > 0) {
@@ -1772,9 +2261,13 @@ export default function ProductsPage() {
           `${failed.length} of ${results.length} updates failed. The successful ones were saved.`,
         );
       }
+      // Fabric (m) feeds BOM material maths, so drop those caches too — the
+      // old inline blur-PUT did this, and the bulk path now owns the write.
+      invalidateCachePrefix("/api/bom");
+      invalidateCachePrefix("/api/bom-master-templates");
       // Wipe local dirty state and reload so the table reflects the new
       // currently-effective price (or shows the Pending badge if the
-      // effective date is in the future).
+      // effective date is in the future) and the committed fabric value.
       setDirtyEdits(new Map());
       setShowBulkSaveDialog(false);
       setEditMode(false);
@@ -1796,6 +2289,148 @@ export default function ProductsPage() {
     if (!d || !d.seatHeightPrices) return false;
     return d.seatHeightPrices.some(
       (s) => s.height === height && (s.tier ?? "PRICE_2") === tier,
+    );
+  };
+  const isFabricDirty = (productId: string) =>
+    dirtyEdits.get(productId)?.fabricUsage !== undefined;
+
+  // ── Fabric (m) cell ────────────────────────────────────────────────────
+  // Shared by BEDFRAME / SOFA and ACCESSORY rows. NO NAKED EDITS: outside
+  // editMode this is plain read-only text (no click target), exactly like the
+  // price cells. Inside editMode it is click-to-edit, and committing the input
+  // DEFERS to the bulk Save flow via recordDirty({ fabricUsage }) — it no
+  // longer fires an immediate PUT on blur. The dirty value shadows the cfg/
+  // product display so the edit is visible (highlighted) until Save commits it.
+  const renderFabricCell = (p: Product, cfg: ProductDeptConfig | undefined) => {
+    const dirty = isFabricDirty(p.id);
+    const stored = (cfg?.fabricUsage ?? p.fabricUsage) || 0;
+    // While a row is dirty for fabric, show the pending value (p.fabricUsage is
+    // updated optimistically on commit) instead of the cfg snapshot.
+    const shown = dirty ? p.fabricUsage || 0 : stored;
+    const hint = fabricWidthHint(p.category);
+    return (
+      <div
+        className="px-3 py-1.5 text-right"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {editMode && editingFabricUsage === p.id ? (
+          <input
+            autoFocus
+            type="number"
+            onFocus={(e) => e.currentTarget.select()}
+            value={fabricUsageInput}
+            onChange={(e) => setFabricUsageInput(e.target.value)}
+            onBlur={() => {
+              const val = parseFloat(fabricUsageInput || "0") || 0;
+              setEditingFabricUsage(null);
+              // Local-only optimistic update + queue for the bulk Save. No
+              // server write here — Save commits via PUT /api/products/:id.
+              setProducts((prev) =>
+                prev.map((pr) => (pr.id === p.id ? { ...pr, fabricUsage: val } : pr)),
+              );
+              recordDirty(p.id, { fabricUsage: val });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              if (e.key === "Escape") setEditingFabricUsage(null);
+            }}
+            className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+            step="0.1"
+            min="0"
+          />
+        ) : (
+          <div className="flex items-baseline justify-end gap-1">
+            {editMode ? (
+              <button
+                onClick={() => {
+                  setEditingFabricUsage(p.id);
+                  setFabricUsageInput(String(shown));
+                }}
+                className={`text-sm tabular-nums rounded px-1.5 transition-colors ${
+                  dirty
+                    ? "bg-[#FEF7E0] text-[#9C6F1E] font-semibold"
+                    : "text-[#111827] hover:text-[#6B5C32] hover:underline cursor-pointer"
+                }`}
+                title="Click to edit fabric (m)"
+              >
+                {shown} m
+              </button>
+            ) : (
+              <span className="text-sm tabular-nums text-[#111827]">{shown} m</span>
+            )}
+            {hint && (
+              <span className="text-[10px] text-[#9CA3AF]">· {hint}</span>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const isUnitM3Dirty = (productId: string) =>
+    dirtyEdits.get(productId)?.unitM3 !== undefined;
+
+  // ── Unit (m³) cell ─────────────────────────────────────────────────────
+  // Shared by BEDFRAME / SOFA and ACCESSORY rows. Same NO-NAKED-EDITS contract
+  // as renderFabricCell: read-only text outside editMode, click-to-edit inside
+  // it, and the commit DEFERS to the bulk Save flow via recordDirty({ unitM3 })
+  // instead of firing an immediate PUT on blur (which was the previous naked
+  // auto-save). The dirty value shadows the cfg/product display until Save.
+  const renderUnitM3Cell = (p: Product, cfg: ProductDeptConfig | undefined) => {
+    const dirty = isUnitM3Dirty(p.id);
+    const stored = cfg?.unitM3 ?? p.unitM3 ?? 0;
+    const shown = dirty ? (p.unitM3 ?? 0) : stored;
+    return (
+      <div
+        className="px-3 py-1.5 text-right"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {editMode && editingM3 === p.id ? (
+          <input
+            autoFocus
+            type="number"
+            onFocus={(e) => e.currentTarget.select()}
+            value={m3Input}
+            onChange={(e) => setM3Input(e.target.value)}
+            onBlur={() => {
+              const val = parseFloat(m3Input || "0") || 0;
+              setEditingM3(null);
+              // Local-only optimistic update + queue for the bulk Save. No
+              // server write here — Save commits via PUT /api/products/:id.
+              setProducts((prev) =>
+                prev.map((pr) => (pr.id === p.id ? { ...pr, unitM3: val } : pr)),
+              );
+              recordDirty(p.id, { unitM3: val });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              if (e.key === "Escape") setEditingM3(null);
+            }}
+            className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+            step="0.001"
+            min="0"
+          />
+        ) : editMode ? (
+          <button
+            onClick={() => {
+              setEditingM3(p.id);
+              setM3Input(shown.toFixed(3));
+            }}
+            className={`text-sm tabular-nums rounded px-1.5 transition-colors ${
+              dirty
+                ? "bg-[#FEF7E0] text-[#9C6F1E] font-semibold"
+                : "text-[#111827] hover:text-[#6B5C32] hover:underline cursor-pointer"
+            }`}
+            title="Click to edit Unit (m³)"
+          >
+            {shown.toFixed(3)}
+          </button>
+        ) : (
+          <span className="text-sm tabular-nums text-[#111827]" title={shown.toFixed(3)}>
+            {shown.toFixed(3)}
+          </span>
+        )}
+      </div>
     );
   };
 
@@ -1976,7 +2611,6 @@ export default function ProductsPage() {
   // via the kv-config subscription below so adding a divan height in the
   // Maintenance tab makes it immediately selectable here without a
   // refresh.
-  /* eslint-disable react-hooks/set-state-in-effect -- one-shot hydrate of master config + fabrics for the variant dialog */
   useEffect(() => {
     setMaintenanceConfig(parseMaintenanceConfig(getVariantsConfigSync()));
     let cancelled = false;
@@ -2000,7 +2634,6 @@ export default function ProductsPage() {
       off();
     };
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Persist updated default variants to /api/products/:id and refresh the
   // local product row so the badge + expand panel reflect the saved state
@@ -2068,7 +2701,7 @@ export default function ProductsPage() {
   // user types anything, cross-category search takes over so typing "pillow"
   // finds the accessory rows even while the BEDFRAME tab is active — no
   // more "why can't I find sofas while on bedframe" surprises.
-  const filtered = useMemo(() => {
+  const filteredRaw = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return products.filter((p) => p.category === categoryFilter);
     return products.filter((p) => {
@@ -2078,6 +2711,274 @@ export default function ProductsPage() {
       return hay.includes(q);
     });
   }, [products, categoryFilter, searchQuery]);
+
+  // Numeric value for an analytic column (labor / margin / labor%) for a
+  // product, so the analytic columns are sortable AND filterable with the
+  // SAME maths the body cells render. Mirrors the body-cell logic: the
+  // selling price compared against is the tier-rep price for sofas, Price 1
+  // for the *P1 columns, else basePriceSen. Returns null when the value can't
+  // be computed (no minutes / no price) so the caller renders "—" and sorts
+  // it to the bottom.
+  const analyticValueFor = useCallback(
+    (p: Product, key: string): number | null => {
+      const cfg = configMap.get(p.code);
+      const totalMin =
+        p.productionTimeMinutes > 0
+          ? p.productionTimeMinutes
+          : cfg
+            ? totalConfigMinutes(cfg)
+            : 0;
+      const laborSen = laborCostSenForMinutes(totalMin);
+      if (key === "labor") return laborSen > 0 ? laborSen : null;
+      const isSofaCat = p.category === "SOFA";
+      const sofaRep = isSofaCat
+        ? ((p.seatHeightPrices || [])
+            .filter((s) => entryTier(s.tier) === sofaTier && s.priceSen > 0)
+            .sort((a, b) => a.priceSen - b.priceSen)[0]?.priceSen ?? 0)
+        : 0;
+      const mainPrice = isSofaCat ? sofaRep : (p.basePriceSen ?? p.costPriceSen ?? 0);
+      const priceFor =
+        key === "marginP1" || key === "laborPctP1" ? (p.price1Sen ?? 0) : mainPrice;
+      if (priceFor <= 0 || laborSen <= 0) return null;
+      if (key === "laborPctP2" || key === "laborPctP1")
+        return (laborSen / priceFor) * 100;
+      // marginP2 / marginP1
+      return priceFor - laborSen;
+    },
+    [configMap, sofaTier],
+  );
+
+  // Per-column sort value for a product. Returns string | number; the
+  // comparator below localeCompares strings and subtracts numbers. Pricing /
+  // fabric / minutes read the same effective values the cells render so the
+  // sort matches what the eye sees. Sofa height columns sort by that seat's
+  // price in the active tier; the sofa "price" proxy uses the lowest tier
+  // price (mirrors the analytic columns).
+  const sortValueFor = useCallback(
+    (p: Product, key: string): string | number => {
+      const cfg = configMap.get(p.code);
+      const seat = (h: string) =>
+        (p.seatHeightPrices || []).find(
+          (s) =>
+            String(s.height ?? "").replace('"', "").trim() === h &&
+            entryTier(s.tier) === sofaTier,
+        )?.priceSen ?? -1;
+      // Analytic columns (labor / margin / labor%) are sortable too. Unset
+      // ("—") values map to -Infinity so they cluster together at the start in
+      // ascending order — mirroring the sofa-height columns' existing missing=
+      // -1 convention so sort behaviour stays consistent across the table.
+      if (
+        key === "labor" ||
+        key === "marginP2" ||
+        key === "marginP1" ||
+        key === "laborPctP2" ||
+        key === "laborPctP1"
+      ) {
+        const v = analyticValueFor(p, key);
+        return v == null ? Number.NEGATIVE_INFINITY : v;
+      }
+      switch (key) {
+        case "code":
+          return (p.code || "").toLowerCase();
+        case "description":
+          return (p.name || p.description || "").toLowerCase();
+        case "category":
+          return (p.category || "").toLowerCase();
+        case "size":
+          return (p.sizeLabel || "").toLowerCase();
+        case "model":
+          return (p.baseModel || "").toLowerCase();
+        case "price2":
+        case "basePrice":
+          return p.basePriceSen ?? p.costPriceSen ?? 0;
+        case "price1":
+          return p.price1Sen ?? 0;
+        case "unitM3":
+          return cfg?.unitM3 ?? p.unitM3 ?? 0;
+        case "fabric":
+          return cfg?.fabricUsage ?? p.fabricUsage ?? 0;
+        case "totalMin":
+          return p.productionTimeMinutes > 0
+            ? p.productionTimeMinutes
+            : cfg
+              ? totalConfigMinutes(cfg)
+              : 0;
+        case "variants":
+          return (
+            (p.defaultVariants?.fabricCode ? 1 : 0) +
+            (p.defaultVariants?.divanHeight ? 1 : 0) +
+            (p.defaultVariants?.legHeight ? 1 : 0) +
+            (p.defaultVariants?.gap ? 1 : 0) +
+            (p.defaultVariants?.seatHeight ? 1 : 0) +
+            ((p.defaultVariants?.specials?.length ?? 0) > 0 ? 1 : 0)
+          );
+        case "h24":
+          return seat("24");
+        case "h28":
+          return seat("28");
+        case "h30":
+          return seat("30");
+        case "h32":
+          return seat("32");
+        case "h35":
+          return seat("35");
+        default:
+          return 0;
+      }
+    },
+    [configMap, sofaTier, analyticValueFor],
+  );
+
+  // Display string for a column used by the per-column filter row. Mirrors
+  // the rendered cell text so a filter matches what the operator sees:
+  // currency columns filter on the formatted "RM …" string, the variants
+  // column on its "N set" / "Configure" label, analytic columns on their
+  // numeric/"—" rendering. Case-insensitive substring is applied by the
+  // caller. Reuses sortValueFor / analyticValueFor where the raw value is
+  // already what's shown so there is a single source of truth per column.
+  const filterValueFor = useCallback(
+    (p: Product, key: string): string => {
+      const cfg = configMap.get(p.code);
+      switch (key) {
+        case "code":
+          return p.code || "";
+        case "description":
+          return `${p.name || ""} ${p.description || ""}`.trim();
+        case "category":
+          return p.category || "";
+        case "size":
+          return p.sizeLabel || "";
+        case "model":
+          return p.baseModel || "";
+        case "price2":
+        case "basePrice": {
+          const v = p.basePriceSen ?? p.costPriceSen ?? 0;
+          return v > 0 ? formatCurrency(v) : "";
+        }
+        case "price1": {
+          const v = p.price1Sen ?? 0;
+          return v > 0 ? formatCurrency(v) : "";
+        }
+        case "unitM3":
+          return (cfg?.unitM3 ?? p.unitM3 ?? 0).toFixed(3);
+        case "fabric":
+          return `${cfg?.fabricUsage ?? p.fabricUsage ?? 0}`;
+        case "totalMin": {
+          const m =
+            p.productionTimeMinutes > 0
+              ? p.productionTimeMinutes
+              : cfg
+                ? totalConfigMinutes(cfg)
+                : 0;
+          return `${m}`;
+        }
+        case "variants": {
+          const n =
+            (p.defaultVariants?.fabricCode ? 1 : 0) +
+            (p.defaultVariants?.divanHeight ? 1 : 0) +
+            (p.defaultVariants?.legHeight ? 1 : 0) +
+            (p.defaultVariants?.gap ? 1 : 0) +
+            (p.defaultVariants?.seatHeight ? 1 : 0) +
+            ((p.defaultVariants?.specials?.length ?? 0) > 0 ? 1 : 0);
+          return n > 0 ? `${n} set` : "Configure";
+        }
+        case "h24":
+        case "h28":
+        case "h30":
+        case "h32":
+        case "h35": {
+          const h = key.slice(1);
+          const sh = (p.seatHeightPrices || []).find(
+            (s) =>
+              String(s.height ?? "").replace('"', "").trim() === h &&
+              entryTier(s.tier) === sofaTier,
+          );
+          return sh && sh.priceSen > 0 ? formatCurrency(sh.priceSen) : "";
+        }
+        case "labor":
+        case "marginP2":
+        case "marginP1":
+        case "laborPctP2":
+        case "laborPctP1": {
+          const v = analyticValueFor(p, key);
+          if (v == null) return "";
+          if (key === "laborPctP2" || key === "laborPctP1")
+            return `${v.toFixed(1)}%`;
+          if (key === "labor") return formatCurrency(v);
+          return formatCurrency(v); // margins
+        }
+        default:
+          return "";
+      }
+    },
+    [configMap, sofaTier, analyticValueFor],
+  );
+
+  // Keys of the columns currently SHOWN for the active category — base
+  // columns that are visible plus the applicable analytic columns that are
+  // toggled on. Used to scope the per-column filter so a filter left on a
+  // column that is now hidden (or belongs to a different category) doesn't
+  // silently narrow the table. colFilters persists across category switches /
+  // column hides, so this gate keeps the visible result honest.
+  const visibleColKeys = useMemo(() => {
+    const cat: ProdCat =
+      categoryFilter === "SOFA"
+        ? "SOFA"
+        : categoryFilter === "ACCESSORY"
+          ? "ACCESSORY"
+          : "BEDFRAME";
+    const keys = new Set<string>();
+    for (const col of BASE_COLS[cat]) {
+      // Inline of isBaseColVisible so this memo depends only on baseColVis
+      // (frozen / always-on columns are always shown; others unless toggled off).
+      if (col.alwaysOn || col.frozen || baseColVis[col.key] !== false)
+        keys.add(col.key);
+    }
+    for (const c of ANALYTIC_COLS) {
+      if (c.applies(cat) && analyticColVis[c.key]) keys.add(c.key);
+    }
+    return keys;
+  }, [categoryFilter, baseColVis, analyticColVis]);
+
+  // Apply the per-column filter row on top of the category/search result.
+  // A row survives only if it matches EVERY active filter on a currently-
+  // VISIBLE column (case-insensitive substring against filterValueFor). No
+  // active filters ⇒ pass-through. Runs before sort so the count + sort
+  // reflect the filtered set.
+  const colFiltered = useMemo(() => {
+    const active = Object.entries(colFilters).filter(
+      ([key, v]) => v.trim() && visibleColKeys.has(key),
+    );
+    if (active.length === 0) return filteredRaw;
+    return filteredRaw.filter((p) =>
+      active.every(([key, term]) =>
+        filterValueFor(p, key).toLowerCase().includes(term.trim().toLowerCase()),
+      ),
+    );
+  }, [filteredRaw, colFilters, filterValueFor, visibleColKeys]);
+
+  // Apply the active column sort on top of the filtered set. Stable: equal
+  // keys keep their natural (load) order. When no sort is active the filtered
+  // array passes through untouched so the default ordering is preserved.
+  const filtered = useMemo(() => {
+    if (!sortCol) return colFiltered;
+    const dir = sortDir === "asc" ? 1 : -1;
+    const decorated = colFiltered.map((p, i) => ({ p, i }));
+    decorated.sort((a, b) => {
+      const av = sortValueFor(a.p, sortCol);
+      const bv = sortValueFor(b.p, sortCol);
+      let cmp: number;
+      if (typeof av === "number" && typeof bv === "number") {
+        cmp = av - bv;
+      } else {
+        cmp = String(av).localeCompare(String(bv), undefined, {
+          numeric: true,
+        });
+      }
+      return cmp !== 0 ? cmp * dir : a.i - b.i;
+    });
+    return decorated.map((d) => d.p);
+  }, [colFiltered, sortCol, sortDir, sortValueFor]);
 
   // ── Row virtualization for the SKU-master catalog table ────────────────
   // The catalog renders one inline-edit row per product (10+ grid cells,
@@ -2143,36 +3044,51 @@ export default function ProductsPage() {
           </div>
         </div>
         {viewMode === "skuMaster" && (
-        <div className="flex gap-2 items-center">
-          {categories.map((cat) => (
-            <button
-              key={cat}
-              onClick={() => setCategoryFilter(cat)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                categoryFilter === cat && !searchQuery
-                  ? "bg-[#111827] text-white"
-                  : "bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6]"
-              }`}
+        <div className="flex gap-2 items-center flex-wrap justify-end">
+          {/* Category filter — segmented pill group, mirrors the view toggle. */}
+          <div className="inline-flex bg-[#F3F4F6] rounded-lg p-0.5">
+            {categories.map((cat) => {
+              const active = categoryFilter === cat && !searchQuery;
+              return (
+                <button
+                  key={cat}
+                  onClick={() => setCategoryFilter(cat)}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                    active
+                      ? "bg-white text-[#111827] shadow-sm"
+                      : "text-[#6B7280] hover:text-[#111827]"
+                  }`}
+                >
+                  {cat.charAt(0) + cat.slice(1).toLowerCase()}
+                </button>
+              );
+            })}
+          </div>
+          <div className="relative">
+            <svg
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#9CA3AF]"
+              viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true"
             >
-              {cat.charAt(0) + cat.slice(1).toLowerCase()}
-            </button>
-          ))}
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search all products..."
-            className="px-3 py-1.5 rounded-md text-xs border border-[#E5E7EB] bg-white focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/30 w-56"
-          />
-          {searchQuery && (
-            <button
-              onClick={() => setSearchQuery("")}
-              className="text-[11px] text-[#6B7280] hover:text-[#111827] px-1"
-              title="Clear search"
-            >
-              ✕
-            </button>
-          )}
+              <circle cx="9" cy="9" r="6" />
+              <path d="M14 14l3.5 3.5" strokeLinecap="round" />
+            </svg>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search all products..."
+              className="pl-8 pr-7 py-1.5 rounded-md text-xs border border-[#E5E7EB] bg-white focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/30 w-56"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-[#9CA3AF] hover:text-[#111827]"
+                title="Clear search"
+              >
+                ✕
+              </button>
+            )}
+          </div>
           <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
           <button
             onClick={handleExportCsv}
@@ -2197,17 +3113,19 @@ export default function ProductsPage() {
             />
           </label>
           <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
-          {/* Edit / Save / Cancel — every price edit on this page goes
-              through this gate now. Cells are click-to-edit only while
-              editMode is on; clicking Save opens a modal that asks for the
-              effective date and dispatches one product_prices history row
-              per dirty product. */}
+          {/* Edit / Save / Cancel — every inline edit on this page goes
+              through this gate now (prices AND Fabric (m)). Cells are
+              click-to-edit only while editMode is on; clicking Save opens a
+              modal that asks for the effective date, dispatches one
+              product_prices history row per dirty product, and commits any
+              edited Fabric (m) via PUT /api/products/:id. */}
           {!editMode ? (
             <button
               onClick={() => setEditMode(true)}
-              className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] transition-colors"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-[#6B5C32] text-white hover:bg-[#5A4E2A] shadow-sm transition-colors"
             >
-              Edit Prices
+              <Pencil className="w-3.5 h-3.5" />
+              Edit
             </button>
           ) : (
             <>
@@ -2246,6 +3164,178 @@ export default function ProductsPage() {
               </button>
             </>
           )}
+          {/* Filter toggle — shows/hides the per-column filter row under the
+              header. Every column (base + analytic) gets a filter input. The
+              badge shows how many columns are currently filtered; the row also
+              auto-stays-open while any filter is active so a filtered view is
+              never hidden. */}
+          <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
+          {(() => {
+            const activeFilterCount = Object.values(colFilters).filter((v) =>
+              v.trim(),
+            ).length;
+            return (
+              <button
+                onClick={() => setShowFilterRow((v) => !v)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-colors inline-flex items-center gap-1.5 ${
+                  showFilterRow || activeFilterCount > 0
+                    ? "bg-[#F4F0E8] text-[#6B5C32] border-[#D9CEB3]"
+                    : "bg-white text-[#6B7280] border-[#E5E7EB] hover:bg-[#F3F4F6]"
+                }`}
+                title="Toggle per-column filter row"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
+                  <path d="M3 4.5h14l-5.5 6.5v4l-3 1.5v-5.5L3 4.5z" strokeLinejoin="round" />
+                </svg>
+                Filter
+                {activeFilterCount > 0 && (
+                  <span className="ml-0.5 inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-[#6B5C32] text-white text-[9px] font-semibold">
+                    {activeFilterCount}
+                  </span>
+                )}
+              </button>
+            );
+          })()}
+          {Object.values(colFilters).some((v) => v.trim()) && (
+            <button
+              onClick={clearAllColFilters}
+              className="px-2 py-1.5 rounded-md text-xs font-medium text-[#9A3A2D] hover:bg-[#F9E1DA] transition-colors"
+              title="Clear all column filters"
+            >
+              Clear filters
+            </button>
+          )}
+          {/* Columns chooser — show/hide ANY column (base + analytic) for the
+              active category. Per-browser persistence (localStorage), like the
+              Tier switcher. Frozen Code is always shown. */}
+          <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
+          {(() => {
+            const catX: ProdCat =
+              categoryFilter === "SOFA"
+                ? "SOFA"
+                : categoryFilter === "ACCESSORY"
+                  ? "ACCESSORY"
+                  : "BEDFRAME";
+            const toggleableBase = BASE_COLS[catX].filter(
+              (col) => !col.frozen && !col.alwaysOn,
+            );
+            const analyticForCat = ANALYTIC_COLS.filter((c) => c.applies(catX));
+            const hiddenCount =
+              toggleableBase.filter((col) => baseColVis[col.key] === false).length;
+            return (
+              <div className="relative">
+                <button
+                  onClick={() => setShowColMenu((v) => !v)}
+                  className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] transition-colors inline-flex items-center gap-1.5"
+                >
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
+                    <rect x="3" y="3.5" width="14" height="13" rx="1.5" />
+                    <path d="M8.5 3.5v13M13 3.5v13" />
+                  </svg>
+                  Columns
+                  {hiddenCount > 0 && (
+                    <span className="ml-0.5 inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-[#6B5C32] text-white text-[9px] font-semibold">
+                      {hiddenCount}
+                    </span>
+                  )}
+                </button>
+                {showColMenu && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-20"
+                      onClick={() => setShowColMenu(false)}
+                    />
+                    <div className="absolute right-0 mt-1 z-30 w-64 bg-white border border-[#E5E7EB] rounded-lg shadow-lg p-2 max-h-[70vh] overflow-y-auto">
+                      <div className="flex items-center justify-between px-2 py-1">
+                        <p className="text-[10px] font-semibold text-[#9CA3AF] uppercase tracking-wide">
+                          Columns
+                        </p>
+                        <button
+                          onClick={() => {
+                            // Reset layout: show all base columns, restore the
+                            // default column ORDER, clear manual widths, any
+                            // active sort, and all column filters. Analytics keep
+                            // their own defaults (left as-is so a chosen analytic
+                            // layout isn't surprising-cleared).
+                            setBaseColVis({});
+                            setColOrder({});
+                            persistColOrder({});
+                            setColWidths({});
+                            persistColWidths({});
+                            setSortCol(null);
+                            clearAllColFilters();
+                            if (typeof window !== "undefined") {
+                              try {
+                                window.localStorage.removeItem("hookka.products.baseCols");
+                              } catch {
+                                /* ignore */
+                              }
+                            }
+                          }}
+                          className="text-[10px] text-[#6B5C32] hover:underline font-medium"
+                        >
+                          Reset layout
+                        </button>
+                      </div>
+                      {/* Code is always shown — surfaced disabled so the owner
+                          sees it's pinned, not missing. */}
+                      <label className="flex items-center gap-2 px-2 py-1.5 rounded opacity-60 cursor-not-allowed">
+                        <input type="checkbox" checked disabled className="rounded border-[#D1D5DB] text-[#6B5C32]" />
+                        <span className="text-xs text-[#374151]">Product Code</span>
+                        <span className="ml-auto text-[9px] text-[#9CA3AF] uppercase">Frozen</span>
+                      </label>
+                      {toggleableBase.map((col) => (
+                        <label
+                          key={col.key}
+                          className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[#F9FAFB] cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={baseColVis[col.key] !== false}
+                            onChange={() => toggleBaseCol(col.key)}
+                            className="rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
+                          />
+                          <span className="text-xs text-[#374151]">
+                            {BASE_COL_CHOOSER_LABEL[col.key] ?? col.label}
+                          </span>
+                        </label>
+                      ))}
+                      {analyticForCat.length > 0 && (
+                        <>
+                          <div className="my-1 border-t border-[#F3F4F6]" />
+                          <p className="px-2 py-1 text-[10px] font-semibold text-[#9CA3AF] uppercase tracking-wide">
+                            Analytics
+                          </p>
+                          {analyticForCat.map((c) => (
+                            <label
+                              key={c.key}
+                              className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[#F9FAFB] cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={!!analyticColVis[c.key]}
+                                onChange={() => toggleAnalyticCol(c.key)}
+                                className="rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
+                              />
+                              <span className="text-xs text-[#374151]">
+                                {c.label(catX)}
+                              </span>
+                            </label>
+                          ))}
+                        </>
+                      )}
+                      <div className="my-1 border-t border-[#F3F4F6]" />
+                      <p className="px-2 py-1 text-[10px] text-[#9CA3AF] leading-snug">
+                        Drag a header to reorder · drag its right edge to resize ·
+                        click to sort · use the Filter button for per-column
+                        filters. Reset layout restores the default order.
+                      </p>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
           {/* Tier switcher — only meaningful for sofas (5 height columns
               are tier-aware). Renders as a single segmented control so the
               row-per-row table layout is preserved; clicking a tier re-renders
@@ -2288,26 +3378,118 @@ export default function ProductsPage() {
       {/* Maintenance View */}
       {viewMode === "maintenance" && <MaintenanceView />}
 
-      {/* Table — different column layout for Bedframe vs Sofa */}
+      {/* Table — column layout driven by the BASE_COLS registry + the
+          owner's per-column visibility / width / sort prefs. */}
       {viewMode === "skuMaster" && (() => {
         const isSofa = categoryFilter === "SOFA";
         const isAccessory = categoryFilter === "ACCESSORY";
-        const colSpanN = isSofa ? 13 : isAccessory ? 8 : 10;
-        const gridCols = isSofa
-          // Sofa: Code | Description | Model | 24 | 28 | 30 | 32 | 35 | Unit | Fabric | Total Min | Variants
-          // 24/28/30/32/35 price cells need "RM 1,000.00" room (0.95fr).
-          // Total Min column was too narrow (0.6fr) — "1405 min" wrapped to
-          // two lines. Widened to 0.9fr and trimmed Description by 0.3fr to
-          // compensate (descriptions echo the SKU code, plenty of headroom).
-          ? "1.3fr 1.2fr 0.55fr 0.95fr 0.95fr 0.95fr 0.95fr 0.95fr 0.6fr 0.5fr 0.9fr 0.7fr"
-          : isAccessory
-          // ACCESSORY: Code | Description | Base Price | Unit M3 | Fabric
-          // (no Category/Size/Price2 — pillows don't carry those), and
-          // no Total Min / Variants / seat-height columns either.
-          ? "1.3fr 2.5fr 1fr 0.7fr 1fr"
-          // Bedframe: Total Min bumped 0.7→0.9 for the same reason as sofa.
-          : "1.3fr 1.8fr 0.8fr 0.8fr 1fr 1fr 0.7fr 0.7fr 0.9fr 0.8fr";
-        const thCls = "px-3 py-1.5 text-[11px] font-medium text-[#6B7280] uppercase tracking-wider";
+        const cat: ProdCat = isSofa ? "SOFA" : isAccessory ? "ACCESSORY" : "BEDFRAME";
+        // The base columns this category defines, filtered to the ones the
+        // owner currently has shown. The Code column is always present (frozen).
+        const visibleBaseCols = BASE_COLS[cat].filter((col) =>
+          isBaseColVisible(col),
+        );
+        // A hidden base / analytic column simply isn't in orderedCols (built
+        // below), so its header cell, body cell, and grid track all drop in
+        // lockstep — the body renders strictly from orderedCols, never a
+        // per-cell visibility gate, so reorder + hide stay aligned.
+        // The analytic columns the chooser currently has switched on, for this
+        // category. Their grid tracks are appended to gridTemplateColumns so the
+        // header + body cells line up; widths come from each column's def.
+        const activeAnalyticCols = ANALYTIC_COLS.filter(
+          (c) => c.applies(cat) && analyticColVis[c.key],
+        );
+        // One <td colSpan> spans the whole grid row; the actual columns live in
+        // the inner CSS grid, so colSpan just needs to cover them all.
+        const colSpanN = visibleBaseCols.length + activeAnalyticCols.length;
+        // Track width for a base column: a manual drag-width (px) overrides the
+        // responsive minmax() default. minmax() floors keep a column from
+        // crushing below its min when many columns are shown (owner: "被挤压了").
+        const trackFor = (key: string, fallback: string) =>
+          colWidths[key] != null ? `${colWidths[key]}px` : fallback;
+        // Single ordered list of EVERY visible column (base + active analytics).
+        // The header row, the per-column filter row, the resize handles, the
+        // grid-template-columns track string, AND every body row's cells all
+        // iterate THIS one list, so they can never drift out of lockstep no
+        // matter how the owner reorders columns. `label` is the clean name;
+        // `frozen` marks the sticky Code column (always emitted first);
+        // `fallbackWidth` is the registry minmax() track, used for both the grid
+        // track (when no manual width is set) and the resize handle's start width.
+        type OrderedCol = {
+          key: string;
+          label: string;
+          frozen: boolean;
+          fallbackWidth: string;
+        };
+        // Build the natural (registry track) order first: base columns, then the
+        // active analytics, exactly as before. Then apply the owner's saved
+        // drag-reorder for this category (frozen Code stays pinned first).
+        const naturalCols: OrderedCol[] = [
+          ...visibleBaseCols.map((col) => ({
+            key: col.key,
+            label: BASE_COL_CHOOSER_LABEL[col.key] ?? col.label,
+            frozen: !!col.frozen,
+            fallbackWidth: col.width,
+          })),
+          ...activeAnalyticCols.map((c) => ({
+            key: c.key,
+            label: c.label(cat),
+            frozen: false,
+            fallbackWidth: c.width,
+          })),
+        ];
+        const colByKey = new Map(naturalCols.map((c) => [c.key, c] as const));
+        const frozenKeys = new Set(
+          naturalCols.filter((c) => c.frozen).map((c) => c.key),
+        );
+        const orderedKeys = applyColOrder(
+          naturalCols.map((c) => c.key),
+          frozenKeys,
+          cat,
+        );
+        const orderedCols: OrderedCol[] = orderedKeys.map(
+          (k) => colByKey.get(k)!,
+        );
+        // The movable (non-frozen) keys in their current visual order — the drag
+        // handlers splice within this list so frozen Code is never displaced.
+        const orderedMovableKeys = orderedCols
+          .filter((c) => !c.frozen)
+          .map((c) => c.key);
+        // grid-template-columns + min-width are derived FROM orderedCols (not the
+        // raw registry order) so the tracks follow the reordered header/body in
+        // lockstep. A manual drag-width overrides the registry minmax() track.
+        const gridColsFull = orderedCols
+          .map((c) => trackFor(c.key, c.fallbackWidth))
+          .join(" ");
+        // UNIFORM header style — every header cell (base + analytic) is
+        // IDENTICAL: same padding, same left alignment, same baseline. Sort
+        // arrow + resize handle render on all of them. (Owner: headers must
+        // look the same across every column.)
+        const thCls =
+          "px-3 py-2 text-[11px] font-semibold text-[#6B7280] uppercase tracking-wider text-left";
+        // Give the scroll container a min-width so columns scroll horizontally
+        // instead of crushing once the table outgrows the viewport. Derived
+        // from the visible columns' minmax floors (digits parsed from each
+        // track) so it tracks show/hide + manual widths automatically.
+        const floorPx = (track: string): number => {
+          if (track.endsWith("px")) {
+            const n = parseInt(track, 10);
+            return Number.isFinite(n) ? n : 90;
+          }
+          const m = track.match(/minmax\((\d+)px/);
+          return m ? parseInt(m[1], 10) : 90;
+        };
+        const totalFloor = orderedCols.reduce(
+          (sum, c) => sum + floorPx(trackFor(c.key, c.fallbackWidth)),
+          0,
+        );
+        // Only force horizontal scroll once the floors exceed a comfortable
+        // baseline, so a trimmed-down table still fits without a scrollbar.
+        const gridMinWidth = totalFloor > 1040 ? `${totalFloor}px` : undefined;
+        // Header cell with an optional sort affordance + a resize handle on the
+        // right edge. Frozen Code gets special sticky styling inline below.
+        const sortIndicator = (key: string) =>
+          sortCol === key ? (sortDir === "asc" ? " ▲" : " ▼") : "";
         return (
       <div className="bg-white rounded-lg border border-[#E5E7EB] overflow-hidden">
         <div
@@ -2317,52 +3499,176 @@ export default function ProductsPage() {
         >
           <table className="min-w-full divide-y divide-[#E5E7EB]">
             <thead className="bg-[#F9FAFB] sticky top-0 z-10">
+              {/* Header row — UNIFORM cells driven by the single orderedCols
+                  list so header / filter / body never drift out of lockstep.
+                  Every column: click-to-sort (asc → desc → off), a drag handle
+                  on the right edge for manual width (double-click resets), and
+                  identical padding / left-alignment / baseline. The frozen Code
+                  column stays sticky-left with an invisible chevron spacer so
+                  its label lines up with the body's code text (expand arrow in
+                  front). */}
               <tr>
                 <th colSpan={colSpanN} className="p-0">
-                  <div className="grid" style={{ gridTemplateColumns: gridCols }}>
-                    {/* Product Code header carries an invisible chevron
-                      * spacer so the "Product Code" label lines up with
-                      * the body cell's code text — the body row renders
-                      * an expand arrow before the code, and without this
-                      * placeholder the header text sat ~20px to the left
-                      * of the code values below. */}
-                    <div className={`${thCls} text-left flex items-center gap-1.5`}>
-                      <span className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" />
-                      Product Code
-                    </div>
-                    <div className={`${thCls} text-left`}>Description</div>
-                    {isSofa ? (
-                      <>
-                        <div className={`${thCls} text-left`}>Model</div>
-                        <div className={`${thCls} text-right`}>24</div>
-                        <div className={`${thCls} text-right`}>28</div>
-                        <div className={`${thCls} text-right`}>30</div>
-                        <div className={`${thCls} text-right`}>32</div>
-                        <div className={`${thCls} text-right`}>35</div>
-                        <div className={`${thCls} text-right`}>Unit (m&sup3;)</div>
-                        <div className={`${thCls} text-right`}>Fabric (m)</div>
-                        <div className={`${thCls} text-right`}>Total Min</div>
-                        <div className={`${thCls} text-center`}>Variants</div>
-                      </>
-                    ) : isAccessory ? (
-                      <>
-                        <div className={`${thCls} text-right`}>Base Price</div>
-                        <div className={`${thCls} text-right`}>Unit (m&sup3;)</div>
-                        <div className={`${thCls} text-right`}>Fabric (m)</div>
-                      </>
-                    ) : (
-                      <>
-                        <div className={`${thCls} text-left`}>Category</div>
-                        <div className={`${thCls} text-left`}>Size</div>
-                        <div className={`${thCls} text-right`}>Price 2</div>
-                        <div className={`${thCls} text-right`}>Price 1</div>
-                        <div className={`${thCls} text-right`}>Unit (m&sup3;)</div>
-                        <div className={`${thCls} text-right`}>Fabric (m)</div>
-                        <div className={`${thCls} text-right`}>Total Min</div>
-                        <div className={`${thCls} text-center`}>Variants</div>
-                      </>
-                    )}
+                  <div className="grid" style={{ gridTemplateColumns: gridColsFull, minWidth: gridMinWidth }}>
+                    {orderedCols.map((col) => {
+                      const active = sortCol === col.key;
+                      // The frozen Code column is pinned first and cannot be
+                      // dragged or used as a drop target — every movable column
+                      // reorders only among themselves. While a column is being
+                      // dragged, the column under the pointer gets a left/right
+                      // accent bar showing where it would land.
+                      const isDragging = draggingColKey === col.key;
+                      const isDropTarget =
+                        !col.frozen &&
+                        dragOverColKey === col.key &&
+                        draggingColKey !== null &&
+                        draggingColKey !== col.key;
+                      // Drop bar side: if the dragged column currently sits to
+                      // the LEFT of this one it would insert AFTER (right edge),
+                      // otherwise BEFORE (left edge).
+                      const dropOnRight =
+                        isDropTarget &&
+                        orderedMovableKeys.indexOf(draggingColKey!) <
+                          orderedMovableKeys.indexOf(col.key);
+                      return (
+                        <div
+                          key={col.key}
+                          draggable={!col.frozen}
+                          onDragStart={(e) => {
+                            if (col.frozen) return;
+                            setDraggingColKey(col.key);
+                            e.dataTransfer.effectAllowed = "move";
+                            // Firefox requires data to be set for drag to start.
+                            try {
+                              e.dataTransfer.setData("text/plain", col.key);
+                            } catch {
+                              /* some browsers disallow setData here */
+                            }
+                          }}
+                          onDragOver={(e) => {
+                            // Allow a drop only onto another movable column.
+                            if (col.frozen || draggingColKey === null) return;
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = "move";
+                            if (dragOverColKey !== col.key)
+                              setDragOverColKey(col.key);
+                          }}
+                          onDragLeave={() => {
+                            if (dragOverColKey === col.key) setDragOverColKey(null);
+                          }}
+                          onDrop={(e) => {
+                            if (col.frozen || draggingColKey === null) return;
+                            e.preventDefault();
+                            reorderColumn(
+                              draggingColKey,
+                              col.key,
+                              orderedMovableKeys,
+                              cat,
+                            );
+                            setDraggingColKey(null);
+                            setDragOverColKey(null);
+                          }}
+                          onDragEnd={() => {
+                            setDraggingColKey(null);
+                            setDragOverColKey(null);
+                          }}
+                          onClick={() => toggleSort(col.key)}
+                          title={col.frozen ? "Click to sort" : "Drag to reorder · click to sort"}
+                          className={`${thCls} relative group/th flex items-center gap-1 select-none hover:text-[#374151] ${
+                            col.frozen ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"
+                          } ${
+                            col.frozen
+                              ? "sticky left-0 z-20 bg-[#F9FAFB] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]"
+                              : ""
+                          } ${active ? "text-[#6B5C32]" : ""} ${
+                            isDragging ? "opacity-40" : ""
+                          }`}
+                        >
+                          {/* Drop-position indicator — a thin accent bar on the
+                              edge the dragged column would land against. */}
+                          {isDropTarget && (
+                            <span
+                              aria-hidden="true"
+                              className={`absolute top-0 ${
+                                dropOnRight ? "right-0" : "left-0"
+                              } h-full w-0.5 bg-[#6B5C32]`}
+                            />
+                          )}
+                          {col.frozen && (
+                            <span className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" />
+                          )}
+                          <span className="truncate" title={col.label}>{col.label}</span>
+                          <span className="text-[#9CA3AF] text-[9px] leading-none">
+                            {sortIndicator(col.key)}
+                          </span>
+                          {/* Resize handle — drag to set px width, dbl-click
+                              to clear back to the responsive default. Not a
+                              reorder handle: it must not start a column drag, so
+                              draggable is force-off here and drag events are
+                              swallowed (grabbing the edge resizes, the rest of
+                              the header drags-to-reorder). */}
+                          <span
+                            draggable={false}
+                            onDragStart={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                            }}
+                            onMouseDown={(e) =>
+                              beginColResize(
+                                e,
+                                col.key,
+                                colWidths[col.key] ?? floorPx(col.fallbackWidth),
+                              )
+                            }
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              clearColWidth(col.key);
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            title="Drag to resize · double-click to reset"
+                            className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize opacity-0 group-hover/th:opacity-100 hover:bg-[#6B5C32]/30 transition-opacity"
+                          />
+                        </div>
+                      );
+                    })}
                   </div>
+                  {/* Per-column filter row — one input per visible column, in
+                      the SAME grid track order as the header + body. Toggled by
+                      the "Filter" button; auto-shown while any filter is active.
+                      Each input is a case-insensitive substring match against
+                      that column's displayed value (filterValueFor). The frozen
+                      Code filter cell is sticky-left to match its header/body. */}
+                  {(showFilterRow ||
+                    Object.values(colFilters).some((v) => v.trim())) && (
+                    <div
+                      className="grid border-t border-[#E5E7EB] bg-white"
+                      style={{ gridTemplateColumns: gridColsFull, minWidth: gridMinWidth }}
+                    >
+                      {orderedCols.map((col) => (
+                        <div
+                          key={col.key}
+                          className={`px-2 py-1 ${
+                            col.frozen
+                              ? "sticky left-0 z-[15] bg-white shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]"
+                              : ""
+                          }`}
+                        >
+                          <input
+                            type="text"
+                            value={colFilters[col.key] ?? ""}
+                            onChange={(e) => setColFilter(col.key, e.target.value)}
+                            placeholder="Filter…"
+                            aria-label={`Filter ${col.label}`}
+                            className={`w-full min-w-0 text-[11px] rounded border px-1.5 py-1 bg-white focus:outline-none focus:border-[#6B5C32] focus:ring-1 focus:ring-[#6B5C32]/30 ${
+                              (colFilters[col.key] ?? "").trim()
+                                ? "border-[#6B5C32] bg-[#FBF8EE]"
+                                : "border-[#E5E7EB]"
+                            }`}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </th>
               </tr>
             </thead>
@@ -2404,6 +3710,15 @@ export default function ProductsPage() {
                 // × flat-average labor rate (see LABOR_RATE_PER_MIN_SEN). 0 when
                 // the SKU has no minutes yet — rendered as "—" downstream.
                 const laborCostSen = laborCostSenForMinutes(totalMin);
+                // Sofa selling price for the analytic columns = lowest positive
+                // seat-height price in the selected tier (mirrors the expand
+                // panel's representative-price logic). 0 for non-sofas, which
+                // fall back to basePriceSen / price1Sen below.
+                const sofaRepPriceSen = isSofa
+                  ? ((p.seatHeightPrices || [])
+                      .filter((s) => entryTier(s.tier) === sofaTier && s.priceSen > 0)
+                      .sort((a, b) => a.priceSen - b.priceSen)[0]?.priceSen ?? 0)
+                  : 0;
                 // Per-SKU default variants — read straight from the product
                 // row. The badge shows "✓ Configured" when ANY default field
                 // is set, otherwise "Configure". Counting the number of set
@@ -2418,6 +3733,26 @@ export default function ProductsPage() {
                   ((variantDefaults.specials?.length ?? 0) > 0 ? 1 : 0);
                 const hasVariantDefaults = variantSetCount > 0;
                 const isEditingThisPrice = editingPrice === p.id;
+                // Zebra striping + state tints. The sticky Code column must use
+                // an OPAQUE background that matches its row's stripe, otherwise
+                // body cells would show through it on horizontal scroll. Expanded
+                // and dirty rows get a soft accent so they stand out.
+                const zebra = vi.index % 2 === 1;
+                const rowDirty = isProductDirty(p.id);
+                const rowGridBg = isExpanded
+                  ? "bg-[#F4F0E8]"
+                  : rowDirty
+                    ? "bg-[#FEFBF0]"
+                    : zebra
+                      ? "bg-[#FCFCFB]"
+                      : "bg-white";
+                const rowStickyBg = isExpanded
+                  ? "bg-[#F4F0E8]"
+                  : rowDirty
+                    ? "bg-[#FEFBF0]"
+                    : zebra
+                      ? "bg-[#FCFCFB]"
+                      : "bg-white";
 
                 return (
                   <tr
@@ -2429,18 +3764,18 @@ export default function ProductsPage() {
                     <td colSpan={colSpanN} className="p-0">
                       {/* Main row */}
                       <div
-                        className="grid cursor-pointer hover:bg-[#F9FAFB] transition-colors"
-                        style={{ gridTemplateColumns: gridCols }}
+                        className={`grid cursor-pointer transition-colors ${rowGridBg} hover:bg-[#F4F2EC]`}
+                        style={{ gridTemplateColumns: gridColsFull, minWidth: gridMinWidth }}
                         onClick={() => setExpandedId(isExpanded ? null : p.id)}
                       >
-                        <div className="px-3 py-1.5 flex items-center gap-1.5">
+                        <div className={`px-3 py-1.5 flex items-center gap-1.5 sticky left-0 z-[5] ${rowStickyBg} group-hover:bg-[#F4F2EC] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.08)]`}>
                           <svg
                             className={`w-3.5 h-3.5 text-[#9CA3AF] transition-transform flex-shrink-0 ${isExpanded ? "rotate-90" : ""}`}
                             fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
                           >
                             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                           </svg>
-                          <span className="text-xs font-mono font-medium text-[#111827] whitespace-nowrap">{p.code}</span>
+                          <span className="text-xs font-medium text-[#111827] whitespace-nowrap">{p.code}</span>
                           {/* Schedule master price change. Same dialog drives the whole
                               row (works for BF Price 2/Price 1 and Sofa seat tiers).
                               stopPropagation so the click doesn't toggle the row's
@@ -2491,23 +3826,163 @@ export default function ProductsPage() {
                             </span>
                           )}
                         </div>
-                        <div className="px-3 py-1.5 min-w-0">
-                          <span className="text-xs text-[#111827] truncate block">{p.name}</span>
-                          <span className="block text-[11px] text-[#9CA3AF] truncate">{p.description}</span>
-                        </div>
-
-                        {isSofa ? (
-                          /* ===== SOFA columns: Model | 24 | 28 | 30 | 32 | 35 ===== */
-                          <>
-                            <div className="px-3 py-1.5 text-sm text-[#111827]">{p.baseModel}</div>
-                            {(['24"', '28"', '30"', '32"', '35"'] as const).map((h) => {
+                        {/* Body cells, keyed by column key, then rendered in the
+                            SAME order as the header via orderedCols (below). The
+                            grid uses ONE ordered list, so reordering a column in
+                            the header reorders its body cell in lockstep — header
+                            and body can never misalign. Each cell's JSX (and its
+                            inline edit / dirty behaviour) is unchanged; only the
+                            iteration order is now data-driven. Hidden columns
+                            aren't in orderedCols, so their cells never render. */}
+                        {(() => {
+                          const norm = (v: unknown) => String(v ?? "").replace('"', '').trim();
+                          const bodyCellByKey: Record<string, ReactNode> = {
+                            description: (
+                              <div className="px-3 py-1.5 min-w-0">
+                                <span className="text-xs text-[#111827] truncate block" title={p.name}>{p.name}</span>
+                                <span className="block text-[11px] text-[#9CA3AF] truncate" title={p.description}>{p.description}</span>
+                              </div>
+                            ),
+                            model: (
+                              <div className="px-3 py-1.5 text-sm text-[#111827] truncate" title={p.baseModel}>{p.baseModel}</div>
+                            ),
+                            category: (
+                              <div className="px-3 py-1.5 min-w-0 flex items-center" title={p.category}>
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium max-w-full truncate ${
+                                  p.category === "BEDFRAME" ? "bg-[#FAEFCB] text-[#9C6F1E]" : "bg-[#E0EDF0] text-[#3E6570]"
+                                }`}>
+                                  {p.category}
+                                </span>
+                              </div>
+                            ),
+                            size: (
+                              <div className="px-3 py-1.5 text-sm text-[#111827] truncate" title={p.sizeLabel}>{p.sizeLabel}</div>
+                            ),
+                            price2: (
+                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                              {isEditingThisPrice ? (
+                                <input
+                                  autoFocus
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
+                                  value={priceInput}
+                                  onChange={(e) => setPriceInput(e.target.value)}
+                                  onBlur={() => {
+                                    const val = Math.round(parseFloat(priceInput || "0") * 100);
+                                    setEditingPrice(null);
+                                    // Local-only update — bulk Save batches every dirty
+                                    // cell into one product_prices row at the picked
+                                    // effective date.
+                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, basePriceSen: val } : pr));
+                                    recordDirty(p.id, { basePriceSen: val });
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                    if (e.key === "Escape") setEditingPrice(null);
+                                  }}
+                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                  step="0.01"
+                                />
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    if (!editMode) return;
+                                    setEditingPrice(p.id);
+                                    setPriceInput((basePrice / 100).toFixed(2));
+                                  }}
+                                  className={`text-sm font-medium ${
+                                    isProductDirty(p.id) && dirtyEdits.get(p.id)?.basePriceSen !== undefined
+                                      ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
+                                      : "text-[#111827]"
+                                  } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
+                                >
+                                  {basePrice > 0 ? formatCurrency(basePrice) : <span className="text-[#9CA3AF]">Set price</span>}
+                                </button>
+                              )}
+                            </div>
+                            ),
+                            price1: (
+                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                              {editingPrice1 === p.id ? (
+                                <input
+                                  autoFocus
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
+                                  value={price1Input}
+                                  onChange={(e) => setPrice1Input(e.target.value)}
+                                  onBlur={() => {
+                                    const val = Math.round(parseFloat(price1Input || "0") * 100);
+                                    setEditingPrice1(null);
+                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, price1Sen: val } : pr));
+                                    recordDirty(p.id, { price1Sen: val });
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                    if (e.key === "Escape") setEditingPrice1(null);
+                                  }}
+                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                  step="0.01"
+                                />
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    if (!editMode) return;
+                                    setEditingPrice1(p.id);
+                                    setPrice1Input((price1Val / 100).toFixed(2));
+                                  }}
+                                  className={`text-sm font-medium ${
+                                    isProductDirty(p.id) && dirtyEdits.get(p.id)?.price1Sen !== undefined
+                                      ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
+                                      : "text-[#111827]"
+                                  } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
+                                >
+                                  {price1Val > 0 ? formatCurrency(price1Val) : <span className="text-[#9CA3AF]">-</span>}
+                                </button>
+                              )}
+                            </div>
+                            ),
+                            basePrice: (
+                            <div className="px-3 py-1.5 text-right">
+                              <span className="text-sm font-medium text-[#111827]">
+                                {basePrice > 0 ? formatCurrency(basePrice) : <span className="text-[#9CA3AF]">-</span>}
+                              </span>
+                            </div>
+                            ),
+                            // Unit (m³) / Fabric (m) — editMode-gated, defers to Save
+                            unitM3: renderUnitM3Cell(p, cfg),
+                            fabric: renderFabricCell(p, cfg),
+                            totalMin: (
+                            <div className="px-3 py-1.5 text-right truncate" title={`${totalMin} min`}>
+                              <div className="text-sm font-medium text-[#111827] truncate">{totalMin} min</div>
+                              {/* Labor cost moved to its own "Labor (est.)"
+                                  column — no longer duplicated under Total Min
+                                  (owner 2026-06-17). */}
+                            </div>
+                            ),
+                            variants: (
+                            <div className="px-3 py-1.5 flex justify-center" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                onClick={() => setEditingVariant(p)}
+                                className={`text-[10px] font-medium px-2 py-1 rounded-full border transition-colors ${
+                                  hasVariantDefaults
+                                    ? "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] hover:bg-[#EEF3E4]"
+                                    : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100"
+                                }`}
+                                title={
+                                  hasVariantDefaults
+                                    ? "Edit default variants for this SKU"
+                                    : "Configure default variants — Sales Order will pre-fill from these"
+                                }
+                              >
+                                {hasVariantDefaults ? `${variantSetCount} set` : "Configure"}
+                              </button>
+                            </div>
+                            ),
+                          };
+                          // Sofa per-seat-height price cells (one per height key).
+                          // Identical edit behaviour as before; keyed h24..h35 so
+                          // they slot into orderedCols like any other column.
+                          if (isSofa) {
+                            for (const h of ['24"', '28"', '30"', '32"', '35"'] as const) {
                               const hNum = h.replace('"', '');
-                              // Match heights regardless of storage type — DB has carried
-                              // int 24, string "24", and string '24"' at different times, so
-                              // normalise both sides before comparing. Prevents the find()
-                              // miss that caused the Products page to show blank sofa prices
-                              // and produced duplicate entries on edit.
-                              const norm = (v: unknown) => String(v ?? "").replace('"', '').trim();
                               // Cell read: scope by (height, current tier). Legacy
                               // entries with no `tier` resolve to P2 via entryTier(),
                               // so an old SKU that only has flat per-height prices
@@ -2518,8 +3993,8 @@ export default function ProductsPage() {
                               );
                               const editKey = `${p.id}__${h}__${sofaTier}`;
                               const isEditingThis = editingSeatPrices === editKey;
-                              return (
-                                <div key={h} className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                              bodyCellByKey[`h${hNum}`] = (
+                                <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
                                   {isEditingThis ? (
                                     <input
                                       autoFocus
@@ -2578,279 +4053,67 @@ export default function ProductsPage() {
                                   )}
                                 </div>
                               );
-                            })}
-                          </>
-                        ) : isAccessory ? null : (
-                          /* ===== BEDFRAME / ALL columns: Category | Size | Price 2 | Price 1 ===== */
-                          <>
-                            <div className="px-3 py-1.5">
-                              <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                                p.category === "BEDFRAME" ? "bg-[#FAEFCB] text-[#9C6F1E]" : "bg-[#E0EDF0] text-[#3E6570]"
-                              }`}>
-                                {p.category}
-                              </span>
-                            </div>
-                            <div className="px-3 py-1.5 text-sm text-[#111827]">{p.sizeLabel}</div>
-                            {/* Price 2 */}
-                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                              {isEditingThisPrice ? (
-                                <input
-                                  autoFocus
-                                  type="number" onFocus={(e) => e.currentTarget.select()}
-                                  value={priceInput}
-                                  onChange={(e) => setPriceInput(e.target.value)}
-                                  onBlur={() => {
-                                    const val = Math.round(parseFloat(priceInput || "0") * 100);
-                                    setEditingPrice(null);
-                                    // Local-only update — bulk Save batches every dirty
-                                    // cell into one product_prices row at the picked
-                                    // effective date.
-                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, basePriceSen: val } : pr));
-                                    recordDirty(p.id, { basePriceSen: val });
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                    if (e.key === "Escape") setEditingPrice(null);
-                                  }}
-                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
-                                  step="0.01"
-                                />
-                              ) : (
-                                <button
-                                  onClick={() => {
-                                    if (!editMode) return;
-                                    setEditingPrice(p.id);
-                                    setPriceInput((basePrice / 100).toFixed(2));
-                                  }}
-                                  className={`text-sm font-medium ${
-                                    isProductDirty(p.id) && dirtyEdits.get(p.id)?.basePriceSen !== undefined
-                                      ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
-                                      : "text-[#111827]"
-                                  } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
-                                >
-                                  {basePrice > 0 ? formatCurrency(basePrice) : <span className="text-[#9CA3AF]">Set price</span>}
-                                </button>
-                              )}
-                            </div>
-                            {/* Price 1 */}
-                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                              {editingPrice1 === p.id ? (
-                                <input
-                                  autoFocus
-                                  type="number" onFocus={(e) => e.currentTarget.select()}
-                                  value={price1Input}
-                                  onChange={(e) => setPrice1Input(e.target.value)}
-                                  onBlur={() => {
-                                    const val = Math.round(parseFloat(price1Input || "0") * 100);
-                                    setEditingPrice1(null);
-                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, price1Sen: val } : pr));
-                                    recordDirty(p.id, { price1Sen: val });
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                    if (e.key === "Escape") setEditingPrice1(null);
-                                  }}
-                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
-                                  step="0.01"
-                                />
-                              ) : (
-                                <button
-                                  onClick={() => {
-                                    if (!editMode) return;
-                                    setEditingPrice1(p.id);
-                                    setPrice1Input((price1Val / 100).toFixed(2));
-                                  }}
-                                  className={`text-sm font-medium ${
-                                    isProductDirty(p.id) && dirtyEdits.get(p.id)?.price1Sen !== undefined
-                                      ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
-                                      : "text-[#111827]"
-                                  } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
-                                >
-                                  {price1Val > 0 ? formatCurrency(price1Val) : <span className="text-[#9CA3AF]">-</span>}
-                                </button>
-                              )}
-                            </div>
-                          </>
-                        )}
-                        {isAccessory ? (
-                          /* ===== ACCESSORY columns: Base Price | Unit M3 | Fabric (no edit) ===== */
-                          <>
-                            <div className="px-3 py-1.5 text-right">
-                              <span className="text-sm font-medium text-[#111827]">
-                                {basePrice > 0 ? formatCurrency(basePrice) : <span className="text-[#9CA3AF]">-</span>}
-                              </span>
-                            </div>
-                            <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
-                              {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
-                            </div>
-                            {/* Fabric (m) - editable, mirrors Unit M3 */}
-                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                              {editingFabricUsage === p.id ? (
-                                <input
-                                  autoFocus
-                                  type="number" onFocus={(e) => e.currentTarget.select()}
-                                  value={fabricUsageInput}
-                                  onChange={(e) => setFabricUsageInput(e.target.value)}
-                                  onBlur={() => {
-                                    const val = parseFloat(fabricUsageInput || "0") || 0;
-                                    setEditingFabricUsage(null);
-                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, fabricUsage: val } : pr));
-                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
-                                      method: "PUT",
-                                      body: { fabricUsage: val },
-                                    }).then((data) => {
-                                      if (data.success && data.data) {
-                                        invalidateCachePrefix("/api/products");
-                                        invalidateCachePrefix("/api/bom");
-                                        invalidateCachePrefix("/api/bom-master-templates");
-                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
-                                      }
-                                    }).catch(() => {});
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                    if (e.key === "Escape") setEditingFabricUsage(null);
-                                  }}
-                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
-                                  step="0.1"
-                                  min="0"
-                                />
-                              ) : (
-                                <div className="flex items-baseline justify-end gap-1">
-                                  <button
-                                    onClick={() => { setEditingFabricUsage(p.id); setFabricUsageInput(String((cfg?.fabricUsage ?? p.fabricUsage) || 0)); }}
-                                    className="text-sm text-[#111827] hover:text-[#6B5C32] hover:underline"
-                                  >
-                                    {(cfg?.fabricUsage ?? p.fabricUsage) || 0} m
-                                  </button>
-                                  {fabricWidthHint(p.category) && (
-                                    <span className="text-[10px] text-[#9CA3AF]">· {fabricWidthHint(p.category)}</span>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            {/* Unit M3 - editable */}
-                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                              {editingM3 === p.id ? (
-                                <input
-                                  autoFocus
-                                  type="number" onFocus={(e) => e.currentTarget.select()}
-                                  value={m3Input}
-                                  onChange={(e) => setM3Input(e.target.value)}
-                                  onBlur={() => {
-                                    const val = parseFloat(m3Input || "0") || 0;
-                                    setEditingM3(null);
-                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, unitM3: val } : pr));
-                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
-                                      method: "PUT",
-                                      body: { unitM3: val },
-                                    }).then((data) => {
-                                      if (data.success && data.data) {
-                                        invalidateCachePrefix("/api/products");
-                                        invalidateCachePrefix("/api/bom");
-                                        invalidateCachePrefix("/api/bom-master-templates");
-                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
-                                      }
-                                    }).catch(() => {});
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                    if (e.key === "Escape") setEditingM3(null);
-                                  }}
-                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
-                                  step="0.001"
-                                />
-                              ) : (
-                                <button
-                                  onClick={() => { setEditingM3(p.id); setM3Input((cfg?.unitM3 ?? p.unitM3).toFixed(3)); }}
-                                  className="text-sm text-[#111827] hover:text-[#6B5C32] hover:underline"
-                                >
-                                  {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
-                                </button>
-                              )}
-                            </div>
-                            {/* Fabric (m) - editable, mirrors Unit M3 */}
-                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                              {editingFabricUsage === p.id ? (
-                                <input
-                                  autoFocus
-                                  type="number" onFocus={(e) => e.currentTarget.select()}
-                                  value={fabricUsageInput}
-                                  onChange={(e) => setFabricUsageInput(e.target.value)}
-                                  onBlur={() => {
-                                    const val = parseFloat(fabricUsageInput || "0") || 0;
-                                    setEditingFabricUsage(null);
-                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, fabricUsage: val } : pr));
-                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
-                                      method: "PUT",
-                                      body: { fabricUsage: val },
-                                    }).then((data) => {
-                                      if (data.success && data.data) {
-                                        invalidateCachePrefix("/api/products");
-                                        invalidateCachePrefix("/api/bom");
-                                        invalidateCachePrefix("/api/bom-master-templates");
-                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
-                                      }
-                                    }).catch(() => {});
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                    if (e.key === "Escape") setEditingFabricUsage(null);
-                                  }}
-                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
-                                  step="0.1"
-                                  min="0"
-                                />
-                              ) : (
-                                <div className="flex items-baseline justify-end gap-1">
-                                  <button
-                                    onClick={() => { setEditingFabricUsage(p.id); setFabricUsageInput(String((cfg?.fabricUsage ?? p.fabricUsage) || 0)); }}
-                                    className="text-sm text-[#111827] hover:text-[#6B5C32] hover:underline"
-                                  >
-                                    {(cfg?.fabricUsage ?? p.fabricUsage) || 0} m
-                                  </button>
-                                  {fabricWidthHint(p.category) && (
-                                    <span className="text-[10px] text-[#9CA3AF]">· {fabricWidthHint(p.category)}</span>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                            <div className="px-3 py-1.5 text-right whitespace-nowrap">
-                              <div className="text-sm font-medium text-[#111827]">{totalMin} min</div>
-                              {/* Estimated labor cost (display-only) — total
-                                  minutes × flat-average rate. See
-                                  LABOR_RATE_PER_MIN_SEN for the RM2,200/26d/9h
-                                  basis. */}
+                            }
+                          }
+                          // Analytic cells (Labor / Margin / Labor %), keyed by
+                          // each analytic column's key. Same computation as before.
+                          for (const c of activeAnalyticCols) {
+                            const mainPrice = isSofa ? sofaRepPriceSen : basePrice;
+                            const priceFor =
+                              c.key === "marginP1" || c.key === "laborPctP1"
+                                ? price1Val
+                                : mainPrice;
+                            const isPct =
+                              c.key === "laborPctP2" || c.key === "laborPctP1";
+                            bodyCellByKey[c.key] = (
                               <div
-                                className="text-[10px] text-[#9CA3AF] tabular-nums"
-                                title="Estimated labor cost = total minutes × flat-average rate (RM 2,200/mo ÷ 26 days ÷ 9 h ÷ 60)"
+                                className="px-3 py-1.5 text-right text-sm tabular-nums truncate"
+                                title={filterValueFor(p, c.key) || "—"}
                               >
-                                {laborCostSen > 0 ? `Labor ${formatCurrency(laborCostSen)}` : "—"}
+                                {c.key === "labor" ? (
+                                  laborCostSen > 0 ? (
+                                    formatCurrency(laborCostSen)
+                                  ) : (
+                                    <span className="text-[#9CA3AF]">—</span>
+                                  )
+                                ) : priceFor <= 0 || laborCostSen <= 0 ? (
+                                  <span className="text-[#9CA3AF]">—</span>
+                                ) : isPct ? (
+                                  <span className="text-[#111827]">
+                                    {((laborCostSen / priceFor) * 100).toFixed(1)}%
+                                  </span>
+                                ) : (
+                                  (() => {
+                                    const m = priceFor - laborCostSen;
+                                    return (
+                                      <span
+                                        className={
+                                          m >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"
+                                        }
+                                      >
+                                        {formatCurrency(m)}
+                                        <span className="ml-1 text-[10px] text-[#9CA3AF]">
+                                          ({((m / priceFor) * 100).toFixed(1)}%)
+                                        </span>
+                                      </span>
+                                    );
+                                  })()
+                                )}
                               </div>
-                            </div>
-                            {/* Variants badge */}
-                            <div className="px-3 py-1.5 flex justify-center" onClick={(e) => e.stopPropagation()}>
-                              <button
-                                onClick={() => setEditingVariant(p)}
-                                className={`text-[10px] font-medium px-2 py-1 rounded-full border transition-colors ${
-                                  hasVariantDefaults
-                                    ? "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] hover:bg-[#EEF3E4]"
-                                    : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100"
-                                }`}
-                                title={
-                                  hasVariantDefaults
-                                    ? "Edit default variants for this SKU"
-                                    : "Configure default variants — Sales Order will pre-fill from these"
-                                }
-                              >
-                                {hasVariantDefaults ? `${variantSetCount} set` : "Configure"}
-                              </button>
-                            </div>
-                          </>
-                        )}
+                            );
+                          }
+                          // Render every non-frozen column's cell in the exact
+                          // header order. The frozen Code cell is rendered above
+                          // (sticky-left); here we emit the rest from orderedCols
+                          // so body order === header order === grid-track order.
+                          return orderedCols
+                            .filter((col) => !col.frozen)
+                            .map((col) => (
+                              <Fragment key={col.key}>
+                                {bodyCellByKey[col.key] ?? null}
+                              </Fragment>
+                            ));
+                        })()}
                       </div>
                       {/* Expanded section */}
                       {isExpanded && (
@@ -2960,7 +4223,7 @@ export default function ProductsPage() {
                                               {formatCurrency(repPriceSen)}
                                               {repHeight && (
                                                 <span className="ml-1 text-[10px] font-normal text-[#9CA3AF]">
-                                                  座高 {repHeight}"
+                                                  Seat {repHeight}"
                                                 </span>
                                               )}
                                             </>
@@ -2985,7 +4248,7 @@ export default function ProductsPage() {
                                       {laborCard}
                                     </div>
                                     <p className="mt-2 text-[10px] text-[#9CA3AF] italic">
-                                      Sofa 价格按座高,见上方每个高度的价格。此处 Margin 用当前 {tierLabel} 档最低座高价做对比。
+                                      Sofa price varies by seat height — see each height's price above. Margin here compares against the lowest seat-height price in the current {tierLabel} tier.
                                     </p>
                                   </>
                                 );

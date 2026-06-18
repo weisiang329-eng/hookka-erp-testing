@@ -209,9 +209,9 @@ export function GRNFormDialog({
                   variant="outline"
                   size="sm"
                   onClick={() => setScanOpen(true)}
-                  title="拍/传一张供应商送货单或发票,自动填收货数量"
+                  title="Snap/upload a supplier delivery note or invoice to auto-fill received quantities"
                 >
-                  <ScanLine className="h-4 w-4" /> 扫描供应商单据
+                  <ScanLine className="h-4 w-4" /> Scan supplier document
                 </Button>
               </div>
               <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">

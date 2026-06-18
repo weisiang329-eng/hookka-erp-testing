@@ -188,7 +188,7 @@ function PIFormDialog({
             materialName:
               sl.description?.trim() ||
               sl.supplierCode?.trim() ||
-              "(扫描项-请补名称)",
+              "(Scanned item - add name)",
             supplierSku: sl.supplierCode?.trim() || "",
             qty: qty > 0 ? qty : 1,
             unitPriceRM: priceRM != null ? priceRM : 0,
@@ -285,9 +285,9 @@ function PIFormDialog({
                 variant="outline"
                 size="sm"
                 onClick={() => setScanOpen(true)}
-                title="拍/传一张供应商发票,自动填料号、数量、单价"
+                title="Snap/upload a supplier invoice to auto-fill code, qty, and unit price"
               >
-                <ScanLine className="h-4 w-4" /> 扫描供应商单据
+                <ScanLine className="h-4 w-4" /> Scan supplier document
               </Button>
             </div>
             <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
@@ -378,7 +378,7 @@ function PIFormDialog({
                             type="button"
                             className="text-[#9CA3AF] hover:text-[#9A3A2D]"
                             onClick={() => removeLine(idx)}
-                            title="删除这一行"
+                            title="Delete this line"
                           >
                             <Trash2 className="h-4 w-4" />
                           </button>

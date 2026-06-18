@@ -28,6 +28,7 @@ import {
 } from "../src/api/lib/print-extras-shared.ts";
 import { breakBomIntoWips } from "../src/api/lib/bom-wip-breakdown.ts";
 import { partLabelFromKey } from "../src/lib/repair-scope.ts";
+import { formatComponentRacksNoLabel } from "../src/lib/rack-format.ts";
 
 const BF_VARIANTS_CTX = {
   productCode: "TRION-K",
@@ -333,6 +334,33 @@ test("deriveComponentRacks: HB-only special ignores stranded DIVAN cards", () =>
   // DIVAN card excluded: HB alone is done ⇒ packed, and no DIVAN rack shows.
   assert.equal(packedDate, "2026-06-02");
   assert.deepEqual(componentRacks, [{ label: "HB", racks: ["Rack 3"] }]);
+});
+
+test("formatComponentRacksNoLabel: DO-document rack line drops labels (owner's spec)", () => {
+  // Single component (e.g. "1 Sofa") → just the bare rack group, NO prefix.
+  assert.equal(
+    formatComponentRacksNoLabel([{ label: "Sofa", racks: ["Rack 3"] }]),
+    "Rack 3",
+  );
+  // Multi component ("1 HB 2 Divan": HB on Rack 1, Divans on Racks 2 & 3) →
+  // per-component groups, NO label, " · " between components, comma within.
+  assert.equal(
+    formatComponentRacksNoLabel([
+      { label: "HB", racks: ["Rack 1"] },
+      { label: "DIVAN", racks: ["Rack 2", "Rack 3"] },
+    ]),
+    "Rack 1 · Rack 2, 3",
+  );
+  // Empty components are dropped; none / null ⇒ "".
+  assert.equal(
+    formatComponentRacksNoLabel([
+      { label: "HB", racks: [] },
+      { label: "DIVAN", racks: ["Rack 5"] },
+    ]),
+    "Rack 5",
+  );
+  assert.equal(formatComponentRacksNoLabel([]), "");
+  assert.equal(formatComponentRacksNoLabel(null), "");
 });
 
 test("selectBestBomByCode: ACTIVE preferred over a later DRAFT", () => {

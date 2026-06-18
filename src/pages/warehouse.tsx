@@ -5,16 +5,23 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { getQRCodeDataURL, rackQrValue } from "@/lib/qr-utils";
+import { getQRCodeDataURL, rackScanUrl, itemQrValue } from "@/lib/qr-utils";
 import {
   Warehouse, Grid3X3, Package, MapPin, LayoutGrid,
   ArrowDownToLine, ArrowUpFromLine, History, X, ArrowRightLeft,
-  Loader2, RefreshCw, QrCode,
+  Loader2, RefreshCw, QrCode, Download,
 } from "lucide-react";
 
 // ---------- Types ----------
 // A rack can hold any number of items — no limit (per user request
 // "正常一个 rack 都可以放好几样东西的 暂时不需要 set limitation").
+//
+// PER-PIECE: a rack item from the public QR scan is ONE physical piece. Its
+// clear description lives in `productName` (e.g. "1013 King Size Headboard") and
+// its Sales Order number is stored in `notes` as "SO <no>" (rack_items has no
+// dedicated SO column; see routes/public-rack-qr.ts). Legacy / office-stocked
+// items instead carry productCode + customerName — the display helpers below
+// unify BOTH shapes so every rack card reads the same way.
 type RackItem = {
   productionOrderId?: string;
   productCode: string;
@@ -25,6 +32,22 @@ type RackItem = {
   stockedInDate?: string;
   notes?: string;
 };
+
+// The piece's Sales Order number, if its notes hold the "SO <no>" tag the
+// public per-piece stock-in writes. Returns "" when there's no SO tag.
+function rackItemSO(it: RackItem): string {
+  const m = (it.notes || "").match(/\bSO\s+(\S+)/i);
+  return m ? m[1] : "";
+}
+
+// One clear description line for a rack item, unifying the per-piece shape
+// (productName + size) and the legacy shape (productCode). Never empty.
+function rackItemDescription(it: RackItem): string {
+  const name = (it.productName || it.productCode || "").trim();
+  const size = (it.sizeLabel || "").trim();
+  const desc = size && !name.includes(size) ? `${name} ${size}`.trim() : name;
+  return desc || "Item";
+}
 
 type RackLocation = {
   id: string;
@@ -101,11 +124,20 @@ export default function WarehousePage() {
 
   // Popup / modals
   const [selectedSlot, setSelectedSlot] = useState<RackLocation | null>(null);
+  // Small action menu shown when an EMPTY rack tile is clicked, so the owner can
+  // print the rack's QR (to stick on, then scan to stock in) OR jump to stock-in.
+  const [emptyRackMenu, setEmptyRackMenu] = useState<RackLocation | null>(null);
   const [showStockInForm, setShowStockInForm] = useState(false);
   const [stockInTarget, setStockInTarget] = useState<string>(""); // rackLocationId
   const [stockOutTarget, setStockOutTarget] = useState<RackLocation | null>(null);
   const [stockOutItemIndex, setStockOutItemIndex] = useState<number>(0);
   const [stockOutReason, setStockOutReason] = useState("");
+
+  // "Create Item QR" — print a QR for a NON-system / loose item by name, with no
+  // backend record (the name lives in the QR itself; see itemQrValue/parseItemQr).
+  const [showItemQrForm, setShowItemQrForm] = useState(false);
+  const [itemQrName, setItemQrName] = useState("");
+  const [itemQrCode, setItemQrCode] = useState("");
 
   // Stock In form fields
   const [selectedPO, setSelectedPO] = useState("");
@@ -161,10 +193,17 @@ export default function WarehousePage() {
     selectedSlot ? `/api/warehouse/${encodeURIComponent(selectedSlot.id)}/details` : null
   );
 
-  const rackLocations: RackLocation[] = useMemo(
-    () => (rackResp?.success ? rackResp.data ?? [] : Array.isArray(rackResp) ? rackResp : []),
-    [rackResp]
-  );
+  const rackLocations: RackLocation[] = useMemo(() => {
+    const list = rackResp?.success ? rackResp.data ?? [] : Array.isArray(rackResp) ? rackResp : [];
+    // Natural numeric sort by the trailing rack number so dropdowns + lists read
+    // Rack 1, 2, 3 … 9, 10, 11 … 20 instead of the string order Rack 1, 10, 11,
+    // 2, 20 … (server returns ORDER BY rack = lexical). Tie-break on the raw
+    // string so racks without a number stay stable.
+    const rackNo = (s: string) => parseInt(s.match(/\d+/)?.[0] ?? "0", 10);
+    return [...list].sort(
+      (a, b) => rackNo(a.rack) - rackNo(b.rack) || a.rack.localeCompare(b.rack)
+    );
+  }, [rackResp]);
   const summary: Summary = useMemo(
     () => rackResp?.summary ?? { total: 0, occupied: 0, empty: 0, reserved: 0, occupancyRate: 0 },
     [rackResp]
@@ -283,9 +322,16 @@ export default function WarehousePage() {
         }),
       });
 
-      // 2. Remove only the selected item from the rack (by productCode).
+      // 2. Remove ONLY the selected item from the rack. Per-piece rows share an
+      // empty productCode, so identify them by their description + SO-notes
+      // signature; legacy single-code racks still remove by productCode. (Never
+      // send an empty productCode — that used to wipe the whole rack.)
+      const removeQs = item.productCode
+        ? `productCode=${encodeURIComponent(item.productCode)}`
+        : `itemName=${encodeURIComponent(item.productName || "")}` +
+          `&itemNotes=${encodeURIComponent(item.notes || "")}`;
       await postOrThrow(
-        `/api/warehouse/${stockOutTarget.id}?productCode=${encodeURIComponent(item.productCode)}`,
+        `/api/warehouse/${stockOutTarget.id}?${removeQs}`,
         { method: "DELETE" }
       );
 
@@ -307,20 +353,21 @@ export default function WarehousePage() {
     }
   };
 
-  // Print a single rack's QR sticker. Encodes the rack IDENTITY (`HKRACK:<id>`)
-  // — not a URL — so it can be scanned later to select this rack. Mirrors the
-  // delivery-QR / department-poster print pattern: build a hi-res data URL, open
-  // a blank window, write a self-contained sticker, then print() after a short
-  // settle delay (runs from a click gesture, so no pop-up-blocker trip).
+  // Print a single rack's QR sticker. Encodes the PUBLIC scan URL (`/r/<id>`)
+  // so a NORMAL phone camera opens this rack's stock-in page — no in-app scanner
+  // needed. Mirrors the delivery-QR / department-poster print pattern: build a
+  // hi-res data URL, open a blank window, write a self-contained sticker, then
+  // print() after a short settle delay (runs from a click gesture, so no
+  // pop-up-blocker trip).
   const handlePrintRackQr = async (slot: RackLocation) => {
-    const qrDataUrl = await getQRCodeDataURL(rackQrValue(slot.id), 600).catch(() => null);
+    const qrDataUrl = await getQRCodeDataURL(rackScanUrl(slot.id), 600).catch(() => null);
     if (!qrDataUrl) {
       toast.error("Failed to generate rack QR");
       return;
     }
     const w = window.open("", "_blank");
     if (!w) {
-      toast.error("请允许弹窗以打印 / popup blocked");
+      toast.error("Please allow pop-ups to print");
       return;
     }
     // position is the rack's location label (e.g. a row/bay); only show the row
@@ -345,7 +392,7 @@ export default function WarehousePage() {
   <div class="rack-no">${esc(slot.rack)}</div>
   ${locationLabel ? `<div class="loc">${esc(locationLabel)}</div>` : ""}
   <img src="${qrDataUrl}" alt="Rack QR code" />
-  <div class="hint">Scan to select this rack</div>
+  <div class="hint">Scan with any phone camera to stock in</div>
   <div class="sub">HOOKKA INDUSTRIES — warehouse rack QR</div>
 </body></html>`);
     w.document.close();
@@ -354,6 +401,133 @@ export default function WarehousePage() {
     // handler, not React lifecycle — useTimeout doesn't apply.
     // eslint-disable-next-line no-restricted-syntax -- print-window settle delay from event handler
     setTimeout(() => w.print(), 500);
+  };
+
+  // Batch-print EVERY rack's public-scan QR onto one sheet (a CSS-grid of
+  // tiles, each = rack label + its `/r/<id>` QR). Same print mechanics as
+  // handlePrintRackQr — local data URLs (no network round-trip), blank window,
+  // self-contained doc, print() after a short settle delay — looped over the
+  // already-loaded rackLocations so the owner can label every rack in one go.
+  const [allRackQrLoading, setAllRackQrLoading] = useState(false);
+  const handleDownloadAllRackQrs = async () => {
+    if (allRackQrLoading) return;
+    if (rackLocations.length === 0) {
+      toast.error("No racks to print");
+      return;
+    }
+    setAllRackQrLoading(true);
+    try {
+      // Generate all QRs locally FIRST (getQRCodeDataURL never hits the network,
+      // so a 20-rack batch is fine), then write one sheet with every tile.
+      const tiles = await Promise.all(
+        rackLocations.map(async (l) => ({
+          rack: l.rack,
+          qr: await getQRCodeDataURL(rackScanUrl(l.id), 600).catch(() => null),
+        })),
+      );
+      const ready = tiles.filter((t) => t.qr);
+      if (ready.length === 0) {
+        toast.error("Failed to generate rack QRs");
+        return;
+      }
+      const w = window.open("", "_blank");
+      if (!w) {
+        toast.error("Please allow pop-ups to print");
+        return;
+      }
+      const esc = (s: string) =>
+        s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const tilesHtml = ready
+        .map(
+          (t) => `  <div class="tile">
+    <div class="rack-no">${esc(t.rack)}</div>
+    <img src="${t.qr}" alt="Rack QR code" />
+    <div class="hint">Scan with any phone camera to stock in</div>
+  </div>`,
+        )
+        .join("\n");
+      w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>All Rack QRs</title>
+<style>
+  @page { margin: 12mm; }
+  body { font-family: Helvetica, Arial, sans-serif; color: #111; margin: 0; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10mm; }
+  .tile { border: 1px solid #ddd; border-radius: 6px; padding: 6mm; text-align: center; break-inside: avoid; page-break-inside: avoid; }
+  .rack-no { font-size: 22px; font-weight: 800; letter-spacing: 1px; margin-bottom: 3mm; }
+  .tile img { width: 60mm; height: 60mm; }
+  .hint { font-size: 11px; color: #333; margin-top: 3mm; }
+</style></head><body>
+  <div class="grid">
+${tilesHtml}
+  </div>
+</body></html>`);
+      w.document.close();
+      w.focus();
+      // Give the new window time to lay out (all images decode) before print().
+      // Click handler, not React lifecycle — useTimeout doesn't apply.
+      // eslint-disable-next-line no-restricted-syntax -- print-window settle delay from event handler
+      setTimeout(() => w.print(), 500);
+    } finally {
+      setAllRackQrLoading(false);
+    }
+  };
+
+  // Print a QR sticker for a NON-system / loose item, naming it. There is NO
+  // backend record — the name (and optional linked product code) is encoded
+  // directly in the QR (`HKITEM:<name>` / `HKITEM:<name>|<code>`) so it can be
+  // scanned later during rack stock-in. Same print mechanics as
+  // handlePrintRackQr: build a hi-res data URL, open a blank window, write a
+  // self-contained sticker, then print() after a short settle delay (runs from
+  // a click gesture, so no pop-up-blocker trip).
+  const handlePrintItemQr = async () => {
+    const name = itemQrName.trim();
+    const code = itemQrCode.trim();
+    if (!name) {
+      toast.error("Please enter an item name");
+      return;
+    }
+    const qrDataUrl = await getQRCodeDataURL(itemQrValue(name, code || undefined), 600).catch(
+      () => null,
+    );
+    if (!qrDataUrl) {
+      toast.error("Failed to generate item QR");
+      return;
+    }
+    const w = window.open("", "_blank");
+    if (!w) {
+      toast.error("Please allow pop-ups to print");
+      return;
+    }
+    const esc = (s: string) =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Item QR — ${esc(name)}</title>
+<style>
+  @page { margin: 14mm; }
+  body { font-family: Helvetica, Arial, sans-serif; color: #111; text-align: center; }
+  .kind { font-size: 13px; text-transform: uppercase; letter-spacing: 3px; color: #555; }
+  .item-name { font-size: 28px; font-weight: 800; letter-spacing: 1px; margin: 10mm 0 2mm; }
+  .code { font-size: 14px; color: #555; margin-bottom: 2mm; }
+  img { width: 90mm; height: 90mm; margin-top: 6mm; }
+  .hint { font-size: 13px; color: #333; margin-top: 8mm; }
+  .sub { font-size: 11px; color: #777; margin-top: 2mm; }
+</style></head><body>
+  <div class="kind">Non-System Item</div>
+  <div class="item-name">${esc(name)}</div>
+  ${code ? `<div class="code">${esc(code)}</div>` : ""}
+  <img src="${qrDataUrl}" alt="Item QR code" />
+  <div class="hint">Scan to select this item</div>
+  <div class="sub">HOOKKA INDUSTRIES — non-system item QR</div>
+</body></html>`);
+    w.document.close();
+    w.focus();
+    // Give the new window time to lay out before invoking print(). Click
+    // handler, not React lifecycle — useTimeout doesn't apply.
+    // eslint-disable-next-line no-restricted-syntax -- print-window settle delay from event handler
+    setTimeout(() => w.print(), 500);
+    setShowItemQrForm(false);
+    setItemQrName("");
+    setItemQrCode("");
   };
 
   // Completed POs that are not yet stocked in
@@ -382,9 +556,22 @@ export default function WarehousePage() {
           <h1 className="text-xl font-bold text-[#1F1D1B]">Warehouse</h1>
           <p className="text-xs text-[#6B7280]">Rack location management, stock-in/out tracking</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => { fetchRackLocations(); fetchMovements(); }}>
-          <RefreshCw className="h-4 w-4" /> Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => setShowItemQrForm(true)}>
+            <QrCode className="h-4 w-4" /> Create Item QR
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={allRackQrLoading || rackLocations.length === 0}
+            onClick={() => void handleDownloadAllRackQrs()}
+          >
+            {allRackQrLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} Download all rack QRs
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => { fetchRackLocations(); fetchMovements(); }}>
+            <RefreshCw className="h-4 w-4" /> Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Summary Cards */}
@@ -513,9 +700,10 @@ export default function WarehousePage() {
                         if (slot.status === "OCCUPIED") {
                           setSelectedSlot(slot);
                         } else if (slot.status === "EMPTY") {
-                          setStockInTarget(slot.id);
-                          setShowStockInForm(true);
-                          setActiveTab("stockio");
+                          // Empty rack: offer Print Rack QR + Stock in here rather
+                          // than jumping straight to the form, so QR labels can be
+                          // printed for empty racks too (stick on → scan to stock in).
+                          setEmptyRackMenu(slot);
                         }
                       }}
                     >
@@ -529,14 +717,26 @@ export default function WarehousePage() {
                       </div>
                       {slot.status === "OCCUPIED" && (
                         <div className="mt-1 space-y-0.5">
-                          {visibleItems.map((it, i) => (
-                            <div key={i} className="leading-tight">
-                              <p className="text-[11px] truncate opacity-95">{it.productCode}</p>
-                              {it.customerName && (
-                                <p className="text-[10px] truncate opacity-75">{it.customerName}</p>
-                              )}
-                            </div>
-                          ))}
+                          {/* Unified per-item line: description + its SO number
+                              (or customer as a fallback), so every occupied rack
+                              card reads consistently regardless of how the item
+                              was stocked (per-piece scan vs legacy office). */}
+                          {visibleItems.map((it, i) => {
+                            const so = rackItemSO(it);
+                            const sub = so
+                              ? `SO ${so}`
+                              : it.customerName || "";
+                            return (
+                              <div key={i} className="leading-tight">
+                                <p className="text-[11px] truncate opacity-95">
+                                  {rackItemDescription(it)}
+                                </p>
+                                {sub && (
+                                  <p className="text-[10px] truncate opacity-75">{sub}</p>
+                                )}
+                              </div>
+                            );
+                          })}
                           {extraCount > 0 && (
                             <p className="text-[10px] opacity-80 pt-0.5">+{extraCount} more</p>
                           )}
@@ -582,20 +782,31 @@ export default function WarehousePage() {
                 {popupContents.length === 0 ? (
                   <p className="text-xs text-[#6B7280] text-center py-3">No items in this rack.</p>
                 ) : (
-                  popupContents.map((it, i) => (
-                    <div key={i} className="rounded-md border border-[#E2DDD8] p-3 space-y-0.5 bg-[#FAF9F7]">
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium text-[#1F1D1B]">{it.productCode}</span>
-                        {typeof it.qty === "number" && (
-                          <span className="text-xs text-[#6B7280]">Qty: {it.qty}</span>
-                        )}
+                  popupContents.map((it, i) => {
+                    const so = rackItemSO(it);
+                    // Suppress notes that are ONLY the "SO <no>" tag — the SO is
+                    // shown on its own line below — but keep any other note text.
+                    const extraNotes = (it.notes || "")
+                      .replace(/\bSO\s+\S+/i, "")
+                      .trim();
+                    // Per-piece rows are always qty 1; only surface qty when it
+                    // adds information (legacy multi-qty rows).
+                    const showQty = typeof it.qty === "number" && it.qty > 1;
+                    return (
+                      <div key={i} className="rounded-md border border-[#E2DDD8] p-3 space-y-0.5 bg-[#FAF9F7]">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-[#1F1D1B]">{rackItemDescription(it)}</span>
+                          {showQty && (
+                            <span className="text-xs text-[#6B7280] shrink-0">Qty: {it.qty}</span>
+                          )}
+                        </div>
+                        {so && <p className="text-xs text-[#4B5563]">Sales Order: {so}</p>}
+                        {it.customerName && <p className="text-xs text-[#6B7280]">Customer: {it.customerName}</p>}
+                        {it.stockedInDate && <p className="text-xs text-[#6B7280]">Stocked In: {it.stockedInDate}</p>}
+                        {extraNotes && <p className="text-xs text-[#6B7280]">Notes: {extraNotes}</p>}
                       </div>
-                      {it.productName && <p className="text-xs text-[#4B5563]">{it.productName}{it.sizeLabel ? ` - ${it.sizeLabel}` : ""}</p>}
-                      {it.customerName && <p className="text-xs text-[#6B7280]">Customer: {it.customerName}</p>}
-                      {it.stockedInDate && <p className="text-xs text-[#6B7280]">Stocked In: {it.stockedInDate}</p>}
-                      {it.notes && <p className="text-xs text-[#6B7280]">Notes: {it.notes}</p>}
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
 
@@ -682,6 +893,108 @@ export default function WarehousePage() {
                   Close
                 </Button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== Empty Rack Action Menu ===== */}
+      {/* Shown when an EMPTY rack tile is clicked. Lets the owner print the rack's
+          QR label (the whole point: stick it on an empty rack, then scan to stock
+          in) or jump straight to the stock-in form. Reuses handlePrintRackQr and
+          the same stock-in navigation the tile used to trigger directly. */}
+      {emptyRackMenu && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setEmptyRackMenu(null)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-sm w-full p-6" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#1F1D1B]">{emptyRackMenu.rack}</h3>
+              <button onClick={() => setEmptyRackMenu(null)} className="text-[#6B7280] hover:text-[#1F1D1B] cursor-pointer">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm text-[#6B7280]">Status</span>
+              <Badge>{emptyRackMenu.status}</Badge>
+            </div>
+            <div className="space-y-2">
+              <Button
+                variant="outline"
+                className="w-full justify-start"
+                onClick={() => {
+                  void handlePrintRackQr(emptyRackMenu);
+                  setEmptyRackMenu(null);
+                }}
+              >
+                <QrCode className="h-4 w-4" /> Print Rack QR
+              </Button>
+              <Button
+                variant="primary"
+                className="w-full justify-start"
+                onClick={() => {
+                  setStockInTarget(emptyRackMenu.id);
+                  setShowStockInForm(true);
+                  setActiveTab("stockio");
+                  setEmptyRackMenu(null);
+                }}
+              >
+                <ArrowDownToLine className="h-4 w-4" /> Stock in here
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== Create Item QR Modal ===== */}
+      {/* Print a QR for a NON-system / loose item by name. No backend record —
+          the name is encoded in the QR (itemQrValue) and can be scanned later
+          during rack stock-in. */}
+      {showItemQrForm && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowItemQrForm(false)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#1F1D1B]">Create Item QR</h3>
+              <button onClick={() => setShowItemQrForm(false)} className="text-[#6B7280] hover:text-[#1F1D1B] cursor-pointer">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="text-xs text-[#6B7280] mb-4">
+              Print a QR label for an item that isn't in the system. The name is
+              stored in the QR itself — scan it later during rack stock-in.
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Item Name</label>
+                <input
+                  type="text"
+                  autoFocus
+                  className="w-full border border-[#E2DDD8] rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  value={itemQrName}
+                  onChange={(e) => setItemQrName(e.target.value)}
+                  placeholder="e.g. Loose timber leg"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Link to product code (optional)</label>
+                <input
+                  type="text"
+                  className="w-full border border-[#E2DDD8] rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  value={itemQrCode}
+                  onChange={(e) => setItemQrCode(e.target.value)}
+                  placeholder="e.g. WD-LEG-01"
+                />
+              </div>
+            </div>
+            <div className="mt-6 flex gap-2 justify-end">
+              <Button variant="outline" size="sm" onClick={() => setShowItemQrForm(false)}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                disabled={!itemQrName.trim()}
+                onClick={() => void handlePrintItemQr()}
+              >
+                <QrCode className="h-4 w-4" /> Generate &amp; Print
+              </Button>
             </div>
           </div>
         </div>
@@ -812,25 +1125,36 @@ export default function WarehousePage() {
                     value={stockOutItemIndex}
                     onChange={(e) => setStockOutItemIndex(Number(e.target.value))}
                   >
-                    {stockOutTarget.items.map((it, i) => (
-                      <option key={i} value={i}>
-                        {it.productCode} - {it.productName || ""} {it.sizeLabel || ""} ({it.customerName || "-"})
-                      </option>
-                    ))}
+                    {stockOutTarget.items.map((it, i) => {
+                      const so = rackItemSO(it);
+                      const tail = so
+                        ? `SO ${so}`
+                        : it.customerName || "-";
+                      return (
+                        <option key={i} value={i}>
+                          {rackItemDescription(it)} ({tail})
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
               )}
-              {stockOutTarget && stockOutTarget.items[stockOutItemIndex] && (
-                <div className="bg-[#F9E1DA] rounded-md p-3 text-sm border border-[#E8B2A1]">
-                  <p className="font-medium text-[#9A3A2D]">Item to be released:</p>
-                  <div className="mt-1 space-y-0.5 text-[#9A3A2D]">
-                    <p>Rack: {stockOutTarget.id}</p>
-                    <p>Product: {stockOutTarget.items[stockOutItemIndex].productName} - {stockOutTarget.items[stockOutItemIndex].sizeLabel}</p>
-                    <p>Customer: {stockOutTarget.items[stockOutItemIndex].customerName}</p>
-                    <p>Stocked In: {stockOutTarget.items[stockOutItemIndex].stockedInDate}</p>
+              {stockOutTarget && stockOutTarget.items[stockOutItemIndex] && (() => {
+                const it = stockOutTarget.items[stockOutItemIndex];
+                const so = rackItemSO(it);
+                return (
+                  <div className="bg-[#F9E1DA] rounded-md p-3 text-sm border border-[#E8B2A1]">
+                    <p className="font-medium text-[#9A3A2D]">Item to be released:</p>
+                    <div className="mt-1 space-y-0.5 text-[#9A3A2D]">
+                      <p>Rack: {stockOutTarget.id}</p>
+                      <p>Product: {rackItemDescription(it)}</p>
+                      {so && <p>Sales Order: {so}</p>}
+                      {it.customerName && <p>Customer: {it.customerName}</p>}
+                      {it.stockedInDate && <p>Stocked In: {it.stockedInDate}</p>}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1">Reason</label>
                 <input
@@ -1023,7 +1347,7 @@ function MovementTable({ movements }: { movements: StockMovement[] }) {
                 </td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.productName}</td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.quantity}</td>
-                <td className="h-10 px-4 text-[#4B5563] max-w-[200px] truncate">{m.reason}</td>
+                <td className="h-10 px-4 text-[#4B5563] max-w-[200px] truncate">{m.reason.replace(/\bDO (DO-)/g, "$1")}</td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.performedBy}</td>
               </tr>
                     );

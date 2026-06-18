@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# hookka-mail-inbound — standalone Cloudflare Email Worker
+# ---------------------------------------------------------------------------
+# Self-contained. This worker is NOT part of the hookka-erp-testing Pages app.
+# It receives mail for the hookka.com zone via Cloudflare Email Routing,
+# parses each message with postal-mime, and POSTs a normalized JSON payload
+# to the ERP's pre-auth inbound endpoint:
+#
+#     POST https://erp.hookka.com/api/mail-center/inbound
+#
+# That endpoint is guarded by the `x-mail-secret` header, which must equal the
+# ERP's MAIL_INBOUND_SECRET. It dedups by Message-ID, so retries are safe.
+#
+# ---------------------------------------------------------------------------
+# SECRETS / VARS (set AFTER the first deploy — see README.md):
+#   MAIL_INBOUND_SECRET  — secret, >= 16 chars. MUST equal the same-named
+#                          secret/var set on the hookka-erp-testing Pages
+#                          project. Set with:
+#                              wrangler secret put MAIL_INBOUND_SECRET
+#   ERP_INBOUND_URL      — the ERP inbound endpoint. Plain var (not secret);
+#                          set in the [vars] block below or on the dashboard:
+#                              https://erp.hookka.com/api/mail-center/inbound
+#   FORWARD_TO           — OPTIONAL. A safety-net mailbox (e.g. a Gmail) that
+#                          receives a forwarded copy of every message. Leave
+#                          unset to disable forwarding. Set with:
+#                              wrangler secret put FORWARD_TO
+#                          (NOTE: the FORWARD_TO destination address must be a
+#                          *verified* destination in Cloudflare Email Routing,
+#                          otherwise message.forward() throws.)
+#
+# ---------------------------------------------------------------------------
+# EMAIL ROUTING (one-time, in the Cloudflare dashboard — see README.md):
+#   Cloudflare dashboard -> hookka.com zone -> Email -> Email Routing ->
+#   enable, then add a route (catch-all OR per-address) whose action is
+#   "Send to a Worker" -> hookka-mail-inbound.
+#   Enabling Email Routing repoints the hookka.com MX records to Cloudflare
+#   (off Hostinger). Prefer per-address rules so finance@/hr@ etc. can keep
+#   forwarding to a Gmail while only the desired addresses hit this worker.
+# ---------------------------------------------------------------------------
+
+name = "hookka-mail-inbound"
+main = "src/index.ts"
+
+# Reused verbatim from the root hookka-erp-testing/wrangler.toml so the
+# runtime matches the ERP it feeds.
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# account_id — REUSED from the hookka-erp-testing Cloudflare account.
+# The root Pages wrangler.toml does NOT pin account_id (Pages resolves the
+# account from the CLOUDFLARE_API_TOKEN at deploy time), so paste the Hookka
+# account id here before deploying this standalone Worker. Find it at:
+#   Cloudflare dashboard -> Workers & Pages -> right sidebar "Account ID",
+# or run: `wrangler whoami`.
+# Alternatively, drop this line and export CLOUDFLARE_ACCOUNT_ID in the shell.
+account_id = "816e457307d7fa0491c2a08a72ad5dcd"
+
+# ERP inbound endpoint. Kept as a plain [vars] entry (it's not a secret) so it
+# travels with the deploy. The matching MAIL_INBOUND_SECRET is a real secret —
+# set it via `wrangler secret put MAIL_INBOUND_SECRET`, never here.
+[vars]
+ERP_INBOUND_URL = "https://erp.hookka.com/api/mail-center/inbound"

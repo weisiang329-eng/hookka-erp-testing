@@ -122,6 +122,66 @@ export function parseRackQr(value: string): string | null {
 }
 
 /**
+ * The PUBLIC URL a rack QR should encode so a NORMAL phone camera (not the
+ * in-app scanner) opens the stock-in page for this rack — route `/r/:rackId`.
+ * Unlike `rackQrValue` (the `HKRACK:` identity token the in-app worker scanner
+ * decodes), this is a real https URL the OS camera recognises and offers to
+ * open. `origin` defaults to the current page origin in the browser, and falls
+ * back to "" when rendered without a window so the path stays relative.
+ */
+export function rackScanUrl(rackId: string, origin?: string): string {
+  return `${origin ?? (typeof window !== "undefined" ? window.location.origin : "")}/r/${encodeURIComponent(rackId)}`;
+}
+
+// ============================================================
+// Item QR — a self-contained QR for a NON-system / loose item.
+//
+// The owner can print a QR for an item that has no system record (a loose or
+// non-catalogue piece), naming it, so it can be SCANNED later during rack
+// stock-in. To stay dependency-free there is no backend row: the NAME is
+// encoded directly in the QR (optionally with a linked product code). Mirrors
+// the `HKRACK:` rack convention — a short sentinel prefix keeps a stray courier
+// / GTIN code (or a rack / WIP QR) from ever being mistaken for an item token,
+// and lets a future scanner branch on the prefix. The optional code rides after
+// a `|` delimiter, so the name is stripped of any `|` to keep the split safe.
+// ============================================================
+
+/** Sentinel prefix on every non-system item QR — `HKITEM:` + name (+ `|code`). */
+export const ITEM_QR_PREFIX = "HKITEM:";
+
+/**
+ * The string to ENCODE in a non-system item's QR: `HKITEM:<name>`, or
+ * `HKITEM:<name>|<code>` when a linked product code is supplied. Whitespace is
+ * trimmed + collapsed, and any `|` is stripped from the name so the delimiter
+ * stays unambiguous (an empty/whitespace-only code is treated as "no code").
+ */
+export function itemQrValue(name: string, code?: string): string {
+  const cleanName = name.replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+  const cleanCode = code ? code.replace(/\|/g, " ").replace(/\s+/g, " ").trim() : "";
+  return cleanCode
+    ? `${ITEM_QR_PREFIX}${cleanName}|${cleanCode}`
+    : `${ITEM_QR_PREFIX}${cleanName}`;
+}
+
+/**
+ * Parse a scanned non-system item QR back into its name (+ optional code), or
+ * null when it isn't one of ours (wrong prefix / empty name). Symmetric with
+ * `itemQrValue`. A future scanner branch will use this to pre-fill the item
+ * name during rack stock-in.
+ */
+export function parseItemQr(value: string): { name: string; code?: string } | null {
+  if (!value) return null;
+  const v = value.trim();
+  if (!v.startsWith(ITEM_QR_PREFIX)) return null;
+  const body = v.slice(ITEM_QR_PREFIX.length);
+  const sep = body.indexOf("|");
+  const name = (sep === -1 ? body : body.slice(0, sep)).trim();
+  if (!name) return null;
+  const code = sep === -1 ? "" : body.slice(sep + 1).trim();
+  return code ? { name, code } : { name };
+}
+
+/**
  * Generate the scan URL that a QR code should encode.
  * When scanned, it takes the worker to the scan page with the operation pre-filled.
  *

@@ -18,6 +18,15 @@ type SupplierInfo = {
   name: string;
 };
 
+// Raw-material option for the Add-Binding material picker. itemCode MUST be the
+// same value the PO uses as rm.itemCode, so a binding created here always links.
+type RMOption = {
+  itemCode: string;
+  description: string;
+  itemGroup?: string;
+  isActive?: boolean;
+};
+
 export default function PricingPage() {
   const [activeTab, setActiveTab] = useState<"price-list" | "price-history" | "comparison">("price-list");
   const [search, setSearch] = useState("");
@@ -29,6 +38,7 @@ export default function PricingPage() {
   const { data: historyResp } = useCachedJson<{ success?: boolean; data?: PriceHistory[] } | PriceHistory[]>("/api/price-history");
   const { data: scorecardsResp } = useCachedJson<{ success?: boolean; data?: SupplierScorecard[] } | SupplierScorecard[]>("/api/supplier-scorecards");
   const { data: suppliersResp } = useCachedJson<{ success?: boolean; data?: { id: string; name: string }[] } | { id: string; name: string }[]>("/api/suppliers");
+  const { data: inventoryResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RMOption[] } }>("/api/inventory");
 
   const bindings: SupplierMaterialBinding[] = useMemo(
     () => ((bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? (Array.isArray(bindingsResp) ? bindingsResp : [])),
@@ -55,6 +65,17 @@ export default function PricingPage() {
     suppliers.forEach((s) => { map[s.id] = s.name; });
     return map;
   }, [suppliers]);
+
+  // Active raw materials for the Add-Binding picker. Binding by FREE TEXT let a
+  // typo'd materialCode silently fail to match the PO's rm.itemCode (owner
+  // 2026-06-18: PO showed ALL suppliers because the code didn't line up).
+  // Picking from the real RM list guarantees materialCode === itemCode.
+  const rawMaterials: RMOption[] = useMemo(() => {
+    const list = inventoryResp?.data?.rawMaterials ?? [];
+    return (Array.isArray(list) ? list : [])
+      .filter((r) => r.isActive !== false)
+      .sort((a, b) => a.itemCode.localeCompare(b.itemCode));
+  }, [inventoryResp]);
 
   const scorecardMap = useMemo(() => {
     const map: Record<string, SupplierScorecard> = {};
@@ -115,6 +136,7 @@ export default function PricingPage() {
       {showAddDialog && (
         <AddBindingDialog
           suppliers={suppliers}
+          rawMaterials={rawMaterials}
           onClose={() => setShowAddDialog(false)}
           onCreated={() => {
             invalidateCachePrefix("/api/supplier-materials");
@@ -252,11 +274,13 @@ function PriceListTab({
 // ---- Add Binding Dialog ----
 function AddBindingDialog({
   suppliers,
+  rawMaterials,
   onClose,
   onCreated,
   onError,
 }: {
   suppliers: SupplierInfo[];
+  rawMaterials: RMOption[];
   onClose: () => void;
   onCreated: () => void;
   onError: (msg: string) => void;
@@ -342,13 +366,35 @@ function AddBindingDialog({
               ))}
             </select>
           </label>
-          <label>
-            <span className="block text-xs font-medium text-gray-600 mb-1">Material Code *</span>
-            <Input value={form.materialCode} onChange={(e) => set("materialCode", e.target.value)} />
-          </label>
-          <label>
-            <span className="block text-xs font-medium text-gray-600 mb-1">Material Name *</span>
-            <Input value={form.materialName} onChange={(e) => set("materialName", e.target.value)} />
+          {/* Pick the material from the real RM list (not free text) so the
+              binding's materialCode == the PO's rm.itemCode and the PO supplier
+              dropdown actually filters to this supplier + auto-fills the SKU. */}
+          <label className="col-span-2">
+            <span className="block text-xs font-medium text-gray-600 mb-1">Material *</span>
+            <select
+              value={form.materialCode}
+              onChange={(e) => {
+                const rm = rawMaterials.find((r) => r.itemCode === e.target.value);
+                setForm((f) => ({
+                  ...f,
+                  materialCode: rm?.itemCode ?? "",
+                  materialName: rm?.description ?? "",
+                }));
+              }}
+              className="w-full border border-[#E2DDD8] rounded px-2 py-1.5 bg-white"
+            >
+              <option value="">Select material…</option>
+              {rawMaterials.map((r) => (
+                <option key={r.itemCode} value={r.itemCode}>
+                  {r.itemCode} — {r.description}
+                </option>
+              ))}
+            </select>
+            {form.materialCode && (
+              <span className="mt-1 block text-[11px] text-gray-500">
+                Code <span className="font-mono">{form.materialCode}</span> · {form.materialName}
+              </span>
+            )}
           </label>
           <label>
             <span className="block text-xs font-medium text-gray-600 mb-1">Supplier SKU *</span>

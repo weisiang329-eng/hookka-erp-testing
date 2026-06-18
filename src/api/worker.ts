@@ -622,6 +622,9 @@ app.post("/api/mail-center/inbound", async (c) => {
     const result = await ingestInboundEmail(
       c.var.DB,
       payload as Parameters<typeof ingestInboundEmail>[1],
+      // Pass storage env so inbound attachments are uploaded to Supabase Storage
+      // and indexed in email_attachments (skipped when creds are absent).
+      c.env,
     );
     return c.json(result, result.ok ? 200 : 400);
   } catch (err) {
@@ -698,6 +701,10 @@ import packingLists from "./routes/packing-lists";
 // credential; auth bypass via PUBLIC_PREFIXES in lib/auth-middleware.ts).
 // Transitions reuse applyDeliveryOrderUpdate, the exact office PUT path.
 import publicDoQr from "./routes/public-do-qr";
+// Public rack STOCK-IN scan flow (no login — the token is the plain rack id;
+// auth bypass via PUBLIC_PREFIXES "/api/public/rack-qr/" in lib/auth-middleware.ts).
+// Writes via the SAME buildRackStockInStatements helper the worker route uses.
+import publicRackQr from "./routes/public-rack-qr";
 import cncTemplates from "./routes/cnc-templates";
 import invoices from "./routes/invoices";
 import payments from "./routes/payments";
@@ -855,6 +862,11 @@ app.route("/api/packing-lists", packingLists);
 // so the request still flows through tenant + rate-limit middleware (the
 // limiter keys by client IP when there is no session).
 app.route("/api/public/do-qr", publicDoQr);
+// Public rack STOCK-IN scan flow. Like the public DO QR mount above, the auth
+// bypass happens in authMiddleware (PUBLIC_PREFIXES "/api/public/rack-qr/"), so
+// the request still flows through tenant + rate-limit middleware (the limiter
+// keys by client IP when there is no session).
+app.route("/api/public/rack-qr", publicRackQr);
 app.route("/api/cnc-templates", cncTemplates);
 app.route("/api/invoices", invoices);
 app.route("/api/payments", payments);

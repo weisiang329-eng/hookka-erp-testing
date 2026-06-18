@@ -38,6 +38,20 @@ type UserRow = {
   createdAt: string;
   lastLoginAt: string | null;
   displayName: string | null;
+  // User-level org placement (owner 2026-06-17, "這個是看 position，不需要 alias").
+  // These live on the USER row — not on the @hookka.com mail alias — so the Org
+  // Chart works for EVERY user, aliased or not. The columns are snake_case in
+  // Postgres (department / position / reports_to), but the postgres.js driver
+  // (lib/db-pg.ts, transform.column.from) camelCases EVERY result column — they
+  // are absent from the column-rename map, so they fall back to postgres.toCamel
+  // (reports_to → reportsTo, department/position unchanged). So a SELECT * row
+  // exposes `reportsTo`, NOT `reports_to`. We keep `reports_to` in the type as
+  // an optional dual-read alias for any code path that still reads the raw name
+  // (e.g. a hypothetical D1 fallback), but `reportsTo` is the live shape.
+  department: string | null;
+  position: string | null;
+  reportsTo: string | null;
+  reports_to?: string | null;
 };
 
 type InviteRow = {
@@ -67,6 +81,12 @@ function publicUser(u: UserRow) {
     createdAt: u.createdAt,
     lastLoginAt: u.lastLoginAt,
     displayName: u.displayName ?? "",
+    // User-level org placement — drives the Org Chart for every user.
+    // The driver camelCases the column to `reportsTo`; dual-read the raw
+    // `reports_to` only as a defensive fallback (it's normally undefined).
+    department: u.department ?? "",
+    position: u.position ?? "",
+    reportsTo: u.reportsTo ?? u.reports_to ?? "",
   };
 }
 
@@ -74,11 +94,52 @@ function genId(): string {
   return `user-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+// ---------------------------------------------------------------------------
+// Lazy idempotent schema ensure for the user-level org-chart columns
+// (department / position / reports_to). Mirrors the repo pattern used in
+// email-outbox.ts, do-qr-token.ts, mail-center.ts etc.: a module-level
+// memoized promise so the ALTERs run AT MOST once per isolate, and the
+// per-statement try/catch swallows the "duplicate column" error on isolates
+// where they already ran.
+//
+// Columns are snake_case in Postgres (department / position / reports_to) and
+// are intentionally NOT in column-rename-map.json. They do NOT pass through
+// verbatim on read: the postgres.js driver (lib/db-pg.ts, transform.column.from)
+// camelCases every result column — reports_to surfaces as `reportsTo` via
+// postgres.toCamel (department / position are unchanged by toCamel). So writes
+// use the snake_case column name, but reads of a SELECT * row use `reportsTo`.
+// All three are plain TEXT (org placement is free-text / id strings, never a
+// toISOString timestamp), so no timestamptz round-trip hazard.
+let orgColumnsEnsured: Promise<void> | null = null;
+function ensureUserOrgColumns(db: D1Database): Promise<void> {
+  if (orgColumnsEnsured) return orgColumnsEnsured;
+  orgColumnsEnsured = (async () => {
+    const stmts = [
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS department TEXT",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS position TEXT",
+      // reports_to holds the user id of this person's upline (manager), so the
+      // org chart can draw a reporting line — mirrors Houzs's parentId.
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS reports_to TEXT",
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (e) {
+        console.error("[users] org-column schema init failed:", e);
+      }
+    }
+  })();
+  return orgColumnsEnsured;
+}
+
 // GET /api/users — list all users
 app.get("/", async (c) => {
   // RBAC gate (P3.3-followup) — users:read.
   const denied = await requirePermission(c, "users", "read");
   if (denied) return denied;
+  // Make sure the org-chart columns exist before SELECT * reads them (first
+  // call on a fresh isolate adds them; later calls are a no-op).
+  await ensureUserOrgColumns(c.var.DB);
   const res = await c.var.DB.prepare(
     "SELECT * FROM users ORDER BY createdAt DESC",
   ).all<UserRow>();
@@ -181,6 +242,8 @@ app.put("/:id", async (c) => {
   if (su) return su;
   const id = c.req.param("id");
   try {
+    // Org-chart columns must exist before we read/write them.
+    await ensureUserOrgColumns(c.var.DB);
     const existing = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
       .bind(id)
       .first<UserRow>();
@@ -200,6 +263,76 @@ app.put("/:id", async (c) => {
       if (roleDenied) return roleDenied;
     }
 
+    // ---- Lockout guard (owner 2026-06-18) ---------------------------------
+    // Two foot-guns the UI also guards, enforced server-side so a direct API
+    // call (or a stale client) can't brick login access:
+    //   1) You cannot disable or role-DEMOTE your OWN account — "otherwise I
+    //      disable myself and lose the page". (A self promote/keep is fine.)
+    //   2) You cannot disable or demote the LAST active SUPER_ADMIN — that
+    //      would leave the org with nobody able to manage accounts.
+    // A "demotion" here is any role change OFF of SUPER_ADMIN. Promotions and
+    // lateral edits (display name, email, dept, position) are untouched.
+    const callerId = (
+      c as unknown as { get: (k: string) => string | undefined }
+    ).get("userId");
+    // Matches the merge's own semantics below (body.isActive ? 1 : 0): a
+    // disable is any explicit falsy isActive in the body against a row that is
+    // currently active. Using the same falsy test (not a strict === false)
+    // keeps the guard and the write in lockstep.
+    const wantsDisable =
+      body.isActive !== undefined && !body.isActive && existing.isActive === 1;
+    const wantsDemote =
+      wantsRoleChange &&
+      existing.role === "SUPER_ADMIN" &&
+      body.role !== "SUPER_ADMIN";
+
+    if (callerId && callerId === id && (wantsDisable || wantsDemote)) {
+      return c.json(
+        {
+          success: false,
+          error: wantsDisable
+            ? "You can't disable your own account."
+            : "You can't remove Super Admin from your own account.",
+        },
+        400,
+      );
+    }
+
+    // Last-active-SUPER_ADMIN protection. Only matters when this row IS an
+    // active super admin and the request would disable or demote it. Count the
+    // OTHER active super admins; if there are none, refuse.
+    if (existing.role === "SUPER_ADMIN" && existing.isActive === 1 &&
+        (wantsDisable || wantsDemote)) {
+      const others = await c.var.DB.prepare(
+        "SELECT COUNT(*) AS n FROM users WHERE role = 'SUPER_ADMIN' AND isActive = 1 AND id != ?",
+      )
+        .bind(id)
+        .first<{ n: number }>();
+      if (!others || Number(others.n) === 0) {
+        return c.json(
+          {
+            success: false,
+            error: wantsDisable
+              ? "You can't disable the last active Super Admin."
+              : "You can't demote the last active Super Admin.",
+          },
+          400,
+        );
+      }
+    }
+
+    // Org-chart fields arrive camelCase from the client (department / position
+    // / reportsTo) and map onto the snake_case columns. Each is left untouched
+    // when the key is absent from the body (so a status-only or role-only PUT
+    // never wipes someone's placement), and an explicit "" clears it. The
+    // reporting line stores the upline's user id (or "" / null for none).
+    //
+    // IMPORTANT: read the EXISTING value off the camelCased row shape. The
+    // driver renames reports_to → existing.reportsTo (see UserRow / db-pg.ts),
+    // so the old `existing.reports_to` read was ALWAYS undefined — an Org Chart
+    // Save (which omits reportsTo) silently NULLed the user's reporting line.
+    // Dual-read camelCase first, then the raw snake_case as a defensive fallback.
+    const existingReportsTo = existing.reportsTo ?? existing.reports_to ?? null;
     const merged = {
       email: body.email ?? existing.email,
       role: body.role ?? existing.role,
@@ -210,12 +343,33 @@ app.put("/:id", async (c) => {
           : body.isActive
             ? 1
             : 0,
+      department:
+        body.department === undefined
+          ? (existing.department ?? null)
+          : (body.department || null),
+      position:
+        body.position === undefined
+          ? (existing.position ?? null)
+          : (body.position || null),
+      reportsTo:
+        body.reportsTo === undefined
+          ? existingReportsTo
+          : (body.reportsTo || null),
     };
 
     await c.var.DB.prepare(
-      `UPDATE users SET email = ?, role = ?, displayName = ?, isActive = ? WHERE id = ?`,
+      `UPDATE users SET email = ?, role = ?, displayName = ?, isActive = ?, department = ?, position = ?, reports_to = ? WHERE id = ?`,
     )
-      .bind(merged.email, merged.role, merged.displayName, merged.isActive, id)
+      .bind(
+        merged.email,
+        merged.role,
+        merged.displayName,
+        merged.isActive,
+        merged.department,
+        merged.position,
+        merged.reportsTo,
+        id,
+      )
       .run();
 
     // P3.8 — security-sensitive mutations require explicit KV cache
@@ -273,6 +427,36 @@ app.delete("/:id", async (c) => {
     .first<UserRow>();
   if (!existing) {
     return c.json({ success: false, error: "User not found" }, 404);
+  }
+
+  // Lockout guard (owner 2026-06-18). DELETE is a SOFT delete (isActive → 0),
+  // so it carries the SAME lockout risk as PUT { isActive: false }. Mirror the
+  // PUT guard: you can't delete your own account, and you can't delete the last
+  // active Super Admin (which would leave nobody able to manage accounts).
+  const callerId = (
+    c as unknown as { get: (k: string) => string | undefined }
+  ).get("userId");
+  if (callerId && callerId === id) {
+    return c.json(
+      { success: false, error: "You can't delete your own account." },
+      400,
+    );
+  }
+  if (existing.role === "SUPER_ADMIN" && existing.isActive === 1) {
+    const others = await c.var.DB.prepare(
+      "SELECT COUNT(*) AS n FROM users WHERE role = 'SUPER_ADMIN' AND isActive = 1 AND id != ?",
+    )
+      .bind(id)
+      .first<{ n: number }>();
+    if (!others || Number(others.n) === 0) {
+      return c.json(
+        {
+          success: false,
+          error: "You can't delete the last active Super Admin.",
+        },
+        400,
+      );
+    }
   }
 
   const { purgeUserSessions } = await import("../lib/auth-middleware");
@@ -692,6 +876,7 @@ app.delete("/invites/:token", async (c) => {
 app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "users", "read");
   if (denied) return denied;
+  await ensureUserOrgColumns(c.var.DB);
   const id = c.req.param("id");
   const user = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)

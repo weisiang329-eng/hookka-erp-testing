@@ -82,6 +82,13 @@ const PUBLIC_PREFIXES = [
   // forward DO transitions (DRAFT→LOADED, LOADED/IN_TRANSIT→DELIVERED)
   // through the SAME office PUT path. See routes/public-do-qr.ts.
   "/api/public/do-qr/",
+  // 2026-06-17 — public rack STOCK-IN scan flow. A worker scans a printed rack
+  // QR (HKRACK:<rack id>) with a normal phone camera — no session — then scans
+  // items to stock them into that rack. The token is the plain rack id (stock-in
+  // is additive/low-risk; the worker endpoint already accepts a bare rack id).
+  // GET exposes only the rack label + item count; POST /stock-in writes via the
+  // SAME helper the worker route uses. See routes/public-rack-qr.ts.
+  "/api/public/rack-qr/",
 ];
 
 // Customer QR tracking lookup: only the single-unit GET is public. The list

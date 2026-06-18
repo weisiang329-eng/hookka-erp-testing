@@ -11,6 +11,9 @@ import {
   Filter,
   Layers,
   Minus,
+  Pencil,
+  Check,
+  X,
 } from "lucide-react";
 
 const CATEGORIES = ["ALL", "B.M-FABR", "S-FABR", "S.M-FABR", "LINING", "WEBBING"] as const;
@@ -62,7 +65,6 @@ type Tab = "inventory";
 
 export default function FabricsPage() {
   const navigate = useNavigate();
-  const { toast } = useToast();
   const { data: fabricsResp, loading, refresh: refreshFabrics } = useCachedJson<{ success?: boolean; data?: FabricTracking[] }>("/api/fabric-tracking");
   const fabrics: FabricTracking[] = useMemo(
     () => (fabricsResp?.data ?? (Array.isArray(fabricsResp) ? (fabricsResp as FabricTracking[]) : [])),
@@ -153,12 +155,17 @@ export default function FabricsPage() {
           setSearch={setSearch}
           categoryFilter={categoryFilter}
           setCategoryFilter={setCategoryFilter}
-          onPriceTierChange={async (id, field, tier) => {
-            try {
-              const res = await fetch(`/api/fabric-tracking/${id}`, {
+          onSaveTiers={async (changes) => {
+            // Edit→Save (owner rule: no naked auto-save). The Edit toggle
+            // collects tier changes into a local draft; Save commits only the
+            // rows that actually changed via one PUT each. Any failure aborts
+            // the batch and surfaces a toast — the grid keeps reading from the
+            // cached rows, so unsaved drafts simply fall away.
+            for (const c of changes) {
+              const res = await fetch(`/api/fabric-tracking/${c.id}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ [field]: tier }),
+                body: JSON.stringify({ [c.field]: c.tier }),
               });
               if (!res.ok) {
                 const body = (await res
@@ -166,17 +173,10 @@ export default function FabricsPage() {
                   .catch(() => ({}))) as { error?: string };
                 throw new Error(body?.error || `HTTP ${res.status}`);
               }
-              invalidateCachePrefix("/api/fabric-tracking");
-              invalidateCachePrefix("/api/raw-materials");
-              refreshFabrics();
-            } catch (err) {
-              const detail = err instanceof Error ? err.message : "try again";
-              toast.error(`Failed to update price tier: ${detail}`);
-              console.error(err);
-              // No local optimistic state here — the controlled <select>
-              // reads value straight from the cached fabric row, so the UI
-              // naturally reverts to the previous tier when the request fails.
             }
+            invalidateCachePrefix("/api/fabric-tracking");
+            invalidateCachePrefix("/api/raw-materials");
+            refreshFabrics();
           }}
           onCreatePO={(fabricCode, qty) => {
             // Deep-link into Procurement with the fabric prefilled. The
@@ -217,13 +217,17 @@ function SummaryCard({
 }
 
 /* ─── Tab 1: Fabric Inventory ─────────────────────────────────────── */
+type TierField = "sofaPriceTier" | "bedframePriceTier";
+type TierValue = "PRICE_1" | "PRICE_2" | "PRICE_3";
+type TierChange = { id: string; field: TierField; tier: TierValue };
+
 function InventoryTab({
   fabrics,
   search,
   setSearch,
   categoryFilter,
   setCategoryFilter,
-  onPriceTierChange,
+  onSaveTiers,
   onCreatePO,
 }: {
   fabrics: FabricTracking[];
@@ -231,13 +235,76 @@ function InventoryTab({
   setSearch: (v: string) => void;
   categoryFilter: string;
   setCategoryFilter: (v: string) => void;
-  onPriceTierChange: (
-    id: string,
-    field: "sofaPriceTier" | "bedframePriceTier",
-    tier: "PRICE_1" | "PRICE_2" | "PRICE_3",
-  ) => void;
+  onSaveTiers: (changes: TierChange[]) => Promise<void>;
   onCreatePO: (fabricCode: string, qty: number) => void;
 }) {
+  const { toast } = useToast();
+  // Edit→Save gating (owner rule: no naked auto-save). Tier selects are
+  // read-only badges until "Edit"; edits land in `drafts` keyed by
+  // `${id}:${field}`, and "Save" commits only the changed rows. "Cancel"
+  // discards the drafts.
+  const [editMode, setEditMode] = useState(false);
+  const [drafts, setDrafts] = useState<Record<string, TierValue>>({});
+  const [saving, setSaving] = useState(false);
+
+  const draftKey = (id: string, field: TierField) => `${id}:${field}`;
+
+  const setDraft = (id: string, field: TierField, tier: TierValue) =>
+    setDrafts((prev) => ({ ...prev, [draftKey(id, field)]: tier }));
+
+  const getTier = (id: string, field: TierField, saved: TierValue): TierValue =>
+    drafts[draftKey(id, field)] ?? saved;
+
+  const dirtyCount = Object.keys(drafts).length;
+
+  const enterEdit = () => {
+    setDrafts({});
+    setEditMode(true);
+  };
+
+  const cancelEdit = () => {
+    setDrafts({});
+    setEditMode(false);
+  };
+
+  const saveEdits = async () => {
+    // Build the change set from drafts that differ from the saved row value.
+    const changes: TierChange[] = [];
+    for (const [key, tier] of Object.entries(drafts)) {
+      const sep = key.lastIndexOf(":");
+      const id = key.slice(0, sep);
+      const field = key.slice(sep + 1) as TierField;
+      const row = fabrics.find((f) => f.id === id);
+      if (!row) continue;
+      const saved =
+        (field === "sofaPriceTier"
+          ? row.sofaPriceTier
+          : row.bedframePriceTier) ??
+        row.priceTier ??
+        "PRICE_2";
+      if (tier !== saved) changes.push({ id, field, tier });
+    }
+    if (changes.length === 0) {
+      setEditMode(false);
+      setDrafts({});
+      return;
+    }
+    setSaving(true);
+    try {
+      await onSaveTiers(changes);
+      toast.success(
+        `Saved ${changes.length} price tier${changes.length === 1 ? "" : "s"}`,
+      );
+      setDrafts({});
+      setEditMode(false);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "try again";
+      toast.error(`Failed to update price tier: ${detail}`);
+      console.error(err);
+    } finally {
+      setSaving(false);
+    }
+  };
   // DataGrid columns. Sticky fabricCode + sortable on every numeric metric +
   // built-in column toggle (visibility) + value filter (the "(All)" dropdown
   // per column header). Replaces the old static <table> + page-level search
@@ -303,12 +370,17 @@ function InventoryTab({
         // Sort keys via filterAccessor so "Price 1/2/3" order naturally.
         filterAccessor: (f) =>
           (f.sofaPriceTier ?? f.priceTier ?? "PRICE_2").replace("PRICE_", ""),
-        render: (_v, f) => (
-          <PriceTierSelect
-            value={f.sofaPriceTier ?? f.priceTier ?? "PRICE_2"}
-            onChange={(t) => onPriceTierChange(f.id, "sofaPriceTier", t)}
-          />
-        ),
+        render: (_v, f) => {
+          const saved = f.sofaPriceTier ?? f.priceTier ?? "PRICE_2";
+          return editMode ? (
+            <PriceTierSelect
+              value={getTier(f.id, "sofaPriceTier", saved)}
+              onChange={(t) => setDraft(f.id, "sofaPriceTier", t)}
+            />
+          ) : (
+            <PriceTierBadge value={saved} />
+          );
+        },
       },
       {
         key: "bedframePriceTier",
@@ -319,12 +391,17 @@ function InventoryTab({
         sortable: true,
         filterAccessor: (f) =>
           (f.bedframePriceTier ?? f.priceTier ?? "PRICE_2").replace("PRICE_", ""),
-        render: (_v, f) => (
-          <PriceTierSelect
-            value={f.bedframePriceTier ?? f.priceTier ?? "PRICE_2"}
-            onChange={(t) => onPriceTierChange(f.id, "bedframePriceTier", t)}
-          />
-        ),
+        render: (_v, f) => {
+          const saved = f.bedframePriceTier ?? f.priceTier ?? "PRICE_2";
+          return editMode ? (
+            <PriceTierSelect
+              value={getTier(f.id, "bedframePriceTier", saved)}
+              onChange={(t) => setDraft(f.id, "bedframePriceTier", t)}
+            />
+          ) : (
+            <PriceTierBadge value={saved} />
+          );
+        },
       },
       {
         key: "price",
@@ -467,11 +544,68 @@ function InventoryTab({
         ),
       },
     ],
-    [onPriceTierChange, onCreatePO],
+    // getTier/setDraft are render-local helpers; the values they actually read
+    // (editMode, drafts) plus onCreatePO are listed, so cells re-render when a
+    // draft changes or edit mode toggles. setDraft only closes over the stable
+    // setDrafts setter, so it needs no entry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [editMode, drafts, onCreatePO],
   );
 
   return (
     <div className="space-y-4">
+      {/* Edit → Save / Cancel bar (owner rule: no naked auto-save). The Sofa /
+          Bedframe price-tier selects are read-only badges until "Edit"; edits
+          collect into a local draft and only commit on "Save". */}
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-gray-500">
+          {editMode
+            ? "Editing price tiers — changes apply only when you press Save."
+            : "Price tiers are read-only. Press Edit to change a fabric's Sofa / Bedframe tier."}
+        </p>
+        <div className="flex items-center gap-2">
+          {!editMode ? (
+            <button
+              type="button"
+              onClick={enterEdit}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] transition-colors"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              Edit
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={saveEdits}
+                disabled={saving}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  dirtyCount > 0
+                    ? "bg-[#6B5C32] text-white hover:bg-[#5A4E2A]"
+                    : "bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6]"
+                }`}
+              >
+                <Check className="h-3.5 w-3.5" />
+                {saving
+                  ? "Saving..."
+                  : dirtyCount > 0
+                    ? `Save (${dirtyCount})`
+                    : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={cancelEdit}
+                disabled={saving}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] disabled:opacity-50 transition-colors"
+              >
+                <X className="h-3.5 w-3.5" />
+                Cancel
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
       {/* Page-level filters — search + category. DataGrid has its own
           per-column filter / sort, but the global search and category
           dropdown are kept for quick scoping (single-keystroke "show only
@@ -519,7 +653,22 @@ function InventoryTab({
   );
 }
 
-/* ─── Price Tier dropdown (shared) ────────────────────────────────── */
+/* ─── Price Tier color (shared by select + read-only badge) ───────── */
+function tierColorClass(value: "PRICE_1" | "PRICE_2" | "PRICE_3"): string {
+  return value === "PRICE_1"
+    ? "bg-[#E0EDF0] border-[#A8CAD2] text-[#3E6570]"
+    : value === "PRICE_3"
+      ? "bg-[#F0E5F8] border-[#C9A8E0] text-[#5E3D80]"
+      : "bg-[#FAEFCB] border-[#E8D597] text-[#9C6F1E]";
+}
+
+const TIER_LABEL: Record<"PRICE_1" | "PRICE_2" | "PRICE_3", string> = {
+  PRICE_1: "Price 1",
+  PRICE_2: "Price 2",
+  PRICE_3: "Price 3",
+};
+
+/* ─── Price Tier dropdown (edit mode only) ────────────────────────── */
 function PriceTierSelect({
   value,
   onChange,
@@ -533,17 +682,26 @@ function PriceTierSelect({
       onChange={(e) =>
         onChange(e.target.value as "PRICE_1" | "PRICE_2" | "PRICE_3")
       }
-      className={`text-xs font-semibold px-2 py-1 rounded border cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40 ${
-        value === "PRICE_1"
-          ? "bg-[#E0EDF0] border-[#A8CAD2] text-[#3E6570]"
-          : value === "PRICE_3"
-            ? "bg-[#F0E5F8] border-[#C9A8E0] text-[#5E3D80]"
-            : "bg-[#FAEFCB] border-[#E8D597] text-[#9C6F1E]"
-      }`}
+      className={`text-xs font-semibold px-2 py-1 rounded border cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40 ${tierColorClass(value)}`}
     >
       <option value="PRICE_1">Price 1</option>
       <option value="PRICE_2">Price 2</option>
       <option value="PRICE_3">Price 3</option>
     </select>
+  );
+}
+
+/* ─── Price Tier read-only badge (default / non-edit mode) ─────────── */
+function PriceTierBadge({
+  value,
+}: {
+  value: "PRICE_1" | "PRICE_2" | "PRICE_3";
+}) {
+  return (
+    <span
+      className={`inline-block text-xs font-semibold px-2 py-1 rounded border ${tierColorClass(value)}`}
+    >
+      {TIER_LABEL[value]}
+    </span>
   );
 }

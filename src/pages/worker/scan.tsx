@@ -40,11 +40,17 @@ import {
   Images,
   Flashlight,
   ZoomOut,
+  Pointer,
 } from "lucide-react";
 import jsQR from "jsqr";
 import { useT } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
-import { parseStickerData, parseJobCardBarcode } from "@/lib/qr-utils";
+import {
+  parseStickerData,
+  parseJobCardBarcode,
+  parseRackQr,
+  parseItemQr,
+} from "@/lib/qr-utils";
 import { deriveBarcodeToken } from "@/lib/job-card-id";
 import { deriveWipName } from "@/lib/wip-name";
 import { z } from "zod";
@@ -300,7 +306,9 @@ export default function WorkerScanPage() {
   // until ready the ref is null and jsQR carries QR. The ref holds a closure
   // that turns an ImageData into the decoded text (or null) so no ZXing types
   // leak into the hot tick loop.
-  const zxingRef = useRef<((img: ImageData) => string | null) | null>(null);
+  const zxingRef = useRef<
+    ((img: ImageData) => { text: string; cy: number } | null) | null
+  >(null);
   const zxingLoadingRef = useRef<Promise<void> | null>(null);
   // Lens zoom state lifted to refs so a tap-to-reset control (outside the scan
   // loop) can zoom back out — the QR auto-zoom-on-fail would otherwise leave the
@@ -341,7 +349,25 @@ export default function WorkerScanPage() {
                 ),
               ),
             );
-            return res ? res.getText() : null;
+            if (!res) return null;
+            // Vertical centre of the decoded code (normalised 0..1) from its
+            // result points. NOTE: considerHit no longer gates on this — barcode
+            // fires INSTANTLY like QR (2026-06-18). cy is kept only for signature
+            // parity / a possible future nearest-centre SELECTION tie-break. It
+            // must NEVER be used to REJECT a decode — a cy/band reject was the
+            // "扫不到" regression. No points → 0.5.
+            let cy = 0.5;
+            try {
+              const pts = res.getResultPoints?.() ?? [];
+              if (pts.length) {
+                let sum = 0;
+                for (const p of pts) sum += p.getY();
+                cy = sum / pts.length / height;
+              }
+            } catch {
+              cy = 0.5;
+            }
+            return { text: res.getText(), cy };
           } catch {
             return null; // NotFoundException — no code in this frame
           }
@@ -395,6 +421,33 @@ export default function WorkerScanPage() {
   const [rackChoice, setRackChoice] = useState("");
   const [savingRack, setSavingRack] = useState(false);
   const [rackSaved, setRackSaved] = useState(false);
+  // Bulk rack stock-in (#52): scan a rack QR (HKRACK:) to enter the mode, then
+  // each FG/packing/PO scan accumulates into a list; one "Stock In" puts them
+  // all into that rack. Additive — never touches the decode loop or the normal
+  // WIP lookup. rackStockInRef mirrors the state so the memoised handleDecoded
+  // reads the current value without being re-created on every scan.
+  const [rackStockIn, setRackStockIn] = useState<{
+    rackId: string;
+    items: Array<{
+      poId: string;
+      poNo: string;
+      productCode: string;
+      productName: string;
+      qty: number;
+      manual?: boolean;
+    }>;
+  } | null>(null);
+  const rackStockInRef = useRef(rackStockIn);
+  useEffect(() => {
+    rackStockInRef.current = rackStockIn;
+  }, [rackStockIn]);
+  const [rackStockingIn, setRackStockingIn] = useState(false);
+  const [rackStockMsg, setRackStockMsg] = useState("");
+  // Tiny on-screen diagnostic for barcode mode (Wei Siang 2026-06-17, after
+  // several "没反应" rounds): shows video dims, ROI, ZXing-loaded, decode
+  // attempts + last raw read, so a failure is observable on the phone instead
+  // of guessed at. Updated ~1.5x/sec from the scan loop; QR mode never sets it.
+  const [scanDbg, setScanDbg] = useState("");
 
   // Pull worker ID + home department from cached /me so we can auto-attribute
   // the scan AND show the card for the worker's OWN section on a shared
@@ -484,6 +537,43 @@ export default function WorkerScanPage() {
       /* leave unsaved — the worker can tap Save again */
     } finally {
       setSavingRack(false);
+    }
+  }, []);
+
+  // #52 — submit the accumulated rack stock-in list to the worker bulk endpoint.
+  const submitRackStockIn = useCallback(async () => {
+    const rs = rackStockInRef.current;
+    if (!rs || rs.items.length === 0) return;
+    setRackStockingIn(true);
+    setRackStockMsg("");
+    try {
+      const res = await workerFetch("/api/worker/rack-bulk-stock-in", {
+        method: "POST",
+        body: JSON.stringify({
+          rackLocationId: rs.rackId,
+          items: rs.items.map((x) => ({
+            productCode: x.productCode,
+            productName: x.productName,
+            productionOrderId: x.manual ? undefined : x.poId,
+            qty: x.qty,
+          })),
+        }),
+      });
+      const j = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        count?: number;
+        error?: string;
+      };
+      if (res.ok && j.ok) {
+        setRackStockMsg(`✓ Stocked ${j.count ?? rs.items.length} into ${rs.rackId}`);
+        setRackStockIn({ rackId: rs.rackId, items: [] });
+      } else {
+        setRackStockMsg(j.error || "Stock-in failed, please retry");
+      }
+    } catch {
+      setRackStockMsg("Stock-in failed, please retry");
+    } finally {
+      setRackStockingIn(false);
     }
   }, []);
 
@@ -591,6 +681,101 @@ export default function WorkerScanPage() {
   // 2/2 on a qty=2 job card is otherwise indistinguishable.
   const handleDecoded = useCallback(
     async (raw: string) => {
+      // Rack bulk stock-in (#52). A rack QR (HKRACK:<id>) enters/keeps the mode;
+      // while in it, every subsequent FG/packing/PO scan is ADDED to that rack's
+      // list instead of doing a normal WIP lookup. Checked first so a rack scan
+      // never falls into the job-card path.
+      const scannedRackId = parseRackQr(raw);
+      if (scannedRackId) {
+        setRackStockMsg("");
+        setRackStockIn((prev) =>
+          prev && prev.rackId === scannedRackId
+            ? prev
+            : { rackId: scannedRackId, items: prev?.items ?? [] },
+        );
+        setResult({ kind: "idle" });
+        return;
+      }
+      if (rackStockInRef.current) {
+        // Manual item QR (HKITEM:<name>[|<code>]) — a non-system item; add it by
+        // its name, no PO lookup.
+        const manualItem = parseItemQr(raw);
+        if (manualItem) {
+          const key = `manual:${manualItem.code || manualItem.name}`;
+          setRackStockMsg("");
+          setRackStockIn((prev) => {
+            if (!prev) return prev;
+            const items = [...prev.items];
+            const i = items.findIndex((x) => x.poId === key);
+            if (i >= 0) {
+              items[i] = { ...items[i], qty: items[i].qty + 1 };
+            } else {
+              items.push({
+                poId: key,
+                poNo: "Manual",
+                productCode: manualItem.code || manualItem.name,
+                productName: manualItem.name,
+                qty: 1,
+                manual: true,
+              });
+            }
+            return { ...prev, items };
+          });
+          return;
+        }
+        // Only FG/packing stickers (op=FG-*) stock IN here. A dept-changeover QR
+        // or a WIP job-card barcode must STILL do its normal action even with the
+        // rack panel open — otherwise a worker who forgot to tap 退出 silently
+        // loses a dept clock-in or a WIP completion (audit C1, 2026-06-17). So if
+        // this isn't an FG sticker, DON'T return — fall through to the handlers
+        // below.
+        const rs0 = parseStickerData(raw);
+        const isFgSticker = !!rs0?.opId && /^FG-/i.test(rs0.opId);
+        if (isFgSticker && rs0?.poNo) {
+          let order: Order | undefined;
+          try {
+            order = (await findMatches(rs0.poNo))[0]?.order;
+          } catch {
+            order = undefined;
+          }
+          if (!order) {
+            setRackStockMsg(`Not recognised: ${rs0.poNo}`);
+            return;
+          }
+          const matched = order;
+          setRackStockMsg("");
+          setRackStockIn((prev) => {
+            if (!prev) return prev;
+            const items = [...prev.items];
+            const i = items.findIndex((x) => x.poId === matched.id);
+            if (i >= 0) {
+              items[i] = { ...items[i], qty: items[i].qty + 1 };
+            } else {
+              items.push({
+                poId: matched.id,
+                poNo: matched.poNo,
+                productCode: matched.productCode,
+                productName: matched.productName || matched.productCode,
+                qty: 1,
+              });
+            }
+            return { ...prev, items };
+          });
+          return;
+        }
+        // Not a stock-in item → fall through to dept-scan / WIP / normal lookup.
+      }
+      // A manual item QR (HKITEM:) scanned OUTSIDE rack stock-in mode has no PO
+      // to look up — show what it is + how to use it, not a blank "not found".
+      const manualOutside = parseItemQr(raw);
+      if (manualOutside) {
+        setResult({
+          kind: "error",
+          message: `Manual item: ${manualOutside.name}. Scan a rack QR first to stock it in.`,
+          decoded: raw,
+        });
+        return;
+      }
       // Department QR (deptscan=<CODE> in the QR's URL) — not a job card.
       // Tells payroll "I am now working in this department"; handled before
       // any sticker parsing so it can never fall into the JC lookup.
@@ -1033,59 +1218,42 @@ export default function WorkerScanPage() {
     const onHit = (data: string) => {
       if (stopped || !data) return;
       stopped = true;
-      stopLiveScan();
-      void handleDecoded(data);
+      // Cyan confirm flash so QR matches the barcode tap feedback — both modes now
+      // flash 青色 on a successful read (owner 2026-06-18). QR has no tap point, so
+      // centre the ring on the video; a brief delay lets it show before the overlay
+      // unmounts for the result card.
+      const v = videoRef.current;
+      if (v && v.clientWidth > 0) {
+        setTapFx({ x: v.clientWidth / 2, y: v.clientHeight / 2, state: "hit" });
+      }
+      // eslint-disable-next-line no-restricted-syntax -- brief one-shot delay so the cyan confirm is visible before navigating
+      window.setTimeout(() => {
+        stopLiveScan();
+        void handleDecoded(data);
+      }, 250);
     };
 
-    // "Too sensitive" guard (Wei Siang 2026-06-17): in BARCODE mode the schedule
-    // stacks many codes close together, so firing on the very first detection
-    // grabbed whatever flashed into frame before the worker had aimed. Require
-    // the SAME value to stay decoded for ~1s before locking — that's the "對準
-    // 1-2 秒先". QR mode (one sticker in view) stays instant.
-    let stableVal: string | null = null;
-    let stableSince = 0;
     let barcodeNativeMiss = 0;
-    // 600ms (was 900): still requires the SAME code held briefly so a barcode
-    // flashing through frame can't fire, but locks faster once the worker is
-    // aimed — the 900ms felt like "扫不到" when decodes were sparse.
-    // Barcode fires after the same value persists this long. Sparse iOS-Safari
-    // ZXing decodes never held 600ms → felt like 扫不到; the value is already
-    // Code128-checksum-valid AND bounded to the aim box, so a short confirm is safe.
-    const STABLE_MS = 300;
-    // Map the on-screen aim box (CSS px, centred over an object-cover video) to a
-    // crop rect in RAW VIDEO pixels. object-cover scales the frame by
-    // max(clientW/vw, clientH/vh) and centre-crops; the inverse maps the centred
-    // CSS box back to a centred video-px rect. WITHOUT this the decoded band did
-    // not line up with the white box, so barcode mode read a neighbouring stacked
-    // row or nothing (Wei Siang 2026-06-17). The box dims here MUST match the
-    // reticle JSX (86vw, max 440px, 118px tall).
-    const aimRoi = () => {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      const cw = video.clientWidth || vw;
-      const ch = video.clientHeight || vh;
-      const cover = Math.max(cw / vw, ch / vh) || 1;
-      const boxWcss = Math.min(0.86 * cw, 440);
-      const boxHcss = 118;
-      const sw = Math.max(1, Math.min(vw, Math.round(boxWcss / cover)));
-      const sh = Math.max(1, Math.min(vh, Math.round(boxHcss / cover)));
-      const sx = Math.round((vw - sw) / 2);
-      const sy = Math.round((vh - sh) / 2);
-      return { sx, sy, sw, sh };
-    };
-    const considerHit = (data: string) => {
+    // Barcode-mode diagnostic counters (drive scanDbg).
+    let bcN = 0;
+    let bcLast = "";
+    let bcDbgAt = 0;
+    // Barcode = TAP-TO-PICK (owner 2026-06-18). The printed schedule stacks 3-4
+    // Code 128s ~1cm apart, ALL near frame centre — so NO automatic rule can win:
+    // instant-fire grabbed a NEIGHBOUR before the worker aimed, and any hold never
+    // completed because the nearest-centre winner FLICKERS between the stacked rows
+    // (→ "完全没有反应"). Both poles are unwinnable for AUTO selection on a dense
+    // stack. So barcode mode does NOT auto-fire from this loop at all: the worker
+    // TAPS the exact row he wants and `tapScanBarcode` decodes a FULL-WIDTH band
+    // around the tap (one-shot — a thin band on a deliberate tap can NEVER cause
+    // the continuous "扫不到" an always-on crop did; a miss just buzzes for a
+    // re-tap). The loop below still decodes but considerHit ignores it in barcode
+    // mode. QR mode is unchanged: one sticker in view → fire on first decode.
+    // See [[project_hookka_barcode_roi]].
+    const considerHit = (data: string, _cy = 0.5) => {
       if (stopped || !data) return;
-      if (scanMode !== "barcode") {
-        onHit(data);
-        return;
-      }
-      const t = performance.now();
-      if (data === stableVal) {
-        if (t - stableSince >= STABLE_MS) onHit(data);
-      } else {
-        stableVal = data;
-        stableSince = t;
-      }
+      if (scanMode === "barcode") return; // barcode fires ONLY via tapScanBarcode
+      onHit(data); // QR: instant, full-frame
     };
 
     const tick = async () => {
@@ -1102,31 +1270,40 @@ export default function WorkerScanPage() {
             const codes = await nativeDetector.detect(video);
             if (stopped) return;
             if (scanMode === "barcode") {
-              // Only a Code 128 whose vertical centre sits in the aim band, and
-              // the nearest one to centre wins — so 2-3 stacked schedule barcodes
-              // in view don't all fire; the row the worker aimed at is taken.
-              const cy = video.videoHeight / 2;
-              // Accept only a Code 128 whose centre sits inside the aim box band
-              // (mapped to video px via aimRoi so it matches the on-screen box),
-              // and among those the one NEAREST the centre wins — stacked schedule
-              // barcodes above/below are ignored. A code with no boundingBox is
-              // treated as centred so it still fires (dropping those was the
-              // earlier "完全没反应" bug).
-              const roiHalf = aimRoi().sh / 2;
-              let best: { v: string; d: number } | null = null;
+              // FULL FRAME, NEAREST code_128 to centre wins — NO band/position
+              // rejection at decode time. We DECODE the full frame (so it never
+              // goes "扫不到") and pick the SINGLE code whose bbox centre is nearest
+              // the frame centre — a SELECTION that biases toward the row the worker
+              // aimed at but can NEVER reject all. considerHit then fires it
+              // INSTANTLY (no band, no hold) — same as QR (owner 2026-06-18).
+              const vh0 = video.videoHeight || 1;
+              const cx = video.videoWidth / 2;
+              const cyMid = video.videoHeight / 2;
+              let best: { v: string; d: number; ncy: number } | null = null;
               for (const c of codes) {
                 if (!c.rawValue) continue;
                 const fmt = (c as { format?: string }).format;
                 if (fmt && fmt !== "code_128") continue;
-                const bb = (c as { boundingBox?: { y: number; height: number } })
-                  .boundingBox;
-                const d = bb ? Math.abs(bb.y + bb.height / 2 - cy) : 0;
-                if (bb && d > roiHalf) continue; // outside the aim band → ignore
-                if (!best || d < best.d) best = { v: c.rawValue, d };
+                const bb = (
+                  c as {
+                    boundingBox?: {
+                      x: number;
+                      y: number;
+                      width: number;
+                      height: number;
+                    };
+                  }
+                ).boundingBox;
+                const bcy = bb ? bb.y + bb.height / 2 : cyMid;
+                const d = bb
+                  ? Math.hypot(bb.x + bb.width / 2 - cx, bcy - cyMid)
+                  : 0;
+                if (!best || d < best.d)
+                  best = { v: c.rawValue, d, ncy: bcy / vh0 };
               }
               if (best) {
                 barcodeNativeMiss = 0;
-                considerHit(best.v);
+                considerHit(best.v, best.ncy);
                 return;
               }
               // Native BarcodeDetector saw nothing usable. Some phones ship one
@@ -1152,23 +1329,17 @@ export default function WorkerScanPage() {
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
             if (scanMode === "barcode") {
-              // Decode ONLY the centred rectangle ROI (matches the on-screen aim
-              // box). The full frame was ~2MP — grayscale + HybridBinarizer +
-              // TRY_HARDER every tick was too slow on iOS Safari (felt like "没反应"),
-              // AND it contained the stacked schedule barcodes above/below, so
-              // ZXing's single-decoder could grab a code the worker didn't aim at.
-              // Cropping to the centred band is ~5x fewer pixels (fast) and leaves
-              // only the aimed code (accurate). Wei Siang 2026-06-17: "只扫中间的
-              // 长方形,不要扫到别的 barcode".
-              const { sx, sy, sw, sh } = aimRoi();
-              // Downscale only if the ROI is huge; Code 128 density runs
-              // horizontally so keep ~1280px across for sharp bars.
-              const s = Math.min(1, 1280 / sw);
-              const cw = Math.max(1, Math.round(sw * s));
-              const ch = Math.max(1, Math.round(sh * s));
+              // Decode the FULL frame — exactly like QR mode, which reads this
+              // same Code 128 fine. A cropped band is what kept breaking barcode
+              // mode ("扫不到"); the stable-hold (considerHit) is what lets the
+              // worker aim, so no crop is needed. ~1280px working width keeps the
+              // Code 128 bars sharp. ZXing is the sole Code 128 decoder on iOS.
+              const s = Math.min(1, 1280 / Math.max(vw, vh));
+              const cw = Math.max(1, Math.round(vw * s));
+              const ch = Math.max(1, Math.round(vh * s));
               canvas.width = cw;
               canvas.height = ch;
-              ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
+              ctx.drawImage(video, 0, 0, cw, ch);
               let imageData: ImageData | null = null;
               try {
                 imageData = ctx.getImageData(0, 0, cw, ch);
@@ -1182,10 +1353,26 @@ export default function WorkerScanPage() {
               const zxDecode = zxingRef.current;
               if (!zxDecode) {
                 void ensureZxing();
+                if (now - bcDbgAt > 600) {
+                  bcDbgAt = now;
+                  setScanDbg(`v:${vw}×${vh} zx:loading… n:${bcN}`);
+                }
               } else if (imageData) {
-                const zxText = zxDecode(imageData);
-                if (zxText) {
-                  considerHit(zxText);
+                const zx = zxDecode(imageData);
+                bcN++;
+                if (zx) bcLast = zx.text;
+                if (now - bcDbgAt > 600) {
+                  bcDbgAt = now;
+                  setScanDbg(
+                    `v:${vw}×${vh} full zx:✓ n:${bcN} ${bcLast ? bcLast.slice(0, 14) : "—"}`,
+                  );
+                }
+                if (zx) {
+                  // considerHit fires instantly (no band, no hold) — same as QR.
+                  // zx.cy is passed for signature parity only; it is NOT gated on
+                  // (a cy/band reject was the "扫不到" regression). ZXing has no
+                  // centre selection, so on iOS the worker confirms via the card.
+                  considerHit(zx.text, zx.cy);
                   return;
                 }
               }
@@ -1221,9 +1408,9 @@ export default function WorkerScanPage() {
                 // path (iOS/older browsers). Loaded lazily; null until ready.
                 const zxDecode = zxingRef.current;
                 if (zxDecode) {
-                  const zxText = zxDecode(imageData);
-                  if (zxText) {
-                    onHit(zxText);
+                  const zx = zxDecode(imageData);
+                  if (zx) {
+                    onHit(zx.text); // QR mode: instant, no aim box
                     return;
                   }
                 }
@@ -1337,7 +1524,8 @@ export default function WorkerScanPage() {
           // jsQR is QR-only — try ZXing (QR + Code 128) for an uploaded
           // barcode photo (the Code 128 printed on the Production Schedule).
           await ensureZxing();
-          decoded = zxingRef.current ? zxingRef.current(imageData) : null;
+          // Uploaded photo: no aim box (single code per photo) — take the text.
+          decoded = zxingRef.current?.(imageData)?.text ?? null;
         }
         if (!decoded) {
           setResult({ kind: "error", message: t("scan.decodeFail") });
@@ -1351,6 +1539,153 @@ export default function WorkerScanPage() {
       }
     },
     [handleDecoded, t, ensureZxing],
+  );
+
+  // Barcode TAP-TO-PICK: the worker taps the exact barcode row he wants on a
+  // stacked schedule; we decode a FULL-WIDTH band (~22% height) around the tap so
+  // ONLY that row is read (the rows above/below are excluded), then fire it. It is
+  // a ONE-SHOT on the tap — a band that misses just buzzes for a re-tap, so it can
+  // NEVER cause the continuous "扫不到" an always-on crop did (owner 2026-06-18).
+  // Tap feedback (owner 2026-06-18: "完全不知道它能被点击，看起来完全没反应").
+  // A ring blooms at the exact tap point so the worker SEES the tap registered;
+  // it turns red if no bars sat on that row (a re-tap cue). PURELY VISUAL — it
+  // never touches the decode band / ROI / coordinate mapping. {x,y} are px within
+  // the video's overflow container (the video is inset-0, so its rect == it).
+  const [tapFx, setTapFx] = useState<
+    { x: number; y: number; state: "scan" | "hit" | "miss" } | null
+  >(null);
+  useEffect(() => {
+    if (!tapFx) return;
+    // "scan" stays up long enough to cover the tap-decode burst so the ring
+    // doesn't vanish mid-scan; "hit" is a brief cyan confirm; "miss" lingers as a
+    // re-tap cue.
+    const ttl =
+      tapFx.state === "scan" ? 1600 : tapFx.state === "hit" ? 500 : 850;
+    // eslint-disable-next-line no-restricted-syntax -- one-shot auto-clear timer with proper effect cleanup; useTimeout would need a nullable-delay dance for the same result
+    const id = window.setTimeout(() => setTapFx(null), ttl);
+    return () => window.clearTimeout(id);
+  }, [tapFx]);
+
+  const tapScanBarcode = useCallback(
+    async (e: React.PointerEvent<HTMLVideoElement>) => {
+      if (scanMode !== "barcode") return;
+      const video = videoRef.current;
+      if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
+      const rect = video.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      // Instant ACK at the tap point — shows BEFORE the (async) decode so the
+      // worker always sees that his tap landed, even on a miss.
+      setTapFx({
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+        state: "scan",
+      });
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      // object-cover: the frame is scaled to COVER the element, overflow cropped +
+      // centred. Map the tap's Y back to the intrinsic frame so the band lands on
+      // the exact row the worker pointed at.
+      const scale = Math.max(rect.width / vw, rect.height / vh);
+      const offsetY = (vh * scale - rect.height) / 2;
+      const intrinsicY = Math.min(
+        Math.max(0, (e.clientY - rect.top + offsetY) / scale),
+        vh,
+      );
+      const bandH = Math.max(48, Math.round(vh * 0.22));
+      const bandTop = Math.min(
+        Math.max(0, Math.round(intrinsicY - bandH / 2)),
+        Math.max(0, vh - bandH),
+      );
+      // A SEPARATE canvas (not the tick loop's scanCanvasRef) so the live decode
+      // loop and this tap decode never race on the same buffer.
+      const canvas = document.createElement("canvas");
+      canvas.width = vw;
+      canvas.height = bandH;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return;
+      // Decode a BURST of fresh frames around the tap, not just one. A single
+      // grabbed frame is often motion-blurred / mid-focus, so an aimed tap used
+      // to MISS and the worker had to tap again and again (owner 2026-06-18:
+      // "有点不敏感，点了好几次都点不到"). Re-grab the SAME band over ~1s of fresh
+      // frames — first clean frame wins — which is exactly what makes live QR feel
+      // instant. The band stays pinned to the tapped row, so this is still
+      // tap-to-pick (never grabs a stacked neighbour).
+      await ensureZxing();
+      const zx = zxingRef.current;
+      const detector =
+        typeof window !== "undefined" && window.BarcodeDetector
+          ? new window.BarcodeDetector({ formats: ["code_128", "qr_code"] })
+          : null;
+      const nextFrame = () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      let decoded: string | null = null;
+      for (let attempt = 0; attempt < 32 && !decoded; attempt++) {
+        if (video.videoWidth === 0) break; // camera closed mid-burst
+        ctx.drawImage(video, 0, bandTop, vw, bandH, 0, 0, vw, bandH);
+        // Native first (fast + centre-biased among stacked rows): among codes in
+        // the band pick the one nearest the band centre = the tapped row.
+        if (detector) {
+          try {
+            const codes = await detector.detect(canvas);
+            let best: { v: string; d: number } | null = null;
+            for (const c of codes) {
+              if (!c.rawValue) continue;
+              const bb = (
+                c as { boundingBox?: { y: number; height: number } }
+              ).boundingBox;
+              const d = bb ? Math.abs(bb.y + bb.height / 2 - bandH / 2) : 0;
+              if (!best || d < best.d) best = { v: c.rawValue, d };
+            }
+            if (best) decoded = best.v;
+          } catch {
+            /* native flaky this frame → ZXing */
+          }
+        }
+        // ZXing fallback — the ONLY decoder on iOS (no BarcodeDetector there), so
+        // run it every frame when native is absent; otherwise every other frame
+        // to keep the burst snappy.
+        if (!decoded && zx && (!detector || attempt % 2 === 1)) {
+          let img: ImageData | null = null;
+          try {
+            img = ctx.getImageData(0, 0, vw, bandH);
+          } catch {
+            img = null;
+          }
+          if (img) {
+            const r = zx(img);
+            if (r) decoded = r.text;
+          }
+        }
+        if (decoded) break;
+        await nextFrame();
+      }
+      if (decoded) {
+        try {
+          navigator.vibrate?.(30);
+        } catch {
+          /* haptics best-effort */
+        }
+        // Flash the ring CYAN ("青色" = scanned!) so the worker clearly SEES the
+        // tap landed on a real barcode, then hand off to the result card.
+        setTapFx((p) => (p ? { ...p, state: "hit" } : null));
+        for (let k = 0; k < 18 && video.videoWidth !== 0; k++) {
+          await nextFrame();
+        }
+        setTapFx(null);
+        stopLiveScan();
+        void handleDecoded(decoded);
+      } else {
+        // No bars on the tapped row — flip the ring red + buzz so the worker
+        // re-taps ON the barcode. One-shot, so this is NEVER the continuous "扫不到".
+        setTapFx((p) => (p ? { ...p, state: "miss" } : null));
+        try {
+          navigator.vibrate?.([15, 35, 15]);
+        } catch {
+          /* */
+        }
+      }
+    },
+    [scanMode, stopLiveScan, handleDecoded, ensureZxing],
   );
 
   // Pop the next file from the queue and decode it. Called after each
@@ -1787,6 +2122,64 @@ export default function WorkerScanPage() {
         </div>
       )}
 
+      {/* #52 — Rack bulk stock-in panel. Visible whenever a rack QR has been
+          scanned; the worker keeps scanning FG/packing stickers (each adds a
+          line) then taps Stock In to put them all into this rack. */}
+      {rackStockIn && (
+        <div className="bg-white rounded-xl p-4 border border-amber-300 space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-bold text-[#1F1D1B]">
+              📦 Stock in to {rackStockIn.rackId}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setRackStockIn(null);
+                setRackStockMsg("");
+              }}
+              className="text-xs text-[#6B5C32] underline"
+            >
+              Exit
+            </button>
+          </div>
+          <p className="text-xs text-[#6B7280]">
+            Keep scanning FG / packing stickers — each adds one. Tap Stock In
+            when done.
+          </p>
+          {rackStockIn.items.length === 0 ? (
+            <p className="text-sm text-[#6B7280] py-2">Nothing scanned yet.</p>
+          ) : (
+            <ul className="divide-y divide-[#EFEAE5]">
+              {rackStockIn.items.map((it) => (
+                <li
+                  key={it.poId}
+                  className="flex items-center justify-between py-1.5 text-sm"
+                >
+                  <span className="truncate">
+                    {it.productName}
+                    <span className="text-xs text-[#6B7280]"> · {it.poNo}</span>
+                  </span>
+                  <span className="shrink-0 font-semibold">× {it.qty}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {rackStockMsg && (
+            <p className="text-sm font-medium text-[#6B5C32]">{rackStockMsg}</p>
+          )}
+          <button
+            type="button"
+            disabled={rackStockIn.items.length === 0 || rackStockingIn}
+            onClick={submitRackStockIn}
+            className="w-full h-12 rounded-full bg-[#6B5C32] text-white font-bold text-base active:bg-[#5a4d2a] disabled:opacity-40"
+          >
+            {rackStockingIn
+              ? "Stocking in…"
+              : `Stock In (${rackStockIn.items.reduce((s, x) => s + x.qty, 0)})`}
+          </button>
+        </div>
+      )}
+
       {/* Multi-WIP chooser — shown when manual PO lookup returned multiple
           job cards, or a QR scan fell back to PO after the op id went
           stale. On a bedframe PO with Divan + HB under one order, this
@@ -2143,6 +2536,7 @@ export default function WorkerScanPage() {
           <div className="relative flex-1 overflow-hidden">
             <video
               ref={videoRef}
+              onPointerUp={tapScanBarcode}
               className="absolute inset-0 w-full h-full object-cover"
               playsInline
               muted
@@ -2160,9 +2554,10 @@ export default function WorkerScanPage() {
                 <ZoomOut className="h-5 w-5" />
               </button>
             )}
-            {/* Aiming frame — square for QR, wide + short for a 1D barcode (with a
-                centre aim line). In barcode mode the decoder reads ONLY the code
-                centred in this band, so the other stacked rows are ignored. */}
+            {/* Aiming frame — a square for QR. In BARCODE mode it's just a loose
+                "barcodes here" guide: the worker TAPS the exact row he wants
+                (tapScanBarcode reads a band around the tap), so there's no centre
+                to line up against — hence no centre line. */}
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div
                 className="relative"
@@ -2176,11 +2571,54 @@ export default function WorkerScanPage() {
                 <span className="absolute right-0 top-0 h-10 w-10 border-t-4 border-r-4 border-white rounded-tr-lg" />
                 <span className="absolute left-0 bottom-0 h-10 w-10 border-b-4 border-l-4 border-white rounded-bl-lg" />
                 <span className="absolute right-0 bottom-0 h-10 w-10 border-b-4 border-r-4 border-white rounded-br-lg" />
+                {/* no centre line — barcode is tap-to-pick now. Instead a gently
+                    pulsing "Tap to scan" badge makes the tap affordance obvious
+                    (owner 2026-06-18: didn't realise the row was tappable). */}
                 {scanMode === "barcode" && (
-                  <span className="absolute left-3 right-3 top-1/2 -translate-y-1/2 h-0.5 bg-red-500/80" />
+                  <span className="absolute inset-0 flex items-center justify-center">
+                    <span className="flex items-center gap-1.5 rounded-full bg-black/55 px-3 py-1.5 text-white text-xs font-semibold animate-pulse">
+                      <Pointer className="h-3.5 w-3.5" />
+                      {t("scan.tapHintBarcode")}
+                    </span>
+                  </span>
                 )}
               </div>
             </div>
+            {/* Tap ACK ring at the tap point (centre for QR). WHITE = scanning,
+                CYAN ("青色") = scanned OK, RED = nothing decodable there → re-tap.
+                Shown in BOTH modes now: barcode tap + QR success both flash it.
+                Auto-clears via the tapFx effect. */}
+            {tapFx && (
+              <span
+                className="pointer-events-none absolute z-20"
+                style={{
+                  left: tapFx.x,
+                  top: tapFx.y,
+                  transform: "translate(-50%, -50%)",
+                }}
+              >
+                <span
+                  className={`block rounded-full animate-ping ring-2 ${
+                    tapFx.state === "miss"
+                      ? "bg-red-400/30 ring-red-300"
+                      : tapFx.state === "hit"
+                        ? "bg-cyan-300/50 ring-cyan-200"
+                        : "bg-white/20 ring-white/80"
+                  }`}
+                  style={{ width: 72, height: 72 }}
+                />
+                <span
+                  className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full ${
+                    tapFx.state === "miss"
+                      ? "bg-red-400"
+                      : tapFx.state === "hit"
+                        ? "bg-cyan-300"
+                        : "bg-white"
+                  }`}
+                  style={{ width: 13, height: 13 }}
+                />
+              </span>
+            )}
           </div>
           <div className="px-4 pb-7 pt-3 flex flex-col items-center gap-3">
             <p className="text-white/90 text-center text-sm">
@@ -2188,6 +2626,11 @@ export default function WorkerScanPage() {
                 ? t("scan.aimHintBarcode")
                 : t("scan.aimHint")}
             </p>
+            {scanMode === "barcode" && scanDbg && (
+              <p className="font-mono text-[10px] leading-tight text-white/40">
+                {scanDbg}
+              </p>
+            )}
             {/* Big mode toggle at the BOTTOM-centre so it's in thumb reach
                 (Wei Siang 2026-06-16: the top one was too high to tap). */}
             <button

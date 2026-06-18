@@ -1,19 +1,82 @@
 // ---------------------------------------------------------------------------
-// Mail Center — shared inbox (P1: read-only thread list).
+// Mail Center — shared inbox (3-pane Gmail/Outlook-like client + compose).
 //
 // Reads /api/mail-center/threads (list) + /api/mail-center/addresses (the
-// mailbox filter chips). Replying, assigning and alias management land in
-// later phases. Bodies are rendered as plain text in the detail view, never
-// as raw customer HTML.
+// mailbox sidebar). Bodies are rendered as plain text in the detail view,
+// never as raw customer HTML.
+//
+// LAYOUT:
+//   • LEFT RAIL  — "New email" button (opens ComposeDialog), the FOLDER list
+//                  (Inbox / Starred / Sent / Archive / Drafts / Trash / All),
+//                  a LABELS section (filter by client-side label), then the
+//                  mailbox switcher (All mailboxes + per-dept + per-person),
+//                  then the search box.
+//   • MIDDLE     — the thread list (<ThreadList>) with per-row checkbox + hover
+//                  actions, plus a bulk action bar when rows are selected.
+//   • RIGHT (lg+)— a reading pane embedding detail.tsx for the selected thread.
+//
+// FOLDERS vs API STATUS: the backend knows status 'open' / 'closed' plus a
+// 'trashed' soft-delete and DB-backed star / labels / unread flags.
+//   Inbox   → status=open (server filter)
+//   Archive → status=closed (server filter, labelled "Archive")  [= "Done"]
+//   Starred → ?starred=1 (server filter)
+//   Trash   → ?status=trashed (server filter; excluded from every other view)
+//   Sent    → fetched with status=all, narrowed client-side by hasOutbound
+//   All     → fetched with status=all
+//   Drafts  → local-only compose drafts (no backend draft table — mail-local.ts)
+// Star, labels, trash and mark-unread are now DB-backed (PATCH /threads/:id),
+// so they sync across users/devices. Only compose drafts remain local.
+//
+// Mobile / under-lg: tapping a row navigates to the standalone
+// /mail-center/:id page (deep links unchanged). The reading pane is lg-only.
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useNavigate } from "react-router-dom";
 import { useCachedJson } from "@/lib/cached-fetch";
+import { getCurrentUser } from "@/lib/auth";
+import { csrfHeaders } from "@/lib/csrf";
+import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { ComposeDialog } from "./compose";
+import MailCenterDetailPage from "./detail";
+import {
+  subscribe as subscribeLocal,
+  getSnapshot as getLocalSnapshot,
+  deleteDraft,
+  type MailDraft,
+} from "./mail-local";
+import {
+  patchManyStatus,
+  patchManyTrashed,
+  patchManyUnread,
+  patchManyAddLabel,
+  patchThreadStatus,
+  patchThreadStarred,
+  patchThreadUnread,
+  patchThreadTrashed,
+  createLabel,
+  updateLabel,
+  deleteLabel,
+  createDeptMailbox,
+} from "./mail-actions";
+import {
+  type MailLabel,
+  LABEL_PALETTE,
+  labelColorMap,
+  colorForLabel,
+  chipStyle,
+} from "./mail-labels";
 import {
   Mail,
   Search,
@@ -21,7 +84,25 @@ import {
   Inbox,
   ArrowDownLeft,
   ArrowUpRight,
-  CircleDot,
+  PenSquare,
+  ChevronRight,
+  Users,
+  User as UserIcon,
+  Check,
+  Star,
+  Send,
+  Archive,
+  Trash2,
+  FileText,
+  Layers,
+  Tag,
+  MailOpen,
+  MailWarning,
+  X,
+  CheckCheck,
+  Plus,
+  Building2,
+  Settings2,
 } from "lucide-react";
 
 type MailThread = {
@@ -36,14 +117,79 @@ type MailThread = {
   lastSnippet: string;
   messageCount: number;
   unread: boolean;
+  // DB-backed email-client fields (server-side, sync across users/devices).
+  starred: boolean;
+  labels: string[];
+  trashedAt: string | null;
+  // Accurate Sent flag — thread has at least one outbound message.
+  hasOutbound: boolean;
 };
 
 type MailAddress = {
   id: string;
   address: string;
   label: string;
+  assignedDept: string | null;
+  assignedUserName: string | null;
   active: boolean;
 };
+
+// Mailbox sidebar selection. "all" clears the filter (every scoped thread),
+// "dept" narrows to all mailboxes in one department, "mailbox" keeps the
+// single-address behaviour (drives the ?mailbox= query).
+type MailboxFilter =
+  | { kind: "all" }
+  | { kind: "dept"; value: string }
+  | { kind: "mailbox"; value: string };
+
+// A mailbox row in a department group: either a REAL address row, or a MISSING
+// canonical shared mailbox (support@/finance@/hr@ that hasn't been created yet)
+// shown as a placeholder the admin can one-click set up.
+type MailboxEntry =
+  | { kind: "real"; address: MailAddress }
+  | { kind: "missing"; address: string; dept: string };
+
+// Email-client folders. Inbox/Archive map to a server status; the rest are
+// resolved client-side (Starred/Sent/Trash/All) or local-only (Drafts).
+type Folder =
+  | "inbox"
+  | "starred"
+  | "sent"
+  | "archive"
+  | "drafts"
+  | "trash"
+  | "all";
+
+// Department ordering for the sidebar: priority depts first, then A–Z, with
+// the catch-all bucket pinned last.
+const DEPT_PRIORITY = ["Support", "Finance", "HR"];
+const UNASSIGNED_DEPT = "Other";
+
+// Canonical SHARED department mailboxes (owner 2026-06-17 — "I can't see
+// support@/finance@/hr@"). These ALWAYS appear in the Departments section even
+// before anyone creates the address row, so the owner sees them; a SUPER_ADMIN
+// gets a one-click "Set up" that provisions the row (assignedDept set, no user)
+// via the existing POST /addresses. Until inbound RECEIVE is live (MX cutover,
+// #51) they correctly show an empty thread list — that's expected, not a bug.
+const CANONICAL_DEPT_MAILBOXES: { dept: string; address: string }[] = [
+  { dept: "Support", address: "support@hookka.com" },
+  { dept: "Finance", address: "finance@hookka.com" },
+  { dept: "HR", address: "hr@hookka.com" },
+];
+
+function deptRank(dept: string): number {
+  const i = DEPT_PRIORITY.indexOf(dept);
+  if (i !== -1) return i;
+  if (dept === UNASSIGNED_DEPT) return DEPT_PRIORITY.length + 1;
+  return DEPT_PRIORITY.length;
+}
+
+function sortDepts(a: string, b: string): number {
+  const ra = deptRank(a);
+  const rb = deptRank(b);
+  if (ra !== rb) return ra - rb;
+  return a.localeCompare(b);
+}
 
 function fmtTime(iso: string): string {
   if (!iso) return "";
@@ -56,15 +202,480 @@ function fmtTime(iso: string): string {
     : d.toLocaleDateString();
 }
 
+// Best-effort display name for a thread's counterparty so the list never shows
+// a bare "(unknown sender)" when we actually hold an address. Falls back to the
+// local-part of the email, then a neutral placeholder.
+function senderLabel(t: MailThread): string {
+  const name = t.counterpartyName?.trim();
+  if (name) return name;
+  const email = t.counterpartyEmail?.trim();
+  if (email) {
+    const local = email.split("@")[0];
+    return local || email;
+  }
+  return "(no sender)";
+}
+
+// The reading pane needs real width for three columns, so it turns on at lg.
+const PANE_QUERY = "(min-width: 1024px)";
+function useIsDesktop(): boolean {
+  const [isDesktop, setIsDesktop] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia(PANE_QUERY).matches;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia(PANE_QUERY);
+    const onChange = () => setIsDesktop(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return isDesktop;
+}
+
+// Subscribe the whole page to the local DRAFTS store (star/label/trash/read are
+// now DB-backed and arrive on the thread rows themselves).
+function useLocalMail() {
+  return useSyncExternalStore(subscribeLocal, getLocalSnapshot, getLocalSnapshot);
+}
+
+// ---------------------------------------------------------------------------
+// ThreadList — the thread rows. Each row has a leading checkbox (bulk select),
+// the unread/star column, the sender + subject + snippet, label chips, and a
+// hover action cluster (star / read-unread / archive-or-inbox / trash).
+// ---------------------------------------------------------------------------
+function ThreadList({
+  threads,
+  loading,
+  activeId,
+  folder,
+  selectedIds,
+  colorMap,
+  onToggleSelect,
+  onOpen,
+  onInjectTest,
+  onRowAction,
+}: {
+  threads: MailThread[];
+  loading: boolean;
+  activeId: string | null;
+  folder: Folder;
+  selectedIds: Set<string>;
+  colorMap: Map<string, string>;
+  onToggleSelect: (id: string) => void;
+  onOpen: (id: string) => void;
+  onInjectTest: () => void;
+  onRowAction: (action: RowAction, t: MailThread) => void;
+}) {
+  if (threads.length === 0) {
+    // Quiet, compact empty state — a normal list column that happens to be
+    // empty, NOT a giant card. Gmail/Outlook show a small muted line here.
+    return (
+      <div className="flex flex-col items-center justify-center gap-1.5 px-4 py-10 text-center">
+        <Inbox className="h-6 w-6 text-muted-foreground/40" />
+        <p className="text-xs font-medium text-muted-foreground">
+          {loading ? "Loading…" : emptyLabel(folder)}
+        </p>
+        {!loading && folder === "inbox" && (
+          <>
+            <p className="max-w-xs text-[11px] leading-snug text-muted-foreground/70">
+              Incoming mail will appear here once the domain MX is switched to
+              Cloudflare and the inbound Worker is live.
+            </p>
+            <button
+              onClick={onInjectTest}
+              className="mt-1 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 hover:bg-amber-100"
+            >
+              Inject a test email (verify inbox)
+            </button>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <ul className="divide-y divide-border">
+      {threads.map((t) => {
+        const active = activeId === t.id;
+        const starred = t.starred;
+        const unread = t.unread;
+        const chips = t.labels;
+        const selected = selectedIds.has(t.id);
+        return (
+          <li
+            key={t.id}
+            className={cn(
+              "group relative flex items-stretch border-l-2 transition",
+              active
+                ? "border-amber-500 bg-amber-50/70"
+                : selected
+                  ? "border-amber-400 bg-amber-50/40"
+                  : unread
+                    ? "border-amber-400 bg-amber-50/30"
+                    : "border-transparent hover:bg-muted/50",
+            )}
+          >
+            {/* Select checkbox — its own click target, never opens the row. */}
+            <label
+              className="flex cursor-pointer items-center pl-3 pr-1"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <input
+                type="checkbox"
+                checked={selected}
+                onChange={() => onToggleSelect(t.id)}
+                aria-label={`Select conversation with ${senderLabel(t)}`}
+                className="h-3.5 w-3.5 cursor-pointer rounded border-[#C9C2BA] text-[#6B5C32] focus:ring-[#6B5C32]/30"
+              />
+            </label>
+
+            {/* Star toggle — DB-backed (PATCH starred). */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onRowAction(starred ? "unstar" : "star", t);
+              }}
+              aria-label={starred ? "Unstar" : "Star"}
+              title={starred ? "Unstar" : "Star"}
+              className="flex items-center px-1 text-muted-foreground/40 hover:text-amber-500"
+            >
+              <Star
+                className={cn(
+                  "h-4 w-4",
+                  starred && "fill-amber-400 text-amber-500",
+                )}
+              />
+            </button>
+
+            <button
+              onClick={() => onOpen(t.id)}
+              className="flex min-w-0 flex-1 items-start gap-2 py-3 pr-2 text-left"
+            >
+              {/* Unread dot / direction arrow column. */}
+              <div className="mt-1.5 flex h-4 w-4 shrink-0 items-center justify-center">
+                {unread ? (
+                  <span className="h-2.5 w-2.5 rounded-full bg-amber-500" />
+                ) : t.lastDirection === "outbound" ? (
+                  <ArrowUpRight className="h-3.5 w-3.5 text-muted-foreground/50" />
+                ) : (
+                  <ArrowDownLeft className="h-3.5 w-3.5 text-muted-foreground/50" />
+                )}
+              </div>
+
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span
+                    className={cn(
+                      "truncate text-sm",
+                      unread
+                        ? "font-semibold text-foreground"
+                        : "font-medium text-foreground/90",
+                    )}
+                  >
+                    {senderLabel(t)}
+                  </span>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {fmtTime(t.lastMessageAt)}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={cn(
+                      "truncate text-sm",
+                      unread ? "text-foreground" : "text-muted-foreground",
+                    )}
+                  >
+                    {t.subject}
+                  </span>
+                  {t.messageCount > 1 && (
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      ({t.messageCount})
+                    </span>
+                  )}
+                </div>
+                {t.lastSnippet && (
+                  <p className="truncate text-xs text-muted-foreground/80">
+                    {/* Strip any HTML so the preview reads clean text, not raw
+                        source like "<!DOCTYPE H…" (owner 2026-06-18). */}
+                    {t.lastSnippet
+                      .replace(/<[^>]+>/g, " ")
+                      .replace(/&(?:nbsp|amp|lt|gt|quot|#\d+);/gi, " ")
+                      .replace(/\s+/g, " ")
+                      .trim() || "(no preview)"}
+                  </p>
+                )}
+                {chips.length > 0 && (
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {chips.map((l) => {
+                      const color = colorForLabel(l, colorMap);
+                      return (
+                        <span
+                          key={l}
+                          style={chipStyle(color)}
+                          className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ring-black/5"
+                        >
+                          <span
+                            className="h-1.5 w-1.5 rounded-full"
+                            style={{ backgroundColor: color }}
+                            aria-hidden="true"
+                          />
+                          {l}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Mailbox + status. Status VALUE stays 'closed'; the chip reads
+                  "Archived" to match the folder name. */}
+              <div className="ml-1 flex shrink-0 flex-col items-end gap-1">
+                {t.mailboxAddress && (
+                  <Badge className="max-w-[150px] truncate text-[10px]">
+                    {t.mailboxAddress}
+                  </Badge>
+                )}
+                {t.status === "closed" && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
+                    <Check className="h-3 w-3" />
+                    Archived
+                  </span>
+                )}
+              </div>
+            </button>
+
+            {/* Hover action cluster — appears on row hover (always visible on
+                touch via focus-within). */}
+            <div className="flex shrink-0 items-center gap-0.5 pr-2 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+              <RowIconButton
+                title={unread ? "Mark as read" : "Mark as unread"}
+                onClick={() => onRowAction(unread ? "read" : "unread", t)}
+              >
+                {unread ? (
+                  <MailOpen className="h-4 w-4" />
+                ) : (
+                  <MailWarning className="h-4 w-4" />
+                )}
+              </RowIconButton>
+              {folder !== "trash" &&
+                (t.status === "closed" ? (
+                  <RowIconButton
+                    title="Move to Inbox"
+                    onClick={() => onRowAction("inbox", t)}
+                  >
+                    <Inbox className="h-4 w-4" />
+                  </RowIconButton>
+                ) : (
+                  <RowIconButton
+                    title="Archive (mark done)"
+                    onClick={() => onRowAction("archive", t)}
+                  >
+                    <Archive className="h-4 w-4" />
+                  </RowIconButton>
+                ))}
+              {folder === "trash" ? (
+                <RowIconButton
+                  title="Restore from Trash"
+                  onClick={() => onRowAction("restore", t)}
+                >
+                  <RotateIcon />
+                </RowIconButton>
+              ) : (
+                <RowIconButton
+                  title="Move to Trash"
+                  onClick={() => onRowAction("trash", t)}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </RowIconButton>
+              )}
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+type RowAction =
+  | "star"
+  | "unstar"
+  | "read"
+  | "unread"
+  | "archive"
+  | "inbox"
+  | "trash"
+  | "restore";
+
+function RowIconButton({
+  title,
+  onClick,
+  children,
+}: {
+  title: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className="rounded p-1.5 text-muted-foreground/70 transition hover:bg-muted hover:text-foreground"
+    >
+      {children}
+    </button>
+  );
+}
+
+// Small inline "restore" glyph (reuse lucide RotateCcw look without another
+// import name clash) — a circular arrow.
+function RotateIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4"
+      aria-hidden="true"
+    >
+      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+      <path d="M3 3v5h5" />
+    </svg>
+  );
+}
+
+function emptyLabel(folder: Folder): string {
+  switch (folder) {
+    case "starred":
+      return "No starred mail";
+    case "sent":
+      return "No sent mail";
+    case "archive":
+      return "Nothing archived";
+    case "drafts":
+      return "No drafts";
+    case "trash":
+      return "Trash is empty";
+    case "all":
+      return "No mail";
+    default:
+      return "No mail yet";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Drafts list — local-only saved compose drafts (no backend draft store).
+// Resuming a draft re-opens the compose dialog pre-filled.
+// ---------------------------------------------------------------------------
+function DraftsList({
+  drafts,
+  onResume,
+}: {
+  drafts: MailDraft[];
+  onResume: (d: MailDraft) => void;
+}) {
+  if (drafts.length === 0) {
+    // Compact, quiet empty state to match the thread list (no giant card).
+    return (
+      <div className="flex flex-col items-center justify-center gap-1.5 px-4 py-10 text-center">
+        <FileText className="h-6 w-6 text-muted-foreground/40" />
+        <p className="text-xs font-medium text-muted-foreground">No drafts</p>
+        <p className="max-w-xs text-[11px] leading-snug text-muted-foreground/70">
+          Start a new email and choose “Save draft” to keep it here. Drafts are
+          stored on this device only.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <ul className="divide-y divide-border">
+      {drafts.map((d) => (
+        <li key={d.id} className="group flex items-stretch hover:bg-muted/50">
+          <button
+            onClick={() => onResume(d)}
+            className="flex min-w-0 flex-1 items-start gap-2 px-4 py-3 text-left"
+          >
+            <FileText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground/60" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate text-sm font-medium text-foreground/90">
+                  {d.subject?.trim() || "(no subject)"}
+                </span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {fmtTime(new Date(d.updatedAt).toISOString())}
+                </span>
+              </div>
+              <p className="truncate text-xs text-muted-foreground">
+                To {d.to?.trim() || "—"}
+              </p>
+              {d.body && (
+                <p className="truncate text-xs text-muted-foreground/80">
+                  {d.body}
+                </p>
+              )}
+            </div>
+          </button>
+          <div className="flex shrink-0 items-center pr-2 opacity-0 transition group-hover:opacity-100">
+            <RowIconButton
+              title="Discard draft"
+              onClick={() => deleteDraft(d.id)}
+            >
+              <Trash2 className="h-4 w-4" />
+            </RowIconButton>
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function MailCenterPage() {
   const navigate = useNavigate();
+  const isDesktop = useIsDesktop();
+  const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
+  const local = useLocalMail();
+  // SUPER_ADMIN sees every mailbox (the backend scope returns all) AND gets the
+  // one-click "Set up" for a missing canonical department mailbox.
+  const isSuperAdmin =
+    (getCurrentUser()?.role ?? "").toUpperCase() === "SUPER_ADMIN";
+
   const [q, setQ] = useState("");
-  const [status, setStatus] = useState<"open" | "closed" | "all">("open");
-  const [mailbox, setMailbox] = useState<string>("");
+  const [folder, setFolder] = useState<Folder>("inbox");
+  const [labelFilter, setLabelFilter] = useState<string | null>(null);
+  const [filter, setFilter] = useState<MailboxFilter>({ kind: "all" });
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [resumeDraft, setResumeDraft] = useState<MailDraft | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // Label manager dialog (create / rename / recolour / delete catalogue labels).
+  const [labelManagerOpen, setLabelManagerOpen] = useState(false);
+
+  // Map folder → the server status param. Inbox/Archive/Trash filter
+  // server-side; Starred/Sent/All fetch the full (non-trashed) set and narrow
+  // client-side; Drafts doesn't hit the threads endpoint at all. Trashed rows
+  // are excluded from every non-Trash view by the backend.
+  const apiStatus: "open" | "closed" | "trashed" | "all" =
+    folder === "inbox"
+      ? "open"
+      : folder === "archive"
+        ? "closed"
+        : folder === "trash"
+          ? "trashed"
+          : "all";
 
   const params = new URLSearchParams();
-  if (status !== "all") params.set("status", status);
-  if (mailbox) params.set("mailbox", mailbox);
+  if (apiStatus !== "all") params.set("status", apiStatus);
+  if (filter.kind === "mailbox") params.set("mailbox", filter.value);
   const listUrl = `/api/mail-center/threads${params.toString() ? `?${params.toString()}` : ""}`;
 
   const {
@@ -77,23 +688,424 @@ export default function MailCenterPage() {
     "/api/mail-center/addresses",
     300,
   );
+  // Label catalogue (name → colour). Drives the coloured dots in the sidebar +
+  // thread-list chips and the label menus. Short TTL so a create/recolour shows
+  // promptly; the mutation helpers also invalidate this prefix.
+  const { data: labelCatalog } = useCachedJson<MailLabel[]>(
+    "/api/mail-center/labels",
+    60,
+  );
+  // Dedicated trashed fetch — drives the Trash folder badge from ANY folder
+  // (the main list excludes trashed rows server-side, so it can't be counted
+  // from there). Mirrors the mailbox filter so the badge tracks the current
+  // mailbox scope.
+  const trashCountUrl = `/api/mail-center/threads?status=trashed${
+    filter.kind === "mailbox" ? `&mailbox=${encodeURIComponent(filter.value)}` : ""
+  }`;
+  const { data: trashedThreads } = useCachedJson<MailThread[]>(
+    trashCountUrl,
+    60,
+  );
 
-  // Client-side text search over the already-scoped list (subject / sender /
-  // snippet) so typing feels instant without a roundtrip per keystroke.
+  const activeAddresses = useMemo(
+    () => (addresses ?? []).filter((a) => a.active),
+    [addresses],
+  );
+
+  // Group active mailboxes by department for the hierarchical switcher.
+  const deptGroups = useMemo(() => {
+    const byDept = new Map<string, MailAddress[]>();
+    for (const a of activeAddresses) {
+      const dept = (a.assignedDept ?? "").trim() || UNASSIGNED_DEPT;
+      const arr = byDept.get(dept);
+      if (arr) arr.push(a);
+      else byDept.set(dept, [a]);
+    }
+    return Array.from(byDept.entries())
+      .map(([dept, mailboxes]) => ({
+        dept,
+        mailboxes: mailboxes
+          .slice()
+          .sort((x, y) =>
+            (x.assignedUserName || x.address).localeCompare(
+              y.assignedUserName || y.address,
+            ),
+          ),
+      }))
+      .sort((a, b) => sortDepts(a.dept, b.dept));
+  }, [activeAddresses]);
+
+  const addressesByDept = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const g of deptGroups) {
+      m.set(g.dept, new Set(g.mailboxes.map((a) => a.address)));
+    }
+    return m;
+  }, [deptGroups]);
+
+  // DEPARTMENT vs PERSONAL split (owner 2026-06-17). The Mailboxes sidebar now
+  // shows a "Departments" section and a separate "Other" (personal) section so
+  // shared mailboxes are never lost among personal aliases:
+  //   • departmentGroups — every real department (≠ "Other"), MERGED with the
+  //     canonical Support/Finance/HR so they ALWAYS appear even when no address
+  //     row exists yet. A canonical dept with no row carries a synthetic
+  //     placeholder entry (a missing shared mailbox) the admin can one-click set
+  //     up. This is why the owner couldn't see support@/finance@/hr@: they were
+  //     never created as rows, so the address-driven list had nothing to show.
+  //   • personalGroup — the "Other" bucket (active aliases with no department,
+  //     e.g. lim@ / violet@), shown under its own "Other" header.
+  const departmentGroups = useMemo(() => {
+    // Real department buckets keyed by dept name (excludes the personal "Other").
+    const real = new Map<string, MailAddress[]>();
+    for (const g of deptGroups) {
+      if (g.dept === UNASSIGNED_DEPT) continue;
+      real.set(g.dept, g.mailboxes);
+    }
+    // Ensure every canonical department is present even with zero mailboxes.
+    const deptNames = new Set<string>(real.keys());
+    for (const c of CANONICAL_DEPT_MAILBOXES) deptNames.add(c.dept);
+
+    const groups: { dept: string; entries: MailboxEntry[] }[] = [];
+    for (const dept of Array.from(deptNames).sort(sortDepts)) {
+      const existing = real.get(dept) ?? [];
+      const haveAddrs = new Set(existing.map((a) => a.address.toLowerCase()));
+      const entries: MailboxEntry[] = existing.map((address) => ({
+        kind: "real",
+        address,
+      }));
+      // Add any canonical shared mailbox for this dept that has no row yet.
+      for (const c of CANONICAL_DEPT_MAILBOXES) {
+        if (c.dept === dept && !haveAddrs.has(c.address.toLowerCase())) {
+          entries.push({ kind: "missing", address: c.address, dept });
+        }
+      }
+      groups.push({ dept, entries });
+    }
+    return groups;
+  }, [deptGroups]);
+
+  // The personal "Other" bucket (aliases with no department).
+  const personalMailboxes = useMemo(() => {
+    const other = deptGroups.find((g) => g.dept === UNASSIGNED_DEPT);
+    return other?.mailboxes ?? [];
+  }, [deptGroups]);
+
+  // Client-side narrowing of the already-scoped list. Trash and status are now
+  // resolved server-side (the fetched set is already the right folder), so this
+  // only layers on:
+  //   1. Folder semantics — Starred (DB star) / Sent (hasOutbound) on top of
+  //      the server status the list was fetched with.
+  //   2. Department filter — when a whole dept is selected.
+  //   3. Label filter — when a sidebar label is active (DB labels).
+  //   4. Text search over subject / sender name / sender email / snippet.
   const visible = useMemo(() => {
-    const list = threads ?? [];
-    const needle = q.trim().toLowerCase();
-    if (!needle) return list;
-    return list.filter(
-      (t) =>
-        t.subject.toLowerCase().includes(needle) ||
-        t.counterpartyEmail.toLowerCase().includes(needle) ||
-        t.counterpartyName.toLowerCase().includes(needle) ||
-        t.lastSnippet.toLowerCase().includes(needle),
-    );
-  }, [threads, q]);
+    let list = threads ?? [];
 
-  const unreadCount = (threads ?? []).filter((t) => t.unread).length;
+    // Folder-specific client narrowing.
+    if (folder === "starred") {
+      list = list.filter((t) => t.starred);
+    } else if (folder === "sent") {
+      // Accurate Sent: thread has at least one outbound message (server-computed
+      // hasOutbound), not the last_direction proxy.
+      list = list.filter((t) => t.hasOutbound);
+    }
+
+    // Department narrowing.
+    if (filter.kind === "dept") {
+      const addrs = addressesByDept.get(filter.value);
+      list = addrs ? list.filter((t) => addrs.has(t.mailboxAddress)) : [];
+    }
+
+    // Label filter.
+    if (labelFilter) {
+      list = list.filter((t) =>
+        t.labels.some((l) => l.toLowerCase() === labelFilter.toLowerCase()),
+      );
+    }
+
+    // Text search.
+    const needle = q.trim().toLowerCase();
+    if (needle) {
+      list = list.filter(
+        (t) =>
+          t.subject.toLowerCase().includes(needle) ||
+          t.counterpartyEmail.toLowerCase().includes(needle) ||
+          t.counterpartyName.toLowerCase().includes(needle) ||
+          t.lastSnippet.toLowerCase().includes(needle),
+      );
+    }
+
+    return list;
+  }, [threads, q, folder, filter, addressesByDept, labelFilter]);
+
+  // Counts for the folder list. inbox-unread / starred are computed off the
+  // FETCHED set (so they reflect the current mailbox scope), filtered to the
+  // LIVE (non-trashed) rows — the backend already excludes trashed rows from
+  // every non-Trash fetch, so on the Trash folder these read 0 until the user
+  // leaves it. The trash badge comes from its own dedicated fetch so it stays
+  // accurate from any folder.
+  const liveThreads = useMemo(
+    () => (threads ?? []).filter((t) => !t.trashedAt),
+    [threads],
+  );
+
+  const folderCounts = useMemo(() => {
+    const inboxUnread = liveThreads.filter(
+      (t) => t.status === "open" && t.unread,
+    ).length;
+    return {
+      inboxUnread,
+      starred: liveThreads.filter((t) => t.starred).length,
+      trash: (trashedThreads ?? []).length,
+    };
+  }, [liveThreads, trashedThreads]);
+
+  const unreadCount = liveThreads.filter((t) => t.unread).length;
+
+  // Per-mailbox + per-dept unread counts for the mailbox switcher badges.
+  const unreadByMailbox = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of liveThreads) {
+      if (!t.unread) continue;
+      m.set(t.mailboxAddress, (m.get(t.mailboxAddress) ?? 0) + 1);
+    }
+    return m;
+  }, [liveThreads]);
+
+  const unreadByDept = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const g of deptGroups) {
+      let n = 0;
+      for (const a of g.mailboxes) n += unreadByMailbox.get(a.address) ?? 0;
+      m.set(g.dept, n);
+    }
+    return m;
+  }, [deptGroups, unreadByMailbox]);
+
+  // Catalogue colour lookup (name → colour), shared by the sidebar dots and the
+  // thread-list chips.
+  const colorMap = useMemo(
+    () => labelColorMap(labelCatalog ?? []),
+    [labelCatalog],
+  );
+
+  // Sidebar label list = the CATALOGUE (so a freshly created label shows even
+  // before it's applied to any thread) UNIONED with any label name found on a
+  // loaded thread but missing from the catalogue (legacy free-text labels keep
+  // working). Each entry carries its resolved colour for the dot.
+  const labels = useMemo(() => {
+    const names = new Map<string, string>(); // lowerName → displayName
+    for (const l of labelCatalog ?? []) names.set(l.name.toLowerCase(), l.name);
+    for (const t of liveThreads) {
+      for (const l of t.labels) {
+        if (!names.has(l.toLowerCase())) names.set(l.toLowerCase(), l);
+      }
+    }
+    return Array.from(names.values())
+      .sort((a, b) => a.localeCompare(b))
+      .map((name) => ({ name, color: colorForLabel(name, colorMap) }));
+  }, [labelCatalog, liveThreads, colorMap]);
+  const drafts = local.drafts;
+
+  // The selection set may hold ids that are no longer visible (folder switch,
+  // search). Rather than prune it in an effect (which causes a cascading
+  // render), we DERIVE the effective selection as the intersection with the
+  // current visible list. Every consumer below uses this derived set, so a
+  // hidden-but-still-checked id never leaks into counts or bulk actions.
+  const selectedArr = useMemo(
+    () => visible.filter((t) => selectedIds.has(t.id)),
+    [visible, selectedIds],
+  );
+  const selectedVisibleIds = useMemo(
+    () => new Set(selectedArr.map((t) => t.id)),
+    [selectedArr],
+  );
+  const selectedCount = selectedArr.length;
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAllVisible() {
+    setSelectedIds(new Set(visible.map((t) => t.id)));
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  function openThread(id: string) {
+    // Opening a thread marks it read server-side (GET /threads/:id clears the
+    // unread flag); the detail view invalidates the list cache so the row
+    // reflects that on the next read.
+    if (isDesktop) {
+      setSelectedId(id);
+    } else {
+      navigate(`/mail-center/${id}`);
+    }
+  }
+
+  // Single-row hover actions. All DB-backed via PATCH /threads/:id.
+  async function onRowAction(action: RowAction, t: MailThread) {
+    switch (action) {
+      case "star": {
+        const ok = await patchThreadStarred(t.id, true);
+        if (!ok) toast.error("Couldn’t star. Please try again.");
+        break;
+      }
+      case "unstar": {
+        const ok = await patchThreadStarred(t.id, false);
+        if (!ok) toast.error("Couldn’t unstar. Please try again.");
+        break;
+      }
+      case "read": {
+        const ok = await patchThreadUnread(t.id, false);
+        if (!ok) toast.error("Couldn’t update. Please try again.");
+        break;
+      }
+      case "unread": {
+        const ok = await patchThreadUnread(t.id, true);
+        toast[ok ? "success" : "error"](
+          ok ? "Marked as unread." : "Couldn’t update. Please try again.",
+        );
+        break;
+      }
+      case "archive": {
+        const ok = await patchThreadStatus(t.id, "closed");
+        toast[ok ? "success" : "error"](
+          ok ? "Archived." : "Couldn’t archive. Please try again.",
+        );
+        break;
+      }
+      case "inbox": {
+        const ok = await patchThreadStatus(t.id, "open");
+        toast[ok ? "success" : "error"](
+          ok ? "Moved to Inbox." : "Couldn’t move. Please try again.",
+        );
+        break;
+      }
+      case "trash": {
+        const ok = await patchThreadTrashed(t.id, true);
+        if (ok) {
+          if (selectedId === t.id) setSelectedId(null);
+          toast.info("Moved to Trash.");
+        } else {
+          toast.error("Couldn’t move to Trash. Please try again.");
+        }
+        break;
+      }
+      case "restore": {
+        const ok = await patchThreadTrashed(t.id, false);
+        toast[ok ? "info" : "error"](
+          ok ? "Restored from Trash." : "Couldn’t restore. Please try again.",
+        );
+        break;
+      }
+    }
+  }
+
+  // ── Bulk actions over the current selection (selectedArr is derived above
+  // as the visible-intersection, so these never touch hidden rows). ─────────
+  async function bulkStatus(status: "open" | "closed") {
+    const ids = selectedArr.map((t) => t.id);
+    if (ids.length === 0) return;
+    const ok = await patchManyStatus(ids, status);
+    const verb = status === "closed" ? "archived" : "moved to Inbox";
+    if (ok === ids.length) toast.success(`${ok} ${verb}.`);
+    else if (ok > 0) toast.warning(`${ok} of ${ids.length} ${verb}.`);
+    else toast.error(`Couldn’t update. Please try again.`);
+    clearSelection();
+  }
+
+  async function bulkRead(value: boolean) {
+    const ids = selectedArr.map((t) => t.id);
+    if (ids.length === 0) return;
+    const ok = await patchManyUnread(ids, value);
+    const verb = value ? "unread" : "read";
+    if (ok === ids.length) toast.success(`${ok} marked as ${verb}.`);
+    else if (ok > 0) toast.warning(`${ok} of ${ids.length} marked as ${verb}.`);
+    else toast.error("Couldn’t update. Please try again.");
+    clearSelection();
+  }
+
+  async function bulkTrash() {
+    const ids = selectedArr.map((t) => t.id);
+    if (ids.length === 0) return;
+    const confirmed = await confirm({
+      title: `Move ${ids.length} ${ids.length === 1 ? "conversation" : "conversations"} to Trash?`,
+      message:
+        "They’ll move to the Trash folder. You can restore them from there.",
+      confirmLabel: "Move to Trash",
+      tone: "danger",
+    });
+    if (!confirmed) return;
+    const ok = await patchManyTrashed(ids, true);
+    if (selectedId && ids.includes(selectedId)) setSelectedId(null);
+    if (ok === ids.length) toast.info(`${ok} moved to Trash.`);
+    else if (ok > 0) toast.warning(`${ok} of ${ids.length} moved to Trash.`);
+    else toast.error("Couldn’t move to Trash. Please try again.");
+    clearSelection();
+  }
+
+  // Bulk-apply ONE label to the selection. Ensures the catalogue carries the
+  // name (so it gets a colour + shows in the sidebar), then merges it into each
+  // selected thread's label set. `name` comes from the catalogue or is typed new.
+  async function bulkApplyLabel(name: string) {
+    const clean = name.trim();
+    if (!clean) return;
+    const items = selectedArr.map((t) => ({ id: t.id, labels: t.labels }));
+    if (items.length === 0) return;
+    // Create the catalogue entry if it's brand new (idempotent server-side).
+    if (!colorMap.has(clean.toLowerCase())) {
+      await createLabel(clean, LABEL_PALETTE[0].value);
+    }
+    const ok = await patchManyAddLabel(items, clean);
+    if (ok === items.length) toast.success(`Labeled ${ok} as “${clean}”.`);
+    else if (ok > 0) toast.warning(`Labeled ${ok} of ${items.length}.`);
+    else toast.error("Couldn’t label. Please try again.");
+    clearSelection();
+  }
+
+  async function injectTest() {
+    try {
+      await fetch("/api/mail-center/test-inject", {
+        method: "POST",
+        headers: csrfHeaders(),
+        credentials: "include",
+      });
+    } catch {
+      /* ignore — refresh just shows nothing changed */
+    }
+    refresh();
+  }
+
+  // SUPER_ADMIN: provision a missing canonical department mailbox (support@/
+  // finance@/hr@) as a SHARED address (assignedDept set, no user). Confirmed
+  // first ("no naked edits"), then created via the existing POST /addresses.
+  async function setupDeptMailbox(address: string, dept: string) {
+    const confirmed = await confirm({
+      title: `Set up ${address}?`,
+      message: `Creates the shared ${dept} mailbox so the team can receive and reply from it. You can grant people access in User Management → Mailbox Access.`,
+      confirmLabel: "Set up mailbox",
+    });
+    if (!confirmed) return;
+    const id = await createDeptMailbox(address, dept, `${dept} Team`);
+    if (id !== null) {
+      toast.success(`${address} is ready.`);
+      setFilter({ kind: "mailbox", value: address });
+    } else {
+      toast.error("Couldn’t set up the mailbox. Please try again.");
+    }
+  }
+
+  const composeDisabled = activeAddresses.length === 0;
+  const allVisibleSelected =
+    visible.length > 0 && selectedCount >= visible.length;
 
   return (
     <div className="space-y-4">
@@ -104,78 +1116,15 @@ export default function MailCenterPage() {
           <div>
             <h1 className="text-xl font-semibold leading-tight">Mail Center</h1>
             <p className="text-xs text-muted-foreground">
-              共享收件箱 · 客户邮件统一在 ERP 里查看
-              {unreadCount > 0 ? ` · ${unreadCount} 封未读` : ""}
+              Shared inbox · all customer email in one place
+              {unreadCount > 0 ? ` · ${unreadCount} unread` : ""}
             </p>
           </div>
         </div>
         <Button variant="outline" size="sm" onClick={refresh} className="gap-1.5">
           <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
-          刷新
+          Refresh
         </Button>
-      </div>
-
-      {/* Mailbox filter chips */}
-      {addresses && addresses.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            onClick={() => setMailbox("")}
-            className={cn(
-              "rounded-full border px-3 py-1 text-xs font-medium transition",
-              mailbox === ""
-                ? "border-amber-300 bg-amber-50 text-amber-800"
-                : "border-border bg-background text-muted-foreground hover:bg-muted",
-            )}
-          >
-            全部信箱
-          </button>
-          {addresses
-            .filter((a) => a.active)
-            .map((a) => (
-              <button
-                key={a.id}
-                onClick={() => setMailbox(a.address)}
-                className={cn(
-                  "rounded-full border px-3 py-1 text-xs font-medium transition",
-                  mailbox === a.address
-                    ? "border-amber-300 bg-amber-50 text-amber-800"
-                    : "border-border bg-background text-muted-foreground hover:bg-muted",
-                )}
-                title={a.address}
-              >
-                {a.label || a.address}
-              </button>
-            ))}
-        </div>
-      )}
-
-      {/* Search + status */}
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative flex-1 min-w-[220px]">
-          <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="搜索主题 / 寄件人 / 内容…"
-            className="pl-8"
-          />
-        </div>
-        <div className="flex items-center gap-1">
-          {(["open", "all", "closed"] as const).map((s) => (
-            <button
-              key={s}
-              onClick={() => setStatus(s)}
-              className={cn(
-                "rounded-md border px-3 py-1.5 text-xs font-medium transition",
-                status === s
-                  ? "border-amber-300 bg-amber-50 text-amber-800"
-                  : "border-border bg-background text-muted-foreground hover:bg-muted",
-              )}
-            >
-              {s === "open" ? "进行中" : s === "closed" ? "已处理" : "全部"}
-            </button>
-          ))}
-        </div>
       </div>
 
       {error && (
@@ -184,97 +1133,1142 @@ export default function MailCenterPage() {
         </div>
       )}
 
-      {/* Thread list */}
-      <Card>
-        <CardContent className="p-0">
-          {visible.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
-              <Inbox className="h-10 w-10 text-muted-foreground/50" />
-              <p className="text-sm font-medium text-muted-foreground">
-                {loading ? "加载中…" : "还没有邮件"}
+      {/* 3-pane shell: rail / list / reading-pane (Gmail/Outlook proportions —
+          folders rail, a fixed-ish list column ~360-400px, then a flex-1
+          reading pane). Single column under md. */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-[210px_minmax(0,1fr)] lg:grid-cols-[230px_minmax(360px,400px)_minmax(0,1fr)]">
+        {/* LEFT RAIL */}
+        <aside className="space-y-3">
+          <Button
+            variant="primary"
+            className="w-full gap-2 rounded-full bg-[#6B5C32] py-2.5 text-white shadow-sm hover:bg-[#5a4d2a]"
+            onClick={() => {
+              setResumeDraft(null);
+              setComposeOpen(true);
+            }}
+            disabled={composeDisabled}
+            title={
+              composeDisabled
+                ? "No mailbox assigned — ask an admin to assign an @hookka.com address"
+                : "Write a new email"
+            }
+          >
+            <PenSquare className="h-4 w-4" />
+            New email
+          </Button>
+          {composeDisabled && (
+            <p className="text-[11px] leading-snug text-muted-foreground">
+              No mailbox assigned yet — "New email" unlocks once an admin assigns
+              you an @hookka.com address.
+            </p>
+          )}
+
+          {/* FOLDERS */}
+          <nav className="space-y-0.5">
+            <FolderItem
+              icon={Inbox}
+              label="Inbox"
+              active={folder === "inbox"}
+              badge={folderCounts.inboxUnread}
+              onClick={() => {
+                setFolder("inbox");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={Star}
+              label="Starred"
+              active={folder === "starred"}
+              badge={folderCounts.starred}
+              badgeTone="muted"
+              onClick={() => {
+                setFolder("starred");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={Send}
+              label="Sent"
+              active={folder === "sent"}
+              onClick={() => {
+                setFolder("sent");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={Archive}
+              label="Archive"
+              active={folder === "archive"}
+              onClick={() => {
+                setFolder("archive");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={FileText}
+              label="Drafts"
+              active={folder === "drafts"}
+              badge={drafts.length}
+              badgeTone="muted"
+              onClick={() => {
+                setFolder("drafts");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={Trash2}
+              label="Trash"
+              active={folder === "trash"}
+              badge={folderCounts.trash}
+              badgeTone="muted"
+              onClick={() => {
+                setFolder("trash");
+                setLabelFilter(null);
+              }}
+            />
+            <FolderItem
+              icon={Layers}
+              label="All mail"
+              active={folder === "all"}
+              onClick={() => {
+                setFolder("all");
+                setLabelFilter(null);
+              }}
+            />
+          </nav>
+
+          {/* LABELS — DB-backed categories with Gmail-style coloured dots.
+              Selecting one filters the list; "Manage" opens the editor to
+              create / rename / recolour / delete catalogue labels. */}
+          <div className="space-y-0.5">
+            <div className="flex items-center justify-between px-3 pb-0.5 pt-1">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+                Labels
               </p>
-              {!loading && (
-                <p className="max-w-sm text-xs text-muted-foreground/80">
-                  邮件接进来后会显示在这里。等域名邮件路由(MX)切到
-                  Cloudflare、收件 Worker 上线后,客户邮件就会自动落到这个收件箱。
-                </p>
-              )}
+              <button
+                type="button"
+                onClick={() => setLabelManagerOpen(true)}
+                title="Manage labels"
+                aria-label="Manage labels"
+                className="rounded p-0.5 text-muted-foreground/60 transition hover:bg-muted hover:text-foreground"
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+              </button>
             </div>
+            {labels.length === 0 ? (
+              <button
+                type="button"
+                onClick={() => setLabelManagerOpen(true)}
+                className="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-xs text-muted-foreground/70 transition hover:bg-muted"
+              >
+                <Plus className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">Create a label</span>
+              </button>
+            ) : (
+              labels.map((l) => (
+                <button
+                  key={l.name}
+                  onClick={() =>
+                    setLabelFilter(labelFilter === l.name ? null : l.name)
+                  }
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition",
+                    labelFilter === l.name
+                      ? "bg-amber-50 font-medium text-amber-800"
+                      : "text-foreground/80 hover:bg-muted",
+                  )}
+                >
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-inset ring-black/10"
+                    style={{ backgroundColor: l.color }}
+                    aria-hidden="true"
+                  />
+                  <span className="truncate">{l.name}</span>
+                </button>
+              ))
+            )}
+          </div>
+
+          {/* MAILBOX SWITCHER — All mailboxes, then a DEPARTMENTS section
+              (shared support@/finance@/hr@ etc., always shown) and a separate
+              OTHER section for personal aliases. */}
+          <div className="space-y-0.5 border-t border-border/60 pt-2">
+            <p className="px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+              Mailboxes
+            </p>
+            <MailboxItem
+              label="All mailboxes"
+              active={filter.kind === "all"}
+              unread={unreadCount}
+              onClick={() => setFilter({ kind: "all" })}
+            />
+
+            {/* DEPARTMENTS — shared department mailboxes. Canonical
+                Support/Finance/HR always appear; a missing one offers a "Set
+                up" (SUPER_ADMIN) or a quiet "not set up yet" note. */}
+            <p className="flex items-center gap-1.5 px-3 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+              <Building2 className="h-3 w-3" />
+              Departments
+            </p>
+            {departmentGroups.map((g) => (
+              <DeptGroup
+                key={g.dept}
+                dept={g.dept}
+                entries={g.entries}
+                filter={filter}
+                isSuperAdmin={isSuperAdmin}
+                unreadByMailbox={unreadByMailbox}
+                unreadForDept={unreadByDept.get(g.dept) ?? 0}
+                onSelectDept={() => setFilter({ kind: "dept", value: g.dept })}
+                onSelectMailbox={(address) =>
+                  setFilter({ kind: "mailbox", value: address })
+                }
+                onSetupMailbox={setupDeptMailbox}
+              />
+            ))}
+
+            {/* OTHER — personal aliases with no department (e.g. lim@/violet@). */}
+            {personalMailboxes.length > 0 && (
+              <>
+                <p className="flex items-center gap-1.5 px-3 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+                  <UserIcon className="h-3 w-3" />
+                  Other
+                </p>
+                <div className="space-y-0.5">
+                  {personalMailboxes.map((a) => (
+                    <PersonItem
+                      key={a.id}
+                      label={a.assignedUserName || a.address}
+                      title={a.address}
+                      active={
+                        filter.kind === "mailbox" && filter.value === a.address
+                      }
+                      unread={unreadByMailbox.get(a.address) ?? 0}
+                      onClick={() =>
+                        setFilter({ kind: "mailbox", value: a.address })
+                      }
+                    />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Search */}
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search mail…"
+              className="pl-8"
+            />
+          </div>
+        </aside>
+
+        {/* MIDDLE — thread list (or drafts list) */}
+        <Card className="overflow-hidden">
+          <CardContent className="p-0">
+            {/* List toolbar: select-all + bulk action bar. Hidden for Drafts. */}
+            {folder !== "drafts" && visible.length > 0 && (
+              <div className="flex items-center justify-between gap-2 border-b border-border bg-muted/30 px-3 py-1.5">
+                <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    aria-label="Select all"
+                    onChange={() =>
+                      allVisibleSelected ? clearSelection() : selectAllVisible()
+                    }
+                    className="h-3.5 w-3.5 cursor-pointer rounded border-[#C9C2BA] text-[#6B5C32] focus:ring-[#6B5C32]/30"
+                  />
+                  {selectedCount > 0 ? `${selectedCount} selected` : "Select"}
+                </label>
+                <span className="text-[11px] text-muted-foreground/70">
+                  {visible.length}{" "}
+                  {visible.length === 1 ? "conversation" : "conversations"}
+                </span>
+              </div>
+            )}
+
+            {selectedCount > 0 && folder !== "drafts" && (
+              <BulkBar
+                count={selectedCount}
+                folder={folder}
+                labels={labels}
+                onArchive={() => bulkStatus("closed")}
+                onInbox={() => bulkStatus("open")}
+                onRead={() => bulkRead(false)}
+                onUnread={() => bulkRead(true)}
+                onTrash={bulkTrash}
+                onApplyLabel={bulkApplyLabel}
+                onClear={clearSelection}
+              />
+            )}
+
+            {folder === "drafts" ? (
+              <DraftsList
+                drafts={drafts}
+                onResume={(d) => {
+                  setResumeDraft(d);
+                  setComposeOpen(true);
+                }}
+              />
+            ) : (
+              <ThreadList
+                threads={visible}
+                loading={loading}
+                activeId={isDesktop ? selectedId : null}
+                folder={folder}
+                selectedIds={selectedVisibleIds}
+                colorMap={colorMap}
+                onToggleSelect={toggleSelect}
+                onOpen={openThread}
+                onInjectTest={injectTest}
+                onRowAction={onRowAction}
+              />
+            )}
+          </CardContent>
+        </Card>
+
+        {/* RIGHT — reading pane (lg+ only). When a thread is selected it shows
+            the conversation in a card; when nothing is selected it's a simple
+            borderless, centered placeholder (no card, no compose button — the
+            sidebar "New email" is the single compose entry, Gmail/Outlook
+            style). */}
+        <div className="hidden min-w-0 lg:block">
+          {selectedId ? (
+            <Card className="min-w-0">
+              <CardContent className="p-4">
+                <MailCenterDetailPage key={selectedId} id={selectedId} embedded />
+              </CardContent>
+            </Card>
           ) : (
-            <ul className="divide-y divide-border">
-              {visible.map((t) => (
-                <li key={t.id}>
-                  <button
-                    onClick={() => navigate(`/mail-center/${t.id}`)}
-                    className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-muted/50"
-                  >
-                    {/* Unread dot / direction */}
-                    <div className="mt-1 shrink-0">
-                      {t.unread ? (
-                        <CircleDot className="h-4 w-4 text-amber-600" />
-                      ) : t.lastDirection === "outbound" ? (
-                        <ArrowUpRight className="h-4 w-4 text-muted-foreground/60" />
-                      ) : (
-                        <ArrowDownLeft className="h-4 w-4 text-muted-foreground/60" />
-                      )}
-                    </div>
+            <div className="flex h-full min-h-[360px] flex-col items-center justify-center gap-2 px-6 text-center">
+              <Mail className="h-8 w-8 text-muted-foreground/30" />
+              <p className="text-sm text-muted-foreground">
+                Select a conversation to read it here
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
 
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span
-                          className={cn(
-                            "truncate text-sm",
-                            t.unread
-                              ? "font-semibold text-foreground"
-                              : "font-medium text-foreground/90",
-                          )}
-                        >
-                          {t.counterpartyName || t.counterpartyEmail || "(未知寄件人)"}
-                        </span>
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          {fmtTime(t.lastMessageAt)}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className={cn(
-                            "truncate text-sm",
-                            t.unread ? "text-foreground" : "text-muted-foreground",
-                          )}
-                        >
-                          {t.subject}
-                        </span>
-                        {t.messageCount > 1 && (
-                          <span className="shrink-0 text-xs text-muted-foreground">
-                            ({t.messageCount})
-                          </span>
-                        )}
-                      </div>
-                      {t.lastSnippet && (
-                        <p className="truncate text-xs text-muted-foreground/80">
-                          {t.lastSnippet}
-                        </p>
-                      )}
-                    </div>
+      {/* Label manager — create / rename / recolour / delete catalogue labels. */}
+      <LabelManagerDialog
+        open={labelManagerOpen}
+        labels={labelCatalog ?? []}
+        onClose={() => setLabelManagerOpen(false)}
+      />
 
-                    {/* Mailbox + status */}
-                    <div className="ml-1 flex shrink-0 flex-col items-end gap-1">
-                      {t.mailboxAddress && (
-                        <Badge className="max-w-[160px] truncate text-[10px]">
-                          {t.mailboxAddress}
-                        </Badge>
-                      )}
-                      {t.status === "closed" && (
-                        <span className="text-[10px] text-muted-foreground">已处理</span>
-                      )}
-                    </div>
-                  </button>
-                </li>
-              ))}
+      {/* Compose modal — additive overlay; closing returns to the inbox. */}
+      <ComposeDialog
+        open={composeOpen}
+        initialDraft={resumeDraft}
+        onClose={() => {
+          setComposeOpen(false);
+          setResumeDraft(null);
+        }}
+        onSent={(threadId) => {
+          if (isDesktop) setSelectedId(threadId);
+        }}
+      />
+
+      {confirmDialog}
+    </div>
+  );
+}
+
+// ── Folder row ──────────────────────────────────────────────────────────────
+function FolderItem({
+  icon: Icon,
+  label,
+  active,
+  badge,
+  badgeTone = "accent",
+  onClick,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  active: boolean;
+  badge?: number;
+  badgeTone?: "accent" | "muted";
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition",
+        active
+          ? "bg-amber-50 font-semibold text-amber-800"
+          : "text-foreground/80 hover:bg-muted",
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-2.5">
+        <Icon
+          className={cn(
+            "h-4 w-4 shrink-0",
+            active ? "text-amber-700" : "text-muted-foreground/60",
+          )}
+        />
+        <span className="truncate">{label}</span>
+      </span>
+      {badge !== undefined && badge > 0 && (
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+            badgeTone === "accent"
+              ? active
+                ? "bg-amber-200 text-amber-900"
+                : "bg-amber-100 text-amber-800"
+              : active
+                ? "bg-amber-200 text-amber-900"
+                : "bg-muted text-muted-foreground",
+          )}
+        >
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+// ── Bulk action bar ─────────────────────────────────────────────────────────
+function BulkBar({
+  count,
+  folder,
+  labels,
+  onArchive,
+  onInbox,
+  onRead,
+  onUnread,
+  onTrash,
+  onApplyLabel,
+  onClear,
+}: {
+  count: number;
+  folder: Folder;
+  labels: { name: string; color: string }[];
+  onArchive: () => void;
+  onInbox: () => void;
+  onRead: () => void;
+  onUnread: () => void;
+  onTrash: () => void;
+  onApplyLabel: (name: string) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1 border-b border-amber-200 bg-amber-50/70 px-3 py-2">
+      <span className="mr-1 text-xs font-medium text-amber-900">
+        {count} selected
+      </span>
+      {folder === "archive" ? (
+        <BulkButton icon={Inbox} label="Move to Inbox" onClick={onInbox} />
+      ) : folder !== "trash" ? (
+        <BulkButton icon={Archive} label="Archive" onClick={onArchive} />
+      ) : null}
+      <BulkButton icon={MailOpen} label="Read" onClick={onRead} />
+      <BulkButton icon={MailWarning} label="Unread" onClick={onUnread} />
+      <BulkLabelMenu labels={labels} onApplyLabel={onApplyLabel} />
+      {folder !== "trash" && (
+        <BulkButton icon={Trash2} label="Trash" onClick={onTrash} />
+      )}
+      <button
+        onClick={onClear}
+        className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-amber-800 transition hover:bg-amber-100"
+      >
+        <X className="h-3.5 w-3.5" />
+        Clear
+      </button>
+    </div>
+  );
+}
+
+// Bulk "Label" control — a small dropdown listing catalogue labels (with their
+// colour dot) plus a free-text "New label…" row. Picking one applies it to the
+// whole selection (creating the catalogue entry first if it's new). Closes on
+// outside click / Escape.
+function BulkLabelMenu({
+  labels,
+  onApplyLabel,
+}: {
+  labels: { name: string; color: string }[];
+  onApplyLabel: (name: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  function apply(name: string) {
+    const clean = name.trim();
+    if (!clean) return;
+    onApplyLabel(clean);
+    setDraft("");
+    setOpen(false);
+  }
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-white px-2 py-1 text-xs font-medium text-amber-900 transition hover:bg-amber-100"
+      >
+        <Tag className="h-3.5 w-3.5" />
+        Label
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute left-0 top-full z-20 mt-1 w-52 rounded-md border border-[#E2DDD8] bg-white p-1 shadow-lg"
+        >
+          <div className="max-h-48 overflow-y-auto">
+            {labels.length === 0 ? (
+              <p className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                No labels yet — type one below.
+              </p>
+            ) : (
+              labels.map((l) => (
+                <button
+                  key={l.name}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => apply(l.name)}
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-foreground/80 transition hover:bg-muted"
+                >
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-inset ring-black/10"
+                    style={{ backgroundColor: l.color }}
+                    aria-hidden="true"
+                  />
+                  <span className="truncate">{l.name}</span>
+                </button>
+              ))
+            )}
+          </div>
+          <div className="mt-1 flex items-center gap-1 border-t border-border/60 pt-1">
+            <Input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  apply(draft);
+                }
+              }}
+              placeholder="New label…"
+              className="h-7 flex-1 px-2 text-xs"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={!draft.trim()}
+              onClick={() => apply(draft)}
+            >
+              Add
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BulkButton({
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-white px-2 py-1 text-xs font-medium text-amber-900 transition hover:bg-amber-100"
+    >
+      <Icon className="h-3.5 w-3.5" />
+      {label}
+    </button>
+  );
+}
+
+// ── Mailbox switcher rows (unchanged behaviour) ─────────────────────────────
+function MailboxItem({
+  label,
+  title,
+  active,
+  unread,
+  onClick,
+}: {
+  label: string;
+  title?: string;
+  active: boolean;
+  unread: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={cn(
+        "flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition",
+        active
+          ? "bg-amber-50 font-medium text-amber-800"
+          : "text-foreground/80 hover:bg-muted",
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <MailboxAllIcon active={active} />
+        <span className="truncate">{label}</span>
+      </span>
+      {unread > 0 && (
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+            active ? "bg-amber-200 text-amber-900" : "bg-muted text-muted-foreground",
+          )}
+        >
+          {unread}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function MailboxAllIcon({ active }: { active: boolean }) {
+  return (
+    <CheckCheck
+      className={cn(
+        "h-4 w-4 shrink-0",
+        active ? "text-amber-700" : "text-muted-foreground/60",
+      )}
+    />
+  );
+}
+
+function DeptGroup({
+  dept,
+  entries,
+  filter,
+  isSuperAdmin,
+  unreadByMailbox,
+  unreadForDept,
+  onSelectDept,
+  onSelectMailbox,
+  onSetupMailbox,
+}: {
+  dept: string;
+  entries: MailboxEntry[];
+  filter: MailboxFilter;
+  isSuperAdmin: boolean;
+  unreadByMailbox: Map<string, number>;
+  unreadForDept: number;
+  onSelectDept: () => void;
+  onSelectMailbox: (address: string) => void;
+  onSetupMailbox: (address: string, dept: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const deptActive = filter.kind === "dept" && filter.value === dept;
+  // Count only REAL mailboxes for the badge; "missing" canonical entries are
+  // placeholders, not live mailboxes.
+  const realCount = entries.filter((e) => e.kind === "real").length;
+
+  return (
+    <div>
+      <div
+        className={cn(
+          "flex w-full items-center gap-1 rounded-md pr-2 text-sm transition",
+          deptActive
+            ? "bg-amber-50 font-medium text-amber-800"
+            : "text-foreground/80 hover:bg-muted",
+        )}
+      >
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-label={expanded ? `Collapse ${dept}` : `Expand ${dept}`}
+          aria-expanded={expanded}
+          className="flex shrink-0 items-center justify-center rounded p-1 text-muted-foreground/70 hover:text-foreground"
+        >
+          <ChevronRight
+            className={cn(
+              "h-3.5 w-3.5 transition-transform",
+              expanded && "rotate-90",
+            )}
+          />
+        </button>
+        <button
+          type="button"
+          onClick={onSelectDept}
+          className="flex min-w-0 flex-1 items-center justify-between gap-2 py-2 text-left"
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            <Users
+              className={cn(
+                "h-4 w-4 shrink-0",
+                deptActive ? "text-amber-700" : "text-muted-foreground/60",
+              )}
+            />
+            <span className="truncate font-medium">{dept}</span>
+            <span className="shrink-0 text-[11px] font-normal text-muted-foreground/70">
+              {realCount}
+            </span>
+          </span>
+          {unreadForDept > 0 && (
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+                deptActive
+                  ? "bg-amber-200 text-amber-900"
+                  : "bg-muted text-muted-foreground",
+              )}
+            >
+              {unreadForDept}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="ml-3 space-y-0.5 border-l border-border/60 pl-2">
+          {entries.map((e) => {
+            if (e.kind === "missing") {
+              return (
+                <MissingMailboxItem
+                  key={e.address}
+                  address={e.address}
+                  canSetup={isSuperAdmin}
+                  onSetup={() => onSetupMailbox(e.address, e.dept)}
+                />
+              );
+            }
+            const a = e.address;
+            const mailboxActive =
+              filter.kind === "mailbox" && filter.value === a.address;
+            // A shared mailbox (no assigned user) shows its address; a personal
+            // alias misfiled into a dept shows the owner's name.
+            const shared = !(a.assignedUserName ?? "").trim();
+            return (
+              <PersonItem
+                key={a.id}
+                label={a.assignedUserName || a.address}
+                title={a.address}
+                active={mailboxActive}
+                shared={shared}
+                unread={unreadByMailbox.get(a.address) ?? 0}
+                onClick={() => onSelectMailbox(a.address)}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A canonical shared mailbox that has no address row yet. For a SUPER_ADMIN it
+// offers a one-click "Set up"; for everyone else it's a quiet, disabled note so
+// they know the mailbox exists but isn't provisioned.
+function MissingMailboxItem({
+  address,
+  canSetup,
+  onSetup,
+}: {
+  address: string;
+  canSetup: boolean;
+  onSetup: () => void;
+}) {
+  if (!canSetup) {
+    return (
+      <div
+        title={`${address} — not set up yet`}
+        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground/50"
+      >
+        <Mail className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">{address}</span>
+        <span className="ml-auto shrink-0 text-[10px] italic">not set up</span>
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onSetup}
+      title={`Set up the shared mailbox ${address}`}
+      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground/70 transition hover:bg-muted hover:text-foreground"
+    >
+      <Mail className="h-3.5 w-3.5 shrink-0" />
+      <span className="truncate">{address}</span>
+      <span className="ml-auto inline-flex shrink-0 items-center gap-0.5 rounded-full bg-[#EFE9DD] px-1.5 py-0.5 text-[10px] font-medium text-[#6B5C32]">
+        <Plus className="h-2.5 w-2.5" />
+        Set up
+      </span>
+    </button>
+  );
+}
+
+function PersonItem({
+  label,
+  title,
+  active,
+  unread,
+  shared = false,
+  onClick,
+}: {
+  label: string;
+  title?: string;
+  active: boolean;
+  unread: number;
+  // A shared mailbox (no assigned user) gets the multi-user glyph; a personal
+  // alias gets the single-user glyph. Defaults to personal.
+  shared?: boolean;
+  onClick: () => void;
+}) {
+  const Icon = shared ? Users : UserIcon;
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={cn(
+        "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition",
+        active
+          ? "bg-amber-50 font-medium text-amber-800"
+          : "text-foreground/75 hover:bg-muted",
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <Icon
+          className={cn(
+            "h-3.5 w-3.5 shrink-0",
+            active ? "text-amber-700" : "text-muted-foreground/50",
+          )}
+        />
+        <span className="truncate">{label}</span>
+      </span>
+      {unread > 0 && (
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+            active ? "bg-amber-200 text-amber-900" : "bg-muted text-muted-foreground",
+          )}
+        >
+          {unread}
+        </span>
+      )}
+    </button>
+  );
+}
+
+// ── Label manager dialog ─────────────────────────────────────────────────────
+// Gmail-style "Manage labels": a create row (name + colour swatches) and a list
+// of existing catalogue labels, each editable inline (rename, recolour, delete).
+// All mutations go through mail-actions (createLabel/updateLabel/deleteLabel),
+// which invalidate the catalogue + thread caches so the sidebar/chips refresh.
+// Rendered as a fixed overlay the house way (same shape as ComposeDialog).
+function LabelManagerDialog({
+  open,
+  labels,
+  onClose,
+}: {
+  open: boolean;
+  labels: MailLabel[];
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
+  const [newName, setNewName] = useState("");
+  const [newColor, setNewColor] = useState(LABEL_PALETTE[0].value);
+  const [busy, setBusy] = useState(false);
+
+  if (!open) return null;
+
+  async function handleCreate() {
+    const clean = newName.trim();
+    if (!clean || busy) return;
+    if (labels.some((l) => l.name.toLowerCase() === clean.toLowerCase())) {
+      toast.error("A label with that name already exists.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const ok = await createLabel(clean, newColor);
+      if (ok) {
+        setNewName("");
+        setNewColor(LABEL_PALETTE[0].value);
+        toast.success("Label created.");
+      } else {
+        toast.error("Couldn’t create the label. Please try again.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRecolor(id: string, color: string) {
+    setBusy(true);
+    try {
+      const ok = await updateLabel(id, { color });
+      if (!ok) toast.error("Couldn’t update the colour. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRename(id: string, name: string, prev: string) {
+    const clean = name.trim();
+    if (!clean || clean === prev) return;
+    if (
+      labels.some(
+        (l) => l.id !== id && l.name.toLowerCase() === clean.toLowerCase(),
+      )
+    ) {
+      toast.error("A label with that name already exists.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const ok = await updateLabel(id, { name: clean });
+      if (ok) toast.success("Label renamed.");
+      else toast.error("Couldn’t rename the label. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(id: string, name: string) {
+    const confirmed = await confirm({
+      title: `Delete “${name}”?`,
+      message:
+        "The label is removed from every conversation that carries it. This can’t be undone.",
+      confirmLabel: "Delete label",
+      tone: "danger",
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      const ok = await deleteLabel(id);
+      if (ok) toast.success("Label deleted.");
+      else toast.error("Couldn’t delete the label. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center">
+      <div className="fixed inset-0 bg-black/40" onClick={onClose} />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Manage labels"
+        className="relative mx-4 flex max-h-[90vh] w-full max-w-md flex-col rounded-lg border border-[#E2DDD8] bg-white shadow-xl"
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-[#E2DDD8] px-4 py-3">
+          <div className="flex items-center gap-2">
+            <Tag className="h-4 w-4 text-amber-700" />
+            <h3 className="text-sm font-semibold text-[#1F1D1B]">
+              Manage labels
+            </h3>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-md p-1 text-[#6B7280] transition hover:bg-[#F0ECE9]"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-3 overflow-y-auto p-4">
+          {/* Create row */}
+          <div className="space-y-2 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-3">
+            <label className="text-xs font-medium text-[#6B7280]">
+              New label
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleCreate();
+                  }
+                }}
+                placeholder="Label name"
+                className="h-8 flex-1 text-sm"
+              />
+              <Button
+                variant="primary"
+                size="sm"
+                className="h-8 gap-1 bg-[#6B5C32] px-2.5 text-white hover:bg-[#5a4d2a]"
+                disabled={!newName.trim() || busy}
+                onClick={handleCreate}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add
+              </Button>
+            </div>
+            <ColorSwatches value={newColor} onPick={setNewColor} />
+          </div>
+
+          {/* Existing labels */}
+          {labels.length === 0 ? (
+            <p className="px-1 py-2 text-center text-xs text-muted-foreground">
+              No labels yet. Create one above to colour-code conversations.
+            </p>
+          ) : (
+            <ul className="space-y-1.5">
+              {labels
+                .slice()
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((l) => (
+                  <LabelManagerRow
+                    key={`${l.id}:${l.name}`}
+                    label={l}
+                    busy={busy}
+                    onRecolor={handleRecolor}
+                    onRename={handleRename}
+                    onDelete={handleDelete}
+                  />
+                ))}
             </ul>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </div>
+      {confirmDialog}
+    </div>
+  );
+}
+
+// A row in the label manager: the colour dot + an inline-editable name, a colour
+// picker popover, and a delete button.
+function LabelManagerRow({
+  label,
+  busy,
+  onRecolor,
+  onRename,
+  onDelete,
+}: {
+  label: MailLabel;
+  busy: boolean;
+  onRecolor: (id: string, color: string) => void;
+  onRename: (id: string, name: string, prev: string) => void;
+  onDelete: (id: string, name: string) => void;
+}) {
+  // Local editable draft of the name. The PARENT keys this row on id+name, so a
+  // committed rename remounts the row with a fresh draft — no sync effect needed
+  // (which would trip react-hooks/set-state-in-effect).
+  const [name, setName] = useState(label.name);
+  const [editingColor, setEditingColor] = useState(false);
+  const color = label.color || LABEL_PALETTE[0].value;
+
+  return (
+    <li className="relative flex items-center gap-2 rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5">
+      <button
+        type="button"
+        onClick={() => setEditingColor((v) => !v)}
+        title="Change colour"
+        aria-label="Change colour"
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-muted"
+      >
+        <span
+          className="h-3.5 w-3.5 rounded-full ring-1 ring-inset ring-black/10"
+          style={{ backgroundColor: color }}
+        />
+      </button>
+      <Input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onBlur={() => onRename(label.id, name, label.name)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        disabled={busy}
+        className="h-7 flex-1 px-2 text-sm"
+        aria-label={`Rename ${label.name}`}
+      />
+      <button
+        type="button"
+        onClick={() => onDelete(label.id, label.name)}
+        disabled={busy}
+        title="Delete label"
+        aria-label={`Delete ${label.name}`}
+        className="rounded p-1 text-muted-foreground/70 transition hover:bg-muted hover:text-red-600 disabled:opacity-50"
+      >
+        <Trash2 className="h-4 w-4" />
+      </button>
+      {editingColor && (
+        <div className="absolute left-2 top-full z-10 mt-1 rounded-md border border-[#E2DDD8] bg-white p-2 shadow-lg">
+          <ColorSwatches
+            value={color}
+            onPick={(c2) => {
+              onRecolor(label.id, c2);
+              setEditingColor(false);
+            }}
+          />
+        </div>
+      )}
+    </li>
+  );
+}
+
+// The shared colour-swatch row used by the create form and each label's colour
+// popover. Renders the curated palette; the active swatch gets a ring.
+function ColorSwatches({
+  value,
+  onPick,
+}: {
+  value: string;
+  onPick: (color: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {LABEL_PALETTE.map((c2) => {
+        const active = c2.value.toUpperCase() === (value || "").toUpperCase();
+        return (
+          <button
+            key={c2.value}
+            type="button"
+            onClick={() => onPick(c2.value)}
+            title={c2.name}
+            aria-label={c2.name}
+            aria-pressed={active}
+            className={cn(
+              "flex h-6 w-6 items-center justify-center rounded-full ring-1 ring-inset ring-black/10 transition",
+              active && "ring-2 ring-offset-1 ring-[#1F1D1B]",
+            )}
+            style={{ backgroundColor: c2.value }}
+          >
+            {active && <Check className="h-3.5 w-3.5 text-white" />}
+          </button>
+        );
+      })}
     </div>
   );
 }

@@ -58,7 +58,7 @@ export function ScanSupplierModal({
   supplierName,
   poContext,
   onApply,
-  title = "扫描供应商单据 / Scan supplier document",
+  title = "Scan supplier document",
 }: Props) {
   const [phase, setPhase] = useState<"pick" | "scanning" | "review" | "error">(
     "pick",
@@ -111,10 +111,10 @@ export function ScanSupplierModal({
       } catch (e) {
         clearTimeout(timer);
         lastErr = controller.signal.aborted
-          ? "识别超时(90s),请重试。"
+          ? "Scan timed out (90s), please retry."
           : e instanceof Error
             ? e.message
-            : "网络错误";
+            : "Network error";
         if (attempt < MAX - 1) {
           await new Promise((r) =>
             // eslint-disable-next-line no-restricted-syntax -- backoff delay in an async retry loop, not a React render
@@ -241,14 +241,14 @@ export function ScanSupplierModal({
         {phase === "pick" && (
           <div className="p-8 flex flex-col items-center gap-4">
             <p className="text-sm text-[#6B7280] text-center">
-              上传供应商的送货单 / 发票(PDF 或图片),或用手机拍一张。系统会自动读出每一行。
+              Upload the supplier's delivery note / invoice (PDF or image), or snap a photo with your phone. The system reads every line automatically.
             </p>
             <div className="flex gap-3">
               <Button variant="outline" onClick={() => fileRef.current?.click()}>
-                <Upload className="h-4 w-4" /> 上传文件
+                <Upload className="h-4 w-4" /> Upload file
               </Button>
               <Button variant="primary" onClick={() => camRef.current?.click()}>
-                <Camera className="h-4 w-4" /> 拍照
+                <Camera className="h-4 w-4" /> Take photo
               </Button>
             </div>
           </div>
@@ -257,15 +257,15 @@ export function ScanSupplierModal({
         {phase === "scanning" && (
           <div className="p-10 flex flex-col items-center gap-3 text-[#6B7280]">
             <Loader2 className="h-7 w-7 animate-spin" />
-            <p className="text-sm">识别中…(约 30–60 秒)</p>
+            <p className="text-sm">Reading…(about 30–60 seconds)</p>
           </div>
         )}
 
         {phase === "error" && (
           <div className="p-8 flex flex-col items-center gap-4">
-            <p className="text-sm text-[#9A3A2D] text-center">识别失败:{error}</p>
+            <p className="text-sm text-[#9A3A2D] text-center">Scan failed: {error}</p>
             <Button variant="outline" onClick={reset}>
-              重试
+              Retry
             </Button>
           </div>
         )}
@@ -274,33 +274,33 @@ export function ScanSupplierModal({
           <div className="p-5 space-y-4">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">供应商</label>
+                <label className="block text-xs text-[#9CA3AF] mb-1">Supplier</label>
                 <Input
                   value={ex.supplierName ?? ""}
                   onChange={(e) => setHeader("supplierName", e.target.value)}
                 />
               </div>
               <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">单号</label>
+                <label className="block text-xs text-[#9CA3AF] mb-1">Doc No.</label>
                 <Input
                   value={ex.docNo ?? ""}
                   onChange={(e) => setHeader("docNo", e.target.value)}
                 />
               </div>
               <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">日期</label>
+                <label className="block text-xs text-[#9CA3AF] mb-1">Date</label>
                 <Input
                   value={ex.docDate ?? ""}
                   onChange={(e) => setHeader("docDate", e.target.value)}
                 />
               </div>
               <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">类型</label>
+                <label className="block text-xs text-[#9CA3AF] mb-1">Type</label>
                 <div className="flex h-10 items-center text-sm text-[#374151]">
                   {ex.docType === "INVOICE"
-                    ? "发票"
+                    ? "Invoice"
                     : ex.docType === "DELIVERY_NOTE"
-                      ? "送货单"
+                      ? "Delivery Note"
                       : ex.docType || "—"}
                 </div>
               </div>
@@ -310,12 +310,12 @@ export function ScanSupplierModal({
               <table className="w-full text-sm">
                 <thead className="bg-[#F0ECE9] text-[#6B7280]">
                   <tr>
-                    <th className="text-left px-2 py-1.5">料号</th>
-                    <th className="text-left px-2 py-1.5">品名</th>
-                    <th className="text-right px-2 py-1.5 w-20">数量</th>
-                    <th className="text-left px-2 py-1.5 w-16">单位</th>
-                    <th className="text-right px-2 py-1.5 w-24">单价</th>
-                    <th className="text-right px-2 py-1.5 w-24">金额</th>
+                    <th className="text-left px-2 py-1.5">Code</th>
+                    <th className="text-left px-2 py-1.5">Description</th>
+                    <th className="text-right px-2 py-1.5 w-20">Qty</th>
+                    <th className="text-left px-2 py-1.5 w-16">Unit</th>
+                    <th className="text-right px-2 py-1.5 w-24">Unit Price</th>
+                    <th className="text-right px-2 py-1.5 w-24">Amount</th>
                     <th className="w-8" />
                   </tr>
                 </thead>
@@ -326,7 +326,7 @@ export function ScanSupplierModal({
                         colSpan={7}
                         className="px-2 py-4 text-center text-[#9CA3AF]"
                       >
-                        没有读到任何行 — 请重拍一张更清晰的。
+                        No lines detected — please retake a clearer photo.
                       </td>
                     </tr>
                   )}
@@ -388,7 +388,7 @@ export function ScanSupplierModal({
                           type="button"
                           className="text-[#9CA3AF] hover:text-[#9A3A2D]"
                           onClick={() => removeLine(i)}
-                          title="删除这一行"
+                          title="Delete this line"
                         >
                           <X className="h-4 w-4" />
                         </button>
@@ -400,27 +400,27 @@ export function ScanSupplierModal({
             </div>
 
             <p className="text-xs text-[#9CA3AF]">
-              核对无误后点「套用」会把这些行填进当前表单(你仍需检查并保存)。「保存为参考样本」会让这个供应商以后扫得更准。
+              Once everything checks out, click "Apply" to fill these lines into the current form (you still need to review and save). "Save as reference sample" helps this supplier scan more accurately next time.
             </p>
 
             <div className="flex items-center justify-end gap-2">
               <Button variant="ghost" onClick={reset}>
-                重扫
+                Rescan
               </Button>
               <Button
                 variant="outline"
                 disabled={applying}
                 onClick={() => apply(true)}
-                title="套用,并把这次确认的结果存为该供应商的参考样本(gold),提升以后准确度"
+                title="Apply, and save this confirmed result as a reference sample (gold) for this supplier to improve future accuracy"
               >
-                <Check className="h-4 w-4" /> 套用并保存为参考样本
+                <Check className="h-4 w-4" /> Apply & save as reference sample
               </Button>
               <Button
                 variant="primary"
                 disabled={applying || lines.length === 0}
                 onClick={() => apply(false)}
               >
-                套用
+                Apply
               </Button>
             </div>
           </div>

@@ -27,6 +27,7 @@ import {
 import { LeadTimeHistoryDialog } from "./LeadTimeHistoryDialog";
 import { EffectiveDateConfirmModal } from "../products/MaintenanceConfigHistoryDialog";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { csrfHeaders } from "@/lib/csrf";
 import { jcMinutesTotal } from "@/lib/job-card-minutes";
 import { BatchActionToolbar, ApplyBatchDueDateDialog } from "../production/components/BatchActionToolbar";
@@ -439,6 +440,11 @@ function utilizationColor(pct: number): { bar: string; text: string; bg: string 
 export default function PlanningPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
+  // In-app confirm (owner rule [[feedback_no_naked_edits]]: no naked toggle —
+  // flipping auto-schedule globally re-routes how every future SO confirm sets
+  // job-card due dates, so it must ask before applying, via the in-app dialog
+  // rather than window.confirm).
+  const { confirm, confirmDialog } = useConfirm();
   const [activeTab, setActiveTab] = useState<TabId>("capacity");
   // ?fields=minimal&include=jobCards → drops ~20 unused PO fields and the
   // piece_pics tree. jobCards still arrive (planning iterates order.jobCards
@@ -684,6 +690,22 @@ export default function PlanningPage() {
   // confirms leave job-card due dates blank for staff to fill manually, and
   // the Recalculate Existing POs action becomes a no-op so manual dates are
   // preserved. Optimistic local update with rollback on failure.
+  // Ask before flipping the global auto-schedule switch (owner rule: no naked
+  // toggle). Confirmed → apply; cancelled → leave the switch untouched.
+  const requestToggleAutoSchedule = async (next: boolean) => {
+    if (autoScheduleSaving) return;
+    const ok = await confirm({
+      title: next ? "Turn auto-schedule ON?" : "Turn auto-schedule OFF?",
+      message: next
+        ? "New SO confirms will auto-compute job-card due dates from the lead times below. Existing orders are not changed until you Recalculate."
+        : "New SO confirms will leave job-card due dates blank for staff to fill in manually. Existing due dates are left untouched.",
+      confirmLabel: next ? "Turn ON" : "Turn OFF",
+      cancelLabel: "Cancel",
+    });
+    if (!ok) return;
+    await toggleAutoSchedule(next);
+  };
+
   const toggleAutoSchedule = async (next: boolean) => {
     setAutoScheduleSaving(true);
     setAutoScheduleEnabled(next);
@@ -2903,7 +2925,7 @@ export default function PlanningPage() {
                       aria-checked={autoScheduleEnabled}
                       aria-label="Auto-schedule due dates"
                       disabled={autoScheduleSaving}
-                      onClick={() => toggleAutoSchedule(!autoScheduleEnabled)}
+                      onClick={() => requestToggleAutoSchedule(!autoScheduleEnabled)}
                       title={
                         autoScheduleEnabled
                           ? "ON — new SO confirms auto-compute job-card due dates from lead times"
@@ -3137,6 +3159,10 @@ export default function PlanningPage() {
           totalCapacity={totalCapacity}
         />
       )}
+
+      {/* In-app confirm for the auto-schedule toggle (owner rule: no naked
+          toggle). Rendered once; awaited by requestToggleAutoSchedule. */}
+      {confirmDialog}
     </div>
   );
 }

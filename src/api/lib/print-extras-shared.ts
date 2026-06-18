@@ -27,6 +27,7 @@ import {
 } from "./bom-wip-breakdown";
 import { isHeadboardOnlySpecial } from "../routes/fg-units";
 import { partLabelFromKey, type RepairScope } from "../../lib/repair-scope";
+import { compareRackLabels } from "../../lib/rack-format";
 
 // One BOM template per product code, already collapsed to the version we
 // print from (ACTIVE preferred, then latest effectiveFrom).
@@ -334,17 +335,14 @@ export function deriveComponentRacks(
     if (!bucket.includes(rack)) bucket.push(rack);
   }
   // HB first, DIVAN second, the rest in first-seen order — matches the
-  // pieces-string ordering fmtPieces prints. Racks sort numerically so
-  // "Rack 3" lands before "Rack 20".
+  // pieces-string ordering fmtPieces prints. Racks sort numerically (via the
+  // shared compareRackLabels) so "Rack 3" lands before "Rack 20" — the exact
+  // same ordering the compact "Rack 3, 4" grid form uses.
   const labRank = (lab: string) => (lab === "HB" ? 0 : lab === "DIVAN" ? 1 : 2);
   labelOrder.sort((a, b) => labRank(a) - labRank(b));
-  const rackNum = (s: string) => {
-    const mm = s.match(/\d+/);
-    return mm ? Number(mm[0]) : Number.POSITIVE_INFINITY;
-  };
   for (const label of labelOrder) {
     const racks = racksByLabel.get(label)!;
-    racks.sort((a, b) => rackNum(a) - rackNum(b) || a.localeCompare(b));
+    racks.sort(compareRackLabels);
     componentRacks.push({ label, racks });
   }
   return { packedDate, componentRacks };

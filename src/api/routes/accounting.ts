@@ -4979,6 +4979,224 @@ app.post("/official-receipts/:id/void", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// FUND TRANSFER — move money between two bank/cash accounts.
+// Stored ONLY in the immutable ledger (sourceType fund_transfer / fund_transfer_void).
+// No dedicated table.
+// ---------------------------------------------------------------------------
+
+app.post("/fund-transfers", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  const body = await c.req.json();
+  const fromAccount = String(body.fromAccount || "");
+  const toAccount = String(body.toAccount || "");
+  const amountSen = Math.round(Number(body.amountSen) || 0);
+  const date = String(body.date || "");
+  const reference = String(body.reference || "");
+
+  if (!fromAccount || !toAccount) {
+    return c.json({ success: false, error: "fromAccount and toAccount are required" }, 400);
+  }
+  if (fromAccount === toAccount) {
+    return c.json({ success: false, error: "fromAccount and toAccount must be different" }, 400);
+  }
+  if (amountSen <= 0) {
+    return c.json({ success: false, error: "amountSen must be a positive integer (sen)" }, 400);
+  }
+  if (!date) {
+    return c.json({ success: false, error: "date is required (YYYY-MM-DD)" }, 400);
+  }
+
+  const coaRes = await c.var.DB.prepare(
+    "SELECT code, type, specialAccountType, isPostable FROM chart_of_accounts",
+  ).all<{ code: string; type: CoaRow["type"]; specialAccountType: string | null; isPostable: number | null }>();
+  const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
+
+  const fromAcct = coa.get(fromAccount);
+  if (!fromAcct || (fromAcct.specialAccountType !== "SBK" && fromAcct.specialAccountType !== "SCH")) {
+    return c.json(
+      { success: false, error: "fromAccount must be a bank (SBK) or cash (SCH) account" },
+      400,
+    );
+  }
+  const toAcct = coa.get(toAccount);
+  if (!toAcct || (toAcct.specialAccountType !== "SBK" && toAcct.specialAccountType !== "SCH")) {
+    return c.json(
+      { success: false, error: "toAccount must be a bank (SBK) or cash (SCH) account" },
+      400,
+    );
+  }
+
+  const no = await issueDocNumber(c.var.DB, {
+    bankAccountCode: fromAccount,
+    direction: "out",
+    dateIso: date,
+  });
+
+  const legs: LedgerEntryInput[] = [
+    {
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType: "fund_transfer",
+      sourceId: no,
+      legNo: 1,
+      accountCode: toAccount,
+      debitSen: amountSen,
+      creditSen: 0,
+      description: `Transfer ${no}${reference ? ` · ${reference}` : ""}`,
+      actorUserId,
+      orgId,
+    },
+    {
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType: "fund_transfer",
+      sourceId: no,
+      legNo: 2,
+      accountCode: fromAccount,
+      debitSen: 0,
+      creditSen: amountSen,
+      description: `Transfer ${no}${reference ? ` · ${reference}` : ""}`,
+      actorUserId,
+      orgId,
+    },
+  ];
+
+  try {
+    const { statements } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+    await c.var.DB.batch(statements);
+  } catch (e) {
+    console.error("[fund-transfer] GL post failed:", e);
+    return c.json({ success: false, error: "Failed to post fund transfer to ledger" }, 500);
+  }
+
+  return c.json({ success: true, data: { transferNo: no } });
+});
+
+app.get("/fund-transfers", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+
+  const resolve = await loadAccountResolver(c.var.DB);
+
+  const [legRes, coaRes] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT accountCode, sourceType, sourceId, debitSen, creditSen, description, postedAt
+         FROM ledger_journal_entries
+        WHERE sourceType IN ('fund_transfer','fund_transfer_void')`,
+    ).all<{
+      accountCode: string;
+      sourceType: string;
+      sourceId: string;
+      debitSen: number;
+      creditSen: number;
+      description: string;
+      postedAt: string;
+    }>(),
+    c.var.DB.prepare(
+      "SELECT code, name FROM chart_of_accounts",
+    ).all<{ code: string; name: string }>(),
+  ]);
+
+  const nameMap = new Map(
+    (coaRes.results ?? []).map((a) => [a.code, a.name] as const),
+  );
+  const nameOf = (code: string) => nameMap.get(code) ?? nameMap.get(resolve(code)) ?? code;
+
+  const rows = legRes.results ?? [];
+
+  const voided = new Set<string>();
+  for (const r of rows) {
+    if (r.sourceType === "fund_transfer_void") voided.add(r.sourceId);
+  }
+
+  const grouped = new Map<string, typeof rows>();
+  for (const r of rows) {
+    if (r.sourceType !== "fund_transfer") continue;
+    const grp = grouped.get(r.sourceId) ?? [];
+    grp.push(r);
+    grouped.set(r.sourceId, grp);
+  }
+
+  const out: {
+    no: string;
+    date: string;
+    fromAccount: string;
+    toAccount: string;
+    fromName: string;
+    toName: string;
+    amountSen: number;
+    description: string;
+  }[] = [];
+
+  for (const [sourceId, legs] of grouped) {
+    if (voided.has(sourceId)) continue;
+    const toLeg = legs.find((l) => (Number(l.debitSen) || 0) > 0);
+    const fromLeg = legs.find((l) => (Number(l.creditSen) || 0) > 0);
+    if (!toLeg || !fromLeg) continue;
+    const resolvedFrom = resolve(fromLeg.accountCode);
+    const resolvedTo = resolve(toLeg.accountCode);
+    out.push({
+      no: sourceId,
+      date: String(toLeg.postedAt || "").slice(0, 10),
+      fromAccount: resolvedFrom,
+      toAccount: resolvedTo,
+      fromName: nameOf(fromLeg.accountCode),
+      toName: nameOf(toLeg.accountCode),
+      amountSen: Number(toLeg.debitSen) || 0,
+      description: String(toLeg.description || ""),
+    });
+  }
+
+  out.sort((a, b) => (a.no < b.no ? 1 : a.no > b.no ? -1 : 0));
+
+  return c.json({ success: true, data: out });
+});
+
+app.post("/fund-transfers/:no/void", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const no = c.req.param("no");
+  const orgId = getOrgId(c);
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+
+  if (await ledgerHasSource(c.var.DB, orgId, "fund_transfer_void", no)) {
+    return c.json({ success: true, alreadyVoided: true });
+  }
+
+  const prior = await c.var.DB.prepare(
+    `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+      WHERE sourceType = 'fund_transfer' AND sourceId = ? AND orgId = ?`,
+  )
+    .bind(no, orgId)
+    .all<{ accountCode: string; debitSen: number; creditSen: number }>();
+
+  if (!prior.results || prior.results.length === 0) {
+    return c.json({ success: false, error: "Transfer not found" }, 404);
+  }
+
+  const legs: LedgerEntryInput[] = (prior.results).map((l, idx) => ({
+    id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+    sourceType: "fund_transfer_void",
+    sourceId: no,
+    legNo: idx + 1,
+    accountCode: l.accountCode,
+    debitSen: Number(l.creditSen) || 0,
+    creditSen: Number(l.debitSen) || 0,
+    description: `Void transfer ${no}`,
+    actorUserId,
+    orgId,
+  }));
+
+  const { statements } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+  await c.var.DB.batch(statements);
+
+  return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
 // CONTRA (Phase 3.8, 2026-06) — when a customer IS also a supplier,
 // offset what we owe them (whole APPROVED PIs, ticked) against what they
 // owe us (FIFO across their oldest unpaid invoices). Legs run through

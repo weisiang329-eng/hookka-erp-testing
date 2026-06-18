@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "trend" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "trend" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -183,6 +183,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   // Daily Operation
   { key: "payments", label: "Expense Payment", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
   { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
+  { key: "transfer", label: "Fund Transfer", icon: <Wallet className="h-4 w-4" />, group: "Daily Operation" },
   // Monthly Operation
   { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" />, group: "Monthly Operation" },
   { key: "cashbook", label: "Cash Book", icon: <BookOpen className="h-4 w-4" />, group: "Monthly Operation" },
@@ -270,6 +271,7 @@ export default function AccountingPage() {
           {tab === "odc" && <OtherPartiesTab />}
           {tab === "payments" && <PaymentsTab accounts={accounts} />}
           {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
+          {tab === "transfer" && <FundTransferTab accounts={accounts} />}
           {tab === "cashbook" && <CashBookTab accounts={accounts} />}
           {tab === "assets" && <FixedAssetsTab accounts={accounts} />}
           {tab === "labor" && <LaborTab accounts={accounts} />}
@@ -4849,6 +4851,199 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 ))}
                 {rows.length === 0 && (
                   <tr><td colSpan={7} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No receipts yet</td></tr>
+                )}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// =============== TAB: FUND TRANSFER (Phase 3) ===============
+//
+// Move money between bank / cash accounts: DR to-account, CR from-account.
+// Posts via POST /api/accounting/fund-transfers; history + void also wired.
+
+type FtRow = {
+  no: string;
+  date: string;
+  fromAccount: string;
+  fromName: string;
+  toAccount: string;
+  toName: string;
+  amountSen: number;
+  description: string | null;
+};
+
+function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
+  const { toast } = useToast();
+  const banks = accounts.filter(
+    (a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH",
+  );
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [amountStr, setAmountStr] = useState("");
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [reference, setReference] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [rows, setRows] = useState<FtRow[] | null>(null);
+
+  const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
+
+  const load = useCallback(() => {
+    fetch("/api/accounting/fund-transfers")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: FtRow[] }>)
+      .then((j) => { if (j?.success) setRows(j.data ?? []); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleSubmit = async () => {
+    const amount = parseFloat(amountStr);
+    if (!from || !to || from === to || !(amount > 0)) {
+      toast.error(!from || !to ? "Select both From and To accounts" : from === to ? "From and To must be different accounts" : "Enter a positive amount");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/accounting/fund-transfers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromAccount: from,
+          toAccount: to,
+          amountSen: Math.round(amount * 100),
+          date,
+          reference,
+        }),
+      });
+      const j = await res.json() as { success?: boolean; data?: { transferNo?: string }; error?: string };
+      if (j?.success) {
+        toast.success(`Transfer ${j.data?.transferNo ?? ""} posted`);
+        setFrom("");
+        setTo("");
+        setAmountStr("");
+        setDate(new Date().toISOString().slice(0, 10));
+        setReference("");
+        load();
+      } else {
+        toast.error((j as { error?: string })?.error || "Transfer failed");
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleVoid = async (row: FtRow) => {
+    if (!window.confirm(`Void transfer ${row.no}? A reversal entry will be posted.`)) return;
+    const res = await fetch(`/api/accounting/fund-transfers/${encodeURIComponent(row.no)}/void`, { method: "POST" });
+    const j = await res.json() as { success?: boolean; error?: string };
+    if (j?.success) { toast.success(`${row.no} voided`); load(); }
+    else toast.error((j as { error?: string })?.error || "Void failed");
+  };
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-semibold text-[#1F1D1B]">Fund Transfer</h2>
+
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Date</label>
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={selCls} />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">From (CR)</label>
+              <select value={from} onChange={(e) => setFrom(e.target.value)} className={`${selCls} w-64`}>
+                <option value="">— pick bank/cash —</option>
+                {banks.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">To (DR)</label>
+              <select value={to} onChange={(e) => setTo(e.target.value)} className={`${selCls} w-64`}>
+                <option value="">— pick bank/cash —</option>
+                {banks.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Amount (RM)</label>
+              <input
+                type="text"
+                placeholder="0.00"
+                value={amountStr}
+                onChange={(e) => setAmountStr(e.target.value)}
+                className={`${selCls} w-36 text-right tabular-nums`}
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Reference</label>
+              <input
+                type="text"
+                placeholder="Optional"
+                value={reference}
+                onChange={(e) => setReference(e.target.value)}
+                className={`${selCls} w-48`}
+              />
+            </div>
+          </div>
+          <div>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={saving}
+              onClick={handleSubmit}
+            >
+              {saving ? "Posting…" : "Post Transfer"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          {rows === null ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">No</th>
+                  <th className="px-3 py-2 text-left">Date</th>
+                  <th className="px-3 py-2 text-left">From</th>
+                  <th className="px-3 py-2 text-center">→</th>
+                  <th className="px-3 py-2 text-left">To</th>
+                  <th className="px-3 py-2 text-right">Amount</th>
+                  <th className="px-3 py-2 text-left">Description</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.no} className="border-b border-[#F0ECE9]">
+                    <td className="px-3 py-1.5 tabular-nums text-xs">{r.no}</td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.date}</td>
+                    <td className="px-3 py-1.5 text-xs">{r.fromAccount} {r.fromName}</td>
+                    <td className="px-3 py-1.5 text-center text-[#6B7280]">→</td>
+                    <td className="px-3 py-1.5 text-xs">{r.toAccount} {r.toName}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.amountSen)}</td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.description ?? ""}</td>
+                    <td className="px-3 py-1.5 text-right">
+                      <button
+                        onClick={() => handleVoid(r)}
+                        className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer"
+                      >
+                        void
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr><td colSpan={8} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No transfers yet</td></tr>
                 )}
               </tbody>
             </table>

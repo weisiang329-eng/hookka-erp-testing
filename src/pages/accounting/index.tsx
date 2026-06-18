@@ -269,7 +269,7 @@ export default function AccountingPage() {
               <APTab apData={apData} onRefresh={fetchAll} />
             </div>
           )}
-          {tab === "odc" && <OtherPartiesTab />}
+          {tab === "odc" && <OtherPartiesTab accounts={accounts} />}
           {tab === "payments" && <PaymentsTab accounts={accounts} />}
           {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
           {tab === "transfer" && <FundTransferTab accounts={accounts} />}
@@ -3560,7 +3560,7 @@ type OtherParty = {
   isActive: boolean;
 };
 
-function OtherPartiesTab() {
+function OtherPartiesTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const { toast } = useToast();
   const [parties, setParties] = useState<OtherParty[] | null>(null);
   const [filter, setFilter] = useState<"ALL" | "DEBTOR" | "CREDITOR">("ALL");
@@ -3762,6 +3762,202 @@ function OtherPartiesTab() {
           )}
         </CardContent>
       </Card>
+      <div className="pt-4 mt-2 border-t border-[#E2DDD8]">
+        <h3 className="text-sm font-semibold text-[#3E6570] mb-3">Bills</h3>
+        <OtherPartyBillsManager parties={parties ?? []} accounts={accounts} />
+      </div>
+    </div>
+  );
+}
+
+type BillLineDraft = { counterAccount: string; amountStr: string; description: string };
+type OtherPartyBill = {
+  id: string; billNo: string; partyId: string; partyType: "DEBTOR" | "CREDITOR";
+  partyName: string; billDate: string; referenceNo: string; description: string;
+  subtotalSen: number; taxSen: number; totalSen: number; paidAmountSen: number;
+  outstandingSen: number; status: string;
+  items: { counterAccount: string; amountSen: number; description: string; lineNo: number }[];
+};
+
+function OtherPartyBillsManager({ parties, accounts }: { parties: OtherParty[]; accounts: ChartOfAccount[] }) {
+  const { toast } = useToast();
+  const [side, setSide] = useState<"CREDITOR" | "DEBTOR">("CREDITOR");
+  const [bills, setBills] = useState<OtherPartyBill[] | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const today = new Date().toISOString().slice(0, 10);
+  const blankLine = (): BillLineDraft => ({ counterAccount: "", amountStr: "", description: "" });
+  const [form, setForm] = useState({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()] });
+
+  const load = () => {
+    fetch(`/api/accounting/other-party-bills?type=${side}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: OtherPartyBill[] }>)
+      .then((j) => { if (j?.success) setBills(j.data ?? []); })
+      .catch(() => {});
+  };
+  useEffect(load, [side]);
+
+  const sideParties = parties.filter((p) => p.type === side && p.isActive);
+  const toSen = (s: string) => Math.round((parseFloat(s) || 0) * 100);
+
+  const updateLine = (idx: number, field: keyof BillLineDraft, value: string) =>
+    setForm((f) => ({ ...f, lines: f.lines.map((l, i) => (i === idx ? { ...l, [field]: value } : l)) }));
+  const addLine = () => setForm((f) => ({ ...f, lines: [...f.lines, blankLine()] }));
+  const removeLine = (idx: number) => setForm((f) => ({ ...f, lines: f.lines.length > 1 ? f.lines.filter((_, i) => i !== idx) : f.lines }));
+
+  const subtotalSen = form.lines.reduce((s, l) => s + toSen(l.amountStr), 0);
+  const totalSen = subtotalSen + toSen(form.taxStr);
+
+  const submit = async () => {
+    if (!form.partyId) { toast.error("Select a party"); return; }
+    const items = form.lines
+      .filter((l) => l.counterAccount && toSen(l.amountStr) > 0)
+      .map((l) => ({ counterAccount: l.counterAccount, amountSen: toSen(l.amountStr), description: l.description }));
+    if (items.length === 0) { toast.error("Add at least one line with account + amount"); return; }
+    const res = await fetch("/api/accounting/other-party-bills", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ partyId: form.partyId, billDate: form.billDate, referenceNo: form.referenceNo, description: form.description, taxSen: toSen(form.taxStr), items }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) {
+      setShowForm(false);
+      setForm({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()] });
+      load();
+    } else toast.error(j?.error || "Failed to create bill");
+  };
+
+  const del = async (billNo: string) => {
+    const res = await fetch(`/api/accounting/other-party-bills/${encodeURIComponent(billNo)}`, { method: "DELETE" });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load();
+    else toast.error(j?.error || "Failed to delete bill");
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex gap-1">
+          {(["CREDITOR", "DEBTOR"] as const).map((s) => (
+            <button key={s} onClick={() => { setSide(s); setShowForm(false); }}
+              className={`rounded-md px-3 py-1.5 text-xs font-medium border ${side === s ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>
+              {s === "CREDITOR" ? "Other Creditor Bills (we owe)" : "Other Debtor Bills (owed to us)"}
+            </button>
+          ))}
+        </div>
+        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+          <Plus className="h-4 w-4" /> New Bill
+        </Button>
+      </div>
+
+      {showForm && (
+        <Card><CardContent className="p-4 space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">{side === "CREDITOR" ? "Creditor" : "Debtor"}</label>
+              <select value={form.partyId} onChange={(e) => setForm({ ...form, partyId: e.target.value })}
+                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm">
+                <option value="">Select…</option>
+                {sideParties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Bill Date</label>
+              <input type="date" value={form.billDate} onChange={(e) => setForm({ ...form, billDate: e.target.value })}
+                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Reference No</label>
+              <input type="text" value={form.referenceNo} onChange={(e) => setForm({ ...form, referenceNo: e.target.value })}
+                placeholder="their invoice / DO no" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+            </div>
+          </div>
+
+          <table className="w-full text-sm">
+            <thead><tr className="text-xs text-[#6B7280]">
+              <th className="text-left py-1">Account</th><th className="text-left py-1">Description</th>
+              <th className="text-right py-1">Amount (RM)</th><th></th>
+            </tr></thead>
+            <tbody>
+              {form.lines.map((l, idx) => (
+                <tr key={idx}>
+                  <td className="py-1 pr-2 w-1/3">
+                    <AccountPicker accounts={accounts} value={l.counterAccount} onChange={(code) => updateLine(idx, "counterAccount", code)} placeholder="counter account" />
+                  </td>
+                  <td className="py-1 pr-2">
+                    <input type="text" value={l.description} onChange={(e) => updateLine(idx, "description", e.target.value)}
+                      className="w-full rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+                  </td>
+                  <td className="py-1 pl-2 w-32">
+                    <input type="text" inputMode="decimal" value={l.amountStr} onChange={(e) => updateLine(idx, "amountStr", e.target.value)}
+                      className="w-full rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm text-right tabular-nums" />
+                  </td>
+                  <td className="py-1 pl-2">
+                    <button onClick={() => removeLine(idx)} className="text-[#9A3A2D] text-xs">✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <Button variant="outline" size="sm" onClick={addLine}>+ Add Line</Button>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end pt-2 border-t border-[#F0ECE9]">
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Tax / SST (RM, optional)</label>
+              <input type="text" inputMode="decimal" value={form.taxStr} onChange={(e) => setForm({ ...form, taxStr: e.target.value })}
+                placeholder="0.00" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm text-right tabular-nums" />
+              <p className="text-[10px] text-[#9CA3AF] mt-0.5">{side === "CREDITOR" ? "→ 706-0000 input SST" : "→ 350-0000 output SST"}</p>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Description</label>
+              <input type="text" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })}
+                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-[#6B7280]">Total</p>
+              <p className="text-lg font-bold text-[#3E6570] tabular-nums">{formatCurrency(totalSen)}</p>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="primary" size="sm" onClick={submit}>Save &amp; Post</Button>
+            <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
+          </div>
+        </CardContent></Card>
+      )}
+
+      <Card><CardContent className="p-0 overflow-x-auto">
+        {bills === null ? (
+          <div className="py-10 text-center text-[#6B7280] text-sm">Loading…</div>
+        ) : bills.length === 0 ? (
+          <div className="py-10 text-center text-[#6B7280] text-sm">No bills yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead><tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+              <th className="px-4 py-2 text-left">Bill No</th><th className="px-4 py-2 text-left">Party</th>
+              <th className="px-4 py-2 text-left">Date</th><th className="px-4 py-2 text-right">Total</th>
+              <th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Outstanding</th>
+              <th className="px-4 py-2 text-center">Status</th><th className="px-4 py-2 text-right"></th>
+            </tr></thead>
+            <tbody>
+              {bills.map((b) => (
+                <tr key={b.id} className="border-b border-[#F0ECE9]">
+                  <td className="px-4 py-1.5 font-mono text-xs">{b.billNo}</td>
+                  <td className="px-4 py-1.5">{b.partyName}</td>
+                  <td className="px-4 py-1.5">{b.billDate}</td>
+                  <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(b.totalSen)}</td>
+                  <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(b.paidAmountSen)}</td>
+                  <td className="px-4 py-1.5 text-right tabular-nums font-medium">{formatCurrency(b.outstandingSen)}</td>
+                  <td className="px-4 py-1.5 text-center text-xs">{b.status}</td>
+                  <td className="px-4 py-1.5 text-right">
+                    {b.paidAmountSen === 0 && (
+                      <button onClick={() => del(b.billNo)} className="text-[#9A3A2D] text-xs hover:underline">Delete</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </CardContent></Card>
     </div>
   );
 }

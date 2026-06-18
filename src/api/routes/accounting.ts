@@ -30,8 +30,7 @@ import { bsSectionFor, bsSectionClass } from "../../lib/bs-section";
 import type { BsSection } from "../../lib/bs-section";
 import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
-import { formatDocNo, ymFromDate, resolveDocPrefix } from "../../lib/doc-number";
-import type { DocDirection, DocPrefixMap } from "../../lib/doc-number";
+import { getDocNumberPrefixes } from "../lib/doc-number-service";
 
 const app = new Hono<Env>();
 
@@ -5271,43 +5270,6 @@ async function getCashflowStockGroupMap(
     if (row?.value) return JSON.parse(row.value) as Record<string, string>;
   } catch { /* absent → empty */ }
   return {};
-}
-
-async function getDocNumberPrefixes(
-  db: Env["Variables"]["DB"],
-): Promise<DocPrefixMap> {
-  try {
-    const row = await db
-      .prepare("SELECT value FROM kv_config WHERE key = 'doc_number_prefixes'")
-      .first<{ value: string | null }>();
-    if (row?.value) return JSON.parse(row.value) as DocPrefixMap;
-  } catch { /* absent → empty (defaults apply) */ }
-  return {};
-}
-
-// Issue the next unified document number for a bank account + direction,
-// dated by the voucher's own date (YYMM). Atomic per (prefix, ym).
-// Entry point for Supplier/Expense/Customer payment + Official Receipt
-// numbering (sub-projects B/C); currently unused.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-async function issueDocNumber(
-  db: Env["Variables"]["DB"],
-  opts: { bankAccountCode: string; direction: DocDirection; dateIso: string },
-): Promise<string> {
-  const cfg = await getDocNumberPrefixes(db);
-  const prefix = resolveDocPrefix(cfg, opts.bankAccountCode, opts.direction);
-  const ym = ymFromDate(opts.dateIso);
-  const row = await db
-    .prepare(
-      `INSERT INTO doc_no_counters (prefix, ym, next_no) VALUES (?, ?, 2)
-       ON CONFLICT (prefix, ym) DO UPDATE SET next_no = doc_no_counters.next_no + 1
-       RETURNING next_no`,
-    )
-    .bind(prefix, ym)
-    .first<{ next_no?: number; nextNo?: number }>();
-  const newNext = Number(row?.next_no ?? row?.nextNo ?? 2);
-  const issued = newNext - 1; // first insert sets 2 → issued 1
-  return formatDocNo(prefix, ym, issued);
 }
 
 async function getPnlSectionMap(

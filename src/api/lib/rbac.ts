@@ -169,6 +169,15 @@ export async function requirePermission(
   if (!role) {
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
+  // SUPER_ADMIN is unconditionally all-powerful (LEGACY_ROLE_DEFAULTS: "*:*", and
+  // the comment there promises the wildcard "short-circuits any check"). But in
+  // prod the role_permissions table enumerates EXPLICIT grants for SUPER_ADMIN, so
+  // any resource that was never seeded as a permission (mail-center before this,
+  // supplier-materials now) 403s the OWNER even though SUPER_ADMIN must bypass
+  // everything (owner 2026-06-18: couldn't delete a SKU mapping). Short-circuit
+  // here so the top role is NEVER blocked by a missing seed. ADMIN still flows
+  // through the table below, so any deliberate prod restriction on ADMIN holds.
+  if (role === "SUPER_ADMIN") return null;
   // Defensive try/catch (2026-04-26 prod 500 dogfood report): if the
   // permission lookup throws (KV blip, D1 transient, schema drift), fall
   // back to legacy users.role text — SUPER_ADMIN / ADMIN keep full access,

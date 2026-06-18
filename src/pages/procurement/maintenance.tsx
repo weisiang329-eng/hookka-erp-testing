@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatDate } from "@/lib/utils";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
+import { useToast } from "@/components/ui/toast";
 import {
   Plus,
   Building2,
@@ -349,6 +350,8 @@ export default function SupplierMaintenancePage() {
   }, [suppliersResp]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  const { toast } = useToast();
+
   // SKU state — D1 is source of truth; MOCK_SKU kept only as a silent
   // fallback if the API is unreachable, so the page always renders.
   const [skuList, setSkuList] = useState<SupplierSKU[]>([]);
@@ -559,37 +562,51 @@ export default function SupplierMaintenancePage() {
           label: "Delete",
           icon: <Trash2 className="h-3.5 w-3.5" />,
           danger: true,
-          action: () => {
+          action: async () => {
             const id = row.id;
-            // Optimistic remove, then persist (was screen-only before).
+            // Optimistic remove, then persist AND surface failure. invalidateCache
+            // re-reads the server so a failed delete reappears (no silent loss).
             setSuppliers((prev) => prev.filter((s) => s.id !== id));
-            fetch(`/api/suppliers/${id}`, { method: "DELETE" }).catch(() => {
-              /* optimistic-only fallback — refresh will reconcile */
-            });
+            try {
+              const res = await fetch(`/api/suppliers/${id}`, { method: "DELETE" });
+              if (!res.ok) {
+                const b = (await res.json().catch(() => ({}))) as { error?: string };
+                toast.error(b.error || `Delete failed (${res.status})`);
+              }
+            } catch {
+              toast.error("Delete failed — network error");
+            }
+            invalidateCache("/api/suppliers");
           },
         },
       ],
-    [navigate]
+    [navigate, toast]
   );
 
   const handleSaveSupplier = async (data: Omit<Supplier, "id">) => {
-    // Optimistic update first so the modal feels instant; the API call
-    // happens in the background. If it fails we still close the modal
-    // (matches the pre-existing UX) and the next /api/suppliers refresh
-    // will reconcile state.
+    // Optimistic update for instant UX, then persist. A FAILED save now shows
+    // a red error and invalidateCache re-reads the server so the optimistic
+    // row reconciles (no more silent "looked saved but wasn't").
+    let ok = false;
+    let errMsg = "";
     if (editingSupplier) {
       const id = editingSupplier.id;
       setSuppliers((prev) =>
         prev.map((s) => (s.id === id ? { ...s, ...data } : s))
       );
       try {
-        await fetch(`/api/suppliers/${id}`, {
+        const res = await fetch(`/api/suppliers/${id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(data),
         });
+        ok = res.ok;
+        if (!ok) {
+          const b = (await res.json().catch(() => ({}))) as { error?: string };
+          errMsg = b.error || `HTTP ${res.status}`;
+        }
       } catch {
-        /* optimistic-only fallback — refresh will reconcile */
+        errMsg = "network error";
       }
     } else {
       const tempId = `sup-${Date.now()}`;
@@ -601,7 +618,8 @@ export default function SupplierMaintenancePage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(data),
         });
-        if (res.ok) {
+        ok = res.ok;
+        if (ok) {
           const body = (await res.json().catch(() => ({}))) as {
             data?: { id?: string };
           };
@@ -611,13 +629,23 @@ export default function SupplierMaintenancePage() {
               prev.map((s) => (s.id === tempId ? { ...s, id: realId } : s)),
             );
           }
+        } else {
+          const b = (await res.json().catch(() => ({}))) as { error?: string };
+          errMsg = b.error || `HTTP ${res.status}`;
         }
       } catch {
-        /* keep the optimistic row; refresh will reconcile */
+        errMsg = "network error";
       }
     }
-    setShowSupplierForm(false);
-    setEditingSupplier(null);
+    invalidateCache("/api/suppliers");
+    if (ok) {
+      toast.success("Supplier saved");
+      setShowSupplierForm(false);
+      setEditingSupplier(null);
+    } else {
+      // Keep the form open so the operator can retry — do NOT pretend it saved.
+      toast.error(`Save failed: ${errMsg}`);
+    }
   };
 
   // ---- SKU Tab ----
@@ -718,21 +746,25 @@ export default function SupplierMaintenancePage() {
           label: "Delete",
           icon: <Trash2 className="h-3.5 w-3.5" />,
           danger: true,
-          action: () => {
+          action: async () => {
             const id = row.id;
-            // Optimistic remove, then persist. (Previously this only mutated
-            // local state, so the binding reappeared on the next
-            // /api/supplier-materials refresh — "delete" never stuck.)
+            // Optimistic remove, then persist AND surface failure. invalidateCache
+            // re-reads the server so a failed delete reappears (no silent loss).
             setSkuList((prev) => prev.filter((s) => s.id !== id));
-            fetch(`/api/supplier-materials/${id}`, { method: "DELETE" }).catch(
-              () => {
-                /* optimistic-only fallback — refresh will reconcile */
-              },
-            );
+            try {
+              const res = await fetch(`/api/supplier-materials/${id}`, { method: "DELETE" });
+              if (!res.ok) {
+                const b = (await res.json().catch(() => ({}))) as { error?: string };
+                toast.error(b.error || `Delete failed (${res.status})`);
+              }
+            } catch {
+              toast.error("Delete failed — network error");
+            }
+            invalidateCache("/api/supplier-materials");
           },
         },
       ],
-    []
+    [toast]
   );
 
   // Map the page's SupplierSKU shape onto the /api/supplier-materials body.
@@ -754,22 +786,29 @@ export default function SupplierMaintenancePage() {
   });
 
   const handleSaveSKU = async (data: Omit<SupplierSKU, "id">) => {
-    // Optimistic local update for instant UX, then persist to the backend.
-    // (Previously this only mutated local state, so new/edited SKU mappings
-    // never saved — they vanished on the next /api/supplier-materials refresh.)
+    // Optimistic local update for instant UX, then persist. A FAILED save now
+    // shows a red error and invalidateCache re-reads the server so a non-saved
+    // edit reconciles (no more silent "looked saved but bounced back").
+    let ok = false;
+    let errMsg = "";
     if (editingSKU) {
       const id = editingSKU.id;
       setSkuList((prev) =>
         prev.map((s) => (s.id === id ? { ...s, ...data } : s))
       );
       try {
-        await fetch(`/api/supplier-materials/${id}`, {
+        const res = await fetch(`/api/supplier-materials/${id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(skuToBindingBody(data)),
         });
+        ok = res.ok;
+        if (!ok) {
+          const b = (await res.json().catch(() => ({}))) as { error?: string };
+          errMsg = b.error || `HTTP ${res.status}`;
+        }
       } catch {
-        /* optimistic-only fallback — refresh will reconcile */
+        errMsg = "network error";
       }
     } else {
       const tempId = `sku-${Date.now()}`;
@@ -780,7 +819,8 @@ export default function SupplierMaintenancePage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(skuToBindingBody(data)),
         });
-        if (res.ok) {
+        ok = res.ok;
+        if (ok) {
           const body = (await res.json().catch(() => ({}))) as {
             data?: { id?: string };
           };
@@ -790,13 +830,23 @@ export default function SupplierMaintenancePage() {
               prev.map((s) => (s.id === tempId ? { ...s, id: realId } : s))
             );
           }
+        } else {
+          const b = (await res.json().catch(() => ({}))) as { error?: string };
+          errMsg = b.error || `HTTP ${res.status}`;
         }
       } catch {
-        /* optimistic-only fallback — refresh will reconcile */
+        errMsg = "network error";
       }
     }
-    setShowSKUForm(false);
-    setEditingSKU(null);
+    invalidateCache("/api/supplier-materials");
+    if (ok) {
+      toast.success("SKU mapping saved");
+      setShowSKUForm(false);
+      setEditingSKU(null);
+    } else {
+      // Keep the form open so the operator can retry — do NOT pretend it saved.
+      toast.error(`Save failed: ${errMsg}`);
+    }
   };
 
   // KPIs

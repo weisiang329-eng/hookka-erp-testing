@@ -164,7 +164,18 @@ export function CncTemplatePanel({
               className="flex flex-wrap items-center gap-2 bg-white rounded-md px-3 py-2 border border-[#E5E7EB]"
             >
               <div className="min-w-0 flex-1">
-                <div className="text-xs font-medium text-[#111827] truncate">{t.displayName}</div>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-xs font-medium text-[#111827] truncate">{t.displayName}</span>
+                  <span
+                    className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
+                      t.material === "wood"
+                        ? "bg-[#EFE7DD] text-[#7A5C3A]"
+                        : "bg-[#E8E2D9] text-[#6B5C32]"
+                    }`}
+                  >
+                    {t.material === "wood" ? "Wood" : "Fabric"}
+                  </span>
+                </div>
                 <div className="text-[11px] text-[#6B7280] truncate">
                   {[
                     t.sizeLabel,

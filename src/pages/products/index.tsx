@@ -3019,9 +3019,10 @@ export default function ProductsPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      {/* Header — wraps so the dense SKU Master toolbar drops onto its own
+          line on narrower screens instead of squeezing the title. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+        <div className="flex items-center gap-4 shrink-0">
           <h1 className="text-xl font-bold text-[#111827]">Products</h1>
           {/* View mode toggle */}
           <div className="flex bg-[#F3F4F6] rounded-lg p-0.5">

@@ -1,27 +1,31 @@
 // ---------------------------------------------------------------------------
 // Product Document Library ("Production Docs") — per-variant.
 //
-// Every product variant (e.g. 5530-1A) carries a categorised set of
-// production documents so a new hire can pull up everything for the model
-// they're assigned and start working: fabric layout + sewing diagram, foam
-// assembly + specs, wood specs + frame assembly, the CNC cut files (linked
-// from the CNC Template module — single source of truth), plus a construction
-// guide and a product walkthrough.
+// Organised around the CNC Cutting Template (the single source of truth for a
+// model's cutting files, owned by the CNC Template module). Everything a new
+// hire needs for a model sits in two stacked sections:
 //
-// Storage: reuses the existing file system (POST/GET/DELETE /api/files →
-// Supabase Storage, images + PDF, 50 MB). Each slot is namespaced by
-// resourceType = "product:<category>", resourceId = product.id, so ALL of a
-// product's docs come back in ONE GET /api/files?resourceId=<id> and we group
-// them client-side. No backend change.
+//   1. CNC Cutting Template — the model's fabric AND wood cutting files, linked
+//      READ-ONLY from the CNC Template module. Uploads happen there, never
+//      here, so there is exactly one place a cutting file can live.
+//   2. Supporting Documents — reference docs that are NOT machine cutting files
+//      (sewing diagram, foam specs, frame assembly), uploaded straight to the
+//      product and placed under the CNC Cutting Template.
 //
-// CNC slots (Stage 2) link to the CNC Template module rather than re-uploading.
-// Export pack (Stage 3) bundles everything into one PDF for onboarding.
+// Storage for the supporting docs: reuses the existing file system (POST/GET/
+// DELETE /api/files → Supabase Storage, images + PDF, 50 MB). Each slot is
+// namespaced by resourceType = "product:<category>", resourceId = product.id,
+// so ALL of a product's docs come back in ONE GET /api/files?resourceId=<id>
+// and we group them client-side. No backend change.
+//
+// Export pack bundles everything into one PDF for onboarding.
 // ---------------------------------------------------------------------------
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
-  ArrowLeft, FileText, Upload, Trash2, Eye, Scissors, Layers, TreePine,
-  Cpu, GraduationCap, Loader2, Download, ExternalLink,
+  ArrowLeft, FileText, Upload, Trash2, Eye, Scissors, TreePine,
+  Cpu, Loader2, Download, ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,83 +46,35 @@ type FileAsset = {
   uploadedAt: string;
 };
 
-// Client shape from GET /api/cnc-templates (fabric cutter files for a model).
+// Client shape from GET /api/cnc-templates. `material` splits the model's
+// cutting files into the fabric cutter (BUYI E-DIGIT) vs the wood router.
 type CncTemplate = {
   id: string;
   productCode: string;
   sizeLabel: string;
   pieceLabel: string;
   displayName: string;
+  material: "fabric" | "wood";
   hasDgt: boolean;
   hasPrj: boolean;
   hasEmf: boolean;
 };
 
 type SlotDef = { key: string; label: string; hint?: string };
-type GroupDef = {
-  title: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  icon: any;
-  accent: string;
-  slots: SlotDef[];
-  // CNC group is special — files live in the CNC Template module, not here.
-  cncLink?: boolean;
-};
 
-// The fixed taxonomy the owner described. Labels are English (UI rule); the
-// keys are stable resourceType suffixes — do NOT rename once docs exist.
-// Labels are English (UI is English-only). Keys are stable resourceType
-// suffixes — do NOT rename once docs exist.
-const GROUPS: GroupDef[] = [
-  {
-    title: "Fabric",
-    icon: Scissors,
-    accent: "#6B5C32",
-    slots: [
-      { key: "fabric-layout", label: "Fabric Layout" },
-      { key: "sewing", label: "Sewing Diagram" },
-    ],
-  },
-  {
-    title: "Foam",
-    icon: Layers,
-    accent: "#8A6D3B",
-    slots: [
-      { key: "foam-assembly", label: "Foam Assembly" },
-      { key: "foam-specs", label: "Foam Specs / Cutting Sheet" },
-    ],
-  },
-  {
-    title: "Wood",
-    icon: TreePine,
-    accent: "#7A5C3A",
-    slots: [
-      { key: "wood-specs", label: "Wood Specs" },
-      { key: "wood-frame", label: "Frame Assembly" },
-    ],
-  },
-  {
-    title: "CNC Cut Files",
-    icon: Cpu,
-    accent: "#4B5563",
-    cncLink: true,
-    slots: [
-      { key: "cnc-fabric", label: "Fabric CNC" },
-      { key: "cnc-wood", label: "Wood CNC" },
-    ],
-  },
-  {
-    title: "Onboarding",
-    icon: GraduationCap,
-    accent: "#2F6F4F",
-    slots: [
-      { key: "construction", label: "Construction Guide" },
-      { key: "walkthrough", label: "Product Walkthrough" },
-    ],
-  },
+// Supporting documents that live UNDER the CNC Cutting Template. These are
+// reference docs (not machine cutting files) uploaded straight to the product.
+// The cutting files themselves are owned by the CNC Template module and shown
+// read-only above — never re-uploaded here (single source of truth). Labels are
+// English (UI rule); keys are stable resourceType suffixes — do NOT rename once
+// docs exist.
+const DOC_SLOTS: SlotDef[] = [
+  { key: "sewing", label: "Sewing Diagram" },
+  { key: "foam-specs", label: "Foam Specs / Cutting Sheet" },
+  { key: "wood-frame", label: "Frame Assembly" },
 ];
 
-const ALL_SLOT_KEYS = GROUPS.flatMap((g) => g.slots.map((s) => s.key));
+const ALL_SLOT_KEYS = DOC_SLOTS.map((s) => s.key);
 
 function fmtSize(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -234,38 +190,57 @@ export default function ProductDocumentsPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {GROUPS.map((g) => (
-          <Card key={g.title}>
-            <CardHeader className="pb-3">
+      {/* Section 1 — CNC Cutting Template (the anchor; cutting files live in the
+          CNC Template module and are shown here read-only, fabric + wood). */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
               <CardTitle className="flex items-center gap-2 text-sm">
-                <g.icon className="h-4 w-4" style={{ color: g.accent }} /> {g.title}
+                <Cpu className="h-4 w-4 text-[#4B5563]" /> CNC Cutting Template
               </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {g.cncLink ? (
-                <CncSlots
-                  product={product}
-                  woodFiles={bySlot["cnc-wood"] ?? []}
-                  onChanged={() => reloadFiles(product.id)}
-                  toast={toast}
-                />
-              ) : (
-                g.slots.map((slot) => (
-                  <DocSlot
-                    key={slot.key}
-                    productId={product.id}
-                    slot={slot}
-                    files={bySlot[slot.key] ?? []}
-                    onChanged={() => reloadFiles(product.id)}
-                    toast={toast}
-                  />
-                ))
-              )}
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+              <p className="text-xs text-[#9CA3AF] mt-1">
+                Linked from the CNC Template module — the single home for this model&apos;s cutting files.
+              </p>
+            </div>
+            <Link to={`/cnc-templates?model=${encodeURIComponent(product.baseModel || product.code)}`}>
+              <Button type="button" variant="outline" size="sm">
+                <ExternalLink className="h-3.5 w-3.5" /> Open in CNC Template
+              </Button>
+            </Link>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <CncSlots product={product} />
+        </CardContent>
+      </Card>
+
+      {/* Section 2 — Supporting documents, placed under the CNC Cutting
+          Template. Reference material a new hire studies, uploaded here. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <FileText className="h-4 w-4 text-[#6B5C32]" /> Supporting Documents
+          </CardTitle>
+          <p className="text-xs text-[#9CA3AF] mt-1">
+            Reference docs for this model — sewing, foam and frame guides.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {DOC_SLOTS.map((slot) => (
+              <DocSlot
+                key={slot.key}
+                productId={product.id}
+                slot={slot}
+                files={bySlot[slot.key] ?? []}
+                onChanged={() => reloadFiles(product.id)}
+                toast={toast}
+              />
+            ))}
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -379,20 +354,11 @@ function DocSlot({
   );
 }
 
-// ---- CNC slots ----
-// Fabric CNC = the model's cutter files, linked READ-ONLY from the CNC Template
-// module (single source of truth — the BUYI fabric cutter owns .dgt/.prj/.emf).
-// Wood CNC = uploaded directly to the product (wood router files are a different
-// format and aren't in the fabric-cutter module; the slot sits ready until you
-// have them).
-function CncSlots({
-  product, woodFiles, onChanged, toast,
-}: {
-  product: Product;
-  woodFiles: FileAsset[];
-  onChanged: () => void;
-  toast: ReturnType<typeof useToast>["toast"];
-}) {
+// ---- CNC cutting files (read-only, linked from the CNC Template module) ----
+// The model's cutting files split into Fabric (BUYI E-DIGIT cutter) and Wood
+// (router). Both come from /api/cnc-templates — the single source of truth — so
+// there is no upload here; the "Open in CNC Template" button manages them.
+function CncSlots({ product }: { product: Product }) {
   const model = product.baseModel || product.code;
   const [cncFiles, setCncFiles] = useState<CncTemplate[]>([]);
   const [loadingCnc, setLoadingCnc] = useState(true);
@@ -413,6 +379,40 @@ function CncSlots({
     return () => { cancelled = true; };
   }, [model]);
 
+  const fabric = useMemo(() => cncFiles.filter((t) => t.material !== "wood"), [cncFiles]);
+  const wood = useMemo(() => cncFiles.filter((t) => t.material === "wood"), [cncFiles]);
+
+  if (loadingCnc) {
+    return <Loader2 className="h-4 w-4 animate-spin text-[#6B5C32]" />;
+  }
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <CncMaterialList
+        label="Fabric Cutting Files"
+        icon={<Scissors className="h-3.5 w-3.5 text-[#6B5C32]" />}
+        templates={fabric}
+        emptyText={`No fabric cutting files for ${model} yet.`}
+      />
+      <CncMaterialList
+        label="Wood Cutting Files"
+        icon={<TreePine className="h-3.5 w-3.5 text-[#7A5C3A]" />}
+        templates={wood}
+        emptyText={`No wood cutting files for ${model} yet.`}
+      />
+    </div>
+  );
+}
+
+// One material column (Fabric or Wood) of the CNC Cutting Template section.
+function CncMaterialList({
+  label, icon, templates, emptyText,
+}: {
+  label: string;
+  icon: ReactNode;
+  templates: CncTemplate[];
+  emptyText: string;
+}) {
   const kinds: Array<{ k: "dgt" | "prj" | "emf"; has: (t: CncTemplate) => boolean }> = [
     { k: "dgt", has: (t) => t.hasDgt },
     { k: "prj", has: (t) => t.hasPrj },
@@ -420,66 +420,48 @@ function CncSlots({
   ];
 
   return (
-    <div className="space-y-4">
-      {/* Fabric CNC — linked from the CNC Template module */}
-      <div className="rounded-md border border-[#E2DDD8] p-3">
-        <div className="flex items-center justify-between mb-2">
-          <div className="text-sm font-medium text-[#374151]">
-            Fabric CNC <span className="text-[#9CA3AF] font-normal text-xs ml-1">from CNC Template</span>
-          </div>
-          <Link to={`/cnc-templates?model=${encodeURIComponent(model)}`}>
-            <Button type="button" variant="outline" size="sm"><ExternalLink className="h-3.5 w-3.5" /> Open</Button>
-          </Link>
-        </div>
-        {loadingCnc ? (
-          <Loader2 className="h-4 w-4 animate-spin text-[#6B5C32]" />
-        ) : cncFiles.length === 0 ? (
-          <p className="text-xs text-[#9CA3AF] italic">No fabric CNC files for {model} yet.</p>
-        ) : (
-          <ul className="space-y-1">
-            {cncFiles.map((t) => (
-              <li key={t.id} className="flex items-center justify-between gap-2 text-sm rounded bg-[#FAF9F7] px-2 py-1.5">
-                <span className="flex items-center gap-2 min-w-0">
-                  <Cpu className="h-3.5 w-3.5 text-[#4B5563] shrink-0" />
-                  <span className="truncate text-[#1F1D1B]" title={t.displayName}>
-                    {t.pieceLabel || t.displayName || "Template"}
-                    {t.sizeLabel ? <span className="text-[#9CA3AF]"> · {t.sizeLabel}</span> : null}
-                  </span>
-                </span>
-                <span className="flex items-center gap-1 shrink-0">
-                  {kinds.filter((kd) => kd.has(t)).map((kd) => (
-                    <a
-                      key={kd.k}
-                      href={`/api/cnc-templates/${t.id}/file/${kd.k}`}
-                      target="_blank" rel="noreferrer"
-                      className="px-1.5 py-0.5 rounded bg-[#E0EDF0] text-[#3E6570] text-[10px] font-semibold uppercase hover:bg-[#cfe3e8]"
-                      title={`Download ${kd.k.toUpperCase()}`}
-                    >
-                      {kd.k}
-                    </a>
-                  ))}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
+    <div className="rounded-md border border-[#E2DDD8] p-3">
+      <div className="flex items-center gap-2 mb-2 text-sm font-medium text-[#374151]">
+        {icon} {label}
+        <span className="text-[#9CA3AF] font-normal text-xs ml-auto">{templates.length} file{templates.length === 1 ? "" : "s"}</span>
       </div>
-
-      {/* Wood CNC — uploaded to the product (not in the fabric-cutter module) */}
-      <DocSlot
-        productId={product.id}
-        slot={{ key: "cnc-wood", label: "Wood CNC", hint: "Router files" }}
-        files={woodFiles}
-        onChanged={onChanged}
-        toast={toast}
-      />
+      {templates.length === 0 ? (
+        <p className="text-xs text-[#9CA3AF] italic">{emptyText}</p>
+      ) : (
+        <ul className="space-y-1">
+          {templates.map((t) => (
+            <li key={t.id} className="flex items-center justify-between gap-2 text-sm rounded bg-[#FAF9F7] px-2 py-1.5">
+              <span className="flex items-center gap-2 min-w-0">
+                <Cpu className="h-3.5 w-3.5 text-[#4B5563] shrink-0" />
+                <span className="truncate text-[#1F1D1B]" title={t.displayName}>
+                  {t.pieceLabel || t.displayName || "Template"}
+                  {t.sizeLabel ? <span className="text-[#9CA3AF]"> · {t.sizeLabel}</span> : null}
+                </span>
+              </span>
+              <span className="flex items-center gap-1 shrink-0">
+                {kinds.filter((kd) => kd.has(t)).map((kd) => (
+                  <a
+                    key={kd.k}
+                    href={`/api/cnc-templates/${t.id}/file/${kd.k}`}
+                    target="_blank" rel="noreferrer"
+                    className="px-1.5 py-0.5 rounded bg-[#E0EDF0] text-[#3E6570] text-[10px] font-semibold uppercase hover:bg-[#cfe3e8]"
+                    title={`Download ${kd.k.toUpperCase()}`}
+                  >
+                    {kd.k}
+                  </a>
+                ))}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
 
-// Bundle every uploaded doc (ordered by the category groups) into one study
-// PDF. pdf-lib is dynamically imported inside the generator so it stays out of
-// the initial bundle. CNC cutter files (.dgt/.prj/.emf) are machine files, not
+// Bundle every uploaded supporting doc (ordered by slot) into one study PDF.
+// pdf-lib is dynamically imported inside the generator so it stays out of the
+// initial bundle. CNC cutter files (.dgt/.prj/.emf) are machine files, not
 // study material, so they're intentionally excluded.
 async function exportPack(
   product: Product,
@@ -488,7 +470,7 @@ async function exportPack(
   toast: ReturnType<typeof useToast>["toast"],
 ) {
   const labelByKey: Record<string, string> = {};
-  GROUPS.forEach((g) => g.slots.forEach((s) => { labelByKey[s.key] = `${g.title} · ${s.label}`; }));
+  DOC_SLOTS.forEach((s) => { labelByKey[s.key] = s.label; });
   const ordered = ALL_SLOT_KEYS.flatMap((k) =>
     files
       .filter((f) => f.resourceType === `${RT_PREFIX}${k}`)

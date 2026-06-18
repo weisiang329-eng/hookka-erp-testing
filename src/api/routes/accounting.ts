@@ -30,7 +30,7 @@ import { bsSectionFor, bsSectionClass } from "../../lib/bs-section";
 import type { BsSection } from "../../lib/bs-section";
 import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
-import { getDocNumberPrefixes } from "../lib/doc-number-service";
+import { getDocNumberPrefixes, issueDocNumber } from "../lib/doc-number-service";
 
 const app = new Hono<Env>();
 
@@ -4518,20 +4518,6 @@ app.get("/pl", async (c) => {
 // the immutable ledger immediately; void posts a reversal.
 // ---------------------------------------------------------------------------
 
-async function nextDocNo(
-  db: Env["Variables"]["DB"],
-  table: string,
-  column: string,
-  prefix: string,
-): Promise<string> {
-  const now = new Date();
-  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const res = await db
-    .prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE ${column} LIKE ?`)
-    .bind(`${prefix}-${yymm}-%`)
-    .first<{ c: number }>();
-  return `${prefix}-${yymm}-${String((res?.c ?? 0) + 1).padStart(4, "0")}`;
-}
 
 type VoucherLineIn = { accountCode: string; description?: string; amountSen: number };
 
@@ -4632,7 +4618,11 @@ app.post("/payment-vouchers", async (c) => {
       }
     }
     const id = `pv-${crypto.randomUUID().slice(0, 8)}`;
-    const pvNo = await nextDocNo(c.var.DB, "payment_vouchers", "pvNo", "PV");
+    const pvNo = await issueDocNumber(c.var.DB, {
+      bankAccountCode: payFrom ?? "",
+      direction: "out",
+      dateIso: date,
+    });
     const now = new Date().toISOString();
     const orgId = getOrgId(c);
     const actorUserId =
@@ -4871,7 +4861,11 @@ app.post("/official-receipts", async (c) => {
       );
     }
     const id = `or-${crypto.randomUUID().slice(0, 8)}`;
-    const orNo = await nextDocNo(c.var.DB, "official_receipts", "orNo", "OR");
+    const orNo = await issueDocNumber(c.var.DB, {
+      bankAccountCode: payTo,
+      direction: "in",
+      dateIso: date,
+    });
     const now = new Date().toISOString();
     const orgId = getOrgId(c);
     const actorUserId =

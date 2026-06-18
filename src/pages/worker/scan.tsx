@@ -40,6 +40,7 @@ import {
   Images,
   Flashlight,
   ZoomOut,
+  Pointer,
 } from "lucide-react";
 import jsQR from "jsqr";
 import { useT } from "@/lib/worker-i18n";
@@ -1534,6 +1535,22 @@ export default function WorkerScanPage() {
   // ONLY that row is read (the rows above/below are excluded), then fire it. It is
   // a ONE-SHOT on the tap — a band that misses just buzzes for a re-tap, so it can
   // NEVER cause the continuous "扫不到" an always-on crop did (owner 2026-06-18).
+  // Tap feedback (owner 2026-06-18: "完全不知道它能被点击，看起来完全没反应").
+  // A ring blooms at the exact tap point so the worker SEES the tap registered;
+  // it turns red if no bars sat on that row (a re-tap cue). PURELY VISUAL — it
+  // never touches the decode band / ROI / coordinate mapping. {x,y} are px within
+  // the video's overflow container (the video is inset-0, so its rect == it).
+  const [tapFx, setTapFx] = useState<
+    { x: number; y: number; state: "scan" | "miss" } | null
+  >(null);
+  useEffect(() => {
+    if (!tapFx) return;
+    const ttl = tapFx.state === "miss" ? 850 : 600;
+    // eslint-disable-next-line no-restricted-syntax -- one-shot auto-clear timer with proper effect cleanup; useTimeout would need a nullable-delay dance for the same result
+    const id = window.setTimeout(() => setTapFx(null), ttl);
+    return () => window.clearTimeout(id);
+  }, [tapFx]);
+
   const tapScanBarcode = useCallback(
     async (e: React.PointerEvent<HTMLVideoElement>) => {
       if (scanMode !== "barcode") return;
@@ -1541,6 +1558,13 @@ export default function WorkerScanPage() {
       if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
       const rect = video.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
+      // Instant ACK at the tap point — shows BEFORE the (async) decode so the
+      // worker always sees that his tap landed, even on a miss.
+      setTapFx({
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+        state: "scan",
+      });
       const vw = video.videoWidth;
       const vh = video.videoHeight;
       // object-cover: the frame is scaled to COVER the element, overflow cropped +
@@ -1610,11 +1634,14 @@ export default function WorkerScanPage() {
         } catch {
           /* haptics best-effort */
         }
+        // Clear the ring — the result card taking over IS the success feedback.
+        setTapFx(null);
         stopLiveScan();
         void handleDecoded(decoded);
       } else {
-        // No bars on the tapped row — buzz so the worker re-taps ON the barcode.
-        // One-shot, so this is NEVER the continuous "扫不到".
+        // No bars on the tapped row — flip the ring red + buzz so the worker
+        // re-taps ON the barcode. One-shot, so this is NEVER the continuous "扫不到".
+        setTapFx((p) => (p ? { ...p, state: "miss" } : null));
         try {
           navigator.vibrate?.([15, 35, 15]);
         } catch {
@@ -2508,9 +2535,46 @@ export default function WorkerScanPage() {
                 <span className="absolute right-0 top-0 h-10 w-10 border-t-4 border-r-4 border-white rounded-tr-lg" />
                 <span className="absolute left-0 bottom-0 h-10 w-10 border-b-4 border-l-4 border-white rounded-bl-lg" />
                 <span className="absolute right-0 bottom-0 h-10 w-10 border-b-4 border-r-4 border-white rounded-br-lg" />
-                {/* no centre line — barcode is tap-to-pick now */}
+                {/* no centre line — barcode is tap-to-pick now. Instead a gently
+                    pulsing "Tap to scan" badge makes the tap affordance obvious
+                    (owner 2026-06-18: didn't realise the row was tappable). */}
+                {scanMode === "barcode" && (
+                  <span className="absolute inset-0 flex items-center justify-center">
+                    <span className="flex items-center gap-1.5 rounded-full bg-black/55 px-3 py-1.5 text-white text-xs font-semibold animate-pulse">
+                      <Pointer className="h-3.5 w-3.5" />
+                      {t("scan.tapHintBarcode")}
+                    </span>
+                  </span>
+                )}
               </div>
             </div>
+            {/* Tap ACK ring — blooms at the exact tap point (green = registered,
+                red = no bars there → re-tap). Auto-clears via the tapFx effect. */}
+            {scanMode === "barcode" && tapFx && (
+              <span
+                className="pointer-events-none absolute z-20"
+                style={{
+                  left: tapFx.x,
+                  top: tapFx.y,
+                  transform: "translate(-50%, -50%)",
+                }}
+              >
+                <span
+                  className={`block rounded-full animate-ping ${
+                    tapFx.state === "miss"
+                      ? "bg-red-400/30 ring-2 ring-red-300"
+                      : "bg-emerald-300/30 ring-2 ring-emerald-200"
+                  }`}
+                  style={{ width: 68, height: 68 }}
+                />
+                <span
+                  className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full ${
+                    tapFx.state === "miss" ? "bg-red-400" : "bg-emerald-300"
+                  }`}
+                  style={{ width: 12, height: 12 }}
+                />
+              </span>
+            )}
           </div>
           <div className="px-4 pb-7 pt-3 flex flex-col items-center gap-3">
             <p className="text-white/90 text-center text-sm">

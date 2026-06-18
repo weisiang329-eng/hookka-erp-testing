@@ -279,6 +279,12 @@ const dict: Dict = {
     zh: '点你要扫的那一行 —— 只读你点的那一条。',
     my: 'သင်လိုချင်သော ဘားကုဒ်လိုင်းကို တို့ပါ — ထိုလိုင်းကိုသာ ဖတ်သည်။',
   },
+  'scan.tapHintBarcode': {
+    en: 'Tap to scan',
+    ms: 'Ketik untuk imbas',
+    zh: '点一下扫描',
+    my: 'တို့၍ ဖတ်ပါ',
+  },
   'scan.modeQr': {
     en: 'QR mode',
     ms: 'Mod QR',

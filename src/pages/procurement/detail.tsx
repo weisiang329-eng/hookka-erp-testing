@@ -100,7 +100,21 @@ export default function PurchaseOrderDetailPage() {
   const { data: bindingsResp } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
   // 2.3 — GRN list, used to gate the Mark Received button. Endpoint is
   // singular /api/grn (NOT /api/grns).
-  const { data: grnResp } = useCachedJson<{ success?: boolean; data?: Array<{ id: string; poId: string | null; status: string | null }> }>("/api/grn");
+  const { data: grnResp } = useCachedJson<{ success?: boolean; data?: Array<{ id: string; grnNumber?: string; poId: string | null; status: string | null; totalAmount?: number }> }>("/api/grn");
+  // Lineage: PIs raised against this PO. The PI list has no poId filter, so we
+  // pull the list and match client-side on purchaseOrderId (small dataset).
+  const { data: piListResp } = useCachedJson<{ success?: boolean; data?: Array<{ id: string; piNo?: string; purchaseOrderId?: string | null; status?: string | null; amountSen?: number }> }>("/api/purchase-invoices");
+
+  // Document lineage for this PO: the GRNs received against it + the PIs raised
+  // from it (clickable chips → their detail pages).
+  const relatedGrns = useMemo(
+    () => (grnResp?.data ?? []).filter((g) => g.poId === po?.id),
+    [grnResp, po?.id],
+  );
+  const relatedPis = useMemo(
+    () => (piListResp?.data ?? []).filter((p) => p.purchaseOrderId === po?.id),
+    [piListResp, po?.id],
+  );
 
   const allSuppliers: Supplier[] = useMemo(
     () => (supResp?.success ? supResp.data ?? [] : []),
@@ -1265,6 +1279,56 @@ export default function PurchaseOrderDetailPage() {
           onSave={handleInlineGrnCreate}
           onClose={() => setShowGrnDialog(false)}
         />
+      )}
+
+      {/* Document lineage — GRNs received + PIs raised against this PO, as
+          clickable chips so the operator can jump across the PO↔GRN↔PI chain. */}
+      {(relatedGrns.length > 0 || relatedPis.length > 0) && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium text-[#6B7280]">Related Documents</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div>
+              <p className="text-xs font-medium text-[#9CA3AF] mb-1.5">Goods Received Notes ({relatedGrns.length})</p>
+              {relatedGrns.length === 0 ? (
+                <p className="text-xs text-[#9CA3AF] italic">None yet.</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {relatedGrns.map((g) => (
+                    <Link
+                      key={g.id}
+                      to={`/procurement/grn/${g.id}`}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1 text-xs font-medium text-[#6B5C32] hover:bg-[#F3F0EA] transition-colors"
+                    >
+                      <Package className="h-3.5 w-3.5" /> {g.grnNumber || g.id}
+                      {g.status ? <span className="text-[#9CA3AF]">· {g.status}</span> : null}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div>
+              <p className="text-xs font-medium text-[#9CA3AF] mb-1.5">Purchase Invoices ({relatedPis.length})</p>
+              {relatedPis.length === 0 ? (
+                <p className="text-xs text-[#9CA3AF] italic">None yet.</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {relatedPis.map((p) => (
+                    <Link
+                      key={p.id}
+                      to={`/procurement/pi/${p.id}`}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1 text-xs font-medium text-[#6B5C32] hover:bg-[#F3F0EA] transition-colors"
+                    >
+                      <FileText className="h-3.5 w-3.5" /> {p.piNo || p.id}
+                      {p.status ? <span className="text-[#9CA3AF]">· {p.status}</span> : null}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Three-Way Match panel (Phase 4.3) — collapsible "tab" surfacing

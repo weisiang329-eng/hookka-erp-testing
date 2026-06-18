@@ -17,7 +17,7 @@
 // ---------------------------------------------------------------------------
 import { useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, FileText, Package, CheckCircle2, PackageCheck, Receipt } from "lucide-react";
+import { ArrowLeft, FileText, Package, CheckCircle2, PackageCheck, Receipt, Printer } from "lucide-react";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -178,6 +178,32 @@ export default function GRNDetailPage() {
     }
   }
 
+  // Print the GRN as a PDF (jspdf dynamic-imported). Map this page's GRN shape
+  // onto the field names generateGRNPdf reads (grnNo / date / poRef / items).
+  async function printPdf() {
+    if (!grn) return;
+    try {
+      const { generateGRNPdf } = await import("@/lib/generate-grn-pdf");
+      generateGRNPdf({
+        grnNo: grn.grnNumber,
+        date: grn.receiveDate,
+        poRef: grn.poNumber,
+        supplierName: grn.supplierName,
+        remarks: grn.notes ?? "",
+        items: items.map((it) => ({
+          itemCode: it.materialCode,
+          description: it.materialName,
+          poQty: it.orderedQty,
+          receivedQty: it.receivedQty,
+          rejectedQty: it.rejectedQty,
+          acceptedQty: it.acceptedQty,
+        })),
+      });
+    } catch {
+      toast.error("Could not generate the PDF.");
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -227,6 +253,9 @@ export default function GRNDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={printPdf} disabled={busy}>
+            <Printer className="h-3.5 w-3.5" /> Print
+          </Button>
           {!isConfirmed && !isPosted && (
             <Button type="button" variant="outline" size="sm" onClick={() => setStatus("CONFIRMED", "Approve")} disabled={busy}>
               <CheckCircle2 className="h-3.5 w-3.5" /> Approve

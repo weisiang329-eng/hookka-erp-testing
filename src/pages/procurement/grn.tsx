@@ -530,7 +530,30 @@ export default function GRNPage() {
       {
         label: "Print GRN",
         icon: <Printer className="h-3.5 w-3.5" />,
-        action: () => toast.info(`Print GRN ${row.grnNumber} — coming soon`),
+        // List rows carry the full GRN — map to the generator's field shape
+        // (same as the bulk download) and print this one.
+        action: async () => {
+          try {
+            const { generateGRNPdf } = await import("@/lib/generate-grn-pdf");
+            generateGRNPdf({
+              grnNo: row.grnNumber,
+              date: row.receiveDate,
+              poRef: row.poNumber,
+              supplierName: row.supplierName,
+              remarks: row.notes,
+              items: row.items.map((it) => ({
+                itemCode: it.materialCode,
+                description: it.materialName,
+                poQty: it.orderedQty,
+                receivedQty: it.receivedQty,
+                rejectedQty: it.rejectedQty,
+                acceptedQty: it.acceptedQty,
+              })),
+            });
+          } catch {
+            toast.error("Could not generate the PDF.");
+          }
+        },
       },
       { label: "", separator: true, action: () => {} },
       {

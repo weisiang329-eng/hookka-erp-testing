@@ -15,7 +15,7 @@
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, FileText, Package, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, FileText, Package, Pencil, Plus, Printer, Trash2 } from "lucide-react";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -141,6 +141,18 @@ export default function PurchaseInvoiceDetailPage() {
       toast.error(`${label} failed — network error`);
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Print the PI as a PDF (jspdf dynamic-imported so the ~1MB lib isn't in the
+  // initial bundle). pi already matches the PurchaseInvoicePdfData shape.
+  async function printPdf() {
+    if (!pi) return;
+    try {
+      const { generatePurchaseInvoicePdf } = await import("@/lib/generate-purchase-invoice-pdf");
+      generatePurchaseInvoicePdf(pi);
+    } catch {
+      toast.error("Could not generate the PDF.");
     }
   }
 
@@ -315,6 +327,11 @@ export default function PurchaseInvoiceDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {!editing && (
+            <Button type="button" variant="outline" size="sm" onClick={printPdf} disabled={busy}>
+              <Printer className="h-3.5 w-3.5" /> Print
+            </Button>
+          )}
           {!editing && pi.status === "DRAFT" && (
             <Button type="button" variant="outline" size="sm" onClick={startEdit} disabled={busy}>
               <Pencil className="h-3.5 w-3.5" /> Edit

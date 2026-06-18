@@ -656,7 +656,27 @@ export default function PurchaseInvoicesPage() {
       {
         label: "Print PI",
         icon: <Printer className="h-3.5 w-3.5" />,
-        action: () => toast.info(`Print PI ${row.piNo} — coming soon`),
+        // List rows are lean (no items[]), so fetch the full PI before printing.
+        action: async () => {
+          try {
+            const res = await fetch(`/api/purchase-invoices/${row.id}`);
+            const j = (await res.json().catch(() => null)) as
+              | { success?: boolean; data?: Record<string, unknown> }
+              | null;
+            if (!res.ok || !j?.success || !j.data) {
+              toast.error("Could not load the invoice to print.");
+              return;
+            }
+            const { generatePurchaseInvoicePdf } = await import(
+              "@/lib/generate-purchase-invoice-pdf"
+            );
+            generatePurchaseInvoicePdf(
+              j.data as unknown as Parameters<typeof generatePurchaseInvoicePdf>[0],
+            );
+          } catch {
+            toast.error("Could not generate the PDF.");
+          }
+        },
       },
       { label: "", separator: true, action: () => {} },
       {

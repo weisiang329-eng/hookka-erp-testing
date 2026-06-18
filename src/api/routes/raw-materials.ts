@@ -685,20 +685,20 @@ app.post("/_relock-duplicate-codes", async (c) => {
 // ---------------------------------------------------------------------------
 // Duplicate-merge (owner 2026-06-18). After the item-code consolidation some
 // materials exist as 2+ rows with the SAME item_code (e.g. "18MM 4' X 8' AA
-// PLYWOOD" with 61 + 310 PCS). This FOLDS the duplicates into one canonical row:
-//   1. repoint every id-reference (rm_batches.rm_id, stock_adjustments.item_id,
-//      rd_material_issuances.raw_material_id, cost_ledger.item_id RM) from the
-//      duplicate to the canonical — FIRST, because rm_batches.rm_id is ON DELETE
-//      CASCADE, so deleting the dup before repointing would destroy its batch /
-//      cost history;
-//   2. add the duplicate's balance_qty to the canonical (stock is summed);
-//   3. RAW-delete the duplicate row (NOT the fabric-aware DELETE /:id cascade —
-//      the item_code lives on the canonical, so the fabrics-by-code mirror must
-//      stay).
-// String refs (supplier_material_bindings.material_code, bom_templates, PO/GRN
-// lines, fabrics by code) need NO repointing: the canonical keeps the same code.
-// A one-time consolidation tool — the canonical is the richest row (most refs,
-// then most stock, then oldest). The preview reports per-row reference counts.
+// PLYWOOD"). These merge them CONSERVATIVELY: keep the row that actually carries
+// data, delete only the EMPTY duplicates. A duplicate that still carries
+// transactional history is REPORTED, never auto-deleted (deleting it would
+// orphan or CASCADE-lose that history — rm_batches FK is ON DELETE CASCADE).
+//
+// Why no repointing of string refs: the surviving row keeps the SAME item_code,
+// so supplier_material_bindings.material_code, bom_templates, PO/GRN lines and
+// the fabrics mirror (by code) all keep working unchanged. The delete is a RAW
+// row delete (NOT the fabric-aware DELETE /:id cascade) for the same reason — the
+// code lives on the canonical row, so the fabrics mirror must stay.
+//
+// "Empty" = zero rm_batches + zero stock_adjustments(RM) + zero
+// rd_material_issuances + zero cost_ledger(RM) + zero balance. Any count query
+// that throws aborts the whole op (we never delete on an uncertain count).
 // ---------------------------------------------------------------------------
 type RmRefCounts = {
   batches: number;
@@ -840,78 +840,52 @@ app.post("/merge-duplicates", async (c) => {
   const groups = await buildDupGroups(c, onlyCodes);
   const plan = groups.map((g) => {
     const keep = pickCanonical(g.rows);
-    const merges = g.rows
-      .filter((r) => r.id !== keep.id)
-      .map((r) => ({
-        id: r.id,
-        balanceQty: r.balanceQty,
-        totalRefs: r.totalRefs,
-      }));
-    return {
-      itemCode: g.itemCode,
-      keepId: keep.id,
-      keepBalanceQty: keep.balanceQty,
-      merges,
-    };
+    const deleteIds: string[] = [];
+    const skipped: { id: string; totalRefs: number; balanceQty: number }[] = [];
+    for (const row of g.rows) {
+      if (row.id === keep.id) continue;
+      if (row.isEmpty) deleteIds.push(row.id);
+      else
+        skipped.push({
+          id: row.id,
+          totalRefs: row.totalRefs,
+          balanceQty: row.balanceQty,
+        });
+    }
+    return { itemCode: g.itemCode, keepId: keep.id, deleteIds, skipped };
   });
 
-  const mergeIds = plan.flatMap((p) => p.merges.map((m) => m.id));
-  let mergedCount = 0;
+  const toDelete = plan.flatMap((p) => p.deleteIds);
+  let deletedCount = 0;
   if (apply) {
-    for (const p of plan) {
-      for (const m of p.merges) {
-        // Repoint EVERY id-reference from the duplicate to the canonical FIRST —
-        // rm_batches.rm_id is ON DELETE CASCADE, so deleting the dup before
-        // repointing would silently destroy its batch / cost history.
-        await c.var.DB.prepare(`UPDATE rm_batches SET rm_id = ? WHERE rm_id = ?`)
-          .bind(p.keepId, m.id)
-          .run();
-        await c.var.DB.prepare(
-          `UPDATE stock_adjustments SET item_id = ? WHERE item_id = ? AND type = 'RM'`,
-        )
-          .bind(p.keepId, m.id)
-          .run();
-        await c.var.DB.prepare(
-          `UPDATE rd_material_issuances SET raw_material_id = ? WHERE raw_material_id = ?`,
-        )
-          .bind(p.keepId, m.id)
-          .run();
-        await c.var.DB.prepare(
-          `UPDATE cost_ledger SET item_id = ? WHERE item_id = ? AND item_type = 'RM'`,
-        )
-          .bind(p.keepId, m.id)
-          .run();
-        // Fold the duplicate's stock into the canonical, then RAW-delete the dup
-        // (the item_code lives on the canonical, so the fabrics-by-code mirror +
-        // every string ref stay valid). Sequential + idempotent.
-        await c.var.DB.prepare(
-          `UPDATE raw_materials SET balanceQty = balanceQty + ? WHERE id = ? AND orgId = ?`,
-        )
-          .bind(m.balanceQty, p.keepId, orgId)
-          .run();
-        await c.var.DB.prepare(
-          `DELETE FROM raw_materials WHERE id = ? AND orgId = ?`,
-        )
-          .bind(m.id, orgId)
-          .run();
-        mergedCount++;
-      }
+    // RAW delete (no fabric cascade): the item_code survives on the canonical
+    // row, so the fabrics-by-code mirror + every string ref must stay intact.
+    // Sequential + idempotent — a re-run after a partial failure is safe.
+    for (const id of toDelete) {
+      await c.var.DB.prepare(
+        `DELETE FROM raw_materials WHERE id = ? AND orgId = ?`,
+      )
+        .bind(id, orgId)
+        .run();
+      deletedCount++;
     }
   }
 
+  const skippedDataBearing = plan.flatMap((p) => p.skipped);
   return c.json({
     success: true,
     applied: apply,
     data: {
       plan,
       groupCount: plan.length,
-      mergedCount: apply ? mergedCount : 0,
-      wouldMergeCount: mergeIds.length,
-      note: apply
-        ? mergeIds.length
-          ? "Duplicates folded into their canonical row (stock summed, batch/cost history repointed). Re-lock with /_relock-duplicate-codes once every code is unique."
-          : "No duplicate item codes to merge."
-        : "Dry-run — pass { apply: true } to merge the duplicates.",
+      deletedCount,
+      wouldDeleteCount: toDelete.length,
+      skippedDataBearing,
+      note: skippedDataBearing.length
+        ? `${skippedDataBearing.length} duplicate row(s) still carry data and were NOT deleted — repoint those by hand. Re-lock with /_relock-duplicate-codes once every code is unique.`
+        : apply && toDelete.length
+          ? "Empty duplicates removed. If no duplicates remain, re-lock with /_relock-duplicate-codes."
+          : "Dry-run — pass { apply: true } to delete the empty duplicates.",
     },
   });
 });

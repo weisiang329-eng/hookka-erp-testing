@@ -30,7 +30,16 @@ import { bsSectionFor, bsSectionClass } from "../../lib/bs-section";
 import type { BsSection } from "../../lib/bs-section";
 import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
-import { getDocNumberPrefixes, issueDocNumber } from "../lib/doc-number-service";
+import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "../lib/doc-number-service";
+import {
+  prefixForPartyType,
+  computeBillTotals,
+  validateBillShape,
+  buildBillLegs,
+  reverseLegs,
+  type PartyType,
+  type BillItemInput,
+} from "../../lib/other-party-bill";
 
 const app = new Hono<Env>();
 
@@ -2078,6 +2087,30 @@ function rowToOtherParty(r: OtherPartyRow) {
   };
 }
 
+type OtherPartyBillRow = {
+  id: string;
+  billNo: string;
+  partyId: string;
+  partyType: "DEBTOR" | "CREDITOR";
+  partyName: string;
+  billDate: string;
+  referenceNo: string | null;
+  description: string | null;
+  subtotalSen: number;
+  taxSen: number;
+  totalSen: number;
+  paidAmountSen: number;
+  status: string;
+};
+type OtherPartyBillItemRow = {
+  id: string;
+  billId: string;
+  counterAccount: string;
+  amountSen: number;
+  description: string | null;
+  lineNo: number;
+};
+
 app.get("/other-parties", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
@@ -2236,6 +2269,247 @@ app.put("/other-parties/:id", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+app.post("/other-party-bills", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as {
+      partyId?: string;
+      billDate?: string;
+      referenceNo?: string;
+      description?: string;
+      taxSen?: number;
+      items?: { counterAccount?: string; amountSen?: number; description?: string }[];
+    };
+    const orgId = getOrgId(c);
+
+    const party = await c.var.DB.prepare(
+      "SELECT * FROM other_parties WHERE id = ? AND orgId = ?",
+    )
+      .bind(String(body.partyId ?? ""), orgId)
+      .first<OtherPartyRow>();
+    if (!party) return c.json({ success: false, error: "Party not found" }, 400);
+
+    const billDate = String(body.billDate ?? "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(billDate))
+      return c.json({ success: false, error: "billDate must be YYYY-MM-DD" }, 400);
+
+    const items: BillItemInput[] = (body.items ?? []).map((it) => ({
+      counterAccount: String(it.counterAccount ?? "").trim(),
+      amountSen: Math.round(Number(it.amountSen ?? 0)),
+      description: it.description ? String(it.description) : "",
+    }));
+    const taxSen = Math.round(Number(body.taxSen ?? 0));
+
+    const shapeErr = validateBillShape(items, taxSen);
+    if (shapeErr) return c.json({ success: false, error: shapeErr }, 400);
+
+    for (const code of [...new Set(items.map((i) => i.counterAccount))]) {
+      const acct = await c.var.DB.prepare(
+        "SELECT code, isPostable FROM chart_of_accounts WHERE code = ?",
+      )
+        .bind(code)
+        .first<{ code: string; isPostable: number }>();
+      if (!acct) return c.json({ success: false, error: `Account ${code} not found` }, 400);
+      if (acct.isPostable !== 1)
+        return c.json({ success: false, error: `Account ${code} is not postable` }, 400);
+    }
+
+    const partyType = party.type as PartyType;
+    const { subtotalSen, totalSen } = computeBillTotals(items, taxSen);
+    const billNo = await issueDocNumberWithPrefix(
+      c.var.DB,
+      prefixForPartyType(partyType),
+      billDate,
+    );
+    const billId = `opb-${crypto.randomUUID().slice(0, 10)}`;
+    const now = new Date().toISOString();
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+
+    const statements: D1PreparedStatement[] = [
+      c.var.DB.prepare(
+        `INSERT INTO other_party_bills
+           (id, billNo, partyId, partyType, partyName, billDate, referenceNo, description,
+            subtotalSen, taxSen, totalSen, paidAmountSen, status, orgId, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?)`,
+      ).bind(
+        billId,
+        billNo,
+        party.id,
+        partyType,
+        party.name,
+        billDate,
+        body.referenceNo ?? null,
+        body.description ?? null,
+        subtotalSen,
+        taxSen,
+        totalSen,
+        orgId,
+        now,
+      ),
+    ];
+    items.forEach((it, idx) => {
+      statements.push(
+        c.var.DB.prepare(
+          `INSERT INTO other_party_bill_items
+             (id, billId, counterAccount, amountSen, description, lineNo, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          `opbi-${crypto.randomUUID().slice(0, 10)}`,
+          billId,
+          it.counterAccount,
+          it.amountSen,
+          it.description ?? null,
+          idx + 1,
+          now,
+        ),
+      );
+    });
+
+    try {
+      const accountingLegs = buildBillLegs({ partyType, billNo, partyName: party.name, items, taxSen });
+      const legs: LedgerEntryInput[] = accountingLegs.map((l) => ({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "other_party_bill",
+        sourceId: billNo,
+        legNo: l.legNo,
+        accountCode: l.accountCode,
+        debitSen: l.debitSen,
+        creditSen: l.creditSen,
+        description: l.description,
+        actorUserId,
+        orgId,
+      }));
+      const { statements: ledgerStmts } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+      statements.push(...ledgerStmts);
+    } catch (e) {
+      console.error(`[ledger] other_party_bill ${billNo} GL build failed — aborting:`, e);
+      return c.json({ success: false, error: "Failed to build the ledger posting — nothing was saved. Retry, and report if it persists." }, 500);
+    }
+
+    await c.var.DB.batch(statements);
+    return c.json({ success: true, data: { id: billId, billNo, partyType, totalSen, status: "OPEN" } }, 201);
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.get("/other-party-bills", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const partyId = c.req.query("partyId");
+  const type = c.req.query("type");
+
+  let q = "SELECT * FROM other_party_bills WHERE orgId = ?";
+  const binds: (string)[] = [orgId];
+  if (partyId) { q += " AND partyId = ?"; binds.push(partyId); }
+  if (type === "DEBTOR" || type === "CREDITOR") { q += " AND partyType = ?"; binds.push(type); }
+  q += " ORDER BY billDate DESC, billNo DESC";
+
+  const billsRes = await c.var.DB.prepare(q).bind(...binds).all<OtherPartyBillRow>();
+  const bills = billsRes.results ?? [];
+
+  const itemsByBill = new Map<string, OtherPartyBillItemRow[]>();
+  if (bills.length > 0) {
+    const itemsRes = await c.var.DB.prepare(
+      "SELECT i.* FROM other_party_bill_items i JOIN other_party_bills b ON b.id = i.billId WHERE b.orgId = ? ORDER BY i.lineNo",
+    ).bind(orgId).all<OtherPartyBillItemRow>();
+    for (const it of itemsRes.results ?? []) {
+      if (!itemsByBill.has(it.billId)) itemsByBill.set(it.billId, []);
+      itemsByBill.get(it.billId)!.push(it);
+    }
+  }
+
+  const data = bills.map((b) => ({
+    id: b.id,
+    billNo: b.billNo,
+    partyId: b.partyId,
+    partyType: b.partyType,
+    partyName: b.partyName,
+    billDate: b.billDate,
+    referenceNo: b.referenceNo ?? "",
+    description: b.description ?? "",
+    subtotalSen: b.subtotalSen,
+    taxSen: b.taxSen,
+    totalSen: b.totalSen,
+    paidAmountSen: b.paidAmountSen,
+    outstandingSen: b.totalSen - b.paidAmountSen,
+    status: b.status,
+    items: (itemsByBill.get(b.id) ?? []).map((i) => ({
+      counterAccount: i.counterAccount,
+      amountSen: i.amountSen,
+      description: i.description ?? "",
+      lineNo: i.lineNo,
+    })),
+  }));
+  return c.json({ success: true, data, total: data.length });
+});
+
+app.delete("/other-party-bills/:billNo", async (c) => {
+  const denied = await requirePermission(c, "accounting", "delete");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const billNo = c.req.param("billNo");
+
+  const bill = await c.var.DB.prepare(
+    "SELECT * FROM other_party_bills WHERE billNo = ? AND orgId = ?",
+  ).bind(billNo, orgId).first<OtherPartyBillRow>();
+  if (!bill) return c.json({ success: false, error: "Bill not found" }, 404);
+  if (bill.paidAmountSen > 0)
+    return c.json({ success: false, error: "Bill has payments — void via settlement (D2), cannot delete" }, 400);
+
+  const itemsRes = await c.var.DB.prepare(
+    "SELECT * FROM other_party_bill_items WHERE billId = ? ORDER BY lineNo",
+  ).bind(bill.id).all<OtherPartyBillItemRow>();
+  const items: BillItemInput[] = (itemsRes.results ?? []).map((i) => ({
+    counterAccount: i.counterAccount,
+    amountSen: i.amountSen,
+    description: i.description ?? "",
+  }));
+
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+
+  const statements: D1PreparedStatement[] = [];
+  try {
+    if (!(await ledgerHasSource(c.var.DB, orgId, "other_party_bill_void", billNo))) {
+      const original = buildBillLegs({
+        partyType: bill.partyType as PartyType,
+        billNo: bill.billNo,
+        partyName: bill.partyName,
+        items,
+        taxSen: bill.taxSen,
+      });
+      const legs: LedgerEntryInput[] = reverseLegs(original).map((l) => ({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "other_party_bill_void",
+        sourceId: billNo,
+        legNo: l.legNo,
+        accountCode: l.accountCode,
+        debitSen: l.debitSen,
+        creditSen: l.creditSen,
+        description: l.description,
+        actorUserId,
+        orgId,
+      }));
+      const { statements: ledgerStmts } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+      statements.push(...ledgerStmts);
+    }
+  } catch (e) {
+    console.error(`[ledger] other_party_bill ${billNo} void GL build failed — aborting:`, e);
+    return c.json({ success: false, error: "Failed to build the ledger reversal — nothing was saved." }, 500);
+  }
+
+  statements.push(
+    c.var.DB.prepare("DELETE FROM other_party_bill_items WHERE billId = ?").bind(bill.id),
+    c.var.DB.prepare("DELETE FROM other_party_bills WHERE id = ?").bind(bill.id),
+  );
+  await c.var.DB.batch(statements);
+  return c.json({ success: true });
 });
 
 // ---------------------------------------------------------------------------

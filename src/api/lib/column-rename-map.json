@@ -786,6 +786,7 @@
   "submittedAt": "submitted_at",
   "subtotalSen": "subtotal_sen",
   "suggestedPOQty": "suggested_po_qty",
+  "supplierDescription": "supplier_description",
   "supplierId": "supplier_id",
   "supplierName": "supplier_name",
   "supplierSKU": "supplier_sku",

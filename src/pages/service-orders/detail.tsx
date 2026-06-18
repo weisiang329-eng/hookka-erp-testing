@@ -534,11 +534,13 @@ function ReturnRow({
       const data = (await res.json()) as { success?: boolean; error?: string };
       if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
       onChanged();
+      // Close ONLY on success — on failure keep the form open (and the
+      // operator's edits) so they can retry instead of losing their input.
+      setEditing(false);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed");
     } finally {
       setBusy(false);
-      setEditing(false);
     }
   }
 
@@ -568,11 +570,11 @@ function ReturnRow({
       invalidateCachePrefix("/api/inventory");
       invalidateCachePrefix("/api/stock-adjustments");
       onChanged();
+      setEditing(false); // close only on success (keep panel + selection on failure)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed");
     } finally {
       setBusy(false);
-      setEditing(false);
     }
   }
 

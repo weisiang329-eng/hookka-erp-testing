@@ -18,7 +18,7 @@ Each entry below jumps to the first BUG with that category tag.
 Entries themselves stay newest-first.
 
 - `inventory-display` (23) — [BUG-2026-04-27-032](#bug-2026-04-27-032-wip-page-inflated-displayed-qty-by-summing-uph-jc-capacity-instead-of-trusting-wip_itemsstockqty)
-- `ui-frontend` (22) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
+- `ui-frontend` (24) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
 - `production-orders` (20) — [BUG-2026-04-29-001](#bug-2026-04-29-001--production-sheet-so-id-column-blank-for-sofa-rows-of-co-origin-pos)
 - `bom` (18) — [BUG-2026-04-29-008](#bug-2026-04-29-008--dept-pivot-editor-shows-stale-minutes-same-cat-different-times-on-different-rows)
 - `infrastructure` (15) — [BUG-2026-04-27-029](#bug-2026-04-27-029-fixdb-hyperdrive-needs-preparefalse-supavisor-6543-rejects-prepared-statements)
@@ -26,11 +26,74 @@ Entries themselves stay newest-first.
 - `delivery-orders` (11) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
 - `sales-orders` (7) — [BUG-2026-04-26-021](#bug-2026-04-26-021-fixsales-drop-wrong-mattress-label-on-sofa-category-option)
 - `pricing-products` (6) — [BUG-2026-04-24-029](#bug-2026-04-24-029-fixcustomers-sofa-seat-prices-now-render-in-customer-products-panel)
-- `data-migration` (6) — [BUG-2026-06-10-001](#bug-2026-06-10-001--punch-selfie-photo-endpoint-500d-an-explicit-camelcase-select-projection-isnt-translated-by-the-d1-compat-adapter)
+- `data-migration` (8) — [BUG-2026-06-10-001](#bug-2026-06-10-001--punch-selfie-photo-endpoint-500d-an-explicit-camelcase-select-projection-isnt-translated-by-the-d1-compat-adapter) · camelCase/rename-map class recurs — see BUG-2026-06-18-001/-002
 - `data-integrity` (4) — [BUG-2026-04-25-008](#bug-2026-04-25-008-stability-add-timeout-abort-propagation-to-fetchjson)
 - `auth-rbac` (3) — [BUG-2026-06-12-010](#bug-2026-06-12-010--any-admin-could-disable-or-delete-other-peoples-accounts-no-admin-tier-below-super-admin)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
+## BUG-2026-06-18-004 — Service Case Root Cause edits silently lost (panel never re-seeded, no Cancel, no leave-guard) → "edited but didn't save", PDF printed old value
+
+**Status:** 🟢 Fixed (2026-06-18), prod; tsc + eslint clean.
+**Category:** ui-frontend
+
+**Symptom:** operator edits the Root Cause & Prevention card (e.g. → Material/supplier, 6MM MDF/B, ADD WOORD), the panel shows the edit, but on reopen/refresh it reverts to the old value and the Service Case Report PDF still prints the old root cause.
+
+**Root cause:** the panel switched to explicit-Save (commit `bfbc7362`, 2026-06-12) but (a) `blocks`/`action`/`owner` were a one-time `useState` initializer that never re-seeded from a fresh server snapshot — so a failed/un-clicked save kept displaying the operator's pick while the server still held the old value; (b) no Cancel/revert; (c) no warning when leaving with unsaved edits. The BACKEND save was always fine (verified live: a MATERIAL root cause persists on PUT + readback).
+
+**Fix:** `src/pages/service-cases/detail.tsx` RootCausePanel — re-seed effect keyed on the server snapshot (guarded by `!dirty` so it never clobbers an in-progress edit), a **Cancel** button (revert to saved), and `useNavGuard(dirty)`. New shared hook `src/lib/use-nav-guard.ts` (React Router `useBlocker` for in-app nav + `useUnsavedChanges` for browser unload — the in-app guard the codebase was missing). Commit `d2fa9e38`. This is the reference pattern for the other manual-save surfaces.
+
+**Verification:** tsc/eslint clean; backend persistence proven live; SC-2606-004 data corrected.
+
+---
+
+## BUG-2026-06-18-003 — Supplier + SKU-mapping saves & deletes swallowed every error (`catch {}`) → silent data loss / "bounce back"
+
+**Status:** 🟢 Fixed (2026-06-18), prod.
+**Category:** ui-frontend
+
+**Symptom:** editing/adding/deleting a supplier or SKU mapping (Supplier Maintenance) showed the change, then it "bounced back" on the next refresh with NO error — the supplier master + 969-row SKU costing could vanish silently.
+
+**Root cause:** `handleSaveSupplier` / `handleSaveSKU` + both Delete actions did optimistic local update + raw `fetch` with `catch {}` (comment: "If it fails we still close the modal"). A failed save was never surfaced; the next cached refetch reverted the optimistic change unexplained. **This surface was MISSED by the 2026-06-09 system-wide silent-save sweep (BUG-2026-06-09-003)** — proof that "swept once" ≠ "swept clean".
+
+**Fix:** `src/pages/procurement/maintenance.tsx` — each handler checks `res.ok`, `toast.error(message)` on failure (keeps form open, does not pretend it saved), `toast.success` on success, `invalidateCache` to reconcile with the server. Commit `e97163fb`.
+
+**Verification:** tsc/eslint clean; backend PUT verified persisting (after the supplier_description fix below).
+
+---
+
+## BUG-2026-06-18-002 — Service-order return receipts silently 400'd: `receivedAt` not in the column-rename map
+
+**Status:** 🟢 Fixed (2026-06-18), prod.
+**Category:** data-migration
+
+**Symptom:** `POST /api/service-orders/:id/returns` (log a defective unit returned for a REPAIR-mode SO) silently failed — every return receipt 400'd.
+
+**Root cause:** the INSERT writes `receivedAt`, but the column is `received_at` and `receivedAt` was missing from `column-rename-map.json`, so the compat shim (`src/api/lib/supabase-compat.ts`) left it un-translated → Postgres folded the unquoted identifier to `receivedat` (no underscore) → no such column → the whole INSERT threw → caught as 400 "Invalid request body". Siblings `receivedBy`/`receivedByName` were mapped; `receivedAt` was missed. Same class as BUG-2026-06-10-001 / 06-11-007.
+
+**Fix:** add `"receivedAt": "received_at"` to `src/api/lib/column-rename-map.json`.
+
+**Verification:** JSON valid; deployed.
+
+---
+
+## BUG-2026-06-18-001 — Supplier code / SKU edits never persisted (3-layer: FE local-state-only + missing `supplier_description` column + rename-map gap)
+
+**Status:** 🟢 Fixed (2026-06-18), prod, live-verified.
+**Category:** data-migration
+
+**Symptom:** "supplier code 換了沒反應" — editing a supplier-material SKU (incl. its supplier code) did nothing; the Supplier Description column always read blank.
+
+**Root cause (3 layers stacked):**
+1. **FE:** the SKU Add/Edit/Delete buttons only mutated local React state, never calling the backend.
+2. **Backend:** `src/api/routes/supplier-materials.ts` POST + PUT have written a `supplier_description` column since 2026-05-10, but it was never migrated onto `supplier_material_bindings` → every create/edit threw on the missing column → 400.
+3. **Compat shim:** `supplierDescription` wasn't in `column-rename-map.json`, so even after adding the column the shim folded the write to `supplierdescription` (no underscore) and still missed.
+
+**Fix:** (1) wire the buttons to `/api/supplier-materials` (commit `33806a73`); (2) add the column — runtime `ensureBindingColumns()` `ALTER TABLE … ADD COLUMN IF NOT EXISTS supplier_description` + migration `0174`; (3) add `"supplierDescription": "supplier_description"` to the rename map. See [[arch_column_rename_map_gotcha]] in memory: adding a new column that route SQL writes camelCase requires ALL THREE (column + rename-map entry + redeploy).
+
+**Verification:** live PUT 200; `supplierSku` + `supplierDescription` both persist + readback confirmed.
 
 ---
 

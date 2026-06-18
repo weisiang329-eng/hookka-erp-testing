@@ -1093,43 +1093,31 @@ export default function InventoryPage() {
   const [mergingDuplicates, setMergingDuplicates] = useState(false);
   // Find duplicate raw-material item codes (same code, 2+ rows left over from the
   // item-code consolidation) and SAFELY merge them: the backend keeps the row
-  // that carries data/stock and deletes only the EMPTY duplicates; any
-  // data-bearing duplicate is reported, never auto-deleted (owner 2026-06-18).
+  // that carries the most data/stock; the duplicates are FOLDED into it (stock
+  // summed, batch/cost history repointed) and removed (owner 2026-06-18).
   const handleMergeDuplicates = async () => {
     setMergingDuplicates(true);
     try {
       const res = await fetch("/api/raw-materials/duplicates");
       const json = (await res.json().catch(() => ({}))) as {
-        data?: {
-          groups?: {
-            recommendedKeepId: string;
-            rows: { id: string; isEmpty: boolean }[];
-          }[];
-        };
+        data?: { groups?: { rows: { id: string }[] }[] };
       };
       const groups = json?.data?.groups ?? [];
       if (groups.length === 0) {
         toast.success("No duplicate item codes found.");
         return;
       }
-      let emptyCount = 0;
-      let dataCount = 0;
+      let mergeCount = 0;
       for (const g of groups) {
-        for (const r of g.rows) {
-          if (r.id === g.recommendedKeepId) continue;
-          if (r.isEmpty) emptyCount++;
-          else dataCount++;
-        }
+        mergeCount += Math.max(0, g.rows.length - 1);
       }
       const ok = await askConfirm({
         title: "Merge duplicate raw materials",
-        message: `${groups.length} item code(s) have duplicates. ${emptyCount} empty duplicate row(s) will be removed (the row with data / stock is always kept).${dataCount ? ` ${dataCount} duplicate(s) still carry data and will be SKIPPED — repoint those by hand first.` : ""}`,
-        confirmLabel: emptyCount
-          ? `Remove ${emptyCount} empty duplicate(s)`
-          : "Close",
+        message: `${groups.length} item code(s) have duplicate rows. ${mergeCount} duplicate row(s) will be merged into their main row — the stock is summed and all batch / cost history is moved over, then the extra rows are removed.`,
+        confirmLabel: `Merge ${mergeCount} duplicate(s)`,
         tone: "danger",
       });
-      if (!ok || emptyCount === 0) return;
+      if (!ok || mergeCount === 0) return;
       const applyRes = await fetch("/api/raw-materials/merge-duplicates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1139,21 +1127,21 @@ export default function InventoryPage() {
         success?: boolean;
         error?: string;
         data?: {
-          deletedCount?: number;
-          skippedDataBearing?: unknown[];
-          plan?: { deleteIds?: string[] }[];
+          mergedCount?: number;
+          plan?: { merges?: { id: string }[] }[];
         };
       };
       if (applyRes.ok && applyJson.success) {
-        const skipped = applyJson.data?.skippedDataBearing?.length ?? 0;
         const deletedIds = new Set(
-          (applyJson.data?.plan ?? []).flatMap((p) => p.deleteIds ?? []),
+          (applyJson.data?.plan ?? []).flatMap((p) =>
+            (p.merges ?? []).map((m) => m.id),
+          ),
         );
         toast.success(
-          `Merged: ${applyJson.data?.deletedCount ?? 0} empty duplicate(s) removed.${skipped ? ` ${skipped} skipped (still have data).` : ""}`,
+          `Merged: ${applyJson.data?.mergedCount ?? 0} duplicate row(s) folded into their main row.`,
         );
-        // Optimistically drop the removed rows + invalidate caches (mirrors the
-        // single-RM delete path so other pages refresh on next mount).
+        // Optimistically drop the merged-away rows + invalidate caches (mirrors
+        // the single-RM delete path so other pages refresh on next mount).
         setLiveRawMaterials((prev) => prev.filter((r) => !deletedIds.has(r.id)));
         invalidateCachePrefix("/api/raw-materials");
         invalidateCachePrefix("/api/inventory");

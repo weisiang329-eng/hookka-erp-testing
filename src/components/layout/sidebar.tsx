@@ -360,7 +360,6 @@ export function Sidebar({
     if (ric) {
       ric(() => prefetchRoute("/dashboard"));
     } else {
-      // eslint-disable-next-line no-restricted-syntax -- non-React call site inside requestIdleCallback fallback; useTimeout not appropriate here
       const t = window.setTimeout(() => prefetchRoute("/dashboard"), 1500);
       return () => window.clearTimeout(t);
     }

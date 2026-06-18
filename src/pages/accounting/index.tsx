@@ -3328,7 +3328,7 @@ function MonthlyPlTab() {
     let hideDepth = Infinity;
     for (const r of rows) {
       if (r.depth > hideDepth) continue;
-      if (r.depth <= hideDepth) hideDepth = Infinity;
+      hideDepth = Infinity;
       visible.push(r);
       if (r.kind === "group" && r.groupId && collapsed.has(r.groupId)) hideDepth = r.depth;
     }

@@ -21,7 +21,7 @@
 // type (which uses baseUOM). API response always exposes both `baseUOM` and
 // `unit` with the same value for backwards compatibility.
 // ---------------------------------------------------------------------------
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import { checkRawMaterialDeleteLocked, lockedResponse } from "../lib/lock-helpers";
@@ -679,6 +679,214 @@ app.post("/_relock-duplicate-codes", async (c) => {
   return c.json({
     success: true,
     message: "Re-locked — raw-material item codes are unique again.",
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Duplicate-merge (owner 2026-06-18). After the item-code consolidation some
+// materials exist as 2+ rows with the SAME item_code (e.g. "18MM 4' X 8' AA
+// PLYWOOD"). These merge them CONSERVATIVELY: keep the row that actually carries
+// data, delete only the EMPTY duplicates. A duplicate that still carries
+// transactional history is REPORTED, never auto-deleted (deleting it would
+// orphan or CASCADE-lose that history — rm_batches FK is ON DELETE CASCADE).
+//
+// Why no repointing of string refs: the surviving row keeps the SAME item_code,
+// so supplier_material_bindings.material_code, bom_templates, PO/GRN lines and
+// the fabrics mirror (by code) all keep working unchanged. The delete is a RAW
+// row delete (NOT the fabric-aware DELETE /:id cascade) for the same reason — the
+// code lives on the canonical row, so the fabrics mirror must stay.
+//
+// "Empty" = zero rm_batches + zero stock_adjustments(RM) + zero
+// rd_material_issuances + zero cost_ledger(RM) + zero balance. Any count query
+// that throws aborts the whole op (we never delete on an uncertain count).
+// ---------------------------------------------------------------------------
+type RmRefCounts = {
+  batches: number;
+  adjustments: number;
+  issuances: number;
+  costLedger: number;
+};
+async function rmRefCounts(
+  DB: D1Database,
+  id: string,
+): Promise<RmRefCounts> {
+  const count = async (sql: string): Promise<number> => {
+    const r = await DB.prepare(sql).bind(id).first<{ n?: number | string }>();
+    return Number(r?.n ?? 0);
+  };
+  // snake_case column names written literally (confirmed from the migrations) so
+  // a count can NEVER silently target the wrong column and read 0 on a row that
+  // actually has data — that would mean deleting live history.
+  const [batches, adjustments, issuances, costLedger] = await Promise.all([
+    count("SELECT COUNT(*) AS n FROM rm_batches WHERE rm_id = ?"),
+    count(
+      "SELECT COUNT(*) AS n FROM stock_adjustments WHERE item_id = ? AND type = 'RM'",
+    ),
+    count(
+      "SELECT COUNT(*) AS n FROM rd_material_issuances WHERE raw_material_id = ?",
+    ),
+    count(
+      "SELECT COUNT(*) AS n FROM cost_ledger WHERE item_id = ? AND item_type = 'RM'",
+    ),
+  ]);
+  return { batches, adjustments, issuances, costLedger };
+}
+
+type DupRow = RmRefCounts & {
+  id: string;
+  description: string;
+  balanceQty: number;
+  totalRefs: number;
+  isEmpty: boolean;
+  isActive: boolean;
+  createdAt: string;
+};
+
+// Keep the richest row: most references, then most stock, then oldest, then
+// active. Deterministic so preview and apply always agree on the keeper.
+function pickCanonical(rows: DupRow[]): DupRow {
+  return [...rows].sort(
+    (a, b) =>
+      b.totalRefs - a.totalRefs ||
+      b.balanceQty - a.balanceQty ||
+      (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0) ||
+      (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0) ||
+      (a.id < b.id ? -1 : 1),
+  )[0];
+}
+
+async function buildDupGroups(
+  c: Context<Env>,
+  onlyCodes: string[] | null,
+) {
+  const orgId = getOrgId(c);
+  const dupRes = await c.var.DB.prepare(
+    `SELECT itemCode FROM raw_materials WHERE orgId = ?
+      GROUP BY itemCode HAVING COUNT(*) > 1 ORDER BY itemCode`,
+  )
+    .bind(orgId)
+    .all<{ itemCode?: string; item_code?: string }>();
+  let codes = (dupRes.results ?? []).map((r) => r.itemCode ?? r.item_code ?? "");
+  if (onlyCodes) {
+    const want = new Set(onlyCodes);
+    codes = codes.filter((code) => want.has(code));
+  }
+  const groups: { itemCode: string; rows: DupRow[]; recommendedKeepId: string }[] =
+    [];
+  for (const code of codes) {
+    if (!code) continue;
+    const rowsRes = await c.var.DB.prepare(
+      `SELECT id, itemCode, description, balanceQty, isActive, createdAt
+         FROM raw_materials WHERE orgId = ? AND itemCode = ?
+        ORDER BY createdAt ASC, id ASC`,
+    )
+      .bind(orgId, code)
+      .all<{
+        id: string;
+        description?: string;
+        balanceQty?: number | string;
+        isActive?: number;
+        is_active?: number;
+        createdAt?: string;
+        created_at?: string;
+      }>();
+    const rows: DupRow[] = [];
+    for (const r of rowsRes.results ?? []) {
+      const refs = await rmRefCounts(c.var.DB, r.id);
+      const balanceQty = Number(r.balanceQty ?? 0);
+      const totalRefs =
+        refs.batches + refs.adjustments + refs.issuances + refs.costLedger;
+      rows.push({
+        id: r.id,
+        description: r.description ?? "",
+        balanceQty,
+        ...refs,
+        totalRefs,
+        isEmpty: totalRefs === 0 && Math.abs(balanceQty) < 1e-6,
+        isActive: (r.isActive ?? r.is_active) === 1,
+        createdAt: r.createdAt ?? r.created_at ?? "",
+      });
+    }
+    if (rows.length > 1) {
+      groups.push({
+        itemCode: code,
+        rows,
+        recommendedKeepId: pickCanonical(rows).id,
+      });
+    }
+  }
+  return groups;
+}
+
+// GET /api/raw-materials/duplicates — preview (read-only, no changes)
+app.get("/duplicates", async (c) => {
+  const groups = await buildDupGroups(c, null);
+  return c.json({ success: true, data: { groups, groupCount: groups.length } });
+});
+
+// POST /api/raw-materials/merge-duplicates
+// body: { apply?: boolean (default false = dry-run), itemCodes?: string[] }
+app.post("/merge-duplicates", async (c) => {
+  const denied = await requirePermission(c, "raw-materials", "delete");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as {
+    apply?: boolean;
+    itemCodes?: string[];
+  };
+  const apply = body.apply === true;
+  const onlyCodes = Array.isArray(body.itemCodes) ? body.itemCodes : null;
+  const orgId = getOrgId(c);
+
+  const groups = await buildDupGroups(c, onlyCodes);
+  const plan = groups.map((g) => {
+    const keep = pickCanonical(g.rows);
+    const deleteIds: string[] = [];
+    const skipped: { id: string; totalRefs: number; balanceQty: number }[] = [];
+    for (const row of g.rows) {
+      if (row.id === keep.id) continue;
+      if (row.isEmpty) deleteIds.push(row.id);
+      else
+        skipped.push({
+          id: row.id,
+          totalRefs: row.totalRefs,
+          balanceQty: row.balanceQty,
+        });
+    }
+    return { itemCode: g.itemCode, keepId: keep.id, deleteIds, skipped };
+  });
+
+  const toDelete = plan.flatMap((p) => p.deleteIds);
+  let deletedCount = 0;
+  if (apply) {
+    // RAW delete (no fabric cascade): the item_code survives on the canonical
+    // row, so the fabrics-by-code mirror + every string ref must stay intact.
+    // Sequential + idempotent — a re-run after a partial failure is safe.
+    for (const id of toDelete) {
+      await c.var.DB.prepare(
+        `DELETE FROM raw_materials WHERE id = ? AND orgId = ?`,
+      )
+        .bind(id, orgId)
+        .run();
+      deletedCount++;
+    }
+  }
+
+  const skippedDataBearing = plan.flatMap((p) => p.skipped);
+  return c.json({
+    success: true,
+    applied: apply,
+    data: {
+      plan,
+      groupCount: plan.length,
+      deletedCount,
+      wouldDeleteCount: toDelete.length,
+      skippedDataBearing,
+      note: skippedDataBearing.length
+        ? `${skippedDataBearing.length} duplicate row(s) still carry data and were NOT deleted — repoint those by hand. Re-lock with /_relock-duplicate-codes once every code is unique.`
+        : apply && toDelete.length
+          ? "Empty duplicates removed. If no duplicates remain, re-lock with /_relock-duplicate-codes."
+          : "Dry-run — pass { apply: true } to delete the empty duplicates.",
+    },
   });
 });
 

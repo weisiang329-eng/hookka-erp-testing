@@ -131,6 +131,7 @@ type PurchaseInvoiceRow = {
   invoiceDate: string | null;
   dueDate: string | null;
   amountSen: number;
+  paidAmountSen: number;
   status: string;
   remarks: string | null;
   created_at: string | null;
@@ -211,6 +212,7 @@ function rowToPI(r: PurchaseInvoiceRow) {
     fxRate?: number | null;
     foreignAmountSen?: number | null;
     payFxRate?: number | null;
+    paid_amount_sen?: number | null;
   };
   return {
     id: r.id,
@@ -223,6 +225,7 @@ function rowToPI(r: PurchaseInvoiceRow) {
     invoiceDate: r.invoiceDate ?? "",
     dueDate: r.dueDate ?? "",
     amountSen: r.amountSen,
+    paidAmountSen: Number(fx.paid_amount_sen ?? r.paidAmountSen ?? 0),
     status: r.status,
     remarks: r.remarks ?? "",
     currency: fx.currency ?? "MYR",

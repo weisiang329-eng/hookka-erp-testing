@@ -1,0 +1,89 @@
+// ---------------------------------------------------------------------------
+// CI guard for the recurring "edit 了沒 save 到" class (silent 400 on write).
+//
+// The d1-compat shim (src/api/lib/supabase-compat.ts) rewrites camelCase SQL
+// identifiers to snake_case ONLY for columns present in column-rename-map.json.
+// A camelCase column written in an INSERT/UPDATE that is NOT in the map is left
+// as-is; Postgres folds it to lowercase-no-underscore; if the real column is
+// snake_case it won't match → the whole statement throws → caught as 400
+// "Invalid request body" → the edit silently fails. This bit us repeatedly
+// (supplier_description, receivedAt, …). This test fails the build whenever a
+// route writes a camelCase column that is neither mapped nor explicitly
+// allow-listed as a self-consistent folded-lowercase table.
+//
+// If this test fails on a NEW column, do ONE of:
+//   • add "camelCaseCol": "snake_case_col" to src/api/lib/column-rename-map.json
+//     (the column is snake_case in the DB — the normal case), OR
+//   • if the table was CREATEd with that same camelCase (folds to the same
+//     lowercase as the write, so it's self-consistent), add the column to ALLOW
+//     below with a one-line reason.
+//
+// Scope: non-finance routes (finance is an active build-out, excluded per owner
+// 2026-06-18; give it its own pass later).
+// ---------------------------------------------------------------------------
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import test from "node:test";
+import assert from "node:assert/strict";
+
+const ROOT = "src/api";
+const FINANCE = /\/(finance|accounting|fund-transfer|supplier-payments|purchase-invoices|three-way|expense|payslip|payroll|other-party)/i;
+
+// Verified self-consistent folded-lowercase columns (the table was CREATEd with
+// the same camelCase, so write+read+create all fold to the same lowercase).
+const ALLOW = new Set([
+  "repairScope",
+  "boxLengthFt", "boxWidthFt", "boxHeightFt",
+  "ocrPromptRules", "isGold",
+  // supplier_scan_samples — CREATE TABLE in ocr-distill.ts uses these exact
+  // camelCase names (all fold to lowercase), INSERT/SELECT match. Self-consistent.
+  "supplierHint", "docIdentifier", "docType", "rawJson", "correctedJson",
+]);
+
+function walk(dir) {
+  const out = [];
+  for (const e of readdirSync(dir)) {
+    const p = join(dir, e);
+    if (statSync(p).isDirectory()) out.push(...walk(p));
+    else if (e.endsWith(".ts")) out.push(p);
+  }
+  return out;
+}
+function insertCols(sql) {
+  const cols = [];
+  for (const m of sql.matchAll(/INSERT\s+(?:OR\s+\w+\s+)?INTO\s+\w+\s*\(([^)]*)\)/gis))
+    for (let c of m[1].split(",")) {
+      c = c.trim().replace(/["'`]/g, "");
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(c)) cols.push(c);
+    }
+  return cols;
+}
+function updateCols(sql) {
+  const cols = [];
+  for (const m of sql.matchAll(/UPDATE\s+\w+\s+SET\s+([\s\S]*?)(?:\bWHERE\b|\bRETURNING\b|`)/gi))
+    for (const part of m[1].split(",")) {
+      const mm = part.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+      if (mm) cols.push(mm[1]);
+    }
+  return cols;
+}
+
+test("no unmapped camelCase write-columns in non-finance routes (silent-400 guard)", () => {
+  const map = JSON.parse(readFileSync("src/api/lib/column-rename-map.json", "utf8"));
+  const mapped = new Set(Object.keys(map));
+  const offenders = [];
+  for (const file of walk(ROOT)) {
+    if (FINANCE.test(file)) continue;
+    const src = readFileSync(file, "utf8");
+    for (const c of new Set([...insertCols(src), ...updateCols(src)])) {
+      if (!/[A-Z]/.test(c)) continue; // only camelCase can be mis-folded
+      if (mapped.has(c) || ALLOW.has(c)) continue;
+      offenders.push(`${file}: ${c}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `Unmapped camelCase write-column(s) — would silently 400. Add to column-rename-map.json (snake col) or ALLOW (self-consistent folded table):\n  ${offenders.join("\n  ")}`,
+  );
+});

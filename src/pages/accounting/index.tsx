@@ -183,6 +183,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   // Daily Operation
   { key: "payments", label: "Expense Payment", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
   { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
+  { key: "transfer", label: "Fund Transfer", icon: <Wallet className="h-4 w-4" />, group: "Daily Operation" },
   // Monthly Operation
   { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" />, group: "Monthly Operation" },
   { key: "cashbook", label: "Cash Book", icon: <BookOpen className="h-4 w-4" />, group: "Monthly Operation" },

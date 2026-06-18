@@ -5077,6 +5077,7 @@ app.post("/fund-transfers", async (c) => {
 app.get("/fund-transfers", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
+  const orgId = getOrgId(c);
 
   const resolve = await loadAccountResolver(c.var.DB);
 
@@ -5084,8 +5085,8 @@ app.get("/fund-transfers", async (c) => {
     c.var.DB.prepare(
       `SELECT accountCode, sourceType, sourceId, debitSen, creditSen, description, postedAt
          FROM ledger_journal_entries
-        WHERE sourceType IN ('fund_transfer','fund_transfer_void')`,
-    ).all<{
+        WHERE sourceType IN ('fund_transfer','fund_transfer_void') AND orgId = ?`,
+    ).bind(orgId).all<{
       accountCode: string;
       sourceType: string;
       sourceId: string;

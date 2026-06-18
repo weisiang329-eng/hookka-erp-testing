@@ -210,7 +210,7 @@ const navigationGroups: NavGroup[] = [
         name: "Daily Operation", href: "/accounting?tab=payments", icon: Wallet, children: [
           { name: "Expense Payment", href: "/accounting?tab=payments", icon: Wallet },
           { name: "Receipts", href: "/accounting?tab=receipts", icon: Receipt },
-          { name: "Supplier Payment", href: "/invoices/payments", icon: CreditCard },
+          { name: "Customer Payment", href: "/invoices/payments", icon: CreditCard },
           { name: "Credit Notes", href: "/invoices/credit-notes", icon: FileX },
           { name: "Debit Notes", href: "/invoices/debit-notes", icon: FilePlus },
         ],

@@ -46,7 +46,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odebtor" | "ocreditor" | "pl" | "trend" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odebtor" | "ocreditor" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -180,6 +180,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   { key: "tb", label: "Trial Balance", icon: <Scale className="h-4 w-4" />, group: "Monthly Report" },
   { key: "gl", label: "General Ledger", icon: <FileText className="h-4 w-4" />, group: "Monthly Report" },
   { key: "trend", label: "Monthly Trend", icon: <TrendingUp className="h-4 w-4" />, group: "Monthly Report" },
+  { key: "plmonthly", label: "Monthly P&L", icon: <BarChart3 className="h-4 w-4" />, group: "Monthly Report" },
   { key: "ceclass", label: "Cost / Expense Classes", icon: <BarChart3 className="h-4 w-4" />, group: "Monthly Report" },
   // Daily Operation
   { key: "payments", label: "Expense Payment", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
@@ -253,6 +254,7 @@ export default function AccountingPage() {
           )}
           {tab === "pl" && <PLStatementTab />}
           {tab === "trend" && <MonthlyTrendTab />}
+          {tab === "plmonthly" && <MonthlyPlTab />}
           {tab === "ceclass" && <CostExpenseClassesTab />}
           {tab === "coststruct" && <CostStructureTab />}
           {tab === "bs" && <BalanceSheetTab />}
@@ -3293,6 +3295,107 @@ function MonthlyTrendTab() {
         </CardContent>
       </Card>
       <p className="text-[11px] text-[#9CA3AF]">Newest month at left · the small number under each amount is % of that month's net sales · negatives in red.</p>
+    </div>
+  );
+}
+
+type PlMatrixRow = { kind: "group" | "line" | "total" | "grandtotal" | "gap"; depth: number; label: string; groupId?: string; accountCode?: string; values: number[]; pctValues: number[] };
+type PlMonthlyData = { fyLabel: string; line: string; anchor: string; columns: { key: string; label: string; accum: boolean }[]; rows: PlMatrixRow[] };
+
+function MonthlyPlTab() {
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const [line, setLine] = useState<"all" | "sofa" | "bedframe">("all");
+  const [anchor, setAnchor] = useState(thisMonth);
+  const [data, setData] = useState<PlMonthlyData | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setData(null);
+    fetch(`/api/accounting/pl-monthly?line=${line}&anchor=${anchor}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: PlMonthlyData }>)
+      .then((j) => { if (j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+  }, [line, anchor]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const fmt = (sen: number) => { const v = sen / 100; const s = Math.abs(v).toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return v < 0 ? `(${s})` : s; };
+
+  const cols = data?.columns ?? [];
+  const rows = data?.rows ?? [];
+  const visible: PlMatrixRow[] = [];
+  {
+    let hideDepth = Infinity;
+    for (const r of rows) {
+      if (r.depth > hideDepth) continue;
+      if (r.depth <= hideDepth) hideDepth = Infinity;
+      visible.push(r);
+      if (r.kind === "group" && r.groupId && collapsed.has(r.groupId)) hideDepth = r.depth;
+    }
+  }
+  const toggle = (gid: string) => setCollapsed((s) => { const n = new Set(s); if (n.has(gid)) n.delete(gid); else n.add(gid); return n; });
+
+  const buildExport = (): (string | number)[][] => {
+    const aoa: (string | number)[][] = [["Item", ...cols.map((c) => c.label)]];
+    for (const r of rows) {
+      if (r.kind === "gap") continue;
+      aoa.push([r.label, ...r.values.map((v) => (v / 100).toFixed(2))]);
+      aoa.push(["  % of net sales", ...r.pctValues.map((p) => `${p.toFixed(1)}%`)]);
+    }
+    return aoa;
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-[#3E6570]">Monthly P&amp;L</h2>
+          <p className="text-xs text-[#9CA3AF]">{data ? `${data.fyLabel} · read-only · all amounts RM` : "Loading…"}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <input type="month" value={anchor} onChange={(e) => setAnchor(e.target.value || thisMonth)} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+          <select value={line} onChange={(e) => setLine(e.target.value as "all" | "sofa" | "bedframe")} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm">
+            <option value="all">All</option><option value="sofa">Sofa</option><option value="bedframe">Bedframe</option>
+          </select>
+          {data && <ExportButtons build={buildExport} filenameBase={`monthly-pl-${data.anchor}-${line}`} title="Monthly P&L" subtitle={`${data.fyLabel} · ${line}`} />}
+        </div>
+      </div>
+
+      <Card><CardContent className="p-0 overflow-x-auto">
+        {!data ? (
+          <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+        ) : (
+          <table className="text-[13px] min-w-full">
+            <thead>
+              <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                <th className="px-3 py-2 text-left sticky left-0 bg-white">Item</th>
+                {cols.map((c) => <th key={c.key} className={`px-3 py-2 text-right whitespace-nowrap ${c.accum ? "font-semibold text-[#3E6570]" : ""}`}>{c.label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((r, i) => {
+                if (r.kind === "gap") return <tr key={`gap${i}`}><td colSpan={cols.length + 1} className="py-1"></td></tr>;
+                const isGroup = r.kind === "group";
+                const isTot = r.kind === "total" || r.kind === "grandtotal";
+                const open = isGroup && r.groupId ? !collapsed.has(r.groupId) : false;
+                const rowCls = r.kind === "grandtotal" ? "font-semibold border-t border-[#C9C2BA] bg-[#F7F5F2]" : isTot ? "font-medium border-t border-[#E2DDD8]" : isGroup ? "font-medium" : "";
+                return (
+                  <React.Fragment key={i}>
+                    <tr className={`${rowCls} ${isGroup ? "cursor-pointer" : ""}`} onClick={isGroup && r.groupId ? () => toggle(r.groupId!) : undefined}>
+                      <td className="px-3 py-1.5 sticky left-0 bg-white" style={{ paddingLeft: `${12 + r.depth * 16}px` }}>{isGroup ? (open ? "▾ " : "▸ ") : ""}{r.label}</td>
+                      {r.values.map((v, j) => <td key={j} className={`px-3 py-1.5 text-right tabular-nums ${v < 0 ? "text-[#9A3A2D]" : ""}`}>{fmt(v)}</td>)}
+                    </tr>
+                    <tr className="text-[11px] text-[#9CA3AF]">
+                      <td className="px-3 pb-1 sticky left-0 bg-white" style={{ paddingLeft: `${12 + r.depth * 16}px` }}>% of net sales</td>
+                      {r.pctValues.map((p, j) => <td key={j} className="px-3 pb-1 text-right tabular-nums">{p.toFixed(1)}%</td>)}
+                    </tr>
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </CardContent></Card>
     </div>
   );
 }

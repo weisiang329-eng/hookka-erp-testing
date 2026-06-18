@@ -203,6 +203,7 @@ const navigationGroups: NavGroup[] = [
           { name: "Trial Balance", href: "/accounting?tab=tb", icon: Scale },
           { name: "General Ledger", href: "/accounting?tab=gl", icon: BookOpen },
           { name: "Monthly Trend", href: "/accounting?tab=trend", icon: TrendingUp },
+          { name: "Monthly P&L", href: "/accounting?tab=plmonthly", icon: BarChart3 },
           { name: "Cost / Expense Classes", href: "/accounting?tab=ceclass", icon: BarChart3 },
         ],
       },
@@ -359,6 +360,7 @@ export function Sidebar({
     if (ric) {
       ric(() => prefetchRoute("/dashboard"));
     } else {
+      // eslint-disable-next-line no-restricted-syntax -- non-React call site inside requestIdleCallback fallback; useTimeout not appropriate here
       const t = window.setTimeout(() => prefetchRoute("/dashboard"), 1500);
       return () => window.clearTimeout(t);
     }

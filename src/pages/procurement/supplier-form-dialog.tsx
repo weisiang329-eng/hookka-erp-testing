@@ -119,12 +119,12 @@ export function SupplierFormDialog({
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Contact Person *</label>
-              <Input value={contactPerson} onChange={(e) => setContactPerson(e.target.value)} required placeholder="Full name" />
+              <label className="block text-sm font-medium text-[#374151] mb-1">Contact Person</label>
+              <Input value={contactPerson} onChange={(e) => setContactPerson(e.target.value)} placeholder="Full name" />
             </div>
             <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Phone *</label>
-              <Input value={phone} onChange={(e) => setPhone(e.target.value)} required placeholder="+60 12-XXX XXXX" />
+              <label className="block text-sm font-medium text-[#374151] mb-1">Phone</label>
+              <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+60 12-XXX XXXX" />
             </div>
           </div>
           <div>

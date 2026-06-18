@@ -210,12 +210,15 @@ export default function CreditNotesPage() {
 
   const contextMenuItems: ContextMenuItem[] = [
     {
-      label: "View",
-      action: (_row) => {},
-    },
-    {
-      label: "Print",
-      action: (_row) => {},
+      label: "Print PDF",
+      action: async (row) => {
+        try {
+          const { generateCreditNotePdf } = await import("@/lib/generate-credit-note-pdf");
+          generateCreditNotePdf(row);
+        } catch {
+          /* generator handles its own draw; nothing to surface here */
+        }
+      },
     },
     {
       label: "Refresh",

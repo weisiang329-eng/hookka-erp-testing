@@ -159,12 +159,15 @@ export default function DebitNotesPage() {
 
   const contextMenuItems: ContextMenuItem[] = [
     {
-      label: "View",
-      action: (_row) => {},
-    },
-    {
-      label: "Print",
-      action: (_row) => {},
+      label: "Print PDF",
+      action: async (row) => {
+        try {
+          const { generateDebitNotePdf } = await import("@/lib/generate-debit-note-pdf");
+          generateDebitNotePdf(row);
+        } catch {
+          /* generator draws/saves itself */
+        }
+      },
     },
     {
       label: "Refresh",

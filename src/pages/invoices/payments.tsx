@@ -223,14 +223,8 @@ export default function PaymentsPage() {
   ];
 
   const contextMenuItems: ContextMenuItem[] = [
-    {
-      label: "View",
-      action: (_row) => {},
-    },
-    {
-      label: "Print",
-      action: (_row) => {},
-    },
+    // (Removed dead no-op "View"/"Print" — no payment detail page or payment
+    // PDF exists, so they did nothing when clicked.)
     {
       label: "Refresh",
       action: (_row) => refreshPayments(),

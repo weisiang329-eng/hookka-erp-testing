@@ -67,14 +67,16 @@ type GroupDef = {
 
 // The fixed taxonomy the owner described. Labels are English (UI rule); the
 // keys are stable resourceType suffixes — do NOT rename once docs exist.
+// Labels are English (UI is English-only). Keys are stable resourceType
+// suffixes — do NOT rename once docs exist.
 const GROUPS: GroupDef[] = [
   {
     title: "Fabric",
     icon: Scissors,
     accent: "#6B5C32",
     slots: [
-      { key: "fabric-layout", label: "Fabric Layout", hint: "排版图" },
-      { key: "sewing", label: "Sewing Diagram", hint: "车工图" },
+      { key: "fabric-layout", label: "Fabric Layout" },
+      { key: "sewing", label: "Sewing Diagram" },
     ],
   },
   {
@@ -82,8 +84,8 @@ const GROUPS: GroupDef[] = [
     icon: Layers,
     accent: "#8A6D3B",
     slots: [
-      { key: "foam-assembly", label: "Foam Assembly", hint: "拼凑图" },
-      { key: "foam-specs", label: "Foam Specs / Cutting Sheet", hint: "规格" },
+      { key: "foam-assembly", label: "Foam Assembly" },
+      { key: "foam-specs", label: "Foam Specs / Cutting Sheet" },
     ],
   },
   {
@@ -91,8 +93,8 @@ const GROUPS: GroupDef[] = [
     icon: TreePine,
     accent: "#7A5C3A",
     slots: [
-      { key: "wood-specs", label: "Wood Specs", hint: "木材规格" },
-      { key: "wood-frame", label: "Frame Assembly", hint: "木架组装图" },
+      { key: "wood-specs", label: "Wood Specs" },
+      { key: "wood-frame", label: "Frame Assembly" },
     ],
   },
   {
@@ -110,8 +112,8 @@ const GROUPS: GroupDef[] = [
     icon: GraduationCap,
     accent: "#2F6F4F",
     slots: [
-      { key: "construction", label: "Construction Guide", hint: "施工图" },
-      { key: "walkthrough", label: "Product Walkthrough", hint: "产品讲解" },
+      { key: "construction", label: "Construction Guide" },
+      { key: "walkthrough", label: "Product Walkthrough" },
     ],
   },
 ];
@@ -466,7 +468,7 @@ function CncSlots({
       {/* Wood CNC — uploaded to the product (not in the fabric-cutter module) */}
       <DocSlot
         productId={product.id}
-        slot={{ key: "cnc-wood", label: "Wood CNC", hint: "木 — router files" }}
+        slot={{ key: "cnc-wood", label: "Wood CNC", hint: "Router files" }}
         files={woodFiles}
         onChanged={onChanged}
         toast={toast}

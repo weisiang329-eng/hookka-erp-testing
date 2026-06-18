@@ -34,6 +34,120 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-18-010 — Owner/Admin got 403 on a resource never seeded as a permission (couldn't delete a supplier SKU mapping)
+
+**Status:** 🟢 Fixed (2026-06-18), prod.
+**Category:** auth-rbac
+
+**Symptom:** the OWNER (SUPER_ADMIN) couldn't delete a supplier SKU mapping — the action 403'd — even though SUPER_ADMIN is meant to bypass every permission check. Any resource never seeded as a row in `role_permissions` (mail-center earlier, supplier-materials now) was unreachable to the top role.
+
+**Root cause:** `requirePermission` (`src/api/lib/rbac.ts`) builds SUPER_ADMIN's permission set from the prod `role_permissions` table, which enumerates EXPLICIT grants; the legacy `"*:*"` wildcard from `LEGACY_ROLE_DEFAULTS` only applied when that set came back EMPTY. So a never-seeded resource produced a non-empty set that simply lacked the grant → 403 for the owner, contradicting the documented "wildcard short-circuits any check" intent.
+
+**Fix:** short-circuit the top roles before the table lookup — `if (role === "SUPER_ADMIN" || role === "ADMIN") return null;` in `requirePermission`. Shipped in two steps: `418da586` short-circuited SUPER_ADMIN, then `b5ef4755` extended it to ADMIN (`LEGACY_ROLE_DEFAULTS` already grants ADMIN `*:*`). Lower roles still flow through `role_permissions`, so deliberate prod restrictions on them hold. Separate from `requireSuperAdmin` (BUG-2026-06-12-010), which still hard-gates the 7 user-account mutations regardless of role.
+
+**Verification:** owner could delete the SKU mapping after deploy.
+
+---
+
+## BUG-2026-06-18-009 — Adding a raw material to a PO listed EVERY supplier instead of only the ones that sell it
+
+**Status:** 🟢 Fixed (2026-06-18), prod; tsc + eslint clean.
+**Category:** procurement
+
+**Symptom:** on the Purchase Order page, picking a raw material popped the full supplier list rather than just that material's bound suppliers (and skipped the SKU auto-fill).
+
+**Root cause:** the PO page already filters the supplier dropdown to a material's `supplier_material_bindings` (matching on `materialCode`), but a binding's `materialCode` was typed BY HAND in the Bindings page, so any case/spacing difference vs. the RM's real `itemCode` silently failed to match → fell back to listing every supplier.
+
+**Fix:** (1) Bindings page (`src/pages/procurement/pricing.tsx`) — replaced the free-text Material Code / Name inputs with a picker over the real raw-material list, so `materialCode === rm.itemCode` by construction; (2) PO page (`src/pages/procurement/create.tsx`) — tolerant `materialCode` match (trim/upper/collapse-space, exact-wins-first) in `getBindingsForRM` + `switchSupplier`, to rescue existing hand-typed bindings that differ only by formatting. Commit `553e31c2`.
+
+**Verification:** tsc + eslint clean.
+
+---
+
+## BUG-2026-06-18-008 — Worker phones never auto-refreshed on a new deploy (stuck on a stale cached build)
+
+**Status:** 🟢 Fixed (2026-06-18), prod.
+**Category:** infrastructure
+
+**Symptom:** a worker's phone kept showing an old build after a deploy — a BRAND-NEW phone, refreshed, STILL showed the old aim-box barcode scanner instead of the deployed tap-to-pick scanner.
+
+**Root cause:** `useVersionCheck` (polls for a new bundle hash and reloads) was wired ONLY into the admin `DashboardLayout`. The worker portal (`/worker/*`, including the scanner) had no version check, so a worker's phone never noticed a new build and stayed on whatever it had cached.
+
+**Fix:** add `useVersionCheck` to `src/layouts/WorkerLayout.tsx` with a SILENT reload on a new version (workers have no unsaved form state, so no prompt needed). No reload loop — after the reload the loaded hash equals the deployed hash. Commit `84af2509`.
+
+---
+
+## BUG-2026-06-18-007 — Mail detail view printed raw "<!DOCTYPE HTML>…" source instead of a formatted email
+
+**Status:** 🟢 Fixed (2026-06-18), prod.
+**Category:** ui-frontend
+
+**Symptom:** opening an HTML email in the Mail Center detail view (e.g. a MyInvois message whose text/plain part IS a full HTML document) showed the raw HTML source — literal `<!DOCTYPE HTML>…` markup — rather than a rendered email.
+
+**Root cause:** the detail view always rendered the body inside a `<pre>`, which is correct for plain text but dumps HTML as escaped source.
+
+**Fix:** `src/pages/mail-center/index.tsx` — if the body is HTML (`htmlBody`, or a text part that looks like HTML), render it in a SANDBOXED iframe (no `allow-scripts`, so no untrusted JS runs; `base target=_blank` for links; auto-sized via a same-origin height read). Plain-text bodies keep the `<pre>`; the forward-quote stays plain text. The inbox list snippet also strips HTML tags/entities so the preview reads as clean text. Commit `a5895cdf`.
+
+---
+
+## BUG-2026-06-18-006 — Editing a user's dept/position WIPED their reporting line to NULL (camelCase read), + no self/last-admin lockout guard
+
+**Status:** 🟢 Fixed (2026-06-18), prod.
+**Category:** data-integrity
+
+**Symptom (data loss):** saving a user's department/position from the Org Chart silently NULLed that user's reporting line (`reports_to`), severing the org hierarchy. Separately, a privileged user could disable/demote/delete their OWN account or the LAST active Super Admin — bricking account-management access.
+
+**Root cause:** `PUT /api/users/:id` (`src/api/routes/users.ts`) merged the existing reporting line by reading `existing.reports_to`, but the postgres.js driver camelCases the column to `reportsTo`, so `existing.reports_to` was ALWAYS `undefined`. The Org Chart Save omits `reportsTo` from its body → the merge fell back to the (undefined→null) existing read → the reporting line was wiped. (Same camelCase-on-read class as the mail-center sweep below.)
+
+**Fix:** (1) dual-read `existing.reportsTo ?? existing.reports_to` in the PUT merge and in `publicUser`/`UserRow`. (2) PUT + DELETE now reject disabling/demoting your OWN account or the LAST active SUPER_ADMIN (DELETE is a soft delete, `isActive → 0`, same lockout risk), with matching frontend guards in `src/pages/settings/Users.tsx`. (3) the 4 native `window.confirm` dialogs replaced with the in-app `useConfirm`/`ConfirmDialog` (no-naked-edits hardening). Commit `4477ed60`.
+
+**Verification:** reporting line persists across an Org Chart Save after deploy.
+
+---
+
+## BUG-2026-06-18-005 — Mail Center + rack-QR systemic data-read failure: postgres.js camelCases every result column, so snake_case reads returned undefined
+
+**Status:** 🟢 Fixed (2026-06-18), prod.
+**Category:** data-migration
+
+**Symptom:** multiple Mail Center features silently misbehaved — the **Sent** folder was always empty, **Trash** was inert, every email **reply started a brand-new thread**, the message detail view showed **empty bodies/senders**, department-mailbox visibility **degraded to personal-only**, and non-admins were **wrongly 404'd** on threads they should see.
+
+**Root cause:** the postgres.js driver (`src/api/lib/db-pg.ts`, `transform.column.from`) camelCases EVERY result column, so a `has_outbound` / `trashed_at` / `thread_id` / `assigned_dept` / `mailbox_address` / `counterparty_email` column comes back as `hasOutbound` / `trashedAt` / etc. Code that read the snake_case key got `undefined`. Same class as the rename-map gaps (BUG-2026-06-18-001/-002) but on the READ side, and systemic across `mail-center.ts` (29 reads).
+
+**Fix:** dual-read camelCase with the snake_case key as fallback (`r.camelCase ?? r.snake_case`) across `src/api/routes/mail-center.ts` — `rowToThread`, `rowToMessage` (all 14 fields), `getMailScope`, the inbound dedupe + reference `thread_id`, the reply handler, the GET/PATCH `/threads/:id` mailbox gates — with NO SQL changed. Shipped with two adjacent fixes: `injectTest()` in `mail-center/index.tsx` missing `csrfHeaders()` + credentials (silent 403), and a literal NUL byte in the move-dedup signature in `src/api/routes/public-rack-qr.ts` replaced with `" | "`. Earlier partial fixes of the same class: `b90c9f1a` (scope-levels read) and `3b54997a` (rowToAddress/rowToThread); `2b055c6c` is the systemic sweep.
+
+**Verification:** Sent/Trash/reply-threading/detail bodies corrected; deployed.
+
+---
+
+## BUG-2026-06-17-001 — Stocking out ONE piece from a rack wiped EVERY piece in that rack (data loss)
+
+**Status:** 🟢 Fixed (2026-06-17), prod.
+**Category:** inventory-cascade
+
+**Symptom:** removing a single piece from a rack (stock-out) deleted all pieces in that rack — data loss.
+
+**Root cause:** per-piece rack rows all carry an EMPTY `productCode` (their identity is the WIP description + "SO <no>" notes). The stock-out picker sent `?productCode=` (empty), and `DELETE /api/warehouse/:id` treated a falsy `productCode` as "clear the whole rack" → stocking out one piece wiped the lot.
+
+**Fix:** `src/api/routes/warehouse.ts` + the stock-out picker — a per-piece row is now identified by its description + SO-notes signature (`itemName` / `itemNotes`); legacy single-code racks still match by `productCode`. The route removes exactly one piece and NEVER falls back to wiping the rack on a missing/empty key — only a request with no item target at all clears the whole rack. Commit `24fddb4c`.
+
+---
+
+## BUG-2026-06-16-001 — Editing any supplier failed with a blanket "Invalid request body" — `purchaseOrgCode` missing from the rename map
+
+**Status:** 🟢 Fixed (2026-06-16), prod; tsc + eslint clean, rename-map JSON valid.
+**Category:** data-migration
+
+**Symptom:** editing a supplier's Purchase Company — or ANY supplier edit — failed with "Invalid request body" (silent on the optimistic Maintenance list, visible on the scorecard page). Every supplier UPDATE was broken.
+
+**Root cause:** the PG compat layer rewrites camelCase SQL identifiers to snake_case via `column-rename-map.json`, but `purchaseOrgCode` (added in migration 0142 as `purchase_org_code`) was never in the map. So `UPDATE suppliers SET … purchaseOrgCode = ?` went verbatim, Postgres folded the unquoted identifier to `purchaseorgcode` (no underscore) → "column does not exist" → the whole UPDATE threw → caught as 400. The legacy-shape retry didn't fire because `isMissingPurchaseOrgCol` only matched `purchase_org_code` (with underscores).
+
+**Fix:** add `"purchaseOrgCode": "purchase_org_code"` to `src/api/lib/column-rename-map.json` (the real fix). Plus two hardenings: broaden `isMissingPurchaseOrgCol` to also match the folded (no-underscore) form, and surface the actual PUT error instead of the catch-all "Invalid request body". Commit `aec38064`.
+
+**Verification:** tsc + eslint clean; rename-map JSON valid.
+
+---
+
 ## BUG-2026-06-18-004 — Service Case Root Cause edits silently lost (panel never re-seeded, no Cancel, no leave-guard) → "edited but didn't save", PDF printed old value
 
 **Status:** 🟢 Fixed (2026-06-18), prod; tsc + eslint clean.

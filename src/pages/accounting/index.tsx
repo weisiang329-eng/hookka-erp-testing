@@ -33,6 +33,7 @@ import {
   Building2,
   BarChart3,
   Scale,
+  Wallet,
 } from "lucide-react";
 import type {
   ChartOfAccount,

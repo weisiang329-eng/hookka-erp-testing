@@ -1218,8 +1218,19 @@ export default function WorkerScanPage() {
     const onHit = (data: string) => {
       if (stopped || !data) return;
       stopped = true;
-      stopLiveScan();
-      void handleDecoded(data);
+      // Cyan confirm flash so QR matches the barcode tap feedback — both modes now
+      // flash 青色 on a successful read (owner 2026-06-18). QR has no tap point, so
+      // centre the ring on the video; a brief delay lets it show before the overlay
+      // unmounts for the result card.
+      const v = videoRef.current;
+      if (v && v.clientWidth > 0) {
+        setTapFx({ x: v.clientWidth / 2, y: v.clientHeight / 2, state: "hit" });
+      }
+      // eslint-disable-next-line no-restricted-syntax -- brief one-shot delay so the cyan confirm is visible before navigating
+      window.setTimeout(() => {
+        stopLiveScan();
+        void handleDecoded(data);
+      }, 250);
     };
 
     let barcodeNativeMiss = 0;
@@ -2573,10 +2584,11 @@ export default function WorkerScanPage() {
                 )}
               </div>
             </div>
-            {/* Tap ACK ring at the exact tap point. WHITE = scanning that row,
+            {/* Tap ACK ring at the tap point (centre for QR). WHITE = scanning,
                 CYAN ("青色") = scanned OK, RED = nothing decodable there → re-tap.
+                Shown in BOTH modes now: barcode tap + QR success both flash it.
                 Auto-clears via the tapFx effect. */}
-            {scanMode === "barcode" && tapFx && (
+            {tapFx && (
               <span
                 className="pointer-events-none absolute z-20"
                 style={{

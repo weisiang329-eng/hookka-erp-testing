@@ -661,7 +661,15 @@ export default function MailCenterDetailPage({
           <div className="space-y-3">
             {messages.map((m) => {
               const outbound = m.direction === "outbound";
-              const body = m.textBody?.trim() || htmlToText(m.htmlBody || "");
+              // Prefer the HTML part; if the text part itself IS html (common —
+              // many senders, e.g. MyInvois, put a full HTML doc in text/plain),
+              // render that as html too. Plain text only when neither is html.
+              const rawHtml =
+                m.htmlBody?.trim() ||
+                (looksLikeHtml(m.textBody) ? (m.textBody || "").trim() : "");
+              const plain = rawHtml
+                ? ""
+                : m.textBody?.trim() || htmlToText(m.htmlBody || "");
               const senderName = m.fromName || m.fromAddress;
               const initial = (senderName || "?").trim().charAt(0).toUpperCase();
               return (
@@ -709,9 +717,31 @@ export default function MailCenterDetailPage({
                             To: {m.toAddresses.join(", ")}
                           </p>
                         )}
-                        <pre className="mt-2 whitespace-pre-wrap break-words border-t border-border/60 pt-2 font-sans text-sm leading-relaxed text-foreground/90">
-                          {body || "(empty)"}
-                        </pre>
+                        {rawHtml ? (
+                          <iframe
+                            title="Email"
+                            sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                            srcDoc={emailSrcDoc(rawHtml)}
+                            className="mt-2 w-full border-t border-border/60 bg-white"
+                            style={{ minHeight: 80 }}
+                            onLoad={(e) => {
+                              try {
+                                const d = e.currentTarget.contentWindow?.document;
+                                if (d)
+                                  e.currentTarget.style.height = `${Math.min(
+                                    d.body.scrollHeight + 24,
+                                    4000,
+                                  )}px`;
+                              } catch {
+                                /* cross-origin guard — keep the min height */
+                              }
+                            }}
+                          />
+                        ) : (
+                          <pre className="mt-2 whitespace-pre-wrap break-words border-t border-border/60 pt-2 font-sans text-sm leading-relaxed text-foreground/90">
+                            {plain || "(empty)"}
+                          </pre>
+                        )}
                       </div>
                     </div>
                   </CardContent>
@@ -805,6 +835,26 @@ export default function MailCenterDetailPage({
 function forwardSubject(subject: string): string {
   const s = subject || "(no subject)";
   return /^fwd:/i.test(s) ? s : `Fwd: ${s}`;
+}
+
+// An email body is usually HTML (a full document or a fragment). We render it in
+// a SANDBOXED iframe (sandbox WITHOUT allow-scripts → no untrusted script can run)
+// so it looks like a real email; the old <pre> showed the raw HTML source (owner
+// 2026-06-18: "字里面为什么是这样子的"). `<base target=_blank>` + allow-popups lets
+// links open in a new tab; allow-same-origin (no scripts) only so we can measure
+// height to auto-size the frame.
+function looksLikeHtml(s: string | undefined): boolean {
+  return /<(?:!doctype|html|body|head|div|table|tr|td|p|br|span|a|img|style|font|center|ul|ol|li|h[1-6])[\s>/]/i.test(
+    s || "",
+  );
+}
+function emailSrcDoc(rawHtml: string): string {
+  const inject = `<base target="_blank"><meta charset="utf-8"><style>html,body{margin:0;padding:10px;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:1.5;color:#1f1d1b;word-break:break-word;overflow-x:hidden}img{max-width:100%;height:auto}table{max-width:100%}</style>`;
+  if (/<head[^>]*>/i.test(rawHtml))
+    return rawHtml.replace(/<head([^>]*)>/i, `<head$1>${inject}`);
+  if (/<html[^>]*>/i.test(rawHtml))
+    return rawHtml.replace(/<html([^>]*)>/i, `<html$1><head>${inject}</head>`);
+  return `<!doctype html><html><head>${inject}</head><body>${rawHtml}</body></html>`;
 }
 
 // Build a quoted forward body from the conversation's messages (most recent

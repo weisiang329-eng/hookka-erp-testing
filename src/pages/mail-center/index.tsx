@@ -397,7 +397,13 @@ function ThreadList({
                 </div>
                 {t.lastSnippet && (
                   <p className="truncate text-xs text-muted-foreground/80">
-                    {t.lastSnippet}
+                    {/* Strip any HTML so the preview reads clean text, not raw
+                        source like "<!DOCTYPE H…" (owner 2026-06-18). */}
+                    {t.lastSnippet
+                      .replace(/<[^>]+>/g, " ")
+                      .replace(/&(?:nbsp|amp|lt|gt|quot|#\d+);/gi, " ")
+                      .replace(/\s+/g, " ")
+                      .trim() || "(no preview)"}
                   </p>
                 )}
                 {chips.length > 0 && (

@@ -1541,13 +1541,15 @@ export default function WorkerScanPage() {
   // never touches the decode band / ROI / coordinate mapping. {x,y} are px within
   // the video's overflow container (the video is inset-0, so its rect == it).
   const [tapFx, setTapFx] = useState<
-    { x: number; y: number; state: "scan" | "miss" } | null
+    { x: number; y: number; state: "scan" | "hit" | "miss" } | null
   >(null);
   useEffect(() => {
     if (!tapFx) return;
-    // "scan" stays up long enough to cover the tap-decode burst (~1s) so the ring
-    // doesn't vanish mid-scan; "miss" lingers briefly as a re-tap cue.
-    const ttl = tapFx.state === "miss" ? 850 : 1400;
+    // "scan" stays up long enough to cover the tap-decode burst so the ring
+    // doesn't vanish mid-scan; "hit" is a brief cyan confirm; "miss" lingers as a
+    // re-tap cue.
+    const ttl =
+      tapFx.state === "scan" ? 1600 : tapFx.state === "hit" ? 500 : 850;
     // eslint-disable-next-line no-restricted-syntax -- one-shot auto-clear timer with proper effect cleanup; useTimeout would need a nullable-delay dance for the same result
     const id = window.setTimeout(() => setTapFx(null), ttl);
     return () => window.clearTimeout(id);
@@ -1606,7 +1608,7 @@ export default function WorkerScanPage() {
       const nextFrame = () =>
         new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       let decoded: string | null = null;
-      for (let attempt = 0; attempt < 24 && !decoded; attempt++) {
+      for (let attempt = 0; attempt < 32 && !decoded; attempt++) {
         if (video.videoWidth === 0) break; // camera closed mid-burst
         ctx.drawImage(video, 0, bandTop, vw, bandH, 0, 0, vw, bandH);
         // Native first (fast + centre-biased among stacked rows): among codes in
@@ -1652,7 +1654,12 @@ export default function WorkerScanPage() {
         } catch {
           /* haptics best-effort */
         }
-        // Clear the ring — the result card taking over IS the success feedback.
+        // Flash the ring CYAN ("青色" = scanned!) so the worker clearly SEES the
+        // tap landed on a real barcode, then hand off to the result card.
+        setTapFx((p) => (p ? { ...p, state: "hit" } : null));
+        for (let k = 0; k < 18 && video.videoWidth !== 0; k++) {
+          await nextFrame();
+        }
         setTapFx(null);
         stopLiveScan();
         void handleDecoded(decoded);
@@ -2566,8 +2573,9 @@ export default function WorkerScanPage() {
                 )}
               </div>
             </div>
-            {/* Tap ACK ring — blooms at the exact tap point (green = registered,
-                red = no bars there → re-tap). Auto-clears via the tapFx effect. */}
+            {/* Tap ACK ring at the exact tap point. WHITE = scanning that row,
+                CYAN ("青色") = scanned OK, RED = nothing decodable there → re-tap.
+                Auto-clears via the tapFx effect. */}
             {scanMode === "barcode" && tapFx && (
               <span
                 className="pointer-events-none absolute z-20"
@@ -2578,18 +2586,24 @@ export default function WorkerScanPage() {
                 }}
               >
                 <span
-                  className={`block rounded-full animate-ping ${
+                  className={`block rounded-full animate-ping ring-2 ${
                     tapFx.state === "miss"
-                      ? "bg-red-400/30 ring-2 ring-red-300"
-                      : "bg-emerald-300/30 ring-2 ring-emerald-200"
+                      ? "bg-red-400/30 ring-red-300"
+                      : tapFx.state === "hit"
+                        ? "bg-cyan-300/50 ring-cyan-200"
+                        : "bg-white/20 ring-white/80"
                   }`}
-                  style={{ width: 68, height: 68 }}
+                  style={{ width: 72, height: 72 }}
                 />
                 <span
                   className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full ${
-                    tapFx.state === "miss" ? "bg-red-400" : "bg-emerald-300"
+                    tapFx.state === "miss"
+                      ? "bg-red-400"
+                      : tapFx.state === "hit"
+                        ? "bg-cyan-300"
+                        : "bg-white"
                   }`}
-                  style={{ width: 12, height: 12 }}
+                  style={{ width: 13, height: 13 }}
                 />
               </span>
             )}

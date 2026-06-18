@@ -59,6 +59,29 @@ function genId(): string {
   return `smb-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+// Runtime self-apply (same pattern as ensureQrTokenColumns / ensureNotifyEmail
+// Columns): the `supplier_description` column was referenced by this route's
+// POST/PUT since 2026-05-10 but never migrated in, so EVERY create/edit of a
+// SKU binding threw on the missing column and returned 400 "Invalid request
+// body" (supplier-code edits silently did nothing). Land it on first use;
+// migration 0174 makes it permanent. Idempotent + once per worker instance.
+let bindingColumnsEnsured: Promise<void> | null = null;
+function ensureBindingColumns(db: D1Database): Promise<void> {
+  if (bindingColumnsEnsured) return bindingColumnsEnsured;
+  bindingColumnsEnsured = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE supplier_material_bindings ADD COLUMN IF NOT EXISTS supplier_description TEXT",
+        )
+        .run();
+    } catch {
+      // column may already exist / DDL transiently rejected — ignore
+    }
+  })();
+  return bindingColumnsEnsured;
+}
+
 // GET /api/supplier-materials?supplierId=...&materialCode=...
 app.get("/", async (c) => {
   const supplierId = c.req.query("supplierId");
@@ -86,6 +109,7 @@ app.get("/", async (c) => {
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "supplier-materials", "create");
   if (denied) return denied;
+  await ensureBindingColumns(c.var.DB);
   try {
     const body = await c.req.json();
     const { supplierId, materialCode, materialName, supplierSku, unitPrice } =
@@ -181,6 +205,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "supplier-materials", "update");
   if (denied) return denied;
+  await ensureBindingColumns(c.var.DB);
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM supplier_material_bindings WHERE id = ?",

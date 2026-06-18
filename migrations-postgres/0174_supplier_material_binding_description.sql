@@ -1,0 +1,12 @@
+-- 0174_supplier_material_binding_description.sql
+-- The supplier-materials route (src/api/routes/supplier-materials.ts) has
+-- referenced a `supplier_description` column on supplier_material_bindings
+-- since 2026-05-10 (the supplier-side SKU description, shown next to the
+-- Internal/Supplier code pair). The column was never created, so every
+-- POST (create) and PUT (edit) of a SKU binding threw on the missing column
+-- and returned 400 "Invalid request body" — supplier-code edits silently
+-- did nothing. Add the column (nullable TEXT; existing rows default NULL,
+-- which the API maps to "").
+-- Mirrors the runtime self-apply in ensureBindingColumns() so deploy ordering
+-- can't break the endpoints.
+ALTER TABLE supplier_material_bindings ADD COLUMN IF NOT EXISTS supplier_description TEXT;

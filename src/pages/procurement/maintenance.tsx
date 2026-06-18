@@ -19,6 +19,7 @@ import {
   Trash2,
   CheckCircle2,
   TrendingUp,
+  X,
 } from "lucide-react";
 
 type InventoryItem = {
@@ -296,6 +297,12 @@ export default function SupplierMaintenancePage() {
   const [supplierSearch, setSupplierSearch] = useState("");
   const [showSupplierForm, setShowSupplierForm] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
+  // Batch edit (multi-select → set ONE safe shared field on all selected).
+  const [selectedSuppliers, setSelectedSuppliers] = useState<Supplier[]>([]);
+  const [showBatchEdit, setShowBatchEdit] = useState(false);
+  const [batchField, setBatchField] = useState<"paymentTerms" | "purchaseOrgCode" | "status">("paymentTerms");
+  const [batchValue, setBatchValue] = useState("");
+  const [batchBusy, setBatchBusy] = useState(false);
 
   const { data: suppliersResp } = useCachedJson<{ success?: boolean; data?: Record<string, unknown>[] } | Record<string, unknown>[]>("/api/suppliers");
 
@@ -648,6 +655,45 @@ export default function SupplierMaintenancePage() {
     }
   };
 
+  // Batch edit — set ONE safe shared field on every selected supplier. Sends
+  // the FULL supplier row with that one field changed (safe whether the PUT
+  // merges or replaces). Names/codes are never offered (unique per supplier).
+  const applyBatchEdit = async () => {
+    const val = batchValue.trim();
+    if (!val) { toast.error("Pick a value to apply."); return; }
+    if (selectedSuppliers.length === 0) return;
+    setBatchBusy(true);
+    const ids = new Set(selectedSuppliers.map((s) => s.id));
+    // Optimistic (mirrors handleSaveSupplier); invalidateCache reconciles after.
+    setSuppliers((prev) => prev.map((s) => (ids.has(s.id) ? { ...s, [batchField]: val } : s)));
+    let ok = 0;
+    const failed: string[] = [];
+    for (const s of selectedSuppliers) {
+      try {
+        const payload: Record<string, unknown> = { ...s, [batchField]: val };
+        delete payload.id;
+        const res = await fetch(`/api/suppliers/${s.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) ok++;
+        else failed.push(s.code || s.id);
+      } catch {
+        failed.push(s.code || s.id);
+      }
+    }
+    invalidateCache("/api/suppliers");
+    setBatchBusy(false);
+    setShowBatchEdit(false);
+    setSelectedSuppliers([]);
+    if (failed.length === 0) {
+      toast.success(`Updated ${ok} supplier(s).`);
+    } else {
+      toast.error(`${ok} updated, ${failed.length} failed: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}`);
+    }
+  };
+
   // ---- SKU Tab ----
   // Per-supplier counts for the dropdown — Wei Siang 2026-05-10:
   // 969 rows in one flat list is unusable; pick a supplier to scope.
@@ -941,6 +987,12 @@ export default function SupplierMaintenancePage() {
                 onChange={(e) => setSupplierSearch(e.target.value)}
               />
             </div>
+            {selectedSuppliers.length > 0 && (
+              <Button variant="outline" onClick={() => { setBatchValue(""); setShowBatchEdit(true); }}>
+                <Pencil className="h-4 w-4" />
+                Batch Edit ({selectedSuppliers.length})
+              </Button>
+            )}
             <Button variant="primary" onClick={() => { setEditingSupplier(null); setShowSupplierForm(true); }}>
               <Plus className="h-4 w-4" />
               Add Supplier
@@ -955,6 +1007,8 @@ export default function SupplierMaintenancePage() {
             gridId="supplier-info"
             contextMenuItems={supplierContextMenu}
             onDoubleClick={(row) => navigate(`/suppliers/${row.id}`)}
+            selectable
+            onSelectionChange={setSelectedSuppliers}
             emptyMessage="No suppliers found."
             stickyHeader
             maxHeight="calc(100vh - 420px)"
@@ -1036,6 +1090,92 @@ export default function SupplierMaintenancePage() {
           onSave={handleSaveSKU}
           onClose={() => { setShowSKUForm(false); setEditingSKU(null); }}
         />
+      )}
+
+      {/* Batch Edit dialog — set ONE safe shared field on all selected suppliers */}
+      {showBatchEdit && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={() => !batchBusy && setShowBatchEdit(false)} />
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4">
+            <div className="flex items-center justify-between p-5 border-b border-[#E2DDD8]">
+              <h2 className="text-lg font-semibold text-[#1F1D1B]">
+                Batch Edit — {selectedSuppliers.length} supplier{selectedSuppliers.length === 1 ? "" : "s"}
+              </h2>
+              <button
+                type="button"
+                onClick={() => !batchBusy && setShowBatchEdit(false)}
+                className="text-[#9CA3AF] hover:text-[#374151]"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Field to change</label>
+                <select
+                  value={batchField}
+                  onChange={(e) => { setBatchField(e.target.value as typeof batchField); setBatchValue(""); }}
+                  className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                >
+                  <option value="paymentTerms">Payment Terms</option>
+                  <option value="purchaseOrgCode">Purchase Company</option>
+                  <option value="status">Status</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">New value (applies to all selected)</label>
+                {batchField === "purchaseOrgCode" ? (
+                  <select
+                    value={batchValue}
+                    onChange={(e) => setBatchValue(e.target.value)}
+                    className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  >
+                    <option value="">Pick a company…</option>
+                    {(orgOptions.length > 0
+                      ? orgOptions.map((o) => ({ value: o.code, label: `${o.code} — ${o.name}` }))
+                      : [{ value: "HOOKKA", label: "HOOKKA INDUSTRIES SDN BHD" }]
+                    ).map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                ) : batchField === "status" ? (
+                  <select
+                    value={batchValue}
+                    onChange={(e) => setBatchValue(e.target.value)}
+                    className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  >
+                    <option value="">Pick a status…</option>
+                    <option value="ACTIVE">Active</option>
+                    <option value="INACTIVE">Inactive</option>
+                    <option value="BLACKLISTED">Blacklisted</option>
+                  </select>
+                ) : (
+                  <select
+                    value={batchValue}
+                    onChange={(e) => setBatchValue(e.target.value)}
+                    className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  >
+                    <option value="">Pick terms…</option>
+                    <option value="COD">COD</option>
+                    <option value="NET15">Net 15</option>
+                    <option value="NET30">Net 30</option>
+                    <option value="NET45">Net 45</option>
+                    <option value="NET60">Net 60</option>
+                  </select>
+                )}
+              </div>
+              <p className="text-xs text-[#9CA3AF]">
+                Only this one field changes on the {selectedSuppliers.length} selected supplier{selectedSuppliers.length === 1 ? "" : "s"}. Names and codes are never touched.
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-2 p-5 border-t border-[#E2DDD8]">
+              <Button variant="outline" onClick={() => setShowBatchEdit(false)} disabled={batchBusy}>Cancel</Button>
+              <Button variant="primary" onClick={applyBatchEdit} disabled={batchBusy || !batchValue}>
+                {batchBusy ? "Applying…" : `Apply to ${selectedSuppliers.length}`}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

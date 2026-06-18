@@ -671,25 +671,6 @@ export default function UsersPage() {
   const aliasIsHeuristic = (u: UserRow, alias: MailAddress | undefined): boolean =>
     !!alias && alias.assignedUserId !== u.id;
 
-  // Unassigned, active @hookka.com aliases an operator can CLAIM for a user
-  // whose local-part never name-matched them (owner 2026-06-17: "lim@hookka.com
-  // 是 under 我的，爲什麽這邊空"). lim@hookka.com exists but has an empty
-  // assigned_user_id and "lim" doesn't match "Wei Siang", so aliasByUserId never
-  // surfaces it on his row. These are addresses with NO assigned_user_id that
-  // are ALSO not already shown on some user's row via the local-part heuristic
-  // (those are offered a one-click "Link" instead) — so the claim picker only
-  // lists genuinely-floating aliases and can't double-assign one. Claiming
-  // PATCHes assigned_user_id, after which it shows as that user's alias and
-  // drops out of the Mailbox Access shared-mailbox columns automatically.
-  const unassignedAliases = useMemo(() => {
-    const shown = new Set<string>();
-    for (const a of aliasByUserId.values()) if (a?.id) shown.add(a.id);
-    return (addressesResp ?? []).filter(
-      (a) =>
-        a.active && !(a.assignedUserId ?? "").trim() && !shown.has(a.id),
-    );
-  }, [addressesResp, aliasByUserId]);
-
   // Effective department for a user, honouring any queued change in edit mode
   // (orgDeptDraft on the user id) over the user's saved department. Empty
   // department ⇒ "Unassigned". Driven by the USER row now, so a user needs NO
@@ -1541,10 +1522,6 @@ export default function UsersPage() {
   // refetches so the column flips from "(matched by name) · Link" to the solid
   // assigned chip. Used straight from the Email Alias cell — no modal needed.
   const [linkingAliasId, setLinkingAliasId] = useState<string | null>(null);
-  // The user-row whose "Claim existing alias" dropdown is currently open in the
-  // Email Alias grid cell (null = none). Keyed by user id. Declared here so
-  // claimAliasForUser (below) can close over the setter.
-  const [claimForUser, setClaimForUser] = useState<string | null>(null);
   const linkAliasToUser = async (alias: MailAddress, u: UserRow) => {
     setLinkingAliasId(alias.id);
     try {
@@ -1558,47 +1535,6 @@ export default function UsersPage() {
       });
       if (res.ok) {
         showFlash("ok", `Linked ${alias.address} to ${u.email}`);
-        fetchAddresses();
-      } else {
-        const json = (await res.json().catch(() => ({}))) as { error?: string };
-        showFlash("err", json.error ?? "Couldn't link the alias. Please retry.");
-      }
-    } catch (err) {
-      showFlash("err", humanizeError(err, "Network problem — please try again."));
-    } finally {
-      setLinkingAliasId(null);
-    }
-  };
-
-  // Claim an EXISTING unassigned @hookka.com alias for a user (BUG-2 fix). Same
-  // PATCH as linkAliasToUser, but the source alias was never surfaced on the
-  // user's row (its local-part doesn't name-match them and assigned_user_id is
-  // empty — e.g. lim@hookka.com → Wei Siang), so it's chosen from the
-  // unassignedAliases picker rather than a per-row "Link". Writing
-  // assigned_user_id makes it that user's alias and removes it from the Mailbox
-  // Access shared columns. Reuses linkingAliasId for the inline spinner /
-  // disabled state. `claimForUser` (set below) tracks the row whose dropdown is
-  // open in the grid.
-  const claimAliasForUser = async (addressId: string, u: UserRow) => {
-    const alias = unassignedAliases.find((a) => a.id === addressId);
-    if (!alias) return;
-    setLinkingAliasId(addressId);
-    try {
-      const res = await fetch(`/api/mail-center/addresses/${addressId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          assignedUserId: u.id,
-          assignedUserName: u.displayName || u.email,
-        }),
-      });
-      if (res.ok) {
-        showFlash("ok", `Linked ${alias.address} to ${u.email}`);
-        setClaimForUser(null);
-        // Also close the Edit-details modal when the claim was made from it, so
-        // the operator returns to the grid and sees the alias on the row.
-        setAliasForUser(null);
-        setAliasExisting(null);
         fetchAddresses();
       } else {
         const json = (await res.json().catch(() => ({}))) as { error?: string };
@@ -1785,13 +1721,8 @@ export default function UsersPage() {
         if (aliasByUserId.has(u.id)) {
           return <span className="text-xs text-gray-400">—</span>;
         }
-        // No alias yet. Offer "Add alias" (create a new address) AND — when
-        // there are floating unassigned @hookka.com aliases — a "Claim existing"
-        // picker so an operator can link one whose local-part never name-matched
-        // this user (BUG-2: lim@hookka.com → Wei Siang). Claiming PATCHes
-        // assigned_user_id; the alias then shows on this row and leaves the
-        // Mailbox Access shared columns.
-        const claimOpen = claimForUser === u.id;
+        // No alias yet — offer "Add alias" (create + assign a new @hookka.com
+        // address). The old "Claim existing" picker was removed (owner 2026-06-18).
         return (
           <span className="inline-flex flex-wrap items-center gap-1.5">
             <Button
@@ -1806,44 +1737,6 @@ export default function UsersPage() {
               <AtSign className="h-3.5 w-3.5 mr-1" />
               Add alias
             </Button>
-            {unassignedAliases.length > 0 &&
-              (claimOpen ? (
-                <select
-                  autoFocus
-                  defaultValue=""
-                  disabled={linkingAliasId !== null}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => {
-                    const id = e.target.value;
-                    if (id) claimAliasForUser(id, u);
-                  }}
-                  onBlur={() => setClaimForUser(null)}
-                  title="Pick an existing unassigned @hookka.com alias to link to this user"
-                  className="h-7 max-w-[180px] rounded border border-[#E2DDD8] bg-white px-1.5 text-[11px] text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] disabled:opacity-50"
-                >
-                  <option value="" disabled>
-                    Choose alias…
-                  </option>
-                  {unassignedAliases.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.address}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setClaimForUser(u.id);
-                  }}
-                  className="inline-flex items-center gap-1 text-[11px] font-medium text-[#6B5C32] hover:underline"
-                  title="Link an existing unassigned @hookka.com alias to this user"
-                >
-                  <Link2 className="h-3 w-3" />
-                  Claim existing
-                </button>
-              ))}
           </span>
         );
       },
@@ -1949,7 +1842,7 @@ export default function UsersPage() {
         ),
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [aliasByUserId, canManageUsers, currentUser?.id, linkingAliasId, unassignedAliases, claimForUser]);
+  ], [aliasByUserId, canManageUsers, currentUser?.id, linkingAliasId]);
 
   // ---------- Render -------------------------------------------------------
 
@@ -3200,46 +3093,6 @@ export default function UsersPage() {
               )}
             </p>
             <div className="mt-4 space-y-2">
-              {/* CLAIM path (BUG-2): on the create branch, when floating
-                  unassigned @hookka.com aliases exist, let the operator link one
-                  to this user instead of creating a brand-new address — fixes
-                  the "lim@hookka.com is mine but the row is empty" case where the
-                  alias's local-part never name-matched the user. Claiming PATCHes
-                  assigned_user_id and refreshes; the new address path stays below
-                  for when none of the existing aliases fit. */}
-              {!aliasExisting && unassignedAliases.length > 0 && (
-                <div className="rounded-md border border-[#CFE0F3] bg-[#F2F7FD] p-3">
-                  <label className="block text-xs font-medium text-[#2C5B8F] uppercase tracking-wide mb-1">
-                    Claim an existing alias
-                  </label>
-                  <p className="text-[11px] text-[#2C5B8F] mb-2">
-                    Link an unassigned @hookka.com address that already exists
-                    (e.g. one whose name doesn&apos;t match this person) to{" "}
-                    <strong>{aliasForUser.email}</strong>.
-                  </p>
-                  <select
-                    defaultValue=""
-                    disabled={aliasSubmitting || linkingAliasId !== null}
-                    onChange={(e) => {
-                      const id = e.target.value;
-                      if (id) claimAliasForUser(id, aliasForUser);
-                    }}
-                    className="flex h-10 w-full rounded-md border border-[#CFE0F3] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] disabled:opacity-50"
-                  >
-                    <option value="" disabled>
-                      Choose an existing alias to link…
-                    </option>
-                    {unassignedAliases.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.address}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-[11px] text-[#6B7280] mt-2">
-                    Or create a brand-new address below.
-                  </p>
-                </div>
-              )}
               <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide">
                 Email alias
               </label>

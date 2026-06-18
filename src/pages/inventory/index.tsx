@@ -2,7 +2,6 @@ import { useState, useMemo, useEffect } from "react";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useToast } from "@/components/ui/toast";
-import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
@@ -1087,73 +1086,6 @@ let invSnapshot: {
 
 export default function InventoryPage() {
   const { toast } = useToast();
-  // Aliased: a native window.confirm is used elsewhere in this component, so
-  // don't shadow the global `confirm`.
-  const { confirm: askConfirm, confirmDialog } = useConfirm();
-  const [mergingDuplicates, setMergingDuplicates] = useState(false);
-  // Find duplicate raw-material item codes (same code, 2+ rows left over from the
-  // item-code consolidation) and SAFELY merge them: the backend keeps the row
-  // that carries the most data/stock; the duplicates are FOLDED into it (stock
-  // summed, batch/cost history repointed) and removed (owner 2026-06-18).
-  const handleMergeDuplicates = async () => {
-    setMergingDuplicates(true);
-    try {
-      const res = await fetch("/api/raw-materials/duplicates");
-      const json = (await res.json().catch(() => ({}))) as {
-        data?: { groups?: { rows: { id: string }[] }[] };
-      };
-      const groups = json?.data?.groups ?? [];
-      if (groups.length === 0) {
-        toast.success("No duplicate item codes found.");
-        return;
-      }
-      let mergeCount = 0;
-      for (const g of groups) {
-        mergeCount += Math.max(0, g.rows.length - 1);
-      }
-      const ok = await askConfirm({
-        title: "Merge duplicate raw materials",
-        message: `${groups.length} item code(s) have duplicate rows. ${mergeCount} duplicate row(s) will be merged into their main row — the stock is summed and all batch / cost history is moved over, then the extra rows are removed.`,
-        confirmLabel: `Merge ${mergeCount} duplicate(s)`,
-        tone: "danger",
-      });
-      if (!ok || mergeCount === 0) return;
-      const applyRes = await fetch("/api/raw-materials/merge-duplicates", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apply: true }),
-      });
-      const applyJson = (await applyRes.json().catch(() => ({}))) as {
-        success?: boolean;
-        error?: string;
-        data?: {
-          mergedCount?: number;
-          plan?: { merges?: { id: string }[] }[];
-        };
-      };
-      if (applyRes.ok && applyJson.success) {
-        const deletedIds = new Set(
-          (applyJson.data?.plan ?? []).flatMap((p) =>
-            (p.merges ?? []).map((m) => m.id),
-          ),
-        );
-        toast.success(
-          `Merged: ${applyJson.data?.mergedCount ?? 0} duplicate row(s) folded into their main row.`,
-        );
-        // Optimistically drop the merged-away rows + invalidate caches (mirrors
-        // the single-RM delete path so other pages refresh on next mount).
-        setLiveRawMaterials((prev) => prev.filter((r) => !deletedIds.has(r.id)));
-        invalidateCachePrefix("/api/raw-materials");
-        invalidateCachePrefix("/api/inventory");
-      } else {
-        toast.error(applyJson.error || "Merge failed — please retry.");
-      }
-    } catch {
-      toast.error("Merge failed — please retry.");
-    } finally {
-      setMergingDuplicates(false);
-    }
-  };
   const [activeTab, setActiveTab] = useState<Tab>("FINISHED");
 
   // Search & filter state
@@ -2289,21 +2221,10 @@ export default function InventoryPage() {
             <Button variant="outline" size="sm" onClick={() => setShowBatchImportRM(true)}>
               <Upload className="h-4 w-4" /> Batch Import
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleMergeDuplicates}
-              disabled={mergingDuplicates}
-              title="Find item codes with duplicate rows and remove the empty duplicates"
-            >
-              <Layers className="h-4 w-4" />{" "}
-              {mergingDuplicates ? "Checking…" : "Merge Dups"}
-            </Button>
             <Button variant="primary" size="sm" onClick={() => setShowCreateRM(true)}>
               <Plus className="h-4 w-4" /> Add RM
             </Button>
           </div>
-          {confirmDialog}
 
           {/* Create RM modal */}
           {showCreateRM && (

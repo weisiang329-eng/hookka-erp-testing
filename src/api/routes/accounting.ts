@@ -30,6 +30,8 @@ import { bsSectionFor, bsSectionClass } from "../../lib/bs-section";
 import type { BsSection } from "../../lib/bs-section";
 import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
+import { formatDocNo, ymFromDate, resolveDocPrefix } from "../../lib/doc-number";
+import type { DocDirection, DocPrefixMap } from "../../lib/doc-number";
 
 const app = new Hono<Env>();
 
@@ -5271,6 +5273,43 @@ async function getCashflowStockGroupMap(
   return {};
 }
 
+async function getDocNumberPrefixes(
+  db: Env["Variables"]["DB"],
+): Promise<DocPrefixMap> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'doc_number_prefixes'")
+      .first<{ value: string | null }>();
+    if (row?.value) return JSON.parse(row.value) as DocPrefixMap;
+  } catch { /* absent → empty (defaults apply) */ }
+  return {};
+}
+
+// Issue the next unified document number for a bank account + direction,
+// dated by the voucher's own date (YYMM). Atomic per (prefix, ym).
+// Entry point for Supplier/Expense/Customer payment + Official Receipt
+// numbering (sub-projects B/C); currently unused.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function issueDocNumber(
+  db: Env["Variables"]["DB"],
+  opts: { bankAccountCode: string; direction: DocDirection; dateIso: string },
+): Promise<string> {
+  const cfg = await getDocNumberPrefixes(db);
+  const prefix = resolveDocPrefix(cfg, opts.bankAccountCode, opts.direction);
+  const ym = ymFromDate(opts.dateIso);
+  const row = await db
+    .prepare(
+      `INSERT INTO doc_no_counters (prefix, ym, next_no) VALUES (?, ?, 2)
+       ON CONFLICT (prefix, ym) DO UPDATE SET next_no = doc_no_counters.next_no + 1
+       RETURNING next_no`,
+    )
+    .bind(prefix, ym)
+    .first<{ next_no?: number; nextNo?: number }>();
+  const newNext = Number(row?.next_no ?? row?.nextNo ?? 2);
+  const issued = newNext - 1; // first insert sets 2 → issued 1
+  return formatDocNo(prefix, ym, issued);
+}
+
 async function getPnlSectionMap(
   db: Env["Variables"]["DB"],
 ): Promise<Record<string, string>> {
@@ -5519,6 +5558,36 @@ app.put("/cashflow/map", async (c) => {
       ).bind(JSON.stringify(sg), now).run();
     }
     return c.json({ success: true, data: { map, stockGroupMap: sg } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.get("/doc-number-prefixes", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const map = await getDocNumberPrefixes(c.var.DB);
+  return c.json({ success: true, data: { map } });
+});
+
+app.put("/doc-number-prefixes", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as { map?: Record<string, { out?: string; in?: string }> };
+    if (body.map === undefined) return c.json({ success: false, error: "map required" }, 400);
+    const map: Record<string, { out: string; in: string }> = {};
+    for (const [code, v] of Object.entries(body.map)) {
+      if (!v) continue;
+      const out = typeof v.out === "string" ? v.out.trim() : "";
+      const inp = typeof v.in === "string" ? v.in.trim() : "";
+      if (out || inp) map[code] = { out, in: inp };
+    }
+    await c.var.DB.prepare(
+      `INSERT INTO kv_config (key, value, updated_at) VALUES ('doc_number_prefixes', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).bind(JSON.stringify(map), new Date().toISOString()).run();
+    return c.json({ success: true, data: { map } });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

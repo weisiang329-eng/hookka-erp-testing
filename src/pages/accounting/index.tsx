@@ -287,6 +287,7 @@ export default function AccountingPage() {
               <FyeCard />
               <CleanupReportCard />
               <LandedCostCard />
+              <DocNumberingCard accounts={accounts} />
             </div>
           )}
         </>
@@ -609,6 +610,69 @@ function LandedCostCard() {
             </tbody>
           </table>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DocNumberingCard({ accounts }: { accounts: ChartOfAccount[] }) {
+  const { toast } = useToast();
+  const [map, setMap] = useState<Record<string, { out: string; in: string }>>({});
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    fetch("/api/accounting/doc-number-prefixes")
+      .then((r) => r.json() as Promise<{ data?: { map?: Record<string, { out?: string; in?: string }> } }>)
+      .then((j) => {
+        const m = j?.data?.map ?? {};
+        const norm: Record<string, { out: string; in: string }> = {};
+        for (const [k, v] of Object.entries(m)) norm[k] = { out: v?.out ?? "", in: v?.in ?? "" };
+        setMap(norm);
+      })
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, []);
+  const banks = accounts.filter((a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH");
+  const setField = (code: string, dir: "out" | "in", val: string) => {
+    setMap((prev) => ({ ...prev, [code]: { out: prev[code]?.out ?? "", in: prev[code]?.in ?? "", [dir]: val } }));
+  };
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch("/api/accounting/doc-number-prefixes", {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ map }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) toast.success("Numbering prefixes saved"); else toast.error(j?.error || "Save failed");
+    } catch { toast.error("Save failed"); } finally { setSaving(false); }
+  };
+  return (
+    <Card className="mb-4">
+      <CardContent className="p-4">
+        <div className="flex items-center gap-3 mb-2">
+          <h3 className="text-sm font-semibold text-[#1F1D1B]">Document Numbering</h3>
+          <Button variant="primary" size="sm" onClick={save} disabled={saving || !loaded} className="ml-auto">{saving ? "Saving…" : "Save"}</Button>
+        </div>
+        <p className="text-[11px] text-[#9CA3AF] mb-3">Number = prefix + voucher month + running no. Outgoing (Expense / Supplier payment) uses the OUT prefix; incoming (Customer payment / Receipt) uses the IN prefix. Per bank.</p>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-[12px] text-[#6B7280]">
+              <td className="text-left pb-1">Bank / Cash account</td>
+              <td className="text-left pb-1 w-40">OUT prefix (payments)</td>
+              <td className="text-left pb-1 w-40">IN prefix (receipts)</td>
+            </tr>
+          </thead>
+          <tbody>
+            {banks.map((a) => (
+              <tr key={a.code} className="border-t border-[#F0ECE9]">
+                <td className="py-1.5"><span className="tabular-nums text-xs text-[#6B7280] mr-2">{a.code}</span>{a.name}</td>
+                <td className="py-1.5"><input value={map[a.code]?.out ?? ""} onChange={(e) => setField(a.code, "out", e.target.value)} placeholder="e.g. HPV" className="w-32 rounded border border-[#E2DDD8] px-2 py-1 text-sm" /></td>
+                <td className="py-1.5"><input value={map[a.code]?.in ?? ""} onChange={(e) => setField(a.code, "in", e.target.value)} placeholder="e.g. HOR" className="w-32 rounded border border-[#E2DDD8] px-2 py-1 text-sm" /></td>
+              </tr>
+            ))}
+            {banks.length === 0 && <tr><td colSpan={3} className="py-3 text-[#9CA3AF] text-sm">No bank/cash accounts (SBK/SCH).</td></tr>}
+          </tbody>
+        </table>
       </CardContent>
     </Card>
   );

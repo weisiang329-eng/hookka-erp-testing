@@ -52,6 +52,13 @@ type POLineItem = {
   materialCategory: string;
 };
 
+// Normalise a material code for tolerant matching. A binding's materialCode is
+// typed by hand in the Supplier-Material Bindings page, so trivial formatting
+// diffs (case, stray/duplicated spaces) used to silently fail to match the RM's
+// itemCode — the PO then showed ALL suppliers instead of the bound ones (owner
+// 2026-06-18). Exact match still wins first; this only rescues near-misses.
+const normMatCode = (s: string) => s.trim().toUpperCase().replace(/\s+/g, " ");
+
 export default function CreatePurchaseOrderPageWrapper() {
   return (
     <Suspense fallback={<div className="flex items-center justify-center h-64 text-[#9CA3AF]">Loading...</div>}>
@@ -104,10 +111,18 @@ function CreatePurchaseOrderPage() {
   );
 
   const getBindingsForRM = useCallback(
-    (materialCode: string): SupplierMaterialBinding[] =>
-      supplierMaterialBindings.filter(
-        (b) => b.materialCode === materialCode && activeSupplierIds.has(b.supplierId),
-      ),
+    (materialCode: string): SupplierMaterialBinding[] => {
+      const active = supplierMaterialBindings.filter((b) =>
+        activeSupplierIds.has(b.supplierId),
+      );
+      const exact = active.filter((b) => b.materialCode === materialCode);
+      if (exact.length > 0) return exact;
+      // Fallback: tolerant code match so a hand-typed binding with only a case /
+      // spacing diff still links to this RM (exact wins above, so a correct
+      // binding is never overridden).
+      const key = normMatCode(materialCode);
+      return active.filter((b) => normMatCode(b.materialCode) === key);
+    },
     [supplierMaterialBindings, activeSupplierIds],
   );
 
@@ -225,8 +240,9 @@ function CreatePurchaseOrderPage() {
   const switchSupplier = (idx: number, supplierId: string) => {
     setItems((prev) => {
       const item = prev[idx];
+      const wantCode = normMatCode(item.rmCode);
       const binding = supplierMaterialBindings.find(
-        (b) => b.materialCode === item.rmCode && b.supplierId === supplierId,
+        (b) => normMatCode(b.materialCode) === wantCode && b.supplierId === supplierId,
       );
       if (!binding) return prev;
       const next = [...prev];
@@ -431,6 +447,7 @@ function CreatePurchaseOrderPage() {
           });
         }
         if (i < groups.length - 1) {
+          // eslint-disable-next-line no-restricted-syntax -- fixed inter-request throttle inside an async submit loop (not a React render path)
           await new Promise((r) => setTimeout(r, 200));
         }
       }

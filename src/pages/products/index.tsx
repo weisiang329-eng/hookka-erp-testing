@@ -22,6 +22,7 @@ import {
   type PricedItemKey,
 } from "./MaintenanceItemHistoryDialog";
 import { CncTemplatePanel } from "@/components/cnc/CncTemplatePanel";
+import { ProductCatalog } from "@/pages/products/catalog";
 
 // Derive the bare product code for the CNC template lookup. SKU codes look
 // like "1013-(K)" / "1013 King" — the cutting templates are keyed by the
@@ -1751,7 +1752,7 @@ function MaintenanceView() {
 // ---------- Main Page ----------
 export default function ProductsPage() {
   const { toast } = useToast();
-  const [viewMode, setViewMode] = useState<"skuMaster" | "maintenance">("skuMaster");
+  const [viewMode, setViewMode] = useState<"skuMaster" | "catalog" | "maintenance">("skuMaster");
   const [products, setProducts] = useState<Product[]>([]);
   const [configs, setConfigs] = useState<ProductDeptConfig[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -3037,6 +3038,16 @@ export default function ProductsPage() {
               SKU Master
             </button>
             <button
+              onClick={() => setViewMode("catalog")}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                viewMode === "catalog"
+                  ? "bg-white text-[#111827] shadow-sm"
+                  : "text-[#6B7280] hover:text-[#111827]"
+              }`}
+            >
+              Catalog
+            </button>
+            <button
               onClick={() => setViewMode("maintenance")}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
                 viewMode === "maintenance"
@@ -3379,6 +3390,9 @@ export default function ProductsPage() {
           {filtered.length} product{filtered.length !== 1 ? "s" : ""} &middot; Production configs from SKU sheet
         </p>
       )}
+
+      {/* Catalog (Modular) View — one photo-first tile per Model. */}
+      {viewMode === "catalog" && <ProductCatalog products={products} />}
 
       {/* Maintenance View */}
       {viewMode === "maintenance" && <MaintenanceView />}

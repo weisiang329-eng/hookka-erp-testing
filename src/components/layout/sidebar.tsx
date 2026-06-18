@@ -211,6 +211,7 @@ const navigationGroups: NavGroup[] = [
           { name: "Expense Payment", href: "/accounting?tab=payments", icon: Wallet },
           { name: "Receipts", href: "/accounting?tab=receipts", icon: Receipt },
           { name: "Customer Payment", href: "/invoices/payments", icon: CreditCard },
+          { name: "Supplier Payment", href: "/invoices/supplier-payments", icon: CreditCard },
           { name: "Credit Notes", href: "/invoices/credit-notes", icon: FileX },
           { name: "Debit Notes", href: "/invoices/debit-notes", icon: FilePlus },
         ],
@@ -453,6 +454,7 @@ export function Sidebar({
     "/invoices/credit-notes": { resource: "invoices", action: "read" },
     "/invoices/debit-notes": { resource: "invoices", action: "read" },
     "/invoices/payments": { resource: "invoices", action: "read" },
+    "/invoices/supplier-payments": { resource: "invoices", action: "read" },
     "/invoices/e-invoice": { resource: "invoices", action: "read" },
   };
   const isNavItemAllowed = (href: string): boolean => {

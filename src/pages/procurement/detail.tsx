@@ -19,7 +19,7 @@ import type {
 import {
   ArrowLeft, Download, Printer, ChevronRight, Package, FileText,
   CheckCircle, Send, Lock, Pencil, Save, X, Trash2, AlertTriangle, Mail,
-  GitCompare, ChevronDown, ChevronUp,
+  GitCompare, ChevronDown, ChevronUp, Receipt,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useParams, useNavigate } from "react-router-dom";
@@ -146,6 +146,7 @@ export default function PurchaseOrderDetailPage() {
 
   // ------- Email-PO state (3.1) -------
   const [emailing, setEmailing] = useState(false);
+  const [creatingInvoice, setCreatingInvoice] = useState(false);
 
   // ------- Inline GRN dialog state (3.2) -------
   // Embeds the existing GRNFormDialog from grn.tsx scoped to this PO so
@@ -494,6 +495,57 @@ export default function PurchaseOrderDetailPage() {
     }
   };
 
+  // Convert PO → Purchase Invoice (DRAFT). Skips the GRN/receiving step — for
+  // when the supplier invoices the whole order up front. Lines map name / SKU /
+  // qty / price (POs carry no internal material code); created as a DRAFT in
+  // MYR so the operator reviews / edits (incl. material codes, currency via the
+  // GRN→PI path) before approving. Foreign-supplier invoicing should go through
+  // the GRN→PI convert, which prompts for the booking rate.
+  const createInvoiceFromPo = async () => {
+    if (!po) return;
+    const ok = window.confirm(
+      `Create a draft Purchase Invoice from ${po.poNo}? It lists all ${po.items.length} line(s); you can edit it before approving.`,
+    );
+    if (!ok) return;
+    setCreatingInvoice(true);
+    try {
+      const today = new Date().toISOString().split("T")[0];
+      const items = po.items.map((it) => ({
+        materialName: it.materialName,
+        supplierSku: it.supplierSKU,
+        qty: it.quantity,
+        unitPriceSen: it.unitPriceSen,
+        lineType: "STOCKED" as const,
+      }));
+      const res = await fetch("/api/purchase-invoices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          purchaseOrderId: po.id,
+          supplierId: po.supplierId,
+          supplierName: po.supplierName,
+          invoiceDate: today,
+          remarks: `Created from PO ${po.poNo}`,
+          items,
+        }),
+      });
+      const j = (await res.json().catch(() => null)) as
+        | { success?: boolean; error?: string; data?: { id: string; piNo: string } }
+        | null;
+      if (!res.ok || !j?.success || !j.data) {
+        toast.error(j?.error || "Could not create the invoice.");
+        return;
+      }
+      invalidateCachePrefix("/api/purchase-invoices");
+      toast.success(`Invoice ${j.data.piNo} created — review & approve`);
+      navigate(`/procurement/pi/${j.data.id}`);
+    } catch {
+      toast.error("Could not create the invoice — network error.");
+    } finally {
+      setCreatingInvoice(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -629,6 +681,11 @@ export default function PurchaseOrderDetailPage() {
               generateGRNPdf(po);
             }}>
               <Printer className="h-4 w-4" /> Print GRN
+            </Button>
+          )}
+          {!isDraft && !isCancelled && !editing && (
+            <Button variant="outline" onClick={createInvoiceFromPo} disabled={creatingInvoice}>
+              <Receipt className="h-4 w-4" /> {creatingInvoice ? "Creating…" : "Create Invoice"}
             </Button>
           )}
         </div>

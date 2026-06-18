@@ -48,6 +48,7 @@ import {
   Plus,
   Pencil,
   Trash2,
+  FileText,
 } from "lucide-react";
 
 type SkuBinding = {
@@ -429,6 +430,39 @@ export default function SupplierDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              const { generateSupplierQuotationPdf } = await import(
+                "@/lib/generate-supplier-quotation-pdf"
+              );
+              generateSupplierQuotationPdf(
+                {
+                  code: supplier.code,
+                  name: supplier.name,
+                  contactPerson: supplier.contactPerson,
+                  email: supplier.email,
+                  purchaseOrgCode: supplier.purchaseOrgCode,
+                },
+                skus.map((b) => ({
+                  materialCode: b.materialCode,
+                  materialName: b.materialName,
+                  supplierSku: b.supplierSku,
+                  supplierDescription: b.supplierDescription,
+                  unitPriceSen: b.unitPrice,
+                  currency: b.currency,
+                  leadTimeDays: b.leadTimeDays,
+                  moq: b.moq,
+                  priceValidFrom: b.priceValidFrom,
+                  priceValidTo: b.priceValidTo,
+                })),
+              );
+            }}
+          >
+            <FileText className="h-4 w-4" />
+            Quotation PDF
+          </Button>
           <Button
             variant="outline"
             size="sm"

@@ -47,6 +47,7 @@ import {
   type PaymentAllocInput,
 } from "../../lib/other-party-payment";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
+import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
 
 const app = new Hono<Env>();
 
@@ -4508,6 +4509,40 @@ app.get("/pl-statement", async (c) => {
       rows: buildPnlRows(p, y, editable),
     },
   });
+});
+
+app.get("/pl-monthly", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const lineParam = c.req.query("line");
+  const line: "all" | "sofa" | "bedframe" = lineParam === "sofa" || lineParam === "bedframe" ? lineParam : "all";
+  const anchor = c.req.query("anchor");
+
+  const fyeMonth = await getFyeMonth(c.var.DB);
+  const anchorYm = /^\d{4}-\d{2}$/.test(anchor ?? "") ? (anchor as string) : new Date().toISOString().slice(0, 7);
+  const anchorDate = new Date(`${anchorYm}-01T00:00:00Z`);
+  const fy = fyWindowFor(anchorDate, fyeMonth);
+  const fyStartYm = fy.startIso.slice(0, 7);
+  const fyEndYm = fy.endIso.slice(0, 7);
+  const lastYm = anchorYm < fyEndYm ? anchorYm : fyEndYm;
+  const months: string[] = [];
+  {
+    let d = new Date(`${fyStartYm}-01T00:00:00Z`);
+    const end = new Date(`${lastYm}-01T00:00:00Z`);
+    while (d <= end) { months.push(d.toISOString().slice(0, 7)); d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)); }
+  }
+
+  const override = await getPnlSectionMap(c.var.DB);
+  const monthLabel = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleString("en", { month: "short", timeZone: "UTC" });
+
+  const cols: PnlMatrixCol[] = [];
+  cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, fyStartYm, lastYm, line, override) });
+  for (const ym of months) {
+    cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, ym, ym, line, override) });
+  }
+
+  const matrix = buildPnlMatrix(cols);
+  return c.json({ success: true, data: { fyLabel: fy.label, line, anchor: anchorYm, columns: matrix.columns, rows: matrix.rows } });
 });
 
 app.get("/cashflow-statement", async (c) => {

@@ -560,7 +560,12 @@ export default function SupplierMaintenancePage() {
           icon: <Trash2 className="h-3.5 w-3.5" />,
           danger: true,
           action: () => {
-            setSuppliers((prev) => prev.filter((s) => s.id !== row.id));
+            const id = row.id;
+            // Optimistic remove, then persist (was screen-only before).
+            setSuppliers((prev) => prev.filter((s) => s.id !== id));
+            fetch(`/api/suppliers/${id}`, { method: "DELETE" }).catch(() => {
+              /* optimistic-only fallback — refresh will reconcile */
+            });
           },
         },
       ],
@@ -714,21 +719,81 @@ export default function SupplierMaintenancePage() {
           icon: <Trash2 className="h-3.5 w-3.5" />,
           danger: true,
           action: () => {
-            setSkuList((prev) => prev.filter((s) => s.id !== row.id));
+            const id = row.id;
+            // Optimistic remove, then persist. (Previously this only mutated
+            // local state, so the binding reappeared on the next
+            // /api/supplier-materials refresh — "delete" never stuck.)
+            setSkuList((prev) => prev.filter((s) => s.id !== id));
+            fetch(`/api/supplier-materials/${id}`, { method: "DELETE" }).catch(
+              () => {
+                /* optimistic-only fallback — refresh will reconcile */
+              },
+            );
           },
         },
       ],
     []
   );
 
-  const handleSaveSKU = (data: Omit<SupplierSKU, "id">) => {
+  // Map the page's SupplierSKU shape onto the /api/supplier-materials body.
+  // unitPrice is sent in SEN (the binding column is integer sen — the same
+  // basis the list maps back from, so do NOT multiply by 100).
+  const skuToBindingBody = (data: Omit<SupplierSKU, "id">) => ({
+    supplierId: data.supplierId,
+    materialCode: data.internalRMCode,
+    materialName: data.materialName,
+    supplierSku: data.supplierSku,
+    supplierDescription: data.supplierDescription ?? "",
+    unitPrice: data.unitPriceSen,
+    currency: data.currency,
+    leadTimeDays: data.leadTimeDays,
+    moq: data.moq,
+    isMainSupplier: data.isMainSupplier,
+    priceValidFrom: data.validFrom || undefined,
+    priceValidTo: data.validTo || undefined,
+  });
+
+  const handleSaveSKU = async (data: Omit<SupplierSKU, "id">) => {
+    // Optimistic local update for instant UX, then persist to the backend.
+    // (Previously this only mutated local state, so new/edited SKU mappings
+    // never saved — they vanished on the next /api/supplier-materials refresh.)
     if (editingSKU) {
+      const id = editingSKU.id;
       setSkuList((prev) =>
-        prev.map((s) => (s.id === editingSKU.id ? { ...s, ...data } : s))
+        prev.map((s) => (s.id === id ? { ...s, ...data } : s))
       );
+      try {
+        await fetch(`/api/supplier-materials/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(skuToBindingBody(data)),
+        });
+      } catch {
+        /* optimistic-only fallback — refresh will reconcile */
+      }
     } else {
-      const newSKU: SupplierSKU = { ...data, id: `sku-${Date.now()}` };
-      setSkuList((prev) => [...prev, newSKU]);
+      const tempId = `sku-${Date.now()}`;
+      setSkuList((prev) => [...prev, { ...data, id: tempId }]);
+      try {
+        const res = await fetch("/api/supplier-materials", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(skuToBindingBody(data)),
+        });
+        if (res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            data?: { id?: string };
+          };
+          const realId = body.data?.id;
+          if (realId) {
+            setSkuList((prev) =>
+              prev.map((s) => (s.id === tempId ? { ...s, id: realId } : s))
+            );
+          }
+        }
+      } catch {
+        /* optimistic-only fallback — refresh will reconcile */
+      }
     }
     setShowSKUForm(false);
     setEditingSKU(null);

@@ -23,7 +23,9 @@ import { humanizeError } from "@/lib/humanize-error";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { asArray } from "@/lib/safe-json";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import { AlertTriangle, Loader2, Plus, Trash2, X, Tag, Layers, History, Pencil } from "lucide-react";
+import { AlertTriangle, Loader2, Plus, Trash2, X, Layers, History, Pencil, Copy } from "lucide-react";
+import { DataGrid, type Column } from "@/components/ui/data-grid";
+import { useToast } from "@/components/ui/toast";
 import type { Product, Customer } from "@/types";
 import {
   SofaComboHistoryDialog,
@@ -291,6 +293,76 @@ function groupByCombo(rules: SofaComboRule[]): ComboGroup[] {
   return groups;
 }
 
+// Canonical JSON of a price map (keys sorted) so identical price sets hash to
+// the same string — used for the History count (distinct date×price events).
+function sortedPricesJson(p: Record<string, number>): string {
+  return JSON.stringify(
+    Object.keys(p)
+      .sort()
+      .reduce<Record<string, number>>((acc, k) => {
+        acc[k] = p[k];
+        return acc;
+      }, {}),
+  );
+}
+
+// Format a sen amount for the grid: drop the non-breaking space (it overflowed
+// the narrow price cells), "—" when the height isn't part of the deal.
+function fmtPriceCell(sen: number | null | undefined): string {
+  if (typeof sen !== "number") return "—";
+  return formatCurrency(sen).replace(new RegExp(String.fromCharCode(160), "g"), " ");
+}
+
+// One flattened combo for the Excel-like grid. The representative (active) rule
+// supplies the displayed values; `group` is kept for row actions and batch
+// operations, which read the full rule set.
+type ComboRow = {
+  key: string;
+  group: ComboGroup;
+  baseModel: string;
+  components: string;
+  fabricTier: FabricTier;
+  customerNames: string[];
+  customerLabel: string;
+  p24: number | null;
+  p28: number | null;
+  p30: number | null;
+  p32: number | null;
+  p35: number | null;
+  effectiveFrom: string;
+  status: "Active" | "Pending";
+  historyCount: number;
+};
+
+function toComboRow(g: ComboGroup): ComboRow {
+  const rep = g.representative;
+  const customerNames = Array.from(
+    new Set(g.rules.map((r) => r.customerName).filter((n): n is string => !!n)),
+  ).sort();
+  const historyCount = new Set(
+    g.rules.map((r) => `${r.effectiveFrom}|${sortedPricesJson(r.pricesByHeight)}`),
+  ).size;
+  const price = (h: string) =>
+    typeof rep.pricesByHeight[h] === "number" ? rep.pricesByHeight[h] : null;
+  return {
+    key: g.key,
+    group: g,
+    baseModel: rep.baseModel,
+    components: renderComponentSizes(rep.componentSizes),
+    fabricTier: rep.fabricTier,
+    customerNames,
+    customerLabel: customerNames.length === 0 ? "All customers" : customerNames.join(", "),
+    p24: price("24"),
+    p28: price("28"),
+    p30: price("30"),
+    p32: price("32"),
+    p35: price("35"),
+    effectiveFrom: rep.effectiveFrom,
+    status: rep.effectiveFrom > todayIso() ? "Pending" : "Active",
+    historyCount,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
@@ -353,6 +425,14 @@ export default function SofaCombosPage() {
   // it pops the dialog open in edit mode pre-filled with the row's values.
   const [editingRule, setEditingRule] = useState<SofaComboRule | null>(null);
 
+  // Grid selection + batch operations (multi-select → copy to a company, or
+  // batch-edit prices across the picked combos).
+  const { toast } = useToast();
+  const [selectedRows, setSelectedRows] = useState<ComboRow[]>([]);
+  const [copyCompanyId, setCopyCompanyId] = useState<string>("");
+  const [copyBusy, setCopyBusy] = useState(false);
+  const [showBatchEdit, setShowBatchEdit] = useState(false);
+
   const filteredRules = useMemo(() => {
     return rules.filter((r) => {
       if (filterBaseModel !== "ALL" && r.baseModel !== filterBaseModel)
@@ -383,6 +463,12 @@ export default function SofaCombosPage() {
     }
     return m;
   }, [groupedByBase]);
+
+  // Flat row list for the Excel-like grid. DataGrid re-groups by baseModel.
+  const comboRows = useMemo<ComboRow[]>(
+    () => Object.values(combosByBase).flat().map(toComboRow),
+    [combosByBase],
+  );
 
   // History dialog: open by group key so the dialog re-derives its rules
   // list from the freshly-fetched data after each save/delete.
@@ -441,6 +527,172 @@ export default function SofaCombosPage() {
       alert(body.error ?? "Failed to delete combo rule");
     }
   }
+
+  // Copy each selected combo to the picked company as a customer-specific row,
+  // effective today. One POST per combo (the create endpoint is single-
+  // customer per row); the grid collapses identical price/date rows so a
+  // re-copy is visually idempotent.
+  async function handleCopyToCompany() {
+    const target = customers.find((c) => c.id === copyCompanyId);
+    if (!target || selectedRows.length === 0) return;
+    if (
+      !confirm(
+        `Copy ${selectedRows.length} combo${selectedRows.length === 1 ? "" : "s"} to ${target.name}? Each becomes a ${target.name}-specific combo effective today.`,
+      )
+    ) {
+      return;
+    }
+    setCopyBusy(true);
+    let ok = 0;
+    const failed: string[] = [];
+    try {
+      for (const row of selectedRows) {
+        const rep = row.group.representative;
+        const res = await fetch("/api/sofa-combos", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            baseModel: rep.baseModel,
+            componentSizes: rep.componentSizes,
+            fabricTier: rep.fabricTier,
+            pricesByHeight: rep.pricesByHeight,
+            effectiveFrom: todayIso(),
+            notes: rep.notes || null,
+            customerId: copyCompanyId,
+          }),
+        });
+        const j = (await res.json().catch(() => ({}))) as ApiSingle<unknown>;
+        if (res.ok && j.success) ok++;
+        else failed.push(`${rep.baseModel} (${j.error ?? "error"})`);
+      }
+      invalidateCachePrefix("/api/sofa-combos");
+      refreshRules();
+      if (failed.length === 0) {
+        toast.success(`Copied ${ok} combo${ok === 1 ? "" : "s"} to ${target.name}.`);
+        setSelectedRows([]);
+        setCopyCompanyId("");
+      } else {
+        toast.error(
+          `Copied ${ok}, failed ${failed.length}: ${failed.slice(0, 2).join("; ")}${failed.length > 2 ? "…" : ""}`,
+        );
+      }
+    } finally {
+      setCopyBusy(false);
+    }
+  }
+
+  // Column defs for the Excel-like combo grid. Rebuilt each render (cheap; a
+  // few dozen rows) so the action closures always see fresh handlers.
+  const comboColumns: Column<ComboRow>[] = [
+    { key: "baseModel", label: "Base Model", width: "120px", sortable: true },
+    {
+      key: "components",
+      label: "Components",
+      width: "210px",
+      sortable: true,
+      render: (v: string) => <span className="text-xs text-[#4B5563]">{v}</span>,
+    },
+    {
+      key: "fabricTier",
+      label: "Fabric",
+      width: "92px",
+      align: "center",
+      sortable: true,
+      filterAccessor: (r) => r.fabricTier,
+      render: (_v, r) => fabricTierBadge(r.fabricTier),
+    },
+    {
+      key: "customerLabel",
+      label: "Customers",
+      width: "180px",
+      sortable: true,
+      noClip: true,
+      render: (_v, r) =>
+        r.customerNames.length === 0 ? (
+          <span className="text-xs text-[#6B7280]">All customers</span>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {r.customerNames.map((c) => (
+              <span
+                key={c}
+                className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#F4F0E8] text-[#6B5C32] border border-[#E2DDD8]"
+              >
+                {c}
+              </span>
+            ))}
+          </div>
+        ),
+    },
+    ...(["24", "28", "30", "32", "35"] as const).map<Column<ComboRow>>((h) => ({
+      key: `p${h}`,
+      label: h,
+      width: "76px",
+      align: "right",
+      sortable: true,
+      render: (v: number | null) => (
+        <span className="text-xs tabular-nums text-[#1F1D1B]">{fmtPriceCell(v)}</span>
+      ),
+    })),
+    {
+      key: "effectiveFrom",
+      label: "Effective",
+      width: "106px",
+      type: "date",
+      sortable: true,
+      render: (v: string) => <span className="text-xs text-[#6B7280]">{formatDate(v)}</span>,
+    },
+    {
+      key: "status",
+      label: "Status",
+      width: "96px",
+      align: "center",
+      sortable: true,
+      filterAccessor: (r) => r.status,
+      render: (_v, r) => statusBadge(r.effectiveFrom),
+    },
+    {
+      key: "actions",
+      label: "",
+      width: "120px",
+      align: "right",
+      render: (_v, r) => (
+        <div className="flex items-center justify-end gap-1">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditingRule(r.group.representative);
+            }}
+            title="Edit this combo in place"
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-[#6B5C32] text-white hover:bg-[#5A4E2A] transition-colors"
+          >
+            <Pencil className="h-3 w-3" />
+            Edit
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setHistoryKey(r.key);
+            }}
+            title="View this combo's full effective-dated history"
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium bg-white text-[#6B5C32] border border-[#D4CCB4] hover:bg-[#F4F0E8] transition-colors"
+          >
+            <History className="h-3 w-3" />
+            {r.historyCount}
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              void handleDelete(r.group.representative.id);
+            }}
+            title="Delete this combo rule"
+            className="p-1 rounded-md text-[#9A3A2D] hover:bg-[#F9E1DA] transition-colors"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ),
+    },
+  ];
 
   if (rulesLoading) {
     return (
@@ -521,74 +773,73 @@ export default function SofaCombosPage() {
         </CardContent>
       </Card>
 
-      {/* Card grid */}
-      {Object.keys(combosByBase).length === 0 ? (
+      {/* Selection toolbar — appears once combos are picked. Copy them to a
+          company (picker top-right) or batch-edit their prices. */}
+      {selectedRows.length > 0 && (
         <Card>
-          <CardContent className="p-10 text-center text-sm text-[#9CA3AF]">
-            No combo rules yet. Click "New Combo" to add one.
+          <CardContent className="p-3">
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              <span className="text-sm font-medium text-[#1F1D1B] mr-auto">
+                {selectedRows.length} combo{selectedRows.length === 1 ? "" : "s"} selected
+              </span>
+              <select
+                value={copyCompanyId}
+                onChange={(e) => setCopyCompanyId(e.target.value)}
+                disabled={copyBusy}
+                className="h-9 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+                title="Company to copy the selected combos to"
+              >
+                <option value="">Copy to company…</option>
+                {customers.map((cu) => (
+                  <option key={cu.id} value={cu.id}>
+                    {cu.name}
+                  </option>
+                ))}
+              </select>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleCopyToCompany()}
+                disabled={!copyCompanyId || copyBusy}
+              >
+                {copyBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
+                Copy
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowBatchEdit(true)}
+                disabled={copyBusy}
+              >
+                <Pencil className="h-4 w-4" /> Batch Edit
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setSelectedRows([])} disabled={copyBusy}>
+                Clear
+              </Button>
+            </div>
           </CardContent>
         </Card>
-      ) : (
-        <div className="space-y-6">
-          {Object.entries(combosByBase).map(([baseModel, groups]) => (
-            <div key={baseModel} className="space-y-3">
-              <div className="flex items-center gap-2">
-                <Layers className="h-4 w-4 text-[#6B5C32]" />
-                <h2 className="text-sm font-semibold text-[#1F1D1B]">
-                  {baseModel}
-                </h2>
-                <span className="text-xs text-[#9CA3AF]">
-                  ({groups.length} combo{groups.length === 1 ? "" : "s"})
-                </span>
-              </div>
-              <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-                {groups.map((g) => {
-                  // Distinct customer labels in this collapsed group.
-                  // Sort for stable rendering. Master (NULL customerId)
-                  // contributes empty list = "All customers" badge.
-                  const customerNames = Array.from(
-                    new Set(
-                      g.rules
-                        .map((r) => r.customerName)
-                        .filter((n): n is string => !!n),
-                    ),
-                  ).sort();
-                  return (
-                    <ComboCard
-                      key={g.key}
-                      rule={g.representative}
-                      historyCount={
-                        // Distinct (date, prices) tuples — matches what
-                        // the dedup'd History dialog will render.
-                        new Set(
-                          g.rules.map(
-                            (r) =>
-                              `${r.effectiveFrom}|${JSON.stringify(
-                                Object.keys(r.pricesByHeight)
-                                  .sort()
-                                  .reduce<Record<string, number>>(
-                                    (acc, k) => {
-                                      acc[k] = r.pricesByHeight[k];
-                                      return acc;
-                                    },
-                                    {},
-                                  ),
-                              )}`,
-                          ),
-                        ).size
-                      }
-                      customerNames={customerNames}
-                      onDelete={() => handleDelete(g.representative.id)}
-                      onOpenHistory={() => setHistoryKey(g.key)}
-                      onEdit={() => setEditingRule(g.representative)}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
       )}
+
+      {/* Excel-like combo listing. Sortable, filterable, grouped by base
+          model; multi-select drives the copy / batch-edit toolbar above. */}
+      <Card>
+        <CardContent className="p-0">
+          <DataGrid<ComboRow>
+            columns={comboColumns}
+            data={comboRows}
+            keyField="key"
+            gridId="sofa-combos"
+            groupBy="baseModel"
+            selectable
+            onSelectionChange={setSelectedRows}
+            onDoubleClick={(r) => setEditingRule(r.group.representative)}
+            emptyMessage={'No combo rules yet. Click "New Combo" to add one.'}
+            stickyHeader
+            maxHeight="calc(100vh - 360px)"
+          />
+        </CardContent>
+      </Card>
 
       {/* Per-combo history dialog */}
       {historyRules && historyRules.length > 0 && (
@@ -632,116 +883,282 @@ export default function SofaCombosPage() {
           }}
         />
       )}
+
+      {/* Batch edit dialog — schedule a price change across the selected combos. */}
+      {showBatchEdit && selectedRows.length > 0 && (
+        <BatchEditDialog
+          rows={selectedRows}
+          onClose={() => setShowBatchEdit(false)}
+          onDone={(ok, fail) => {
+            invalidateCachePrefix("/api/sofa-combos");
+            refreshRules();
+            if (fail === 0) {
+              toast.success(`Scheduled a new price on ${ok} row${ok === 1 ? "" : "s"}.`);
+              setShowBatchEdit(false);
+              setSelectedRows([]);
+            } else {
+              toast.error(`Applied ${ok}, failed ${fail}. Adjust and retry.`);
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Combo card
+// Batch edit dialog — schedule a price change across several combos at once.
+// Each selected combo gets a NEW effective-dated row (append-only) for every
+// customer the card represents, so existing orders stay untouched. Fabric tier
+// and components are intentionally NOT batch-editable — they define the combo's
+// identity; changing them would make a different combo, not edit this one.
 // ---------------------------------------------------------------------------
-function ComboCard({
-  rule,
-  historyCount,
-  customerNames,
-  onDelete,
-  onOpenHistory,
-  onEdit,
+function BatchEditDialog({
+  rows,
+  onClose,
+  onDone,
 }: {
-  rule: SofaComboRule;
-  historyCount: number;
-  /** Distinct customer labels in this group. Empty = company-wide. */
-  customerNames: string[];
-  onDelete: () => void;
-  onOpenHistory: () => void;
-  onEdit: () => void;
+  rows: ComboRow[];
+  onClose: () => void;
+  onDone: (ok: number, fail: number) => void;
 }) {
+  const [effectiveFrom, setEffectiveFrom] = useState(todayIso());
+  const [mode, setMode] = useState<"percent" | "set">("percent");
+  const [percent, setPercent] = useState("");
+  const [setRm, setSetRm] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !saving) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, saving]);
+
+  // Compute the new price map for a combo from its CURRENT active prices.
+  function computeNewPrices(current: Record<string, number>): Record<string, number> | null {
+    const out: Record<string, number> = {};
+    if (mode === "percent") {
+      const pct = Number(percent);
+      if (!Number.isFinite(pct)) return null;
+      for (const [h, sen] of Object.entries(current)) {
+        out[h] = Math.max(0, Math.round(sen * (1 + pct / 100)));
+      }
+    } else {
+      const rm = Number(setRm);
+      if (!Number.isFinite(rm) || rm < 0) return null;
+      const sen = Math.round(rm * 100);
+      for (const h of Object.keys(current)) out[h] = sen;
+    }
+    return out;
+  }
+
+  // Live preview off the first selected combo.
+  const preview = rows[0];
+  const previewNew = preview ? computeNewPrices(preview.group.representative.pricesByHeight) : null;
+
+  async function handleApply() {
+    setErr(null);
+    if (!effectiveFrom) {
+      setErr("Pick an effective date");
+      return;
+    }
+    if (mode === "percent") {
+      if (!percent.trim() || !Number.isFinite(Number(percent))) {
+        setErr("Enter a percentage, e.g. 5 (raise) or -10 (cut)");
+        return;
+      }
+    } else if (!setRm.trim() || !Number.isFinite(Number(setRm)) || Number(setRm) < 0) {
+      setErr("Enter a non-negative price");
+      return;
+    }
+
+    // One new row per (combo × distinct customer the card covers).
+    const jobs: Record<string, unknown>[] = [];
+    for (const row of rows) {
+      const rep = row.group.representative;
+      const newPrices = computeNewPrices(rep.pricesByHeight);
+      if (!newPrices || Object.keys(newPrices).length === 0) continue;
+      const customerIds = Array.from(new Set(row.group.rules.map((r) => r.customerId)));
+      for (const cid of customerIds) {
+        jobs.push({
+          baseModel: rep.baseModel,
+          componentSizes: rep.componentSizes,
+          fabricTier: rep.fabricTier,
+          pricesByHeight: newPrices,
+          effectiveFrom,
+          notes: rep.notes || null,
+          customerId: cid,
+        });
+      }
+    }
+    if (jobs.length === 0) {
+      setErr("Nothing to update — the selected combos have no prices set.");
+      return;
+    }
+
+    setSaving(true);
+    setProgress({ done: 0, total: jobs.length });
+    let ok = 0;
+    let fail = 0;
+    for (let i = 0; i < jobs.length; i++) {
+      try {
+        const res = await fetch("/api/sofa-combos", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(jobs[i]),
+        });
+        const j = (await res.json().catch(() => ({}))) as ApiSingle<unknown>;
+        if (res.ok && j.success) ok++;
+        else fail++;
+      } catch {
+        fail++;
+      }
+      setProgress({ done: i + 1, total: jobs.length });
+    }
+    setSaving(false);
+    onDone(ok, fail);
+  }
+
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-2">
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <Tag className="h-3.5 w-3.5 text-[#6B5C32]" />
-              <span className="text-sm font-semibold text-[#1F1D1B]">
-                {rule.baseModel}
-              </span>
-              <span className="text-xs text-[#6B7280]">·</span>
-              <span className="text-xs font-medium text-[#4B5563]">
-                {renderComponentSizes(rule.componentSizes)}
-              </span>
-              {fabricTierBadge(rule.fabricTier)}
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/40" onClick={() => !saving && onClose()} />
+      <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4">
+        <div className="flex items-center justify-between p-5 border-b border-[#E2DDD8]">
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">
+            Batch Edit — {rows.length} combo{rows.length === 1 ? "" : "s"}
+          </h2>
+          <button
+            type="button"
+            onClick={() => !saving && onClose()}
+            className="text-[#9CA3AF] hover:text-[#374151]"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-[#6B7280]">
+            Schedules a new price on every selected combo from the date below.
+            Past orders are never touched — this appends a fresh effective-dated
+            row (the old price stays in History).
+          </p>
+
+          <div>
+            <label className="block text-xs font-medium text-[#374151] mb-1">Price change</label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setMode("percent")}
+                className={`flex-1 rounded-md border px-3 py-2 text-sm transition-colors ${
+                  mode === "percent"
+                    ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                    : "bg-white text-[#6B7280] border-[#E2DDD8] hover:bg-[#F3F4F6]"
+                }`}
+              >
+                Adjust by %
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode("set")}
+                className={`flex-1 rounded-md border px-3 py-2 text-sm transition-colors ${
+                  mode === "set"
+                    ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                    : "bg-white text-[#6B7280] border-[#E2DDD8] hover:bg-[#F3F4F6]"
+                }`}
+              >
+                Set all heights
+              </button>
             </div>
-            {customerNames.length === 0 ? (
-              <div className="text-xs text-[#6B7280]">All customers</div>
-            ) : (
-              <div className="flex flex-wrap gap-1">
-                {customerNames.map((c) => (
-                  <span
-                    key={c}
-                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#F4F0E8] text-[#6B5C32] border border-[#E2DDD8]"
-                  >
-                    {c}
+          </div>
+
+          {mode === "percent" ? (
+            <div>
+              <label className="block text-xs font-medium text-[#374151] mb-1">
+                Percentage (e.g. 5 to raise, -10 to cut)
+              </label>
+              <Input
+                type="number"
+                step="0.1"
+                placeholder="5"
+                value={percent}
+                onFocus={(e) => e.currentTarget.select()}
+                onChange={(e) => setPercent(e.target.value)}
+              />
+            </div>
+          ) : (
+            <div>
+              <label className="block text-xs font-medium text-[#374151] mb-1">
+                New price for every priced height (RM)
+              </label>
+              <Input
+                type="number"
+                step="0.01"
+                min="0"
+                placeholder="0.00"
+                value={setRm}
+                onFocus={(e) => e.currentTarget.select()}
+                onChange={(e) => setSetRm(e.target.value)}
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-medium text-[#374151] mb-1">Effective From</label>
+            <Input
+              type="date"
+              value={effectiveFrom}
+              onChange={(e) => setEffectiveFrom(e.target.value)}
+            />
+          </div>
+
+          {preview && previewNew && (
+            <div className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-3 text-xs">
+              <div className="font-medium text-[#374151] mb-1">
+                Preview — {preview.baseModel} ({preview.components})
+              </div>
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {Object.keys(preview.group.representative.pricesByHeight).map((h) => (
+                  <span key={h} className="text-[#6B7280]">
+                    {h}:{" "}
+                    <span className="line-through">
+                      {fmtPriceCell(preview.group.representative.pricesByHeight[h])}
+                    </span>{" "}
+                    <span className="font-medium text-[#1F1D1B]">{fmtPriceCell(previewNew[h])}</span>
                   </span>
                 ))}
               </div>
+            </div>
+          )}
+
+          {err && (
+            <div className="rounded-md border border-[#E8B2A1] bg-[#F9E1DA] px-3 py-2 text-sm text-[#9A3A2D]">
+              {err}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 p-5 border-t border-[#E2DDD8]">
+          <Button variant="outline" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void handleApply()} disabled={saving}>
+            {saving ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {progress ? `Applying ${progress.done}/${progress.total}…` : "Applying…"}
+              </>
+            ) : (
+              <>
+                <Pencil className="h-4 w-4" />
+                Apply to {rows.length}
+              </>
             )}
-          </div>
-          <Button variant="ghost" size="icon" onClick={onDelete}>
-            <Trash2 className="h-4 w-4 text-[#9A3A2D]" />
           </Button>
         </div>
-      </CardHeader>
-      <CardContent className="pt-0 space-y-3">
-        <div className="grid grid-cols-5 gap-1 text-center">
-          {SEAT_HEIGHTS.map((h) => {
-            const sen = rule.pricesByHeight[h];
-            return (
-              <div
-                key={h}
-                className="rounded border border-[#E2DDD8] bg-[#FAF9F7] px-0.5 py-1.5"
-              >
-                <div className="text-[10px] uppercase tracking-wide text-[#9CA3AF]">
-                  {h}
-                </div>
-                {/* text-[10px] + tabular-nums keeps "RM 2,640.00" inside the
-                    narrow 1/5 cell. Intl currency uses a non-breaking space
-                    between "RM" and the amount, which forced one long line
-                    that overflowed the cell border — swap it for a normal
-                    space so it wraps gracefully instead of spilling. */}
-                <div className="text-[10px] font-medium text-[#1F1D1B] tabular-nums leading-tight">
-                  {typeof sen === "number" ? formatCurrency(sen).replace(new RegExp(String.fromCharCode(160), "g"), " ") : "—"}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        <div className="flex items-center justify-between text-xs text-[#6B7280] gap-2 flex-wrap">
-          <span>Effective {formatDate(rule.effectiveFrom)}</span>
-          <div className="flex items-center gap-2">
-            {statusBadge(rule.effectiveFrom)}
-            <button
-              onClick={onEdit}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-[#6B5C32] text-white hover:bg-[#5A4E2A] transition-colors"
-              title="Edit this combo's components, fabric tier, prices, customer, and effective date in place"
-            >
-              <Pencil className="h-3 w-3" />
-              Edit
-            </button>
-            <button
-              onClick={onOpenHistory}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-white text-[#6B5C32] border border-[#D4CCB4] hover:bg-[#F4F0E8] transition-colors"
-              title="View this combo's full effective-dated history"
-            >
-              <History className="h-3 w-3" />
-              History ({historyCount})
-            </button>
-          </div>
-        </div>
-        {rule.notes ? (
-          <p className="text-xs text-[#6B7280] italic">{rule.notes}</p>
-        ) : null}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 

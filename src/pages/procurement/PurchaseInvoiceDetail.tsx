@@ -15,14 +15,29 @@
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, FileText, Package } from "lucide-react";
+import { ArrowLeft, FileText, Package, Pencil, Plus, Trash2 } from "lucide-react";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useNavGuard } from "@/lib/use-nav-guard";
 import { formatCurrency, formatDate } from "@/lib/utils";
+
+const VALID_LINE_TYPES: LineType[] = ["STOCKED", "FEE", "TAX", "REBATE", "DISCOUNT", "OTHER"];
+
+// Draft shape for the edit-mode line editor (unit price held as an RM string
+// for the input; converted to sen on save).
+type DraftLine = {
+  materialCode: string;
+  materialName: string;
+  supplierSku: string;
+  qty: string;
+  unitPriceRm: string;
+  lineType: LineType;
+};
 
 // Status lifecycle (matches backend VALID_TRANSITIONS in purchase-invoices.ts).
 // Each current status → the action buttons it offers.
@@ -151,6 +166,107 @@ export default function PurchaseInvoiceDetailPage() {
     }
   }
 
+  // ---- Phase B2: edit mode (DRAFT-only) — editable header + line items ----
+  const [editing, setEditing] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [dInvoiceDate, setDInvoiceDate] = useState("");
+  const [dDueDate, setDDueDate] = useState("");
+  const [dRemarks, setDRemarks] = useState("");
+  const [dLines, setDLines] = useState<DraftLine[]>([]);
+  useNavGuard(editing && dirty, "You have unsaved invoice edits. Leave without saving?");
+
+  function startEdit() {
+    if (!pi) return;
+    setDInvoiceDate((pi.invoiceDate || "").split("T")[0]);
+    setDDueDate((pi.dueDate || "").split("T")[0]);
+    setDRemarks(pi.remarks || "");
+    setDLines(
+      (pi.items ?? []).map((it) => ({
+        materialCode: it.materialCode || "",
+        materialName: it.materialName || "",
+        supplierSku: it.supplierSku || "",
+        qty: String(it.qty ?? 0),
+        unitPriceRm: (Number(it.unitPriceSen || 0) / 100).toFixed(2),
+        lineType: it.lineType,
+      })),
+    );
+    setDirty(false);
+    setEditing(true);
+  }
+  function cancelEdit() {
+    setEditing(false);
+    setDirty(false);
+  }
+  function patchLine(i: number, patch: Partial<DraftLine>) {
+    setDLines((p) => p.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
+    setDirty(true);
+  }
+  function addLine() {
+    setDLines((p) => [
+      ...p,
+      { materialCode: "", materialName: "", supplierSku: "", qty: "1", unitPriceRm: "0.00", lineType: "STOCKED" },
+    ]);
+    setDirty(true);
+  }
+  function removeLine(i: number) {
+    setDLines((p) => p.filter((_, idx) => idx !== i));
+    setDirty(true);
+  }
+
+  const draftTotalSen = dLines.reduce(
+    (s, l) => s + Math.round((parseFloat(l.unitPriceRm) || 0) * 100) * (parseFloat(l.qty) || 0),
+    0,
+  );
+
+  async function handleSaveEdit() {
+    if (!pi) return;
+    for (const l of dLines) {
+      if (!l.materialName.trim()) {
+        toast.error("Every line needs a description.");
+        return;
+      }
+      if (!(parseFloat(l.qty) >= 0)) {
+        toast.error("Every line needs a valid quantity.");
+        return;
+      }
+    }
+    setBusy(true);
+    try {
+      const items = dLines.map((l) => ({
+        materialCode: l.materialCode.trim() || null,
+        materialName: l.materialName.trim(),
+        supplierSku: l.supplierSku.trim() || null,
+        qty: parseFloat(l.qty) || 0,
+        unitPriceSen: Math.round((parseFloat(l.unitPriceRm) || 0) * 100),
+        lineType: l.lineType,
+      }));
+      const res = await fetch(`/api/purchase-invoices/${pi.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          invoiceDate: dInvoiceDate || undefined,
+          dueDate: dDueDate || undefined,
+          remarks: dRemarks,
+          items,
+        }),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || `Save failed (${res.status})`);
+        return;
+      }
+      toast.success("Invoice saved");
+      setEditing(false);
+      setDirty(false);
+      invalidateCachePrefix("/api/purchase-invoices");
+      refresh();
+    } catch {
+      toast.error("Save failed — network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -199,20 +315,26 @@ export default function PurchaseInvoiceDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          {(PI_STATUS_ACTIONS[pi.status] ?? []).map((a) => (
-            <Button
-              key={a.next}
-              type="button"
-              variant={a.next === "DRAFT" ? "outline" : "primary"}
-              size="sm"
-              onClick={() => changeStatus(a.next, a.label)}
-              disabled={busy}
-              className={a.next === "DRAFT" ? "" : "bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"}
-            >
-              {a.label}
+          {!editing && pi.status === "DRAFT" && (
+            <Button type="button" variant="outline" size="sm" onClick={startEdit} disabled={busy}>
+              <Pencil className="h-3.5 w-3.5" /> Edit
             </Button>
-          ))}
-          {pi.status === "DRAFT" && (
+          )}
+          {!editing &&
+            (PI_STATUS_ACTIONS[pi.status] ?? []).map((a) => (
+              <Button
+                key={a.next}
+                type="button"
+                variant={a.next === "DRAFT" ? "outline" : "primary"}
+                size="sm"
+                onClick={() => changeStatus(a.next, a.label)}
+                disabled={busy}
+                className={a.next === "DRAFT" ? "" : "bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"}
+              >
+                {a.label}
+              </Button>
+            ))}
+          {!editing && pi.status === "DRAFT" && (
             <Button
               type="button"
               variant="outline"
@@ -227,7 +349,8 @@ export default function PurchaseInvoiceDetailPage() {
         </div>
       </div>
 
-      {/* PI Details + Items */}
+      {/* PI Details + Items (read-only view) */}
+      {!editing && (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: Details */}
         <Card className="lg:col-span-1">
@@ -361,6 +484,171 @@ export default function PurchaseInvoiceDetailPage() {
           </CardContent>
         </Card>
       </div>
+      )}
+
+      {/* Edit mode (DRAFT-only): editable header + line items */}
+      {editing && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Pencil className="h-4 w-4 text-[#6B5C32]" /> Edit Invoice
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            {/* Header fields */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs text-[#9CA3AF] mb-1">Invoice Date</label>
+                <Input
+                  type="date"
+                  value={dInvoiceDate}
+                  onChange={(e) => { setDInvoiceDate(e.target.value); setDirty(true); }}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9CA3AF] mb-1">Due Date</label>
+                <Input
+                  type="date"
+                  value={dDueDate}
+                  onChange={(e) => { setDDueDate(e.target.value); setDirty(true); }}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9CA3AF] mb-1">Remarks</label>
+                <Input
+                  value={dRemarks}
+                  onChange={(e) => { setDRemarks(e.target.value); setDirty(true); }}
+                  placeholder="Optional notes"
+                />
+              </div>
+            </div>
+
+            {/* Line items editor */}
+            <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                    <th className="h-10 px-2 text-left font-medium text-[#374151]">#</th>
+                    <th className="h-10 px-2 text-left font-medium text-[#374151]">Description</th>
+                    <th className="h-10 px-2 text-left font-medium text-[#374151]">Material Code</th>
+                    <th className="h-10 px-2 text-left font-medium text-[#374151]">Supplier SKU</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] w-20">Qty</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] w-28">Unit Price (RM)</th>
+                    <th className="h-10 px-2 text-left font-medium text-[#374151] w-32">Type</th>
+                    <th className="h-10 px-2 text-center font-medium text-[#374151] w-12"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dLines.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="h-16 px-3 text-center text-sm text-[#9CA3AF]">
+                        No lines. Use “Add Line” to start.
+                      </td>
+                    </tr>
+                  ) : (
+                    dLines.map((l, i) => (
+                      <tr key={i} className={`border-b border-[#E2DDD8] ${i % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}>
+                        <td className="px-2 py-1.5 text-[#6B7280]">{i + 1}</td>
+                        <td className="px-2 py-1.5">
+                          <Input
+                            value={l.materialName}
+                            onChange={(e) => patchLine(i, { materialName: e.target.value })}
+                            placeholder="Description"
+                          />
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <Input
+                            value={l.materialCode}
+                            onChange={(e) => patchLine(i, { materialCode: e.target.value })}
+                            placeholder="—"
+                          />
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <Input
+                            value={l.supplierSku}
+                            onChange={(e) => patchLine(i, { supplierSku: e.target.value })}
+                            placeholder="—"
+                          />
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <Input
+                            type="number"
+                            min="0"
+                            step="any"
+                            className="text-right"
+                            value={l.qty}
+                            onChange={(e) => patchLine(i, { qty: e.target.value })}
+                          />
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            className="text-right"
+                            value={l.unitPriceRm}
+                            onChange={(e) => patchLine(i, { unitPriceRm: e.target.value })}
+                          />
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <select
+                            value={l.lineType}
+                            onChange={(e) => patchLine(i, { lineType: e.target.value as LineType })}
+                            className="w-full rounded-md border border-[#E2DDD8] bg-white px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                          >
+                            {VALID_LINE_TYPES.map((t) => (
+                              <option key={t} value={t}>{t}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="px-2 py-1.5 text-center">
+                          <button
+                            type="button"
+                            onClick={() => removeLine(i)}
+                            className="text-[#9A3A2D] hover:bg-[#9A3A2D]/10 rounded p-1"
+                            title="Remove line"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+                <tfoot>
+                  <tr className="bg-[#F0ECE9]">
+                    <td colSpan={5} className="h-10 px-2">
+                      <Button type="button" variant="outline" size="sm" onClick={addLine}>
+                        <Plus className="h-3.5 w-3.5" /> Add Line
+                      </Button>
+                    </td>
+                    <td colSpan={3} className="h-10 px-2 text-right font-bold text-[#6B5C32]">
+                      Total: {formatCurrency(draftTotalSen)}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+            {/* Save / Cancel bar */}
+            <div className="flex items-center justify-end gap-2 pt-1">
+              {dirty && <span className="text-xs text-[#9A3A2D] mr-auto">Unsaved changes</span>}
+              <Button type="button" variant="outline" size="sm" onClick={cancelEdit} disabled={busy}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                onClick={handleSaveEdit}
+                disabled={busy || !dirty}
+                className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+              >
+                Save Changes
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Audit trail for this PI */}
       <AuditHistoryPanel resource="purchase-invoices" resourceId={pi.id} />

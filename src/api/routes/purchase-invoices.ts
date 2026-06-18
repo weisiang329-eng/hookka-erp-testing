@@ -670,6 +670,18 @@ app.put("/:id", async (c) => {
   // If items[] is omitted, leave existing items + amountSen logic untouched.
   let normalizedItems: ReturnType<typeof normalizeItems> | null = null;
   if (body.items !== undefined) {
+    // Line-item edits are DRAFT-only — mirrors the Edit gate on the detail page.
+    // Rewriting lines after APPROVED/PAID would desync the already-posted GL
+    // entry (and the amountSen the GL was posted against). Reject, don't paper.
+    if (existing.status !== "DRAFT") {
+      return c.json(
+        {
+          success: false,
+          error: `Line items can only be edited while the invoice is DRAFT (current: ${existing.status}).`,
+        },
+        409,
+      );
+    }
     normalizedItems = normalizeItems(body.items);
     if (!normalizedItems.ok) {
       return c.json({ success: false, error: normalizedItems.error }, 400);

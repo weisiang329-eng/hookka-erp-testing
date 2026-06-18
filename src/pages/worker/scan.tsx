@@ -1545,7 +1545,9 @@ export default function WorkerScanPage() {
   >(null);
   useEffect(() => {
     if (!tapFx) return;
-    const ttl = tapFx.state === "miss" ? 850 : 600;
+    // "scan" stays up long enough to cover the tap-decode burst (~1s) so the ring
+    // doesn't vanish mid-scan; "miss" lingers briefly as a re-tap cue.
+    const ttl = tapFx.state === "miss" ? 850 : 1400;
     // eslint-disable-next-line no-restricted-syntax -- one-shot auto-clear timer with proper effect cleanup; useTimeout would need a nullable-delay dance for the same result
     const id = window.setTimeout(() => setTapFx(null), ttl);
     return () => window.clearTimeout(id);
@@ -1588,34 +1590,48 @@ export default function WorkerScanPage() {
       canvas.height = bandH;
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       if (!ctx) return;
-      ctx.drawImage(video, 0, bandTop, vw, bandH, 0, 0, vw, bandH);
+      // Decode a BURST of fresh frames around the tap, not just one. A single
+      // grabbed frame is often motion-blurred / mid-focus, so an aimed tap used
+      // to MISS and the worker had to tap again and again (owner 2026-06-18:
+      // "有点不敏感，点了好几次都点不到"). Re-grab the SAME band over ~1s of fresh
+      // frames — first clean frame wins — which is exactly what makes live QR feel
+      // instant. The band stays pinned to the tapped row, so this is still
+      // tap-to-pick (never grabs a stacked neighbour).
+      await ensureZxing();
+      const zx = zxingRef.current;
+      const detector =
+        typeof window !== "undefined" && window.BarcodeDetector
+          ? new window.BarcodeDetector({ formats: ["code_128", "qr_code"] })
+          : null;
+      const nextFrame = () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       let decoded: string | null = null;
-      // Native detector first (fast); among any codes inside the band pick the one
-      // nearest the band centre = the row the worker tapped.
-      if (typeof window !== "undefined" && window.BarcodeDetector) {
-        try {
-          const det = new window.BarcodeDetector({
-            formats: ["code_128", "qr_code"],
-          });
-          const codes = await det.detect(canvas);
-          let best: { v: string; d: number } | null = null;
-          for (const c of codes) {
-            if (!c.rawValue) continue;
-            const bb = (
-              c as { boundingBox?: { y: number; height: number } }
-            ).boundingBox;
-            const d = bb ? Math.abs(bb.y + bb.height / 2 - bandH / 2) : 0;
-            if (!best || d < best.d) best = { v: c.rawValue, d };
+      for (let attempt = 0; attempt < 24 && !decoded; attempt++) {
+        if (video.videoWidth === 0) break; // camera closed mid-burst
+        ctx.drawImage(video, 0, bandTop, vw, bandH, 0, 0, vw, bandH);
+        // Native first (fast + centre-biased among stacked rows): among codes in
+        // the band pick the one nearest the band centre = the tapped row.
+        if (detector) {
+          try {
+            const codes = await detector.detect(canvas);
+            let best: { v: string; d: number } | null = null;
+            for (const c of codes) {
+              if (!c.rawValue) continue;
+              const bb = (
+                c as { boundingBox?: { y: number; height: number } }
+              ).boundingBox;
+              const d = bb ? Math.abs(bb.y + bb.height / 2 - bandH / 2) : 0;
+              if (!best || d < best.d) best = { v: c.rawValue, d };
+            }
+            if (best) decoded = best.v;
+          } catch {
+            /* native flaky this frame → ZXing */
           }
-          if (best) decoded = best.v;
-        } catch {
-          /* native flaky → fall through to ZXing */
         }
-      }
-      if (!decoded) {
-        await ensureZxing();
-        const zx = zxingRef.current;
-        if (zx) {
+        // ZXing fallback — the ONLY decoder on iOS (no BarcodeDetector there), so
+        // run it every frame when native is absent; otherwise every other frame
+        // to keep the burst snappy.
+        if (!decoded && zx && (!detector || attempt % 2 === 1)) {
           let img: ImageData | null = null;
           try {
             img = ctx.getImageData(0, 0, vw, bandH);
@@ -1627,6 +1643,8 @@ export default function WorkerScanPage() {
             if (r) decoded = r.text;
           }
         }
+        if (decoded) break;
+        await nextFrame();
       }
       if (decoded) {
         try {

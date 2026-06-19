@@ -37,9 +37,20 @@ export type ServiceCasePdfData = {
   customerName: string;
   customerCode?: string | null;
   customerPhone?: string | null;
+  // Customer + delivery address (from the customer master + its default
+  // delivery hub). All optional — older / EXTERNAL cases may carry none.
+  customerContact?: string | null;
+  customerEmail?: string | null;
+  customerAddress?: string | null;
+  deliveryAddress?: string | null;
+  deliveryState?: string | null;
   sourceType: string;
   sourceNo?: string | null;
   externalRef?: string | null;
+  // Customer-side references on the source order (their PO / reference) — so
+  // the printed report ties back to the customer's own paperwork.
+  customerPO?: string | null;
+  customerRef?: string | null;
   category?: string | null;
   createdByName?: string | null;
   createdAt?: string | null;
@@ -56,6 +67,11 @@ export type ServiceCasePdfData = {
     qty?: number | null;
     components?: Array<{ label: string; qty: number }>;
   }>;
+  // Repair scope summary — full remake vs picked departments / components.
+  // One human line per spawned service order (derived in the caller from the
+  // SV order's production-order repairscope), e.g. "SV-2606-003: Frame repair
+  // · Headboard ×1". Absent / empty = no scope info (no spawned order yet).
+  repairScopes?: Array<{ orderNo: string; label: string }>;
   rootCauses?: Array<{ category: string; details?: Record<string, unknown> }>;
   preventionAction?: string | null;
   preventionOwner?: string | null;
@@ -65,7 +81,12 @@ export type ServiceCasePdfData = {
     mode?: string | null;
     status: string;
     isSv?: boolean;
+    createdAt?: string | null;
   }>;
+  // Computed case pipeline timeline (from src/lib/case-pipeline.ts) — one
+  // entry per stage, in CASE_PIPELINE_STEPS order, with completion + the date
+  // the case entered that stage where the data carries it.
+  timeline?: Array<{ step: string; done: boolean; date?: string | null }>;
 };
 
 // Flatten a per-category root-cause details object into a one-line summary.
@@ -133,6 +154,12 @@ export function generateServiceCasePdf(data: ServiceCasePdfData): void {
 
   // ── Case details ──────────────────────────────────────────────────────
   y = drawSectionLabel(doc, "Case Details", y);
+  // Customer-side reference suffix on the Source line (their PO / ref).
+  const custRefParts: string[] = [];
+  if (data.customerPO && data.customerPO.trim())
+    custRefParts.push("PO " + data.customerPO.trim());
+  if (data.customerRef && data.customerRef.trim())
+    custRefParts.push("Ref " + data.customerRef.trim());
   const info: Array<[string, string]> = [
     [
       "Customer",
@@ -140,11 +167,34 @@ export function generateServiceCasePdf(data: ServiceCasePdfData): void {
         data.customerPhone ? " (" + data.customerPhone + ")" : ""
       }${data.customerState ? " · " + data.customerState : ""}`,
     ],
+    ...(data.customerContact && data.customerContact.trim()
+      ? ([["Contact", data.customerContact.trim()]] as [string, string][])
+      : []),
+    ...(data.customerEmail && data.customerEmail.trim()
+      ? ([["Email", data.customerEmail.trim()]] as [string, string][])
+      : []),
+    ...(data.customerAddress && data.customerAddress.trim()
+      ? ([["Address", data.customerAddress.trim()]] as [string, string][])
+      : []),
+    ...(data.deliveryAddress && data.deliveryAddress.trim()
+      ? ([
+          [
+            "Delivery To",
+            `${data.deliveryAddress.trim()}${
+              data.deliveryState && data.deliveryState.trim()
+                ? " · " + data.deliveryState.trim()
+                : ""
+            }`,
+          ],
+        ] as [string, string][])
+      : []),
     [
       "Source",
-      data.sourceType === "EXTERNAL"
-        ? `External${data.externalRef ? " (" + data.externalRef + ")" : ""}`
-        : data.sourceNo || data.sourceType,
+      `${
+        data.sourceType === "EXTERNAL"
+          ? `External${data.externalRef ? " (" + data.externalRef + ")" : ""}`
+          : data.sourceNo || data.sourceType
+      }${custRefParts.length ? "  ·  " + custRefParts.join(" · ") : ""}`,
     ],
     ["Category", data.category || "-"],
     ...(data.responsibleUnit
@@ -261,6 +311,24 @@ export function generateServiceCasePdf(data: ServiceCasePdfData): void {
     y = finalY() + 6;
   }
 
+  // ── Repair scope ──────────────────────────────────────────────────────
+  // Full remake vs picked departments / components, per spawned service
+  // order. Derived in the caller from each SV order's production-order
+  // repairscope (src/lib/repair-scope.ts repairScopeBadgeLabel).
+  if (data.repairScopes && data.repairScopes.length) {
+    ensure(16);
+    y = drawSectionLabel(doc, "Repair Scope", y);
+    autoTable(doc, {
+      startY: y,
+      margin: { left: m, right: m },
+      head: [["Service Order", "Scope"]],
+      body: data.repairScopes.map((r) => [r.orderNo, r.label]) as RowInput[],
+      ...tableTheme(),
+      columnStyles: { 0: { cellWidth: 38 } },
+    });
+    y = finalY() + 6;
+  }
+
   // ── Root cause(s) + prevention ────────────────────────────────────────
   if (
     (data.rootCauses && data.rootCauses.length) ||
@@ -313,20 +381,50 @@ export function generateServiceCasePdf(data: ServiceCasePdfData): void {
     y = finalY() + 6;
   }
 
-  // ── Spawned service orders ────────────────────────────────────────────
+  // ── Linked / spawned service orders ───────────────────────────────────
   if (data.orders && data.orders.length) {
     ensure(16);
-    y = drawSectionLabel(doc, "Service Orders", y);
+    y = drawSectionLabel(doc, "Linked Service Orders", y);
     autoTable(doc, {
       startY: y,
       margin: { left: m, right: m },
-      head: [["SO No", "Mode", "Status"]],
+      head: [["SO No", "Mode", "Status", "Created"]],
       body: data.orders.map((o) => [
         o.serviceOrderNo,
         o.isSv ? "SV" : o.mode || "-",
         o.status,
+        o.createdAt ? fmtDate(o.createdAt) : "-",
       ]) as RowInput[],
       ...tableTheme(),
+      columnStyles: {
+        1: { cellWidth: 22 },
+        2: { cellWidth: 32 },
+        3: { cellWidth: 26 },
+      },
+    });
+    y = finalY() + 6;
+  }
+
+  // ── Status timeline ───────────────────────────────────────────────────
+  // The 8-stage case pipeline (computeCasePipeline, src/lib/case-pipeline.ts):
+  // each stage with its completion mark + the date the case entered it.
+  if (data.timeline && data.timeline.length) {
+    ensure(16);
+    y = drawSectionLabel(doc, "Status Timeline", y);
+    autoTable(doc, {
+      startY: y,
+      margin: { left: m, right: m },
+      head: [["", "Stage", "Date"]],
+      body: data.timeline.map((t) => [
+        t.done ? "Done" : "—",
+        t.step,
+        t.date ? fmtDate(t.date) : "-",
+      ]) as RowInput[],
+      ...tableTheme(),
+      columnStyles: {
+        0: { cellWidth: 16, halign: "center" },
+        2: { cellWidth: 36 },
+      },
     });
     y = finalY() + 6;
   }

@@ -11,7 +11,12 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavGuard } from "@/lib/use-nav-guard";
 import { todayYmdMY } from "@/lib/utils";
-import { computeCasePipeline, CASE_PIPELINE_STEPS } from "@/lib/case-pipeline";
+import {
+  computeCasePipeline,
+  CASE_PIPELINE_STEPS,
+  type CasePipelineResult,
+} from "@/lib/case-pipeline";
+import { parseRepairScope, repairScopeBadgeLabel } from "@/lib/repair-scope";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -198,7 +203,21 @@ export default function ServiceCaseDetailPage() {
   // master, so the header doesn't only show the customer code (operators
   // complained the bare code wasn't useful at-a-glance, 2026-04-29).
   const { data: custResp } = useCachedJson<{
-    data?: Array<{ id: string; code?: string; name: string; phone?: string; mobile?: string }>;
+    data?: Array<{
+      id: string;
+      code?: string;
+      name: string;
+      phone?: string;
+      mobile?: string;
+      contactName?: string;
+      email?: string;
+      companyAddress?: string;
+      deliveryHubs?: Array<{
+        state?: string;
+        address?: string;
+        isDefault?: boolean;
+      }>;
+    }>;
   }>("/api/customers");
   const customerRecord = useMemo(() => {
     if (!caseDetail || !custResp?.data) return null;
@@ -206,6 +225,109 @@ export default function ServiceCaseDetailPage() {
       custResp.data.find((c) => c.id === caseDetail.customerId) ?? null
     );
   }, [caseDetail, custResp]);
+
+  // Default delivery hub (or the first one) — used for the "Delivery To"
+  // line on the printed report.
+  const deliveryHub = useMemo(() => {
+    const hubs = customerRecord?.deliveryHubs ?? [];
+    if (hubs.length === 0) return null;
+    return hubs.find((h) => h.isDefault) ?? hubs[0];
+  }, [customerRecord]);
+
+  // ── Pipeline + production-order inputs, lifted to the page level ────────
+  // The Case Pipeline stepper and the Download-PDF handler both need the
+  // case's delivery orders + production orders (matched by salesOrderId
+  // against the case's SV order ids). Lift the two cached fetches here so
+  // both consumers share one fetch (no double round-trip) and the PDF can
+  // derive the timeline + repair scope without re-fetching inside the lib.
+  const svOrderIds = useMemo(
+    () => (caseDetail?.orders ?? []).filter((o) => o.isSv).map((o) => o.id),
+    [caseDetail],
+  );
+  const { data: doResp } = useCachedJson<{
+    data?: Array<{
+      id: string;
+      salesOrderId?: string;
+      status?: string;
+      createdAt?: string | null;
+      dispatchedAt?: string | null;
+      deliveredAt?: string | null;
+    }>;
+  }>(svOrderIds.length > 0 ? "/api/delivery-orders" : null);
+  const { data: poResp } = useCachedJson<{
+    data?: Array<{
+      id: string;
+      salesOrderId?: string | null;
+      companySOId?: string | null;
+      customerPOId?: string | null;
+      customerReference?: string | null;
+      repairScope?: string | null;
+      repairscope?: string | null;
+      jobCards?: Array<{ completedDate?: string | null }>;
+    }>;
+  }>(
+    svOrderIds.length > 0
+      ? "/api/production-orders?fields=minimal&include=jobCards"
+      : null,
+  );
+
+  // Computed pipeline (single source — same helper the stepper uses).
+  const pipe = useMemo(() => {
+    if (!caseDetail) return null;
+    return computeCasePipeline({
+      caseStatus: caseDetail.status,
+      createdAt: caseDetail.createdAt,
+      investigatingAt: caseDetail.investigatingAt ?? null,
+      closedAt: caseDetail.closedAt || null,
+      orders: caseDetail.orders.map((o) => ({
+        isSv: o.isSv,
+        status: o.status,
+        createdAt: o.createdAt,
+      })),
+      dos: doResp?.data ?? [],
+      pos: poResp?.data ?? [],
+      svOrderIds,
+    });
+  }, [caseDetail, doResp, poResp, svOrderIds]);
+
+  // The case's production orders (matched by salesOrderId to its SV orders).
+  const casePos = useMemo(() => {
+    const ids = new Set(svOrderIds);
+    return (poResp?.data ?? []).filter(
+      (p) => !!p.salesOrderId && ids.has(p.salesOrderId),
+    );
+  }, [poResp, svOrderIds]);
+
+  // Repair scope per spawned service order — derived from each SV order's
+  // production-order repairscope (one scope per SO; presets/components share
+  // the line scope, so the first PO carrying a scope is representative).
+  const repairScopes = useMemo(() => {
+    const out: Array<{ orderNo: string; label: string }> = [];
+    const seen = new Set<string>();
+    for (const p of casePos) {
+      const soId = p.salesOrderId ?? "";
+      if (!soId || seen.has(soId)) continue;
+      seen.add(soId);
+      const scope = parseRepairScope(p.repairScope ?? p.repairscope ?? null);
+      out.push({
+        orderNo: p.companySOId || p.salesOrderId || "Service Order",
+        label: repairScopeBadgeLabel(scope),
+      });
+    }
+    return out;
+  }, [casePos]);
+
+  // Customer-side references on the source order, snapshotted onto the case's
+  // SV production orders (copied through the spawn flow). First non-empty wins.
+  const customerRefs = useMemo(() => {
+    let po = "";
+    let ref = "";
+    for (const p of casePos) {
+      if (!po && p.customerPOId) po = p.customerPOId;
+      if (!ref && p.customerReference) ref = p.customerReference;
+    }
+    return { po, ref };
+  }, [casePos]);
 
   const [advancing, setAdvancing] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -336,8 +458,15 @@ export default function ServiceCaseDetailPage() {
                 customerCode: customerRecord?.code ?? null,
                 customerPhone:
                   customerRecord?.phone ?? customerRecord?.mobile ?? null,
+                customerContact: customerRecord?.contactName ?? null,
+                customerEmail: customerRecord?.email ?? null,
+                customerAddress: customerRecord?.companyAddress ?? null,
+                deliveryAddress: deliveryHub?.address ?? null,
+                deliveryState: deliveryHub?.state ?? null,
                 sourceType: caseDetail.sourceType,
                 sourceNo: caseDetail.sourceNo,
+                customerPO: customerRefs.po || null,
+                customerRef: customerRefs.ref || null,
                 externalRef: caseDetail.externalRef,
                 category: firstCat
                   ? ROOT_CAUSE_LABELS[firstCat] ?? firstCat
@@ -370,7 +499,30 @@ export default function ServiceCaseDetailPage() {
                   mode: o.mode,
                   status: o.status,
                   isSv: o.isSv,
+                  createdAt: o.createdAt,
                 })),
+                repairScopes,
+                // Status timeline — one row per pipeline stage with its
+                // completion + a date where the case carries one. The shared
+                // computeCasePipeline only returns enteredAt for the CURRENT
+                // stage, so show that against the last done step; the three
+                // stages with their own stored timestamps (Opened / Investigating
+                // / Closed) fill from the case row directly.
+                timeline: pipe
+                  ? CASE_PIPELINE_STEPS.map((step, i) => {
+                      let date: string | null = null;
+                      if (i === 0) date = caseDetail.createdAt || null;
+                      else if (i === 1)
+                        date =
+                          caseDetail.investigatingAt ??
+                          caseDetail.createdAt ??
+                          null;
+                      else if (i === CASE_PIPELINE_STEPS.length - 1)
+                        date = caseDetail.closedAt || null;
+                      if (i === pipe.index && !date) date = pipe.enteredAt;
+                      return { step, done: pipe.doneFlags[i], date };
+                    })
+                  : undefined,
               });
             }}
           >
@@ -476,8 +628,9 @@ export default function ServiceCaseDetailPage() {
 
       {/* Case pipeline — auto-computed progress stepper, display-only.
           Derived from the case status + attached orders + their delivery
-          orders; nothing here writes. */}
-      <CasePipeline caseDetail={caseDetail} />
+          orders; nothing here writes. The derivation (computeCasePipeline) is
+          lifted to the page level so the Download-PDF handler shares it. */}
+      {pipe && <CasePipeline pipe={pipe} />}
 
       {/* Issue (editable) + photos.
           Issue Description carries the 5W story (what / when / who / where /
@@ -673,62 +826,11 @@ export default function ServiceCaseDetailPage() {
 // are manual clicks; everything else lights itself (owner 2026-06-12).
 //
 // The derivation itself lives in the shared, pure src/lib/case-pipeline.ts
-// (computeCasePipeline) so the list page and this stepper never drift. This
-// component only fetches the bulk DO / PO lists, shapes the input, and
-// renders the doneFlags exactly as before.
-function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
-  const svOrderIds = useMemo(
-    () => caseDetail.orders.filter((o) => o.isSv).map((o) => o.id),
-    [caseDetail.orders],
-  );
-
-  // Two extra fetches (cached) — only when the case actually has SV orders;
-  // legacy-only cases derive everything from the statuses already loaded.
-  const { data: doResp } = useCachedJson<{
-    data?: Array<{
-      id: string;
-      salesOrderId?: string;
-      status?: string;
-      createdAt?: string | null;
-      dispatchedAt?: string | null;
-      deliveredAt?: string | null;
-    }>;
-  }>(svOrderIds.length > 0 ? "/api/delivery-orders" : null);
-  const { data: poResp } = useCachedJson<{
-    data?: Array<{
-      id: string;
-      salesOrderId?: string | null;
-      jobCards?: Array<{ completedDate?: string | null }>;
-    }>;
-  }>(svOrderIds.length > 0 ? "/api/production-orders?fields=minimal&include=jobCards" : null);
-
-  const pipe = useMemo(
-    () =>
-      computeCasePipeline({
-        caseStatus: caseDetail.status,
-        createdAt: caseDetail.createdAt,
-        investigatingAt: caseDetail.investigatingAt ?? null,
-        closedAt: caseDetail.closedAt || null,
-        orders: caseDetail.orders.map((o) => ({
-          isSv: o.isSv,
-          status: o.status,
-          createdAt: o.createdAt,
-        })),
-        dos: doResp?.data ?? [],
-        pos: poResp?.data ?? [],
-        svOrderIds,
-      }),
-    [
-      caseDetail.status,
-      caseDetail.createdAt,
-      caseDetail.investigatingAt,
-      caseDetail.closedAt,
-      caseDetail.orders,
-      doResp,
-      poResp,
-      svOrderIds,
-    ],
-  );
+// (computeCasePipeline) so the list page and this stepper never drift. The
+// page lifts the bulk DO / PO fetches + the computeCasePipeline call up so the
+// Download-PDF handler reuses the same result; this component only renders the
+// doneFlags it's handed.
+function CasePipeline({ pipe }: { pipe: CasePipelineResult }) {
   const stepsDone = pipe.doneFlags;
 
   // "Current" = the step right after the last done one (outlined dot);

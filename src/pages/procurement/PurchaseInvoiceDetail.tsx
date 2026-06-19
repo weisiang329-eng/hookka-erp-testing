@@ -20,6 +20,7 @@ import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -341,64 +342,53 @@ export default function PurchaseInvoiceDetailPage() {
 
   return (
     <div className="space-y-6">
-      {/* Back link */}
-      <Link
-        to="/procurement/pi"
-        className="inline-flex items-center gap-2 text-sm text-[#6B5C32] hover:underline"
-      >
-        <ArrowLeft className="h-4 w-4" /> Back to Purchase Invoices
-      </Link>
-
       {/* Header */}
-      <div className="flex items-start justify-between flex-wrap gap-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold text-[#1F1D1B]">{pi.piNo}</h1>
-            <Badge variant="status" status={pi.status} />
-          </div>
-          <p className="text-xs text-[#6B7280] mt-0.5">
-            Supplier: <span className="font-medium text-[#1F1D1B]">{pi.supplierName}</span>
-          </p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {!editing && (
-            <Button type="button" variant="outline" size="sm" onClick={printPdf} disabled={busy}>
-              <Printer className="h-3.5 w-3.5" /> Print
-            </Button>
-          )}
-          {!editing && pi.status === "DRAFT" && (
-            <Button type="button" variant="outline" size="sm" onClick={startEdit} disabled={busy}>
-              <Pencil className="h-3.5 w-3.5" /> Edit
-            </Button>
-          )}
-          {!editing &&
-            (PI_STATUS_ACTIONS[pi.status] ?? []).map((a) => (
-              <Button
-                key={a.next}
-                type="button"
-                variant={a.next === "DRAFT" ? "outline" : "primary"}
-                size="sm"
-                onClick={() => changeStatus(a.next, a.label)}
-                disabled={busy}
-                className={a.next === "DRAFT" ? "" : "bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"}
-              >
-                {a.label}
+      <ObjectPageHeader
+        backTo="/procurement/pi"
+        title={pi.piNo}
+        subtitle={`Supplier: ${pi.supplierName}${pi.poRef ? ` · PO ${pi.poRef}` : ""}`}
+        badges={<Badge variant="status" status={pi.status} />}
+        actions={
+          <>
+            {!editing && (
+              <Button type="button" variant="outline" size="sm" onClick={printPdf} disabled={busy}>
+                <Printer className="h-3.5 w-3.5" /> Print
               </Button>
-            ))}
-          {!editing && pi.status === "DRAFT" && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={deletePI}
-              disabled={busy}
-              className="text-[#9A3A2D] hover:bg-[#9A3A2D]/5"
-            >
-              Delete
-            </Button>
-          )}
-        </div>
-      </div>
+            )}
+            {!editing && pi.status === "DRAFT" && (
+              <Button type="button" variant="outline" size="sm" onClick={startEdit} disabled={busy}>
+                <Pencil className="h-3.5 w-3.5" /> Edit
+              </Button>
+            )}
+            {!editing &&
+              (PI_STATUS_ACTIONS[pi.status] ?? []).map((a) => (
+                <Button
+                  key={a.next}
+                  type="button"
+                  variant={a.next === "DRAFT" ? "outline" : "primary"}
+                  size="sm"
+                  onClick={() => changeStatus(a.next, a.label)}
+                  disabled={busy}
+                  className={a.next === "DRAFT" ? "" : "bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"}
+                >
+                  {a.label}
+                </Button>
+              ))}
+            {!editing && pi.status === "DRAFT" && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={deletePI}
+                disabled={busy}
+                className="text-[#9A3A2D] hover:bg-[#9A3A2D]/5"
+              >
+                Delete
+              </Button>
+            )}
+          </>
+        }
+      />
 
       {/* PI Details + Items (read-only view) */}
       {!editing && (

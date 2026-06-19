@@ -25,6 +25,7 @@ import {
 import { Link } from "react-router-dom";
 import { useParams, useNavigate } from "react-router-dom";
 import { GRNFormDialog } from "@/pages/procurement/grn";
+import { ObjectPageHeader } from "@/components/ui/object-page-header";
 
 // Status timeline steps
 const STATUS_STEPS = [
@@ -648,91 +649,83 @@ export default function PurchaseOrderDetailPage() {
 
   return (
     <div className="space-y-6">
-      {/* Back link */}
-      <Link to="/procurement" className="inline-flex items-center gap-2 text-sm text-[#6B5C32] hover:underline">
-        <ArrowLeft className="h-4 w-4" /> Back to Procurement
-      </Link>
-
       {/* Header */}
-      <div className="flex items-start justify-between flex-wrap gap-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold text-[#1F1D1B]">{po.poNo}</h1>
-            <Badge variant="status" status={po.status} />
-          </div>
-          <p className="text-xs text-[#6B7280] mt-0.5">
-            Supplier: <span className="font-medium text-[#1F1D1B]">{po.supplierName}</span>
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {isDraft && !editing && (
-            <Button variant="outline" onClick={startEdit}>
-              <Pencil className="h-4 w-4" /> Edit
-            </Button>
-          )}
-          {canEmail && !editing && (
-            <div className="flex items-center gap-2">
-              {po.lastEmailedAt && (
-                <span className="text-xs text-[#6B7280]" title={po.lastEmailedAt}>
-                  Last sent: {formatDateTime(po.lastEmailedAt)}
-                </span>
-              )}
-              <Button
-                variant="outline"
-                onClick={sendEmail}
-                disabled={emailing}
-                title={po.lastEmailedAt ? "Resend PO to supplier" : "Email PO to supplier"}
-              >
-                <Mail className="h-4 w-4" /> {po.lastEmailedAt ? (emailing ? "Resending…" : "Resend Email") : (emailing ? "Sending…" : "Email to Supplier")}
+      <ObjectPageHeader
+        backTo="/procurement"
+        title={po.poNo}
+        subtitle={`Supplier: ${po.supplierName}`}
+        badges={<Badge variant="status" status={po.status} />}
+        actions={
+          <>
+            {isDraft && !editing && (
+              <Button variant="outline" onClick={startEdit}>
+                <Pencil className="h-4 w-4" /> Edit
               </Button>
-            </div>
-          )}
-          <Button variant="outline" onClick={async () => {
-            const { generatePurchaseOrderPdf, letterheadForPurchaseOrg } = await import("@/lib/generate-purchase-order-pdf");
-            // Print under the supplier's Purchase Company letterhead (HOOKKA /
-            // OHANA / any sister co in the organisations registry). Accounting
-            // stays HOOKKA. Defaults to HOOKKA when no Purchase Company is set.
-            const sup = allSuppliers.find((s) => s.id === po.supplierId);
-            const purchaseOrgCode = sup?.purchaseOrgCode || "HOOKKA";
-            const lh = letterheadForPurchaseOrg(purchaseOrgCode, orgsResp?.organisations);
-            generatePurchaseOrderPdf({ ...po, purchaseOrgCode }, lh);
-          }}>
-            <Download className="h-4 w-4" /> Download PDF
-          </Button>
-          {canPrintGRN && (
+            )}
+            {canEmail && !editing && (
+              <div className="flex items-center gap-2">
+                {po.lastEmailedAt && (
+                  <span className="text-xs text-[#6B7280]" title={po.lastEmailedAt}>
+                    Last sent: {formatDateTime(po.lastEmailedAt)}
+                  </span>
+                )}
+                <Button
+                  variant="outline"
+                  onClick={sendEmail}
+                  disabled={emailing}
+                  title={po.lastEmailedAt ? "Resend PO to supplier" : "Email PO to supplier"}
+                >
+                  <Mail className="h-4 w-4" /> {po.lastEmailedAt ? (emailing ? "Resending…" : "Resend Email") : (emailing ? "Sending…" : "Email to Supplier")}
+                </Button>
+              </div>
+            )}
             <Button variant="outline" onClick={async () => {
-              const [{ generateGRNPdf }, { letterheadForPurchaseOrg }] = await Promise.all([
-                import("@/lib/generate-grn-pdf"),
-                import("@/lib/generate-purchase-order-pdf"),
-              ]);
-              // GRN prints under the supplier's Purchase Company; accounting stays HOOKKA.
+              const { generatePurchaseOrderPdf, letterheadForPurchaseOrg } = await import("@/lib/generate-purchase-order-pdf");
+              // Print under the supplier's Purchase Company letterhead (HOOKKA /
+              // OHANA / any sister co in the organisations registry). Accounting
+              // stays HOOKKA. Defaults to HOOKKA when no Purchase Company is set.
               const sup = allSuppliers.find((s) => s.id === po.supplierId);
-              const lh = letterheadForPurchaseOrg(sup?.purchaseOrgCode || "HOOKKA", orgsResp?.organisations);
-              generateGRNPdf(po, lh);
+              const purchaseOrgCode = sup?.purchaseOrgCode || "HOOKKA";
+              const lh = letterheadForPurchaseOrg(purchaseOrgCode, orgsResp?.organisations);
+              generatePurchaseOrderPdf({ ...po, purchaseOrgCode }, lh);
             }}>
-              <Printer className="h-4 w-4" /> Print GRN
+              <Download className="h-4 w-4" /> Download PDF
             </Button>
-          )}
-          {!isDraft && !isCancelled && !editing && (() => {
-            // One live (non-cancelled) PI per PO — the convert copies every line
-            // at full qty, so a second one is a full-value duplicate. Disable
-            // when an invoice already exists; the backend also 409s this.
-            const hasLivePi = relatedPis.some(
-              (p) => ((p as { status?: string }).status ?? "") !== "CANCELLED",
-            );
-            return (
-              <Button
-                variant="outline"
-                onClick={createInvoiceFromPo}
-                disabled={creatingInvoice || hasLivePi}
-                title={hasLivePi ? "This PO already has an invoice. Cancel it first to re-invoice." : undefined}
-              >
-                <Receipt className="h-4 w-4" /> {creatingInvoice ? "Creating…" : hasLivePi ? "Invoiced" : "Create Invoice"}
+            {canPrintGRN && (
+              <Button variant="outline" onClick={async () => {
+                const [{ generateGRNPdf }, { letterheadForPurchaseOrg }] = await Promise.all([
+                  import("@/lib/generate-grn-pdf"),
+                  import("@/lib/generate-purchase-order-pdf"),
+                ]);
+                // GRN prints under the supplier's Purchase Company; accounting stays HOOKKA.
+                const sup = allSuppliers.find((s) => s.id === po.supplierId);
+                const lh = letterheadForPurchaseOrg(sup?.purchaseOrgCode || "HOOKKA", orgsResp?.organisations);
+                generateGRNPdf(po, lh);
+              }}>
+                <Printer className="h-4 w-4" /> Print GRN
               </Button>
-            );
-          })()}
-        </div>
-      </div>
+            )}
+            {!isDraft && !isCancelled && !editing && (() => {
+              // One live (non-cancelled) PI per PO — the convert copies every line
+              // at full qty, so a second one is a full-value duplicate. Disable
+              // when an invoice already exists; the backend also 409s this.
+              const hasLivePi = relatedPis.some(
+                (p) => ((p as { status?: string }).status ?? "") !== "CANCELLED",
+              );
+              return (
+                <Button
+                  variant="outline"
+                  onClick={createInvoiceFromPo}
+                  disabled={creatingInvoice || hasLivePi}
+                  title={hasLivePi ? "This PO already has an invoice. Cancel it first to re-invoice." : undefined}
+                >
+                  <Receipt className="h-4 w-4" /> {creatingInvoice ? "Creating…" : hasLivePi ? "Invoiced" : "Create Invoice"}
+                </Button>
+              );
+            })()}
+          </>
+        }
+      />
 
       {/* Status Timeline */}
       <Card>

@@ -22,6 +22,7 @@ import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -253,54 +254,51 @@ export default function GRNDetailPage() {
 
   return (
     <div className="space-y-6">
-      <Link to="/procurement/grn" className="inline-flex items-center gap-2 text-sm text-[#6B5C32] hover:underline">
-        <ArrowLeft className="h-4 w-4" /> Back to GRNs
-      </Link>
-
       {/* Header + actions */}
-      <div className="flex items-start justify-between flex-wrap gap-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold text-[#1F1D1B]">{grn.grnNumber}</h1>
+      <ObjectPageHeader
+        backTo="/procurement/grn"
+        title={grn.grnNumber}
+        subtitle={`Supplier: ${grn.supplierName}${grn.poNumber ? ` · PO ${grn.poNumber}` : ""}`}
+        badges={
+          <>
             <Badge variant="status" status={grn.status} />
             {grn.qcStatus ? (
               <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-[#F0ECE9] text-[#6B5C32]">
                 QC: {grn.qcStatus}
               </span>
             ) : null}
-          </div>
-          <p className="text-xs text-[#6B7280] mt-0.5">
-            Supplier: <span className="font-medium text-[#1F1D1B]">{grn.supplierName}</span>
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={printPdf} disabled={busy}>
-            <Printer className="h-3.5 w-3.5" /> Print
-          </Button>
-          {!isConfirmed && !isPosted && (
-            <Button type="button" variant="outline" size="sm" onClick={() => setStatus("CONFIRMED", "Approve")} disabled={busy}>
-              <CheckCircle2 className="h-3.5 w-3.5" /> Approve
+          </>
+        }
+        actions={
+          <>
+            <Button type="button" variant="outline" size="sm" onClick={printPdf} disabled={busy}>
+              <Printer className="h-3.5 w-3.5" /> Print
             </Button>
-          )}
-          {!isPosted && (
-            <Button
-              type="button"
-              variant="primary"
-              size="sm"
-              onClick={() => setStatus("POSTED", "Post to Stock")}
-              disabled={busy}
-              className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-            >
-              <PackageCheck className="h-3.5 w-3.5" /> Post to Stock
-            </Button>
-          )}
-          {isPosted && (
-            <Button type="button" variant="primary" size="sm" onClick={convertToInvoice} disabled={busy} className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]">
-              <Receipt className="h-3.5 w-3.5" /> Convert to Invoice
-            </Button>
-          )}
-        </div>
-      </div>
+            {!isConfirmed && !isPosted && (
+              <Button type="button" variant="outline" size="sm" onClick={() => setStatus("CONFIRMED", "Approve")} disabled={busy}>
+                <CheckCircle2 className="h-3.5 w-3.5" /> Approve
+              </Button>
+            )}
+            {!isPosted && (
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={() => setStatus("POSTED", "Post to Stock")}
+                disabled={busy}
+                className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+              >
+                <PackageCheck className="h-3.5 w-3.5" /> Post to Stock
+              </Button>
+            )}
+            {isPosted && (
+              <Button type="button" variant="primary" size="sm" onClick={convertToInvoice} disabled={busy} className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]">
+                <Receipt className="h-3.5 w-3.5" /> Convert to Invoice
+              </Button>
+            )}
+          </>
+        }
+      />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: details */}

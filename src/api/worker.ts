@@ -943,7 +943,7 @@ app.route("/api/dashboard/overview", dashboardOverview);
 // Phase C #4 quick-win — MDM duplicate-detection review queue. Routes
 // scoped by orgId via getOrgId(c); detection-pass endpoint is admin-only
 // in spirit (gated by the existing auth middleware until role-aware
-// authz lands; see roadmap §1).
+// rbac lands; see roadmap §1).
 app.route("/api/mdm", mdm);
 // Phase B.4 — file_assets API. Mounted under /api/files. Returns 503 when
 // Supabase Storage credentials are missing; see docs/DR-RUNBOOK.md.

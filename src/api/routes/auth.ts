@@ -427,10 +427,10 @@ app.get("/me", async (c) => {
 //
 // SUPER_ADMIN: returns ["*"] as a single sentinel — the frontend treats it
 // as "allow everything". Cheaper than enumerating the full matrix and aligns
-// with the bypass behavior in src/api/lib/authz.ts.
+// with the bypass behavior in src/api/lib/rbac.ts.
 //
 // READ_ONLY fallback: users without a roleId fall through to role_read_only
-// per the same convention as authz.ts.
+// per the same convention as rbac.ts.
 app.get("/me/permissions", async (c) => {
   const userId = (c as unknown as { get: (k: string) => unknown }).get(
     "userId",
@@ -447,7 +447,7 @@ app.get("/me/permissions", async (c) => {
   // operator re-applies migrations.
   try {
     // Look up the user's role (id + name). Empty roleId -> READ_ONLY fallback,
-    // mirroring authz.ts's resolveUserRole().
+    // mirroring rbac.ts's role resolution.
     const roleRow = await c.var.DB.prepare(
       `SELECT u.roleId AS roleId, r.name AS "roleName"
          FROM users u
@@ -464,7 +464,7 @@ app.get("/me/permissions", async (c) => {
     }
 
     // SUPER_ADMIN bypass — sentinel list keeps payload tiny + matches the
-    // authz.ts SUPER_ADMIN short-circuit.
+    // rbac.ts SUPER_ADMIN short-circuit.
     if (roleRow.roleName === "SUPER_ADMIN") {
       return c.json({
         success: true,

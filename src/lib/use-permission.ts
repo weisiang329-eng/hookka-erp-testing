@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // usePermissions — frontend permission set lookup (P3.6).
 //
-// The backend (src/api/lib/authz.ts) gates every API route on
+// The backend (src/api/lib/rbac.ts) gates every API route on
 // (resource, action). Without a matching client-side check users navigate to
 // /accounting, see the page shell render, then watch the data fetches all 403.
 // This hook fetches GET /api/auth/me/permissions once per session and exposes
@@ -15,7 +15,7 @@
 //
 // Caching strategy: piggyback on useCachedJson so the permission set is
 // stale-while-revalidate cached in localStorage with a 5 minute TTL — same
-// window as the authz.ts KV cache, so client and server stay in sync within
+// window as the rbac.ts KV cache, so client and server stay in sync within
 // a 5-minute drift after a role-permission edit.
 //
 // Failure mode: on any error (network, schema mismatch) we return an empty

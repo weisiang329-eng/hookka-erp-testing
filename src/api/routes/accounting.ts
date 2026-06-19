@@ -5264,8 +5264,7 @@ app.get("/payment-vouchers", async (c) => {
         `SELECT payment_vouchers.*, dl.state AS lifecycleState
            FROM payment_vouchers
            LEFT JOIN document_lifecycle dl
-             ON dl.orgId = payment_vouchers.orgId
-            AND dl.sourceType = 'payment_voucher'
+             ON dl.sourceType = 'payment_voucher'
             AND dl.sourceId = payment_vouchers.id
           WHERE (dl.state IS NULL OR dl.state <> 'DELETED')
           ORDER BY date DESC, pvNo DESC LIMIT 500`,
@@ -5533,7 +5532,7 @@ app.post("/payment-vouchers/:id/lifecycle", async (c) => {
   try { action = ((await c.req.json()) as { action: string }).action as typeof action; } catch { return c.json({ success: false, error: "Invalid body" }, 400); }
   if (!["void", "delete", "unvoid"].includes(action)) return c.json({ success: false, error: "action must be void|delete|unvoid" }, 400);
 
-  const pv = await c.var.DB.prepare("SELECT id, pvNo, status FROM payment_vouchers WHERE id = ? AND orgId = ?").bind(id, orgId).first<{ id: string; pvNo: string; status: string }>();
+  const pv = await c.var.DB.prepare("SELECT id, pvNo, status FROM payment_vouchers WHERE id = ?").bind(id).first<{ id: string; pvNo: string; status: string }>();
   if (!pv) return c.json({ success: false, error: "Voucher not found" }, 404);
 
   const actorUserId =
@@ -5547,7 +5546,7 @@ app.post("/payment-vouchers/:id/lifecycle", async (c) => {
   const docStatus = lc.newState === "ACTIVE" ? "POSTED" : "VOID";
   const statements: D1PreparedStatement[] = [
     ...lc.statements,
-    c.var.DB.prepare("UPDATE payment_vouchers SET status = ? WHERE id = ? AND orgId = ?").bind(docStatus, id, orgId),
+    c.var.DB.prepare("UPDATE payment_vouchers SET status = ? WHERE id = ?").bind(docStatus, id),
   ];
   await c.var.DB.batch(statements);
   return c.json({ success: true, data: { state: lc.newState } });
@@ -5562,8 +5561,7 @@ app.get("/official-receipts", async (c) => {
         `SELECT official_receipts.*, dl.state AS lifecycleState
          FROM official_receipts
          LEFT JOIN document_lifecycle dl
-           ON dl.orgId = official_receipts.orgId
-          AND dl.sourceType = 'official_receipt'
+           ON dl.sourceType = 'official_receipt'
           AND dl.sourceId = official_receipts.id
          WHERE (dl.state IS NULL OR dl.state <> 'DELETED')
          ORDER BY date DESC, orNo DESC LIMIT 500`,
@@ -5733,7 +5731,7 @@ app.post("/official-receipts/:id/lifecycle", async (c) => {
   try { action = ((await c.req.json()) as { action: string }).action as typeof action; } catch { return c.json({ success: false, error: "Invalid body" }, 400); }
   if (!["void", "delete", "unvoid"].includes(action)) return c.json({ success: false, error: "action must be void|delete|unvoid" }, 400);
 
-  const orRow = await c.var.DB.prepare("SELECT id, orNo, status FROM official_receipts WHERE id = ? AND orgId = ?").bind(id, orgId).first<{ id: string; orNo: string; status: string }>();
+  const orRow = await c.var.DB.prepare("SELECT id, orNo, status FROM official_receipts WHERE id = ?").bind(id).first<{ id: string; orNo: string; status: string }>();
   if (!orRow) return c.json({ success: false, error: "Receipt not found" }, 404);
 
   const actorUserId =
@@ -5747,7 +5745,7 @@ app.post("/official-receipts/:id/lifecycle", async (c) => {
   const docStatus = lc.newState === "ACTIVE" ? "POSTED" : "VOID";
   const statements: D1PreparedStatement[] = [
     ...lc.statements,
-    c.var.DB.prepare("UPDATE official_receipts SET status = ?, updated_at = ? WHERE id = ? AND orgId = ?").bind(docStatus, new Date().toISOString(), id, orgId),
+    c.var.DB.prepare("UPDATE official_receipts SET status = ?, updated_at = ? WHERE id = ?").bind(docStatus, new Date().toISOString(), id),
   ];
   await c.var.DB.batch(statements);
   return c.json({ success: true, data: { state: lc.newState } });

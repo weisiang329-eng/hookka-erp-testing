@@ -5261,7 +5261,14 @@ app.get("/payment-vouchers", async (c) => {
   try {
     const [pvRes, lineRes] = await Promise.all([
       c.var.DB.prepare(
-        `SELECT * FROM payment_vouchers ORDER BY date DESC, pvNo DESC LIMIT 500`,
+        `SELECT payment_vouchers.*, dl.state AS lifecycleState
+           FROM payment_vouchers
+           LEFT JOIN document_lifecycle dl
+             ON dl.orgId = payment_vouchers.orgId
+            AND dl.sourceType = 'payment_voucher'
+            AND dl.sourceId = payment_vouchers.id
+          WHERE (dl.state IS NULL OR dl.state <> 'DELETED')
+          ORDER BY date DESC, pvNo DESC LIMIT 500`,
       ).all(),
       c.var.DB.prepare(
         `SELECT * FROM payment_voucher_lines ORDER BY lineOrder`,

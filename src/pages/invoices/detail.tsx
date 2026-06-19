@@ -11,8 +11,8 @@ import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { LockBanner } from "@/components/ui/lock-banner";
+import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import {
-  ArrowLeft,
   Trash2,
   Send,
   Download,
@@ -366,108 +366,96 @@ export default function InvoiceDetailPage() {
       )}
 
       {/* Header */}
-      <div className="flex items-center gap-4">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => navigate("/invoices")}
-        >
-          <ArrowLeft className="h-5 w-5" />
-        </Button>
-        <div className="flex-1">
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold text-[#1F1D1B] doc-number">
-              {invoice.invoiceNo}
-            </h1>
-            <Badge variant="status" status={invoice.status} />
-          </div>
-          <p className="text-xs text-[#6B7280]">
-            {invoice.customerName} &middot; {invoice.customerState}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void printInvoicePdf("view")}
-          >
-            <FileText className="h-4 w-4" /> View Documentation
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void printInvoicePdf("download")}
-          >
-            <Download className="h-4 w-4" /> PDF
-          </Button>
-          {canEditPrices && !editingPrices && (
+      <ObjectPageHeader
+        backTo="/invoices"
+        title={invoice.invoiceNo}
+        subtitle={`${invoice.customerName} · ${invoice.customerState}`}
+        badges={<Badge variant="status" status={invoice.status} />}
+        actions={
+          <>
             <Button
               variant="outline"
               size="sm"
-              onClick={beginEditPrices}
+              onClick={() => void printInvoicePdf("view")}
             >
-              <DollarSign className="h-4 w-4" /> Edit Prices
+              <FileText className="h-4 w-4" /> View Documentation
             </Button>
-          )}
-          {editingPrices && (
-            <>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => void saveEditPrices()}
-                disabled={savingPrices}
-              >
-                <CheckCircle2 className="h-4 w-4" />
-                {savingPrices ? "Saving..." : "Save Prices"}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setEditingPrices(false)}
-                disabled={savingPrices}
-              >
-                Cancel
-              </Button>
-            </>
-          )}
-          {invoice.status === "DRAFT" && (
-            <>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-[#9A3A2D] hover:text-[#7A2E24]"
-                onClick={deleteInvoice}
-              >
-                <Trash2 className="h-4 w-4" /> Delete
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={sendInvoice}
-                disabled={updating}
-              >
-                <Send className="h-4 w-4" />
-                Send Invoice
-              </Button>
-            </>
-          )}
-          {(invoice.status === "SENT" || invoice.status === "PARTIAL_PAID") && (
             <Button
-              variant="primary"
+              variant="outline"
               size="sm"
-              onClick={() => {
-                setPaymentAmount(String(balanceSen / 100));
-                setPaymentDate(new Date().toISOString().split("T")[0]);
-                setPaymentReference("");
-                setShowPayment(true);
-              }}
+              onClick={() => void printInvoicePdf("download")}
             >
-              <CreditCard className="h-4 w-4" />
-              Record Payment
+              <Download className="h-4 w-4" /> PDF
             </Button>
-          )}
-        </div>
-      </div>
+            {canEditPrices && !editingPrices && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={beginEditPrices}
+              >
+                <DollarSign className="h-4 w-4" /> Edit Prices
+              </Button>
+            )}
+            {editingPrices && (
+              <>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => void saveEditPrices()}
+                  disabled={savingPrices}
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  {savingPrices ? "Saving..." : "Save Prices"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setEditingPrices(false)}
+                  disabled={savingPrices}
+                >
+                  Cancel
+                </Button>
+              </>
+            )}
+            {invoice.status === "DRAFT" && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                  onClick={deleteInvoice}
+                >
+                  <Trash2 className="h-4 w-4" /> Delete
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={sendInvoice}
+                  disabled={updating}
+                >
+                  <Send className="h-4 w-4" />
+                  Send Invoice
+                </Button>
+              </>
+            )}
+            {(invoice.status === "SENT" || invoice.status === "PARTIAL_PAID") && (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => {
+                  setPaymentAmount(String(balanceSen / 100));
+                  setPaymentDate(new Date().toISOString().split("T")[0]);
+                  setPaymentReference("");
+                  setShowPayment(true);
+                }}
+              >
+                <CreditCard className="h-4 w-4" />
+                Record Payment
+              </Button>
+            )}
+          </>
+        }
+      />
 
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
         {/* Left Column: Invoice Info */}

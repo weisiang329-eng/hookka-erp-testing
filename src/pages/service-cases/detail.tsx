@@ -19,6 +19,7 @@ import {
 import { parseRepairScope, repairScopeBadgeLabel } from "@/lib/repair-scope";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -383,31 +384,23 @@ export default function ServiceCaseDetailPage() {
 
   return (
     <div className="space-y-4">
-      <Link
-        to="/service-cases"
-        className="text-sm text-[#6B5C32] hover:underline inline-flex items-center gap-1"
-      >
-        <ArrowLeft className="h-3.5 w-3.5" /> Service Cases
-      </Link>
-
       {/* Header */}
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold text-[#1F1D1B]">
-              {caseDetail.caseNo}
-            </h1>
-            <span
-              className={`text-[10px] uppercase px-2 py-0.5 rounded ${STATUS_COLOR[caseDetail.status] ?? "bg-[#F4EFE3]"}`}
-            >
-              {caseDetail.status}
-            </span>
-          </div>
-          {/* Header customer row — includes name + phone from the customer
-              master if we can match it by id, otherwise just falls back to
-              the snapshot name stored on the case (covers older cases and
-              EXTERNAL cases keyed by name only). */}
-          <p className="text-xs text-[#6B7280] mt-1">
+      <ObjectPageHeader
+        backTo="/service-cases"
+        title={caseDetail.caseNo}
+        badges={
+          <span
+            className={`text-[10px] uppercase px-2 py-0.5 rounded ${STATUS_COLOR[caseDetail.status] ?? "bg-[#F4EFE3]"}`}
+          >
+            {caseDetail.status}
+          </span>
+        }
+        subtitle={
+          /* Header customer row — includes name + phone from the customer
+             master if we can match it by id, otherwise just falls back to
+             the snapshot name stored on the case (covers older cases and
+             EXTERNAL cases keyed by name only). */
+          <>
             Customer:{" "}
             <span className="font-medium">
               {customerRecord?.code ?? ""}
@@ -435,9 +428,10 @@ export default function ServiceCaseDetailPage() {
             )}
             {caseDetail.createdAt ? ` · Opened ${dateLabel(caseDetail.createdAt)}` : ""}
             {caseDetail.createdByName ? ` by ${caseDetail.createdByName}` : ""}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 justify-end shrink-0">
+          </>
+        }
+        actions={
+          <>
           {/* Download a one-page Service Case report (info + issue + photos +
               affected products + root cause + action log). Always available. */}
           <Button
@@ -603,8 +597,9 @@ export default function ServiceCaseDetailPage() {
               <XCircle className="h-4 w-4" /> Cancel
             </Button>
           )}
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {/* Edit-mode banner — makes it obvious the case info below is now
           unlocked (so the explicit edit function is never "看不到"). */}

@@ -91,8 +91,10 @@ export function drawLetterhead(
   doc.text(co.address, tx, 25);
   doc.text(`Tel ${co.phone}   |   ${co.email}`, tx, 29);
 
-  // Document title block (right)
-  doc.setTextColor(...PDF.accent);
+  // Document title block (right). House standard = DO/SI look: BLACK title,
+  // clean hairline rule, no coloured accent bar (owner ruling: "单据统一用
+  // DO/SI 当标准"). Tune the look HERE and every document follows.
+  doc.setTextColor(...PDF.ink);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(18);
   doc.text(opts.docTitle.toUpperCase(), pageW - m, 17, { align: "right" });
@@ -107,14 +109,12 @@ export function drawLetterhead(
   if (opts.statusText) meta.push(opts.statusText);
   if (meta.length) doc.text(meta.join("   |   "), pageW - m, 29, { align: "right" });
 
-  // Hairline + bronze accent bar
+  // Clean hairline rule (no bronze bar) — the DO/SI house style.
   doc.setDrawColor(...PDF.rule);
-  doc.setLineWidth(0.3);
+  doc.setLineWidth(0.4);
   doc.line(m, 34, pageW - m, 34);
-  doc.setFillColor(...PDF.accent);
-  doc.rect(m, 34.6, pageW - m * 2, 0.8, "F");
 
-  return 41;
+  return 40;
 }
 
 /** Thin section label with an underline rule. Returns next Y. */

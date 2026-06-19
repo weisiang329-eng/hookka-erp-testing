@@ -27,6 +27,11 @@ export async function getDocState(
  * `baseSourceTypes` is the array of original leg sourceTypes (first element is
  * also the lifecycle key); `voidSourceType` is the reversal legs' sourceType
  * (e.g. "payment_voucher_void").
+ *
+ * Returns `prevState` (the state BEFORE this action) alongside `newState` so
+ * callers can apply boundary-aware side effects — adjusting an aggregate (e.g.
+ * legacy balanceSen) only when crossing the ACTIVE boundary, never on a
+ * non-active → non-active transition such as VOID → DELETED.
  */
 export async function applyLifecycle(
   db: Env["Variables"]["DB"],
@@ -39,7 +44,7 @@ export async function applyLifecycle(
     actorUserId: string | null;
     descriptionTag: string;
   },
-): Promise<{ statements: D1PreparedStatement[]; newState: DocState }> {
+): Promise<{ statements: D1PreparedStatement[]; newState: DocState; prevState: DocState }> {
   const { orgId, baseSourceTypes, voidSourceType, sourceId, action, actorUserId, descriptionTag } = opts;
   const primarySourceType = baseSourceTypes[0];
   const cur = await getDocState(db, orgId, primarySourceType, sourceId);
@@ -107,5 +112,5 @@ export async function applyLifecycle(
       .bind(`dl-${crypto.randomUUID().slice(0, 10)}`, primarySourceType, sourceId, target, now, actorUserId, orgId, target, now, actorUserId),
   );
 
-  return { statements, newState: target };
+  return { statements, newState: target, prevState: cur };
 }

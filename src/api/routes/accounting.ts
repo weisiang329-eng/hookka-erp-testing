@@ -848,15 +848,30 @@ app.post("/coa/rename", async (c) => {
 app.get("/journals", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
+  // T5d: annotate each JV with its lifecycle state and hide DELETED ones.
+  // journal_entries has no orgId column (it predates multi-tenancy), so we
+  // bind the active orgId into the JOIN condition rather than referencing a
+  // table column — the original query was not orgId-filtered and we keep it
+  // that way (consistent with PV/OR). VOID/REVERSED JVs still show (with
+  // state); only DELETED is excluded.
+  const orgId = getOrgId(c);
   const [entries, lines] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT * FROM journal_entries ORDER BY date DESC, entryNo DESC",
-    ).all<JournalEntryRow>(),
+      `SELECT journal_entries.*, dl.state AS lifecycleState
+         FROM journal_entries
+         LEFT JOIN document_lifecycle dl
+           ON dl.orgId = ?
+          AND dl.sourceType = 'manual'
+          AND dl.sourceId = journal_entries.id
+        WHERE (dl.state IS NULL OR dl.state <> 'DELETED')
+        ORDER BY date DESC, entryNo DESC`,
+    ).bind(orgId).all<JournalEntryRow & { lifecycleState: string | null }>(),
     c.var.DB.prepare("SELECT * FROM journal_lines").all<JournalLineRow>(),
   ]);
-  const data = (entries.results ?? []).map((e) =>
-    rowToJournal(e, lines.results ?? []),
-  );
+  const data = (entries.results ?? []).map((e) => ({
+    ...rowToJournal(e, lines.results ?? []),
+    lifecycleState: e.lifecycleState ?? null,
+  }));
   return c.json({ success: true, data, total: data.length });
 });
 
@@ -1145,6 +1160,20 @@ app.put("/journals/:id", async (c) => {
             await buildJournalEntryStatements(c.var.DB, orgId, legs);
           statements.push(...ledgerStmts);
         }
+        // T5d (correctness): legacy reverse rolls back balanceSen + creates the
+        // manual_reversal legs but never recorded document_lifecycle. Without
+        // this upsert a later /journals/:id/lifecycle call sees getDocState =
+        // ACTIVE and rolls balanceSen back a SECOND time (double-rollback bug).
+        // Stamp state = VOID (same table/key as applyLifecycle) so the lifecycle
+        // machine sees a consistent prior state.
+        const now = new Date().toISOString();
+        statements.push(
+          c.var.DB.prepare(
+            `INSERT INTO document_lifecycle (id, sourceType, sourceId, state, actionAt, actorUserId, orgId)
+             VALUES (?, ?, ?, 'VOID', ?, ?, ?)
+             ON CONFLICT (orgId, sourceType, sourceId) DO UPDATE SET state='VOID', actionAt=?, actorUserId=?`,
+          ).bind(`dl-${crypto.randomUUID().slice(0, 10)}`, "manual", id, now, actorUserId, orgId, now, actorUserId),
+        );
       } catch (e) {
         console.error(
           `[ledger] JV ${id} reversal GL build failed — aborting:`,
@@ -1233,6 +1262,65 @@ app.put("/journals/:id", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// Lifecycle (void | delete | unvoid) for a POSTED/REVERSED JV. JV is the only
+// doc that maintains legacy balanceSen, so balanceSen is adjusted ONLY when
+// crossing the ACTIVE boundary (prevState vs newState) — a VOID → DELETED
+// transition does NOT touch balanceSen (avoids double-rollback). The ledger
+// hidden flags + reversal entry are handled by applyLifecycle.
+app.post("/journals/:id/lifecycle", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+  let action: "void" | "delete" | "unvoid";
+  try { action = ((await c.req.json()) as { action: string }).action as typeof action; } catch { return c.json({ success: false, error: "Invalid body" }, 400); }
+  if (!["void", "delete", "unvoid"].includes(action)) return c.json({ success: false, error: "action must be void|delete|unvoid" }, 400);
+
+  const entry = await c.var.DB.prepare("SELECT id, entryNo, status FROM journal_entries WHERE id = ?").bind(id).first<{ id: string; entryNo: string; status: string }>();
+  if (!entry) return c.json({ success: false, error: "Journal entry not found" }, 404);
+  // A DRAFT JV has no ledger posting — there is nothing to void/delete/unvoid.
+  if (entry.status === "DRAFT") {
+    return c.json({ success: false, error: "Draft journal has no ledger posting — post it first, or delete the draft." }, 400);
+  }
+
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  let lc: { statements: D1PreparedStatement[]; newState: string; prevState: string };
+  try {
+    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: ["manual"], voidSourceType: "manual_reversal", sourceId: id, action, actorUserId, descriptionTag: `${action.toUpperCase()} · JV ${entry.entryNo}` });
+  } catch (e) { return c.json({ success: false, error: (e as Error).message }, 400); }
+
+  // Boundary-aware: only adjust balanceSen when crossing the ACTIVE boundary.
+  const deactivated = lc.prevState === "ACTIVE" && lc.newState !== "ACTIVE";
+  const reactivated = lc.prevState !== "ACTIVE" && lc.newState === "ACTIVE";
+
+  const statements: D1PreparedStatement[] = [
+    ...lc.statements,
+    // doc-specific side effect: sync status column (lifecycle state is source of truth; this is for UI)
+    c.var.DB.prepare("UPDATE journal_entries SET status = ? WHERE id = ?").bind(lc.newState === "ACTIVE" ? "POSTED" : "REVERSED", id),
+  ];
+
+  if (deactivated || reactivated) {
+    const lineRes = await c.var.DB.prepare("SELECT * FROM journal_lines WHERE journalEntryId = ?").bind(id).all<JournalLineRow>();
+    for (const l of lineRes.results ?? []) {
+      const acct = await c.var.DB.prepare("SELECT * FROM chart_of_accounts WHERE code = ?").bind(l.accountCode).first<CoaRow>();
+      if (!acct) continue;
+      // Same account-type-aware delta as PUT POST; subtract on deactivate, add on reactivate.
+      const delta =
+        acct.type === "ASSET" || acct.type === "EXPENSE" || acct.type === "COST"
+          ? l.debitSen - l.creditSen
+          : l.creditSen - l.debitSen;
+      const signed = deactivated ? -delta : delta;
+      statements.push(
+        c.var.DB.prepare("UPDATE chart_of_accounts SET balanceSen = balanceSen + ? WHERE code = ?").bind(signed, l.accountCode),
+      );
+    }
+  }
+
+  await c.var.DB.batch(statements);
+  return c.json({ success: true, data: { state: lc.newState } });
 });
 
 app.delete("/journals/:id", async (c) => {

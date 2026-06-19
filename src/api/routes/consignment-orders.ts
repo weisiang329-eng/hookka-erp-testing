@@ -33,6 +33,7 @@ import {
 import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { getOrgId } from "../lib/tenant";
 import { invalidateHubChangeSnapshots } from "../lib/snapshot";
 import {
@@ -464,6 +465,11 @@ app.get("/", async (c) => {
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "consignments", "create");
   if (denied) return denied;
+  // Idempotency — a duplicate retry (e.g. a dropped create response) returns
+  // the cached result instead of creating a second CO. No-op without the
+  // Idempotency-Key header. Mirrors the sales-orders create path.
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "consignment-orders", idemKey, async () => {
   try {
     const body = await c.req.json();
 
@@ -756,6 +762,7 @@ app.post("/", async (c) => {
     const message = err instanceof Error ? err.message : "Invalid request body";
     return c.json({ success: false, error: message }, 400);
   }
+  });
 });
 
 // ---------------------------------------------------------------------------

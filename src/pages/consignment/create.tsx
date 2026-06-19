@@ -796,9 +796,13 @@ function CreateConsignmentOrderPage() {
         void _drop;
         return rest;
       });
+      // Idempotency key — a dropped create response otherwise lets a retry
+      // create a duplicate CO. Sales create already does this; bring consignment
+      // to parity. Same base key reused for the chained confirm below.
+      const idemKey = crypto.randomUUID();
       const res = await fetch("/api/consignment-orders", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": idemKey },
         body: JSON.stringify({
           customerId, customerPOId, customerCOId, reference,
           companyCODate, customerDeliveryDate, hookkaExpectedDD, notes,
@@ -827,7 +831,7 @@ function CreateConsignmentOrderPage() {
       if (status === "CONFIRMED" && newId) {
         const confirmRes = await fetch(`/api/consignment-orders/${newId}/confirm`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "Idempotency-Key": `${idemKey}-confirm` },
           body: JSON.stringify({ changedBy: "Admin" }),
         });
         const confirmData = (await confirmRes.json().catch(() => ({}))) as {

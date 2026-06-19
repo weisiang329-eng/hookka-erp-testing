@@ -695,8 +695,14 @@ export default function PurchaseOrderDetailPage() {
           </Button>
           {canPrintGRN && (
             <Button variant="outline" onClick={async () => {
-              const { generateGRNPdf } = await import("@/lib/generate-grn-pdf");
-              generateGRNPdf(po);
+              const [{ generateGRNPdf }, { letterheadForPurchaseOrg }] = await Promise.all([
+                import("@/lib/generate-grn-pdf"),
+                import("@/lib/generate-purchase-order-pdf"),
+              ]);
+              // GRN prints under the supplier's Purchase Company; accounting stays HOOKKA.
+              const sup = allSuppliers.find((s) => s.id === po.supplierId);
+              const lh = letterheadForPurchaseOrg(sup?.purchaseOrgCode || "HOOKKA", orgsResp?.organisations);
+              generateGRNPdf(po, lh);
             }}>
               <Printer className="h-4 w-4" /> Print GRN
             </Button>

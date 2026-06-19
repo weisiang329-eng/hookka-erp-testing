@@ -65,6 +65,11 @@ export default function GRNDetailPage() {
     error?: string;
   }>(id ? `/api/grn/${id}` : null);
 
+  // Purchase Company letterhead — print the GRN under the supplier's buying
+  // company (HOOKKA / OHANA / any sister co); accounting stays HOOKKA.
+  const { data: supResp } = useCachedJson<{ data?: Array<{ id: string; purchaseOrgCode?: string }> }>("/api/suppliers");
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
+
   const grn: GRNDetail | null = resp?.success ? resp.data ?? null : null;
   const error: string | null =
     fetchError ?? (resp && resp.success === false ? resp.error || "GRN not found" : null);
@@ -190,7 +195,12 @@ export default function GRNDetailPage() {
   async function printPdf() {
     if (!grn) return;
     try {
-      const { generateGRNPdf } = await import("@/lib/generate-grn-pdf");
+      const [{ generateGRNPdf }, { letterheadForPurchaseOrg }] = await Promise.all([
+        import("@/lib/generate-grn-pdf"),
+        import("@/lib/generate-purchase-order-pdf"),
+      ]);
+      const sup = (supResp?.data ?? []).find((s) => s.id === grn.supplierId);
+      const lh = letterheadForPurchaseOrg(sup?.purchaseOrgCode || "HOOKKA", orgsResp?.organisations);
       generateGRNPdf({
         grnNo: grn.grnNumber,
         date: grn.receiveDate,
@@ -205,7 +215,7 @@ export default function GRNDetailPage() {
           rejectedQty: it.rejectedQty,
           acceptedQty: it.acceptedQty,
         })),
-      });
+      }, lh);
     } catch {
       toast.error("Could not generate the PDF.");
     }

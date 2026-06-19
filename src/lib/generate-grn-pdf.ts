@@ -2,6 +2,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
 import { fmtDate, drawLetterhead } from "@/lib/pdf-utils";
+import type { LetterheadInfo } from "@/lib/generate-purchase-order-pdf";
 
 // Company name for the footer line (the header now comes from drawLetterhead).
 const COMPANY_NAME = COMPANY.HOOKKA.name;
@@ -13,6 +14,10 @@ const COMPANY_NAME = COMPANY.HOOKKA.name;
 export function generateGRNPdf(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   data: any,
+  // Letterhead override: the GRN prints under the Purchase Company that bought
+  // the goods (HOOKKA / OHANA / any sister co in the registry), while the
+  // accounting entity stays HOOKKA ("borrow the letterhead"). HOOKKA when omitted.
+  letterheadOverride?: LetterheadInfo,
   // returnDoc: hand back the built jsPDF instead of saving — lets the bulk
   // "Download PDF" action merge several GRNs into one file (see merge-pdf.ts).
   opts?: { returnDoc?: boolean },
@@ -22,12 +27,25 @@ export function generateGRNPdf(
   const pageH = doc.internal.pageSize.getHeight();
   const margin = 15;
 
-  // --- Header (shared letterhead — single source of truth across all docs) ---
+  // --- Header (shared letterhead — single source of truth across all docs).
+  // Logo skipped for sister companies so we don't mis-brand them. ---
+  const isHookkaLetterhead = !letterheadOverride || letterheadOverride.code === "HOOKKA";
   let y = drawLetterhead(doc, {
     docTitle: "GOODS RECEIVED NOTE",
     docNo: data.grnNo ?? "-",
     docDate: fmtDate(data.date),
-    company: "HOOKKA",
+    logo: isHookkaLetterhead,
+    companyInfo: letterheadOverride
+      ? {
+          name: letterheadOverride.name,
+          regNo: letterheadOverride.regNo ?? "",
+          tin: letterheadOverride.tin ?? "",
+          address: letterheadOverride.address ?? "",
+          phone: letterheadOverride.phone ?? "",
+          email: letterheadOverride.email ?? "",
+        }
+      : undefined,
+    company: letterheadOverride ? undefined : "HOOKKA",
   });
 
   // --- Two columns ---
@@ -206,12 +224,12 @@ export function generateGRNPdf(
 // download, then merge-pdf stitches them into one file.
 export async function generateCombinedGRNPdf(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  items: { data: any }[],
+  items: { data: any; letterhead?: LetterheadInfo }[],
   filename = "GRNs.pdf",
 ): Promise<void> {
   if (items.length === 0) return;
   const docs = items
-    .map(({ data }) => generateGRNPdf(data, { returnDoc: true }))
+    .map(({ data, letterhead }) => generateGRNPdf(data, letterhead, { returnDoc: true }))
     .filter((d): d is jsPDF => !!d);
   const { downloadMergedPdf } = await import("./merge-pdf");
   await downloadMergedPdf(docs, filename);

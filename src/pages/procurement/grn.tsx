@@ -350,6 +350,10 @@ export default function GRNPage() {
 
   const { data: grnResp, loading: grnLoading, refresh: refreshGrns } = useCachedJson<{ success?: boolean; data?: GoodsReceiptNote[] } | GoodsReceiptNote[]>("/api/grn");
   const { data: poResp, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] } | PurchaseOrder[]>("/api/purchase-orders");
+  // Purchase Company letterhead — print each GRN under its supplier's buying
+  // company (HOOKKA / OHANA / any sister co); accounting stays HOOKKA.
+  const { data: supResp } = useCachedJson<{ data?: Array<{ id: string; purchaseOrgCode?: string }> }>("/api/suppliers");
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
 
   const grns: GoodsReceiptNote[] = useMemo(
     () => ((grnResp as { data?: GoodsReceiptNote[] } | undefined)?.data ?? (Array.isArray(grnResp) ? grnResp : [])),
@@ -458,24 +462,32 @@ export default function GRNPage() {
       const ordered = [...selectedGrns].sort((a, b) =>
         String(a.grnNumber || "").localeCompare(String(b.grnNumber || "")),
       );
-      const items = ordered.map((grn) => ({
-        data: {
-          grnNo: grn.grnNumber,
-          date: grn.receiveDate,
-          poRef: grn.poNumber,
-          supplierName: grn.supplierName,
-          remarks: grn.notes,
-          items: grn.items.map((it) => ({
-            itemCode: it.materialCode,
-            description: it.materialName,
-            poQty: it.orderedQty,
-            receivedQty: it.receivedQty,
-            rejectedQty: it.rejectedQty,
-            acceptedQty: it.acceptedQty,
-          })),
-        },
-      }));
-      const { generateCombinedGRNPdf } = await import("@/lib/generate-grn-pdf");
+      const [{ generateCombinedGRNPdf }, { letterheadForPurchaseOrg }] = await Promise.all([
+        import("@/lib/generate-grn-pdf"),
+        import("@/lib/generate-purchase-order-pdf"),
+      ]);
+      const suppliersList = supResp?.data ?? [];
+      const items = ordered.map((grn) => {
+        const sup = suppliersList.find((s) => s.id === grn.supplierId);
+        return {
+          data: {
+            grnNo: grn.grnNumber,
+            date: grn.receiveDate,
+            poRef: grn.poNumber,
+            supplierName: grn.supplierName,
+            remarks: grn.notes,
+            items: grn.items.map((it) => ({
+              itemCode: it.materialCode,
+              description: it.materialName,
+              poQty: it.orderedQty,
+              receivedQty: it.receivedQty,
+              rejectedQty: it.rejectedQty,
+              acceptedQty: it.acceptedQty,
+            })),
+          },
+          letterhead: letterheadForPurchaseOrg(sup?.purchaseOrgCode || "HOOKKA", orgsResp?.organisations),
+        };
+      });
       await generateCombinedGRNPdf(items, `GRNs-${items.length}.pdf`);
     } catch {
       /* best-effort; the button returns to idle on failure */
@@ -539,7 +551,12 @@ export default function GRNPage() {
         // (same as the bulk download) and print this one.
         action: async () => {
           try {
-            const { generateGRNPdf } = await import("@/lib/generate-grn-pdf");
+            const [{ generateGRNPdf }, { letterheadForPurchaseOrg }] = await Promise.all([
+              import("@/lib/generate-grn-pdf"),
+              import("@/lib/generate-purchase-order-pdf"),
+            ]);
+            const sup = (supResp?.data ?? []).find((s) => s.id === row.supplierId);
+            const lh = letterheadForPurchaseOrg(sup?.purchaseOrgCode || "HOOKKA", orgsResp?.organisations);
             generateGRNPdf({
               grnNo: row.grnNumber,
               date: row.receiveDate,
@@ -554,7 +571,7 @@ export default function GRNPage() {
                 rejectedQty: it.rejectedQty,
                 acceptedQty: it.acceptedQty,
               })),
-            });
+            }, lh);
           } catch {
             toast.error("Could not generate the PDF.");
           }

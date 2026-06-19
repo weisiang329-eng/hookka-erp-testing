@@ -2537,13 +2537,21 @@ app.get("/other-party-bills", async (c) => {
   const partyId = c.req.query("partyId");
   const type = c.req.query("type");
 
-  let q = "SELECT * FROM other_party_bills WHERE orgId = ?";
+  let q =
+    `SELECT other_party_bills.*, dl.state AS lifecycleState
+       FROM other_party_bills
+       LEFT JOIN document_lifecycle dl
+         ON dl.orgId = other_party_bills.orgId
+        AND dl.sourceType = 'other_party_bill'
+        AND dl.sourceId = other_party_bills.billNo
+      WHERE other_party_bills.orgId = ?`;
   const binds: (string)[] = [orgId];
-  if (partyId) { q += " AND partyId = ?"; binds.push(partyId); }
-  if (type === "DEBTOR" || type === "CREDITOR") { q += " AND partyType = ?"; binds.push(type); }
+  if (partyId) { q += " AND other_party_bills.partyId = ?"; binds.push(partyId); }
+  if (type === "DEBTOR" || type === "CREDITOR") { q += " AND other_party_bills.partyType = ?"; binds.push(type); }
+  q += " AND (dl.state IS NULL OR dl.state <> 'DELETED')";
   q += " ORDER BY billDate DESC, billNo DESC";
 
-  const billsRes = await c.var.DB.prepare(q).bind(...binds).all<OtherPartyBillRow>();
+  const billsRes = await c.var.DB.prepare(q).bind(...binds).all<OtherPartyBillRow & { lifecycleState: string | null }>();
   const bills = billsRes.results ?? [];
 
   const itemsByBill = new Map<string, OtherPartyBillItemRow[]>();
@@ -2572,6 +2580,7 @@ app.get("/other-party-bills", async (c) => {
     paidAmountSen: b.paidAmountSen,
     outstandingSen: b.totalSen - b.paidAmountSen,
     status: b.status,
+    lifecycleState: b.lifecycleState ?? "ACTIVE",
     items: (itemsByBill.get(b.id) ?? []).map((i) => ({
       counterAccount: i.counterAccount,
       amountSen: i.amountSen,
@@ -2595,54 +2604,50 @@ app.delete("/other-party-bills/:billNo", async (c) => {
   if (bill.paidAmountSen > 0)
     return c.json({ success: false, error: "Bill has payments — void via settlement (D2), cannot delete" }, 400);
 
-  const itemsRes = await c.var.DB.prepare(
-    "SELECT * FROM other_party_bill_items WHERE billId = ? ORDER BY lineNo",
-  ).bind(bill.id).all<OtherPartyBillItemRow>();
-  const items: BillItemInput[] = (itemsRes.results ?? []).map((i) => ({
-    counterAccount: i.counterAccount,
-    amountSen: i.amountSen,
-    description: i.description ?? "",
-  }));
-
   const actorUserId =
     (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
 
-  const statements: D1PreparedStatement[] = [];
+  // Soft delete: keep the row, build the reversal + state=DELETED via the lifecycle helper.
+  let lc: { statements: D1PreparedStatement[]; newState: string };
   try {
-    if (!(await ledgerHasSource(c.var.DB, orgId, "other_party_bill_void", billNo))) {
-      const original = buildBillLegs({
-        partyType: bill.partyType as PartyType,
-        billNo: bill.billNo,
-        partyName: bill.partyName,
-        items,
-        taxSen: bill.taxSen,
-      });
-      const legs: LedgerEntryInput[] = reverseLegs(original).map((l) => ({
-        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-        sourceType: "other_party_bill_void",
-        sourceId: billNo,
-        legNo: l.legNo,
-        accountCode: l.accountCode,
-        debitSen: l.debitSen,
-        creditSen: l.creditSen,
-        description: l.description,
-        actorUserId,
-        orgId,
-      }));
-      const { statements: ledgerStmts } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
-      statements.push(...ledgerStmts);
-    }
+    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: ["other_party_bill"], voidSourceType: "other_party_bill_void", sourceId: billNo, action: "delete", actorUserId, descriptionTag: `DELETE · ${billNo}` });
   } catch (e) {
-    console.error(`[ledger] other_party_bill ${billNo} void GL build failed — aborting:`, e);
-    return c.json({ success: false, error: "Failed to build the ledger reversal — nothing was saved." }, 500);
+    console.error(`[ledger] other_party_bill ${billNo} delete lifecycle build failed — aborting:`, e);
+    return c.json({ success: false, error: (e as Error).message }, 400);
   }
-
-  statements.push(
-    c.var.DB.prepare("DELETE FROM other_party_bill_items WHERE billId = ?").bind(bill.id),
-    c.var.DB.prepare("DELETE FROM other_party_bills WHERE id = ?").bind(bill.id),
-  );
-  await c.var.DB.batch(statements);
+  await c.var.DB.batch(lc.statements);
   return c.json({ success: true });
+});
+
+app.post("/other-party-bills/:billNo/lifecycle", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const billNo = c.req.param("billNo");
+  let action: "void" | "delete" | "unvoid";
+  try { action = ((await c.req.json()) as { action: string }).action as typeof action; } catch { return c.json({ success: false, error: "Invalid body" }, 400); }
+  if (!["void", "delete", "unvoid"].includes(action)) return c.json({ success: false, error: "action must be void|delete|unvoid" }, 400);
+
+  const bill = await c.var.DB.prepare(
+    "SELECT * FROM other_party_bills WHERE billNo = ? AND orgId = ?",
+  ).bind(billNo, orgId).first<OtherPartyBillRow>();
+  if (!bill) return c.json({ success: false, error: "Bill not found" }, 404);
+
+  // Payment guard: blocks void/delete while there are active payments; unvoid is exempt.
+  if (action !== "unvoid" && bill.paidAmountSen > 0)
+    return c.json({ success: false, error: "Bill has active payments — void the settlement (D2) first." }, 400);
+
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  let lc: { statements: D1PreparedStatement[]; newState: string };
+  try {
+    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: ["other_party_bill"], voidSourceType: "other_party_bill_void", sourceId: billNo, action, actorUserId, descriptionTag: `${action.toUpperCase()} · ${billNo}` });
+  } catch (e) { return c.json({ success: false, error: (e as Error).message }, 400); }
+
+  // No status-column change: other_party_bills.status carries payment progress
+  // (OPEN/PARTIAL_PAID/PAID); lifecycle state lives in document_lifecycle.
+  await c.var.DB.batch(lc.statements);
+  return c.json({ success: true, data: { state: lc.newState } });
 });
 
 // ---------------------------------------------------------------------------

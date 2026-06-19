@@ -1,7 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { DeliveryOrder } from "@/lib/mock-data";
-import { addHookkaLetterhead } from "@/lib/pdf-utils";
+import { drawLetterhead } from "@/lib/pdf-utils";
 
 function fmtDate(iso: string): string {
   if (!iso) return "-";
@@ -17,37 +17,14 @@ export function generatePackingListPdf(order: DeliveryOrder) {
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const margin = 15;
-  let y = margin;
 
-  // --- Header (compact) ---
-  addHookkaLetterhead(doc, margin, 6, 8);
-  const textX = margin + 21;
-
-  doc.setTextColor(0, 0, 0);
-  doc.setFontSize(13);
-  doc.setFont("helvetica", "bold");
-  doc.text("PACKING LIST", textX, 12);
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  doc.text("HOOKKA INDUSTRIES SDN BHD", textX, 17);
-
-  // DO reference on right
-  doc.setFontSize(12);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text(order.doNo, pageW - margin, 12, { align: "right" });
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  doc.text(`SO: ${order.companySOId || "-"}`, pageW - margin, 18, { align: "right" });
-
-  // Divider line
-  doc.setDrawColor(180, 180, 180);
-  doc.setLineWidth(0.5);
-  doc.line(margin, 22, pageW - margin, 22);
-
-  y = 28;
+  // --- Header (shared letterhead — single source of truth across all docs) ---
+  let y = drawLetterhead(doc, {
+    docTitle: "PACKING LIST",
+    docNo: order.doNo,
+    statusText: `SO: ${order.companySOId || "-"}`,
+    company: "HOOKKA",
+  });
   doc.setTextColor(31, 29, 27);
 
   // --- Quick Info Row ---

@@ -6,7 +6,7 @@ import {
   fmtRM,
   fmtDate,
   amountInWords,
-  addHookkaLetterhead,
+  drawLetterhead,
 } from "@/lib/pdf-utils";
 
 // Read-only print enrichment from GET /api/invoices/:id/print-extras.
@@ -229,38 +229,21 @@ function buildInvoiceDoc(
 
   const HEADER_BOTTOM = 72;
   const drawHeader = () => {
-    // --- B/W letterhead: logo left, company block beside, title right ---
-    addHookkaLetterhead(doc, m, 12, 12);
-    const tx = m + 12 * (2038 / 907) + 5;
-    doc.setTextColor(...INK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(13);
-    doc.text(companyName, tx, 16);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(6.8);
-    doc.setTextColor(...FAINT);
-    doc.text(`Reg. ${co.regNo}   |   TIN ${co.tin}`, tx, 20.5);
-    doc.text(co.address, tx, 24);
-    doc.text(`Tel ${co.phone}   |   ${co.email}`, tx, 27.5);
-
-    doc.setTextColor(...INK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(17);
-    doc.text("INVOICE", pageW - m, 17, { align: "right" });
-    doc.setFontSize(10.5);
-    doc.text(`No. ${invoice.invoiceNo || "-"}`, pageW - m, 23, {
-      align: "right",
+    // --- Shared letterhead (single source of truth across all docs) ---
+    drawLetterhead(doc, {
+      docTitle: "INVOICE",
+      docNo: `No. ${invoice.invoiceNo || "-"}`,
+      docDate,
+      statusText: terms,
+      companyInfo: {
+        name: companyName,
+        regNo: co.regNo,
+        tin: co.tin,
+        address: co.address,
+        phone: co.phone,
+        email: co.email,
+      },
     });
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.setTextColor(...FAINT);
-    doc.text(`${docDate}   |   ${terms}`, pageW - m, 27.5, {
-      align: "right",
-    });
-
-    doc.setDrawColor(...RULE);
-    doc.setLineWidth(0.5);
-    doc.line(m, 31, pageW - m, 31);
 
     // --- Reference block ---
     const labelW = 23;

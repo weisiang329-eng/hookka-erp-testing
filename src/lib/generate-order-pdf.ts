@@ -19,7 +19,7 @@ import {
   fmtCurrency as fmtRM,
   fmtDate,
   amountInWords,
-  addHookkaLetterhead,
+  drawLetterhead,
 } from "@/lib/pdf-utils";
 
 const CO = COMPANY.HOOKKA;
@@ -91,58 +91,18 @@ export function generateOrderPdf(
   const ph = doc.internal.pageSize.getHeight(); // 297
   const m = 12; // margin
   const cw = pw - m * 2; // content width
-  let y = 10;
 
   // Resolve hub for delivery address
   const hub = customer?.deliveryHubs?.find(h => h.state === order.customerState)
     || customer?.deliveryHubs?.find(h => h.isDefault)
     || customer?.deliveryHubs?.[0];
 
-  // ===== HEADER =====
-  // Logo (left of company text)
-  addHookkaLetterhead(doc, m, y - 2, 9);
-  const cx = m + 23;
-
-  // Company name (left)
-  doc.setFontSize(10);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text(CO.name, cx, y + 5);
-
-  // Reg no
-  doc.setFontSize(7);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  doc.text(`(${CO.regNo})`, cx, y + 9);
-
-  // Address lines
-  doc.setFontSize(6.5);
-  doc.setTextColor(100, 100, 100);
-  let ay = y + 12.5;
-  for (const line of CO.addressLines) {
-    doc.text(line, cx, ay);
-    ay += 3;
-  }
-  doc.text(`Tel: ${CO.phone}  |  Email: ${CO.email}`, cx, ay);
-
-  // Title (right)
-  doc.setFontSize(18);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text(variant.title, pw - m, y + 6, { align: "right" });
-
-  // Document Number
-  doc.setFontSize(11);
-  doc.text(variant.documentNumber, pw - m, y + 13, { align: "right" });
-
-  // Double line separator
-  y = 32;
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.5);
-  doc.line(m, y, pw - m, y);
-  doc.setLineWidth(0.15);
-  doc.line(m, y + 1, pw - m, y + 1);
-  y += 4;
+  // ===== HEADER (shared letterhead — single source of truth across all docs) =====
+  let y = drawLetterhead(doc, {
+    docTitle: variant.title,
+    docNo: variant.documentNumber,
+    company: "HOOKKA",
+  });
 
   // ===== ROW: Customer (left) + Order Details (right) =====
   const halfW = (cw - 4) / 2;

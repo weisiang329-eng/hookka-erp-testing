@@ -1,7 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
-import { fmtRM, fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
+import { fmtRM, fmtDate, drawLetterhead } from "@/lib/pdf-utils";
 
 // Fixed seat-height set the sales team quotes against. Keep ordered
 // so columns line up the same way across every quotation (matches the
@@ -118,45 +118,14 @@ export default function generateCustomerQuotationPdf(args: QuotationArgs): jsPDF
   const today = new Date().toISOString();
 
   // =========================================================================
-  // 1. COMPANY HEADER (logo + legal text)
+  // 1. HEADER (shared letterhead — single source of truth across all docs)
   // =========================================================================
-  addHookkaLetterhead(doc, margin, 5, 10);
-  const textX = margin + 26;
-
-  doc.setTextColor(0, 0, 0);
-  doc.setFontSize(11);
-  doc.setFont("helvetica", "bold");
-  doc.text(co.name, textX, 12);
-
-  doc.setFontSize(7.5);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  doc.text(`Reg No: ${co.regNo}`, textX, 17);
-  doc.text(co.address, textX, 22);
-  doc.text(`Tel: ${co.phone}`, textX, 27);
-
-  // =========================================================================
-  // 2. QUOTATION TITLE (right side)
-  // =========================================================================
-  doc.setFontSize(20);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("QUOTATION", pageW - margin, 14, { align: "right" });
-
-  doc.setFontSize(11);
-  doc.setFont("helvetica", "normal");
-  doc.text(customer.name, pageW - margin, 22, { align: "right" });
-
-  doc.setFontSize(8);
-  doc.setTextColor(80, 80, 80);
-  doc.text(fmtDate(today), pageW - margin, 28, { align: "right" });
-
-  // Divider
-  doc.setDrawColor(180, 180, 180);
-  doc.setLineWidth(0.5);
-  doc.line(margin, 32, pageW - margin, 32);
-
-  let y = 40;
+  let y = drawLetterhead(doc, {
+    docTitle: "QUOTATION",
+    docNo: customer.name,
+    docDate: fmtDate(today),
+    company: "HOOKKA",
+  });
   doc.setTextColor(31, 29, 27);
 
   // =========================================================================

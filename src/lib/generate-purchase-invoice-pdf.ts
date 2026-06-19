@@ -1,6 +1,6 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { addHookkaLetterhead } from "@/lib/pdf-utils";
+import { drawLetterhead } from "@/lib/pdf-utils";
 import { COMPANY } from "@/lib/constants";
 import type { LetterheadInfo } from "@/lib/generate-purchase-order-pdf";
 
@@ -76,53 +76,24 @@ export function generatePurchaseInvoicePdf(
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
   const margin = 15;
-  let y = margin;
 
-  // --- Header ---
-  if (isHookkaLetterhead) {
-    addHookkaLetterhead(doc, margin, 5, 10);
-  }
-  const textX = isHookkaLetterhead ? margin + 26 : margin;
-
-  doc.setTextColor(0, 0, 0);
-  doc.setFontSize(12);
-  doc.setFont("helvetica", "bold");
-  doc.text(co.name, textX, 14);
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  if (co.tagline) {
-    doc.text(co.tagline, textX, 20);
-  }
-  const contactLine = [
-    co.phone ? `Tel: ${co.phone}` : "",
-    co.email ? `Email: ${co.email}` : "",
-  ]
-    .filter(Boolean)
-    .join("  |  ");
-  if (contactLine) {
-    doc.text(contactLine, textX, 25);
-  }
-
-  // Title on right
-  doc.setFontSize(14);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("PURCHASE INVOICE", pageW - margin, 14, { align: "right" });
-  doc.setFontSize(11);
-  doc.text(pi.piNo, pageW - margin, 22, { align: "right" });
-
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(80, 80, 80);
-  doc.text(`Status: ${pi.status.replace(/_/g, " ")}`, pageW - margin, 28, { align: "right" });
-
-  // Divider
-  doc.setDrawColor(180, 180, 180);
-  doc.setLineWidth(0.5);
-  doc.line(margin, 32, pageW - margin, 32);
-
-  y = 38;
+  // --- Header (shared letterhead — single source of truth across all docs).
+  // Logo is skipped for sister companies so we don't mis-brand OHANA/HOUZS. ---
+  let y = drawLetterhead(doc, {
+    docTitle: "PURCHASE INVOICE",
+    docNo: pi.piNo,
+    docDate: fmtDate(pi.invoiceDate),
+    statusText: `Status: ${pi.status.replace(/_/g, " ")}`,
+    logo: isHookkaLetterhead,
+    companyInfo: {
+      name: co.name,
+      regNo: co.regNo ?? "",
+      tin: co.tin ?? "",
+      address: co.address ?? "",
+      phone: co.phone ?? "",
+      email: co.email ?? "",
+    },
+  });
   doc.setTextColor(31, 29, 27);
 
   const colLeft = margin;
@@ -153,7 +124,7 @@ export function generatePurchaseInvoicePdf(
   }
 
   // Right column - Invoice info
-  let yRight = 38;
+  let yRight = y;
   doc.setFontSize(9);
   doc.setFont("helvetica", "bold");
   doc.setTextColor(0, 0, 0);

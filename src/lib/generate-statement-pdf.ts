@@ -1,7 +1,10 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { addHookkaLetterhead } from "@/lib/pdf-utils";
 import { COMPANY } from "@/lib/constants";
+import { fmtDate, drawLetterhead } from "@/lib/pdf-utils";
+
+// Company name for the footer line (the header now comes from drawLetterhead).
+const COMPANY_NAME = COMPANY.HOOKKA.name;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -15,25 +18,6 @@ function fmtCurrencyPlain(sen: number): string {
   return (sen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function fmtDate(iso: string): string {
-  if (!iso) return "-";
-  const d = new Date(iso);
-  return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" });
-}
-
-// ---------------------------------------------------------------------------
-// Company constants
-// ---------------------------------------------------------------------------
-
-// Single source of truth — was hardcoded to a WRONG Penang entity (placeholder
-// reg/address/phone), printing the wrong legal company on statements. Use the
-// real HOOKKA constant.
-const COMPANY_NAME = COMPANY.HOOKKA.name;
-const COMPANY_REG = COMPANY.HOOKKA.regNo;
-const COMPANY_ADDRESS = COMPANY.HOOKKA.address;
-const COMPANY_TEL = COMPANY.HOOKKA.phone;
-const COMPANY_FAX = "";
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -44,40 +28,15 @@ export function generateStatementPdf(data: any) {
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
   const margin = 15;
-  let y = margin;
 
-  // --- Company Header (logo + legal text) ---
-  addHookkaLetterhead(doc, margin, y - 10, 10);
-  const textX = margin + 26;
-
-  doc.setFontSize(11);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(31, 29, 27);
-  doc.text(COMPANY_NAME, textX, y);
-  y += 5;
-
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  doc.text(`Reg No: ${COMPANY_REG}`, textX, y);
-  y += 4;
-  doc.text(COMPANY_ADDRESS, textX, y, { maxWidth: pageW / 2 - 10 });
-  y += 8;
-  doc.text(`Tel: ${COMPANY_TEL}  |  Fax: ${COMPANY_FAX}`, textX, y);
-  y += 2;
-
-  // Title
-  doc.setFontSize(18);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(31, 29, 27);
-  doc.text("STATEMENT OF ACCOUNT", pageW - margin, margin + 2, { align: "right" });
-
-  // Divider
-  y += 3;
-  doc.setDrawColor(180, 180, 180);
-  doc.setLineWidth(0.5);
-  doc.line(margin, y, pageW - margin, y);
-  y += 6;
+  // --- Header (shared letterhead — single source of truth across all docs) ---
+  let y = drawLetterhead(doc, {
+    docTitle: "STATEMENT OF ACCOUNT",
+    docNo: data.accountNo ?? "",
+    docDate: fmtDate(data.statementDate),
+    statusText: data.period ?? undefined,
+    company: "HOOKKA",
+  });
 
   // --- Two columns ---
   const colLeft = margin;

@@ -1,7 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable, { type RowInput } from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
-import { fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
+import { fmtDate, drawLetterhead } from "@/lib/pdf-utils";
 // REUSE the DO PDF's exported formatting helpers so the two documents render
 // the SAME per-item detail and can never drift (CN/DO FE parity P3): the
 // stacked build-spec Description cell (describe), the "1 HB + 2 DIVAN" pieces
@@ -117,36 +117,21 @@ export function renderCnInto(doc: jsPDF, data: CNPdfData) {
   // an extra State line and the right column a Transport Co. line.
   const HEADER_BOTTOM = 76;
   const drawHeader = () => {
-    // --- B/W letterhead: logo left, company block beside, title right ---
-    addHookkaLetterhead(doc, m, 12, 12);
-    const tx = m + 12 * (2038 / 907) + 5;
-    doc.setTextColor(...INK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(13);
-    doc.text(co.name, tx, 16);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(6.8);
-    doc.setTextColor(...FAINT);
-    doc.text(`Reg. ${co.regNo}   |   TIN ${co.tin}`, tx, 20.5);
-    doc.text(co.address, tx, 24);
-    doc.text(`Tel ${co.phone}   |   ${co.email}`, tx, 27.5);
-
-    doc.setTextColor(...INK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(17);
-    doc.text("CONSIGNMENT NOTE", pageW - m, 17, { align: "right" });
-    doc.setFontSize(10.5);
-    doc.text(`No. ${data.cnNo}`, pageW - m, 23, { align: "right" });
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.setTextColor(...FAINT);
-    doc.text(`${docDate}   |   CONSIGNMENT`, pageW - m, 27.5, {
-      align: "right",
+    // --- Shared letterhead (single source of truth across all docs) ---
+    drawLetterhead(doc, {
+      docTitle: "CONSIGNMENT NOTE",
+      docNo: `No. ${data.cnNo}`,
+      docDate,
+      statusText: "CONSIGNMENT",
+      companyInfo: {
+        name: co.name,
+        regNo: co.regNo,
+        tin: co.tin,
+        address: co.address,
+        phone: co.phone,
+        email: co.email,
+      },
     });
-
-    doc.setDrawColor(...RULE);
-    doc.setLineWidth(0.5);
-    doc.line(m, 31, pageW - m, 31);
 
     // --- Reference block ---
     const labelW = 23;
@@ -532,39 +517,21 @@ function renderCnPackingSummary(doc: jsPDF, cns: CNPdfData[]) {
   const m = 14;
   const co = COMPANY.HOOKKA;
 
-  // --- Letterhead — same block the CN document header draws ---
-  addHookkaLetterhead(doc, m, 12, 12);
-  const tx = m + 12 * (2038 / 907) + 5;
-  doc.setTextColor(...INK);
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(13);
-  doc.text(co.name, tx, 16);
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(6.8);
-  doc.setTextColor(...FAINT);
-  doc.text(`Reg. ${co.regNo}   |   TIN ${co.tin}`, tx, 20.5);
-  doc.text(co.address, tx, 24);
-  doc.text(`Tel ${co.phone}   |   ${co.email}`, tx, 27.5);
-
-  doc.setTextColor(...INK);
-  doc.setFont("helvetica", "bold");
-  // 14.5pt (the CN doc title runs 17): this title is 8 characters longer
-  // and must still clear the company-name block on the same header band.
-  doc.setFontSize(14.5);
-  doc.text("CONSIGNMENT PACKING LIST", pageW - m, 17, { align: "right" });
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(7.5);
-  doc.setTextColor(...FAINT);
-  doc.text(
-    `${cns.length} CN${cns.length === 1 ? "" : "s"}   |   Printed ${fmtDate(new Date().toISOString())}`,
-    pageW - m,
-    23,
-    { align: "right" },
-  );
-
-  doc.setDrawColor(...RULE);
-  doc.setLineWidth(0.5);
-  doc.line(m, 31, pageW - m, 31);
+  // --- Shared letterhead (single source of truth across all docs) — same
+  // block every CN/DO document header draws. ---
+  const bodyY = drawLetterhead(doc, {
+    docTitle: "CONSIGNMENT PACKING LIST",
+    docNo: "",
+    docDate: `${cns.length} CN${cns.length === 1 ? "" : "s"}   |   Printed ${fmtDate(new Date().toISOString())}`,
+    companyInfo: {
+      name: co.name,
+      regNo: co.regNo,
+      tin: co.tin,
+      address: co.address,
+      phone: co.phone,
+      email: co.email,
+    },
+  });
 
   // One line per CN; grand totals use the same qty / m³ math as the CN
   // items-table footer so cover and per-CN documents always agree.
@@ -591,7 +558,7 @@ function renderCnPackingSummary(doc: jsPDF, cns: CNPdfData[]) {
   });
 
   autoTable(doc, {
-    startY: 38,
+    startY: bodyY,
     head: [
       [
         { content: "#", styles: { halign: "center" } },

@@ -1,13 +1,10 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
-import { fmtRM as fmtCurrency, fmtDate, amountInWords, addHookkaLetterhead } from "@/lib/pdf-utils";
+import { fmtRM as fmtCurrency, fmtDate, amountInWords, drawLetterhead } from "@/lib/pdf-utils";
 
+// Company name for the signature / footer lines (header now via drawLetterhead).
 const COMPANY_NAME = COMPANY.HOOKKA.name;
-const COMPANY_REG = COMPANY.HOOKKA.regNo;
-const COMPANY_ADDRESS = COMPANY.HOOKKA.address;
-const COMPANY_TEL = COMPANY.HOOKKA.phone;
-const COMPANY_FAX = "";
 
 // ---------------------------------------------------------------------------
 // Main
@@ -25,40 +22,14 @@ export function generateCreditNotePdf(
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
   const margin = 15;
-  let y = margin;
 
-  // --- Company Header (logo + legal text) ---
-  addHookkaLetterhead(doc, margin, y - 10, 10);
-  const textX = margin + 26;
-
-  doc.setFontSize(11);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(31, 29, 27);
-  doc.text(COMPANY_NAME, textX, y);
-  y += 5;
-
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  doc.text(`Reg No: ${COMPANY_REG}`, textX, y);
-  y += 4;
-  doc.text(COMPANY_ADDRESS, textX, y, { maxWidth: pageW / 2 - 10 });
-  y += 8;
-  doc.text(`Tel: ${COMPANY_TEL}  |  Fax: ${COMPANY_FAX}`, textX, y);
-  y += 2;
-
-  // Title
-  doc.setFontSize(20);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(31, 29, 27);
-  doc.text("CREDIT NOTE", pageW - margin, margin + 2, { align: "right" });
-
-  // Divider
-  y += 3;
-  doc.setDrawColor(180, 180, 180);
-  doc.setLineWidth(0.5);
-  doc.line(margin, y, pageW - margin, y);
-  y += 6;
+  // --- Header (shared letterhead — single source of truth across all docs) ---
+  let y = drawLetterhead(doc, {
+    docTitle: "CREDIT NOTE",
+    docNo: data.cnNo ?? "-",
+    docDate: fmtDate(data.date),
+    company: "HOOKKA",
+  });
 
   // --- Two columns ---
   const colLeft = margin;

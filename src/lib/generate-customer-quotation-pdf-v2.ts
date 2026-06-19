@@ -21,7 +21,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
-import { fmtRM, fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
+import { fmtRM, fmtDate, drawLetterhead } from "@/lib/pdf-utils";
 
 // ---------------------------------------------------------------------------
 // Envelope types — must match the GET /api/customer-quotation response.
@@ -229,54 +229,29 @@ export default function generateCustomerQuotationPdfV2(
   //    so Wei Siang can chop the bedframe pages and hand the SOFA pages out
   //    standalone with their own letterhead.)
   // -------------------------------------------------------------------------
-  function renderLetterhead() {
-    try {
-      addHookkaLetterhead(doc, margin, 5, 11);
-    } catch {
-      // Logo asset missing in some build modes — ignore so the PDF still renders.
-    }
-    const textX = margin + 28;
-
-    doc.setTextColor(0, 0, 0);
-    doc.setFontSize(11);
-    doc.setFont("helvetica", "bold");
-    doc.text(letterhead.name, textX, 12);
-
-    doc.setFontSize(7.5);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(80, 80, 80);
-    let lhY = 17;
-    for (const line of letterhead.addressLines) {
-      doc.text(line, textX, lhY);
-      lhY += 3.5;
-    }
-    doc.text(`Tel: ${letterhead.phone}  |  Email: ${letterhead.email}`, textX, lhY);
-    lhY += 3.5;
-    doc.text(
-      `SSM: ${letterhead.ssmNo}  |  TIN: ${letterhead.taxNo}`,
-      textX,
-      lhY,
-    );
-
-    doc.setFontSize(20);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(0, 0, 0);
-    doc.text("QUOTATION", pageW - margin, 14, { align: "right" });
-
-    doc.setFontSize(8);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(80, 80, 80);
-    doc.text(`Effective: ${fmtDate(asOf)}`, pageW - margin, 21, { align: "right" });
-    doc.text(`Generated: ${fmtDate(today)}`, pageW - margin, 25, { align: "right" });
-    doc.text(`Customer: ${customer.code}`, pageW - margin, 29, { align: "right" });
-
-    doc.setDrawColor(180, 180, 180);
-    doc.setLineWidth(0.5);
-    doc.line(margin, 35, pageW - margin, 35);
+  // Shared letterhead — single source of truth across all docs. Returns the
+  // body-start Y so each call site continues from the same place. The asOf /
+  // generated dates ride along as the right-side meta; the customer code is
+  // the document number slot.
+  function renderLetterhead(): number {
+    return drawLetterhead(doc, {
+      docTitle: "QUOTATION",
+      docNo: `Customer: ${customer.code}`,
+      docDate: `Effective: ${fmtDate(asOf)}`,
+      statusText: `Generated: ${fmtDate(today)}`,
+      logo: true,
+      companyInfo: {
+        name: letterhead.name,
+        regNo: letterhead.ssmNo,
+        tin: letterhead.taxNo,
+        address: letterhead.addressLines.join(", "),
+        phone: letterhead.phone,
+        email: letterhead.email,
+      },
+    });
   }
 
-  renderLetterhead();
-  let y = 42;
+  let y = renderLetterhead();
   doc.setTextColor(31, 29, 27);
 
   // -------------------------------------------------------------------------
@@ -387,8 +362,7 @@ export default function generateCustomerQuotationPdfV2(
       // pages can be detached and the SOFA pages handed out standalone.
       if (cat === "SOFA") {
         doc.addPage();
-        renderLetterhead();
-        y = 42;
+        y = renderLetterhead();
       }
 
       ensureRoom(20);
@@ -713,8 +687,7 @@ export default function generateCustomerQuotationPdfV2(
   // so the bedframe / sofa / config portions can each be detached and handed
   // out standalone. — Wei Siang 2026-05-09
   doc.addPage();
-  renderLetterhead();
-  y = 42;
+  y = renderLetterhead();
 
   sectionHeader(
     "Customer Maintenance Config",

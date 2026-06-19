@@ -1,6 +1,6 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { addHookkaLetterhead } from "@/lib/pdf-utils";
+import { drawLetterhead } from "@/lib/pdf-utils";
 import { COMPANY } from "@/lib/constants";
 import type { LetterheadInfo } from "@/lib/generate-purchase-order-pdf";
 
@@ -88,42 +88,24 @@ export function generateSupplierQuotationPdf(
   const pageH = doc.internal.pageSize.getHeight();
   const margin = 15;
 
-  // --- Header ---
-  if (isHookka) addHookkaLetterhead(doc, margin, 5, 10);
-  const textX = isHookka ? margin + 26 : margin;
-  doc.setTextColor(0, 0, 0);
-  doc.setFontSize(12);
-  doc.setFont("helvetica", "bold");
-  doc.text(co.name, textX, 14);
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  if (co.tagline) doc.text(co.tagline, textX, 20);
-  const contact = [co.phone ? `Tel: ${co.phone}` : "", co.email ? `Email: ${co.email}` : ""]
-    .filter(Boolean)
-    .join("  |  ");
-  if (contact) doc.text(contact, textX, 25);
-
-  doc.setFontSize(14);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("SUPPLIER QUOTATION", pageW - margin, 14, { align: "right" });
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  doc.text(
-    `Generated: ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`,
-    pageW - margin,
-    20,
-    { align: "right" },
-  );
-
-  doc.setDrawColor(180, 180, 180);
-  doc.setLineWidth(0.5);
-  doc.line(margin, 32, pageW - margin, 32);
+  // --- Header (shared letterhead — single source of truth across all docs).
+  // Logo is skipped for sister companies so we don't mis-brand OHANA/HOUZS. ---
+  let y = drawLetterhead(doc, {
+    docTitle: "SUPPLIER QUOTATION",
+    docNo: "",
+    docDate: `Generated: ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`,
+    logo: isHookka,
+    companyInfo: {
+      name: co.name,
+      regNo: co.regNo ?? "",
+      tin: co.tin ?? "",
+      address: co.address ?? "",
+      phone: co.phone ?? "",
+      email: co.email ?? "",
+    },
+  });
 
   // --- Supplier block ---
-  let y = 40;
   doc.setFontSize(9);
   doc.setFont("helvetica", "bold");
   doc.setTextColor(0, 0, 0);

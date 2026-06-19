@@ -2,7 +2,7 @@ import jsPDF from "jspdf";
 import autoTable, { type RowInput } from "jspdf-autotable";
 import type { DeliveryOrder } from "@/lib/mock-data";
 import { COMPANY } from "@/lib/constants";
-import { fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
+import { fmtDate, drawLetterhead } from "@/lib/pdf-utils";
 // Shared DO line ordering (customer PO ascending, blanks last, then SO).
 // Lives in its own dependency-free module so the page can import the same
 // comparator without pulling jsPDF into the page bundle.
@@ -344,8 +344,6 @@ export function renderDoInto(
 
   const HEADER_BOTTOM = 72;
   const drawHeader = () => {
-    // --- B/W letterhead: logo left, company block beside, title right ---
-    addHookkaLetterhead(doc, m, 12, 12);
     // Consolidated packing list: tag each DO with its stop number (1, 2, 3…).
     if (opts?.seq) {
       doc.setFont("helvetica", "bold");
@@ -358,32 +356,21 @@ export function renderDoInto(
         { align: "right" },
       );
     }
-    const tx = m + 12 * (2038 / 907) + 5;
-    doc.setTextColor(...INK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(13);
-    doc.text(co.name, tx, 16);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(6.8);
-    doc.setTextColor(...FAINT);
-    doc.text(`Reg. ${co.regNo}   |   TIN ${co.tin}`, tx, 20.5);
-    doc.text(co.address, tx, 24);
-    doc.text(`Tel ${co.phone}   |   ${co.email}`, tx, 27.5);
-
-    doc.setTextColor(...INK);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(17);
-    doc.text("DELIVERY ORDER", pageW - m, 17, { align: "right" });
-    doc.setFontSize(10.5);
-    doc.text(`No. ${order.doNo}`, pageW - m, 23, { align: "right" });
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.setTextColor(...FAINT);
-    doc.text(`${docDate}   |   C.O.D.`, pageW - m, 27.5, { align: "right" });
-
-    doc.setDrawColor(...RULE);
-    doc.setLineWidth(0.5);
-    doc.line(m, 31, pageW - m, 31);
+    // --- Shared letterhead (single source of truth across all docs) ---
+    drawLetterhead(doc, {
+      docTitle: "DELIVERY ORDER",
+      docNo: `No. ${order.doNo}`,
+      docDate,
+      statusText: "C.O.D.",
+      companyInfo: {
+        name: co.name,
+        regNo: co.regNo,
+        tin: co.tin,
+        address: co.address,
+        phone: co.phone,
+        email: co.email,
+      },
+    });
 
     // --- Reference block ---
     const labelW = 23;
@@ -825,40 +812,20 @@ function renderPackingSummary(
     deliveryAddress?: string;
   })[];
 
-  // --- Header ---
-  addHookkaLetterhead(doc, m, 12, 12);
-  const tx = m + 12 * (2038 / 907) + 5;
-  doc.setTextColor(...INK);
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(13);
-  doc.text(co.name, tx, 16);
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(6.8);
-  doc.setTextColor(...FAINT);
-  doc.text(`Reg. ${co.regNo}   |   TIN ${co.tin}`, tx, 20.5);
-  doc.text(co.address, tx, 24);
-
-  doc.setTextColor(...INK);
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(17);
-  doc.text("PACKING LIST", pageW - m, 15, { align: "right" });
-  if (packingNo) {
-    doc.setFontSize(11);
-    doc.text(`No. ${packingNo}`, pageW - m, 21, { align: "right" });
-  }
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(7.5);
-  doc.setTextColor(...FAINT);
-  doc.text(
-    `Delivery Run Manifest  ·  ${fmtDate(new Date().toISOString())}`,
-    pageW - m,
-    packingNo ? 26 : 21,
-    { align: "right" },
-  );
-
-  doc.setDrawColor(...RULE);
-  doc.setLineWidth(0.5);
-  doc.line(m, 31, pageW - m, 31);
+  // --- Header (shared letterhead — single source of truth across all docs) ---
+  const bodyY = drawLetterhead(doc, {
+    docTitle: "PACKING LIST",
+    docNo: packingNo ? `No. ${packingNo}` : "",
+    docDate: `Delivery Run Manifest  ·  ${fmtDate(new Date().toISOString())}`,
+    companyInfo: {
+      name: co.name,
+      regNo: co.regNo,
+      tin: co.tin,
+      address: co.address,
+      phone: co.phone,
+      email: co.email,
+    },
+  });
 
   // --- Run totals ---
   const uniq = (vals: (string | undefined)[]) =>
@@ -913,7 +880,7 @@ function renderPackingSummary(
     g.dos.push(o);
   }
 
-  let y = 38;
+  let y = bodyY;
   const colW = (pageW - 2 * m) / 4;
   const kv = (label: string, val: string, x: number, yy: number) => {
     doc.setFont("helvetica", "normal");

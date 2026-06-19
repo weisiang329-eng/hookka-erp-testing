@@ -476,6 +476,7 @@
   "legHeightInches": "leg_height_inches",
   "legNo": "leg_no",
   "legPriceSen": "leg_price_sen",
+  "lifecycleState": "lifecycle_state",
   "lineIndex": "line_index",
   "lineNo": "line_no",
   "lineOrder": "line_order",

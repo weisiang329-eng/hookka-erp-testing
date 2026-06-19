@@ -5385,7 +5385,14 @@ app.get("/official-receipts", async (c) => {
   try {
     const [orRes, lineRes] = await Promise.all([
       c.var.DB.prepare(
-        `SELECT * FROM official_receipts ORDER BY date DESC, orNo DESC LIMIT 500`,
+        `SELECT official_receipts.*, dl.state AS lifecycleState
+         FROM official_receipts
+         LEFT JOIN document_lifecycle dl
+           ON dl.orgId = official_receipts.orgId
+          AND dl.sourceType = 'official_receipt'
+          AND dl.sourceId = official_receipts.id
+         WHERE (dl.state IS NULL OR dl.state <> 'DELETED')
+         ORDER BY date DESC, orNo DESC LIMIT 500`,
       ).all(),
       c.var.DB.prepare(
         `SELECT * FROM official_receipt_lines ORDER BY lineOrder`,
@@ -5541,6 +5548,35 @@ app.post("/official-receipts/:id/void", async (c) => {
     ...ledgerStmts,
   ]);
   return c.json({ success: true });
+});
+
+app.post("/official-receipts/:id/lifecycle", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+  let action: "void" | "delete" | "unvoid";
+  try { action = ((await c.req.json()) as { action: string }).action as typeof action; } catch { return c.json({ success: false, error: "Invalid body" }, 400); }
+  if (!["void", "delete", "unvoid"].includes(action)) return c.json({ success: false, error: "action must be void|delete|unvoid" }, 400);
+
+  const orRow = await c.var.DB.prepare("SELECT id, orNo, status FROM official_receipts WHERE id = ? AND orgId = ?").bind(id, orgId).first<{ id: string; orNo: string; status: string }>();
+  if (!orRow) return c.json({ success: false, error: "Receipt not found" }, 404);
+
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  let lc: { statements: D1PreparedStatement[]; newState: string };
+  try {
+    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: ["official_receipt"], voidSourceType: "official_receipt_void", sourceId: id, action, actorUserId, descriptionTag: `${action.toUpperCase()} · ${orRow.orNo}` });
+  } catch (e) { return c.json({ success: false, error: (e as Error).message }, 400); }
+
+  // doc-specific side effect: sync status column (lifecycle state is source of truth; this is for UI)
+  const docStatus = lc.newState === "ACTIVE" ? "POSTED" : "VOID";
+  const statements: D1PreparedStatement[] = [
+    ...lc.statements,
+    c.var.DB.prepare("UPDATE official_receipts SET status = ?, updated_at = ? WHERE id = ? AND orgId = ?").bind(docStatus, new Date().toISOString(), id, orgId),
+  ];
+  await c.var.DB.batch(statements);
+  return c.json({ success: true, data: { state: lc.newState } });
 });
 
 // ---------------------------------------------------------------------------

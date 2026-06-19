@@ -51,12 +51,15 @@ export function GRNFormDialog({
   onSave,
   onClose,
   lockedPoId,
+  autoScan,
 }: {
   purchaseOrders: PurchaseOrder[];
   onSave: (data: Record<string, unknown>) => void;
   onClose: () => void;
   /** When provided, the PO selector is hidden and this PO is pre-selected. */
   lockedPoId?: string;
+  /** When true, the supplier-document scan modal opens once on mount (header Scan entry point). */
+  autoScan?: boolean;
 }) {
   const [selectedPO, setSelectedPO] = useState(lockedPoId ?? "");
   const [receivedBy, setReceivedBy] = useState("");
@@ -71,6 +74,14 @@ export function GRNFormDialog({
     }[]
   >([]);
   const [scanOpen, setScanOpen] = useState(false);
+
+  /* eslint-disable react-hooks/set-state-in-effect -- open the scan modal once on mount when launched from the header Scan button */
+  useEffect(() => {
+    if (autoScan) setScanOpen(true);
+    // run once on mount only
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const po = purchaseOrders.find((p) => p.id === selectedPO);
 
@@ -337,6 +348,9 @@ export default function GRNPage() {
 
   // Dialog
   const [showForm, setShowForm] = useState(false);
+  // When the form is opened from the header "Scan supplier document" button,
+  // auto-open its scan modal on mount. Reset on close.
+  const [autoScan, setAutoScan] = useState(false);
 
   // Filters
   const [filterStatus, setFilterStatus] = useState("");
@@ -749,9 +763,20 @@ export default function GRNPage() {
           <h1 className="text-xl font-bold text-[#1F1D1B]">Goods Receipt Notes</h1>
           <p className="text-xs text-[#6B7280]">Receive and verify incoming goods against purchase orders</p>
         </div>
-        <Button variant="primary" onClick={() => setShowForm(true)}>
-          <Plus className="h-4 w-4" /> Create GRN
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => {
+              setAutoScan(true);
+              setShowForm(true);
+            }}
+          >
+            <ScanLine className="h-4 w-4" /> Scan supplier document
+          </Button>
+          <Button variant="primary" onClick={() => setShowForm(true)}>
+            <Plus className="h-4 w-4" /> Create GRN
+          </Button>
+        </div>
       </div>
 
       {/* Status Pipeline */}
@@ -928,8 +953,12 @@ export default function GRNPage() {
       {showForm && (
         <GRNFormDialog
           purchaseOrders={purchaseOrders}
+          autoScan={autoScan}
           onSave={handleCreateGRN}
-          onClose={() => setShowForm(false)}
+          onClose={() => {
+            setShowForm(false);
+            setAutoScan(false);
+          }}
         />
       )}
     </div>

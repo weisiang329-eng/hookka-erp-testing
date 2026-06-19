@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -95,12 +95,15 @@ function PIFormDialog({
   materialOptions,
   onSave,
   onClose,
+  autoScan,
 }: {
   suppliers: Supplier[];
   /** Active raw-materials catalog — suggestions for the line picker. */
   materialOptions: MaterialOption[];
   onSave: (data: Record<string, unknown>) => Promise<void> | void;
   onClose: () => void;
+  /** When true, the supplier-document scan modal opens once on mount (header Scan entry point). */
+  autoScan?: boolean;
 }) {
   const [supplierId, setSupplierId] = useState("");
   const [invoiceDate, setInvoiceDate] = useState(
@@ -110,6 +113,14 @@ function PIFormDialog({
   const [lines, setLines] = useState<PILineDraft[]>([emptyPILine()]);
   const [scanOpen, setScanOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  /* eslint-disable react-hooks/set-state-in-effect -- open the scan modal once on mount when launched from the header Scan button */
+  useEffect(() => {
+    if (autoScan) setScanOpen(true);
+    // run once on mount only
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const supplier = suppliers.find((s) => s.id === supplierId);
 
@@ -500,6 +511,9 @@ export default function PurchaseInvoicesPage() {
 
   // Create dialog
   const [showForm, setShowForm] = useState(false);
+  // When the form is opened from the header "Scan supplier document" button,
+  // auto-open its scan modal on mount. Reset on close.
+  const [autoScan, setAutoScan] = useState(false);
 
   // Filters
   const [filterStatus, setFilterStatus] = useState("");
@@ -783,9 +797,20 @@ export default function PurchaseInvoicesPage() {
           <h1 className="text-xl font-bold text-[#1F1D1B]">Purchase Invoices</h1>
           <p className="text-xs text-[#6B7280]">Track supplier invoices and payment status</p>
         </div>
-        <Button variant="primary" onClick={() => setShowForm(true)}>
-          <Plus className="h-4 w-4" /> Create Invoice
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => {
+              setAutoScan(true);
+              setShowForm(true);
+            }}
+          >
+            <ScanLine className="h-4 w-4" /> Scan supplier document
+          </Button>
+          <Button variant="primary" onClick={() => setShowForm(true)}>
+            <Plus className="h-4 w-4" /> Create Invoice
+          </Button>
+        </div>
       </div>
 
       {/* Status Pipeline */}
@@ -946,8 +971,12 @@ export default function PurchaseInvoicesPage() {
         <PIFormDialog
           suppliers={suppliers}
           materialOptions={materialOptions}
+          autoScan={autoScan}
           onSave={handleCreatePI}
-          onClose={() => setShowForm(false)}
+          onClose={() => {
+            setShowForm(false);
+            setAutoScan(false);
+          }}
         />
       )}
     </div>

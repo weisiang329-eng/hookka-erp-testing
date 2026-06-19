@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { humanizeError } from "@/lib/humanize-error";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type { Supplier } from "@/types";
@@ -116,6 +117,7 @@ function deliveryDelta(po: ScorecardLastPO): {
 
 export default function SupplierDetailPage() {
   const { id } = useParams();
+  const { confirm } = useConfirm();
 
   const { data: supResp, loading: supLoading } = useCachedJson<{
     success?: boolean;
@@ -273,7 +275,7 @@ export default function SupplierDetailPage() {
   }
 
   async function handleDeleteSKU(b: SkuBinding) {
-    if (!confirm(`Delete SKU mapping for ${b.materialCode}?`)) return;
+    if (!(await confirm({ title: "Delete SKU mapping", message: `Delete SKU mapping for ${b.materialCode}?`, danger: true }))) return;
     const res = await fetch(`/api/supplier-materials/${b.id}`, { method: "DELETE" });
     if (!res.ok) {
       const j = (await res.json().catch(() => ({}))) as { error?: string };

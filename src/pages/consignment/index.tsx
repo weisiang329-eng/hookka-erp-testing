@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useUrlState, useUrlStateNumber, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
@@ -78,6 +79,7 @@ const PAGE_SIZE = 200;
 
 export default function SalesPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const navigate = useNavigate();
 
   // Pagination — server-side. Filter/tab changes reset to page 1.
@@ -769,7 +771,7 @@ export default function SalesPage() {
                 onClick={async () => {
                   const drafts = selectedRows.filter(s => s.status === "DRAFT");
                   if (drafts.length === 0) return;
-                  if (!confirm(`Convert ${drafts.length} draft order(s) to CONFIRMED? This will auto-create production orders.`)) return;
+                  if (!(await confirm({ title: "Convert drafts", message: `Convert ${drafts.length} draft order(s) to CONFIRMED? This will auto-create production orders.`, danger: false }))) return;
                   setBulkConverting(true);
                   let ok = 0, fail = 0;
                   const errors: string[] = [];

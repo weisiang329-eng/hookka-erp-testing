@@ -59,6 +59,10 @@ export default defineConfig([
       'src/dashboard-routes.tsx',
       'src/components/ui/button.tsx',
       'src/components/ui/toast.tsx',
+      // confirm-dialog.tsx exports ConfirmProvider (component) alongside the
+      // useConfirm hook + ConfirmOptions type — the same Provider+hook pattern
+      // as toast.tsx. Splitting them would hurt DX without improving HMR.
+      'src/components/ui/confirm-dialog.tsx',
       'src/components/ui/status-badge.tsx',
     ],
     rules: {

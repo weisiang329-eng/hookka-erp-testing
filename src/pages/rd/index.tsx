@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   Lightbulb,
@@ -1306,6 +1307,7 @@ export default function RDPage() {
   const [activeTab, setActiveTab] = useState<TabId>("projects");
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const { toast } = useToast();
+  const { confirm } = useConfirm();
 
   // Page-level category filter. "ALL" shows every project across all
   // categories; otherwise only that productCategory. Persists in
@@ -1373,9 +1375,11 @@ export default function RDPage() {
 
   const handleStartProject = useCallback(
     async (project: RDProject) => {
-      const ok = window.confirm(
-        "Start this project? It will enter the production pipeline.",
-      );
+      const ok = await confirm({
+        title: "Start project?",
+        message: "Start this project? It will enter the production pipeline.",
+        danger: false,
+      });
       if (!ok) return;
       try {
         const res = await fetch(`/api/rd-projects/${project.id}/start`, {
@@ -1397,7 +1401,7 @@ export default function RDPage() {
         toast.error(err instanceof Error ? err.message : "Failed to start project");
       }
     },
-    [fetchProjects, toast],
+    [fetchProjects, toast, confirm],
   );
 
   // Compute aggregate health for the Summary tab badge — show a count of

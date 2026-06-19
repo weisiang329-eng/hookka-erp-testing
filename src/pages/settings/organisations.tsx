@@ -11,6 +11,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 // Letterhead override registry. The Inter-Company Configuration card below
 // is HOOKKA-OHANA-specific (transfer pricing %), but the top grid of cards
@@ -69,6 +70,7 @@ const EMPTY_FORM: FormState = {
 };
 
 export default function OrganisationsPage() {
+  const { confirm } = useConfirm();
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [config, setConfig] = useState<InterCompanyConfig>({
@@ -219,9 +221,11 @@ export default function OrganisationsPage() {
       return;
     }
     if (
-      !window.confirm(
-        `Soft-delete ${org.name}? Existing suppliers / POs that reference this org keep their letterhead override, but it stops appearing in pickers.`,
-      )
+      !(await confirm({
+        title: "Soft-delete organisation?",
+        message: `Soft-delete ${org.name}? Existing suppliers / POs that reference this org keep their letterhead override, but it stops appearing in pickers.`,
+        danger: true,
+      }))
     ) {
       return;
     }

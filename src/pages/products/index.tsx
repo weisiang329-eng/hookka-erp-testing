@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef, Fragment, type React
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Link } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
 import { Plus, Trash2, Check, Calendar, History, Pencil } from "lucide-react";
@@ -456,6 +457,7 @@ function CustomerAssignmentsSection({ productId, active }: { productId: string; 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState("");
   const [busy, setBusy] = useState(false);
+  const { confirm } = useConfirm();
 
   const assignments: CustomerAssignment[] = Array.isArray(cpResp?.data) ? cpResp!.data! : [];
   const allCustomers: CustomerLite[] = Array.isArray(customersResp?.data) ? customersResp!.data! : [];
@@ -488,7 +490,7 @@ function CustomerAssignmentsSection({ productId, active }: { productId: string; 
 
   async function handleRemove(assignmentId: string, customerName: string) {
     if (busy) return;
-    if (!window.confirm(`Remove assignment to ${customerName}?`)) return;
+    if (!(await confirm({ title: "Remove assignment?", message: `Remove assignment to ${customerName}?`, danger: true }))) return;
     setBusy(true);
     try {
       const res = await fetch(`/api/customer-products/${assignmentId}`, { method: "DELETE" });
@@ -1050,6 +1052,7 @@ function MaintenanceView() {
   // when editMode is on, mirroring the SKU Master pattern.)
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMsg, setToastMsg] = useState("Saved");
+  const { confirm } = useConfirm();
 
   // Edit / Save / Cancel mode. Mirrors the SKU Master pattern at the top of
   // ProductsPage. When false, inline RM inputs are read-only text and Add /
@@ -1232,10 +1235,10 @@ function MaintenanceView() {
     }
   }
 
-  function handleCancel() {
+  async function handleCancel() {
     if (
       isDirty &&
-      !window.confirm("Discard your unsaved Maintenance edits?")
+      !(await confirm({ title: "Discard unsaved edits?", message: "Discard your unsaved Maintenance edits?", danger: true }))
     ) {
       return;
     }
@@ -1752,6 +1755,7 @@ function MaintenanceView() {
 // ---------- Main Page ----------
 export default function ProductsPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [viewMode, setViewMode] = useState<"skuMaster" | "catalog" | "maintenance">("skuMaster");
   const [products, setProducts] = useState<Product[]>([]);
   const [configs, setConfigs] = useState<ProductDeptConfig[]>([]);
@@ -3163,12 +3167,14 @@ export default function ProductsPage() {
                 Save{dirtyEdits.size > 0 ? ` (${dirtyEdits.size})` : ""}
               </button>
               <button
-                onClick={() => {
+                onClick={async () => {
                   if (
                     dirtyEdits.size > 0 &&
-                    !confirm(
-                      `Discard ${dirtyEdits.size} unsaved change${dirtyEdits.size === 1 ? "" : "s"}?`,
-                    )
+                    !(await confirm({
+                      title: "Discard unsaved changes?",
+                      message: `Discard ${dirtyEdits.size} unsaved change${dirtyEdits.size === 1 ? "" : "s"}?`,
+                      danger: true,
+                    }))
                   ) {
                     return;
                   }

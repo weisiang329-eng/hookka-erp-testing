@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { humanizeError } from "@/lib/humanize-error";
 import { Input } from "@/components/ui/input";
 import { AlertTriangle, Loader2, Plus, Trash2, X } from "lucide-react";
@@ -66,6 +67,7 @@ export function MasterPriceHistoryDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { confirm } = useConfirm();
   const [history, setHistory] = useState<PriceHistoryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -224,7 +226,7 @@ export function MasterPriceHistoryDialog({
 
   async function deleteRow(rowId: string) {
     if (!product) return;
-    if (!confirm("Delete this price history entry?")) return;
+    if (!(await confirm({ title: "Delete price entry", message: "Delete this price history entry?", danger: true }))) return;
     const res = await fetch(`/api/products/price-row/${rowId}`, {
       method: "DELETE",
     });

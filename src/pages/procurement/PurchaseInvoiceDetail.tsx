@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavGuard } from "@/lib/use-nav-guard";
 import { formatCurrency, formatDate } from "@/lib/utils";
@@ -102,6 +103,7 @@ export default function PurchaseInvoiceDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [busy, setBusy] = useState(false);
   const { data: resp, loading, error: fetchError, refresh } = useCachedJson<{
     success?: boolean;
@@ -191,7 +193,7 @@ export default function PurchaseInvoiceDetailPage() {
   // Delete (DRAFT-only; backend 409s otherwise — surfaced).
   async function deletePI() {
     if (!pi) return;
-    if (!window.confirm(`Delete draft invoice ${pi.piNo}? This cannot be undone.`)) return;
+    if (!(await confirm({ title: "Delete draft invoice?", message: `Delete draft invoice ${pi.piNo}? This cannot be undone.`, danger: true }))) return;
     setBusy(true);
     try {
       const res = await fetch(`/api/purchase-invoices/${pi.id}`, { method: "DELETE" });

@@ -28,6 +28,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useUrlState, useUrlStateNumber, useUrlBatch } from "@/lib/use-url-state";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
@@ -503,6 +504,7 @@ function mapCNToRow(
 
 export default function ConsignmentNotePage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const navigate = useNavigate();
 
   // Top-level page tab. CN page has no "3PL Providers" sister section
@@ -2091,9 +2093,11 @@ export default function ConsignmentNotePage() {
   const reverseToPendingCN = useCallback(
     async (row: ConsignmentNoteRow) => {
       if (
-        !confirm(
-          `Delete ${row.cnNo} and return its POs to Pending CN? This cannot be undone.`,
-        )
+        !(await confirm({
+          title: "Delete consignment note?",
+          message: `Delete ${row.cnNo} and return its POs to Pending CN? This cannot be undone.`,
+          danger: true,
+        }))
       ) {
         return;
       }
@@ -2112,7 +2116,7 @@ export default function ConsignmentNotePage() {
         toast.error("Failed to delete CN");
       }
     },
-    [fetchData, toast],
+    [fetchData, toast, confirm],
   );
 
   // ---------- Print / View CN PDF ----------
@@ -2267,11 +2271,13 @@ export default function ConsignmentNotePage() {
   // Delete a saved CN packing list (frees its CNs to be grouped again).
   const handleDeletePackingList = async (pl: CnPackingListRecord) => {
     if (
-      !confirm(
-        `Delete packing list ${pl.packingNo}? Its ${
+      !(await confirm({
+        title: "Delete packing list?",
+        message: `Delete packing list ${pl.packingNo}? Its ${
           pl.cnCount ?? pl.stopCount
         } consignment note(s) will be freed to add to another list. This does not delete the CNs.`,
-      )
+        danger: true,
+      }))
     ) {
       return;
     }

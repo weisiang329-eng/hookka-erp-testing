@@ -5,6 +5,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { Breadcrumbs } from "@/components/layout/breadcrumbs";
 import { ToastProvider, useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { fetchVariantsConfig } from "@/lib/kv-config";
 import { useVersionCheck } from "@/lib/use-version-check";
 import { DASHBOARD_ROUTE_ELEMENTS } from "@/dashboard-routes";
@@ -17,6 +18,7 @@ import { MobileBottomNav } from "@/components/layout/mobile-bottom-nav";
 // user might be mid-form.
 function NewVersionWatcher() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   useVersionCheck({
     onNewVersion: () => {
       toast.info("A new version is available — refresh to update (Ctrl+Shift+R).");
@@ -25,8 +27,14 @@ function NewVersionWatcher() {
       // so useTimeout doesn't apply — this is a one-shot reaction to an
       // event, not a lifecycle-bound effect.
       // eslint-disable-next-line no-restricted-syntax -- one-shot delay inside event-style callback, not in a React effect
-      window.setTimeout(() => {
-        if (window.confirm("A new version is available. Reload now? Unsaved changes may be lost.")) {
+      window.setTimeout(async () => {
+        if (
+          await confirm({
+            title: "Reload for new version?",
+            message: "A new version is available. Reload now? Unsaved changes may be lost.",
+            confirmLabel: "Reload",
+          })
+        ) {
           window.location.reload();
         }
       }, 1500);

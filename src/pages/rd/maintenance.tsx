@@ -10,6 +10,7 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { formatCurrency } from "@/lib/utils";
 import { Plus, Pencil, Archive, RotateCcw, X, Users, Clock, Wallet } from "lucide-react";
 import type { RDTeamMember } from "@/types";
@@ -91,6 +92,7 @@ function memberToDraft(m: RDTeamMember): EditDraft {
 
 export default function RDMaintenancePage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [showInactive, setShowInactive] = useState(false);
   const [editing, setEditing] = useState<EditDraft | null>(null);
   const [saving, setSaving] = useState(false);
@@ -178,7 +180,7 @@ export default function RDMaintenancePage() {
   };
 
   const handleArchive = async (m: RDTeamMember) => {
-    if (!window.confirm(`Archive ${m.name}? Their logged hours stay attributable.`)) return;
+    if (!(await confirm({ title: "Archive member?", message: `Archive ${m.name}? Their logged hours stay attributable.`, danger: true }))) return;
     try {
       const res = await fetch(`/api/rd-team-members/${m.id}`, {
         method: "DELETE",

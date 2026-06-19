@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { formatCurrency, formatDate, formatDateTime } from "@/lib/utils";
 // PDF generators dynamic-imported at click handlers so the 1MB jspdf
 // vendor chunk only ships when the user actually downloads.
@@ -86,6 +87,7 @@ export default function PurchaseOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const { data: resp, loading, error: fetchError, refresh: fetchPO } = useCachedJson<{ success?: boolean; data?: PurchaseOrder; error?: string }>(id ? `/api/purchase-orders/${id}` : null);
   const po: PurchaseOrder | null = useMemo(
     () => (resp?.success ? resp.data ?? null : null),
@@ -460,9 +462,11 @@ export default function PurchaseOrderDetailPage() {
   // the operator never sent and just wants gone.
   const handleDelete = async () => {
     if (!po) return;
-    const ok = window.confirm(
-      `Permanently delete PO ${po.poNo}? This cannot be undone.`,
-    );
+    const ok = await confirm({
+      title: "Delete purchase order?",
+      message: `Permanently delete PO ${po.poNo}? This cannot be undone.`,
+      danger: true,
+    });
     if (!ok) return;
     setDeleting(true);
     try {
@@ -521,9 +525,11 @@ export default function PurchaseOrderDetailPage() {
   // the GRN→PI convert, which prompts for the booking rate.
   const createInvoiceFromPo = async () => {
     if (!po) return;
-    const ok = window.confirm(
-      `Create a draft Purchase Invoice from ${po.poNo}? It lists all ${po.items.length} line(s); you can edit it before approving.`,
-    );
+    const ok = await confirm({
+      title: "Create Purchase Invoice?",
+      message: `Create a draft Purchase Invoice from ${po.poNo}? It lists all ${po.items.length} line(s); you can edit it before approving.`,
+      danger: false,
+    });
     if (!ok) return;
     setCreatingInvoice(true);
     try {

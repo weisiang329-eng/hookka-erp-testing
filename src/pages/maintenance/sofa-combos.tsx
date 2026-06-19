@@ -18,6 +18,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { humanizeError } from "@/lib/humanize-error";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -367,6 +368,7 @@ function toComboRow(g: ComboGroup): ComboRow {
 // Main page
 // ---------------------------------------------------------------------------
 export default function SofaCombosPage() {
+  const { confirm } = useConfirm();
   const {
     data: rulesResp,
     loading: rulesLoading,
@@ -516,7 +518,7 @@ export default function SofaCombosPage() {
   }, [combosByBase, historyKey]);
 
   async function handleDelete(id: string) {
-    if (!confirm("Delete this combo rule? The history of past rules is preserved by their dates."))
+    if (!(await confirm({ title: "Delete combo rule", message: "Delete this combo rule? The history of past rules is preserved by their dates.", danger: true })))
       return;
     const res = await fetch(`/api/sofa-combos/${id}`, { method: "DELETE" });
     if (res.ok) {
@@ -536,9 +538,10 @@ export default function SofaCombosPage() {
     const target = customers.find((c) => c.id === copyCompanyId);
     if (!target || selectedRows.length === 0) return;
     if (
-      !confirm(
-        `Copy ${selectedRows.length} combo${selectedRows.length === 1 ? "" : "s"} to ${target.name}? Each becomes a ${target.name}-specific combo effective today.`,
-      )
+      !(await confirm({
+        title: "Copy combos to company",
+        message: `Copy ${selectedRows.length} combo${selectedRows.length === 1 ? "" : "s"} to ${target.name}? Each becomes a ${target.name}-specific combo effective today.`,
+      }))
     ) {
       return;
     }
@@ -1759,15 +1762,17 @@ function CopyMasterCombosButton({
   const [open, setOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  const { confirm } = useConfirm();
 
   async function handleCopy() {
     if (!selectedId) return;
     const target = customers.find((c) => c.id === selectedId);
     if (
       !target ||
-      !confirm(
-        `Copy every company-wide combo into ${target.name}? Already-copied combos are skipped (idempotent).`,
-      )
+      !(await confirm({
+        title: "Copy combos to company?",
+        message: `Copy every company-wide combo into ${target.name}? Already-copied combos are skipped (idempotent).`,
+      }))
     ) {
       return;
     }

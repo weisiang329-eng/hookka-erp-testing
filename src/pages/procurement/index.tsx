@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -805,6 +806,7 @@ const ALL_PO_STATUSES = [
 // ============================================================
 export default function ProcurementPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const navigate = useNavigate();
 
   // Dialog
@@ -1137,7 +1139,7 @@ export default function ProcurementPage() {
       toast.error(ineligibleReason);
       return;
     }
-    if (!window.confirm(`Create GRN for ${selectedPOs.length} PO${selectedPOs.length === 1 ? "" : "s"} and clear In Transit?`)) {
+    if (!(await confirm({ title: "Create GRN?", message: `Create GRN for ${selectedPOs.length} PO${selectedPOs.length === 1 ? "" : "s"} and clear In Transit?`, danger: false }))) {
       return;
     }
     setBulkGrnRunning(true);

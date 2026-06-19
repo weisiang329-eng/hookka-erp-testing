@@ -23,6 +23,7 @@
 import { useEffect, useState } from "react";
 import { humanizeError } from "@/lib/humanize-error";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { AlertTriangle, Loader2, Trash2, X } from "lucide-react";
 
@@ -374,6 +375,7 @@ export function MaintenanceConfigHistoryDialog({
   onClose: () => void;
   onChanged?: () => void;
 }) {
+  const { confirm } = useConfirm();
   const [history, setHistory] = useState<MaintenanceHistoryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
@@ -432,7 +434,7 @@ export function MaintenanceConfigHistoryDialog({
   }
 
   async function handleDelete(rowId: string) {
-    if (!confirm("Delete this maintenance config history entry?")) return;
+    if (!(await confirm({ title: "Delete history entry", message: "Delete this maintenance config history entry?", danger: true }))) return;
     try {
       const res = await fetch(
         `/api/maintenance-config/changes/${encodeURIComponent(rowId)}`,

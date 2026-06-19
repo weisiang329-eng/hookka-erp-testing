@@ -23,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency, formatDate } from "@/lib/utils";
 
@@ -58,6 +59,7 @@ export default function GRNDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [busy, setBusy] = useState(false);
   const { data: resp, loading, error: fetchError, refresh } = useCachedJson<{
     success?: boolean;
@@ -121,9 +123,11 @@ export default function GRNDetailPage() {
   // Convert POSTED GRN → Purchase Invoice (DRAFT). Same payload as grn.tsx list.
   async function convertToInvoice() {
     if (!grn) return;
-    const ok = window.confirm(
-      `Create Purchase Invoice from GRN ${grn.grnNumber}? Total: ${(grn.totalAmount / 100).toFixed(2)}`,
-    );
+    const ok = await confirm({
+      title: "Create Purchase Invoice?",
+      message: `Create Purchase Invoice from GRN ${grn.grnNumber}? Total: ${(grn.totalAmount / 100).toFixed(2)}`,
+      danger: false,
+    });
     if (!ok) return;
     const currency = (
       window.prompt(

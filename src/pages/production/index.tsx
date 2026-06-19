@@ -6,6 +6,7 @@ import { useSessionState } from "@/lib/use-session-state";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
@@ -504,6 +505,7 @@ export default function ProductionPage({
 }: { mode?: ProductionPageMode; deptCode?: string } = {}) {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   // Tablet breakpoint — default-hide low-priority DataGrid columns when the
   // viewport is narrower than ~lg (1280px gives a safety margin over the
   // Tailwind lg=1024 breakpoint so iPad Mini landscape ~1180px also hides
@@ -4203,9 +4205,10 @@ export default function ProductionPage({
     }
     // Guard-rail for accidental mega-prints.
     if (onScreenStickers.length > 500) {
-      const ok = window.confirm(
-        `This will print ${onScreenStickers.length} job card stickers (${onScreenStickers.length} pages of 50×75 mm). Continue?`,
-      );
+      const ok = await confirm({
+        title: "Print all stickers?",
+        message: `This will print ${onScreenStickers.length} job card stickers (${onScreenStickers.length} pages of 50×75 mm). Continue?`,
+      });
       if (!ok) return;
     }
     setPrintingJobCards(true);
@@ -4223,7 +4226,7 @@ export default function ProductionPage({
     } finally {
       setPrintingJobCards(false);
     }
-  }, [onScreenStickers, activeTab, toast]);
+  }, [onScreenStickers, activeTab, toast, confirm]);
 
   // FAB_CUT only: Show / Print the downstream Fab Sew stickers. Mirrors the
   // Foam Bonding Show Packing Preview / Print Packing pair, but acts on the
@@ -4259,9 +4262,10 @@ export default function ProductionPage({
     }
     // Same mega-print guard-rail as the native pair.
     if (source.length > 500) {
-      const ok = window.confirm(
-        `This will print ${source.length} Fab Sew stickers (${source.length} pages of 100×150 mm). Continue?`,
-      );
+      const ok = await confirm({
+        title: "Print all stickers?",
+        message: `This will print ${source.length} Fab Sew stickers (${source.length} pages of 100×150 mm). Continue?`,
+      });
       if (!ok) return;
     }
     setPrintingFabSew(true);
@@ -4279,7 +4283,7 @@ export default function ProductionPage({
     } finally {
       setPrintingFabSew(false);
     }
-  }, [fabSewStickers, loadFabSewStickers]);
+  }, [fabSewStickers, loadFabSewStickers, confirm]);
 
   // Shared 230×380px on-screen sticker tile (the FAB_CUT / FAB_SEW large
   // tile). Extracted so the native QR Stickers strip AND the FAB_CUT "Show
@@ -5281,12 +5285,13 @@ export default function ProductionPage({
   // after POs were already created (sofa UPH/PKG, FAB_CUT missing on
   // 5536-CSL / 5537-STOOL, etc.) without needing another ad-hoc migration.
   const _handleSyncJobCardsFromBom = useCallback(async () => {
-    const ok = window.confirm(
-      "Sync Job Cards from BOM?\n\n" +
+    const ok = await confirm({
+      title: "Sync Job Cards from BOM?",
+      message:
         "This scans every production order and inserts any job cards that the current BOM expects but the PO is missing. " +
         "Existing job cards (dueDate, status, PIC) are NOT modified.\n\n" +
         "Proceed?",
-    );
+    });
     if (!ok) return;
     try {
       const res = await fetch("/api/production/sync-jobcards-from-bom", {
@@ -5311,7 +5316,7 @@ export default function ProductionPage({
     } catch (err) {
       toast.error(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [toast]);
+  }, [toast, confirm]);
 
   const handlePrintSchedule = useCallback((markDecision: boolean | null = null) => {
     const today = new Date().toLocaleDateString("en-MY", {

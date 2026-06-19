@@ -44,6 +44,7 @@ import {
   Package,
 } from "lucide-react";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   uploadCncFiles,
   updateCncTemplate,
@@ -250,6 +251,7 @@ type CreateDraft = {
 
 export default function CncTemplatesPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
 
   // Drill-down navigation: null model = Level 1; model + null bucket = Level 2;
   // model + bucket = Level 3.
@@ -518,9 +520,11 @@ export default function CncTemplatesPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const handleDelete = async (t: CncTemplate) => {
     if (
-      !window.confirm(
-        `Delete "${t.displayName || t.id}"? This removes its DGT / PRJ / EMF files. This cannot be undone.`,
-      )
+      !(await confirm({
+        title: "Delete template?",
+        message: `Delete "${t.displayName || t.id}"? This removes its DGT / PRJ / EMF files. This cannot be undone.`,
+        danger: true,
+      }))
     )
       return;
     setDeletingId(t.id);

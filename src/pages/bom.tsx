@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useDeferredValue, useRef } from "r
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   fetchVariantsConfig,
   flushKvConfig,
@@ -2616,6 +2617,7 @@ function EditBOMDialog({
   productVariantCategories: VariantCategoryInfo[];
   allTemplates: BOMTemplate[];
 }) {
+  const { confirm } = useConfirm();
   const [l1Processes, setL1Processes] = useState<BOMProcess[]>([]);
   const [l1Materials, setL1Materials] = useState<WIPMaterial[]>([]);
   const [wipComponents, setWipComponents] = useState<WIPComponent[]>([]);
@@ -2678,13 +2680,14 @@ function EditBOMDialog({
   // Load a specific master template from the Load Default picker.
   // When masterId is null, falls back to the product-aware auto-resolver
   // (same behaviour as the old single-button Load Default).
-  function loadDefault(masterId: string | null) {
+  async function loadDefault(masterId: string | null) {
     const master = masterId ? loadMasterTemplateById(masterId) : null;
     const label = master?.label || "auto-matched";
     if (
-      !confirm(
-        `Load "${label}" master template? This will replace current L1 processes, L1 materials, and WIP components.`,
-      )
+      !(await confirm({
+        title: "Load master template",
+        message: `Load "${label}" master template? This will replace current L1 processes, L1 materials, and WIP components.`,
+      }))
     ) {
       return;
     }
@@ -2696,10 +2699,10 @@ function EditBOMDialog({
   }
 
   // Copy from another existing template
-  function copyFromTemplate(sourceId: string) {
+  async function copyFromTemplate(sourceId: string) {
     const src = allTemplates.find((t) => t.id === sourceId);
     if (!src) return;
-    if (!confirm(`Copy BOM from ${src.productCode}? This will replace current content.`)) return;
+    if (!(await confirm({ title: "Copy BOM", message: `Copy BOM from ${src.productCode}? This will replace current content.` }))) return;
     setL1Processes(src.l1Processes.map((p) => ({ ...p })));
     setL1Materials((src.l1Materials || []).map((m) => ({ ...m })));
     setWipComponents(
@@ -3101,7 +3104,7 @@ function EditBOMDialog({
                     return (
                       <button
                         key={mt.id}
-                        onClick={() => loadDefault(mt.id)}
+                        onClick={() => void loadDefault(mt.id)}
                         className="w-full text-left px-3 py-2 text-xs hover:bg-[#FAEFCB] border-b border-gray-50 last:border-b-0 flex items-center justify-between gap-2"
                       >
                         <div className="flex-1 min-w-0">
@@ -3147,7 +3150,7 @@ function EditBOMDialog({
                     .map((t) => (
                       <button
                         key={t.id}
-                        onClick={() => copyFromTemplate(t.id)}
+                        onClick={() => void copyFromTemplate(t.id)}
                         className="w-full text-left px-3 py-2 text-xs hover:bg-[#E0EDF0] border-b border-gray-50 last:border-b-0"
                       >
                         <div className="font-medium text-gray-900">{t.productCode}</div>
@@ -3414,6 +3417,7 @@ function MasterTemplatesDialog({
   fabricOptions: string[];
 }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [tab, setTab] = useState<BOMCategory>("BEDFRAME");
   // We now keep a LIST of master templates per category. Bedframes typically
   // have one ("Default"), sofas can have many — one per module type
@@ -3553,12 +3557,16 @@ function MasterTemplatesDialog({
   }
 
   // Delete the selected template. The category default cannot be deleted.
-  function deleteTemplate() {
+  async function deleteTemplate() {
     if (!current || current.isDefault) {
       toast.warning("Cannot delete the default template for this category.");
       return;
     }
-    const ok = window.confirm(`Delete master template "${current.label}"? This cannot be undone after Save.`);
+    const ok = await confirm({
+      title: "Delete master template?",
+      message: `Delete master template "${current.label}"? This cannot be undone after Save.`,
+      danger: true,
+    });
     if (!ok) return;
     setDeletedIds((prev) => [...prev, current.id]);
     setCurrentList((prev) => {
@@ -3878,15 +3886,16 @@ function MasterTemplatesDialog({
     onClose();
   }
 
-  function handleReset() {
+  async function handleReset() {
     if (!current) return;
-    const ok = typeof window !== "undefined"
-      ? window.confirm(
-          `Clear template "${current.label}"?\n\n` +
-          `This will empty all L1 processes, L1 materials, and WIP items.\n` +
-          `(Changes are only persisted after you click "Save Templates".)`
-        )
-      : true;
+    const ok = await confirm({
+      title: "Clear template?",
+      message:
+        `Clear template "${current.label}"?\n\n` +
+        `This will empty all L1 processes, L1 materials, and WIP items.\n` +
+        `(Changes are only persisted after you click "Save Templates".)`,
+      danger: true,
+    });
     if (!ok) return;
     setCurrent((prev) => ({ ...prev, l1Processes: [], l1Materials: [], wipItems: [] }));
   }
@@ -4358,6 +4367,7 @@ function buildDefaultProductionTimes(cats: string[]): ProductionTimes {
 // unchanged and still auto-retries / backs up to localStorage.)
 
 function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { confirm } = useConfirm();
   const [categories, setCategories] = useState<string[]>([]);
   const [times, setTimes] = useState<ProductionTimes>({});
   const [dirty, setDirty] = useState(false);
@@ -4493,10 +4503,10 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
     setDirty(true);
   }
 
-  function deleteCategory(catIndex: number) {
+  async function deleteCategory(catIndex: number) {
     if (categories.length <= 1) return;
     const catName = categories[catIndex];
-    if (!window.confirm(`Delete "${catName}"? All times for this category will be lost.`)) return;
+    if (!(await confirm({ title: "Delete category?", message: `Delete "${catName}"? All times for this category will be lost.`, danger: true }))) return;
     setCategories((prev) => prev.filter((_, i) => i !== catIndex));
     setTimes((prev) => {
       const next = { ...prev };

@@ -17,6 +17,7 @@
 // ---------------------------------------------------------------------------
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { humanizeError } from "@/lib/humanize-error";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
@@ -91,6 +92,7 @@ export function SofaComboHistoryDialog({
 }) {
   // Top-of-group canonical row — the Active one if it exists, otherwise
   // the newest Pending. Used for the dialog header + form pre-fill.
+  const { confirm } = useConfirm();
   const sortedRules = useMemo(() => sortByEffectiveDesc(rules), [rules]);
   const seedRule = sortedRules[0] ?? null;
 
@@ -183,7 +185,7 @@ export function SofaComboHistoryDialog({
   }
 
   async function deleteRow(rowId: string) {
-    if (!confirm("Delete this combo history entry?")) return;
+    if (!(await confirm({ title: "Delete history entry", message: "Delete this combo history entry?", danger: true }))) return;
     const res = await fetch(`/api/sofa-combos/${rowId}`, { method: "DELETE" });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));

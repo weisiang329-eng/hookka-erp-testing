@@ -18,6 +18,7 @@
 // future overview tab if we want batch there too.
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { X, Calendar, CalendarClock, User, FolderPlus, Trash2 } from "lucide-react";
 
 export type BatchActionToolbarProps = {
@@ -103,6 +104,7 @@ type ApplyBatchDateDialogProps = {
 };
 
 export function ApplyBatchDateDialog({ open, count, onCancel, onApply }: ApplyBatchDateDialogProps) {
+  const { confirm } = useConfirm();
   const today = new Date().toISOString().slice(0, 10);
   const [date, setDate] = useState<string>(today);
   if (!open) return null;
@@ -131,8 +133,8 @@ export function ApplyBatchDateDialog({ open, count, onCancel, onApply }: ApplyBa
             size="sm"
             variant="ghost"
             className="text-red-600 hover:text-red-700"
-            onClick={() => {
-              if (confirm(`Clear completion date on ${count} job card${count === 1 ? "" : "s"}? Status will revert to WAITING.`)) {
+            onClick={async () => {
+              if (await confirm({ title: "Clear completion date", message: `Clear completion date on ${count} job card${count === 1 ? "" : "s"}? Status will revert to WAITING.`, danger: true })) {
                 onApply("");
               }
             }}
@@ -172,6 +174,7 @@ type ApplyBatchDueDateDialogProps = {
 };
 
 export function ApplyBatchDueDateDialog({ open, count, onCancel, onApply }: ApplyBatchDueDateDialogProps) {
+  const { confirm } = useConfirm();
   const today = new Date().toISOString().slice(0, 10);
   const [date, setDate] = useState<string>(today);
   if (!open) return null;
@@ -196,8 +199,8 @@ export function ApplyBatchDueDateDialog({ open, count, onCancel, onApply }: Appl
             size="sm"
             variant="ghost"
             className="text-red-600 hover:text-red-700"
-            onClick={() => {
-              if (confirm(`Clear due date on ${count} job card${count === 1 ? "" : "s"}? Overdue colouring will be lost on these rows.`)) {
+            onClick={async () => {
+              if (await confirm({ title: "Clear due date", message: `Clear due date on ${count} job card${count === 1 ? "" : "s"}? Overdue colouring will be lost on these rows.`, danger: true })) {
                 onApply("");
               }
             }}
@@ -248,6 +251,7 @@ const LEAVE_ALONE = "__leave__";
 const EXPLICIT_CLEAR = "__clear__";
 
 export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel, onApply }: ApplyBatchPicDialogProps) {
+  const { confirm } = useConfirm();
   // Default value = LEAVE_ALONE which renders as "— Select —" placeholder.
   // Operator picks a worker or "— Remove —" to act; leaving the placeholder
   // = skip that slot.
@@ -326,8 +330,8 @@ export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel
             size="sm"
             variant="ghost"
             className="text-red-600 hover:text-red-700 flex-1 text-[11px]"
-            onClick={() => {
-              if (confirm(`Clear PIC 1 on ${count} job card${count === 1 ? "" : "s"}?`)) {
+            onClick={async () => {
+              if (await confirm({ title: "Clear PIC 1", message: `Clear PIC 1 on ${count} job card${count === 1 ? "" : "s"}?`, danger: true })) {
                 onApply({ pic1: null, pic2: undefined });
               }
             }}
@@ -338,8 +342,8 @@ export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel
             size="sm"
             variant="ghost"
             className="text-red-600 hover:text-red-700 flex-1 text-[11px]"
-            onClick={() => {
-              if (confirm(`Clear PIC 2 on ${count} job card${count === 1 ? "" : "s"}?`)) {
+            onClick={async () => {
+              if (await confirm({ title: "Clear PIC 2", message: `Clear PIC 2 on ${count} job card${count === 1 ? "" : "s"}?`, danger: true })) {
                 onApply({ pic1: undefined, pic2: null });
               }
             }}

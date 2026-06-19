@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -331,6 +332,7 @@ const ALL_GRN_STATUSES = [
 // ============================================================
 export default function GRNPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const navigate = useNavigate();
 
   // Dialog
@@ -655,9 +657,11 @@ export default function GRNPage() {
         icon: <FileText className="h-3.5 w-3.5" />,
         action: async () => {
           const grnTotalRM = (row.totalAmount / 100).toFixed(2);
-          const ok = window.confirm(
-            `Create Purchase Invoice from GRN ${row.grnNumber}? Total: ${grnTotalRM}`,
-          );
+          const ok = await confirm({
+            title: "Create Purchase Invoice?",
+            message: `Create Purchase Invoice from GRN ${row.grnNumber}? Total: ${grnTotalRM}`,
+            danger: false,
+          });
           if (!ok) return;
           // Phase 3.6 multi-currency (rate keyed per document): an import
           // supplier's GRN was keyed in the supplier's currency — declare

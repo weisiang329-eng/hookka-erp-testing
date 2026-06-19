@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cachedFetchJson } from "@/lib/cached-fetch";
 import type { Product } from "@/types";
 
@@ -257,6 +258,7 @@ function DocSlot({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
+  const { confirm } = useConfirm();
 
   async function upload(file: File) {
     setBusy(true);
@@ -282,7 +284,7 @@ function DocSlot({
   }
 
   async function remove(f: FileAsset) {
-    if (!window.confirm(`Delete "${f.filename}"?`)) return;
+    if (!(await confirm({ title: "Delete file?", message: `Delete "${f.filename}"?`, danger: true }))) return;
     setBusy(true);
     try {
       const res = await fetch(`/api/files/${f.id}`, { method: "DELETE" });

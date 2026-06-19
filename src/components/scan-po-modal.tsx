@@ -6,6 +6,7 @@ import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { parsePOText, mapDeliveryHub, type ParsedPO, type POParseResult } from "@/lib/po-parser";
 import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles, Star, Plus } from "lucide-react";
 
@@ -162,6 +163,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
   const [createdSOs, setCreatedSOs] = useState<{ soNo: string; poNo: string; itemCount: number }[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
   const [catalog, setCatalog] = useState<ScanCatalog | null>(null);
+  const { confirm } = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Pull the slim catalog once when the modal first opens. Cached for the
@@ -212,12 +214,15 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
   // Close requested via an EXPLICIT control (header ✕ / a Cancel button).
   // When busy, confirm first so the operator can't lose a scan/parse in
   // progress with one stray click; otherwise close immediately.
-  const requestClose = () => {
+  const requestClose = async () => {
     if (
       isBusy &&
-      !window.confirm(
-        "A scan is still in progress. Close and discard the work in progress?",
-      )
+      !(await confirm({
+        title: "Discard scan in progress?",
+        message:
+          "A scan is still in progress. Close and discard the work in progress?",
+        danger: true,
+      }))
     ) {
       return;
     }

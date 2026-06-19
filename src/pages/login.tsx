@@ -16,6 +16,7 @@
 import { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { setAuth, isAuthenticated, type AuthUser } from "@/lib/auth";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 type LoginResponse =
   | {
@@ -35,6 +36,7 @@ type LoginResponse =
 export default function LoginPage() {
   const location = useLocation();
   const navigate = useNavigate();
+  const { confirm } = useConfirm();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -114,9 +116,13 @@ export default function LoginPage() {
           // Confirm dialog is the lightest possible UI without pulling in
           // a modal component — keeps this change small. "OK" goes to
           // setup, "Cancel" dismisses for 24h then continues to dashboard.
-          const wantSetup = window.confirm(
-            "Make your account more secure with two-factor sign-in?\n\nClick OK to set it up now, or Cancel to be reminded later.",
-          );
+          const wantSetup = await confirm({
+            title: "Enable two-factor sign-in?",
+            message:
+              "Make your account more secure with two-factor sign-in?\n\nClick Set up now to enable it, or Remind me later to continue.",
+            confirmLabel: "Set up now",
+            cancelLabel: "Remind me later",
+          });
           if (wantSetup) {
             navigate("/setup-2fa", {
               replace: true,

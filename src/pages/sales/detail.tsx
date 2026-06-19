@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback } from "react";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useNavigate, useParams } from "react-router-dom";
 import { useSOMode, soBasePath, soSingularNoun } from "@/lib/so-mode";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -230,6 +231,7 @@ export default function SalesOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   // 0134 — flips this detail page between regular Sales Order and
   // Service Order modes (route-derived). Only navigates + header copy
   // differ.
@@ -468,9 +470,12 @@ export default function SalesOrderDetailPage() {
           return;
         }
         if (action === "cancel") {
-          const ok = window.confirm(
-            "Cancel this PO?\n\nAll non-completed job cards under it will also be cancelled. Completed work stays intact (it's already real product).\n\nProceed?",
-          );
+          const ok = await confirm({
+            title: "Cancel PO?",
+            message:
+              "Cancel this PO?\n\nAll non-completed job cards under it will also be cancelled. Completed work stays intact (it's already real product).\n\nProceed?",
+            danger: true,
+          });
           if (!ok) return;
         }
       }
@@ -506,7 +511,7 @@ export default function SalesOrderDetailPage() {
         setPoActionBusyId(null);
       }
     },
-    [fetchOrder, toast],
+    [fetchOrder, toast, confirm],
   );
 
   const updateStatus = useCallback(async (newStatus: SOStatus) => {
@@ -636,7 +641,7 @@ export default function SalesOrderDetailPage() {
   };
 
   const deleteOrder = async () => {
-    if (!confirm("Delete this order?")) return;
+    if (!(await confirm({ title: "Delete order?", message: "Delete this order?", danger: true }))) return;
     try {
       const res = await fetch(`/api/sales-orders/${id}`, { method: "DELETE" });
       if (!res.ok) {

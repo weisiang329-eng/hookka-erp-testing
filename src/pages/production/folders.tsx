@@ -11,6 +11,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Trash2, FolderOpen, Pencil, Plus } from "lucide-react";
 import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
@@ -38,6 +39,7 @@ type Folder = {
 export default function ProductionFoldersPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [folders, setFolders] = useState<Folder[]>([]);
   const [loading, setLoading] = useState(true);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -62,7 +64,7 @@ export default function ProductionFoldersPage() {
   }, []);
 
   const handleDelete = async (folder: Folder) => {
-    if (!confirm(`Delete folder "${folder.name}"?\n\nThis only removes the folder. The ${folder.jc_count} job card${folder.jc_count === 1 ? "" : "s"} inside stay untouched.`)) return;
+    if (!(await confirm({ title: "Delete folder", message: `Delete folder "${folder.name}"?\n\nThis only removes the folder. The ${folder.jc_count} job card${folder.jc_count === 1 ? "" : "s"} inside stay untouched.`, danger: true }))) return;
     try {
       const res = await fetch(`/api/production-folders/${encodeURIComponent(folder.id)}`, {
         method: "DELETE",

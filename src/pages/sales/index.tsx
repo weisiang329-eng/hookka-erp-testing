@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSOMode, soBasePath, soPageTitle, soNewButtonLabel } from "@/lib/so-mode";
 import { useUrlState, useUrlStateNumber, useUrlBatch } from "@/lib/use-url-state";
@@ -165,6 +166,7 @@ function soStageLabel(status: string): string {
 
 export default function SalesPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const navigate = useNavigate();
   // 0134 — mode flips this page between the regular Sales Orders list
   // (/sales) and the Service Orders list (/service-order). The mode comes
@@ -1152,7 +1154,7 @@ export default function SalesPage() {
                 onClick={async () => {
                   const drafts = selectedRows.filter(s => s.status === "DRAFT");
                   if (drafts.length === 0) return;
-                  if (!confirm(`Convert ${drafts.length} draft order(s) to CONFIRMED? This will auto-create production orders.`)) return;
+                  if (!(await confirm({ title: "Convert drafts", message: `Convert ${drafts.length} draft order(s) to CONFIRMED? This will auto-create production orders.`, danger: false }))) return;
                   setBulkConverting(true);
                   let ok = 0, fail = 0;
                   const errors: string[] = [];

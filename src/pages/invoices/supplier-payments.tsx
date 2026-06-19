@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { LifecycleActions, LifecycleBadge } from "@/components/accounting/lifecycle-actions";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -72,6 +73,7 @@ type PaymentGroup = {
 
 export default function SupplierPaymentsPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
 
   // History list
   const { data: histResp, loading, refresh: refreshHistory } = useCachedJson<
@@ -297,7 +299,7 @@ export default function SupplierPaymentsPage() {
       : action === "void"
         ? " This reverses the payment (nothing is deleted)."
         : "";
-    if (!window.confirm(`${verb} supplier payment ${paymentNo}?${extra}`)) return;
+    if (!(await confirm({ title: `${verb} supplier payment?`, message: `${verb} supplier payment ${paymentNo}?${extra}`, danger: true }))) return;
     try {
       const res = await fetch(`/api/supplier-payments/${encodeURIComponent(paymentNo)}/lifecycle`, {
         method: "POST",

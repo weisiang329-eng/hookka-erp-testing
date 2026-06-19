@@ -234,6 +234,7 @@ const AUDIT_DOC_MAP: Record<string, { label: string; base: string }> = {
 
 function AuditLogTab() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [rows, setRows] = useState<AuditRow[] | null>(null);
 
   const load = useCallback(() => {
@@ -247,7 +248,7 @@ function AuditLogTab() {
   const unvoid = async (row: AuditRow) => {
     const map = AUDIT_DOC_MAP[row.sourceType];
     if (!map) { toast.error(`Don't know how to restore ${row.sourceType}`); return; }
-    if (!window.confirm(`Restore ${map.label} ${row.sourceId}? It will be reposted to the GL.`)) return;
+    if (!(await confirm({ title: "Restore document?", message: `Restore ${map.label} ${row.sourceId}? It will be reposted to the GL.`, danger: false }))) return;
     const res = await fetch(`${map.base}/${encodeURIComponent(row.sourceId)}/lifecycle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -480,6 +481,7 @@ function CleanupReportCard() {
 // suspense. Both control accounts and both subledgers settle together.
 function ContraCard() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
   const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
   const [customerId, setCustomerId] = useState("");
@@ -523,7 +525,7 @@ function ContraCard() {
   const canPost = customerId && totalSen > 0 && totalSen <= arUnpaidSen;
 
   const handlePost = async () => {
-    if (!window.confirm(`Contra ${formatCurrency(totalSen)} of payables against this customer's oldest unpaid invoices?`)) return;
+    if (!(await confirm({ title: "Post contra?", message: `Contra ${formatCurrency(totalSen)} of payables against this customer's oldest unpaid invoices?`, danger: true }))) return;
     setBusy(true);
     try {
       const res = await fetch("/api/accounting/contra", {
@@ -1894,6 +1896,7 @@ function JournalsTab({
   accounts: ChartOfAccount[];
   onRefresh: () => void;
 }) {
+  const { confirm } = useConfirm();
   const [showForm, setShowForm] = useState(false);
 
   const handlePost = async (id: string) => {
@@ -1912,7 +1915,7 @@ function JournalsTab({
       : action === "void"
         ? " A reversal entry will be posted (nothing is deleted)."
         : "";
-    if (!window.confirm(`${verb} ${entryNo}?${extra}`)) return;
+    if (!(await confirm({ title: `${verb} entry?`, message: `${verb} ${entryNo}?${extra}`, danger: true }))) return;
     try {
       const res = await fetch(`/api/accounting/journals/${id}/lifecycle`, {
         method: "POST",
@@ -2662,6 +2665,7 @@ function APControlPanel() {
     rows: { date: string; ref: string; type: string; debitSen: number; creditSen: number; runningSen: number }[];
   } | null>(null);
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [pcns, setPcns] = useState<{ id: string; noteNumber: string; supplierName: string; date: string; reason: string; totalAmount: number; status: string }[]>([]);
   const [showPcnForm, setShowPcnForm] = useState(false);
   const [pcnForm, setPcnForm] = useState({ supplierId: "", reason: "", netRm: "", sstRm: "" });
@@ -2697,7 +2701,7 @@ function APControlPanel() {
   };
 
   const postPcn = async (id: string, noteNumber: string, amount: number) => {
-    if (!window.confirm(`Post ${noteNumber} (${formatCurrency(amount)})?\n\nDR 400-0000 Trade Creditors / CR purchase accounts — immutable ledger entries.`)) return;
+    if (!(await confirm({ title: "Post credit note?", message: `Post ${noteNumber} (${formatCurrency(amount)})?\n\nDR 400-0000 Trade Creditors / CR purchase accounts — immutable ledger entries.`, danger: false }))) return;
     const res = await fetch(`/api/accounting/purchase-credit-notes/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -3795,6 +3799,7 @@ type OtherParty = {
 
 function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [parties, setParties] = useState<OtherParty[] | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -3851,7 +3856,7 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
     setShowForm(true);
   };
   const del = async (p: OtherParty) => {
-    if (!window.confirm(`Delete ${p.name}? (only allowed if it has no bills/payments)`)) return;
+    if (!(await confirm({ title: "Delete party?", message: `Delete ${p.name}? (only allowed if it has no bills/payments)`, danger: true }))) return;
     const res = await fetch(`/api/accounting/other-parties/${p.id}`, { method: "DELETE" });
     const j = asMutationResponse(await res.json());
     if (j?.success) load();
@@ -4012,6 +4017,7 @@ type OtherPartyBill = {
 
 function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherParty[]; accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [bills, setBills] = useState<OtherPartyBill[] | null>(null);
   const [showForm, setShowForm] = useState(false);
   const today = new Date().toISOString().slice(0, 10);
@@ -4063,7 +4069,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
       : action === "void"
         ? " A reversal entry will be posted (nothing is deleted)."
         : "";
-    if (!window.confirm(`${verb} ${billNo}?${extra}`)) return;
+    if (!(await confirm({ title: `${verb} bill?`, message: `${verb} ${billNo}?${extra}`, danger: true }))) return;
     const res = await fetch(`/api/accounting/other-party-bills/${encodeURIComponent(billNo)}/lifecycle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4211,6 +4217,7 @@ type PaymentGroup = {
 
 function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: OtherParty[]; accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const today = new Date().toISOString().slice(0, 10);
   const banks = accounts.filter((a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH");
   const [partyId, setPartyId] = useState("");
@@ -4276,7 +4283,7 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
       : action === "void"
         ? " A reversal entry will be posted (nothing is deleted)."
         : "";
-    if (!window.confirm(`${lcVerb} ${paymentNo}?${extra}`)) return;
+    if (!(await confirm({ title: `${lcVerb} payment?`, message: `${lcVerb} ${paymentNo}?${extra}`, danger: true }))) return;
     const res = await fetch(`/api/accounting/other-party-payments/${encodeURIComponent(paymentNo)}/lifecycle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5003,6 +5010,7 @@ type PvRow = {
 
 function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [rows, setRows] = useState<PvRow[] | null>(null);
   const [migrationMissing, setMigrationMissing] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -5132,7 +5140,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
       : action === "void"
         ? " A reversal entry will be posted (nothing is deleted)."
         : "";
-    if (!window.confirm(`${verb} ${pvNo}?${extra}`)) return;
+    if (!(await confirm({ title: `${verb} voucher?`, message: `${verb} ${pvNo}?${extra}`, danger: true }))) return;
     const res = await fetch(`/api/accounting/payment-vouchers/${id}/lifecycle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5146,7 +5154,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   };
 
   const startEdit = async (r: PvRow) => {
-    if (!window.confirm(`Edit ${r.pvNo}? It will be VOIDED and a new prefilled payment opened to repost.`)) return;
+    if (!(await confirm({ title: "Edit voucher?", message: `Edit ${r.pvNo}? It will be VOIDED and a new prefilled payment opened to repost.`, danger: true }))) return;
     const res = await fetch(`/api/accounting/payment-vouchers/${r.id}/void`, { method: "POST" });
     const j = asMutationResponse(await res.json());
     if (!j?.success) { toast.error(j?.error || "Could not void the original"); return; }
@@ -5348,6 +5356,7 @@ type OrRow = {
 
 function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [rows, setRows] = useState<OrRow[] | null>(null);
   const [migrationMissing, setMigrationMissing] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -5433,7 +5442,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
       : action === "void"
         ? " A reversal entry will be posted (nothing is deleted)."
         : "";
-    if (!window.confirm(`${verb} ${orNo}?${extra}`)) return;
+    if (!(await confirm({ title: `${verb} receipt?`, message: `${verb} ${orNo}?${extra}`, danger: true }))) return;
     const res = await fetch(`/api/accounting/official-receipts/${id}/lifecycle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5588,6 +5597,7 @@ type FtRow = {
 
 function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const banks = accounts.filter(
     (a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH",
   );
@@ -5653,7 +5663,7 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
       : action === "void"
         ? " A reversal entry will be posted (nothing is deleted)."
         : "";
-    if (!window.confirm(`${verb} transfer ${no}?${extra}`)) return;
+    if (!(await confirm({ title: `${verb} transfer?`, message: `${verb} transfer ${no}?${extra}`, danger: true }))) return;
     const res = await fetch(`/api/accounting/fund-transfers/${encodeURIComponent(no)}/lifecycle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5786,6 +5796,7 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
 function StockSummaryTab() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
   const [reloadKey, setReloadKey] = useState(0);
   const [posting, setPosting] = useState(false);
@@ -5828,7 +5839,7 @@ function StockSummaryTab() {
   const anyUnbalanced = (data?.rows ?? []).some((r) => !r.balanced);
 
   const handlePost = async () => {
-    if (!window.confirm(`Post closing stock for ${month}? This takes the period's stock onto the balance-sheet stock accounts (DR 330-x · CR closing-stock) and brings down opening; re-posting/next month re-bases automatically.`)) return;
+    if (!(await confirm({ title: "Post closing stock?", message: `Post closing stock for ${month}? This takes the period's stock onto the balance-sheet stock accounts (DR 330-x · CR closing-stock) and brings down opening; re-posting/next month re-bases automatically.`, danger: false }))) return;
     setPosting(true);
     try {
       const res = await fetch("/api/accounting/stock/close-post", {
@@ -6269,6 +6280,7 @@ type FaRow = {
 
 function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [rows, setRows] = useState<FaRow[] | null>(null);
   const [migrationMissing, setMigrationMissing] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -6333,7 +6345,7 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   };
 
   const handleDispose = async (row: FaRow) => {
-    if (!window.confirm(`Dispose ${row.name}? Depreciation stops; the disposal gain/loss entry stays a manual JV for now.`)) return;
+    if (!(await confirm({ title: "Dispose asset?", message: `Dispose ${row.name}? Depreciation stops; the disposal gain/loss entry stays a manual JV for now.`, danger: true }))) return;
     const res = await fetch(`/api/accounting/fixed-assets/${row.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -6345,7 +6357,7 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   };
 
   const handleDelete = async (row: FaRow) => {
-    if (!window.confirm(`Delete ${row.name}? Only possible while it has no posted depreciation.`)) return;
+    if (!(await confirm({ title: "Delete asset?", message: `Delete ${row.name}? Only possible while it has no posted depreciation.`, danger: true }))) return;
     const res = await fetch(`/api/accounting/fixed-assets/${row.id}`, { method: "DELETE" });
     const j = asMutationResponse(await res.json());
     if (j?.success) load();
@@ -7294,6 +7306,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
 // legs. Idempotent server-side; the button disables once closed.
 function YearCloseCard() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [preview, setPreview] = useState<{
     fyEnd: string;
     alreadyClosed: boolean;
@@ -7310,9 +7323,11 @@ function YearCloseCard() {
   useEffect(load, []);
   const post = async () => {
     if (!preview) return;
-    if (!window.confirm(
-      `Close FY ended ${preview.fyEnd}?\n\nNet ${preview.netSen >= 0 ? "profit" : "loss"} of ${formatCurrency(Math.abs(preview.netSen))} across ${preview.accountCount} P&L accounts will be posted to 150-0000 RETAINED EARNING. This writes immutable ledger entries.`,
-    )) return;
+    if (!(await confirm({
+      title: "Close financial year?",
+      message: `Close FY ended ${preview.fyEnd}?\n\nNet ${preview.netSen >= 0 ? "profit" : "loss"} of ${formatCurrency(Math.abs(preview.netSen))} across ${preview.accountCount} P&L accounts will be posted to 150-0000 RETAINED EARNING. This writes immutable ledger entries.`,
+      danger: false,
+    }))) return;
     setPosting(true);
     try {
       const res = await fetch("/api/accounting/year-close", {

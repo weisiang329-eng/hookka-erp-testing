@@ -6,6 +6,7 @@ import { SoDocumentRelationship } from "@/components/ui/so-document-relationship
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -39,6 +40,7 @@ const PAYMENT_METHODS = [
 ];
 
 export default function InvoiceDetailPage() {
+  const { confirm } = useConfirm();
   const { id } = useParams();
   const navigate = useNavigate();
   const { data: invResp, loading: invLoading, refresh: refreshInvoice } = useCachedJson<{ success?: boolean; data?: Invoice; lockReason?: string | null }>(id ? `/api/invoices/${id}` : null);
@@ -305,7 +307,7 @@ export default function InvoiceDetailPage() {
   };
 
   const deleteInvoice = async () => {
-    if (!confirm("Delete this invoice?")) return;
+    if (!(await confirm({ title: "Delete invoice", message: "Delete this invoice?", danger: true }))) return;
     try {
       const res = await fetch(`/api/invoices/${id}`, { method: "DELETE" });
       if (!res.ok) {

@@ -745,11 +745,14 @@ export default function PlanningPage() {
   // and then invalidate the production cache so the tracker picks up new
   // dates immediately.
   const recalcAllDueDates = async () => {
-    const ok = window.confirm(
-      "Recalculate due dates on ALL existing production orders?\n\n" +
+    const ok = await confirm({
+      title: "Recalculate all due dates?",
+      message:
+        "Recalculate due dates on ALL existing production orders?\n\n" +
         "This will rewrite every job card's dueDate using the current lead " +
         "times. Orders mid-production will see their department targets shift.",
-    );
+      danger: true,
+    });
     if (!ok) return;
     setRecalcRunning(true);
     setRecalcResult(null);

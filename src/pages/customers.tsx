@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { formatCurrency, formatRM } from "@/lib/utils";
 import { humanizeError } from "@/lib/humanize-error";
 import { parseDebtorCode } from "@/lib/debtor";
@@ -187,6 +188,7 @@ function StateBadge({ state }: { state: string }) {
 // =====================================================================
 function CustomerProductsPanel({ customerId, customerName, customer: _customer }: { customerId: string; customerName: string; customer: Customer }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   // Date the operator wants prices resolved to. Drives BOTH the on-screen
   // grid AND the Export Quotation PDF — plumbed into both
   // /api/customer-products?asOf= and /api/customer-quotation?asOf=.
@@ -376,7 +378,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
   const assignedIds = useMemo(() => new Set(rows.map((r) => r.productId)), [rows]);
 
   const handleRemove = async (row: CustomerProduct) => {
-    if (!confirm(`Remove "${row.productCode} ${row.productName}" from ${customerName}?`)) return;
+    if (!(await confirm({ title: "Remove product?", message: `Remove "${row.productCode} ${row.productName}" from ${customerName}?`, danger: true }))) return;
     const res = await fetch(`/api/customer-products/${row.id}`, { method: "DELETE" });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
@@ -432,7 +434,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
       unassignedCount === 0
         ? `All master SKUs already assigned to ${customerName}. Re-syncing the price HISTORY from Master will add any missing rows (idempotent — won't duplicate). Continue?`
         : `Copy ${unassignedCount} unassigned SKU${unassignedCount === 1 ? "" : "s"} to ${customerName} AND mirror the full master price history (every effective-dated row). Continue?`;
-    if (!confirm(confirmMsg)) {
+    if (!(await confirm({ title: "Copy from Master?", message: confirmMsg }))) {
       return;
     }
     setCopyingFromMaster(true);
@@ -677,12 +679,14 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
                 Save{dirtyEdits.size > 0 ? ` (${dirtyEdits.size})` : ""}
               </button>
               <button
-                onClick={() => {
+                onClick={async () => {
                   if (
                     dirtyEdits.size > 0 &&
-                    !confirm(
-                      `Discard ${dirtyEdits.size} unsaved change${dirtyEdits.size === 1 ? "" : "s"}?`,
-                    )
+                    !(await confirm({
+                      title: "Discard unsaved changes?",
+                      message: `Discard ${dirtyEdits.size} unsaved change${dirtyEdits.size === 1 ? "" : "s"}?`,
+                      danger: true,
+                    }))
                   ) {
                     return;
                   }
@@ -1304,6 +1308,7 @@ type CustFabricRow = {
 };
 
 function CustomerMaintenancePanel({ customerId, customerName }: { customerId: string; customerName: string }) {
+  const { confirm } = useConfirm();
   // Loaded blob from /api/kv-config/variants-config:<customerId>. null = not
   // yet hydrated; "missing" sentinel via `seeded` flag tells us whether the
   // customer has had Copy from Master run.
@@ -1408,10 +1413,12 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
     : [];
 
   const handleCopyFromMaster = async () => {
-    if (!confirm(
-      `Copy current Master Maintenance values to "${customerName}"?\n\n` +
-      `This will create a customer-specific snapshot. Future master changes will NOT flow through; you'll edit ${customerName}'s prices independently from this point on.`,
-    )) return;
+    if (!(await confirm({
+      title: "Copy from Master?",
+      message:
+        `Copy current Master Maintenance values to "${customerName}"?\n\n` +
+        `This will create a customer-specific snapshot. Future master changes will NOT flow through; you'll edit ${customerName}'s prices independently from this point on.`,
+    }))) return;
     setCopying(true);
     setErrorMsg("");
     try {
@@ -1450,10 +1457,14 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
     setShowSaveModal(true);
   };
 
-  const handleCancel = () => {
+  const handleCancel = async () => {
     if (
       isDirty &&
-      !window.confirm("Discard your unsaved Maintenance edits?")
+      !(await confirm({
+        title: "Discard unsaved edits?",
+        message: "Discard your unsaved Maintenance edits?",
+        danger: true,
+      }))
     ) {
       return;
     }
@@ -2061,6 +2072,7 @@ function renderCustComponentSizes(sizes: CustSofaComboSizes): string {
 }
 
 function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: string; customerName: string }) {
+  const { confirm } = useConfirm();
   const [rules, setRules] = useState<CustSofaComboRule[]>([]);
   const [loading, setLoading] = useState(true);
   const [copying, setCopying] = useState(false);
@@ -2121,11 +2133,13 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const handleCopyFromMaster = async () => {
-    if (!confirm(
-      `Copy company-wide Sofa Combos to "${customerName}"?\n\n` +
-      `This snapshots the latest master rules into customer-specific copies. ` +
-      `Already-snapshotted rules are skipped (re-running is safe).`,
-    )) return;
+    if (!(await confirm({
+      title: "Copy Sofa Combos?",
+      message:
+        `Copy company-wide Sofa Combos to "${customerName}"?\n\n` +
+        `This snapshots the latest master rules into customer-specific copies. ` +
+        `Already-snapshotted rules are skipped (re-running is safe).`,
+    }))) return;
     setCopying(true);
     setErrorMsg("");
     try {
@@ -2146,9 +2160,11 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
   };
 
   const handleDelete = async (rule: CustSofaComboRule) => {
-    if (!confirm(
-      `Delete combo "${rule.baseModel} — ${renderCustComponentSizes(rule.componentSizes)}"?`,
-    )) return;
+    if (!(await confirm({
+      title: "Delete combo?",
+      message: `Delete combo "${rule.baseModel} — ${renderCustComponentSizes(rule.componentSizes)}"?`,
+      danger: true,
+    }))) return;
     const res = await fetch(`/api/sofa-combos/${rule.id}`, { method: "DELETE" });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
@@ -2350,6 +2366,7 @@ function CustomerPriceHistoryDialog({
   onChanged: () => void;
 }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [history, setHistory] = useState<PriceHistoryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -2491,7 +2508,7 @@ function CustomerPriceHistoryDialog({
   };
 
   const deleteRow = async (rowId: string) => {
-    if (!confirm("Delete this price history entry?")) return;
+    if (!(await confirm({ title: "Delete price entry?", message: "Delete this price history entry?", danger: true }))) return;
     const res = await fetch(`/api/customer-products/price-row/${rowId}`, {
       method: "DELETE",
     });
@@ -3063,6 +3080,7 @@ function AssignSkuModal({
 // =====================================================================
 export default function CustomersPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const { data: customersResp, loading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   const initialCustomers: Customer[] = useMemo(
     () => (customersResp?.success ? customersResp.data ?? [] : Array.isArray(customersResp) ? customersResp : []),
@@ -3135,7 +3153,7 @@ export default function CustomersPage() {
 
   // ---------- Delete ----------
   const handleDelete = async (customer: Customer) => {
-    if (!confirm(`Delete customer "${customer.name}"?`)) return;
+    if (!(await confirm({ title: "Delete customer?", message: `Delete customer "${customer.name}"?`, danger: true }))) return;
     try {
       const res = await fetch(`/api/customers/${customer.id}`, { method: "DELETE" });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3662,7 +3680,7 @@ export default function CustomersPage() {
                           </button>
                           <button
                             onClick={async () => {
-                              if (!confirm(`Delete hub "${hub.shortName}"?`)) return;
+                              if (!(await confirm({ title: "Delete hub?", message: `Delete hub "${hub.shortName}"?`, danger: true }))) return;
                               const cust = data.find(c => c.id === expandedCustomer);
                               if (!cust) return;
                               await persistCustomer({ ...cust, deliveryHubs: cust.deliveryHubs.filter(h => h.id !== hub.id) });

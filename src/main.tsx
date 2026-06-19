@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from 'react-router-dom'
 import { router } from './router'
+import { ConfirmProvider } from './components/ui/confirm-dialog'
 import './index.css'
 // Side-effect import: installs the global fetch interceptor that injects the
 // Authorization header and handles 401 redirects. Must run before any
@@ -39,6 +40,8 @@ window.addEventListener('vite:preloadError', () => {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <RouterProvider router={router} />
+    <ConfirmProvider>
+      <RouterProvider router={router} />
+    </ConfirmProvider>
   </StrictMode>,
 )

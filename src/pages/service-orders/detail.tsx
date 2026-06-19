@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { getCurrentUser } from "@/lib/auth";
 import {
   ArrowLeft,
@@ -123,6 +124,7 @@ type FgPickerOpt = { id: string; code: string; name: string; stockQty?: number }
 export default function ServiceOrderDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const user = getCurrentUser();
 
   const { data: resp, refresh } = useCachedJson<{ data?: ServiceOrderDetail }>(
@@ -169,7 +171,7 @@ export default function ServiceOrderDetailPage() {
           : order?.mode === "STOCK_SWAP"
             ? `Cancel will restore ${lines.filter((l) => l.resolutionFgBatchId).length} reserved FG batch(es).`
             : "";
-      if (summary && !window.confirm(`${summary} Continue?`)) return;
+      if (summary && !(await confirm({ title: "Continue?", message: `${summary} Continue?`, danger: true }))) return;
     }
     setAdvancing(true);
     try {

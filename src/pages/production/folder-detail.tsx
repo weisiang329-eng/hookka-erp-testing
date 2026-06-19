@@ -13,6 +13,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Trash2, ArrowLeft, Printer } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
@@ -95,6 +96,7 @@ type Worker = { id: string; name: string; departmentCode: string | null; departm
 export default function ProductionFolderDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const params = useParams<{ id: string }>();
   const folderId = params.id ?? "";
   const [folder, setFolder] = useState<FolderData | null>(null);
@@ -280,7 +282,7 @@ export default function ProductionFolderDetailPage() {
 
   const handleDeleteFolder = async () => {
     if (!folder) return;
-    if (!confirm(`Delete folder "${folder.name}"?\n\nThis only removes the folder. The ${rows.length} job card${rows.length === 1 ? "" : "s"} inside stay untouched.`)) return;
+    if (!(await confirm({ title: "Delete folder", message: `Delete folder "${folder.name}"?\n\nThis only removes the folder. The ${rows.length} job card${rows.length === 1 ? "" : "s"} inside stay untouched.`, danger: true }))) return;
     try {
       const res = await fetch(`/api/production-folders/${encodeURIComponent(folder.id)}`, {
         method: "DELETE",
@@ -297,7 +299,7 @@ export default function ProductionFolderDetailPage() {
 
   const handleRemoveFromFolder = async () => {
     if (selected.length === 0) return;
-    if (!confirm(`Remove ${selected.length} job card${selected.length === 1 ? "" : "s"} from this folder?\n\nThe job card${selected.length === 1 ? "" : "s"} stay in production — only the folder reference is removed.`)) return;
+    if (!(await confirm({ title: "Remove from folder", message: `Remove ${selected.length} job card${selected.length === 1 ? "" : "s"} from this folder?\n\nThe job card${selected.length === 1 ? "" : "s"} stay in production — only the folder reference is removed.`, danger: true }))) return;
     try {
       const res = await fetch(`/api/production-folders/${encodeURIComponent(folderId)}/remove-jcs`, {
         method: "POST",

@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { formatCurrency, formatDate, todayYmdMY } from "@/lib/utils";
 import {
   ArrowLeft,
@@ -223,6 +224,7 @@ export default function RDProjectDetailPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [project, setProject] = useState<RDProject | null>(null);
   const [advancing, setAdvancing] = useState(false);
   const [statusFlipping, setStatusFlipping] = useState<
@@ -409,7 +411,7 @@ export default function RDProjectDetailPage() {
     successMsg: string,
   ) => {
     if (!project) return;
-    if (!window.confirm(confirmMsg)) return;
+    if (!(await confirm({ message: confirmMsg, danger: false }))) return;
     setStatusFlipping(action);
     try {
       const r = await fetch(`/api/rd-projects/${id}/${action}`, {
@@ -441,9 +443,12 @@ export default function RDProjectDetailPage() {
     if (!project) return;
     if (project.currentStage !== "PRODUCTION_READY") return;
     if (
-      !window.confirm(
-        "Mark this project as Completed? It will leave the active pipeline and move to the Completed tab.",
-      )
+      !(await confirm({
+        title: "Complete project?",
+        message:
+          "Mark this project as Completed? It will leave the active pipeline and move to the Completed tab.",
+        danger: false,
+      }))
     )
       return;
     setStatusFlipping("complete");
@@ -1006,7 +1011,7 @@ export default function RDProjectDetailPage() {
   };
 
   const handleRemoveLabourHour = async (logId: string) => {
-    if (!window.confirm("Remove this labour hours row?")) return;
+    if (!(await confirm({ title: "Remove row?", message: "Remove this labour hours row?", danger: true }))) return;
     try {
       const res = await fetch(
         `/api/rd-projects/${id}/labour-hours/${logId}`,
@@ -1066,7 +1071,7 @@ export default function RDProjectDetailPage() {
   };
 
   const handleClearManualCost = async () => {
-    if (!window.confirm("Clear the manual override and revert to the auto-computed labour cost?"))
+    if (!(await confirm({ title: "Clear override?", message: "Clear the manual override and revert to the auto-computed labour cost?", danger: true })))
       return;
     await submitManualCost(null);
   };

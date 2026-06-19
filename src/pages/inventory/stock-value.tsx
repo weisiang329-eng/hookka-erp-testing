@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { formatCurrency } from "@/lib/utils";
 import {
   Calculator,
@@ -191,6 +192,7 @@ function EntryTab({
   onRefresh: () => void;
 }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [editingPhysical, setEditingPhysical] = useState<Record<string, string>>({});
   const [editMode, setEditMode] = useState(false);
   const [savingPhysical, setSavingPhysical] = useState(false);
@@ -318,9 +320,11 @@ function EntryTab({
   };
 
   const handleReopenPeriod = async () => {
-    const confirmed = window.confirm(
-      `Reopen ${periodLabel(selectedPeriod)}? All POSTED entries will return to DRAFT and become editable again.`
-    );
+    const confirmed = await confirm({
+      title: "Reopen period?",
+      message: `Reopen ${periodLabel(selectedPeriod)}? All POSTED entries will return to DRAFT and become editable again.`,
+      danger: true,
+    });
     if (!confirmed) return;
 
     setReopening(true);

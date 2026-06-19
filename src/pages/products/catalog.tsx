@@ -16,6 +16,7 @@ import { Box, Images, Upload, Trash2, Loader2, X, FileText } from "lucide-react"
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 const RT_MODULAR = "modular";
 
@@ -288,6 +289,7 @@ function ModelDetailDialog({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
+  const { confirm } = useConfirm();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !busy) onClose(); };
@@ -323,7 +325,7 @@ function ModelDetailDialog({
   }
 
   async function remove(f: FileAsset) {
-    if (!window.confirm(`Delete "${f.filename}"?`)) return;
+    if (!(await confirm({ title: "Delete photo?", message: `Delete "${f.filename}"?`, danger: true }))) return;
     setBusy(true);
     try {
       const res = await fetch(`/api/files/${f.id}`, { method: "DELETE" });

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { useUrlState, useUrlStateNumber } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -799,6 +800,7 @@ async function sendCustomerNotice(
 
 export default function DeliveryPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   // Top-level "Orders" / "3PL" tab — URL-synced so refresh and back/forward
   // both keep the user where they were.
   const [pageTab, setPageTab] = useUrlState<"orders" | "3pl">("section", "orders");
@@ -1563,7 +1565,7 @@ export default function DeliveryPage() {
   };
 
   const deleteProvider = async (id: string) => {
-    if (!confirm("Delete this 3PL provider?")) return;
+    if (!(await confirm({ title: "Delete provider", message: "Delete this 3PL provider?", danger: true }))) return;
     try {
       const res = await fetch(`/api/drivers/${id}`, { method: "DELETE" });
       if (!res.ok) {
@@ -1897,7 +1899,7 @@ export default function DeliveryPage() {
   };
 
   const deleteVehicle = async (id: string) => {
-    if (!confirm("Delete this vehicle?")) return;
+    if (!(await confirm({ title: "Delete vehicle", message: "Delete this vehicle?", danger: true }))) return;
     if (!currentProviderId) return;
     try {
       const res = await fetch(`/api/three-pl-vehicles/${id}`, { method: "DELETE" });
@@ -1963,7 +1965,7 @@ export default function DeliveryPage() {
   };
 
   const deleteDriverPerson = async (id: string) => {
-    if (!confirm("Delete this driver?")) return;
+    if (!(await confirm({ title: "Delete driver", message: "Delete this driver?", danger: true }))) return;
     if (!currentProviderId) return;
     try {
       const res = await fetch(`/api/three-pl-drivers/${id}`, { method: "DELETE" });
@@ -2575,9 +2577,11 @@ export default function DeliveryPage() {
   // Delete a saved packing list (frees its DOs to be grouped again).
   const handleDeletePackingList = async (pl: PackingListRecord) => {
     if (
-      !confirm(
-        `Delete packing list ${pl.packingNo}? Its ${pl.doCount ?? pl.stopCount} delivery order(s) will be freed to add to another list. This does not delete the DOs.`,
-      )
+      !(await confirm({
+        title: "Delete packing list",
+        message: `Delete packing list ${pl.packingNo}? Its ${pl.doCount ?? pl.stopCount} delivery order(s) will be freed to add to another list. This does not delete the DOs.`,
+        danger: true,
+      }))
     )
       return;
     try {
@@ -2827,12 +2831,14 @@ export default function DeliveryPage() {
       return;
     }
     if (
-      !confirm(
-        `Mark ${eligible.length} delivery order(s) in ${pl.packingNo} as ${verb}? (${eligible
+      !(await confirm({
+        title: `Mark ${verb}`,
+        message: `Mark ${eligible.length} delivery order(s) in ${pl.packingNo} as ${verb}? (${eligible
           .map((d) => d.doNo)
           .slice(0, 5)
           .join(", ")}${eligible.length > 5 ? "…" : ""})`,
-      )
+        danger: false,
+      }))
     )
       return;
     setPlBulkBusy(pl.id);
@@ -4035,7 +4041,7 @@ export default function DeliveryPage() {
         label: "Reverse to Pending Dispatch",
         icon: <Package className="h-3.5 w-3.5" />,
         action: async () => {
-          if (!confirm("Reverse this DO back to Pending Dispatch?")) return;
+          if (!(await confirm({ title: "Reverse DO", message: "Reverse this DO back to Pending Dispatch?", danger: true }))) return;
           // 2026-05-27 verifiedSave migration.
           const result = await verifiedSave<DeliveryOrder>({
             endpoint: `/api/delivery-orders/${row.id}`,
@@ -5422,7 +5428,7 @@ export default function DeliveryPage() {
                         which goes away with the DO). */}
                     <button
                       onClick={async () => {
-                        if (!confirm(`Delete ${detailDO.doNo}? Items will return to Pending Delivery.`)) return;
+                        if (!(await confirm({ title: "Delete DO", message: `Delete ${detailDO.doNo}? Items will return to Pending Delivery.`, danger: true }))) return;
                         try {
                           const res = await fetch(`/api/delivery-orders/${detailDO.id}`, { method: "DELETE" });
                           const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;

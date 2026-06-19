@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback } from "react";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -176,6 +177,7 @@ export default function SalesOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{
     success?: boolean;
     data?: SalesOrder;
@@ -473,7 +475,7 @@ export default function SalesOrderDetailPage() {
   }, [id, overrideModal.reason, navigate, toast, refreshEligibility]);
 
   const deleteOrder = async () => {
-    if (!confirm("Delete this order?")) return;
+    if (!(await confirm({ title: "Delete order", message: "Delete this order?", danger: true }))) return;
     await fetch(`/api/consignment-orders/${id}`, { method: "DELETE" });
     // Deleting an SO also cascades to its linked POs on the server. Invalidate
     // the SO list (one row gone) and the PO list (linked POs gone), plus the
@@ -488,15 +490,18 @@ export default function SalesOrderDetailPage() {
   // because the dedicated endpoint also stamps cancelled_at and stays
   // idempotent on a second click. Only DRAFT/CONFIRMED orders qualify here —
   // beyond that the server refuses (IN_PRODUCTION → "pause first",
-  // DELIVERED → "credit note instead"). Browser confirm() is intentional;
-  // the action lives in the page header where the modal-driven "Cancel
-  // Order" status button lower in the page covers the deeper cascade flow.
+  // DELIVERED → "credit note instead"). This quick header confirm uses the
+  // shared in-app confirm dialog; the modal-driven "Cancel Order" status
+  // button lower in the page covers the deeper cascade flow.
   const cancelOrder = async () => {
     if (!order) return;
     if (
-      !confirm(
-        "Cancel this order? Cannot be undone, but the order record stays for audit.",
-      )
+      !(await confirm({
+        title: "Cancel order",
+        message:
+          "Cancel this order? Cannot be undone, but the order record stays for audit.",
+        danger: true,
+      }))
     )
       return;
     setUpdating(true);

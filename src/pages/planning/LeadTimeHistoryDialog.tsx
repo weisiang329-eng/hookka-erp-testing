@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { humanizeError } from "@/lib/humanize-error";
 import { Input } from "@/components/ui/input";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
@@ -73,6 +74,7 @@ export function LeadTimeHistoryDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { confirm } = useConfirm();
   const [rows, setRows] = useState<AnyHistoryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -183,7 +185,7 @@ export function LeadTimeHistoryDialog({
   }
 
   async function deleteRow(rowId: string) {
-    if (!confirm("Delete this history entry?")) return;
+    if (!(await confirm({ title: "Delete history entry", message: "Delete this history entry?", danger: true }))) return;
     const res = await fetch(`/api/production/leadtimes/history/${rowId}`, {
       method: "DELETE",
     });

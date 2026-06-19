@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import {
   Boxes, AlertTriangle, Package, Layers, Plus, X,
@@ -1086,6 +1087,7 @@ let invSnapshot: {
 
 export default function InventoryPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [activeTab, setActiveTab] = useState<Tab>("FINISHED");
 
   // Search & filter state
@@ -2753,7 +2755,7 @@ export default function InventoryPage() {
                 size="sm"
                 disabled={deletingRM || savingRM}
                 onClick={async () => {
-                  if (!confirm(`Delete raw material "${editRM.itemCode}" (${editRM.description})?\n\nThis cannot be undone.`)) return;
+                  if (!(await confirm({ title: "Delete raw material", message: `Delete raw material "${editRM.itemCode}" (${editRM.description})?\n\nThis cannot be undone.`, danger: true }))) return;
                   setDeletingRM(true);
                   try {
                     const res = await fetch(`/api/raw-materials/${encodeURIComponent(editRM.id)}`, { method: "DELETE" });

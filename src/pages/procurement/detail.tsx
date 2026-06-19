@@ -24,7 +24,6 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useParams, useNavigate } from "react-router-dom";
-import { GRNFormDialog } from "@/pages/procurement/grn";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
 
 // Status timeline steps
@@ -169,35 +168,9 @@ export default function PurchaseOrderDetailPage() {
   const [emailing, setEmailing] = useState(false);
   const [creatingInvoice, setCreatingInvoice] = useState(false);
 
-  // ------- Inline GRN dialog state (3.2) -------
-  // Embeds the existing GRNFormDialog from grn.tsx scoped to this PO so
-  // the operator doesn't have to navigate to the standalone GRN page +
-  // pick the PO from a list. The handler mirrors the canonical
-  // handleCreateGRN in grn.tsx — POST /api/grn, invalidate caches.
-  const [showGrnDialog, setShowGrnDialog] = useState(false);
-  const handleInlineGrnCreate = async (payload: Record<string, unknown>) => {
-    try {
-      const res = await fetch("/api/grn", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const body = await res.json().catch(() => ({})) as { success?: boolean; error?: string };
-      if (!res.ok || !body.success) {
-        toast.error(body.error || `Failed to create GRN (HTTP ${res.status})`);
-        return;
-      }
-      invalidateCachePrefix("/api/grn");
-      invalidateCachePrefix("/api/purchase-orders");
-      invalidateCachePrefix("/api/inventory");
-      invalidateCachePrefix("/api/raw-materials");
-      fetchPO();
-      toast.success("GRN created");
-      setShowGrnDialog(false);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Network error creating GRN");
-    }
-  };
+  // GRN creation from a PO now routes to the full-page /procurement/grn/create
+  // (with ?poId= pre-selecting this PO), so the inline modal that used to live
+  // here was removed — every GRN-create entry point is the same full page now.
 
   const resolveSupplierName = useCallback(
     (sid: string): string => {
@@ -1172,7 +1145,7 @@ export default function PurchaseOrderDetailPage() {
                 {showCreateGrnCta && (
                   <Button
                     variant="primary"
-                    onClick={() => setShowGrnDialog(true)}
+                    onClick={() => navigate(`/procurement/grn/create?poId=${po.id}`)}
                   >
                     <Package className="h-4 w-4" /> Create GRN
                   </Button>
@@ -1180,7 +1153,7 @@ export default function PurchaseOrderDetailPage() {
                 {!showCreateGrnCta && canReceiveInline && (
                   <Button
                     variant="outline"
-                    onClick={() => setShowGrnDialog(true)}
+                    onClick={() => navigate(`/procurement/grn/create?poId=${po.id}`)}
                   >
                     <Package className="h-4 w-4" /> Receive Goods
                   </Button>
@@ -1288,19 +1261,6 @@ export default function PurchaseOrderDetailPage() {
             </div>
           </div>
         </div>
-      )}
-
-      {/* 3.2 — Inline GRN dialog scoped to this PO. The exported dialog
-          from grn.tsx renders the same form the standalone GRN page uses,
-          but lockedPoId hides the PO selector and pre-selects this PO,
-          so the operator skips the "pick the PO from a list" step. */}
-      {showGrnDialog && (
-        <GRNFormDialog
-          purchaseOrders={[po]}
-          lockedPoId={po.id}
-          onSave={handleInlineGrnCreate}
-          onClose={() => setShowGrnDialog(false)}
-        />
       )}
 
       {/* Document lineage — GRNs received + PIs raised against this PO, as

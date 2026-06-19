@@ -1805,13 +1805,30 @@ function JournalsTab({
     onRefresh();
   };
 
-  const handleReverse = async (id: string) => {
-    await fetch(`/api/accounting/journals/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "REVERSED" }),
-    });
-    onRefresh();
+  const handleLifecycle = async (id: string, entryNo: string, action: "void" | "delete" | "unvoid") => {
+    const verb = action === "unvoid" ? "Restore" : action === "delete" ? "Delete" : "Void";
+    const extra = action === "delete"
+      ? " It will be hidden from the GL (still visible in the audit log)."
+      : action === "void"
+        ? " A reversal entry will be posted (nothing is deleted)."
+        : "";
+    if (!window.confirm(`${verb} ${entryNo}?${extra}`)) return;
+    try {
+      const res = await fetch(`/api/accounting/journals/${id}/lifecycle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      if (!res.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body: any = await res.json().catch(() => ({}));
+        alert(humanizeError({ status: res.status, message: body?.error }, `Couldn't ${verb.toLowerCase()} the journal entry.`));
+        return;
+      }
+      onRefresh();
+    } catch (e) {
+      alert(humanizeError(e, `Couldn't ${verb.toLowerCase()} the journal entry.`));
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -1894,9 +1911,12 @@ function JournalsTab({
       key: "status",
       label: "Status",
       render: (value, row) => (
-        <Badge variant="status" status={row.status}>
-          {row.status}
-        </Badge>
+        <span className="inline-flex items-center gap-1">
+          <Badge variant="status" status={row.status}>
+            {row.status}
+          </Badge>
+          <LifecycleBadge state={row.lifecycleState} />
+        </span>
       ),
     },
   ];
@@ -1908,9 +1928,16 @@ function JournalsTab({
     if (row.status === "DRAFT") {
       items.push({ label: "Post", action: (r) => handlePost(r.id) });
       items.push({ label: "Delete", danger: true, action: (r) => handleDelete(r.id) });
-    }
-    if (row.status === "POSTED") {
-      items.push({ label: "Reverse", action: (r) => handleReverse(r.id) });
+    } else {
+      // Posted (or already reversed) — drive lifecycle off document state.
+      const state = row.lifecycleState ?? "ACTIVE";
+      if (state === "ACTIVE") {
+        items.push({ label: "Void", action: (r) => handleLifecycle(r.id, r.entryNo, "void") });
+        items.push({ label: "Delete", danger: true, action: (r) => handleLifecycle(r.id, r.entryNo, "delete") });
+      } else if (state === "VOID") {
+        items.push({ label: "Unvoid", action: (r) => handleLifecycle(r.id, r.entryNo, "unvoid") });
+        items.push({ label: "Delete", danger: true, action: (r) => handleLifecycle(r.id, r.entryNo, "delete") });
+      }
     }
     items.push({ label: "Duplicate as draft (template)", action: (r) => handleDuplicate(r) });
     items.push({ separator: true, label: "", action: () => {} });
@@ -3879,7 +3906,7 @@ type OtherPartyBill = {
   id: string; billNo: string; partyId: string; partyType: "DEBTOR" | "CREDITOR";
   partyName: string; billDate: string; referenceNo: string; description: string;
   subtotalSen: number; taxSen: number; totalSen: number; paidAmountSen: number;
-  outstandingSen: number; status: string;
+  outstandingSen: number; status: string; lifecycleState?: string;
   items: { counterAccount: string; amountSen: number; description: string; lineNo: number }[];
 };
 
@@ -3929,11 +3956,22 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
     } else toast.error(j?.error || "Failed to create bill");
   };
 
-  const del = async (billNo: string) => {
-    const res = await fetch(`/api/accounting/other-party-bills/${encodeURIComponent(billNo)}`, { method: "DELETE" });
+  const handleLifecycle = async (billNo: string, action: "void" | "delete" | "unvoid") => {
+    const verb = action === "unvoid" ? "Restore" : action === "delete" ? "Delete" : "Void";
+    const extra = action === "delete"
+      ? " It will be hidden from the GL (still visible in the audit log)."
+      : action === "void"
+        ? " A reversal entry will be posted (nothing is deleted)."
+        : "";
+    if (!window.confirm(`${verb} ${billNo}?${extra}`)) return;
+    const res = await fetch(`/api/accounting/other-party-bills/${encodeURIComponent(billNo)}/lifecycle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
     const j = asMutationResponse(await res.json());
     if (j?.success) load();
-    else toast.error(j?.error || "Failed to delete bill");
+    else toast.error(j?.error || `${verb} failed`);
   };
 
   return (
@@ -4041,11 +4079,18 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
                   <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(b.totalSen)}</td>
                   <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(b.paidAmountSen)}</td>
                   <td className="px-4 py-1.5 text-right tabular-nums font-medium">{formatCurrency(b.outstandingSen)}</td>
-                  <td className="px-4 py-1.5 text-center text-xs">{b.status}</td>
+                  <td className="px-4 py-1.5 text-center text-xs">
+                    <LifecycleBadge state={b.lifecycleState} />
+                    {(b.lifecycleState ?? "ACTIVE") === "ACTIVE" && b.status}
+                  </td>
                   <td className="px-4 py-1.5 text-right">
-                    {b.paidAmountSen === 0 && (
-                      <button onClick={() => del(b.billNo)} className="text-[#9A3A2D] text-xs hover:underline">Delete</button>
-                    )}
+                    <LifecycleActions
+                      state={b.lifecycleState}
+                      disabled={(b.lifecycleState ?? "ACTIVE") === "ACTIVE" && b.paidAmountSen > 0}
+                      onVoid={() => handleLifecycle(b.billNo, "void")}
+                      onDelete={() => handleLifecycle(b.billNo, "delete")}
+                      onUnvoid={() => handleLifecycle(b.billNo, "unvoid")}
+                    />
                   </td>
                 </tr>
               ))}
@@ -4060,7 +4105,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
 type OpenBill = { id: string; billNo: string; outstandingSen: number };
 type PaymentGroup = {
   paymentNo: string; partyId: string; partyType: "DEBTOR" | "CREDITOR"; partyName: string;
-  date: string; bankAccount: string; totalSen: number;
+  date: string; bankAccount: string; totalSen: number; lifecycleState?: string;
   lines: { billId: string; billNo: string; amountSen: number }[];
 };
 
@@ -4124,11 +4169,22 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
     else toast.error(j?.error || `Failed to post ${verb.toLowerCase()}`);
   };
 
-  const voidPayment = async (paymentNo: string) => {
-    const res = await fetch(`/api/accounting/other-party-payments/${encodeURIComponent(paymentNo)}/void`, { method: "POST" });
+  const handleLifecycle = async (paymentNo: string, action: "void" | "delete" | "unvoid") => {
+    const lcVerb = action === "unvoid" ? "Restore" : action === "delete" ? "Delete" : "Void";
+    const extra = action === "delete"
+      ? " It will be hidden from the GL (still visible in the audit log)."
+      : action === "void"
+        ? " A reversal entry will be posted (nothing is deleted)."
+        : "";
+    if (!window.confirm(`${lcVerb} ${paymentNo}?${extra}`)) return;
+    const res = await fetch(`/api/accounting/other-party-payments/${encodeURIComponent(paymentNo)}/lifecycle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
     const j = asMutationResponse(await res.json());
     if (j?.success) { loadHistory(); if (partyId) loadOpenBills(partyId); }
-    else toast.error(j?.error || "Failed to void");
+    else toast.error(j?.error || `${lcVerb} failed`);
   };
 
   return (
@@ -4218,7 +4274,15 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
                   <td className="px-4 py-1.5">{g.date}</td>
                   <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(g.totalSen)}</td>
                   <td className="px-4 py-1.5 text-center">{g.lines.length}</td>
-                  <td className="px-4 py-1.5 text-right"><button onClick={() => voidPayment(g.paymentNo)} className="text-[#9A3A2D] text-xs hover:underline">Void</button></td>
+                  <td className="px-4 py-1.5 text-right whitespace-nowrap">
+                    <span className="mr-2"><LifecycleBadge state={g.lifecycleState} /></span>
+                    <LifecycleActions
+                      state={g.lifecycleState}
+                      onVoid={() => handleLifecycle(g.paymentNo, "void")}
+                      onDelete={() => handleLifecycle(g.paymentNo, "delete")}
+                      onUnvoid={() => handleLifecycle(g.paymentNo, "unvoid")}
+                    />
+                  </td>
                 </tr>
               ))}
             </tbody>

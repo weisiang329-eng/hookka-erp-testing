@@ -654,6 +654,7 @@ export type JournalEntry = {
   description: string;
   lines: JournalLine[];
   status: "DRAFT" | "POSTED" | "REVERSED";
+  lifecycleState?: string;
   createdBy: string;
   createdAt: string;
 };

@@ -11,6 +11,7 @@
   "accumAccount": "accum_account",
   "acknowledgedAt": "acknowledged_at",
   "acquiredAt": "acquired_at",
+  "actionAt": "action_at",
   "actionLog": "action_log",
   "actionTaken": "action_taken",
   "activeHeadcount": "active_headcount",

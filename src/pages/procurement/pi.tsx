@@ -9,7 +9,8 @@ import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { Supplier } from "@/types";
+import type { Supplier, RawMaterial } from "@/types";
+import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
 import {
   FileText,
   Clock,
@@ -91,10 +92,13 @@ function emptyPILine(): PILineDraft {
 
 function PIFormDialog({
   suppliers,
+  materialOptions,
   onSave,
   onClose,
 }: {
   suppliers: Supplier[];
+  /** Active raw-materials catalog — suggestions for the line picker. */
+  materialOptions: MaterialOption[];
   onSave: (data: Record<string, unknown>) => Promise<void> | void;
   onClose: () => void;
 }) {
@@ -319,12 +323,30 @@ function PIFormDialog({
                     return (
                       <tr key={idx} className="border-t border-[#E2DDD8]">
                         <td className="px-2 py-1.5">
-                          <Input
+                          {/* Catalog picker — suggests raw materials by code
+                              OR name and fills BOTH the code and the name on
+                              pick. Still free-text: a supplier invoice can
+                              list off-catalog materials, so a typed value is
+                              kept verbatim (no hard-block, no normalize). */}
+                          <MaterialPicker
                             className="h-8"
-                            placeholder="Material / description"
+                            inputClassName="h-8"
+                            placeholder="Search code or name…"
                             value={line.materialName}
-                            onChange={(e) =>
-                              updateLine(idx, "materialName", e.target.value)
+                            options={materialOptions}
+                            onPick={(o) =>
+                              setLines((prev) => {
+                                const next = [...prev];
+                                next[idx] = {
+                                  ...next[idx],
+                                  materialCode: o.itemCode,
+                                  materialName: o.description,
+                                };
+                                return next;
+                              })
+                            }
+                            onTyped={(text) =>
+                              updateLine(idx, "materialName", text)
                             }
                           />
                         </td>
@@ -509,6 +531,20 @@ export default function PurchaseInvoicesPage() {
   const suppliers: Supplier[] = useMemo(
     () => supResp?.data ?? [],
     [supResp],
+  );
+  // Raw-materials catalog — powers the line "Description" picker so operators
+  // pick from the catalog instead of free-typing. Same /api/inventory cache the
+  // PO create + detail pages warm, so this is usually already loaded.
+  const { data: invResp } = useCachedJson<{
+    success?: boolean;
+    data?: { rawMaterials?: RawMaterial[] };
+  }>("/api/inventory");
+  const materialOptions: MaterialOption[] = useMemo(
+    () =>
+      (invResp?.success ? invResp.data?.rawMaterials ?? [] : [])
+        .filter((rm) => rm.isActive)
+        .map((rm) => ({ itemCode: rm.itemCode, description: rm.description })),
+    [invResp],
   );
   // Purchase Company letterhead registry — print each PI under its supplier's
   // buying company (accounting stays HOOKKA).
@@ -909,6 +945,7 @@ export default function PurchaseInvoicesPage() {
       {showForm && (
         <PIFormDialog
           suppliers={suppliers}
+          materialOptions={materialOptions}
           onSave={handleCreatePI}
           onClose={() => setShowForm(false)}
         />

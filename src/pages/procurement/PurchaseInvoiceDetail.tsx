@@ -25,6 +25,8 @@ import { useToast } from "@/components/ui/toast";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavGuard } from "@/lib/use-nav-guard";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
+import type { RawMaterial } from "@/types";
 
 const VALID_LINE_TYPES: LineType[] = ["STOCKED", "FEE", "TAX", "REBATE", "DISCOUNT", "OTHER"];
 
@@ -112,6 +114,21 @@ export default function PurchaseInvoiceDetailPage() {
   // accounting entity stays HOOKKA ("borrow the letterhead"). Lightweight JSON.
   const { data: supResp } = useCachedJson<{ data?: Array<{ id: string; purchaseOrgCode?: string }> }>("/api/suppliers");
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
+
+  // Raw-materials catalog — powers the line-editor's Material Code picker so
+  // an editing operator picks from the catalog instead of free-typing. Same
+  // /api/inventory cache the PO pages warm. Off-catalog text stays allowed.
+  const { data: invResp } = useCachedJson<{
+    success?: boolean;
+    data?: { rawMaterials?: RawMaterial[] };
+  }>("/api/inventory");
+  const materialOptions: MaterialOption[] = useMemo(
+    () =>
+      (invResp?.success ? invResp.data?.rawMaterials ?? [] : [])
+        .filter((rm) => rm.isActive)
+        .map((rm) => ({ itemCode: rm.itemCode, description: rm.description })),
+    [invResp],
+  );
 
   const pi: PurchaseInvoiceDetail | null = useMemo(
     () => (resp?.success ? resp.data ?? null : null),
@@ -589,10 +606,21 @@ export default function PurchaseInvoiceDetailPage() {
                           />
                         </td>
                         <td className="px-2 py-1.5">
-                          <Input
+                          {/* Catalog picker — suggests raw materials by code OR
+                              name and fills BOTH code + description on pick.
+                              Still free-text: an off-catalog supplier item is
+                              kept verbatim (no hard-block, no normalize). */}
+                          <MaterialPicker
                             value={l.materialCode}
-                            onChange={(e) => patchLine(i, { materialCode: e.target.value })}
+                            options={materialOptions}
                             placeholder="—"
+                            onPick={(o) =>
+                              patchLine(i, {
+                                materialCode: o.itemCode,
+                                materialName: o.description,
+                              })
+                            }
+                            onTyped={(text) => patchLine(i, { materialCode: text })}
                           />
                         </td>
                         <td className="px-2 py-1.5">

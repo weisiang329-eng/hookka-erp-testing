@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate, formatDateTime } from "@/lib/utils";
 import {
-  ArrowLeft, Trash2, Download, Edit, Copy,
+  Trash2, Download, Edit, Copy,
   CheckCircle2, Truck, FileText, XCircle, PauseCircle, PlayCircle, X,
   Factory, Clock, DollarSign, AlertTriangle, ChevronDown, ChevronUp,
   Wrench, Pencil,
@@ -25,6 +25,7 @@ import { HubEditModal } from "@/components/orders/HubEditModal";
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { LockBanner } from "@/components/ui/lock-banner";
+import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { getCurrentUser } from "@/lib/auth";
 import type { SalesOrder, SOStatus, Customer } from "@/types";
@@ -865,67 +866,65 @@ export default function SalesOrderDetailPage() {
         </div>
       )}
 
-      <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={() => navigate(basePath)}><ArrowLeft className="h-5 w-5" /></Button>
-        <div className="flex-1">
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold text-[#1F1D1B] doc-number">{order.companySOId}</h1>
-            <Badge variant="status" status={order.status} />
-          </div>
-          <p className="text-xs text-[#6B7280]">{order.customerName} &middot; {order.customerState}</p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap justify-end">
-          <Button variant="outline" size="sm" onClick={async () => {
-            if (!order) return;
-            const { generateSOPdf } = await import("@/lib/generate-so-pdf");
-            generateSOPdf(order, customer);
-          }}><Download className="h-4 w-4" /> PDF</Button>
-          <Button variant="outline" size="sm" onClick={handleClone}><Copy className="h-4 w-4" /> Clone</Button>
-          {canEdit && (
-            <Button variant="outline" size="sm" onClick={() => navigate(`${basePath}/${id}/edit`)}><Edit className="h-4 w-4" /> Edit</Button>
-          )}
-          {/* Rule-3 production_window lock surface. Non-admins see a
-              disabled "Edit (locked)" with a tooltip explaining the cutoff;
-              ADMIN / SUPER_ADMIN see the same disabled chip PLUS an amber
-              "Override Lock" button that opens the reason-capture modal. */}
-          {!canEdit && productionWindowLocked && (
-            <>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled
-                title={
-                  eligibilityResp?.earliestJcDueDate && eligibilityResp?.cutoffDate
-                    ? `Locked — first JC dueDate ${eligibilityResp.earliestJcDueDate} is within the 2-day cutoff (${eligibilityResp.cutoffDate}).`
-                    : "Locked — within production window."
-                }
-              >
-                <Edit className="h-4 w-4" /> Edit (locked)
-              </Button>
-              {canOverride && (
+      <ObjectPageHeader
+        backTo={basePath}
+        title={order.companySOId}
+        subtitle={`${order.customerName} · ${order.customerState}`}
+        badges={<Badge variant="status" status={order.status} />}
+        actions={
+          <>
+            <Button variant="outline" size="sm" onClick={async () => {
+              if (!order) return;
+              const { generateSOPdf } = await import("@/lib/generate-so-pdf");
+              generateSOPdf(order, customer);
+            }}><Download className="h-4 w-4" /> PDF</Button>
+            <Button variant="outline" size="sm" onClick={handleClone}><Copy className="h-4 w-4" /> Clone</Button>
+            {canEdit && (
+              <Button variant="outline" size="sm" onClick={() => navigate(`${basePath}/${id}/edit`)}><Edit className="h-4 w-4" /> Edit</Button>
+            )}
+            {/* Rule-3 production_window lock surface. Non-admins see a
+                disabled "Edit (locked)" with a tooltip explaining the cutoff;
+                ADMIN / SUPER_ADMIN see the same disabled chip PLUS an amber
+                "Override Lock" button that opens the reason-capture modal. */}
+            {!canEdit && productionWindowLocked && (
+              <>
                 <Button
                   variant="outline"
                   size="sm"
-                  className="text-[#8A6D1B] border-[#E8D38A] hover:bg-[#FBF1D6]"
-                  onClick={() =>
-                    setOverrideModal({
-                      open: true,
-                      reason: "",
-                      submitting: false,
-                      error: null,
-                    })
+                  disabled
+                  title={
+                    eligibilityResp?.earliestJcDueDate && eligibilityResp?.cutoffDate
+                      ? `Locked — first JC dueDate ${eligibilityResp.earliestJcDueDate} is within the 2-day cutoff (${eligibilityResp.cutoffDate}).`
+                      : "Locked — within production window."
                   }
                 >
-                  <AlertTriangle className="h-4 w-4" /> Override Lock
+                  <Edit className="h-4 w-4" /> Edit (locked)
                 </Button>
-              )}
-            </>
-          )}
-          {order.status === "DRAFT" && (
-            <Button variant="outline" size="sm" className="text-[#9A3A2D] hover:text-[#7A2E24]" onClick={deleteOrder}><Trash2 className="h-4 w-4" /> Delete</Button>
-          )}
-        </div>
-      </div>
+                {canOverride && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-[#8A6D1B] border-[#E8D38A] hover:bg-[#FBF1D6]"
+                    onClick={() =>
+                      setOverrideModal({
+                        open: true,
+                        reason: "",
+                        submitting: false,
+                        error: null,
+                      })
+                    }
+                  >
+                    <AlertTriangle className="h-4 w-4" /> Override Lock
+                  </Button>
+                )}
+              </>
+            )}
+            {order.status === "DRAFT" && (
+              <Button variant="outline" size="sm" className="text-[#9A3A2D] hover:text-[#7A2E24]" onClick={deleteOrder}><Trash2 className="h-4 w-4" /> Delete</Button>
+            )}
+          </>
+        }
+      />
 
       {/* Override-Lock Modal — admin-only escape hatch for Rule 3 (the
           production_window soft-lock). Required reason text is captured

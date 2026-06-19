@@ -3669,6 +3669,7 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
   const { toast } = useToast();
   const [parties, setParties] = useState<OtherParty[] | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({
     type: side as "DEBTOR" | "CREDITOR",
     name: "",
@@ -3703,19 +3704,30 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
   };
   useEffect(load, []);
 
-  const add = async () => {
+  const save = async () => {
     if (!form.name.trim()) { toast.error("Name is required"); return; }
-    const res = await fetch("/api/accounting/other-parties", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
-    });
+    const url = editingId ? `/api/accounting/other-parties/${editingId}` : "/api/accounting/other-parties";
+    const method = editingId ? "PUT" : "POST";
+    const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
     const j = asMutationResponse(await res.json());
     if (j?.success) {
-      setShowForm(false);
+      setShowForm(false); setEditingId(null);
       setForm({ type: side, name: "", contactPerson: "", phone: "", email: "", tin: "", registrationNo: "", address: "", notes: "" });
       load();
-    } else toast.error(j?.error || "Failed to create party");
+    } else toast.error(j?.error || (editingId ? "Failed to update party" : "Failed to create party"));
+  };
+
+  const startEdit = (p: OtherParty) => {
+    setEditingId(p.id);
+    setForm({ type: p.type, name: p.name, contactPerson: p.contactPerson, phone: p.phone, email: p.email, tin: p.tin, registrationNo: p.registrationNo, address: p.address, notes: p.notes });
+    setShowForm(true);
+  };
+  const del = async (p: OtherParty) => {
+    if (!window.confirm(`Delete ${p.name}? (only allowed if it has no bills/payments)`)) return;
+    const res = await fetch(`/api/accounting/other-parties/${p.id}`, { method: "DELETE" });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load();
+    else toast.error(j?.error || "Failed to delete party");
   };
 
   const setActive = async (id: string, isActive: boolean) => {
@@ -3753,7 +3765,7 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
       </div>
 
       <div className="flex flex-wrap items-center justify-end gap-3">
-        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+        <Button variant="primary" size="sm" onClick={() => { setEditingId(null); setForm({ type: side, name: "", contactPerson: "", phone: "", email: "", tin: "", registrationNo: "", address: "", notes: "" }); setShowForm(!showForm); }}>
           <Plus className="h-4 w-4" /> Add Party
         </Button>
       </div>
@@ -3794,7 +3806,7 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
               <input type="text" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
             </div>
             <div className="flex gap-2">
-              <Button variant="primary" size="sm" onClick={add}>Save</Button>
+              <Button variant="primary" size="sm" onClick={save}>{editingId ? "Save changes" : "Save"}</Button>
               <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
             </div>
           </CardContent>
@@ -3834,6 +3846,8 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
                     <td className="px-4 py-1.5 text-[#6B7280]">{p.phone}</td>
                     <td className="px-4 py-1.5 text-[#6B7280] text-xs">{p.notes}</td>
                     <td className="px-4 py-1.5 text-right">
+                      <button onClick={() => startEdit(p)} className="text-[#6B5C32] hover:underline text-xs mr-3">Edit</button>
+                      <button onClick={() => del(p)} className="text-[#9A3A2D] hover:underline text-xs mr-3">Delete</button>
                       <button
                         onClick={() => setActive(p.id, !p.isActive)}
                         className={`text-xs underline decoration-dotted cursor-pointer ${p.isActive ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}`}

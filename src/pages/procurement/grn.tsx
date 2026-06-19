@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -75,15 +75,24 @@ export function GRNFormDialog({
   >([]);
   const [scanOpen, setScanOpen] = useState(false);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- open the scan modal once on mount when launched from the header Scan button */
-  useEffect(() => {
-    if (autoScan) setScanOpen(true);
-    // run once on mount only
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
   const po = purchaseOrders.find((p) => p.id === selectedPO);
+
+  // When launched from the header "Scan supplier document" button (autoScan),
+  // auto-open the scan modal ONLY ONCE A PO IS SELECTED — never before. A GRN
+  // receives against a specific PO, and the scanned lines are matched to that
+  // PO's items; a supplier can have several open POs, so we never auto-pick one
+  // (wrong PO = wrong received quantities). The operator picks the PO, then the
+  // scan pops to auto-fill. When opened from the PO detail page (lockedPoId),
+  // the PO is already set, so the scan opens immediately.
+  const autoScanFired = useRef(false);
+  /* eslint-disable react-hooks/set-state-in-effect -- open scan once a PO is chosen */
+  useEffect(() => {
+    if (autoScan && po && !autoScanFired.current) {
+      autoScanFired.current = true;
+      setScanOpen(true);
+    }
+  }, [autoScan, po]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /* eslint-disable react-hooks/set-state-in-effect -- seed item entries from the selected PO when the user picks one */
   useEffect(() => {

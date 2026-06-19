@@ -697,11 +697,24 @@ export default function PurchaseOrderDetailPage() {
               <Printer className="h-4 w-4" /> Print GRN
             </Button>
           )}
-          {!isDraft && !isCancelled && !editing && (
-            <Button variant="outline" onClick={createInvoiceFromPo} disabled={creatingInvoice}>
-              <Receipt className="h-4 w-4" /> {creatingInvoice ? "Creating…" : "Create Invoice"}
-            </Button>
-          )}
+          {!isDraft && !isCancelled && !editing && (() => {
+            // One live (non-cancelled) PI per PO — the convert copies every line
+            // at full qty, so a second one is a full-value duplicate. Disable
+            // when an invoice already exists; the backend also 409s this.
+            const hasLivePi = relatedPis.some(
+              (p) => ((p as { status?: string }).status ?? "") !== "CANCELLED",
+            );
+            return (
+              <Button
+                variant="outline"
+                onClick={createInvoiceFromPo}
+                disabled={creatingInvoice || hasLivePi}
+                title={hasLivePi ? "This PO already has an invoice. Cancel it first to re-invoice." : undefined}
+              >
+                <Receipt className="h-4 w-4" /> {creatingInvoice ? "Creating…" : hasLivePi ? "Invoiced" : "Create Invoice"}
+              </Button>
+            );
+          })()}
         </div>
       </div>
 

@@ -492,6 +492,28 @@ app.put("/:id", async (c) => {
       }
     }
 
+    // An issued credit note is terminal. Its customer-credit (A/R reduction) +
+    // invoice-total cascade fire on the DRAFT→issued transition and are NOT
+    // idempotent (only the GL leg is guarded by ledgerHasSource). Allowing
+    // issued→DRAFT→issued would apply the credit TWICE and drift customer A/R +
+    // invoice total off the GL. Reverting an issued CN needs a dedicated contra
+    // flow (none exists yet), so block any transition back out of an issued
+    // status. issued→issued (APPROVED→POSTED) and the first DRAFT→issued stay
+    // allowed.
+    if (
+      isIssuedStatus(existing.status) &&
+      status !== existing.status &&
+      !isIssuedStatus(status)
+    ) {
+      return c.json(
+        {
+          success: false,
+          error: `Credit note ${existing.noteNumber} is already issued and can't be reverted to ${status}. The customer credit has already been applied.`,
+        },
+        409,
+      );
+    }
+
     // Fire cascade only on the first DRAFT → issued transition. Once the
     // existing row is already APPROVED or POSTED, the invoice cascade has
     // already been applied (either here on the earlier transition, or via

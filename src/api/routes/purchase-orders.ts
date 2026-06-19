@@ -229,7 +229,18 @@ app.post("/", async (c) => {
     const now = new Date().toISOString();
     const today = now.split("T")[0];
 
-    const items = (rawItems as Array<Record<string, unknown>>).map((item) => {
+    const poItems = rawItems as Array<Record<string, unknown>>;
+    for (let i = 0; i < poItems.length; i++) {
+      const q = Number(poItems[i].quantity);
+      const p = Number(poItems[i].unitPriceSen);
+      if (!Number.isFinite(q) || q < 0) {
+        return c.json({ success: false, error: `items[${i}]: quantity must be a number >= 0` }, 400);
+      }
+      if (!Number.isFinite(p) || p < 0) {
+        return c.json({ success: false, error: `items[${i}]: unitPriceSen must be a number >= 0` }, 400);
+      }
+    }
+    const items = poItems.map((item) => {
       const quantity = Number(item.quantity) || 0;
       const unitPriceSen = Number(item.unitPriceSen) || 0;
       return {
@@ -378,6 +389,31 @@ app.put("/:id", async (c) => {
     const body = await c.req.json();
     const now = new Date().toISOString();
 
+    // Lock supplier + line items once goods have been received against this PO.
+    // A POSTED/CONFIRMED GRN has written rm_batches + cost_ledger against the
+    // original supplier and prices; editing them here would desync stock/cost
+    // from the document (and re-reading receivedQty from the body can even zero
+    // it). Status / notes / date edits still flow through.
+    const wantsSupplierChange =
+      body.supplierId !== undefined && body.supplierId !== existing.supplierId;
+    const wantsItemChange = body.items !== undefined;
+    if (wantsSupplierChange || wantsItemChange) {
+      const postedGrn = await c.var.DB.prepare(
+        `SELECT id FROM grns WHERE poId = ? AND status IN ('POSTED','CONFIRMED') LIMIT 1`,
+      )
+        .bind(id)
+        .first<{ id: string }>();
+      if (postedGrn) {
+        return c.json(
+          {
+            success: false,
+            error: "This PO already has a posted goods receipt — its supplier and line items are locked. Reverse/cancel the GRN first.",
+          },
+          409,
+        );
+      }
+    }
+
     // Status transition validation
     if (body.status && body.status !== existing.status) {
       const allowed = VALID_TRANSITIONS[existing.status] || [];
@@ -439,6 +475,16 @@ app.put("/:id", async (c) => {
       const rawItems: Array<Record<string, unknown>> = Array.isArray(body.items)
         ? body.items
         : [];
+      for (let i = 0; i < rawItems.length; i++) {
+        const q = Number(rawItems[i].quantity);
+        const p = Number(rawItems[i].unitPriceSen);
+        if (!Number.isFinite(q) || q < 0) {
+          return c.json({ success: false, error: `items[${i}]: quantity must be a number >= 0` }, 400);
+        }
+        if (!Number.isFinite(p) || p < 0) {
+          return c.json({ success: false, error: `items[${i}]: unitPriceSen must be a number >= 0` }, 400);
+        }
+      }
       const newItems = rawItems.map((item) => {
         const quantity = Number(item.quantity) || 0;
         const unitPriceSen = Number(item.unitPriceSen) || 0;

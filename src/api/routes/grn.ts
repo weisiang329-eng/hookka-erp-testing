@@ -686,6 +686,20 @@ app.put("/:id", async (c) => {
 
     // Replace items if provided; recompute totalAmount
     if (body.items) {
+      // Once a GRN is committed (POSTED/CONFIRMED) its receipt has already
+      // written rm_batches + cost_ledger + raw_materials.balanceQty. Re-writing
+      // grn_items/totalAmount here would silently desync the GRN record from
+      // that committed stock (the post is idempotent, so stock never re-applies
+      // — only the document drifts). Lock line edits to the pre-commit state.
+      if (COMMITTED_STATUSES.has(prevStatus)) {
+        return c.json(
+          {
+            success: false,
+            error: "This GRN is already posted to stock — its line items are locked. Reverse the receipt before editing.",
+          },
+          409,
+        );
+      }
       const rawItems: Array<Record<string, unknown>> = body.items;
       const newItems = rawItems.map((item) => ({
         poItemIndex: Number(item.poItemIndex) || 0,

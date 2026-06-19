@@ -1690,6 +1690,21 @@ app.put("/:id", async (c) => {
 
     // --- items replacement (optional) ---
     if (Array.isArray(body.items)) {
+      // Wholesale line replacement is DRAFT-only. On a SENT/posted invoice it
+      // rewrites subtotal/tax/total + customer A/R but does NOT restate the GL
+      // journal (the per-line "price edit" path below is the one that correctly
+      // reverses + re-posts the GL for a sent invoice). Skipping the GL restate
+      // means a later void reverses against the ORIGINAL posting and orphans the
+      // difference in revenue/AR. Block it; sent-invoice edits go via price-edit.
+      if (existing.status !== "DRAFT") {
+        return c.json(
+          {
+            success: false,
+            error: "Line items can only be replaced while the invoice is a DRAFT. Use the per-line price edit on a sent invoice.",
+          },
+          409,
+        );
+      }
       statements.push(
         c.var.DB.prepare(
           "DELETE FROM invoice_items WHERE invoiceId = ?",

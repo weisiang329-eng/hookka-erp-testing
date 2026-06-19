@@ -494,6 +494,27 @@ app.post("/", async (c) => {
       .bind(body.purchaseOrderId)
       .first<{ poNo: string }>();
     poRef = po?.poNo ?? null;
+
+    // Guard against double-billing: the PO→PI convert copies every PO line at
+    // full quantity, so a second convert (a double-click, or re-opening the PO
+    // and converting again) produces a full-value duplicate invoice and double
+    // AP liability. Block when a non-CANCELLED PI already exists for this PO —
+    // the operator cancels or edits that one instead of stacking a duplicate.
+    const existingPi = await db
+      .prepare(
+        "SELECT piNo FROM purchase_invoices WHERE purchaseOrderId = ? AND status != 'CANCELLED' LIMIT 1",
+      )
+      .bind(body.purchaseOrderId)
+      .first<{ piNo: string }>();
+    if (existingPi) {
+      return c.json(
+        {
+          success: false,
+          error: `This purchase order already has invoice ${existingPi.piNo}. Cancel it first, or edit that invoice instead of creating a duplicate.`,
+        },
+        409,
+      );
+    }
   }
 
   const piNo = await generatePiNo(db);

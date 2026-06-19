@@ -98,6 +98,13 @@ export default function GRNDetailPage() {
         toast.success(`${label} — done`);
       }
       invalidateCachePrefix("/api/grn");
+      // Post-to-Stock lands inventory (raw_materials.balanceQty), so refresh the
+      // inventory surfaces too — otherwise they show stale on-hand until TTL.
+      if (next === "POSTED") {
+        invalidateCachePrefix("/api/raw-materials");
+        invalidateCachePrefix("/api/inventory");
+        invalidateCachePrefix("/api/stock-value");
+      }
       refresh();
     } catch {
       toast.error(`${label} failed — network error`);

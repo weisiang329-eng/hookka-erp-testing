@@ -53,6 +53,7 @@ import {
 } from "@/lib/qr-utils";
 import { deriveBarcodeToken } from "@/lib/job-card-id";
 import { deriveWipName } from "@/lib/wip-name";
+import { todayYmdMY } from "@/lib/utils";
 import { z } from "zod";
 
 // Loose passthrough envelopes — runtime validation at boundaries while
@@ -476,7 +477,7 @@ export default function WorkerScanPage() {
   // which is the primary purpose of this page.
   const loadToday = useCallback(async () => {
     try {
-      const d = new Date().toISOString().slice(0, 10);
+      const d = todayYmdMY();
       const res = await workerFetch(
         `/api/worker/history?from=${d}&to=${d}`,
       );

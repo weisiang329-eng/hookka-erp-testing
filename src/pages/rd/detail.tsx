@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate, todayYmdMY } from "@/lib/utils";
 import {
   ArrowLeft,
   Calendar,
@@ -271,7 +271,7 @@ export default function RDProjectDetailPage() {
     feedback: "",
     improvements: "",
     defects: "",
-    createdDate: new Date().toISOString().slice(0, 10),
+    createdDate: todayYmdMY(),
   });
 
   // Production BOM section was removed in Task #8 — its modal, state, and
@@ -291,7 +291,7 @@ export default function RDProjectDetailPage() {
   const [issuanceError, setIssuanceError] = useState<string | null>(null);
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
   const [issuanceHeader, setIssuanceHeader] = useState({
-    issuedAt: new Date().toISOString().slice(0, 10),
+    issuedAt: todayYmdMY(),
     issuedBy: "",
     notes: "",
   });
@@ -309,7 +309,7 @@ export default function RDProjectDetailPage() {
   const [labourSaving, setLabourSaving] = useState(false);
   const [labourForm, setLabourForm] = useState({
     teamMemberId: "",
-    workDate: new Date().toISOString().slice(0, 10),
+    workDate: todayYmdMY(),
     hours: 1,
     notes: "",
   });
@@ -500,7 +500,7 @@ export default function RDProjectDetailPage() {
 
     const updatedMilestones = project.milestones.map((m) => {
       if (m.stage === project.currentStage) {
-        return { ...m, actualDate: new Date().toISOString().slice(0, 10), approvedBy: "Current User" };
+        return { ...m, actualDate: todayYmdMY(), approvedBy: "Current User" };
       }
       return m;
     });
@@ -714,7 +714,7 @@ export default function RDProjectDetailPage() {
       feedback: "",
       improvements: "",
       defects: "",
-      createdDate: new Date().toISOString().slice(0, 10),
+      createdDate: todayYmdMY(),
     });
     setProtoOpen(true);
   };
@@ -799,7 +799,7 @@ export default function RDProjectDetailPage() {
   const openIssuanceModal = () => {
     fetchRawMaterials();
     setIssuanceHeader({
-      issuedAt: new Date().toISOString().slice(0, 10),
+      issuedAt: todayYmdMY(),
       issuedBy: "",
       notes: "",
     });
@@ -957,7 +957,7 @@ export default function RDProjectDetailPage() {
     fetchTeamMembers();
     setLabourForm({
       teamMemberId: teamMembers.length > 0 ? teamMembers[0].id : "",
-      workDate: new Date().toISOString().slice(0, 10),
+      workDate: todayYmdMY(),
       hours: 1,
       notes: "",
     });

@@ -10,6 +10,7 @@ import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData } from "@/lib/qr-utils";
+import { todayYmdMY } from "@/lib/utils";
 import { deriveBarcodeToken } from "@/lib/job-card-id";
 // Static import (not dynamic) so Code 128 generation is SYNCHRONOUS inside the
 // print click gesture — an await before window.open would trip the pop-up
@@ -3004,7 +3005,7 @@ export default function ProductionPage({
   useEffect(() => {
     const worker = baserowsWorkerRef.current;
     if (!worker) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayYmdMY();
     const reqId = ++baserowsReqRef.current;
     setBaserowsPending(true);
     // Drain the accumulated dirty-PO set — this post takes ownership of
@@ -3222,7 +3223,7 @@ export default function ProductionPage({
               !(s === "COMPLETED" || s === "TRANSFERRED");
             const patch: Parameters<typeof patchJobCard>[2] = { status: next };
             if (becomingDone && !row.completedDate) {
-              patch.completedDate = new Date().toISOString().slice(0, 10);
+              patch.completedDate = todayYmdMY();
             }
             // BUG-2026-05-12 (frontend twin of the backend fix in
             // production-orders.ts:3211): previously, flipping status from

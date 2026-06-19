@@ -10,6 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavGuard } from "@/lib/use-nav-guard";
+import { todayYmdMY } from "@/lib/utils";
 import { computeCasePipeline, CASE_PIPELINE_STEPS } from "@/lib/case-pipeline";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -2321,7 +2322,7 @@ function StockTopUpPanel({
               ...(caseDetail.actionLog ?? []),
               {
                 id: `act-${Math.random().toString(36).slice(2, 8)}`,
-                date: new Date().toISOString().slice(0, 10),
+                date: todayYmdMY(),
                 description: `Issued replacement part: ${selected.code} × ${Math.abs(qtyNum)} (${type} stock deducted${note.trim() ? " — " + note.trim() : ""})`,
                 createdAt: new Date().toISOString(),
                 createdByName: user?.displayName ?? user?.email ?? "",
@@ -2699,7 +2700,7 @@ function ActionLogPanel({
       ...entries,
       {
         id: `act-${Math.random().toString(36).slice(2, 8)}`,
-        date: new Date().toISOString().slice(0, 10),
+        date: todayYmdMY(),
         description: "",
         createdAt: new Date().toISOString(),
         createdByName: user?.displayName ?? user?.email ?? "",

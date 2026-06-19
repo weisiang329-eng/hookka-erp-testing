@@ -51,6 +51,17 @@ export function formatDate(date: Date | string): string {
   });
 }
 
+/**
+ * Today's date as YYYY-MM-DD in Malaysia time (UTC+8).
+ *
+ * `new Date().toISOString().slice(0,10)` is UTC, so before 08:00 MYT it returns
+ * YESTERDAY — wrong for every "today" default the operator saves (production
+ * completed date, price effective date, issuance date, …). Use this instead.
+ */
+export function todayYmdMY(): string {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 export function formatDateTime(date: Date | string): string {
   return new Date(date).toLocaleDateString("en-MY", {
     day: "2-digit",

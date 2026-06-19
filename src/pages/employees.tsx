@@ -23,7 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM, roundSen, distributeRoundSen } from "@/lib/utils";
+import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM, roundSen, distributeRoundSen, todayYmdMY } from "@/lib/utils";
 import { printReport, type PrintColumn, type PrintCard, type PrintSection } from "@/lib/print-report";
 import { asArray } from "@/lib/safe-json";
 import {
@@ -2315,7 +2315,7 @@ function EmployeeMasterTab({
           workerName: editForm.name || originalWorker.name,
           newSalarySen,
           oldSalarySen: originalWorker.basicSalarySen,
-          effectiveFrom: new Date().toISOString().slice(0, 10),
+          effectiveFrom: todayYmdMY(),
           submitting: false,
           error: null,
         });
@@ -7282,7 +7282,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                         <b>From {v.effectiveFrom}</b> — day ÷{v.rules.dayRateDivisorMode === "calendarDays" ? "cal" : v.rules.dayRateDivisorMode === "workingDays" ? "work-days" : "26"} · hour ÷{v.rules.hourRateDivisorMode === "fixed" ? v.rules.rateHoursPerDay : v.rules.hourRateDivisorMode === "hoursOnly" ? "hours" : "hours+lunch"} · Sun {v.rules.sundayOtMultiplier}× · PH {v.rules.holidayOtMultiplier}× · grace {v.rules.lateGraceMin}m · block {v.rules.lateBlockMin}m · lunch {v.rules.lunchMin}m · {minToHhmm(v.rules.shiftStartMin)}–{minToHhmm(v.rules.shiftEndMin)}
                         {v.note ? <span className="text-[#9CA3AF]"> · {v.note}</span> : null}
                       </span>
-                      {v.effectiveFrom > new Date().toISOString().slice(0, 10) && (
+                      {v.effectiveFrom > todayYmdMY() && (
                         <button
                           type="button"
                           onClick={() => deleteRuleVersion(v.id)}
@@ -8659,7 +8659,7 @@ function LaborCostTab({
         let remaining = Math.max(
           0,
           Math.round(
-            resolvePayRulesAsOf(payRuleVersions, new Date().toISOString().slice(0, 10))
+            resolvePayRulesAsOf(payRuleVersions, todayYmdMY())
               .absenceGraceWorkingDays,
           ),
         );
@@ -8788,7 +8788,7 @@ function LaborCostTab({
       let remaining = Math.max(
         0,
         Math.round(
-          resolvePayRulesAsOf(payRuleVersions, new Date().toISOString().slice(0, 10))
+          resolvePayRulesAsOf(payRuleVersions, todayYmdMY())
             .absenceGraceWorkingDays,
         ),
       );

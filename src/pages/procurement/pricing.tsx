@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { Plus, X } from "lucide-react";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate, todayYmdMY } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type {
   SupplierMaterialBinding,
@@ -295,7 +295,7 @@ function AddBindingDialog({
     leadTimeDays: "7",
     moq: "1",
     paymentTerms: "NET30",
-    priceValidFrom: new Date().toISOString().slice(0, 10),
+    priceValidFrom: todayYmdMY(),
     priceValidTo: "2026-12-31",
     isMainSupplier: false,
   });

@@ -2782,6 +2782,40 @@ app.get("/other-party-payments", async (c) => {
   return c.json({ success: true, data, total: data.length });
 });
 
+// ---------------------------------------------------------------------------
+// GET /audit-log — document lifecycle trail (F3). Lists every document
+// currently in a non-ACTIVE state (VOID or DELETED), newest action first, for
+// the Audit Log page. The immutable ledger keeps the full reversal detail;
+// this table is the index of voided/deleted documents + who/when, and the page
+// can unvoid from here (the only way back for DELETED docs, which are hidden
+// from the normal lists).
+// ---------------------------------------------------------------------------
+app.get("/audit-log", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const rows =
+    (
+      await c.var.DB.prepare(
+        `SELECT id, sourceType, sourceId, state, actionAt, actorUserId
+           FROM document_lifecycle
+          WHERE orgId = ? AND state <> 'ACTIVE'
+          ORDER BY actionAt DESC
+          LIMIT 1000`,
+      )
+        .bind(orgId)
+        .all<{
+          id: string;
+          sourceType: string;
+          sourceId: string;
+          state: string;
+          actionAt: string | null;
+          actorUserId: string | null;
+        }>()
+    ).results ?? [];
+  return c.json({ success: true, data: rows });
+});
+
 // Shared internal builder (NOT a route): used by both the rewired /void
 // endpoint and the new /lifecycle endpoint. Builds the lifecycle statements
 // (GL reversal / hidden flags / document_lifecycle state via applyLifecycle)

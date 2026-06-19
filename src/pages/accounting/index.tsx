@@ -47,7 +47,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odebtor" | "ocreditor" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odebtor" | "ocreditor" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "audit" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -202,8 +202,107 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   { key: "stock", label: "Stock", icon: <List className="h-4 w-4" />, group: "Maintenance" },
   { key: "stockmap", label: "Stock Mapping", icon: <List className="h-4 w-4" />, group: "Maintenance" },
   { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" />, group: "Maintenance" },
+  { key: "audit", label: "Audit Log", icon: <FileText className="h-4 w-4" />, group: "Maintenance" },
   { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" />, group: "Maintenance" },
 ];
+
+// =============== TAB: AUDIT LOG (F3 — document lifecycle trail) ===============
+//
+// Lists every document currently VOID or DELETED (newest action first) with
+// who/when, and lets you Unvoid — the only way back for DELETED docs, which
+// are hidden from the normal document lists. Each sourceType maps to its
+// /lifecycle endpoint to repost the unvoid.
+
+type AuditRow = {
+  id: string;
+  sourceType: string;
+  sourceId: string;
+  state: string;
+  actionAt: string | null;
+  actorUserId: string | null;
+};
+
+const AUDIT_DOC_MAP: Record<string, { label: string; base: string }> = {
+  payment_voucher: { label: "Expense Payment", base: "/api/accounting/payment-vouchers" },
+  official_receipt: { label: "Official Receipt", base: "/api/accounting/official-receipts" },
+  manual: { label: "Journal Entry", base: "/api/accounting/journals" },
+  fund_transfer: { label: "Fund Transfer", base: "/api/accounting/fund-transfers" },
+  other_party_bill: { label: "Other Party Bill", base: "/api/accounting/other-party-bills" },
+  other_party_payment: { label: "Other Party Payment", base: "/api/accounting/other-party-payments" },
+  supplier_payment: { label: "Supplier Payment", base: "/api/supplier-payments" },
+};
+
+function AuditLogTab() {
+  const { toast } = useToast();
+  const [rows, setRows] = useState<AuditRow[] | null>(null);
+
+  const load = useCallback(() => {
+    fetch("/api/accounting/audit-log")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: AuditRow[] }>)
+      .then((j) => { if (j?.success) setRows(j.data ?? []); })
+      .catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const unvoid = async (row: AuditRow) => {
+    const map = AUDIT_DOC_MAP[row.sourceType];
+    if (!map) { toast.error(`Don't know how to restore ${row.sourceType}`); return; }
+    if (!window.confirm(`Restore ${map.label} ${row.sourceId}? It will be reposted to the GL.`)) return;
+    const res = await fetch(`${map.base}/${encodeURIComponent(row.sourceId)}/lifecycle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "unvoid" }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) { toast.success(`${row.sourceId} restored`); load(); }
+    else toast.error(j?.error || "Restore failed");
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Audit Log</h2>
+        <p className="text-xs text-[#6B7280]">Voided &amp; deleted documents — the GL keeps every reversal; restore any of them here.</p>
+      </div>
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          {rows === null ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+          ) : rows.length === 0 ? (
+            <div className="py-12 text-center text-[#9CA3AF] text-sm">No voided or deleted documents.</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">When</th>
+                  <th className="px-3 py-2 text-left">Type</th>
+                  <th className="px-3 py-2 text-left">Reference</th>
+                  <th className="px-3 py-2 text-left">State</th>
+                  <th className="px-3 py-2 text-left">By</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.id} className="border-b border-[#F0ECE9]">
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.actionAt ? r.actionAt.slice(0, 19).replace("T", " ") : "—"}</td>
+                    <td className="px-3 py-1.5 text-xs">{AUDIT_DOC_MAP[r.sourceType]?.label ?? r.sourceType}</td>
+                    <td className="px-3 py-1.5 tabular-nums text-xs">{r.sourceId}</td>
+                    <td className="px-3 py-1.5"><LifecycleBadge state={r.state} /></td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.actorUserId ?? "—"}</td>
+                    <td className="px-3 py-1.5 text-right">
+                      <button onClick={() => unvoid(r)} className="text-[#4F7C3A] hover:text-[#3A5C29] text-xs underline decoration-dotted cursor-pointer">unvoid</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
 
 // =============== MAIN PAGE ===============
 
@@ -254,6 +353,7 @@ export default function AccountingPage() {
             <OverviewTab accounts={accounts} journals={journals} arData={arData} apData={apData} />
           )}
           {tab === "pl" && <PLStatementTab />}
+          {tab === "audit" && <AuditLogTab />}
           {tab === "trend" && <MonthlyTrendTab />}
           {tab === "plmonthly" && <MonthlyPlTab />}
           {tab === "ceclass" && <CostExpenseClassesTab />}

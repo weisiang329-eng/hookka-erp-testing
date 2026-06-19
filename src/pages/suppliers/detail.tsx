@@ -19,6 +19,7 @@ import { useParams, Link } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -415,67 +416,62 @@ export default function SupplierDetailPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Link to="/procurement/maintenance">
-            <Button variant="ghost" size="sm">
-              <ArrowLeft className="h-4 w-4" />
-              Back
+      <ObjectPageHeader
+        backTo="/procurement/maintenance"
+        title={
+          <span className="inline-flex items-center gap-2">
+            <Building2 className="h-5 w-5 text-[#6B5C32]" />
+            {supplier.code} - {supplier.name}
+          </span>
+        }
+        subtitle="Supplier scorecard and recent purchase order history"
+        badges={<Badge variant="status" status={supplier.status} />}
+        actions={
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                const { generateSupplierQuotationPdf } = await import(
+                  "@/lib/generate-supplier-quotation-pdf"
+                );
+                generateSupplierQuotationPdf(
+                  {
+                    code: supplier.code,
+                    name: supplier.name,
+                    contactPerson: supplier.contactPerson,
+                    email: supplier.email,
+                    purchaseOrgCode: supplier.purchaseOrgCode,
+                  },
+                  skus.map((b) => ({
+                    materialCode: b.materialCode,
+                    materialName: b.materialName,
+                    supplierSku: b.supplierSku,
+                    supplierDescription: b.supplierDescription,
+                    unitPriceSen: b.unitPrice,
+                    currency: b.currency,
+                    leadTimeDays: b.leadTimeDays,
+                    moq: b.moq,
+                    priceValidFrom: b.priceValidFrom,
+                    priceValidTo: b.priceValidTo,
+                  })),
+                );
+              }}
+            >
+              <FileText className="h-4 w-4" />
+              Quotation PDF
             </Button>
-          </Link>
-          <div>
-            <h1 className="text-xl font-bold text-[#1F1D1B] flex items-center gap-2">
-              <Building2 className="h-5 w-5 text-[#6B5C32]" />
-              {supplier.code} - {supplier.name}
-            </h1>
-            <p className="text-xs text-[#6B7280]">Supplier scorecard and recent purchase order history</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={async () => {
-              const { generateSupplierQuotationPdf } = await import(
-                "@/lib/generate-supplier-quotation-pdf"
-              );
-              generateSupplierQuotationPdf(
-                {
-                  code: supplier.code,
-                  name: supplier.name,
-                  contactPerson: supplier.contactPerson,
-                  email: supplier.email,
-                  purchaseOrgCode: supplier.purchaseOrgCode,
-                },
-                skus.map((b) => ({
-                  materialCode: b.materialCode,
-                  materialName: b.materialName,
-                  supplierSku: b.supplierSku,
-                  supplierDescription: b.supplierDescription,
-                  unitPriceSen: b.unitPrice,
-                  currency: b.currency,
-                  leadTimeDays: b.leadTimeDays,
-                  moq: b.moq,
-                  priceValidFrom: b.priceValidFrom,
-                  priceValidTo: b.priceValidTo,
-                })),
-              );
-            }}
-          >
-            <FileText className="h-4 w-4" />
-            Quotation PDF
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowSupplierForm(true)}
-          >
-            <Pencil className="h-4 w-4" />
-            Edit Supplier
-          </Button>
-          <Badge variant="status" status={supplier.status} />
-        </div>
-      </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowSupplierForm(true)}
+            >
+              <Pencil className="h-4 w-4" />
+              Edit Supplier
+            </Button>
+          </>
+        }
+      />
 
       {/* Header card */}
       <Card>

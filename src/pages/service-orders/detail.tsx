@@ -3,10 +3,11 @@
 // the lifecycle (status transitions) or log a returned defective unit.
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -123,6 +124,7 @@ type FgPickerOpt = { id: string; code: string; name: string; stockQty?: number }
 
 export default function ServiceOrderDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const user = getCurrentUser();
@@ -217,19 +219,11 @@ export default function ServiceOrderDetailPage() {
 
   return (
     <div className="space-y-4">
-      <Link
-        to={`/service-cases/${order.caseId}`}
-        className="text-sm text-[#6B5C32] hover:underline inline-flex items-center gap-1"
-      >
-        <ArrowLeft className="h-3.5 w-3.5" /> Back to Service Case
-      </Link>
-
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold text-[#1F1D1B] font-mono">
-              {order.serviceOrderNo}
-            </h1>
+      <ObjectPageHeader
+        onBack={() => navigate(`/service-cases/${order.caseId}`)}
+        title={<span className="font-mono">{order.serviceOrderNo}</span>}
+        badges={
+          <>
             <span
               className={`text-[10px] uppercase px-2 py-0.5 rounded ${STATUS_COLOR[order.status] ?? "bg-[#F4EFE3]"}`}
             >
@@ -242,8 +236,10 @@ export default function ServiceOrderDetailPage() {
                 Mode pending
               </span>
             )}
-          </div>
-          <p className="text-xs text-[#6B7280] mt-1">
+          </>
+        }
+        subtitle={
+          <>
             Customer: <span className="font-medium">{order.customerName}</span>{" "}
             · Source:{" "}
             <Link to={sourceHref} className="text-[#6B5C32] hover:underline">
@@ -251,67 +247,69 @@ export default function ServiceOrderDetailPage() {
             </Link>
             {order.createdAt ? ` · Created ${dateLabel(order.createdAt)}` : ""}
             {order.createdByName ? ` by ${order.createdByName}` : ""}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap justify-end">
-          {/* Status advancement buttons — driven by adjacency. */}
-          {allowedTransitions.includes("READY_TO_SHIP") && (
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={advancing}
-              onClick={() => advanceStatus("READY_TO_SHIP")}
-              className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-            >
-              <Truck className="h-4 w-4" /> Mark Ready to Ship
-            </Button>
-          )}
-          {allowedTransitions.includes("DELIVERED") && (
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={advancing}
-              onClick={() => advanceStatus("DELIVERED")}
-              className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-            >
-              <CheckCircle2 className="h-4 w-4" /> Mark Delivered
-            </Button>
-          )}
-          {allowedTransitions.includes("CLOSED") && (
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={advancing}
-              onClick={() => advanceStatus("CLOSED")}
-              className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-            >
-              <CheckCircle2 className="h-4 w-4" /> Close
-            </Button>
-          )}
-          {allowedTransitions.includes("CANCELLED") && (
+          </>
+        }
+        actions={
+          <>
+            {/* Status advancement buttons — driven by adjacency. */}
+            {allowedTransitions.includes("READY_TO_SHIP") && (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={advancing}
+                onClick={() => advanceStatus("READY_TO_SHIP")}
+                className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+              >
+                <Truck className="h-4 w-4" /> Mark Ready to Ship
+              </Button>
+            )}
+            {allowedTransitions.includes("DELIVERED") && (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={advancing}
+                onClick={() => advanceStatus("DELIVERED")}
+                className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+              >
+                <CheckCircle2 className="h-4 w-4" /> Mark Delivered
+              </Button>
+            )}
+            {allowedTransitions.includes("CLOSED") && (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={advancing}
+                onClick={() => advanceStatus("CLOSED")}
+                className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+              >
+                <CheckCircle2 className="h-4 w-4" /> Close
+              </Button>
+            )}
+            {allowedTransitions.includes("CANCELLED") && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={advancing}
+                className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                onClick={() => advanceStatus("CANCELLED")}
+              >
+                <XCircle className="h-4 w-4" /> Cancel
+              </Button>
+            )}
+            {/* Return logging — REPAIR mode primarily, but the user can log a
+                return for any mode (the customer's defective unit might come
+                back even for REPRODUCE/STOCK_SWAP). */}
             <Button
               variant="outline"
               size="sm"
-              disabled={advancing}
-              className="text-[#9A3A2D] hover:text-[#7A2E24]"
-              onClick={() => advanceStatus("CANCELLED")}
+              onClick={() => setReturnOpen(true)}
+              disabled={order.status === "CANCELLED" || order.status === "CLOSED"}
             >
-              <XCircle className="h-4 w-4" /> Cancel
+              <PackageOpen className="h-4 w-4" /> Log Return
             </Button>
-          )}
-          {/* Return logging — REPAIR mode primarily, but the user can log a
-              return for any mode (the customer's defective unit might come
-              back even for REPRODUCE/STOCK_SWAP). */}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setReturnOpen(true)}
-            disabled={order.status === "CANCELLED" || order.status === "CLOSED"}
-          >
-            <PackageOpen className="h-4 w-4" /> Log Return
-          </Button>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {/* Mode-pending banner — order can be spawned with mode TBD ("Decide
           later"); pick later via SetModePanel. */}

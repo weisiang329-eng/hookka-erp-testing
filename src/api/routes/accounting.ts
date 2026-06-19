@@ -36,7 +36,6 @@ import {
   computeBillTotals,
   validateBillShape,
   buildBillLegs,
-  reverseLegs,
   type PartyType,
   type BillItemInput,
 } from "../../lib/other-party-bill";
@@ -49,6 +48,7 @@ import {
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
 import { applyLifecycle } from "../lib/document-lifecycle";
+import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 
 const app = new Hono<Env>();
 
@@ -2760,19 +2760,21 @@ app.get("/other-party-payments", async (c) => {
   const partyId = c.req.query("partyId");
   const type = c.req.query("type");
 
-  let q = `SELECT p.*, b.billNo AS billNo FROM other_party_payments p
+  let q = `SELECT p.*, b.billNo AS billNo, dl.state AS lifecycleState FROM other_party_payments p
            LEFT JOIN other_party_bills b ON b.id = p.billId
+           LEFT JOIN document_lifecycle dl ON dl.orgId = p.orgId AND dl.sourceType = 'other_party_payment' AND dl.sourceId = p.paymentNo
            WHERE p.orgId = ?`;
   const binds: string[] = [orgId];
   if (partyId) { q += " AND p.partyId = ?"; binds.push(partyId); }
   if (type === "DEBTOR" || type === "CREDITOR") { q += " AND p.partyType = ?"; binds.push(type); }
+  q += " AND (dl.state IS NULL OR dl.state <> 'DELETED')";
   q += " ORDER BY p.date DESC, p.paymentNo DESC";
 
-  const rows = (await c.var.DB.prepare(q).bind(...binds).all<OtherPartyPaymentRow & { billNo: string | null }>()).results ?? [];
-  const byNo = new Map<string, { paymentNo: string; partyId: string; partyType: string; partyName: string; date: string; bankAccount: string; reference: string; totalSen: number; lines: { billId: string; billNo: string; amountSen: number }[] }>();
+  const rows = (await c.var.DB.prepare(q).bind(...binds).all<OtherPartyPaymentRow & { billNo: string | null; lifecycleState: string | null }>()).results ?? [];
+  const byNo = new Map<string, { paymentNo: string; partyId: string; partyType: string; partyName: string; date: string; bankAccount: string; reference: string; totalSen: number; lifecycleState: string; lines: { billId: string; billNo: string; amountSen: number }[] }>();
   for (const r of rows) {
     let g = byNo.get(r.paymentNo);
-    if (!g) { g = { paymentNo: r.paymentNo, partyId: r.partyId, partyType: r.partyType, partyName: r.partyName, date: r.date, bankAccount: r.bankAccount, reference: r.reference ?? "", totalSen: 0, lines: [] }; byNo.set(r.paymentNo, g); }
+    if (!g) { g = { paymentNo: r.paymentNo, partyId: r.partyId, partyType: r.partyType, partyName: r.partyName, date: r.date, bankAccount: r.bankAccount, reference: r.reference ?? "", totalSen: 0, lifecycleState: r.lifecycleState ?? "ACTIVE", lines: [] }; byNo.set(r.paymentNo, g); }
     g.totalSen += r.amountSen;
     g.lines.push({ billId: r.billId, billNo: r.billNo ?? "", amountSen: r.amountSen });
   }
@@ -2780,56 +2782,94 @@ app.get("/other-party-payments", async (c) => {
   return c.json({ success: true, data, total: data.length });
 });
 
+// Shared internal builder (NOT a route): used by both the rewired /void
+// endpoint and the new /lifecycle endpoint. Builds the lifecycle statements
+// (GL reversal / hidden flags / document_lifecycle state via applyLifecycle)
+// and — only when crossing the ACTIVE boundary — boundary-aware paidAmountSen
+// re-apply on each settled bill. It does NOT hard-delete the payment rows.
+//   - deactivate (ACTIVE → VOID/DELETED): roll back paidAmountSen (floor 0).
+//   - reactivate (VOID → ACTIVE via unvoid): re-add paidAmountSen.
+//   - non-active → non-active (e.g. VOID → DELETED): neither flag set, so
+//     paidAmountSen is left untouched (correct — money already rolled back).
+async function buildOtherPartyPaymentLifecycle(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  paymentNo: string,
+  action: LifecycleAction,
+  actorUserId: string | null,
+): Promise<{ statements: D1PreparedStatement[]; newState: DocState }> {
+  const rows = (await db.prepare("SELECT * FROM other_party_payments WHERE paymentNo = ? AND orgId = ?")
+    .bind(paymentNo, orgId).all<OtherPartyPaymentRow>()).results ?? [];
+  if (rows.length === 0) throw new Error("PAYMENT_NOT_FOUND");
+
+  const lc = await applyLifecycle(db, {
+    orgId, baseSourceTypes: ["other_party_payment"], voidSourceType: "other_party_payment_void",
+    sourceId: paymentNo, action, actorUserId, descriptionTag: `${action.toUpperCase()} · ${paymentNo}`,
+  });
+  const statements = [...lc.statements];
+
+  const deactivated = lc.prevState === "ACTIVE" && lc.newState !== "ACTIVE";
+  const reactivated = lc.prevState !== "ACTIVE" && lc.newState === "ACTIVE";
+  if (deactivated || reactivated) {
+    const now = new Date().toISOString();
+    for (const r of rows) {
+      // deactivate: paid -= amount (floor 0); reactivate: paid += amount. status recalculated uniformly.
+      const paidExpr = deactivated
+        ? "CASE WHEN paidAmountSen - ? < 0 THEN 0 ELSE paidAmountSen - ? END"
+        : "paidAmountSen + ?";
+      const binds = deactivated ? [r.amountSen, r.amountSen] : [r.amountSen];
+      statements.push(db.prepare(
+        `UPDATE other_party_bills
+           SET paidAmountSen = ${paidExpr},
+               status = CASE WHEN (${paidExpr}) >= totalSen THEN 'PAID'
+                            WHEN (${paidExpr}) > 0 THEN 'PARTIAL_PAID' ELSE 'OPEN' END,
+               updatedAt = ?
+         WHERE id = ? AND orgId = ?`,
+      ).bind(...binds, ...binds, ...binds, now, r.billId, orgId));
+    }
+  }
+  return { statements, newState: lc.newState };
+}
+
 app.post("/other-party-payments/:paymentNo/void", async (c) => {
   const denied = await requirePermission(c, "accounting", "update");
   if (denied) return denied;
   const orgId = getOrgId(c);
   const paymentNo = c.req.param("paymentNo");
 
+  // Idempotency: keep the legacy early-return so a re-void is a no-op success.
   if (await ledgerHasSource(c.var.DB, orgId, "other_party_payment_void", paymentNo))
     return c.json({ success: true, data: { alreadyVoided: true } });
 
-  const rows = (await c.var.DB.prepare("SELECT * FROM other_party_payments WHERE paymentNo = ? AND orgId = ?")
-    .bind(paymentNo, orgId).all<OtherPartyPaymentRow>()).results ?? [];
-  if (rows.length === 0) return c.json({ success: false, error: "Payment not found" }, 404);
+  const actorUserId = (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  try {
+    const { statements } = await buildOtherPartyPaymentLifecycle(c.var.DB, orgId, paymentNo, "void", actorUserId);
+    await c.var.DB.batch(statements);
+    return c.json({ success: true });
+  } catch (e) {
+    if ((e as Error).message === "PAYMENT_NOT_FOUND") return c.json({ success: false, error: "Payment not found" }, 404);
+    return c.json({ success: false, error: (e as Error).message }, 400);
+  }
+});
+
+app.post("/other-party-payments/:paymentNo/lifecycle", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const paymentNo = c.req.param("paymentNo");
+  let action: LifecycleAction;
+  try { action = ((await c.req.json()) as { action: string }).action as LifecycleAction; } catch { return c.json({ success: false, error: "Invalid body" }, 400); }
+  if (!["void", "delete", "unvoid"].includes(action)) return c.json({ success: false, error: "action must be void|delete|unvoid" }, 400);
 
   const actorUserId = (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
-  const statements: D1PreparedStatement[] = [];
-
   try {
-    const orig = (await c.var.DB.prepare(
-      "SELECT accountCode, debitSen, creditSen, legNo FROM ledger_journal_entries WHERE sourceType = 'other_party_payment' AND sourceId = ? AND orgId = ? ORDER BY legNo",
-    ).bind(paymentNo, orgId).all<{ accountCode: string; debitSen: number; creditSen: number; legNo: number }>()).results ?? [];
-    const revLegs = reverseLegs(orig.map((l) => ({ legNo: l.legNo, accountCode: l.accountCode, debitSen: l.debitSen, creditSen: l.creditSen, description: `other party payment ${paymentNo}` })));
-    const legs: LedgerEntryInput[] = revLegs.map((l) => ({
-      id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "other_party_payment_void", sourceId: paymentNo,
-      legNo: l.legNo, accountCode: l.accountCode, debitSen: l.debitSen, creditSen: l.creditSen, description: l.description, actorUserId, orgId,
-    }));
-    const { statements: ledgerStmts } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
-    statements.push(...ledgerStmts);
+    const { statements, newState } = await buildOtherPartyPaymentLifecycle(c.var.DB, orgId, paymentNo, action, actorUserId);
+    await c.var.DB.batch(statements);
+    return c.json({ success: true, data: { state: newState } });
   } catch (e) {
-    console.error(`[ledger] other_party_payment ${paymentNo} void GL build failed — aborting:`, e);
-    return c.json({ success: false, error: "Failed to build the ledger reversal — nothing was saved." }, 500);
+    if ((e as Error).message === "PAYMENT_NOT_FOUND") return c.json({ success: false, error: "Payment not found" }, 404);
+    return c.json({ success: false, error: (e as Error).message }, 400);
   }
-
-  const now = new Date().toISOString();
-  for (const r of rows) {
-    statements.push(
-      c.var.DB.prepare(
-        `UPDATE other_party_bills
-           SET paidAmountSen = CASE WHEN paidAmountSen - ? < 0 THEN 0 ELSE paidAmountSen - ? END,
-               status = CASE WHEN (CASE WHEN paidAmountSen - ? < 0 THEN 0 ELSE paidAmountSen - ? END) <= 0 THEN 'OPEN'
-                             WHEN (CASE WHEN paidAmountSen - ? < 0 THEN 0 ELSE paidAmountSen - ? END) >= totalSen THEN 'PAID'
-                             ELSE 'PARTIAL_PAID' END,
-               updatedAt = ?
-         WHERE id = ?`,
-      ).bind(r.amountSen, r.amountSen, r.amountSen, r.amountSen, r.amountSen, r.amountSen, now, r.billId),
-    );
-  }
-  statements.push(c.var.DB.prepare("DELETE FROM other_party_payments WHERE paymentNo = ? AND orgId = ?").bind(paymentNo, orgId));
-
-  await c.var.DB.batch(statements);
-  return c.json({ success: true });
 });
 
 // ---------------------------------------------------------------------------

@@ -5682,11 +5682,13 @@ app.get("/fund-transfers", async (c) => {
 
   const resolve = await loadAccountResolver(c.var.DB);
 
-  const [legRes, coaRes] = await Promise.all([
+  const [legRes, coaRes, lifeRes] = await Promise.all([
+    // Only the original `fund_transfer` legs, and only visible ones: DELETED hides
+    // them (hidden=1) so they drop out here; ACTIVE/VOID keep hidden=0 and remain.
     c.var.DB.prepare(
       `SELECT accountCode, sourceType, sourceId, debitSen, creditSen, description, postedAt
          FROM ledger_journal_entries
-        WHERE sourceType IN ('fund_transfer','fund_transfer_void') AND orgId = ?`,
+        WHERE sourceType = 'fund_transfer' AND hidden = 0 AND orgId = ?`,
     ).bind(orgId).all<{
       accountCode: string;
       sourceType: string;
@@ -5699,6 +5701,11 @@ app.get("/fund-transfers", async (c) => {
     c.var.DB.prepare(
       "SELECT code, name FROM chart_of_accounts",
     ).all<{ code: string; name: string }>(),
+    // Lifecycle state per transfer no (no record → ACTIVE; VOID shown with badge;
+    // DELETED never appears because its original legs are hidden above).
+    c.var.DB.prepare(
+      "SELECT sourceId, state FROM document_lifecycle WHERE sourceType = 'fund_transfer' AND orgId = ?",
+    ).bind(orgId).all<{ sourceId: string; state: string }>(),
   ]);
 
   const nameMap = new Map(
@@ -5708,14 +5715,14 @@ app.get("/fund-transfers", async (c) => {
 
   const rows = legRes.results ?? [];
 
-  const voided = new Set<string>();
-  for (const r of rows) {
-    if (r.sourceType === "fund_transfer_void") voided.add(r.sourceId);
-  }
+  // Map each transfer no → lifecycle state (default ACTIVE when no record).
+  const stateOf = new Map<string, string>();
+  for (const l of lifeRes.results ?? []) stateOf.set(l.sourceId, l.state);
 
+  // Rows are already only original `fund_transfer` legs (void legs are not read);
+  // group them by no to rebuild one transfer per leg-group.
   const grouped = new Map<string, typeof rows>();
   for (const r of rows) {
-    if (r.sourceType !== "fund_transfer") continue;
     const grp = grouped.get(r.sourceId) ?? [];
     grp.push(r);
     grouped.set(r.sourceId, grp);
@@ -5730,10 +5737,10 @@ app.get("/fund-transfers", async (c) => {
     toName: string;
     amountSen: number;
     description: string;
+    lifecycleState: string;
   }[] = [];
 
   for (const [sourceId, legs] of grouped) {
-    if (voided.has(sourceId)) continue;
     const toLeg = legs.find((l) => (Number(l.debitSen) || 0) > 0);
     const fromLeg = legs.find((l) => (Number(l.creditSen) || 0) > 0);
     if (!toLeg || !fromLeg) continue;
@@ -5748,6 +5755,7 @@ app.get("/fund-transfers", async (c) => {
       toName: nameOf(toLeg.accountCode),
       amountSen: Number(toLeg.debitSen) || 0,
       description: String(toLeg.description || ""),
+      lifecycleState: stateOf.get(sourceId) ?? "ACTIVE",
     });
   }
 
@@ -5796,6 +5804,31 @@ app.post("/fund-transfers/:no/void", async (c) => {
   await c.var.DB.batch(statements);
 
   return c.json({ success: true });
+});
+
+app.post("/fund-transfers/:no/lifecycle", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const no = c.req.param("no");
+  let action: "void" | "delete" | "unvoid";
+  try { action = ((await c.req.json()) as { action: string }).action as typeof action; } catch { return c.json({ success: false, error: "Invalid body" }, 400); }
+  if (!["void", "delete", "unvoid"].includes(action)) return c.json({ success: false, error: "action must be void|delete|unvoid" }, 400);
+
+  // Fund Transfer has no document table; confirm the transfer exists via its original ledger legs.
+  const ft = await c.var.DB.prepare("SELECT 1 AS ok FROM ledger_journal_entries WHERE sourceType = 'fund_transfer' AND sourceId = ? AND orgId = ? LIMIT 1").bind(no, orgId).first<{ ok: number }>();
+  if (!ft) return c.json({ success: false, error: "Fund transfer not found" }, 404);
+
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  let lc: { statements: D1PreparedStatement[]; newState: string };
+  try {
+    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: ["fund_transfer"], voidSourceType: "fund_transfer_void", sourceId: no, action, actorUserId, descriptionTag: `${action.toUpperCase()} · FT ${no}` });
+  } catch (e) { return c.json({ success: false, error: (e as Error).message }, 400); }
+
+  // No status column to sync (ledger-only document): just run the lifecycle statements.
+  await c.var.DB.batch(lc.statements);
+  return c.json({ success: true, data: { state: lc.newState } });
 });
 
 // ---------------------------------------------------------------------------

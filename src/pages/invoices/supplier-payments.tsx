@@ -2,9 +2,10 @@ import { useState, useMemo, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
+import { LifecycleActions, LifecycleBadge } from "@/components/accounting/lifecycle-actions";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { CreditCard, X } from "lucide-react";
+import { CreditCard } from "lucide-react";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Supplier Payment — the AP twin of the customer Payment page
@@ -65,6 +66,7 @@ type PaymentGroup = {
   date: string;
   totalBankSen: number;
   totalBookedSen: number;
+  lifecycleState?: string;
   lines: PaymentLine[];
 };
 
@@ -288,25 +290,32 @@ export default function SupplierPaymentsPage() {
     setPosting(false);
   };
 
-  const handleVoid = async (paymentNo: string) => {
-    if (!window.confirm(`Void supplier payment ${paymentNo}? This reverses the payment.`)) return;
+  const handleLifecycle = async (paymentNo: string, action: "void" | "delete" | "unvoid") => {
+    const verb = action === "unvoid" ? "Restore" : action === "delete" ? "Delete" : "Void";
+    const extra = action === "delete"
+      ? " It will be hidden from the GL (still visible in the audit log)."
+      : action === "void"
+        ? " This reverses the payment (nothing is deleted)."
+        : "";
+    if (!window.confirm(`${verb} supplier payment ${paymentNo}?${extra}`)) return;
     try {
-      const res = await fetch(`/api/supplier-payments/${encodeURIComponent(paymentNo)}/void`, {
+      const res = await fetch(`/api/supplier-payments/${encodeURIComponent(paymentNo)}/lifecycle`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
       });
       const j = (await res.json()) as { success?: boolean; error?: string };
       if (res.ok && j.success) {
-        toast.success(`Payment ${paymentNo} voided`);
+        toast.success(`Payment ${paymentNo} ${action === "unvoid" ? "restored" : action === "delete" ? "deleted" : "voided"}`);
         invalidateCachePrefix("/api/supplier-payments");
         invalidateCachePrefix("/api/purchase-invoices");
         refreshHistory();
         if (selectedSupplierId) loadOpenPIs(selectedSupplierId);
       } else {
-        toast.error(j.error || "Failed to void payment");
+        toast.error(j.error || `Failed to ${verb.toLowerCase()} payment`);
       }
     } catch {
-      toast.error("Failed to void payment");
+      toast.error(`Failed to ${verb.toLowerCase()} payment`);
     }
   };
 
@@ -545,16 +554,20 @@ export default function SupplierPaymentsPage() {
                 </thead>
                 <tbody>
                   {history.map((p) => (
-                    <tr key={p.paymentNo} className="border-t hover:bg-gray-50">
+                    <tr key={p.paymentNo} className={`border-t hover:bg-gray-50 ${(p.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? "opacity-50" : ""}`}>
                       <td className="px-3 py-2 font-mono font-medium">{p.paymentNo}</td>
                       <td className="px-3 py-2">{p.supplierName}</td>
                       <td className="px-3 py-2 text-gray-600">{formatDateDMY(p.date)}</td>
                       <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{formatRM(p.totalBankSen)}</td>
                       <td className="px-3 py-2 text-right text-gray-600">{p.lines?.length ?? 0}</td>
-                      <td className="px-3 py-2 text-right">
-                        <Button variant="ghost" size="sm" onClick={() => handleVoid(p.paymentNo)}>
-                          <X className="h-4 w-4 mr-1" /> Void
-                        </Button>
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        <span className="mr-2"><LifecycleBadge state={p.lifecycleState} /></span>
+                        <LifecycleActions
+                          state={p.lifecycleState}
+                          onVoid={() => handleLifecycle(p.paymentNo, "void")}
+                          onDelete={() => handleLifecycle(p.paymentNo, "delete")}
+                          onUnvoid={() => handleLifecycle(p.paymentNo, "unvoid")}
+                        />
                       </td>
                     </tr>
                   ))}

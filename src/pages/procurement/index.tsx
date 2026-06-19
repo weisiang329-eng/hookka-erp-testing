@@ -830,6 +830,9 @@ export default function ProcurementPage() {
   const [filterOverdueOnly, setFilterOverdueOnly] = useState(false);
 
   const { data: supResp, loading: supLoading, refresh: refreshSuppliers } = useCachedJson<{ success?: boolean; data?: Supplier[] }>("/api/suppliers");
+  // Purchase Company letterhead registry — print each PO under its supplier's
+  // buying company (HOOKKA / OHANA / any sister co); accounting stays HOOKKA.
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
   const { data: poResp, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] }>("/api/purchase-orders");
   const { data: invResp, loading: invLoading, refresh: refreshInventory } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
   const { data: bindingsResp, loading: bindingsLoading, refresh: refreshBindings } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
@@ -1107,14 +1110,16 @@ export default function ProcurementPage() {
     if (selectedPOs.length === 0 || downloadingPdf) return;
     setDownloadingPdf(true);
     try {
-      const { generateCombinedPurchaseOrderPdf } = await import(
+      const { generateCombinedPurchaseOrderPdf, letterheadForPurchaseOrg } = await import(
         "@/lib/generate-purchase-order-pdf"
       );
       await generateCombinedPurchaseOrderPdf(
         selectedPOs.map((po) => {
           const sup = allSuppliers.find((s) => s.id === po.supplierId);
+          const purchaseOrgCode = sup?.purchaseOrgCode || "HOOKKA";
           return {
-            po: { ...po, purchaseOrgCode: sup?.purchaseOrgCode || "HOOKKA" },
+            po: { ...po, purchaseOrgCode },
+            letterhead: letterheadForPurchaseOrg(purchaseOrgCode, orgsResp?.organisations),
           };
         }),
         `PurchaseOrders-${selectedPOs.length}.pdf`,
@@ -1502,12 +1507,13 @@ export default function ProcurementPage() {
         label: "Print / Preview",
         icon: <Printer className="h-3.5 w-3.5" />,
         action: async () => {
-          const { generatePurchaseOrderPdf } = await import("@/lib/generate-purchase-order-pdf");
-          // Look up the supplier's letterhead override so the PDF prints
-          // under HOOKKA / OHANA / sister-company. Defaults to HOOKKA.
+          const { generatePurchaseOrderPdf, letterheadForPurchaseOrg } = await import("@/lib/generate-purchase-order-pdf");
+          // Print under the supplier's Purchase Company (HOOKKA / OHANA / any
+          // sister co in the registry). Accounting stays HOOKKA.
           const sup = allSuppliers.find((s) => s.id === row.supplierId);
           const purchaseOrgCode = sup?.purchaseOrgCode || "HOOKKA";
-          generatePurchaseOrderPdf({ ...row, purchaseOrgCode });
+          const lh = letterheadForPurchaseOrg(purchaseOrgCode, orgsResp?.organisations);
+          generatePurchaseOrderPdf({ ...row, purchaseOrgCode }, lh);
         },
       },
       { label: "", separator: true, action: () => {} },

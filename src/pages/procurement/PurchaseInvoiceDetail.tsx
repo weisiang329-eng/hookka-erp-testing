@@ -107,6 +107,12 @@ export default function PurchaseInvoiceDetailPage() {
     error?: string;
   }>(id ? `/api/purchase-invoices/${id}` : null);
 
+  // Purchase Company letterhead — print the PI under the supplier's buying
+  // company (HOOKKA / OHANA / any sister co in the registry) while the
+  // accounting entity stays HOOKKA ("borrow the letterhead"). Lightweight JSON.
+  const { data: supResp } = useCachedJson<{ data?: Array<{ id: string; purchaseOrgCode?: string }> }>("/api/suppliers");
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
+
   const pi: PurchaseInvoiceDetail | null = useMemo(
     () => (resp?.success ? resp.data ?? null : null),
     [resp],
@@ -149,8 +155,17 @@ export default function PurchaseInvoiceDetailPage() {
   async function printPdf() {
     if (!pi) return;
     try {
-      const { generatePurchaseInvoicePdf } = await import("@/lib/generate-purchase-invoice-pdf");
-      generatePurchaseInvoicePdf(pi);
+      const [{ generatePurchaseInvoicePdf }, { letterheadForPurchaseOrg }] = await Promise.all([
+        import("@/lib/generate-purchase-invoice-pdf"),
+        import("@/lib/generate-purchase-order-pdf"),
+      ]);
+      // Resolve the supplier's Purchase Company so the PI prints under that
+      // company's letterhead (was always HOOKKA before — bug). Accounting
+      // stays HOOKKA.
+      const sup = (supResp?.data ?? []).find((s) => s.id === pi.supplierId);
+      const purchaseOrgCode = sup?.purchaseOrgCode || "HOOKKA";
+      const lh = letterheadForPurchaseOrg(purchaseOrgCode, orgsResp?.organisations);
+      generatePurchaseInvoicePdf(pi, lh);
     } catch {
       toast.error("Could not generate the PDF.");
     }

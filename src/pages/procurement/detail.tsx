@@ -96,6 +96,10 @@ export default function PurchaseOrderDetailPage() {
   // Auxiliary data needed for inline edit. Same endpoints procurement/index
   // already pulls — useCachedJson dedupes if the user navigated from there.
   const { data: supResp } = useCachedJson<{ success?: boolean; data?: Supplier[] }>("/api/suppliers");
+  // Purchase Company letterhead registry — lets a PO print under the buying
+  // company's own letterhead (HOOKKA / OHANA / any sister co) while accounting
+  // stays HOOKKA. Lightweight JSON; no jspdf pulled into the page bundle.
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
   const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
   const { data: bindingsResp } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
   // 2.3 — GRN list, used to gate the Mark Received button. Endpoint is
@@ -678,14 +682,14 @@ export default function PurchaseOrderDetailPage() {
             </div>
           )}
           <Button variant="outline" onClick={async () => {
-            const { generatePurchaseOrderPdf } = await import("@/lib/generate-purchase-order-pdf");
-            // Pick up the supplier's letterhead override so the PDF
-            // prints under HOOKKA / OHANA / any sister company the
-            // operator set. Defaults to HOOKKA when the supplier row
-            // is missing the field (pre-migration / unknown supplier).
+            const { generatePurchaseOrderPdf, letterheadForPurchaseOrg } = await import("@/lib/generate-purchase-order-pdf");
+            // Print under the supplier's Purchase Company letterhead (HOOKKA /
+            // OHANA / any sister co in the organisations registry). Accounting
+            // stays HOOKKA. Defaults to HOOKKA when no Purchase Company is set.
             const sup = allSuppliers.find((s) => s.id === po.supplierId);
             const purchaseOrgCode = sup?.purchaseOrgCode || "HOOKKA";
-            generatePurchaseOrderPdf({ ...po, purchaseOrgCode });
+            const lh = letterheadForPurchaseOrg(purchaseOrgCode, orgsResp?.organisations);
+            generatePurchaseOrderPdf({ ...po, purchaseOrgCode }, lh);
           }}>
             <Download className="h-4 w-4" /> Download PDF
           </Button>

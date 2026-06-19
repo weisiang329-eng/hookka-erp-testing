@@ -40,7 +40,7 @@ function fmtDate(iso: string): string {
 // network round-trip during what is supposed to be an instant download.
 // For sister companies beyond HOOKKA/OHANA the caller can pass a fully
 // populated LetterheadInfo (looked up from /api/organisations elsewhere).
-function resolveLetterhead(code: string | undefined): LetterheadInfo {
+export function resolveLetterhead(code: string | undefined): LetterheadInfo {
   const c = (code || "HOOKKA").toUpperCase();
   if (c === "OHANA") {
     return {
@@ -64,6 +64,44 @@ function resolveLetterhead(code: string | undefined): LetterheadInfo {
     tin: COMPANY.HOOKKA.tin,
     address: COMPANY.HOOKKA.address,
   };
+}
+
+// One org row from GET /api/organisations (the Settings → Organisations
+// registry). Only the letterhead-relevant fields are needed here.
+export type OrgRegistryRow = {
+  code?: string | null;
+  name?: string | null;
+  regNo?: string | null;
+  tin?: string | null;
+  address?: string | null;
+  phone?: string | null;
+  email?: string | null;
+};
+
+// Resolve a Purchase Company code into its printed letterhead. Looks the code
+// up in the organisations registry first (so ANY sister company — HOUZS etc. —
+// prints its own name/reg/TIN/address, the owner's "借用 letterhead"), and
+// falls back to the hardcoded HOOKKA/OHANA block when the registry isn't
+// loaded or the code is unknown. The DB / accounting entity is ALWAYS HOOKKA;
+// this only changes what prints on the page.
+export function letterheadForPurchaseOrg(
+  code: string | undefined,
+  organisations?: OrgRegistryRow[],
+): LetterheadInfo {
+  const c = (code || "HOOKKA").toUpperCase();
+  const org = organisations?.find((o) => (o.code || "").toUpperCase() === c);
+  if (org && org.name) {
+    return {
+      code: c,
+      name: org.name,
+      regNo: org.regNo ?? "",
+      tin: org.tin ?? "",
+      address: org.address ?? "",
+      phone: org.phone ?? "",
+      email: org.email ?? "",
+    };
+  }
+  return resolveLetterhead(code);
 }
 
 // PurchaseOrder shape returned by /api/purchase-orders includes a

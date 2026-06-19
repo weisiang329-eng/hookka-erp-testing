@@ -510,6 +510,9 @@ export default function PurchaseInvoicesPage() {
     () => supResp?.data ?? [],
     [supResp],
   );
+  // Purchase Company letterhead registry — print each PI under its supplier's
+  // buying company (accounting stays HOOKKA).
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
 
   const handleCreatePI = useCallback(
     async (data: Record<string, unknown>) => {
@@ -667,11 +670,16 @@ export default function PurchaseInvoicesPage() {
               toast.error("Could not load the invoice to print.");
               return;
             }
-            const { generatePurchaseInvoicePdf } = await import(
-              "@/lib/generate-purchase-invoice-pdf"
-            );
+            const [{ generatePurchaseInvoicePdf }, { letterheadForPurchaseOrg }] = await Promise.all([
+              import("@/lib/generate-purchase-invoice-pdf"),
+              import("@/lib/generate-purchase-order-pdf"),
+            ]);
+            const supId = (j.data as { supplierId?: string }).supplierId;
+            const sup = suppliers.find((s) => s.id === supId);
+            const lh = letterheadForPurchaseOrg(sup?.purchaseOrgCode || "HOOKKA", orgsResp?.organisations);
             generatePurchaseInvoicePdf(
               j.data as unknown as Parameters<typeof generatePurchaseInvoicePdf>[0],
+              lh,
             );
           } catch {
             toast.error("Could not generate the PDF.");

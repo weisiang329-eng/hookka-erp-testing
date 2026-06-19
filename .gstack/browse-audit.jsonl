@@ -1,0 +1,58 @@
+{"ts":"2026-04-23T14:51:38.654Z","cmd":"goto","args":"https://hookka-erp-testing.pages.dev","origin":"https://hookka-erp-testing.pages.dev/","durationMs":3736,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:51:38.910Z","cmd":"url","args":"","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":3,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:51:41.199Z","cmd":"console","args":"--errors","origin":"about:blank","durationMs":3,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:51:41.534Z","cmd":"text","args":"","origin":"about:blank","durationMs":18,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:51:47.056Z","cmd":"wait","args":"--networkidle","origin":"about:blank","durationMs":9,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:51:47.313Z","cmd":"text","args":"","origin":"about:blank","durationMs":4,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:51:57.765Z","cmd":"screenshot","args":"C:/Users/User/AppData/Local/Temp/hookka-login.png","origin":"about:blank","durationMs":10207,"status":"error","hasCookies":false,"mode":"launched","error":"page.screenshot: Target page, context or browser has been closed\nCall log:\n\u001b[2m  - taking page screenshot\u001b[22m\n\u001b[2m  - waiting for fonts to load...\u001b[22m\n\u001b[2m  - fonts loaded\u001b[22m\n"}
+{"ts":"2026-04-23T14:52:11.285Z","cmd":"screenshot","args":"C:/Users/User/hookka-login.png","origin":"about:blank","durationMs":4,"status":"error","hasCookies":false,"mode":"launched","error":"Path must be within: C:\\Users\\User\\AppData\\Local\\Temp, C:\\Users\\User\\hookka-erp-testing"}
+{"ts":"2026-04-23T14:52:16.288Z","cmd":"screenshot","args":"C:/Users/User/hookka-erp-testing/hookka-login.png","origin":"about:blank","durationMs":153,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:30.000Z","cmd":"goto","args":"https://hookka-erp-testing.pages.dev/login","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":287,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:30.191Z","cmd":"wait","args":"--load","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":1,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:30.410Z","cmd":"html","args":"","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":11,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:30.647Z","cmd":"console","args":"","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:30.897Z","cmd":"network","args":"","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:36.428Z","cmd":"wait","args":"--networkidle","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":1,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:40.848Z","cmd":"screenshot","args":"C:/Users/User/hookka-erp-testing/hookka-login2.png","origin":"about:blank","durationMs":119,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:41.064Z","cmd":"text","args":"","origin":"about:blank","durationMs":4,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:41.317Z","cmd":"snapshot","args":"-i","origin":"about:blank","durationMs":28,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:48.551Z","cmd":"url","args":"","origin":"about:blank","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:52:48.748Z","cmd":"tabs","args":"","origin":"about:blank","durationMs":2,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:53:09.201Z","cmd":"goto","args":"https://hookka-erp-testing.pages.dev/login","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":256,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:53:09.743Z","cmd":"wait","args":"--networkidle","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":278,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:53:10.051Z","cmd":"url","args":"","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":4,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:53:10.563Z","cmd":"screenshot","args":"C:/Users/User/hookka-erp-testing/hookka-login3.png","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":275,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T14:53:10.849Z","cmd":"html","args":"","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":12,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:25.814Z","cmd":"goto","args":"https://hookka-erp-testing.pages.dev/login","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":3239,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:26.367Z","cmd":"wait","args":"--networkidle","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":283,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:26.768Z","cmd":"snapshot","args":"-i","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":119,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:38.366Z","cmd":"fill","args":"@e1 weisiang329@gmail.com","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":159,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:38.796Z","cmd":"fill","args":"@e2 Hookka@123","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":89,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:39.334Z","cmd":"click","args":"@e5","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":179,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:39.599Z","cmd":"wait","args":"--networkidle","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":2,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:39.851Z","cmd":"url","args":"","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:55.759Z","cmd":"url","args":"","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:55.967Z","cmd":"text","args":"","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":6,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:09:56.173Z","cmd":"console","args":"--errors","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:12:29.417Z","cmd":"goto","args":"https://hookka-erp-testing.pages.dev/login","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":1060,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:12:29.979Z","cmd":"wait","args":"--networkidle","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":322,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:12:30.300Z","cmd":"fill","args":"@e1 weisiang329@gmail.com","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":1,"status":"error","hasCookies":false,"mode":"launched","error":"Ref @e1 not found. Run 'snapshot' to get fresh refs."}
+{"ts":"2026-04-23T15:12:30.605Z","cmd":"fill","args":"@e2 Claude@debug","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":1,"status":"error","hasCookies":false,"mode":"launched","error":"Ref @e2 not found. Run 'snapshot' to get fresh refs."}
+{"ts":"2026-04-23T15:12:30.934Z","cmd":"click","args":"@e5","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":0,"status":"error","hasCookies":false,"mode":"launched","error":"Ref @e5 not found. Run 'snapshot' to get fresh refs."}
+{"ts":"2026-04-23T15:12:34.256Z","cmd":"url","args":"","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":2,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:12:47.729Z","cmd":"snapshot","args":"-i","origin":"about:blank","durationMs":40,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:10.187Z","cmd":"goto","args":"https://hookka-erp-testing.pages.dev/login","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":235,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:10.737Z","cmd":"wait","args":"--networkidle","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":353,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:11.025Z","cmd":"snapshot","args":"-i","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":52,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:11.264Z","cmd":"fill","args":"@e1 weisiang329@gmail.com","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":20,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:11.493Z","cmd":"fill","args":"@e2 Claude@debug","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":16,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:11.852Z","cmd":"click","args":"@e5","origin":"https://hookka-erp-testing.pages.dev/login","durationMs":118,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:16.191Z","cmd":"url","args":"","origin":"https://hookka-erp-testing.pages.dev/dashboard","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:16.412Z","cmd":"text","args":"","origin":"https://hookka-erp-testing.pages.dev/dashboard","durationMs":11,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:31.782Z","cmd":"goto","args":"https://hookka-erp-testing.pages.dev/production","origin":"https://hookka-erp-testing.pages.dev/production","durationMs":127,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:36.555Z","cmd":"wait","args":"--networkidle","origin":"https://hookka-erp-testing.pages.dev/production","durationMs":4479,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:39.879Z","cmd":"url","args":"","origin":"https://hookka-erp-testing.pages.dev/production","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:13:49.795Z","cmd":"snapshot","args":"-i","origin":"https://hookka-erp-testing.pages.dev/production","durationMs":9700,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:55:24.224Z","cmd":"click","args":"@e85","origin":"about:blank","durationMs":2,"status":"error","hasCookies":false,"mode":"launched","error":"Ref @e85 not found. Run 'snapshot' to get fresh refs."}
+{"ts":"2026-04-23T15:55:27.489Z","cmd":"screenshot","args":"C:/Users/User/hookka-erp-testing/fabcut.png","origin":"about:blank","durationMs":61,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-04-23T15:55:27.635Z","cmd":"text","args":"","origin":"about:blank","durationMs":5,"status":"ok","hasCookies":false,"mode":"launched"}

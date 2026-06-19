@@ -2,7 +2,6 @@ import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { SKUFormDialog } from "./sku-form-dialog";
 import { SupplierFormDialog, type OrgOption } from "./supplier-form-dialog";
-import { MaterialPriceInsightModal } from "./material-price-insight";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,7 +19,6 @@ import {
   Trash2,
   CheckCircle2,
   TrendingUp,
-  Scale,
   X,
 } from "lucide-react";
 
@@ -370,9 +368,6 @@ export default function SupplierMaintenancePage() {
   );
   const [showSKUForm, setShowSKUForm] = useState(false);
   const [editingSKU, setEditingSKU] = useState<SupplierSKU | null>(null);
-  // Price Insight modal — compare suppliers + see buy-price history for one
-  // internal material code. Read-only; layered over the same binding data.
-  const [insightSku, setInsightSku] = useState<SupplierSKU | null>(null);
 
   // Deep-link from /suppliers/:id detail page: ?action=add pre-opens the
   // SKU form on the SKU & Costing tab. Once consumed, the param is stripped
@@ -780,41 +775,13 @@ export default function SupplierMaintenancePage() {
           </span>
         ),
       },
-      {
-        key: "insight",
-        label: "Compare",
-        width: "90px",
-        align: "right",
-        render: (_val: unknown, row: SupplierSKU) => (
-          <div className="flex items-center justify-end">
-            <Button
-              variant="ghost"
-              size="icon"
-              title="Compare suppliers & price history for this material"
-              onClick={(e) => {
-                e.stopPropagation();
-                setInsightSku(row);
-              }}
-            >
-              <Scale className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        ),
-      },
     ],
-    // Columns read pre-resolved row fields only (supplierName is baked into
-    // resolvedSkuList), so the table definition is stable — no live deps.
-    [],
+    [supplierMap]
   );
 
   const skuContextMenu = useMemo(
     () =>
       (row: SupplierSKU): ContextMenuItem[] => [
-        {
-          label: "Compare & History",
-          icon: <Scale className="h-3.5 w-3.5" />,
-          action: () => setInsightSku(row),
-        },
         {
           label: "Edit",
           icon: <Pencil className="h-3.5 w-3.5" />,
@@ -1122,18 +1089,6 @@ export default function SupplierMaintenancePage() {
           presetSupplierId={editingSKU ? undefined : skuSupplierFilter || undefined}
           onSave={handleSaveSKU}
           onClose={() => { setShowSKUForm(false); setEditingSKU(null); }}
-        />
-      )}
-
-      {/* Price Insight modal — compare suppliers + buy-price history */}
-      {insightSku && (
-        <MaterialPriceInsightModal
-          materialCode={insightSku.internalRMCode}
-          materialName={insightSku.materialName}
-          skuList={resolvedSkuList}
-          supplierNameById={supplierMap}
-          initialSupplierId={insightSku.supplierId}
-          onClose={() => setInsightSku(null)}
         />
       )}
 

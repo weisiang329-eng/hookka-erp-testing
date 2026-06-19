@@ -48,6 +48,7 @@ import {
 } from "../../lib/other-party-payment";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
+import { applyLifecycle } from "../lib/document-lifecycle";
 
 const app = new Hono<Env>();
 
@@ -5347,6 +5348,35 @@ app.post("/payment-vouchers/:id/void", async (c) => {
     ...ledgerStmts,
   ]);
   return c.json({ success: true });
+});
+
+app.post("/payment-vouchers/:id/lifecycle", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+  let action: "void" | "delete" | "unvoid";
+  try { action = ((await c.req.json()) as { action: string }).action as typeof action; } catch { return c.json({ success: false, error: "Invalid body" }, 400); }
+  if (!["void", "delete", "unvoid"].includes(action)) return c.json({ success: false, error: "action must be void|delete|unvoid" }, 400);
+
+  const pv = await c.var.DB.prepare("SELECT id, pvNo, status FROM payment_vouchers WHERE id = ? AND orgId = ?").bind(id, orgId).first<{ id: string; pvNo: string; status: string }>();
+  if (!pv) return c.json({ success: false, error: "Voucher not found" }, 404);
+
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  let lc: { statements: D1PreparedStatement[]; newState: string };
+  try {
+    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: ["payment_voucher", "payment_voucher_settle"], voidSourceType: "payment_voucher_void", sourceId: id, action, actorUserId, descriptionTag: `${action.toUpperCase()} · ${pv.pvNo}` });
+  } catch (e) { return c.json({ success: false, error: (e as Error).message }, 400); }
+
+  // doc-specific side effect: sync status column (lifecycle state is source of truth; this is for UI)
+  const docStatus = lc.newState === "ACTIVE" ? "POSTED" : "VOID";
+  const statements: D1PreparedStatement[] = [
+    ...lc.statements,
+    c.var.DB.prepare("UPDATE payment_vouchers SET status = ? WHERE id = ? AND orgId = ?").bind(docStatus, id, orgId),
+  ];
+  await c.var.DB.batch(statements);
+  return c.json({ success: true, data: { state: lc.newState } });
 });
 
 app.get("/official-receipts", async (c) => {

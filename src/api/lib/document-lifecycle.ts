@@ -24,14 +24,15 @@ export async function getDocState(
  * Caller appends these to its own batch (with the doc-specific side effects) and
  * runs one c.var.DB.batch(...). Throws on an illegal transition (caller → 400).
  *
- * `baseSourceType` is BOTH the original legs' sourceType AND the lifecycle key;
- * `voidSourceType` is the reversal legs' sourceType (e.g. "payment_voucher_void").
+ * `baseSourceTypes` is the array of original leg sourceTypes (first element is
+ * also the lifecycle key); `voidSourceType` is the reversal legs' sourceType
+ * (e.g. "payment_voucher_void").
  */
 export async function applyLifecycle(
   db: Env["Variables"]["DB"],
   opts: {
     orgId: string;
-    baseSourceType: string;
+    baseSourceTypes: string[];
     voidSourceType: string;
     sourceId: string;
     action: LifecycleAction;
@@ -39,8 +40,9 @@ export async function applyLifecycle(
     descriptionTag: string;
   },
 ): Promise<{ statements: D1PreparedStatement[]; newState: DocState }> {
-  const { orgId, baseSourceType, voidSourceType, sourceId, action, actorUserId, descriptionTag } = opts;
-  const cur = await getDocState(db, orgId, baseSourceType, sourceId);
+  const { orgId, baseSourceTypes, voidSourceType, sourceId, action, actorUserId, descriptionTag } = opts;
+  const primarySourceType = baseSourceTypes[0];
+  const cur = await getDocState(db, orgId, primarySourceType, sourceId);
   const target = nextState(cur, action);
   if (!target) throw new Error(`Illegal lifecycle action '${action}' from state '${cur}'`);
 
@@ -48,13 +50,14 @@ export async function applyLifecycle(
 
   // 1. ensure reversal exists (void/delete only; idempotent via ledgerHasSource)
   if (needsReversal(action) && !(await ledgerHasSource(db, orgId, voidSourceType, sourceId))) {
+    const placeholders = baseSourceTypes.map(() => "?").join(", ");
     const orig =
       (
         await db
           .prepare(
-            "SELECT accountCode, debitSen, creditSen, legNo FROM ledger_journal_entries WHERE sourceType = ? AND sourceId = ? AND orgId = ? ORDER BY legNo",
+            `SELECT accountCode, debitSen, creditSen, legNo FROM ledger_journal_entries WHERE sourceType IN (${placeholders}) AND sourceId = ? AND orgId = ? ORDER BY legNo`,
           )
-          .bind(baseSourceType, sourceId, orgId)
+          .bind(...baseSourceTypes, sourceId, orgId)
           .all<{ accountCode: string; debitSen: number; creditSen: number; legNo: number }>()
       ).results ?? [];
     const rev = reverseLegs(
@@ -78,16 +81,21 @@ export async function applyLifecycle(
 
   // 2. set hidden flags per target state
   const h = hiddenTargets(target);
+  // one UPDATE per base sourceType
+  for (const baseSourceType of baseSourceTypes) {
+    statements.push(
+      db
+        .prepare("UPDATE ledger_journal_entries SET hidden = ? WHERE sourceType = ? AND sourceId = ? AND orgId = ?")
+        .bind(h.original, baseSourceType, sourceId, orgId),
+    );
+  }
   statements.push(
-    db
-      .prepare("UPDATE ledger_journal_entries SET hidden = ? WHERE sourceType = ? AND sourceId = ? AND orgId = ?")
-      .bind(h.original, baseSourceType, sourceId, orgId),
     db
       .prepare("UPDATE ledger_journal_entries SET hidden = ? WHERE sourceType = ? AND sourceId = ? AND orgId = ?")
       .bind(h.reversal, voidSourceType, sourceId, orgId),
   );
 
-  // 3. upsert lifecycle state
+  // 3. upsert lifecycle state (key = primarySourceType)
   const now = new Date().toISOString();
   statements.push(
     db
@@ -96,7 +104,7 @@ export async function applyLifecycle(
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (orgId, sourceType, sourceId) DO UPDATE SET state = ?, actionAt = ?, actorUserId = ?`,
       )
-      .bind(`dl-${crypto.randomUUID().slice(0, 10)}`, baseSourceType, sourceId, target, now, actorUserId, orgId, target, now, actorUserId),
+      .bind(`dl-${crypto.randomUUID().slice(0, 10)}`, primarySourceType, sourceId, target, now, actorUserId, orgId, target, now, actorUserId),
   );
 
   return { statements, newState: target };

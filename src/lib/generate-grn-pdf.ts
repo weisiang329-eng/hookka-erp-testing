@@ -1,11 +1,14 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
-import { fmtDate, drawLetterhead } from "@/lib/pdf-utils";
+import {
+  fmtDate,
+  drawLetterhead,
+  drawSectionLabel,
+  drawDocFooter,
+  PDF,
+} from "@/lib/pdf-utils";
 import type { LetterheadInfo } from "@/lib/generate-purchase-order-pdf";
-
-// Company name for the footer line (the header now comes from drawLetterhead).
-const COMPANY_NAME = COMPANY.HOOKKA.name;
 
 // ---------------------------------------------------------------------------
 // Main
@@ -22,15 +25,18 @@ export function generateGRNPdf(
   // "Download PDF" action merge several GRNs into one file (see merge-pdf.ts).
   opts?: { returnDoc?: boolean },
 ): jsPDF | void {
-  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
-  const margin = 15;
+  // Align to the DO/SI family margin (14mm) so PO / PI / GRN frame identically.
+  const margin = PDF.margin; // 14
+  const cw = pageW - margin * 2;
 
   // --- Header (shared letterhead — single source of truth across all docs).
   // Logo skipped for sister companies so we don't mis-brand them. ---
   const isHookkaLetterhead = !letterheadOverride || letterheadOverride.code === "HOOKKA";
-  let y = drawLetterhead(doc, {
+  const companyName = letterheadOverride?.name ?? COMPANY.HOOKKA.name;
+  drawLetterhead(doc, {
     docTitle: "GOODS RECEIVED NOTE",
     docNo: data.grnNo ?? "-",
     docDate: fmtDate(data.date),
@@ -47,65 +53,47 @@ export function generateGRNPdf(
       : undefined,
     company: letterheadOverride ? undefined : "HOOKKA",
   });
+  doc.setTextColor(...PDF.ink);
 
-  // --- Two columns ---
-  const colLeft = margin;
-  const colRight = pageW / 2 + 10;
-  const labelW = 35;
-  const labelWRight = 28;
-
-  // Supplier details
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(31, 29, 27);
-  doc.text("SUPPLIER", colLeft, y);
-
-  let yL = y + 5;
-  doc.setFontSize(8);
-  const supplierFields: [string, string][] = [
-    ["Name", data.supplierName ?? "-"],
-    ["Address", data.supplierAddress ?? "-"],
-    ["Contact", data.supplierContact ?? "-"],
-  ];
-  for (const [label, value] of supplierFields) {
+  // --- Reference block (DO/SI lblVal two-column style) ---
+  const labelW = 24;
+  const lblVal = (
+    x: number,
+    yy: number,
+    k: string,
+    v: string,
+    maxW: number,
+  ): number => {
     doc.setFont("helvetica", "normal");
-    doc.setTextColor(100, 100, 100);
-    doc.text(label, colLeft, yL);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(31, 29, 27);
-    const lines = doc.splitTextToSize(String(value), pageW / 2 - labelW - 15);
-    doc.text(lines, colLeft + labelW, yL);
-    yL += lines.length * 4 + 1;
-  }
+    doc.setFontSize(8);
+    doc.setTextColor(...PDF.muted);
+    doc.text(k, x, yy);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(...PDF.ink);
+    const lines = doc.splitTextToSize(v || "-", maxW);
+    doc.text(lines, x + labelW, yy);
+    return yy + Math.max(1, lines.length) * 4.3 + 0.8;
+  };
 
-  // GRN details
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(31, 29, 27);
-  doc.text("GRN DETAILS", colRight, y);
+  const leftX = margin;
+  const leftMaxW = cw * 0.55 - labelW;
+  let ly = 40;
+  ly = lblVal(leftX, ly, "Supplier", data.supplierName ?? "-", leftMaxW);
+  ly = lblVal(leftX, ly, "Address", data.supplierAddress ?? "-", leftMaxW);
+  ly = lblVal(leftX, ly, "Contact", data.supplierContact ?? "-", leftMaxW);
 
-  let yR = y + 5;
-  doc.setFontSize(8);
-  const grnFields: [string, string][] = [
-    ["GRN No", data.grnNo ?? "-"],
-    ["Date", fmtDate(data.date)],
-    ["PO Ref", data.poRef ?? "-"],
-    ["DO Ref", data.doRef ?? "-"],
-    ["Warehouse", data.warehouse ?? "-"],
-  ];
-  for (const [label, value] of grnFields) {
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(100, 100, 100);
-    doc.text(label, colRight, yR);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(31, 29, 27);
-    doc.text(String(value), colRight + labelWRight, yR);
-    yR += 5;
-  }
+  const rightX = pageW / 2 + 12;
+  const rightMaxW = pageW - margin - rightX - labelW;
+  let ry = 40;
+  ry = lblVal(rightX, ry, "GRN No.", data.grnNo ?? "-", rightMaxW);
+  ry = lblVal(rightX, ry, "Date", fmtDate(data.date), rightMaxW);
+  ry = lblVal(rightX, ry, "PO Ref", data.poRef ?? "-", rightMaxW);
+  ry = lblVal(rightX, ry, "DO Ref", data.doRef ?? "-", rightMaxW);
+  lblVal(rightX, ry, "Warehouse", data.warehouse ?? "-", rightMaxW);
 
-  y = Math.max(yL, yR) + 6;
+  let y = Math.max(ly, ry) + 2;
 
-  // --- Items Table ---
+  // --- Received Items (bronze section label, DO/SI house style) ---
   type GRNItem = {
     itemCode?: string;
     description?: string;
@@ -115,6 +103,8 @@ export function generateGRNPdf(
     acceptedQty?: number;
   };
   const items: GRNItem[] = data.items ?? [];
+  y = drawSectionLabel(doc, `Received Items (${items.length} lines)`, y);
+
   const tableBody = items.map((item, idx) => [
     String(idx + 1),
     item.itemCode ?? "",
@@ -127,62 +117,80 @@ export function generateGRNPdf(
 
   autoTable(doc, {
     startY: y,
-    margin: { left: margin, right: margin },
-    head: [["No", "Item Code", "Description", "PO Qty", "Received Qty", "Rejected Qty", "Accepted Qty"]],
+    margin: { left: margin, right: margin, bottom: 16 },
+    head: [[
+      { content: "No", styles: { halign: "center" } },
+      { content: "Item Code" },
+      { content: "Description" },
+      { content: "PO Qty", styles: { halign: "right" } },
+      { content: "Received Qty", styles: { halign: "right" } },
+      { content: "Rejected Qty", styles: { halign: "right" } },
+      { content: "Accepted Qty", styles: { halign: "right" } },
+    ]],
     body: tableBody,
+    // DO/SI house theme: plain grid, white header with a black underline rule,
+    // hairline body lines, dashed per-row separators.
+    theme: "plain",
+    rowPageBreak: "avoid",
     styles: {
+      font: "helvetica",
       fontSize: 8,
-      cellPadding: 2.5,
-      textColor: [31, 29, 27],
-      lineColor: [200, 200, 200],
-      lineWidth: 0.3,
+      cellPadding: { top: 1.3, bottom: 1.8, left: 1.8, right: 1.8 },
+      textColor: PDF.ink,
+      lineColor: PDF.rule,
+      lineWidth: 0,
+      overflow: "linebreak",
+      valign: "top",
     },
     headStyles: {
-      fillColor: [255, 255, 255],
-      textColor: [0, 0, 0],
-      fontSize: 8,
       fontStyle: "bold",
-      lineColor: [0, 0, 0],
-      lineWidth: 0.3,
-    },
-    alternateRowStyles: {
-      fillColor: [255, 255, 255],
+      fontSize: 7.6,
+      lineWidth: { top: 0, bottom: 0.5, left: 0, right: 0 },
+      lineColor: PDF.ink,
+      valign: "middle",
     },
     columnStyles: {
       0: { cellWidth: 10, halign: "center" },
       1: { cellWidth: 25 },
-      2: { cellWidth: 55 },
+      2: { cellWidth: "auto" },
       3: { cellWidth: 22, halign: "right" },
       4: { cellWidth: 22, halign: "right" },
       5: { cellWidth: 22, halign: "right" },
       6: { cellWidth: 22, halign: "right", fontStyle: "bold" },
     },
+    didDrawCell(d) {
+      // Thin dashed separator under every item row (drawn once on the last
+      // column) — the DO/SI per-row separator.
+      if (d.section !== "body" || d.column.index !== 6) return;
+      const yy = d.cell.y + d.cell.height;
+      doc.setDrawColor(...PDF.rule);
+      doc.setLineWidth(0.1);
+      doc.setLineDashPattern([0.7, 0.7], 0);
+      doc.line(margin, yy, pageW - margin, yy);
+      doc.setLineDashPattern([], 0);
+    },
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  y = (doc as any).lastAutoTable.finalY + 5;
+  y = (doc as any).lastAutoTable.finalY + 8;
 
   // --- Remarks ---
   if (data.remarks) {
-    if (y > pageH - 60) { doc.addPage(); y = margin; }
-    doc.setFontSize(8);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(31, 29, 27);
-    doc.text("Remarks:", margin, y);
-    y += 4;
+    const remarkLines = doc.splitTextToSize(data.remarks, cw);
+    const blockH = 6 + remarkLines.length * 3.6;
+    if (y + blockH > pageH - 50) { doc.addPage(); y = 36; }
+    y = drawSectionLabel(doc, "Remarks", y);
     doc.setFont("helvetica", "normal");
-    doc.setTextColor(80, 80, 80);
-    const remarkLines = doc.splitTextToSize(data.remarks, pageW - margin * 2);
+    doc.setFontSize(7);
+    doc.setTextColor(...PDF.ink);
     doc.text(remarkLines, margin, y);
-    y += remarkLines.length * 4 + 4;
+    y += remarkLines.length * 3.6 + 6;
   }
 
   // --- Three Signature Lines ---
-  y += 8;
-  if (y > pageH - 45) { doc.addPage(); y = margin + 10; }
-
+  if (y + 26 > pageH - 18) { doc.addPage(); y = 36; }
   const sigWidth = 50;
-  const sigGap = (pageW - margin * 2 - sigWidth * 3) / 2;
+  const sigGap = (cw - sigWidth * 3) / 2;
   const sigPositions = [
     margin,
     margin + sigWidth + sigGap,
@@ -190,30 +198,53 @@ export function generateGRNPdf(
   ];
   const sigLabels = ["Received By", "Checked By", "Approved By"];
 
-  doc.setDrawColor(31, 29, 27);
+  doc.setDrawColor(...PDF.rule);
+  doc.setLineWidth(0.3);
   for (let i = 0; i < 3; i++) {
-    doc.line(sigPositions[i], y + 15, sigPositions[i] + sigWidth, y + 15);
-    doc.setFontSize(8);
+    doc.line(sigPositions[i], y + 14, sigPositions[i] + sigWidth, y + 14);
     doc.setFont("helvetica", "bold");
-    doc.setTextColor(31, 29, 27);
-    doc.text(sigLabels[i], sigPositions[i], y + 20);
-
-    doc.setFontSize(7);
+    doc.setFontSize(8);
+    doc.setTextColor(...PDF.ink);
+    doc.text(sigLabels[i], sigPositions[i], y + 19);
     doc.setFont("helvetica", "normal");
-    doc.setTextColor(100, 100, 100);
-    doc.text("Name:", sigPositions[i], y + 25);
-    doc.text("Date:", sigPositions[i], y + 29);
+    doc.setFontSize(7);
+    doc.setTextColor(...PDF.faint);
+    doc.text("Name / Date / Stamp", sigPositions[i], y + 23.5);
   }
 
-  // --- Footer ---
-  const footerY = pageH - 10;
-  doc.setDrawColor(200, 200, 200);
-  doc.line(margin, footerY - 3, pageW - margin, footerY - 3);
-  doc.setFontSize(7);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(156, 163, 175);
-  doc.text(`${COMPANY_NAME}  |  This is a computer-generated document.`, margin, footerY);
-  doc.text(`Generated: ${fmtDate(new Date().toISOString())}`, pageW - margin, footerY, { align: "right" });
+  // --- Footer (all pages — shared DO/SI footer) ---
+  // HOOKKA prints via the shared drawDocFooter; sister-company letterheads
+  // keep their OWN name in the footer line, drawn in the same hairline style.
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    if (isHookkaLetterhead) {
+      drawDocFooter(doc, "HOOKKA");
+    } else {
+      const fy = pageH - 12;
+      doc.setDrawColor(...PDF.rule);
+      doc.setLineWidth(0.3);
+      doc.line(margin, fy - 4, pageW - margin, fy - 4);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(6.8);
+      doc.setTextColor(...PDF.faint);
+      doc.text(
+        `${companyName} · This is a computer-generated document; no signature required for system records.`,
+        margin,
+        fy,
+      );
+      doc.text(
+        `Generated ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`,
+        pageW - margin,
+        fy,
+        { align: "right" },
+      );
+    }
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(6.5);
+    doc.setTextColor(...PDF.faint);
+    doc.text(`Page ${p} of ${totalPages}`, pageW - margin, pageH - 16, { align: "right" });
+  }
 
   if (opts?.returnDoc) return doc;
   doc.save(`${data.grnNo ?? "GRN"}.pdf`);

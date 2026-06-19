@@ -1,7 +1,15 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { PurchaseOrder } from "@/lib/mock-data";
-import { drawLetterhead } from "@/lib/pdf-utils";
+import {
+  fmtCurrency,
+  fmtRM,
+  fmtDate,
+  drawLetterhead,
+  drawSectionLabel,
+  drawDocFooter,
+  PDF,
+} from "@/lib/pdf-utils";
 import { COMPANY } from "@/lib/constants";
 
 // Letterhead info passed in from the caller. Mirrors the COMPANY constant's
@@ -19,16 +27,6 @@ export type LetterheadInfo = {
   address?: string;
   footerLine?: string;
 };
-
-function fmtCurrency(sen: number): string {
-  return `RM ${(sen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function fmtDate(iso: string): string {
-  if (!iso) return "-";
-  const d = new Date(iso);
-  return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" });
-}
 
 // Resolve the supplier's purchase_org_code into a LetterheadInfo. Falls
 // back to HOOKKA so any pre-migration supplier (or unknown code) prints
@@ -126,19 +124,20 @@ export function generatePurchaseOrderPdf(
   const co = letterheadOverride ?? resolveLetterhead(po.purchaseOrgCode);
   const isHookkaLetterhead = co.code === "HOOKKA";
 
-  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
-  const margin = 15;
-  let y = margin;
+  // Align to the DO/SI family margin (14mm) so PO / PI / GRN frame identically.
+  const margin = PDF.margin; // 14
+  const cw = pageW - margin * 2;
 
   // --- Header (shared letterhead — single source of truth across all docs).
   // Logo is skipped for sister companies so we don't mis-brand OHANA/HOUZS. ---
-  y = drawLetterhead(doc, {
+  drawLetterhead(doc, {
     docTitle: "PURCHASE ORDER",
     docNo: po.poNo,
     docDate: fmtDate(po.orderDate),
-    statusText: `Status: ${po.status.replace(/_/g, " ")}`,
+    statusText: po.status.replace(/_/g, " "),
     logo: isHookkaLetterhead,
     companyInfo: {
       name: co.name,
@@ -149,76 +148,51 @@ export function generatePurchaseOrderPdf(
       email: co.email ?? "",
     },
   });
-  doc.setTextColor(31, 29, 27);
+  doc.setTextColor(...PDF.ink);
 
-  // --- Two-column: Supplier (left) + PO Details (right) ---
-  const colLeft = margin;
-  const colRight = pageW / 2 + 5;
-
-  // Left column - Supplier Details
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("SUPPLIER DETAILS", colLeft + 3, y + 5);
-  doc.setDrawColor(180, 180, 180);
-  doc.line(colLeft, y + 7, colLeft + pageW / 2 - 10, y + 7);
-  y += 10;
-
-  const supplierFields = [
-    ["Supplier", po.supplierName],
-    ["Supplier ID", po.supplierId],
-  ];
-
-  doc.setFontSize(8);
-  for (const [label, value] of supplierFields) {
+  // --- Reference block (DO/SI lblVal two-column style) ---
+  // Label in muted 8pt normal, value in INK bold; left column ~55% of the
+  // content width, right column starts at pageW/2 + 12. Identical to
+  // generate-do-pdf / generate-invoice-pdf / generate-order-pdf.
+  const labelW = 24;
+  const lblVal = (
+    x: number,
+    yy: number,
+    k: string,
+    v: string,
+    maxW: number,
+  ): number => {
     doc.setFont("helvetica", "normal");
-    doc.setTextColor(107, 114, 128);
-    doc.text(label, colLeft + 3, y);
+    doc.setFontSize(8);
+    doc.setTextColor(...PDF.muted);
+    doc.text(k, x, yy);
     doc.setFont("helvetica", "bold");
-    doc.setTextColor(31, 29, 27);
-    doc.text(String(value), colLeft + 35, y);
-    y += 5;
-  }
+    doc.setTextColor(...PDF.ink);
+    const lines = doc.splitTextToSize(v || "-", maxW);
+    doc.text(lines, x + labelW, yy);
+    return yy + Math.max(1, lines.length) * 4.3 + 0.8;
+  };
 
-  // Right column - PO Info
-  let yRight = y;
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("ORDER DETAILS", colRight + 3, yRight + 5);
-  doc.setDrawColor(180, 180, 180);
-  doc.line(colRight, yRight + 7, colRight + pageW / 2 - 10, yRight + 7);
-  yRight += 10;
+  const leftX = margin;
+  const leftMaxW = cw * 0.55 - labelW;
+  let ly = 40;
+  ly = lblVal(leftX, ly, "Supplier", po.supplierName, leftMaxW);
+  ly = lblVal(leftX, ly, "Supplier ID", String(po.supplierId ?? "-"), leftMaxW);
 
-  const orderFields = [
-    ["Order Date", fmtDate(po.orderDate)],
-    ["Delivery Date", po.expectedDate ? fmtDate(po.expectedDate) : "-"],
-    ["Payment Terms", "NET 30"],
-    ["Status", po.status.replace(/_/g, " ")],
-  ];
+  const rightX = pageW / 2 + 12;
+  const rightMaxW = pageW - margin - rightX - labelW;
+  let ry = 40;
+  ry = lblVal(rightX, ry, "PO No.", po.poNo || "-", rightMaxW);
+  ry = lblVal(rightX, ry, "Order Date", fmtDate(po.orderDate), rightMaxW);
+  ry = lblVal(rightX, ry, "Delivery Date", po.expectedDate ? fmtDate(po.expectedDate) : "-", rightMaxW);
+  ry = lblVal(rightX, ry, "Terms", "Net 30", rightMaxW);
+  lblVal(rightX, ry, "Status", po.status.replace(/_/g, " "), rightMaxW);
 
-  doc.setFontSize(8);
-  for (const [label, value] of orderFields) {
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(107, 114, 128);
-    doc.text(label, colRight + 3, yRight);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(31, 29, 27);
-    doc.text(String(value), colRight + 40, yRight);
-    yRight += 5;
-  }
+  let y = Math.max(ly, ry) + 2;
 
-  y = Math.max(y, yRight) + 8;
-
-  // --- Items Table ---
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
+  // --- Items (bronze section label, DO/SI house style) ---
   const totalQty = po.items.reduce((s, i) => s + i.quantity, 0);
-  doc.text(`ORDER ITEMS (${po.items.length} lines, ${totalQty} qty)`, margin + 3, y + 5);
-  doc.setDrawColor(180, 180, 180);
-  doc.line(margin, y + 7, pageW - margin, y + 7);
-  y += 10;
+  y = drawSectionLabel(doc, `Order Items (${po.items.length} lines, ${totalQty} qty)`, y);
 
   const tableBody = po.items.map((item, idx) => [
     String(idx + 1),
@@ -232,91 +206,107 @@ export function generatePurchaseOrderPdf(
 
   autoTable(doc, {
     startY: y,
-    margin: { left: margin, right: margin },
-    head: [["#", "Item Code", "Description", "Unit", "Qty", "Unit Price", "Total"]],
+    margin: { left: margin, right: margin, bottom: 16 },
+    head: [[
+      { content: "#", styles: { halign: "center" } },
+      { content: "Item Code" },
+      { content: "Description" },
+      { content: "Unit", styles: { halign: "center" } },
+      { content: "Qty", styles: { halign: "right" } },
+      { content: "Unit Price (RM)", styles: { halign: "right" } },
+      { content: "Total (RM)", styles: { halign: "right" } },
+    ]],
     body: tableBody,
+    // DO/SI house theme: plain grid, white header with a black underline rule,
+    // hairline body lines, dashed per-row separators.
+    theme: "plain",
+    rowPageBreak: "avoid",
     styles: {
+      font: "helvetica",
       fontSize: 8,
-      cellPadding: 2.5,
-      textColor: [31, 29, 27],
-      lineColor: [226, 221, 216],
-      lineWidth: 0.3,
+      cellPadding: { top: 1.3, bottom: 1.8, left: 1.8, right: 1.8 },
+      textColor: PDF.ink,
+      lineColor: PDF.rule,
+      lineWidth: 0,
+      overflow: "linebreak",
+      valign: "top",
     },
     headStyles: {
-      fillColor: [255, 255, 255],
-      textColor: [0, 0, 0],
-      fontSize: 8,
       fontStyle: "bold",
-      lineColor: [0, 0, 0],
-      lineWidth: 0.3,
-    },
-    alternateRowStyles: {
-      fillColor: [255, 255, 255],
+      fontSize: 8,
+      lineWidth: { top: 0, bottom: 0.5, left: 0, right: 0 },
+      lineColor: PDF.ink,
+      valign: "middle",
     },
     columnStyles: {
       0: { cellWidth: 10, halign: "center" },
-      1: { cellWidth: 28, font: "helvetica", fontStyle: "bold" },
-      2: { cellWidth: 50 },
+      1: { cellWidth: 28, fontStyle: "bold" },
+      2: { cellWidth: "auto" },
       3: { cellWidth: 18, halign: "center" },
       4: { cellWidth: 18, halign: "right" },
       5: { cellWidth: 28, halign: "right" },
       6: { cellWidth: 28, halign: "right", fontStyle: "bold" },
     },
+    didDrawCell(data) {
+      // Thin dashed separator under every item row (drawn once on the last
+      // column) — the DO/SI per-row separator.
+      if (data.section !== "body" || data.column.index !== 6) return;
+      const yy = data.cell.y + data.cell.height;
+      doc.setDrawColor(...PDF.rule);
+      doc.setLineWidth(0.1);
+      doc.setLineDashPattern([0.7, 0.7], 0);
+      doc.line(margin, yy, pageW - margin, yy);
+      doc.setLineDashPattern([], 0);
+    },
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  y = (doc as any).lastAutoTable.finalY + 5;
+  y = (doc as any).lastAutoTable.finalY;
 
-  // --- Totals ---
-  const totalsX = pageW - margin - 70;
-  doc.setFontSize(8);
+  // --- Totals (DO/SI right-aligned label + value pairs) ---
+  y += 8;
+  if (y > pageH - 70) {
+    doc.addPage();
+    y = 36;
+  }
+  const valX = pageW - margin;
+  const lblX = pageW - margin - 42;
+  const sumLine = (label: string, value: string, bold: boolean, big = false) => {
+    doc.setFont("helvetica", bold ? "bold" : "normal");
+    doc.setFontSize(big ? 11 : 8.5);
+    doc.setTextColor(...(bold ? PDF.ink : PDF.muted));
+    doc.text(label, lblX, y, { align: "right" });
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(...PDF.ink);
+    doc.text(value, valX, y, { align: "right" });
+    y += big ? 8 : 6;
+  };
 
-  // Subtotal
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(107, 114, 128);
-  doc.text("Subtotal:", totalsX, y);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(31, 29, 27);
-  doc.text(fmtCurrency(po.subtotalSen), pageW - margin, y, { align: "right" });
-  y += 5;
-
-  // Divider
-  doc.setDrawColor(226, 221, 216);
-  doc.line(totalsX, y - 2, pageW - margin, y - 2);
-
-  // Grand Total
-  doc.setFontSize(11);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("GRAND TOTAL:", totalsX, y + 2);
-  doc.text(fmtCurrency(po.totalSen), pageW - margin, y + 2, { align: "right" });
-  y += 12;
+  sumLine("Subtotal", fmtRM(po.subtotalSen), false);
+  // Rule clears the 11pt TOTAL cap height (matches the invoice spacing).
+  y += 3;
+  doc.setDrawColor(...PDF.rule);
+  doc.setLineWidth(0.4);
+  doc.line(lblX - 2, y - 5.5, valX, y - 5.5);
+  sumLine("GRAND TOTAL", fmtRM(po.totalSen), true, true);
 
   // --- Notes ---
   if (po.notes) {
-    doc.setDrawColor(200, 200, 200);
-    doc.rect(margin, y, pageW - margin * 2, 15, "S");
-    doc.setFontSize(7);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(0, 0, 0);
-    doc.text("NOTES", margin + 3, y + 4);
+    const noteLines = doc.splitTextToSize(po.notes, cw);
+    const blockH = 6 + noteLines.length * 3.6;
+    if (y + blockH > pageH - 38) {
+      doc.addPage();
+      y = 36;
+    }
+    y = drawSectionLabel(doc, "Notes", y);
     doc.setFont("helvetica", "normal");
-    doc.setTextColor(80, 80, 80);
-    doc.text(po.notes, margin + 3, y + 9, { maxWidth: pageW - margin * 2 - 6 });
-    y += 18;
+    doc.setFontSize(7);
+    doc.setTextColor(...PDF.ink);
+    doc.text(noteLines, margin, y);
+    y += noteLines.length * 3.6 + 6;
   }
 
   // --- Terms & Conditions ---
-  y += 3;
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(55, 65, 81);
-  doc.text("TERMS & CONDITIONS", margin, y);
-  y += 5;
-
-  doc.setFontSize(7);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(107, 114, 128);
   // Buyer in the T&Cs is the letterhead company — that's how the supplier
   // reads it. Internally the buyer / AP entity is still HOOKKA INDUSTRIES;
   // the cosmetic swap is documented in src/api/routes/organisations.ts.
@@ -331,48 +321,77 @@ export function generatePurchaseOrderPdf(
     `5. ${buyerShort} reserves the right to reject goods that do not meet quality requirements.`,
     `6. This Purchase Order is subject to the standard terms of ${co.name}.`,
   ];
-
-  for (const term of terms) {
-    if (y > pageH - 40) {
-      doc.addPage();
-      y = margin;
-    }
-    doc.text(term, margin, y, { maxWidth: pageW - margin * 2 });
-    y += 4;
+  const tcLineH = 3.6;
+  const tcBlockH = 6 + terms.length * tcLineH;
+  if (y + tcBlockH > pageH - 40) {
+    doc.addPage();
+    y = 36;
   }
+  y = drawSectionLabel(doc, "Terms & Conditions", y);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(6.6);
+  doc.setTextColor(...PDF.muted);
+  for (const term of terms) {
+    const ln = doc.splitTextToSize(term, cw);
+    doc.text(ln, margin, y);
+    y += ln.length * tcLineH;
+  }
+  y += 6;
 
   // --- Authorized Signature ---
-  y += 10;
-  if (y > pageH - 35) {
+  if (y + 26 > pageH - 18) {
     doc.addPage();
-    y = margin + 10;
+    y = 36;
   }
-
-  doc.setDrawColor(31, 29, 27);
-  doc.line(margin, y + 12, margin + 60, y + 12);
+  const sigW = 60;
+  doc.setDrawColor(...PDF.rule);
+  doc.setLineWidth(0.3);
+  doc.line(margin, y + 12, margin + sigW, y + 12);
+  doc.line(pageW - margin - sigW, y + 12, pageW - margin, y + 12);
+  doc.setFont("helvetica", "bold");
   doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(55, 65, 81);
+  doc.setTextColor(...PDF.ink);
   doc.text("Authorized Signature", margin, y + 17);
+  doc.text("Date", pageW - margin - sigW, y + 17);
+  doc.setFont("helvetica", "normal");
   doc.setFontSize(7);
-  doc.setTextColor(107, 114, 128);
+  doc.setTextColor(...PDF.faint);
   doc.text(co.name, margin, y + 21);
 
-  // Date on right
-  doc.line(pageW - margin - 60, y + 12, pageW - margin, y + 12);
-  doc.setFontSize(8);
-  doc.setTextColor(55, 65, 81);
-  doc.text("Date", pageW - margin - 60, y + 17);
-
-  // --- Footer ---
-  const footerY = pageH - 15;
-  doc.setDrawColor(226, 221, 216);
-  doc.line(margin, footerY - 3, pageW - margin, footerY - 3);
-  doc.setFontSize(7);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(156, 163, 175);
-  doc.text(`${co.name}  |  This is a computer-generated document.`, margin, footerY);
-  doc.text(`Generated: ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`, pageW - margin, footerY, { align: "right" });
+  // --- Footer (all pages — shared DO/SI footer) ---
+  // HOOKKA prints via the shared drawDocFooter; sister-company letterheads
+  // (OHANA/HOUZS) keep their OWN name in the footer line, drawn in the same
+  // hairline style so the look stays identical.
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    if (isHookkaLetterhead) {
+      drawDocFooter(doc, "HOOKKA");
+    } else {
+      const fy = pageH - 12;
+      doc.setDrawColor(...PDF.rule);
+      doc.setLineWidth(0.3);
+      doc.line(margin, fy - 4, pageW - margin, fy - 4);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(6.8);
+      doc.setTextColor(...PDF.faint);
+      doc.text(
+        `${co.name} · This is a computer-generated document; no signature required for system records.`,
+        margin,
+        fy,
+      );
+      doc.text(
+        `Generated ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`,
+        pageW - margin,
+        fy,
+        { align: "right" },
+      );
+    }
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(6.5);
+    doc.setTextColor(...PDF.faint);
+    doc.text(`Page ${p} of ${totalPages}`, pageW - margin, pageH - 16, { align: "right" });
+  }
 
   // Save
   if (opts?.returnDoc) return doc;

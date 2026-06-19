@@ -1,6 +1,14 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { drawLetterhead } from "@/lib/pdf-utils";
+import {
+  fmtCurrency,
+  fmtRM,
+  fmtDate,
+  drawLetterhead,
+  drawSectionLabel,
+  drawDocFooter,
+  PDF,
+} from "@/lib/pdf-utils";
 import { COMPANY } from "@/lib/constants";
 import type { LetterheadInfo } from "@/lib/generate-purchase-order-pdf";
 
@@ -40,17 +48,6 @@ export type PurchaseInvoicePdfData = {
   items?: PurchaseInvoicePdfLine[];
 };
 
-function fmtCurrency(sen: number): string {
-  return `RM ${(sen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function fmtDate(iso: string | undefined): string {
-  if (!iso) return "-";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "-";
-  return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" });
-}
-
 function defaultLetterhead(): LetterheadInfo {
   return {
     code: "HOOKKA",
@@ -72,18 +69,20 @@ export function generatePurchaseInvoicePdf(
   const co = letterheadOverride ?? defaultLetterhead();
   const isHookkaLetterhead = co.code === "HOOKKA";
 
-  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
-  const margin = 15;
+  // Align to the DO/SI family margin (14mm) so PO / PI / GRN frame identically.
+  const margin = PDF.margin; // 14
+  const cw = pageW - margin * 2;
 
   // --- Header (shared letterhead — single source of truth across all docs).
   // Logo is skipped for sister companies so we don't mis-brand OHANA/HOUZS. ---
-  let y = drawLetterhead(doc, {
+  drawLetterhead(doc, {
     docTitle: "PURCHASE INVOICE",
     docNo: pi.piNo,
     docDate: fmtDate(pi.invoiceDate),
-    statusText: `Status: ${pi.status.replace(/_/g, " ")}`,
+    statusText: pi.status.replace(/_/g, " "),
     logo: isHookkaLetterhead,
     companyInfo: {
       name: co.name,
@@ -94,74 +93,49 @@ export function generatePurchaseInvoicePdf(
       email: co.email ?? "",
     },
   });
-  doc.setTextColor(31, 29, 27);
+  doc.setTextColor(...PDF.ink);
 
-  const colLeft = margin;
-  const colRight = pageW / 2 + 5;
-
-  // Left column - Supplier
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("SUPPLIER DETAILS", colLeft + 3, y + 5);
-  doc.setDrawColor(180, 180, 180);
-  doc.line(colLeft, y + 7, colLeft + pageW / 2 - 10, y + 7);
-  y += 10;
-
-  const supplierFields: Array<[string, string]> = [
-    ["Supplier", pi.supplierName],
-    ["Supplier ID", pi.supplierId || "-"],
-  ];
-  doc.setFontSize(8);
-  for (const [label, value] of supplierFields) {
+  // --- Reference block (DO/SI lblVal two-column style) ---
+  const labelW = 24;
+  const lblVal = (
+    x: number,
+    yy: number,
+    k: string,
+    v: string,
+    maxW: number,
+  ): number => {
     doc.setFont("helvetica", "normal");
-    doc.setTextColor(107, 114, 128);
-    doc.text(label, colLeft + 3, y);
+    doc.setFontSize(8);
+    doc.setTextColor(...PDF.muted);
+    doc.text(k, x, yy);
     doc.setFont("helvetica", "bold");
-    doc.setTextColor(31, 29, 27);
-    doc.text(String(value), colLeft + 35, y);
-    y += 5;
-  }
+    doc.setTextColor(...PDF.ink);
+    const lines = doc.splitTextToSize(v || "-", maxW);
+    doc.text(lines, x + labelW, yy);
+    return yy + Math.max(1, lines.length) * 4.3 + 0.8;
+  };
 
-  // Right column - Invoice info
-  let yRight = y;
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("INVOICE DETAILS", colRight + 3, yRight + 5);
-  doc.setDrawColor(180, 180, 180);
-  doc.line(colRight, yRight + 7, colRight + pageW / 2 - 10, yRight + 7);
-  yRight += 10;
+  const leftX = margin;
+  const leftMaxW = cw * 0.55 - labelW;
+  let ly = 40;
+  ly = lblVal(leftX, ly, "Supplier", pi.supplierName, leftMaxW);
+  ly = lblVal(leftX, ly, "Supplier ID", pi.supplierId || "-", leftMaxW);
 
-  const infoFields: Array<[string, string]> = [
-    ["Invoice Date", fmtDate(pi.invoiceDate)],
-    ["Due Date", fmtDate(pi.dueDate)],
-    ["Linked PO", pi.poRef || (pi.purchaseOrderId ? pi.purchaseOrderId : "-")],
-    ["Status", pi.status.replace(/_/g, " ")],
-  ];
-  doc.setFontSize(8);
-  for (const [label, value] of infoFields) {
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(107, 114, 128);
-    doc.text(label, colRight + 3, yRight);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(31, 29, 27);
-    doc.text(String(value), colRight + 40, yRight);
-    yRight += 5;
-  }
+  const rightX = pageW / 2 + 12;
+  const rightMaxW = pageW - margin - rightX - labelW;
+  let ry = 40;
+  ry = lblVal(rightX, ry, "Invoice No.", pi.piNo || "-", rightMaxW);
+  ry = lblVal(rightX, ry, "Linked PO", pi.poRef || (pi.purchaseOrderId ? pi.purchaseOrderId : "-"), rightMaxW);
+  ry = lblVal(rightX, ry, "Invoice Date", fmtDate(pi.invoiceDate), rightMaxW);
+  ry = lblVal(rightX, ry, "Due Date", fmtDate(pi.dueDate), rightMaxW);
+  lblVal(rightX, ry, "Status", pi.status.replace(/_/g, " "), rightMaxW);
 
-  y = Math.max(y, yRight) + 8;
+  let y = Math.max(ly, ry) + 2;
 
-  // --- Items Table ---
+  // --- Items (bronze section label, DO/SI house style) ---
   const items = pi.items ?? [];
   const totalQty = items.reduce((s, i) => s + (Number(i.qty) || 0), 0);
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text(`INVOICE ITEMS (${items.length} lines, ${totalQty} qty)`, margin + 3, y + 5);
-  doc.setDrawColor(180, 180, 180);
-  doc.line(margin, y + 7, pageW - margin, y + 7);
-  y += 10;
+  y = drawSectionLabel(doc, `Invoice Items (${items.length} lines, ${totalQty} qty)`, y);
 
   // Item Code column shows the material code for STOCKED lines, else the
   // line-type tag (FEE / TAX / REBATE / …) so non-stock charges read clearly.
@@ -183,80 +157,132 @@ export function generatePurchaseInvoicePdf(
 
   autoTable(doc, {
     startY: y,
-    margin: { left: margin, right: margin },
-    head: [["#", "Item Code", "Description", "Supplier SKU", "Qty", "Unit Price", "Total"]],
+    margin: { left: margin, right: margin, bottom: 16 },
+    head: [[
+      { content: "#", styles: { halign: "center" } },
+      { content: "Item Code" },
+      { content: "Description" },
+      { content: "Supplier SKU" },
+      { content: "Qty", styles: { halign: "right" } },
+      { content: "Unit Price (RM)", styles: { halign: "right" } },
+      { content: "Total (RM)", styles: { halign: "right" } },
+    ]],
     body: tableBody,
+    // DO/SI house theme: plain grid, white header with a black underline rule,
+    // hairline body lines, dashed per-row separators.
+    theme: "plain",
+    rowPageBreak: "avoid",
     styles: {
+      font: "helvetica",
       fontSize: 8,
-      cellPadding: 2.5,
-      textColor: [31, 29, 27],
-      lineColor: [226, 221, 216],
-      lineWidth: 0.3,
+      cellPadding: { top: 1.3, bottom: 1.8, left: 1.8, right: 1.8 },
+      textColor: PDF.ink,
+      lineColor: PDF.rule,
+      lineWidth: 0,
+      overflow: "linebreak",
+      valign: "top",
     },
     headStyles: {
-      fillColor: [255, 255, 255],
-      textColor: [0, 0, 0],
-      fontSize: 8,
       fontStyle: "bold",
-      lineColor: [0, 0, 0],
-      lineWidth: 0.3,
+      fontSize: 8,
+      lineWidth: { top: 0, bottom: 0.5, left: 0, right: 0 },
+      lineColor: PDF.ink,
+      valign: "middle",
     },
-    alternateRowStyles: { fillColor: [255, 255, 255] },
     columnStyles: {
       0: { cellWidth: 10, halign: "center" },
-      1: { cellWidth: 26, font: "helvetica", fontStyle: "bold" },
-      2: { cellWidth: 48 },
+      1: { cellWidth: 26, fontStyle: "bold" },
+      2: { cellWidth: "auto" },
       3: { cellWidth: 26 },
       4: { cellWidth: 16, halign: "right" },
       5: { cellWidth: 27, halign: "right" },
       6: { cellWidth: 27, halign: "right", fontStyle: "bold" },
     },
+    didDrawCell(data) {
+      // Thin dashed separator under every item row (drawn once on the last
+      // column) — the DO/SI per-row separator.
+      if (data.section !== "body" || data.column.index !== 6) return;
+      const yy = data.cell.y + data.cell.height;
+      doc.setDrawColor(...PDF.rule);
+      doc.setLineWidth(0.1);
+      doc.setLineDashPattern([0.7, 0.7], 0);
+      doc.line(margin, yy, pageW - margin, yy);
+      doc.setLineDashPattern([], 0);
+    },
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  y = (doc as any).lastAutoTable.finalY + 5;
+  y = (doc as any).lastAutoTable.finalY;
 
-  // --- Totals ---
-  const totalsX = pageW - margin - 70;
-  doc.setFontSize(11);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("GRAND TOTAL:", totalsX, y + 2);
-  doc.text(fmtCurrency(pi.amountSen), pageW - margin, y + 2, { align: "right" });
-  y += 12;
+  // --- Totals (DO/SI right-aligned label + value pairs) ---
+  y += 8;
+  if (y > pageH - 70) {
+    doc.addPage();
+    y = 36;
+  }
+  const valX = pageW - margin;
+  const lblX = pageW - margin - 42;
+  const sumLine = (label: string, value: string, bold: boolean, big = false) => {
+    doc.setFont("helvetica", bold ? "bold" : "normal");
+    doc.setFontSize(big ? 11 : 8.5);
+    doc.setTextColor(...(bold ? PDF.ink : PDF.muted));
+    doc.text(label, lblX, y, { align: "right" });
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(...PDF.ink);
+    doc.text(value, valX, y, { align: "right" });
+    y += big ? 8 : 6;
+  };
+  sumLine("GRAND TOTAL", fmtRM(pi.amountSen), true, true);
 
   // --- Remarks ---
   if (pi.remarks) {
-    if (y > pageH - 40) {
+    const noteLines = doc.splitTextToSize(pi.remarks, cw);
+    const blockH = 6 + noteLines.length * 3.6;
+    if (y + blockH > pageH - 38) {
       doc.addPage();
-      y = margin;
+      y = 36;
     }
-    doc.setDrawColor(200, 200, 200);
-    doc.rect(margin, y, pageW - margin * 2, 15, "S");
-    doc.setFontSize(7);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(0, 0, 0);
-    doc.text("REMARKS", margin + 3, y + 4);
+    y = drawSectionLabel(doc, "Remarks", y);
     doc.setFont("helvetica", "normal");
-    doc.setTextColor(80, 80, 80);
-    doc.text(pi.remarks, margin + 3, y + 9, { maxWidth: pageW - margin * 2 - 6 });
-    y += 18;
+    doc.setFontSize(7);
+    doc.setTextColor(...PDF.ink);
+    doc.text(noteLines, margin, y);
+    y += noteLines.length * 3.6 + 6;
   }
 
-  // --- Footer ---
-  const footerY = pageH - 15;
-  doc.setDrawColor(226, 221, 216);
-  doc.line(margin, footerY - 3, pageW - margin, footerY - 3);
-  doc.setFontSize(7);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(156, 163, 175);
-  doc.text(`${co.name}  |  Accounts Payable record — computer-generated document.`, margin, footerY);
-  doc.text(
-    `Generated: ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`,
-    pageW - margin,
-    footerY,
-    { align: "right" },
-  );
+  // --- Footer (all pages — shared DO/SI footer) ---
+  // HOOKKA prints via the shared drawDocFooter; sister-company letterheads
+  // keep their OWN name in the footer line, drawn in the same hairline style.
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    if (isHookkaLetterhead) {
+      drawDocFooter(doc, "HOOKKA");
+    } else {
+      const fy = pageH - 12;
+      doc.setDrawColor(...PDF.rule);
+      doc.setLineWidth(0.3);
+      doc.line(margin, fy - 4, pageW - margin, fy - 4);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(6.8);
+      doc.setTextColor(...PDF.faint);
+      doc.text(
+        `${co.name} · Accounts Payable record — computer-generated document.`,
+        margin,
+        fy,
+      );
+      doc.text(
+        `Generated ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`,
+        pageW - margin,
+        fy,
+        { align: "right" },
+      );
+    }
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(6.5);
+    doc.setTextColor(...PDF.faint);
+    doc.text(`Page ${p} of ${totalPages}`, pageW - margin, pageH - 16, { align: "right" });
+  }
 
   if (opts?.returnDoc) return doc;
   doc.save(`${pi.piNo}.pdf`);

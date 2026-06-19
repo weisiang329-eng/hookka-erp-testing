@@ -180,6 +180,11 @@ export function GRNFormDialog({
                 <div className="flex h-10 w-full items-center rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm text-[#374151]">
                   {po ? `${po.poNo} - ${po.supplierName}` : "Loading PO…"}
                 </div>
+              ) : eligiblePOs.length === 0 ? (
+                <div className="rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-xs text-[#6B5C32]">
+                  <span className="font-medium">No purchase orders are ready to receive.</span>{" "}
+                  A PO must be <b>Submitted</b> or <b>Confirmed</b> first — open the PO, submit/confirm it, then come back here to record the goods.
+                </div>
               ) : (
                 <select
                   className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"

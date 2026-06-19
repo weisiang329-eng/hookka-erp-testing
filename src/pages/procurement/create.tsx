@@ -614,72 +614,50 @@ function CreatePurchaseOrderPage() {
               wider on the full page. */}
           <div className="space-y-2">
             <label className="block text-xs text-[#6B7280]">
-              Add material — pick a category or search by code/description
+              Add material — search by code/description, or narrow by category
             </label>
 
-            {(() => {
-              const renderChip = (cat: string) => {
-                const active = selectedCategory === cat;
-                const count = cat === "ALL" ? activeRMs.length : (categoryCounts[cat] ?? 0);
-                const lowVolume = !active && cat !== "ALL" && count < 5;
-                return (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => setSelectedCategory(cat)}
-                    className={
-                      "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium border transition-colors " +
-                      (active
-                        ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-                        : lowVolume
-                          ? "bg-white text-[#9CA3AF] border-[#EDE8E3] hover:bg-[#F0ECE9] hover:text-[#1F1D1B]"
-                          : "bg-white text-[#1F1D1B] border-[#E2DDD8] hover:bg-[#F0ECE9]")
-                    }
-                    aria-pressed={active}
-                  >
-                    <span>{cat === "ALL" ? "All" : cat}</span>
-                    <span className={`text-[10px] tabular-nums ${active ? "text-white/75" : "text-[#9CA3AF]"}`}>
-                      {count}
-                    </span>
-                  </button>
-                );
-              };
-              const labelCls = "shrink-0 text-[10px] font-medium uppercase tracking-wide text-[#9CA3AF] w-16";
-              const rowCls = "flex flex-wrap items-center gap-1.5";
-              return (
-                <div className="space-y-1.5">
-                  <div className={rowCls}>
-                    <span className={labelCls}>All</span>
-                    {renderChip("ALL")}
-                  </div>
-                  {groupedCategories.bedframe.length > 0 && (
-                    <div className={rowCls}>
-                      <span className={labelCls}>Bedframe</span>
-                      {groupedCategories.bedframe.map(renderChip)}
-                    </div>
-                  )}
-                  {groupedCategories.sofa.length > 0 && (
-                    <div className={rowCls}>
-                      <span className={labelCls}>Sofa</span>
-                      {groupedCategories.sofa.map(renderChip)}
-                    </div>
-                  )}
-                  {groupedCategories.common.length > 0 && (
-                    <div className={rowCls}>
-                      <span className={labelCls}>Common</span>
-                      {groupedCategories.common.map(renderChip)}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-
-            <Input
-              className="h-9 text-sm"
-              value={rmSearch}
-              onChange={(e) => setRmSearch(e.target.value)}
-              placeholder="Search by RM code or description..."
-            />
+            {/* Compact filter row: one category dropdown (grouped Bedframe /
+                Sofa / Common) + a search box, replacing the old wall of ~22
+                category chips. Same filter state (selectedCategory + rmSearch)
+                drives the list below — only the picker UI got tidier. */}
+            <div className="flex flex-col sm:flex-row gap-2">
+              <select
+                value={selectedCategory}
+                onChange={(e) => setSelectedCategory(e.target.value)}
+                className="h-9 w-full sm:w-60 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                aria-label="Filter materials by category"
+              >
+                <option value="ALL">All categories ({activeRMs.length})</option>
+                {groupedCategories.bedframe.length > 0 && (
+                  <optgroup label="Bedframe">
+                    {groupedCategories.bedframe.map((cat) => (
+                      <option key={cat} value={cat}>{cat} ({categoryCounts[cat] ?? 0})</option>
+                    ))}
+                  </optgroup>
+                )}
+                {groupedCategories.sofa.length > 0 && (
+                  <optgroup label="Sofa">
+                    {groupedCategories.sofa.map((cat) => (
+                      <option key={cat} value={cat}>{cat} ({categoryCounts[cat] ?? 0})</option>
+                    ))}
+                  </optgroup>
+                )}
+                {groupedCategories.common.length > 0 && (
+                  <optgroup label="Common">
+                    {groupedCategories.common.map((cat) => (
+                      <option key={cat} value={cat}>{cat} ({categoryCounts[cat] ?? 0})</option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+              <Input
+                className="h-9 text-sm flex-1"
+                value={rmSearch}
+                onChange={(e) => setRmSearch(e.target.value)}
+                placeholder="Search by RM code or description..."
+              />
+            </div>
 
             <div className="max-h-64 overflow-y-auto bg-white border border-[#E2DDD8] rounded-md">
               {filteredRMs.length === 0 ? (

@@ -34,6 +34,62 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-19-001 — Cross-audit vs the 2990s ERP: purchasing/invoicing integrity guards + frontend/date hygiene (13 fixes)
+
+🟢 **Fixed** · `purchasing` `data-integrity` `ui-frontend`
+
+**Trigger:** owner asked us to read the sibling 2990s (Houzs) ERP's full bug
+history and check whether Hookka has the same problems. We distilled ~30 of
+their incidents into 18 bug *classes* and audited Hookka against each (full
+write-up: `docs/cross-audit-2990s-2026-06.md`). Headline: Hookka was already
+defended against their worst classes (cancel/reopen double-apply, reversal
+cost/batch drop, allocation-keying, service-line miscategorisation, the
+FormData upload break, `SELECT *` view drift, under-gated routes). The real
+gaps clustered in Purchasing + a couple of frontend/data-hygiene spots. All
+shipped straight to prod.
+
+**Fixes (file:line):**
+- PO→PI double-bill: `purchase-invoices.ts` POST now 409s when a non-CANCELLED
+  PI already exists for the PO; FE `procurement/detail.tsx` disables the
+  "Create Invoice" button ("Invoiced"). *Verified live — button shows the
+  disabled "already has an invoice" state on a PO that's been invoiced.*
+- Sent-invoice line replace skipped the GL restatement → orphaned revenue/AR on
+  a later void: `invoices.ts` rejects `body.items` wholesale-replace unless
+  DRAFT (the per-line price-edit path already restates sent invoices).
+- POSTED GRN line edit desynced the receipt from stock: `grn.ts` PUT locks
+  `body.items` once committed.
+- PO editable (incl. supplier) after goods received, could zero receivedQty:
+  `purchase-orders.ts` PUT locks supplier+items when a POSTED/CONFIRMED GRN
+  exists.
+- PO line inputs unguarded (`Number(...) || 0`): `purchase-orders.ts` POST+PUT
+  now reject non-finite / negative qty & price (parity with the PI validator).
+- Credit-note re-issue double-credited A/R + invoice total (API-only):
+  `credit-notes.ts` PUT makes an issued CN terminal (blocks issued→DRAFT→issued).
+- GRN Post-to-Stock left inventory screens stale: `grn-detail.tsx` also
+  invalidates raw-materials / inventory / stock-value.
+- Mid-edit draft wipe on Sales/Consignment edit: `sales/edit.tsx` +
+  `consignment/edit.tsx` seed the form once per order id (was re-seeding on
+  every background refetch, discarding in-progress edits).
+- Pre-08:00 MYT "today" saved as yesterday: new `todayYmdMY()` in `utils.ts`;
+  swapped the write-path date defaults (production completed date, price
+  valid-from, pay-rule effective-from, worker today, R&D issuances, service
+  cases).
+- Broken FG option in Stock Adjustments (product id vs fg_batches id) removed.
+- ON_HOLD PO could read "ready for delivery": `delivery-pipeline.ts` excludes it.
+- Consignment create wasn't idempotent (dup CO on a dropped-response retry):
+  brought to parity with sales (Idempotency-Key + `withIdempotency`).
+- Cosmetic raw-ISO timestamps formatted (dept schedule snapshot, planning
+  "Saved", employee "left" date).
+
+**Deferred (with reason, not bugs to rush):** catch-up migrations for ~11
+runtime-only tables (reproducibility hygiene, no user impact — schema work to do
+on an isolated, verified pass); deleting the dead `authz.ts` (live comments
+still call it canonical RBAC — contradictory signal); a shared `MoneyInput` (not
+a bug — the keystroke-eating variant is absent, all money inputs are
+`type=number`).
+
+---
+
 ## BUG-2026-06-18-011 — Silent save failures across 5 manual-save surfaces ("save fail 也沒跟我們說")
 
 **Status:** 🟢 Fixed (2026-06-18), prod; tsc + eslint clean, 988 tests pass.

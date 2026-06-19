@@ -1275,7 +1275,7 @@ app.get("/ar-control", async (c) => {
       "SELECT code, name, type, specialAccountType FROM chart_of_accounts WHERE specialAccountType = 'SDC'",
     ).all<{ code: string; name: string; type: string; specialAccountType: string }>(),
     c.var.DB.prepare(
-      "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries",
+      "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE hidden = 0",
     ).all<{ accountCode: string; debitSen: number; creditSen: number }>(),
     c.var.DB.prepare(
       `SELECT customerId, customerName, invoiceNo, totalSen, paidAmount, status, dueDate
@@ -1847,7 +1847,7 @@ app.get("/ap-control", async (c) => {
       "SELECT code, name FROM chart_of_accounts WHERE specialAccountType = 'SCC'",
     ).all<{ code: string; name: string }>(),
     c.var.DB.prepare(
-      "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries",
+      "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE hidden = 0",
     ).all<{ accountCode: string; debitSen: number; creditSen: number }>(),
     c.var.DB.prepare(
       `SELECT supplierId, supplierName, piNo, amountSen, status, dueDate
@@ -2825,7 +2825,7 @@ app.get("/trial-balance", async (c) => {
   const asOf = c.req.query("asOf") || new Date().toISOString().slice(0, 10);
   const [legRes, coaRes] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries",
+      "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
     ).all<{
       accountCode: string;
       debitSen: number;
@@ -2913,6 +2913,7 @@ app.get("/gl", async (c) => {
       `SELECT id, accountCode, sourceType, sourceId, debitSen, creditSen,
               description, postedAt
          FROM ledger_journal_entries
+        WHERE hidden = 0
         ORDER BY postedAt DESC, id DESC`,
     ).all<{
       id: string;
@@ -3047,7 +3048,7 @@ app.get("/gl", async (c) => {
     `SELECT id, sourceType, sourceId, debitSen, creditSen, description,
             postedAt
        FROM ledger_journal_entries
-      WHERE accountCode IN (${placeholders})
+      WHERE accountCode IN (${placeholders}) AND hidden = 0
       ORDER BY postedAt ASC, id ASC`,
   )
     .bind(...equivalents)
@@ -3170,7 +3171,7 @@ async function computeUnclosedAsOf(
   const [legRes, coaRes] = await Promise.all([
     db
       .prepare(
-        "SELECT accountCode, debitSen, creditSen, postedAt FROM ledger_journal_entries",
+        "SELECT accountCode, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0",
       )
       .all<{
         accountCode: string;
@@ -4064,7 +4065,7 @@ async function glWindowSigned(
   endYm: string | null,
 ): Promise<{ net: GlWindow; coa: Map<string, { name: string; type: CoaRow["type"] }> }> {
   const [legRes, coaRes] = await Promise.all([
-    db.prepare("SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries")
+    db.prepare("SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0")
       .all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     db.prepare("SELECT code, name, type FROM chart_of_accounts").all<{ code: string; name: string; type: CoaRow["type"] }>(),
   ]);
@@ -4426,7 +4427,7 @@ app.get("/cost-expense-classes", async (c) => {
     }
   }
   const [legRes, coaRes] = await Promise.all([
-    db.prepare("SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries").all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+    db.prepare("SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0").all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     db.prepare("SELECT code, name, type, pnlCategory FROM chart_of_accounts").all<{ code: string; name: string; type: CoaRow["type"]; pnlCategory: string | null }>(),
   ]);
   const resolve = await loadAccountResolver(db);
@@ -4592,7 +4593,7 @@ app.get("/cashflow-statement", async (c) => {
   }
 
   const legRes = await c.var.DB.prepare(
-    "SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries",
+    "SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0",
   ).all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>();
   const allLegs = (legRes.results ?? []).map((l) => ({
     code: resolveAcct(l.accountCode),
@@ -4709,7 +4710,7 @@ app.get("/pl", async (c) => {
 
   // --- ledger legs ---
   const legRes = await c.var.DB.prepare(
-    "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries",
+    "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
   ).all<{
     accountCode: string;
     debitSen: number;
@@ -6555,6 +6556,7 @@ app.get("/gl-report", async (c) => {
       `SELECT id, accountCode, sourceType, sourceId, debitSen, creditSen,
               description, postedAt
          FROM ledger_journal_entries
+        WHERE hidden = 0
         ORDER BY postedAt ASC, id ASC`,
     ).all<{
       id: string; accountCode: string; sourceType: string; sourceId: string;
@@ -7032,7 +7034,7 @@ app.get("/bank-reco", async (c) => {
   const legRes = await c.var.DB.prepare(
     `SELECT id, sourceType, sourceId, debitSen, creditSen, description, postedAt
        FROM ledger_journal_entries
-      WHERE accountCode IN (${marks})
+      WHERE accountCode IN (${marks}) AND hidden = 0
       ORDER BY postedAt ASC, id ASC`,
   )
     .bind(...equivalents)
@@ -7220,7 +7222,7 @@ app.post("/bank-reco/automatch", async (c) => {
     const [legRes, lineRes, matchedRes] = await Promise.all([
       c.var.DB.prepare(
         `SELECT id, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries
-          WHERE accountCode IN (${marks})`,
+          WHERE accountCode IN (${marks}) AND hidden = 0`,
       )
         .bind(...equivalents)
         .all<{ id: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),

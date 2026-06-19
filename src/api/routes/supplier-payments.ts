@@ -25,6 +25,8 @@ import {
 } from "../lib/journal-hash";
 import { computeAlloc } from "../../lib/supplier-payment-alloc";
 import { issueDocNumber } from "../lib/doc-number-service";
+import { applyLifecycle } from "../lib/document-lifecycle";
+import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 
 const AP_CONTROL = "400-0000"; // Trade Creditors
 const FX_GAIN_ACCT = "530-0000"; // GAIN ON FOREIGN EXCHANGE (realised; debit = loss)
@@ -60,6 +62,7 @@ type PaymentGroup = {
   totalBankSen: number;
   totalBookedSen: number;
   lines: PaymentLine[];
+  lifecycleState: string;
 };
 
 app.get("/", async (c) => {
@@ -78,14 +81,19 @@ app.get("/", async (c) => {
             sp.date         AS date,
             sp.amount_sen   AS amount_sen,
             sp.booked_sen   AS booked_sen,
-            pi.pi_no        AS pi_no
+            pi.pi_no        AS pi_no,
+            dl.state        AS lifecycleState
        FROM supplier_payments sp
        LEFT JOIN purchase_invoices pi ON pi.id = sp.purchase_invoice_id
-      WHERE sp.org_id = ?
+       LEFT JOIN document_lifecycle dl
+              ON dl.sourceType = 'supplier_payment'
+             AND dl.sourceId = sp.payment_no
+             AND dl.orgId = sp.org_id
+      WHERE sp.org_id = ? AND (dl.state IS NULL OR dl.state <> 'DELETED')
       ORDER BY sp.date DESC, sp.payment_no DESC, sp.id DESC`,
   )
     .bind(orgId)
-    .all<SupplierPaymentRow & { pi_no: string | null }>();
+    .all<SupplierPaymentRow & { pi_no: string | null; lifecycleState: string | null }>();
 
   const groups = new Map<string, PaymentGroup>();
   for (const row of res.results ?? []) {
@@ -101,6 +109,7 @@ app.get("/", async (c) => {
         totalBankSen: 0,
         totalBookedSen: 0,
         lines: [],
+        lifecycleState: row.lifecycleState ?? "ACTIVE",
       };
       groups.set(payNo, g);
     }
@@ -384,11 +393,92 @@ app.post("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /:paymentNo/void — reverse a supplier payment.
-//   * Idempotent: if a supplier_payment_void already exists, return success.
-//   * Reverses every original GL leg (swap debit/credit).
-//   * Restores paid_amount_sen + status on each PI.
-//   * Deletes the supplier_payments rows so AP reflects the reversal.
+// buildSupplierPaymentLifecycle — shared core for void/delete/unvoid (F3).
+// applyLifecycle (GL reversal + hidden flags + document_lifecycle state) plus
+// boundary-aware paid_amount_sen on each PI: rolled back when leaving ACTIVE
+// (void/delete), re-applied when returning to ACTIVE (unvoid). The
+// supplier_payments rows are KEPT (never deleted) so unvoid can re-read the
+// booked amounts. Caller batches the returned statements. Throws
+// "PAYMENT_NOT_FOUND" when no rows exist for the paymentNo.
+// ---------------------------------------------------------------------------
+async function buildSupplierPaymentLifecycle(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  paymentNo: string,
+  action: LifecycleAction,
+  actorUserId: string | null,
+): Promise<{ statements: D1PreparedStatement[]; newState: DocState }> {
+  const rows =
+    (
+      await db
+        .prepare(
+          "SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ?",
+        )
+        .bind(paymentNo)
+        .all<{ purchaseInvoiceId: string | null; booked_sen: number | null }>()
+    ).results ?? [];
+  if (rows.length === 0) throw new Error("PAYMENT_NOT_FOUND");
+
+  const lc = await applyLifecycle(db, {
+    orgId,
+    baseSourceTypes: ["supplier_payment"],
+    voidSourceType: "supplier_payment_void",
+    sourceId: paymentNo,
+    action,
+    actorUserId,
+    descriptionTag: `${action.toUpperCase()} · ${paymentNo}`,
+  });
+  const statements: D1PreparedStatement[] = [...lc.statements];
+
+  const deactivated = lc.prevState === "ACTIVE" && lc.newState !== "ACTIVE";
+  const reactivated = lc.prevState !== "ACTIVE" && lc.newState === "ACTIVE";
+  if (deactivated || reactivated) {
+    for (const row of rows) {
+      const piId = row.purchaseInvoiceId;
+      if (!piId) continue;
+      const bookedSen = Number(row.booked_sen) || 0;
+      if (deactivated) {
+        // Roll back the PI to its pre-payment paid_amount_sen + status (same
+        // SQL the legacy void used).
+        statements.push(
+          db
+            .prepare(
+              `UPDATE purchase_invoices
+                 SET paid_amount_sen = GREATEST(0, paid_amount_sen - ?),
+                     status = CASE
+                       WHEN paid_amount_sen - ? <= 0 THEN 'APPROVED'
+                       WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID'
+                       ELSE 'PAID'
+                     END
+               WHERE id = ?`,
+            )
+            .bind(bookedSen, bookedSen, bookedSen, piId),
+        );
+      } else {
+        // Re-apply the booked amount (mirrors the create-apply SQL).
+        statements.push(
+          db
+            .prepare(
+              `UPDATE purchase_invoices
+                 SET paid_amount_sen = paid_amount_sen + ?,
+                     status = CASE
+                       WHEN paid_amount_sen + ? >= amount_sen THEN 'PAID'
+                       WHEN paid_amount_sen + ? > 0 THEN 'PARTIAL_PAID'
+                       ELSE status
+                     END
+               WHERE id = ?`,
+            )
+            .bind(bookedSen, bookedSen, bookedSen, piId),
+        );
+      }
+    }
+  }
+  return { statements, newState: lc.newState };
+}
+
+// ---------------------------------------------------------------------------
+// POST /:paymentNo/void — reverse a supplier payment (legacy alias for the
+// lifecycle "void"). Idempotent; soft (rows kept), paid_amount_sen rolled back.
 // ---------------------------------------------------------------------------
 app.post("/:paymentNo/void", async (c) => {
   const denied = await requirePermission(c, "invoices", "update");
@@ -407,89 +497,80 @@ app.post("/:paymentNo/void", async (c) => {
       return c.json({ success: true, data: { alreadyVoided: true } });
     }
 
-    const statements: D1PreparedStatement[] = [];
-
-    // 1. Read the original ledger legs for this payment.
-    const orig = await c.var.DB.prepare(
-      `SELECT accountCode, debitSen, creditSen
-         FROM ledger_journal_entries
-        WHERE sourceType = 'supplier_payment' AND sourceId = ? AND orgId = ?`,
-    )
-      .bind(paymentNo, orgId)
-      .all<{ accountCode: string; debitSen: number; creditSen: number }>();
-
-    const origLegs = orig.results ?? [];
-    if (origLegs.length === 0) {
+    const { statements } = await buildSupplierPaymentLifecycle(
+      c.var.DB,
+      orgId,
+      paymentNo,
+      "void",
+      actorUserId,
+    );
+    await c.var.DB.batch(statements);
+    return c.json({ success: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "PAYMENT_NOT_FOUND") {
       return c.json(
         { success: false, error: `No supplier payment found for ${paymentNo}` },
         404,
       );
     }
-
-    // 2. Build REVERSED legs (swap debit/credit) as a new entry group.
-    const revLegs: Parameters<typeof buildJournalEntryStatements>[2] =
-      origLegs.map((leg, i) => ({
-        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-        sourceType: "supplier_payment_void",
-        sourceId: paymentNo,
-        legNo: i + 1,
-        accountCode: leg.accountCode,
-        debitSen: Number(leg.creditSen) || 0,
-        creditSen: Number(leg.debitSen) || 0,
-        description: `VOID · supplier payment ${paymentNo}`,
-        actorUserId,
-        orgId,
-      }));
-    const { statements: ls } = await buildJournalEntryStatements(
-      c.var.DB,
-      orgId,
-      revLegs,
-    );
-    statements.push(...ls);
-
-    // 3. Restore paid_amount_sen + status on each PI from the sub-ledger rows.
-    const rows = await c.var.DB.prepare(
-      "SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ?",
-    )
-      .bind(paymentNo)
-      .all<{ purchaseInvoiceId: string | null; booked_sen: number | null }>();
-
-    for (const row of rows.results ?? []) {
-      const piId = row.purchaseInvoiceId;
-      if (!piId) continue;
-      const bookedSen = Number(row.booked_sen) || 0;
-      statements.push(
-        c.var.DB.prepare(
-          `UPDATE purchase_invoices
-             SET paid_amount_sen = GREATEST(0, paid_amount_sen - ?),
-                 status = CASE
-                   WHEN paid_amount_sen - ? <= 0 THEN 'APPROVED'
-                   WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID'
-                   ELSE 'PAID'
-                 END
-           WHERE id = ?`,
-        ).bind(bookedSen, bookedSen, bookedSen, piId),
-      );
-    }
-
-    // 4. Delete the supplier_payments rows so AP reflects the reversal.
-    statements.push(
-      c.var.DB.prepare(
-        "DELETE FROM supplier_payments WHERE payment_no = ?",
-      ).bind(paymentNo),
-    );
-
-    // 5. Execute.
-    await c.var.DB.batch(statements);
-
-    return c.json({ success: true });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
     console.error("[POST /api/supplier-payments/:paymentNo/void] failed:", msg, err);
     return c.json(
       { success: false, error: msg || "Internal error voiding supplier payment" },
       500,
     );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /:paymentNo/lifecycle — unified void / delete / unvoid (F3).
+//   void   = visible reversal (stays in GL, paid_amount_sen rolled back)
+//   delete = hidden from GL (paid_amount_sen rolled back; audit-traceable)
+//   unvoid = restore (paid_amount_sen re-applied)
+// ---------------------------------------------------------------------------
+app.post("/:paymentNo/lifecycle", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+
+  const paymentNo = c.req.param("paymentNo");
+  let action: LifecycleAction;
+  try {
+    action = ((await c.req.json()) as { action: string })
+      .action as LifecycleAction;
+  } catch {
+    return c.json({ success: false, error: "Invalid body" }, 400);
+  }
+  if (!["void", "delete", "unvoid"].includes(action)) {
+    return c.json(
+      { success: false, error: "action must be void|delete|unvoid" },
+      400,
+    );
+  }
+
+  try {
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get(
+        "userId",
+      ) ?? null;
+    const { statements, newState } = await buildSupplierPaymentLifecycle(
+      c.var.DB,
+      orgId,
+      paymentNo,
+      action,
+      actorUserId,
+    );
+    await c.var.DB.batch(statements);
+    return c.json({ success: true, data: { state: newState } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "PAYMENT_NOT_FOUND") {
+      return c.json(
+        { success: false, error: `No supplier payment found for ${paymentNo}` },
+        404,
+      );
+    }
+    return c.json({ success: false, error: msg }, 400);
   }
 });
 

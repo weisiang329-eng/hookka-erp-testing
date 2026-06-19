@@ -5,6 +5,7 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { LifecycleActions, LifecycleBadge } from "@/components/accounting/lifecycle-actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -4832,6 +4833,7 @@ type PvRow = {
   description: string | null; payFrom: string | null; accrued: number;
   accrualAccount: string | null; settledAt: string | null;
   productLine: string | null; totalSen: number; status: string;
+  lifecycleState?: string;
   lines: { accountCode: string; description: string | null; amountSen: number }[];
 };
 
@@ -4959,12 +4961,24 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     else toast.error(j?.error || "Settle failed");
   };
 
-  const handleVoid = async (row: PvRow) => {
-    if (!window.confirm(`Void ${row.pvNo}? A reversal entry will be posted (nothing is deleted).`)) return;
-    const res = await fetch(`/api/accounting/payment-vouchers/${row.id}/void`, { method: "POST" });
+  const handleLifecycle = async (id: string, pvNo: string, action: "void" | "delete" | "unvoid") => {
+    const verb = action === "unvoid" ? "Restore" : action === "delete" ? "Delete" : "Void";
+    const extra = action === "delete"
+      ? " It will be hidden from the GL (still visible in the audit log)."
+      : action === "void"
+        ? " A reversal entry will be posted (nothing is deleted)."
+        : "";
+    if (!window.confirm(`${verb} ${pvNo}?${extra}`)) return;
+    const res = await fetch(`/api/accounting/payment-vouchers/${id}/lifecycle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
     const j = asMutationResponse(await res.json());
-    if (j?.success) { toast.success(`${row.pvNo} voided`); load(); }
-    else toast.error(j?.error || "Void failed");
+    if (j?.success) {
+      toast.success(`${pvNo} ${action === "unvoid" ? "restored" : action === "delete" ? "deleted" : "voided"}`);
+      load();
+    } else toast.error(j?.error || `${verb} failed`);
   };
 
   const startEdit = async (r: PvRow) => {
@@ -5135,9 +5149,12 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                       {r.status === "POSTED" && r.accrued === 1 && !r.settledAt && (
                         <button onClick={() => handleSettle(r)} className="text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3">settle</button>
                       )}
-                      {r.status === "POSTED" && (
-                        <button onClick={() => handleVoid(r)} className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer">void</button>
-                      )}
+                      <LifecycleActions
+                        state={r.lifecycleState}
+                        onVoid={() => handleLifecycle(r.id, r.pvNo, "void")}
+                        onDelete={() => handleLifecycle(r.id, r.pvNo, "delete")}
+                        onUnvoid={() => handleLifecycle(r.id, r.pvNo, "unvoid")}
+                      />
                     </td>
                   </tr>
                 ))}
@@ -5161,6 +5178,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 type OrRow = {
   id: string; orNo: string; date: string; receivedFrom: string | null;
   description: string | null; payTo: string; totalSen: number; status: string;
+  lifecycleState?: string;
   lines: { accountCode: string; description: string | null; amountSen: number }[];
 };
 
@@ -5244,12 +5262,24 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     }
   };
 
-  const handleVoid = async (row: OrRow) => {
-    if (!window.confirm(`Void ${row.orNo}? A reversal entry will be posted (nothing is deleted).`)) return;
-    const res = await fetch(`/api/accounting/official-receipts/${row.id}/void`, { method: "POST" });
+  const handleLifecycle = async (id: string, orNo: string, action: "void" | "delete" | "unvoid") => {
+    const verb = action === "unvoid" ? "Restore" : action === "delete" ? "Delete" : "Void";
+    const extra = action === "delete"
+      ? " It will be hidden from the GL (still visible in the audit log)."
+      : action === "void"
+        ? " A reversal entry will be posted (nothing is deleted)."
+        : "";
+    if (!window.confirm(`${verb} ${orNo}?${extra}`)) return;
+    const res = await fetch(`/api/accounting/official-receipts/${id}/lifecycle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
     const j = asMutationResponse(await res.json());
-    if (j?.success) { toast.success(`${row.orNo} voided`); load(); }
-    else toast.error(j?.error || "Void failed");
+    if (j?.success) {
+      toast.success(`${orNo} ${action === "unvoid" ? "restored" : action === "delete" ? "deleted" : "voided"}`);
+      load();
+    } else toast.error(j?.error || `${verb} failed`);
   };
 
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
@@ -5349,11 +5379,17 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     <td className="px-3 py-1.5">{[r.receivedFrom, r.description].filter(Boolean).join(" · ")}</td>
                     <td className="px-3 py-1.5 text-xs">{r.payTo}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.totalSen)}</td>
-                    <td className="px-3 py-1.5 text-xs">{r.status}</td>
+                    <td className="px-3 py-1.5 text-xs">
+                      <LifecycleBadge state={r.lifecycleState} />
+                      {(r.lifecycleState ?? "ACTIVE") === "ACTIVE" && r.status}
+                    </td>
                     <td className="px-3 py-1.5 text-right">
-                      {r.status === "POSTED" && (
-                        <button onClick={() => handleVoid(r)} className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer">void</button>
-                      )}
+                      <LifecycleActions
+                        state={r.lifecycleState}
+                        onVoid={() => handleLifecycle(r.id, r.orNo, "void")}
+                        onDelete={() => handleLifecycle(r.id, r.orNo, "delete")}
+                        onUnvoid={() => handleLifecycle(r.id, r.orNo, "unvoid")}
+                      />
                     </td>
                   </tr>
                 ))}
@@ -5383,6 +5419,7 @@ type FtRow = {
   toName: string;
   amountSen: number;
   description: string | null;
+  lifecycleState?: string;
 };
 
 function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
@@ -5445,12 +5482,24 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
     }
   };
 
-  const handleVoid = async (row: FtRow) => {
-    if (!window.confirm(`Void transfer ${row.no}? A reversal entry will be posted.`)) return;
-    const res = await fetch(`/api/accounting/fund-transfers/${encodeURIComponent(row.no)}/void`, { method: "POST" });
+  const handleLifecycle = async (no: string, action: "void" | "delete" | "unvoid") => {
+    const verb = action === "unvoid" ? "Restore" : action === "delete" ? "Delete" : "Void";
+    const extra = action === "delete"
+      ? " It will be hidden from the GL (still visible in the audit log)."
+      : action === "void"
+        ? " A reversal entry will be posted (nothing is deleted)."
+        : "";
+    if (!window.confirm(`${verb} transfer ${no}?${extra}`)) return;
+    const res = await fetch(`/api/accounting/fund-transfers/${encodeURIComponent(no)}/lifecycle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
     const j = await res.json() as { success?: boolean; error?: string };
-    if (j?.success) { toast.success(`${row.no} voided`); load(); }
-    else toast.error((j as { error?: string })?.error || "Void failed");
+    if (j?.success) {
+      toast.success(`${no} ${action === "unvoid" ? "restored" : action === "delete" ? "deleted" : "voided"}`);
+      load();
+    } else toast.error(j?.error || `${verb} failed`);
   };
 
   return (
@@ -5532,7 +5581,7 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <tr key={r.no} className="border-b border-[#F0ECE9]">
+                  <tr key={r.no} className={`border-b border-[#F0ECE9] ${(r.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? "opacity-50" : ""}`}>
                     <td className="px-3 py-1.5 tabular-nums text-xs">{r.no}</td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.date}</td>
                     <td className="px-3 py-1.5 text-xs">{r.fromAccount} {r.fromName}</td>
@@ -5540,13 +5589,14 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     <td className="px-3 py-1.5 text-xs">{r.toAccount} {r.toName}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.amountSen)}</td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.description ?? ""}</td>
-                    <td className="px-3 py-1.5 text-right">
-                      <button
-                        onClick={() => handleVoid(r)}
-                        className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer"
-                      >
-                        void
-                      </button>
+                    <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                      <span className="mr-2"><LifecycleBadge state={r.lifecycleState} /></span>
+                      <LifecycleActions
+                        state={r.lifecycleState}
+                        onVoid={() => handleLifecycle(r.no, "void")}
+                        onDelete={() => handleLifecycle(r.no, "delete")}
+                        onUnvoid={() => handleLifecycle(r.no, "unvoid")}
+                      />
                     </td>
                   </tr>
                 ))}

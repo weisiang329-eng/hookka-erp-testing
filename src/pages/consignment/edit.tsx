@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -299,14 +299,22 @@ export default function EditSalesOrderPage() {
 
   // Load existing order
   const { data: orderResp } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null }>(id ? `/api/consignment-orders/${id}` : null);
+  // Seed the form ONCE per order — re-seeding on a background refetch would
+  // wipe in-progress edits (the 2990s "mid-edit draft wipe" class). Marked
+  // seeded only on success so an error→success sequence still hydrates.
+  const seededIdRef = useRef<string | null>(null);
   useEffect(() => {
     const d = orderResp;
     if (!d) {
       // no cached data yet — wait for the hook to fetch
       return;
     }
+    if (seededIdRef.current === id) {
+      return;
+    }
     (() => {
         if (d.success) {
+          seededIdRef.current = id ?? null;
           const so: SalesOrder = d.data as SalesOrder;
           setOrder(so);
           setCustomerId(so.customerId);

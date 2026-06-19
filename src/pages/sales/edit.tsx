@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { useSOMode, soBasePath, soSingularNoun } from "@/lib/so-mode";
@@ -531,14 +531,24 @@ export default function EditSalesOrderPage() {
   // (e.g. "PO X is COMPLETED") so the page can disable Save + show banner.
   const { data: orderResp } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null }>(id ? `/api/sales-orders/${id}` : null);
   const { data: eligibilityResp } = useCachedJson<EditEligibility>(id ? `/api/sales-orders/${id}/edit-eligibility` : null);
+  // Seed the form ONCE per order. Re-seeding on a later background refetch
+  // (cross-tab cache invalidation, the SWR mount refetch, polling) would
+  // silently wipe the operator's in-progress edits — the "mid-edit draft wipe"
+  // class from the 2990s cross-audit. Marked seeded only on a successful load
+  // so an error→success sequence still hydrates.
+  const seededIdRef = useRef<string | null>(null);
   useEffect(() => {
     const d = orderResp;
     if (!d) {
       // no cached data yet — wait for the hook to fetch
       return;
     }
+    if (seededIdRef.current === id) {
+      return;
+    }
     (() => {
         if (d.success) {
+          seededIdRef.current = id ?? null;
           const so: SalesOrder = d.data as SalesOrder;
           setOrder(so);
           setCustomerId(so.customerId);

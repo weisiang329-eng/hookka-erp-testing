@@ -32,12 +32,6 @@ import {
   type SupplierExtraction,
 } from "@/components/scan-supplier-modal";
 
-function readErrorMessage(v: unknown): string | null {
-  if (!v || typeof v !== "object") return null;
-  const err = (v as { error?: unknown }).error;
-  return typeof err === "string" ? err : null;
-}
-
 // ============================================================
 // GRN FORM DIALOG (Transfer from PO)
 //
@@ -85,14 +79,12 @@ export function GRNFormDialog({
   // scan pops to auto-fill. When opened from the PO detail page (lockedPoId),
   // the PO is already set, so the scan opens immediately.
   const autoScanFired = useRef(false);
-  /* eslint-disable react-hooks/set-state-in-effect -- open scan once a PO is chosen */
   useEffect(() => {
     if (autoScan && po && !autoScanFired.current) {
       autoScanFired.current = true;
       setScanOpen(true);
     }
   }, [autoScan, po]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   /* eslint-disable react-hooks/set-state-in-effect -- seed item entries from the selected PO when the user picks one */
   useEffect(() => {
@@ -355,12 +347,6 @@ export default function GRNPage() {
   const { confirm } = useConfirm();
   const navigate = useNavigate();
 
-  // Dialog
-  const [showForm, setShowForm] = useState(false);
-  // When the form is opened from the header "Scan supplier document" button,
-  // auto-open its scan modal on mount. Reset on close.
-  const [autoScan, setAutoScan] = useState(false);
-
   // Filters
   const [filterStatus, setFilterStatus] = useState("");
   const [filterSupplier, setFilterSupplier] = useState("");
@@ -374,7 +360,7 @@ export default function GRNPage() {
   const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const { data: grnResp, loading: grnLoading, refresh: refreshGrns } = useCachedJson<{ success?: boolean; data?: GoodsReceiptNote[] } | GoodsReceiptNote[]>("/api/grn");
-  const { data: poResp, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] } | PurchaseOrder[]>("/api/purchase-orders");
+  const { loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] } | PurchaseOrder[]>("/api/purchase-orders");
   // Purchase Company letterhead — print each GRN under its supplier's buying
   // company (HOOKKA / OHANA / any sister co); accounting stays HOOKKA.
   const { data: supResp } = useCachedJson<{ data?: Array<{ id: string; purchaseOrgCode?: string }> }>("/api/suppliers");
@@ -384,41 +370,12 @@ export default function GRNPage() {
     () => ((grnResp as { data?: GoodsReceiptNote[] } | undefined)?.data ?? (Array.isArray(grnResp) ? grnResp : [])),
     [grnResp]
   );
-  const purchaseOrders: PurchaseOrder[] = useMemo(
-    () => ((poResp as { data?: PurchaseOrder[] } | undefined)?.data ?? (Array.isArray(poResp) ? poResp : [])),
-    [poResp]
-  );
-
   const loading = grnLoading || poLoading;
 
   const fetchData = useCallback(() => {
     refreshGrns();
     refreshPOs();
   }, [refreshGrns, refreshPOs]);
-
-  const handleCreateGRN = async (data: Record<string, unknown>) => {
-    try {
-      const res = await fetch("/api/grn", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      if (res.ok) {
-        invalidateCachePrefix("/api/grn");
-        invalidateCachePrefix("/api/purchase-orders");
-        invalidateCachePrefix("/api/inventory");
-        invalidateCachePrefix("/api/raw-materials");
-        refreshGrns();
-        refreshPOs();
-        setShowForm(false);
-      } else {
-        const err = await res.json();
-        toast.error(readErrorMessage(err) || "Failed to create GRN");
-      }
-    } catch {
-      toast.error("Failed to create GRN");
-    }
-  };
 
   // ---- Filters ----
   const hasActiveFilters = filterStatus || filterSupplier || filterDateFrom || filterDateTo;
@@ -775,14 +732,14 @@ export default function GRNPage() {
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
-            onClick={() => {
-              setAutoScan(true);
-              setShowForm(true);
-            }}
+            onClick={() => navigate("/procurement/grn/create?scan=1")}
           >
             <ScanLine className="h-4 w-4" /> Scan GRN
           </Button>
-          <Button variant="primary" onClick={() => setShowForm(true)}>
+          <Button
+            variant="primary"
+            onClick={() => navigate("/procurement/grn/create")}
+          >
             <Plus className="h-4 w-4" /> Create GRN
           </Button>
         </div>
@@ -958,18 +915,6 @@ export default function GRNPage() {
         </CardContent>
       </Card>
 
-      {/* GRN Form Dialog */}
-      {showForm && (
-        <GRNFormDialog
-          purchaseOrders={purchaseOrders}
-          autoScan={autoScan}
-          onSave={handleCreateGRN}
-          onClose={() => {
-            setShowForm(false);
-            setAutoScan(false);
-          }}
-        />
-      )}
     </div>
   );
 }

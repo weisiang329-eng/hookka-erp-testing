@@ -1,12 +1,35 @@
+// ---------------------------------------------------------------------------
+// Supplier Pricing — the SINGLE home for supplier-material pricing, SKU
+// mapping and costing. Three tabs:
+//   - Price List   : full binding CRUD (create / edit / delete) over
+//                    supplier_material_bindings, scoped by supplier + search.
+//                    (Folded in from the old /procurement/maintenance
+//                    "Supplier SKU & Costing" tab on 2026-06-20 so the
+//                    binding list lives in exactly ONE place.)
+//   - Price History: the price_histories trail (auto-written on a price
+//                    change in src/api/routes/supplier-materials.ts).
+//   - Comparison   : cross-supplier compare for one material + scorecards.
+//
+// The per-supplier drill-down (scorecard + that supplier's bindings) still
+// lives on /suppliers/:id; this page is the global / cross-supplier view.
+// ---------------------------------------------------------------------------
 import { useState, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { useToast } from "@/components/ui/toast";
-import { Plus, X } from "lucide-react";
-import { formatCurrency, formatDate, todayYmdMY } from "@/lib/utils";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { Plus, Pencil, Trash2 } from "lucide-react";
+import { formatCurrency, formatDate } from "@/lib/utils";
+import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import {
+  SKUFormDialog,
+  type SupplierSKU,
+  type SkuFormSupplier,
+  type SkuFormInventoryItem,
+} from "./sku-form-dialog";
 import type {
   SupplierMaterialBinding,
   PriceHistory,
@@ -18,27 +41,27 @@ type SupplierInfo = {
   name: string;
 };
 
-// Raw-material option for the Add-Binding material picker. itemCode MUST be the
-// same value the PO uses as rm.itemCode, so a binding created here always links.
-type RMOption = {
-  itemCode: string;
-  description: string;
-  itemGroup?: string;
-  isActive?: boolean;
-};
-
 export default function PricingPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<"price-list" | "price-history" | "comparison">("price-list");
-  const [search, setSearch] = useState("");
   const [selectedMaterial, setSelectedMaterial] = useState("");
-  const [showAddDialog, setShowAddDialog] = useState(false);
+
+  // Price List filters (folded in from the old maintenance SKU & Costing tab).
+  const [skuSearch, setSkuSearch] = useState("");
+  const [skuSupplierFilter, setSkuSupplierFilter] = useState<string>(
+    searchParams.get("supplier") ?? "",
+  );
+
+  // SKU binding dialog state — create + edit share the same form.
+  const [showSKUForm, setShowSKUForm] = useState(false);
+  const [editingSKU, setEditingSKU] = useState<SupplierSKU | null>(null);
   const { toast } = useToast();
 
   const { data: bindingsResp, refresh: reloadBindings } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
   const { data: historyResp } = useCachedJson<{ success?: boolean; data?: PriceHistory[] } | PriceHistory[]>("/api/price-history");
   const { data: scorecardsResp } = useCachedJson<{ success?: boolean; data?: SupplierScorecard[] } | SupplierScorecard[]>("/api/supplier-scorecards");
-  const { data: suppliersResp } = useCachedJson<{ success?: boolean; data?: { id: string; name: string }[] } | { id: string; name: string }[]>("/api/suppliers");
-  const { data: inventoryResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RMOption[] } }>("/api/inventory");
+  const { data: suppliersResp } = useCachedJson<{ success?: boolean; data?: Record<string, unknown>[] } | Record<string, unknown>[]>("/api/suppliers");
+  const { data: inventoryResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: SkuFormInventoryItem[]; finishedGoods?: SkuFormInventoryItem[]; wipItems?: SkuFormInventoryItem[] } }>("/api/inventory");
 
   const bindings: SupplierMaterialBinding[] = useMemo(
     () => ((bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? (Array.isArray(bindingsResp) ? bindingsResp : [])),
@@ -52,13 +75,27 @@ export default function PricingPage() {
     () => ((scorecardsResp as { data?: SupplierScorecard[] } | undefined)?.data ?? (Array.isArray(scorecardsResp) ? scorecardsResp : [])),
     [scorecardsResp]
   );
-  const suppliers: SupplierInfo[] = useMemo(() => {
-    const list = (suppliersResp as { data?: { id: string; name: string }[] } | undefined)?.data ?? (Array.isArray(suppliersResp) ? suppliersResp : []);
-    return (Array.isArray(list) ? list : []).map((s: { id: string; name: string }) => ({
-      id: s.id,
-      name: s.name,
+
+  // Full supplier rows — the SKUFormDialog supplier dropdown needs code + name
+  // + status, and the Price List supplier-filter needs id + name.
+  const supplierRows: SkuFormSupplier[] = useMemo(() => {
+    const list = Array.isArray((suppliersResp as { data?: unknown[] })?.data)
+      ? ((suppliersResp as { data: Record<string, unknown>[] }).data)
+      : Array.isArray(suppliersResp)
+        ? (suppliersResp as Record<string, unknown>[])
+        : [];
+    return list.map((s) => ({
+      id: String(s.id ?? s.code ?? ""),
+      code: String(s.code ?? s.id ?? ""),
+      name: String(s.name ?? ""),
+      status: String(s.status ?? (s.isActive === false ? "INACTIVE" : "ACTIVE")),
     }));
   }, [suppliersResp]);
+
+  const suppliers: SupplierInfo[] = useMemo(
+    () => supplierRows.map((s) => ({ id: s.id, name: s.name })),
+    [supplierRows]
+  );
 
   const supplierMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -66,15 +103,21 @@ export default function PricingPage() {
     return map;
   }, [suppliers]);
 
-  // Active raw materials for the Add-Binding picker. Binding by FREE TEXT let a
-  // typo'd materialCode silently fail to match the PO's rm.itemCode (owner
-  // 2026-06-18: PO showed ALL suppliers because the code didn't line up).
-  // Picking from the real RM list guarantees materialCode === itemCode.
-  const rawMaterials: RMOption[] = useMemo(() => {
-    const list = inventoryResp?.data?.rawMaterials ?? [];
-    return (Array.isArray(list) ? list : [])
-      .filter((r) => r.isActive !== false)
-      .sort((a, b) => a.itemCode.localeCompare(b.itemCode));
+  // Inventory items for the SKU form's RM autocomplete.
+  const inventoryItems: SkuFormInventoryItem[] = useMemo(() => {
+    const d = inventoryResp;
+    if (!d?.success || !d.data) return [];
+    return [
+      ...(d.data.rawMaterials || []),
+      ...(d.data.finishedGoods || []),
+      ...(d.data.wipItems || []),
+    ].map((item) => ({
+      id: item.id,
+      itemCode: item.itemCode,
+      description: item.description,
+      baseUOM: item.baseUOM,
+      itemGroup: item.itemGroup,
+    }));
   }, [inventoryResp]);
 
   const scorecardMap = useMemo(() => {
@@ -89,6 +132,93 @@ export default function PricingPage() {
     return codes.sort();
   }, [bindings]);
 
+  // ---- binding helpers (map the page's SupplierSKU form shape onto the
+  //      /api/supplier-materials body; unitPrice is sent in SEN — the binding
+  //      column is integer sen, so do NOT multiply by 100). ----
+  const bindingToSKU = (b: SupplierMaterialBinding): SupplierSKU => ({
+    id: b.id,
+    internalRMCode: b.materialCode,
+    materialName: b.materialName,
+    supplierId: b.supplierId,
+    supplierName: supplierMap[b.supplierId],
+    supplierSku: b.supplierSku,
+    supplierDescription: (b as unknown as { supplierDescription?: string }).supplierDescription ?? "",
+    unitPriceSen: b.unitPrice,
+    currency: b.currency || "MYR",
+    leadTimeDays: b.leadTimeDays,
+    moq: b.moq,
+    isMainSupplier: b.isMainSupplier,
+    validFrom: b.priceValidFrom ?? "",
+    validTo: b.priceValidTo ?? "",
+  });
+
+  const skuToBindingBody = (data: Omit<SupplierSKU, "id">) => ({
+    supplierId: data.supplierId,
+    materialCode: data.internalRMCode,
+    materialName: data.materialName,
+    supplierSku: data.supplierSku,
+    supplierDescription: data.supplierDescription ?? "",
+    unitPrice: data.unitPriceSen,
+    currency: data.currency,
+    leadTimeDays: data.leadTimeDays,
+    moq: data.moq,
+    isMainSupplier: data.isMainSupplier,
+    priceValidFrom: data.validFrom || undefined,
+    priceValidTo: data.validTo || undefined,
+  });
+
+  const handleSaveSKU = async (data: Omit<SupplierSKU, "id">) => {
+    let ok = false;
+    let errMsg = "";
+    const url = editingSKU
+      ? `/api/supplier-materials/${editingSKU.id}`
+      : "/api/supplier-materials";
+    const method = editingSKU ? "PUT" : "POST";
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(skuToBindingBody(data)),
+      });
+      ok = res.ok;
+      if (!ok) {
+        const b = (await res.json().catch(() => ({}))) as { error?: string };
+        errMsg = b.error || `HTTP ${res.status}`;
+      }
+    } catch {
+      errMsg = "network error";
+    }
+    invalidateCachePrefix("/api/supplier-materials");
+    // The Price History trail is server-written on a price change; refresh it
+    // so the History tab reflects an edit immediately.
+    invalidateCache("/api/price-history");
+    reloadBindings();
+    if (ok) {
+      toast.success("SKU mapping saved");
+      setShowSKUForm(false);
+      setEditingSKU(null);
+    } else {
+      // Keep the form open so the operator can retry — do NOT pretend it saved.
+      toast.error(`Save failed: ${errMsg}`);
+    }
+  };
+
+  const handleDeleteSKU = async (b: SupplierMaterialBinding) => {
+    try {
+      const res = await fetch(`/api/supplier-materials/${b.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        toast.error(j.error || `Delete failed (${res.status})`);
+      } else {
+        toast.success("SKU mapping deleted");
+      }
+    } catch {
+      toast.error("Delete failed — network error");
+    }
+    invalidateCachePrefix("/api/supplier-materials");
+    reloadBindings();
+  };
+
   const tabs = [
     { key: "price-list" as const, label: "Price List" },
     { key: "price-history" as const, label: "Price History" },
@@ -101,7 +231,7 @@ export default function PricingPage() {
       <div>
         <h1 className="text-xl font-bold text-[#1F1D1B]">Supplier Pricing</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Manage supplier-material bindings, track price changes, and compare suppliers
+          Manage supplier-material SKU mappings &amp; costing, track price changes, and compare suppliers
         </p>
       </div>
 
@@ -126,26 +256,31 @@ export default function PricingPage() {
       {activeTab === "price-list" && (
         <PriceListTab
           bindings={bindings}
+          suppliers={suppliers}
           supplierMap={supplierMap}
-          search={search}
-          onSearchChange={setSearch}
-          onAddClick={() => setShowAddDialog(true)}
+          search={skuSearch}
+          onSearchChange={setSkuSearch}
+          supplierFilter={skuSupplierFilter}
+          onSupplierFilterChange={(v) => {
+            setSkuSupplierFilter(v);
+            const next = new URLSearchParams(searchParams);
+            if (v) next.set("supplier", v); else next.delete("supplier");
+            setSearchParams(next, { replace: true });
+          }}
+          onAddClick={() => { setEditingSKU(null); setShowSKUForm(true); }}
+          onEdit={(b) => { setEditingSKU(bindingToSKU(b)); setShowSKUForm(true); }}
+          onDelete={handleDeleteSKU}
         />
       )}
 
-      {showAddDialog && (
-        <AddBindingDialog
-          suppliers={suppliers}
-          rawMaterials={rawMaterials}
-          onClose={() => setShowAddDialog(false)}
-          onCreated={() => {
-            invalidateCachePrefix("/api/supplier-materials");
-            invalidateCachePrefix("/api/suppliers");
-            setShowAddDialog(false);
-            reloadBindings();
-            toast.success("Supplier-material binding created");
-          }}
-          onError={(msg) => toast.error(msg)}
+      {showSKUForm && (
+        <SKUFormDialog
+          editData={editingSKU}
+          suppliers={supplierRows}
+          inventoryItems={inventoryItems}
+          presetSupplierId={editingSKU ? undefined : skuSupplierFilter || undefined}
+          onSave={handleSaveSKU}
+          onClose={() => { setShowSKUForm(false); setEditingSKU(null); }}
         />
       )}
       {activeTab === "price-history" && (
@@ -165,38 +300,180 @@ export default function PricingPage() {
   );
 }
 
-// ---- Price List Tab ----
+// ---- Price List Tab — full binding CRUD (was the maintenance SKU & Costing
+//      tab). Supplier filter + search scope the grid; Add/Edit/Delete drive
+//      the shared SKUFormDialog. ----
 function PriceListTab({
   bindings,
+  suppliers,
   supplierMap,
   search,
   onSearchChange,
+  supplierFilter,
+  onSupplierFilterChange,
   onAddClick,
+  onEdit,
+  onDelete,
 }: {
   bindings: SupplierMaterialBinding[];
+  suppliers: SupplierInfo[];
   supplierMap: Record<string, string>;
   search: string;
   onSearchChange: (v: string) => void;
+  supplierFilter: string;
+  onSupplierFilterChange: (v: string) => void;
   onAddClick: () => void;
+  onEdit: (b: SupplierMaterialBinding) => void;
+  onDelete: (b: SupplierMaterialBinding) => void;
 }) {
+  // Resolve supplier names + a supplierDescription string onto each row for
+  // display/filter (the API returns supplierDescription; it isn't on the
+  // @/types SupplierMaterialBinding so read it loosely).
+  type Row = SupplierMaterialBinding & { supplierName: string; supplierDescription: string };
+  const rows: Row[] = useMemo(
+    () => bindings.map((b) => ({
+      ...b,
+      supplierName: supplierMap[b.supplierId] ?? b.supplierId,
+      supplierDescription: (b as unknown as { supplierDescription?: string }).supplierDescription ?? "",
+    })),
+    [bindings, supplierMap]
+  );
+
+  // Per-supplier counts for the dropdown — a single flat list of ~1k rows is
+  // unusable, so pick a supplier to scope (Wei Siang 2026-05-10).
+  const countBySupplierId = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of rows) m.set(r.supplierId, (m.get(r.supplierId) ?? 0) + 1);
+    return m;
+  }, [rows]);
+
   const filtered = useMemo(() => {
-    if (!search) return bindings;
-    const q = search.toLowerCase();
-    return bindings.filter(
-      (b) =>
-        b.materialCode.toLowerCase().includes(q) ||
-        b.materialName.toLowerCase().includes(q) ||
-        b.supplierSku.toLowerCase().includes(q) ||
-        (supplierMap[b.supplierId] ?? "").toLowerCase().includes(q)
-    );
-  }, [bindings, search, supplierMap]);
+    let out = rows;
+    if (supplierFilter) out = out.filter((r) => r.supplierId === supplierFilter);
+    if (search) {
+      const q = search.toLowerCase();
+      out = out.filter(
+        (r) =>
+          r.materialCode.toLowerCase().includes(q) ||
+          r.materialName.toLowerCase().includes(q) ||
+          r.supplierSku.toLowerCase().includes(q) ||
+          r.supplierDescription.toLowerCase().includes(q) ||
+          r.supplierName.toLowerCase().includes(q)
+      );
+    }
+    return out;
+  }, [rows, search, supplierFilter]);
+
+  const columns: Column<Row>[] = useMemo(
+    () => [
+      { key: "materialCode", label: "Internal Code", type: "docno", width: "130px", sortable: true },
+      { key: "materialName", label: "Internal Description", type: "text", sortable: true },
+      { key: "supplierName", label: "Supplier", type: "text", width: "160px", sortable: true },
+      { key: "supplierSku", label: "Supplier Code", type: "text", width: "140px", sortable: true },
+      { key: "supplierDescription", label: "Supplier Description", type: "text", sortable: true },
+      { key: "unitPrice", label: "Unit Price", type: "currency", width: "110px", sortable: true },
+      { key: "currency", label: "Currency", type: "text", width: "80px" },
+      {
+        key: "leadTimeDays",
+        label: "Lead Time",
+        width: "90px",
+        sortable: true,
+        render: (val: unknown) => <span>{val as number}d</span>,
+      },
+      { key: "moq", label: "MOQ", type: "number", width: "70px", sortable: true },
+      {
+        key: "isMainSupplier",
+        label: "Main",
+        width: "70px",
+        sortable: true,
+        render: (_val: unknown, row: Row) =>
+          row.isMainSupplier ? (
+            <Badge className="bg-green-50 text-green-800 border-green-300">Main</Badge>
+          ) : (
+            <span className="text-gray-400 text-xs">-</span>
+          ),
+      },
+      {
+        key: "priceValidFrom",
+        label: "Valid Period",
+        width: "160px",
+        render: (_val: unknown, row: Row) => (
+          <span className="text-xs text-gray-500">
+            {formatDate(row.priceValidFrom)} - {formatDate(row.priceValidTo)}
+          </span>
+        ),
+      },
+      {
+        key: "actions",
+        label: "Actions",
+        width: "90px",
+        align: "right",
+        render: (_val: unknown, row: Row) => (
+          <div className="flex items-center justify-end gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              title="Edit"
+              onClick={(e) => { e.stopPropagation(); onEdit(row); }}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              title="Delete"
+              className="text-[#9A3A2D] hover:text-[#7A2E24]"
+              onClick={(e) => { e.stopPropagation(); onDelete(row); }}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        ),
+      },
+    ],
+    [onEdit, onDelete]
+  );
+
+  const contextMenu = useMemo(
+    () =>
+      (row: Row): ContextMenuItem[] => [
+        {
+          label: "Edit",
+          icon: <Pencil className="h-3.5 w-3.5" />,
+          action: () => onEdit(row),
+        },
+        { label: "", separator: true, action: () => {} },
+        {
+          label: "Delete",
+          icon: <Trash2 className="h-3.5 w-3.5" />,
+          danger: true,
+          action: () => onDelete(row),
+        },
+      ],
+    [onEdit, onDelete]
+  );
 
   return (
     <Card>
       <CardHeader className="pb-4">
-        <div className="flex items-center justify-between gap-3">
-          <CardTitle>All Supplier-Material Bindings</CardTitle>
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <CardTitle>Supplier-Material Bindings</CardTitle>
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={supplierFilter}
+              onChange={(e) => onSupplierFilterChange(e.target.value)}
+              className="h-10 px-3 rounded border border-[#D8D2CC] bg-white text-sm min-w-[240px]"
+              title="Filter bindings by supplier"
+            >
+              <option value="">All suppliers ({rows.length})</option>
+              {[...suppliers]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({countBySupplierId.get(s.id) ?? 0})
+                  </option>
+                ))}
+            </select>
             <div className="w-72">
               <Input
                 placeholder="Search material, supplier, SKU..."
@@ -215,247 +492,20 @@ function PriceListTab({
         </div>
       </CardHeader>
       <CardContent>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-[#E2DDD8] text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                <th className="pb-3 pr-4">Material Code</th>
-                <th className="pb-3 pr-4">Material Name</th>
-                <th className="pb-3 pr-4">Supplier</th>
-                <th className="pb-3 pr-4">Supplier SKU</th>
-                <th className="pb-3 pr-4 text-right">Unit Price</th>
-                <th className="pb-3 pr-4">Currency</th>
-                <th className="pb-3 pr-4 text-right">Lead Time</th>
-                <th className="pb-3 pr-4 text-right">MOQ</th>
-                <th className="pb-3 pr-4">Main</th>
-                <th className="pb-3">Valid Period</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#E2DDD8]">
-              {filtered.map((b) => (
-                <tr key={b.id} className="hover:bg-[#F0ECE9]/50">
-                  <td className="py-3 pr-4 font-mono text-xs">{b.materialCode}</td>
-                  <td className="py-3 pr-4">{b.materialName}</td>
-                  <td className="py-3 pr-4">{supplierMap[b.supplierId] ?? b.supplierId}</td>
-                  <td className="py-3 pr-4 font-mono text-xs">{b.supplierSku}</td>
-                  <td className="py-3 pr-4 text-right font-medium">
-                    {formatCurrency(b.unitPrice, b.currency)}
-                  </td>
-                  <td className="py-3 pr-4">{b.currency}</td>
-                  <td className="py-3 pr-4 text-right">{b.leadTimeDays}d</td>
-                  <td className="py-3 pr-4 text-right">{b.moq}</td>
-                  <td className="py-3 pr-4">
-                    {b.isMainSupplier && (
-                      <Badge className="bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8]">
-                        Main
-                      </Badge>
-                    )}
-                  </td>
-                  <td className="py-3 text-xs text-gray-500">
-                    {formatDate(b.priceValidFrom)} - {formatDate(b.priceValidTo)}
-                  </td>
-                </tr>
-              ))}
-              {filtered.length === 0 && (
-                <tr>
-                  <td colSpan={10} className="py-8 text-center text-gray-400">
-                    No bindings found
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+        <DataGrid<Row>
+          columns={columns}
+          data={filtered}
+          keyField="id"
+          virtualize
+          gridId="supplier-sku-costing"
+          contextMenuItems={contextMenu}
+          onDoubleClick={(row) => onEdit(row)}
+          emptyMessage="No bindings found."
+          stickyHeader
+          maxHeight="calc(100vh - 360px)"
+        />
       </CardContent>
     </Card>
-  );
-}
-
-// ---- Add Binding Dialog ----
-function AddBindingDialog({
-  suppliers,
-  rawMaterials,
-  onClose,
-  onCreated,
-  onError,
-}: {
-  suppliers: SupplierInfo[];
-  rawMaterials: RMOption[];
-  onClose: () => void;
-  onCreated: () => void;
-  onError: (msg: string) => void;
-}) {
-  const [form, setForm] = useState({
-    supplierId: "",
-    materialCode: "",
-    materialName: "",
-    supplierSku: "",
-    unitPrice: "",
-    currency: "MYR",
-    leadTimeDays: "7",
-    moq: "1",
-    paymentTerms: "NET30",
-    priceValidFrom: todayYmdMY(),
-    priceValidTo: "2026-12-31",
-    isMainSupplier: false,
-  });
-  const [saving, setSaving] = useState(false);
-
-  const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) =>
-    setForm((f) => ({ ...f, [k]: v }));
-
-  const handleSubmit = async () => {
-    if (!form.supplierId || !form.materialCode || !form.materialName || !form.supplierSku || !form.unitPrice) {
-      onError("Fill in supplier, material code, name, SKU, and unit price.");
-      return;
-    }
-    setSaving(true);
-    try {
-      const res = await fetch("/api/supplier-materials", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          supplierId: form.supplierId,
-          materialCode: form.materialCode,
-          materialName: form.materialName,
-          supplierSku: form.supplierSku,
-          unitPrice: Number(form.unitPrice),
-          currency: form.currency,
-          leadTimeDays: Number(form.leadTimeDays) || 7,
-          moq: Number(form.moq) || 1,
-          paymentTerms: form.paymentTerms,
-          priceValidFrom: form.priceValidFrom,
-          priceValidTo: form.priceValidTo,
-          isMainSupplier: form.isMainSupplier,
-        }),
-      });
-      const json = (await res.json().catch(() => ({ success: false }))) as { success?: boolean; error?: string };
-      if (res.ok && json.success) {
-        onCreated();
-      } else {
-        onError(json.error || "Failed to create binding");
-      }
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div
-        className="bg-white rounded-lg shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-5 py-3 border-b border-[#E2DDD8]">
-          <h3 className="text-base font-semibold text-[#1F1D1B]">Add Supplier-Material Binding</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <div className="p-5 grid grid-cols-2 gap-3 text-sm">
-          <label className="col-span-2">
-            <span className="block text-xs font-medium text-gray-600 mb-1">Supplier *</span>
-            <select
-              value={form.supplierId}
-              onChange={(e) => set("supplierId", e.target.value)}
-              className="w-full border border-[#E2DDD8] rounded px-2 py-1.5 bg-white"
-            >
-              <option value="">Select supplier…</option>
-              {suppliers.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-          </label>
-          {/* Pick the material from the real RM list (not free text) so the
-              binding's materialCode == the PO's rm.itemCode and the PO supplier
-              dropdown actually filters to this supplier + auto-fills the SKU. */}
-          <label className="col-span-2">
-            <span className="block text-xs font-medium text-gray-600 mb-1">Material *</span>
-            <select
-              value={form.materialCode}
-              onChange={(e) => {
-                const rm = rawMaterials.find((r) => r.itemCode === e.target.value);
-                setForm((f) => ({
-                  ...f,
-                  materialCode: rm?.itemCode ?? "",
-                  materialName: rm?.description ?? "",
-                }));
-              }}
-              className="w-full border border-[#E2DDD8] rounded px-2 py-1.5 bg-white"
-            >
-              <option value="">Select material…</option>
-              {rawMaterials.map((r) => (
-                <option key={r.itemCode} value={r.itemCode}>
-                  {r.itemCode} — {r.description}
-                </option>
-              ))}
-            </select>
-            {form.materialCode && (
-              <span className="mt-1 block text-[11px] text-gray-500">
-                Code <span className="font-mono">{form.materialCode}</span> · {form.materialName}
-              </span>
-            )}
-          </label>
-          <label>
-            <span className="block text-xs font-medium text-gray-600 mb-1">Supplier SKU *</span>
-            <Input value={form.supplierSku} onChange={(e) => set("supplierSku", e.target.value)} />
-          </label>
-          <label>
-            <span className="block text-xs font-medium text-gray-600 mb-1">Unit Price *</span>
-            <Input type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" value={form.unitPrice} onChange={(e) => set("unitPrice", e.target.value)} />
-          </label>
-          <label>
-            <span className="block text-xs font-medium text-gray-600 mb-1">Currency</span>
-            <select
-              value={form.currency}
-              onChange={(e) => set("currency", e.target.value)}
-              className="w-full border border-[#E2DDD8] rounded px-2 py-1.5 bg-white"
-            >
-              <option value="MYR">MYR</option>
-              <option value="RMB">RMB</option>
-            </select>
-          </label>
-          <label>
-            <span className="block text-xs font-medium text-gray-600 mb-1">Lead Time (days)</span>
-            <Input type="number" onFocus={(e) => e.currentTarget.select()} value={form.leadTimeDays} onChange={(e) => set("leadTimeDays", e.target.value)} />
-          </label>
-          <label>
-            <span className="block text-xs font-medium text-gray-600 mb-1">MOQ</span>
-            <Input type="number" onFocus={(e) => e.currentTarget.select()} value={form.moq} onChange={(e) => set("moq", e.target.value)} />
-          </label>
-          <label>
-            <span className="block text-xs font-medium text-gray-600 mb-1">Payment Terms</span>
-            <Input value={form.paymentTerms} onChange={(e) => set("paymentTerms", e.target.value)} />
-          </label>
-          <label>
-            <span className="block text-xs font-medium text-gray-600 mb-1">Valid From</span>
-            <Input type="date" value={form.priceValidFrom} onChange={(e) => set("priceValidFrom", e.target.value)} />
-          </label>
-          <label>
-            <span className="block text-xs font-medium text-gray-600 mb-1">Valid To</span>
-            <Input type="date" value={form.priceValidTo} onChange={(e) => set("priceValidTo", e.target.value)} />
-          </label>
-          <label className="col-span-2 flex items-center gap-2 pt-1">
-            <input
-              type="checkbox"
-              checked={form.isMainSupplier}
-              onChange={(e) => set("isMainSupplier", e.target.checked)}
-            />
-            <span className="text-xs font-medium text-gray-600">Mark as main supplier for this material</span>
-          </label>
-        </div>
-        <div className="flex justify-end gap-2 px-5 py-3 border-t border-[#E2DDD8] bg-[#FAF8F4]">
-          <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button
-            onClick={handleSubmit}
-            disabled={saving}
-            className="bg-[#6B5C32] hover:bg-[#574A28] text-white"
-          >
-            {saving ? "Saving…" : "Create Binding"}
-          </Button>
-        </div>
-      </div>
-    </div>
   );
 }
 

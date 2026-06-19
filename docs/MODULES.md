@@ -133,9 +133,9 @@ Supplier-side counterpart to Sales.
 | Detail        | `/procurement/:id`           | Single PO, items, 3-way match status, GRN linkage    |
 | GRN           | `/procurement/grn`           | Goods-receipt notes — match PO vs invoice vs receipt |
 | In Transit    | `/procurement/in-transit`    | International shipments (ETA, customs, hand-off)     |
-| Maintenance   | `/procurement/maintenance`   | Supplier master + material map                       |
-| PI            | `/procurement/pi`            | Proforma invoices (pre-GRN)                          |
-| Pricing       | `/procurement/pricing`       | Unit-price history per supplier × material           |
+| Maintenance   | `/procurement/maintenance`   | Supplier master (info, rating, status, batch edit)   |
+| PI            | `/procurement/pi`            | Proforma invoices (pre-GRN)                           |
+| Pricing       | `/procurement/pricing`       | Supplier-material SKU/costing CRUD + price history + cross-supplier comparison |
 
 **Entities** — `PurchaseOrder`, `GRN`, `Supplier`, `SupplierMaterial`,
 `SupplierScorecard`, `ThreeWayMatch`, `GoodsInTransit`, `PriceHistory`

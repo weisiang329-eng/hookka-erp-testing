@@ -152,7 +152,7 @@ const navigationGroups: NavGroup[] = [
       { name: "In Transit", href: "/procurement/in-transit", icon: Route },
       { name: "GRN", href: "/procurement/grn", icon: ClipboardList },
       { name: "Purchase Invoice", href: "/procurement/pi", icon: CreditCard },
-      { name: "Pricing", href: "/procurement/pricing", icon: DollarSign },
+      { name: "Supplier Pricing", href: "/procurement/pricing", icon: DollarSign },
       { name: "MRP", href: "/planning/mrp", icon: Layers },
       { name: "Supplier", href: "/procurement/maintenance", icon: Building2 },
     ],

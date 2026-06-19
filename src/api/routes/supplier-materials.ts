@@ -272,6 +272,38 @@ app.put("/:id", async (c) => {
         id,
       )
       .run();
+    // Record a price-history entry whenever the unit price actually moves.
+    // The `price_histories` table + GET /api/price-history already existed but
+    // nothing wrote to it, so the comparison/history view had no trail. Capture
+    // it here so our buy-price changes accumulate going forward. Fire-and-forget
+    // inside its own try/catch: a history-write failure must never fail the edit
+    // (matches the "binding write throws → 400" gotcha we already guard against).
+    if (existing.unitPrice !== merged.unitPrice) {
+      try {
+        await c.var.DB.prepare(
+          `INSERT INTO price_histories (id, bindingId, supplierId, materialCode,
+             oldPrice, newPrice, currency, changedDate, changedBy, reason,
+             approvalStatus)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+          .bind(
+            `ph-${crypto.randomUUID().slice(0, 8)}`,
+            id,
+            merged.supplierId,
+            merged.materialCode,
+            existing.unitPrice,
+            merged.unitPrice,
+            merged.currency,
+            new Date().toISOString().slice(0, 10),
+            "System",
+            "Price binding updated",
+            "APPROVED",
+          )
+          .run();
+      } catch {
+        // history is best-effort; the binding update already succeeded
+      }
+    }
     const updated = await c.var.DB.prepare(
       "SELECT * FROM supplier_material_bindings WHERE id = ?",
     )

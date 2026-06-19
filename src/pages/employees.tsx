@@ -2871,7 +2871,7 @@ function EmployeeMasterTab({
               <Badge variant="status" status={row.status} />
               {row.status === "RESIGNED" && row.resignedAt && (
                 <span className="text-[11px] text-[#9CA3AF]">
-                  · left {row.resignedAt}
+                  · left {formatDateDMY(row.resignedAt)}
                 </span>
               )}
             </span>

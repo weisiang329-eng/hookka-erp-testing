@@ -24,6 +24,7 @@
 // cell renders as-is.
 // ---------------------------------------------------------------------------
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { formatDate } from "@/lib/utils";
 import { Link, useNavigate } from "react-router-dom";
 import { fetchJson, passthrough } from "@/lib/fetch-json";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -698,11 +699,14 @@ export default function DepartmentSchedulePage(props: DepartmentSchedulePageProp
   );
 
   useEffect(() => {
+    // loadLive sets state only AFTER an async fetch (not synchronously), so the
+    // set-state-in-effect rule is a false positive for this mount-time load.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadLive(false);
   }, [loadLive]);
 
   const SNAP = liveSnap ?? props.snapshot;
-  const generatedAt = SNAP.generatedAt ?? "unknown date";
+  const generatedAt = SNAP.generatedAt ? formatDate(SNAP.generatedAt) : "unknown date";
   const calendarSheet = SNAP.sheets?.[props.calendarSheetName];
   const byDaySheet = SNAP.sheets?.[props.byDaySheetName];
 

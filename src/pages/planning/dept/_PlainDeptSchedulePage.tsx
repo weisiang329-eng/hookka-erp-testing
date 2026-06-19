@@ -17,6 +17,7 @@
 // (headerOverride) so no mixed-language column titles leak into the UI.
 // ---------------------------------------------------------------------------
 import { useState } from "react";
+import { formatDate } from "@/lib/utils";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -197,7 +198,7 @@ export default function PlainDeptSchedulePage(props: PlainDeptSchedulePageProps)
   const { toast } = useToast();
 
   const SNAP = props.snapshot;
-  const generatedAt = SNAP.generatedAt ?? "unknown date";
+  const generatedAt = SNAP.generatedAt ? formatDate(SNAP.generatedAt) : "unknown date";
   const sheet = SNAP.sheets?.[props.sheetName];
 
   function handleRecalculate() {

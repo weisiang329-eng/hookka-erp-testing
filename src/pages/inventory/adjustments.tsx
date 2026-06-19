@@ -124,7 +124,11 @@ const REASON_OPTIONS: { value: AdjustmentReason; label: string }[] = [
   { value: "OTHER", label: "Other" },
 ];
 
-const TYPE_OPTIONS: AdjustmentType[] = ["RM", "WIP", "FG"];
+// FG removed (cross-audit #10): the FG row passed a product id where the backend
+// expected an fg_batches id (→ 404), and fg_batches isn't the FG system-of-record
+// anyway (on-hand is derived from production + DO / fg_units). The control was
+// dead/misleading. A real FG write-off needs its own grain — out of scope here.
+const TYPE_OPTIONS: AdjustmentType[] = ["RM", "WIP"];
 
 function newDraftRow(): DraftRow {
   return {

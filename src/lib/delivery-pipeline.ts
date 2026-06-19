@@ -81,6 +81,9 @@ export function poInPlanning(po: PipelinePO): boolean {
 // is COMPLETED/TRANSFERRED (zero cards never qualifies).
 export function poReadyForDelivery(po: PipelinePO, linkedPOIds: Set<string>): boolean {
   if (po.status === "CANCELLED") return false;
+  // A held PO is paused work — it belongs in Outstanding, not Pending Delivery,
+  // even if its upholstery cards happened to complete before it was put on hold.
+  if (po.status === "ON_HOLD") return false;
   if (po.consignmentOrderId) return false;
   if (linkedPOIds.has(po.id)) return false;
   const uphCards = pickRelevantUphCards(po);

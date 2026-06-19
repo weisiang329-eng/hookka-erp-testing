@@ -2959,7 +2959,7 @@ export default function PlanningPage() {
                     </span>
                   </div>
                   {ltSavedAt && (
-                    <span className="text-xs text-[#6B5C32]">Saved {ltSavedAt}</span>
+                    <span className="text-xs text-[#6B5C32]">Saved {formatDate(ltSavedAt)}</span>
                   )}
                   {recalcResult && (
                     <span className="text-xs text-[#6B5C32]">{recalcResult}</span>

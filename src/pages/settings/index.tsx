@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MoneyInput } from "@/components/ui/money-input";
 import {
   Building2,
   Hash,
@@ -784,15 +785,12 @@ export default function SettingsPage() {
                     <td className="py-3 px-3">
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-[#6B7280]">RM</span>
-                        <Input
-                          type="number" onFocus={(e) => e.currentTarget.select()}
+                        <MoneyInput
                           className="w-28 h-8 text-xs"
                           value={sc.amountSen / 100}
-                          min={0}
-                          step={5}
-                          onChange={(e) => {
+                          onChange={(rm) => {
                             const updated = [...surcharges];
-                            updated[idx] = { ...updated[idx], amountSen: Math.round(Number(e.target.value) * 100) };
+                            updated[idx] = { ...updated[idx], amountSen: Math.round((rm ?? 0) * 100) };
                             setSurcharges(updated);
                           }}
                         />

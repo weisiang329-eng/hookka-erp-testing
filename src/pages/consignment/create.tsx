@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
@@ -1474,7 +1475,7 @@ function LineItemCard({
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
-            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.basePriceSen / 100} onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+            <MoneyInput value={item.basePriceSen / 100} onChange={(rm) => onUpdate(idx, { basePriceSen: Math.round((rm ?? 0) * 100) })} className="h-8" />
           </div>
         </div>
       ) : item.itemCategory === "SOFA" ? (
@@ -1508,7 +1509,7 @@ function LineItemCard({
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
-            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.basePriceSen / 100} onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+            <MoneyInput value={item.basePriceSen / 100} onChange={(rm) => onUpdate(idx, { basePriceSen: Math.round((rm ?? 0) * 100) })} className="h-8" />
           </div>
         </div>
       ) : (

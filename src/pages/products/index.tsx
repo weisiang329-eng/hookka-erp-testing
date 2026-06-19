@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { MoneyInput } from "@/components/ui/money-input";
 import { Link } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
 import { Plus, Trash2, Check, Calendar, History, Pencil } from "lucide-react";
@@ -1568,12 +1569,10 @@ function MaintenanceView() {
                         * discount off the base price (e.g. "No Leg" = -RM10).
                         * Label stays neutral; the number carries its sign. */}
                       <span className="text-xs text-gray-500">RM</span>
-                      <input
-                        type="number" onFocus={(e) => e.currentTarget.select()}
-                        step="0.01"
+                      <MoneyInput
                         value={newPriceSen / 100}
-                        onChange={(e) => setNewPriceSen(Math.round(parseFloat(e.target.value || "0") * 100))}
-                        className="w-24 text-right text-sm border border-[#E2DDD8] rounded-md px-3 py-2 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
+                        onChange={(rm) => setNewPriceSen(Math.round((rm ?? 0) * 100))}
+                        className="w-24 text-sm bg-[#FAF9F7] focus:bg-white"
                         placeholder="0.00"
                       />
                     </div>
@@ -1664,12 +1663,10 @@ function MaintenanceView() {
                           <div className="flex items-center gap-1">
                             <span className="text-xs text-gray-400">RM</span>
                             {editMode ? (
-                              <input
-                                type="number" onFocus={(e) => e.currentTarget.select()}
-                                step="0.01"
+                              <MoneyInput
                                 value={entry.priceSen / 100}
-                                onChange={(e) => updatePrice(idx, Math.round(parseFloat(e.target.value || "0") * 100))}
-                                className="w-20 text-right text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32]"
+                                onChange={(rm) => updatePrice(idx, Math.round((rm ?? 0) * 100))}
+                                className="w-20 text-sm"
                               />
                             ) : (
                               <span className="w-20 text-right text-sm tabular-nums text-[#111827] font-medium">

@@ -6,6 +6,7 @@ import { humanizeError } from "@/lib/humanize-error";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
@@ -3296,7 +3297,7 @@ function LineItemCard({
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
-            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.basePriceSen / 100} onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+            <MoneyInput value={item.basePriceSen / 100} onChange={(rm) => onUpdate(idx, { basePriceSen: Math.round((rm ?? 0) * 100) })} className="h-8" />
           </div>
         </div>
       ) : item.itemCategory === "SOFA" ? (
@@ -3330,7 +3331,7 @@ function LineItemCard({
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
-            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.basePriceSen / 100} onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+            <MoneyInput value={item.basePriceSen / 100} onChange={(rm) => onUpdate(idx, { basePriceSen: Math.round((rm ?? 0) * 100) })} className="h-8" />
           </div>
         </div>
       ) : (
@@ -3348,15 +3349,11 @@ function LineItemCard({
                 (in regular mode) or 0 (in Service Order mode) — operator types
                 over it when needed. Matches the always-editable SOFA + ACCESSORY
                 Base Price input above. */}
-            <Input
-              type="number"
-              onFocus={(e) => e.currentTarget.select()}
-              min={0}
-              step="0.01"
+            <MoneyInput
               value={item.basePriceSen / 100}
-              onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })}
+              onChange={(rm) => onUpdate(idx, { basePriceSen: Math.round((rm ?? 0) * 100) })}
               placeholder={item.basePriceSen === 0 && !isServiceOrderMode ? "Pick fabric to auto-fill, or type" : ""}
-              className={`h-8 text-right ${item.basePriceSen === 0 && !isServiceOrderMode ? "bg-[#FAEFCB]/30 border-[#E8D597]" : ""}`}
+              className={`h-8 ${item.basePriceSen === 0 && !isServiceOrderMode ? "bg-[#FAEFCB]/30 border-[#E8D597]" : ""}`}
             />
           </div>
           <div>
@@ -3519,20 +3516,14 @@ function LineItemCard({
                   {!isServiceOrderMode && (
                     <div className="flex items-center gap-1">
                       <span className="text-xs text-[#9CA3AF]">RM</span>
-                      <Input
-                        type="number"
-                        onFocus={(e) => e.currentTarget.select()}
-                        min={0}
-                        step={0.01}
+                      <MoneyInput
                         value={cs.surchargeSen / 100}
-                        onChange={(e) =>
+                        onChange={(rm) =>
                           onUpdateCustomSpecial(idx, csIdx, {
-                            surchargeSen: Math.round(
-                              parseFloat(e.target.value || "0") * 100,
-                            ),
+                            surchargeSen: Math.round((rm ?? 0) * 100),
                           })
                         }
-                        className="h-8 w-24 text-right text-sm"
+                        className="h-8 w-24 text-sm"
                       />
                     </div>
                   )}

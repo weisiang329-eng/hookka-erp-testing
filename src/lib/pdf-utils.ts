@@ -94,10 +94,23 @@ export function drawLetterhead(
   // Document title block (right). House standard = DO/SI look: BLACK title,
   // clean hairline rule, no coloured accent bar (owner ruling: "单据统一用
   // DO/SI 当标准"). Tune the look HERE and every document follows.
-  doc.setTextColor(...PDF.ink);
+  //
+  // Auto-fit the title: start at 18pt and shrink (to a 11pt floor) until the
+  // right-aligned title clears the company name on the same band by >=4mm, so a
+  // long title (e.g. "CONSIGNMENT PACKING LIST") can never overlap the name.
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(18);
-  doc.text(opts.docTitle.toUpperCase(), pageW - m, 17, { align: "right" });
+  doc.setFontSize(12.5);
+  const companyNameRight = tx + doc.getTextWidth(co.name);
+  const titleUpper = opts.docTitle.toUpperCase();
+  let titleSize = 18;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(titleSize);
+  while (titleSize > 11 && pageW - m - doc.getTextWidth(titleUpper) < companyNameRight + 4) {
+    titleSize -= 0.5;
+    doc.setFontSize(titleSize);
+  }
+  doc.setTextColor(...PDF.ink);
+  doc.text(titleUpper, pageW - m, 17, { align: "right" });
   doc.setTextColor(...PDF.ink);
   doc.setFontSize(11);
   doc.text(opts.docNo, pageW - m, 24, { align: "right" });

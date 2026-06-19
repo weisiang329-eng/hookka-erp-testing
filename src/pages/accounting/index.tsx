@@ -4854,6 +4854,12 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     { accountCode: "", description: "", amount: "" },
   ]);
 
+  const [q, setQ] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"ALL" | "PAID" | "UNPAID" | "VOID">("ALL");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [bankFilter, setBankFilter] = useState("");
+
   const bankCash = accounts.filter(
     (a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH",
   );
@@ -4889,6 +4895,16 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     return Number.isFinite(v) ? Math.round(v * 100) : 0;
   };
   const totalSen = lines.reduce((s, l) => s + toSen(l.amount), 0);
+
+  const statusOf = (r: PvRow) => r.status === "VOID" ? "VOID" : (r.accrued === 1 && !r.settledAt ? "UNPAID" : "PAID");
+  const visibleRows = (rows ?? []).filter((r) => {
+    if (q.trim()) { const kw = q.toLowerCase(); if (![r.pvNo, r.payee ?? "", r.description ?? ""].some((s) => s.toLowerCase().includes(kw))) return false; }
+    if (statusFilter !== "ALL" && statusOf(r) !== statusFilter) return false;
+    if (dateFrom && r.date < dateFrom) return false;
+    if (dateTo && r.date > dateTo) return false;
+    if (bankFilter && (r.payFrom ?? "") !== bankFilter) return false;
+    return true;
+  });
 
   const handleSave = async () => {
     const body = {
@@ -4949,6 +4965,18 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     const j = asMutationResponse(await res.json());
     if (j?.success) { toast.success(`${row.pvNo} voided`); load(); }
     else toast.error(j?.error || "Void failed");
+  };
+
+  const startEdit = async (r: PvRow) => {
+    if (!window.confirm(`Edit ${r.pvNo}? It will be VOIDED and a new prefilled payment opened to repost.`)) return;
+    const res = await fetch(`/api/accounting/payment-vouchers/${r.id}/void`, { method: "POST" });
+    const j = asMutationResponse(await res.json());
+    if (!j?.success) { toast.error(j?.error || "Could not void the original"); return; }
+    setForm({ date: r.date, payee: r.payee ?? "", description: r.description ?? "", accrued: r.accrued === 1, payFrom: r.payFrom ?? "", accrualAccount: r.accrualAccount ?? "", productLine: r.productLine ?? "" });
+    setLines(r.lines.length ? r.lines.map((l) => ({ accountCode: l.accountCode, description: l.description ?? "", amount: (l.amountSen / 100).toFixed(2) })) : [{ accountCode: "", description: "", amount: "" }]);
+    setShowForm(true);
+    toast.success(`${r.pvNo} voided — edit and Save to repost`);
+    load();
   };
 
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
@@ -5052,6 +5080,20 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
         </Card>
       )}
 
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search PV no / payee / description" className="rounded-md border border-[#E2DDD8] px-3 py-1.5 text-sm w-64" />
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as "ALL" | "PAID" | "UNPAID" | "VOID")} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm">
+          <option value="ALL">All status</option><option value="PAID">Paid</option><option value="UNPAID">Unpaid (accrued)</option><option value="VOID">Void</option>
+        </select>
+        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+        <span className="text-xs text-[#9CA3AF]">→</span>
+        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+        <select value={bankFilter} onChange={(e) => setBankFilter(e.target.value)} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm">
+          <option value="">All banks</option>
+          {bankCash.map((b) => <option key={b.code} value={b.code}>{b.code} {b.name}</option>)}
+        </select>
+      </div>
+
       <Card>
         <CardContent className="p-0 overflow-x-auto">
           {rows === null ? (
@@ -5071,7 +5113,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
+                {visibleRows.map((r) => (
                   <tr key={r.id} className={`border-b border-[#F0ECE9] ${r.status === "VOID" ? "opacity-50" : ""}`}>
                     <td className="px-3 py-1.5 tabular-nums text-xs">{r.pvNo}</td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.date}</td>
@@ -5087,6 +5129,9 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                       {r.status === "VOID" ? "VOID" : r.accrued === 1 && !r.settledAt ? "UNPAID (accrued)" : "PAID"}
                     </td>
                     <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                      {r.status === "POSTED" && (
+                        <button onClick={() => startEdit(r)} className="text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3">edit</button>
+                      )}
                       {r.status === "POSTED" && r.accrued === 1 && !r.settledAt && (
                         <button onClick={() => handleSettle(r)} className="text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3">settle</button>
                       )}
@@ -5096,8 +5141,8 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     </td>
                   </tr>
                 ))}
-                {rows.length === 0 && (
-                  <tr><td colSpan={8} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No payments yet</td></tr>
+                {visibleRows.length === 0 && (
+                  <tr><td colSpan={8} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No payments match</td></tr>
                 )}
               </tbody>
             </table>

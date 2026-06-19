@@ -805,7 +805,7 @@ export default function PurchaseInvoicesPage() {
               setShowForm(true);
             }}
           >
-            <ScanLine className="h-4 w-4" /> Scan supplier document
+            <ScanLine className="h-4 w-4" /> Scan PI
           </Button>
           <Button variant="primary" onClick={() => setShowForm(true)}>
             <Plus className="h-4 w-4" /> Create Invoice

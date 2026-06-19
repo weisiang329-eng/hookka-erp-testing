@@ -2291,6 +2291,30 @@ app.put("/other-parties/:id", async (c) => {
   }
 });
 
+app.delete("/other-parties/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "delete");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+  const existing = await c.var.DB.prepare(
+    "SELECT id FROM other_parties WHERE id = ? AND orgId = ?",
+  ).bind(id, orgId).first<{ id: string }>();
+  if (!existing) return c.json({ success: false, error: "Party not found" }, 404);
+
+  const bill = await c.var.DB.prepare(
+    "SELECT id FROM other_party_bills WHERE partyId = ? AND orgId = ? LIMIT 1",
+  ).bind(id, orgId).first<{ id: string }>();
+  const pay = await c.var.DB.prepare(
+    "SELECT id FROM other_party_payments WHERE partyId = ? AND orgId = ? LIMIT 1",
+  ).bind(id, orgId).first<{ id: string }>();
+  if (bill || pay) {
+    return c.json({ success: false, error: "This party has bills or payments — deactivate it instead of deleting." }, 400);
+  }
+
+  await c.var.DB.prepare("DELETE FROM other_parties WHERE id = ? AND orgId = ?").bind(id, orgId).run();
+  return c.json({ success: true });
+});
+
 app.post("/other-party-bills", async (c) => {
   const denied = await requirePermission(c, "accounting", "create");
   if (denied) return denied;

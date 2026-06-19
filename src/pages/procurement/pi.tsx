@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,8 +9,7 @@ import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { Supplier, RawMaterial } from "@/types";
-import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
+import type { Supplier } from "@/types";
 import {
   FileText,
   Clock,
@@ -25,19 +24,8 @@ import {
   Filter,
   Download,
   Plus,
-  Trash2,
   ScanLine,
 } from "lucide-react";
-import {
-  ScanSupplierModal,
-  type SupplierExtraction,
-} from "@/components/scan-supplier-modal";
-
-function readErrorMessage(v: unknown): string | null {
-  if (!v || typeof v !== "object") return null;
-  const err = (v as { error?: unknown }).error;
-  return typeof err === "string" ? err : null;
-}
 
 // ============================================================
 // Types
@@ -58,440 +46,6 @@ type PurchaseInvoice = {
 };
 
 // ============================================================
-// PI FORM DIALOG (Create supplier invoice)
-//
-// The supplier-invoice twin of GRNFormDialog. The PI list previously had no
-// create entry point — PIs only appeared via the GRN "Convert to Invoice"
-// action. This dialog lets AP key a standalone supplier invoice (no GRN/PO
-// required: the backend POST /api/purchase-invoices accepts items[] with just
-// supplierId + supplierName) AND scan the supplier's invoice photo to auto-fill
-// the lines, giving OCR parity with GRN ("OCR 在 GRN 还有 PI 的").
-//
-// Line items mirror the backend PurchaseInvoiceItemInput shape: materialName +
-// supplierSku + qty + unitPrice (entered in RM, converted to sen on submit) +
-// lineType. All lines created here are STOCKED — fee/tax/rebate lines stay an
-// API-only concern for the GRN-conversion path.
-// ============================================================
-type PILineDraft = {
-  materialCode: string;
-  materialName: string;
-  supplierSku: string;
-  qty: number;
-  unitPriceRM: number;
-};
-
-function emptyPILine(): PILineDraft {
-  return {
-    materialCode: "",
-    materialName: "",
-    supplierSku: "",
-    qty: 1,
-    unitPriceRM: 0,
-  };
-}
-
-function PIFormDialog({
-  suppliers,
-  materialOptions,
-  onSave,
-  onClose,
-  autoScan,
-}: {
-  suppliers: Supplier[];
-  /** Active raw-materials catalog — suggestions for the line picker. */
-  materialOptions: MaterialOption[];
-  onSave: (data: Record<string, unknown>) => Promise<void> | void;
-  onClose: () => void;
-  /** When true, the supplier-document scan modal opens once on mount (header Scan entry point). */
-  autoScan?: boolean;
-}) {
-  const [supplierId, setSupplierId] = useState("");
-  const [invoiceDate, setInvoiceDate] = useState(
-    () => new Date().toISOString().split("T")[0],
-  );
-  const [remarks, setRemarks] = useState("");
-  const [lines, setLines] = useState<PILineDraft[]>([emptyPILine()]);
-  const [scanOpen, setScanOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  /* eslint-disable react-hooks/set-state-in-effect -- open the scan modal once on mount when launched from the header Scan button */
-  useEffect(() => {
-    if (autoScan) setScanOpen(true);
-    // run once on mount only
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  const supplier = suppliers.find((s) => s.id === supplierId);
-
-  const updateLine = (
-    idx: number,
-    field: keyof PILineDraft,
-    value: string | number,
-  ) => {
-    setLines((prev) => {
-      const next = [...prev];
-      next[idx] = { ...next[idx], [field]: value };
-      return next;
-    });
-  };
-  const addLine = () => setLines((prev) => [...prev, emptyPILine()]);
-  const removeLine = (idx: number) =>
-    setLines((prev) =>
-      prev.length === 1 ? [emptyPILine()] : prev.filter((_, i) => i !== idx),
-    );
-
-  // OCR apply — fill the PI lines from a scanned supplier invoice. A manually
-  // created PI starts with one blank row and no PO to match against, so the
-  // strategy is: for each scanned line, first try to fuzz-match an existing
-  // row the operator already typed (by supplier SKU / material name, same
-  // normalize-and-include rule as GRN) and fill its qty + unit price; if no row
-  // matches, APPEND it as a new line carrying description + code + qty + price.
-  // The operator still reviews every line and submits (no naked write).
-  const applyOcr = (ex: SupplierExtraction) => {
-    const norm = (s: string | null | undefined) =>
-      String(s ?? "")
-        .toUpperCase()
-        .replace(/[^A-Z0-9]/g, "");
-    setLines((prev) => {
-      // Drop a single pristine blank starter row so the first scanned line
-      // doesn't leave an empty row above it.
-      const seed = prev.filter(
-        (l) =>
-          l.materialName.trim() !== "" ||
-          l.supplierSku.trim() !== "" ||
-          l.materialCode.trim() !== "" ||
-          l.qty !== 1 ||
-          l.unitPriceRM !== 0,
-      );
-      const next = seed.map((l) => ({ ...l }));
-      for (const sl of ex.lines ?? []) {
-        const qty = Number(sl.qty) || 0;
-        const priceRM =
-          sl.unitPrice == null || Number.isNaN(Number(sl.unitPrice))
-            ? null
-            : Number(sl.unitPrice);
-        const codeN = norm(sl.supplierCode);
-        const descN = norm(sl.description);
-        const hitIdx = next.findIndex((l) => {
-          const sku = norm(l.supplierSku || l.materialCode);
-          const nm = norm(l.materialName);
-          const codeHit =
-            !!codeN &&
-            !!sku &&
-            (sku === codeN || sku.includes(codeN) || codeN.includes(sku));
-          const nameHit =
-            !!descN && !!nm && (nm.includes(descN) || descN.includes(nm));
-          return codeHit || nameHit;
-        });
-        if (hitIdx >= 0) {
-          next[hitIdx] = {
-            ...next[hitIdx],
-            qty: qty > 0 ? qty : next[hitIdx].qty,
-            unitPriceRM: priceRM != null ? priceRM : next[hitIdx].unitPriceRM,
-          };
-        } else {
-          // When the scanned line has neither a description nor a supplier
-          // code we still APPEND it (with qty/price) so the operator sees the
-          // row — but an empty materialName would be silently dropped by the
-          // validLines filter at submit (operator saw the row, PI omits it).
-          // Seed a visible placeholder name instead: it passes the non-empty
-          // filter AND prompts the operator to fill in the real name before
-          // submit. No data loss.
-          next.push({
-            materialCode: "",
-            materialName:
-              sl.description?.trim() ||
-              sl.supplierCode?.trim() ||
-              "(Scanned item - add name)",
-            supplierSku: sl.supplierCode?.trim() || "",
-            qty: qty > 0 ? qty : 1,
-            unitPriceRM: priceRM != null ? priceRM : 0,
-          });
-        }
-      }
-      return next.length > 0 ? next : [emptyPILine()];
-    });
-  };
-
-  const validLines = lines.filter((l) => l.materialName.trim() !== "");
-  const totalRM = validLines.reduce(
-    (s, l) => s + (Number(l.qty) || 0) * (Number(l.unitPriceRM) || 0),
-    0,
-  );
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!supplier || validLines.length === 0 || saving) return;
-    setSaving(true);
-    try {
-      await onSave({
-        supplierId: supplier.id,
-        supplierName: supplier.name,
-        invoiceDate,
-        remarks,
-        items: validLines.map((l) => ({
-          materialCode: l.materialCode.trim() || null,
-          materialName: l.materialName.trim(),
-          supplierSku: l.supplierSku.trim() || null,
-          qty: Number(l.qty) || 0,
-          // Backend stores unit price in sen; the form keys RM.
-          unitPriceSen: Math.round((Number(l.unitPriceRM) || 0) * 100),
-          lineType: "STOCKED" as const,
-        })),
-      });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between p-6 border-b border-[#E2DDD8]">
-          <h2 className="text-lg font-semibold text-[#1F1D1B]">
-            Create Purchase Invoice
-          </h2>
-          <Button variant="ghost" size="icon" onClick={onClose}>
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">
-                Supplier *
-              </label>
-              <select
-                className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
-                value={supplierId}
-                onChange={(e) => setSupplierId(e.target.value)}
-                required
-              >
-                <option value="">Select supplier...</option>
-                {suppliers.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">
-                Invoice Date *
-              </label>
-              <Input
-                type="date"
-                value={invoiceDate}
-                onChange={(e) => setInvoiceDate(e.target.value)}
-                required
-              />
-            </div>
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-semibold text-[#1F1D1B]">
-                Items - Enter Quantities & Unit Prices
-              </h3>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setScanOpen(true)}
-                title="Snap/upload a supplier invoice to auto-fill code, qty, and unit price"
-              >
-                <ScanLine className="h-4 w-4" /> Scan supplier document
-              </Button>
-            </div>
-            <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
-              <table className="w-full text-sm">
-                <thead className="bg-[#F0ECE9]">
-                  <tr>
-                    <th className="text-left px-3 py-2 font-medium text-[#374151]">
-                      Description
-                    </th>
-                    <th className="text-left px-3 py-2 font-medium text-[#374151] w-32">
-                      Supplier SKU
-                    </th>
-                    <th className="text-right px-3 py-2 font-medium text-[#374151] w-24">
-                      Qty
-                    </th>
-                    <th className="text-right px-3 py-2 font-medium text-[#374151] w-28">
-                      Unit Price (RM)
-                    </th>
-                    <th className="text-right px-3 py-2 font-medium text-[#374151] w-28">
-                      Line Total
-                    </th>
-                    <th className="w-8" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {lines.map((line, idx) => {
-                    const lineTotal =
-                      (Number(line.qty) || 0) * (Number(line.unitPriceRM) || 0);
-                    return (
-                      <tr key={idx} className="border-t border-[#E2DDD8]">
-                        <td className="px-2 py-1.5">
-                          {/* Catalog picker — suggests raw materials by code
-                              OR name and fills BOTH the code and the name on
-                              pick. Still free-text: a supplier invoice can
-                              list off-catalog materials, so a typed value is
-                              kept verbatim (no hard-block, no normalize). */}
-                          <MaterialPicker
-                            className="h-8"
-                            inputClassName="h-8"
-                            placeholder="Search code or name…"
-                            value={line.materialName}
-                            options={materialOptions}
-                            onPick={(o) =>
-                              setLines((prev) => {
-                                const next = [...prev];
-                                next[idx] = {
-                                  ...next[idx],
-                                  materialCode: o.itemCode,
-                                  materialName: o.description,
-                                };
-                                return next;
-                              })
-                            }
-                            onTyped={(text) =>
-                              updateLine(idx, "materialName", text)
-                            }
-                          />
-                        </td>
-                        <td className="px-2 py-1.5">
-                          <Input
-                            className="h-8"
-                            placeholder="SKU"
-                            value={line.supplierSku}
-                            onChange={(e) =>
-                              updateLine(idx, "supplierSku", e.target.value)
-                            }
-                          />
-                        </td>
-                        <td className="px-2 py-1.5">
-                          <Input
-                            type="number"
-                            min={0}
-                            onFocus={(e) => e.currentTarget.select()}
-                            className="h-8 w-20 text-right ml-auto"
-                            value={line.qty}
-                            onChange={(e) =>
-                              updateLine(idx, "qty", Number(e.target.value))
-                            }
-                          />
-                        </td>
-                        <td className="px-2 py-1.5">
-                          <Input
-                            type="number"
-                            min={0}
-                            step="0.01"
-                            onFocus={(e) => e.currentTarget.select()}
-                            className="h-8 w-24 text-right ml-auto"
-                            value={line.unitPriceRM}
-                            onChange={(e) =>
-                              updateLine(
-                                idx,
-                                "unitPriceRM",
-                                Number(e.target.value),
-                              )
-                            }
-                          />
-                        </td>
-                        <td className="px-3 py-1.5 text-right font-medium text-[#1F1D1B]">
-                          {lineTotal.toLocaleString("en-MY", {
-                            minimumFractionDigits: 2,
-                            maximumFractionDigits: 2,
-                          })}
-                        </td>
-                        <td className="px-1 py-1.5 text-center">
-                          <button
-                            type="button"
-                            className="text-[#9CA3AF] hover:text-[#9A3A2D]"
-                            onClick={() => removeLine(idx)}
-                            title="Delete this line"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-                <tfoot>
-                  <tr className="bg-[#F0ECE9]">
-                    <td colSpan={4} className="px-3 py-2 font-semibold text-[#374151]">
-                      Total
-                    </td>
-                    <td className="px-3 py-2 text-right font-bold text-[#6B5C32]">
-                      {totalRM.toLocaleString("en-MY", {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}
-                    </td>
-                    <td />
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="mt-2"
-              onClick={addLine}
-            >
-              <Plus className="h-4 w-4" /> Add line
-            </Button>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-[#374151] mb-1">
-              Remarks
-            </label>
-            <Input
-              value={remarks}
-              onChange={(e) => setRemarks(e.target.value)}
-              placeholder="Optional notes..."
-            />
-          </div>
-
-          <div className="flex justify-end gap-3 pt-4 border-t border-[#E2DDD8]">
-            <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={!supplier || validLines.length === 0 || saving}
-            >
-              {saving ? "Creating…" : "Create Invoice"}
-            </Button>
-          </div>
-        </form>
-        <ScanSupplierModal
-          open={scanOpen}
-          onClose={() => setScanOpen(false)}
-          supplierId={supplier?.id ?? null}
-          supplierName={supplier?.name ?? null}
-          poContext={
-            validLines.length > 0
-              ? validLines
-                  .map((l) => `${l.supplierSku || ""} ${l.materialName || ""}`.trim())
-                  .filter(Boolean)
-                  .join("\n")
-              : undefined
-          }
-          onApply={applyOcr}
-        />
-      </div>
-    </div>
-  );
-}
-
-// ============================================================
 // STATUS OPTIONS
 // ============================================================
 const ALL_PI_STATUSES = [
@@ -508,12 +62,6 @@ const ALL_PI_STATUSES = [
 export default function PurchaseInvoicesPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
-
-  // Create dialog
-  const [showForm, setShowForm] = useState(false);
-  // When the form is opened from the header "Scan supplier document" button,
-  // auto-open its scan modal on mount. Reset on close.
-  const [autoScan, setAutoScan] = useState(false);
 
   // Filters
   const [filterStatus, setFilterStatus] = useState("");
@@ -546,53 +94,9 @@ export default function PurchaseInvoicesPage() {
     () => supResp?.data ?? [],
     [supResp],
   );
-  // Raw-materials catalog — powers the line "Description" picker so operators
-  // pick from the catalog instead of free-typing. Same /api/inventory cache the
-  // PO create + detail pages warm, so this is usually already loaded.
-  const { data: invResp } = useCachedJson<{
-    success?: boolean;
-    data?: { rawMaterials?: RawMaterial[] };
-  }>("/api/inventory");
-  const materialOptions: MaterialOption[] = useMemo(
-    () =>
-      (invResp?.success ? invResp.data?.rawMaterials ?? [] : [])
-        .filter((rm) => rm.isActive)
-        .map((rm) => ({ itemCode: rm.itemCode, description: rm.description })),
-    [invResp],
-  );
   // Purchase Company letterhead registry — print each PI under its supplier's
   // buying company (accounting stays HOOKKA).
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
-
-  const handleCreatePI = useCallback(
-    async (data: Record<string, unknown>) => {
-      try {
-        const res = await fetch("/api/purchase-invoices", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(data),
-        });
-        const j = (await res.json().catch(() => null)) as
-          | { success?: boolean; error?: string; data?: { piNo?: string } }
-          | null;
-        if (!res.ok || !j?.success) {
-          toast.error(readErrorMessage(j) || "Failed to create invoice");
-          return;
-        }
-        invalidateCachePrefix("/api/purchase-invoices");
-        fetchData();
-        setShowForm(false);
-        toast.success(
-          j.data?.piNo
-            ? `Invoice ${j.data.piNo} created`
-            : "Purchase invoice created",
-        );
-      } catch {
-        toast.error("Failed to create invoice");
-      }
-    },
-    [toast, fetchData],
-  );
 
   const updateStatus = useCallback(
     async (id: string, nextStatus: PIStatus, extra?: Record<string, unknown>) => {
@@ -800,14 +304,11 @@ export default function PurchaseInvoicesPage() {
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
-            onClick={() => {
-              setAutoScan(true);
-              setShowForm(true);
-            }}
+            onClick={() => navigate("/procurement/pi/create?scan=1")}
           >
             <ScanLine className="h-4 w-4" /> Scan PI
           </Button>
-          <Button variant="primary" onClick={() => setShowForm(true)}>
+          <Button variant="primary" onClick={() => navigate("/procurement/pi/create")}>
             <Plus className="h-4 w-4" /> Create Invoice
           </Button>
         </div>
@@ -966,19 +467,6 @@ export default function PurchaseInvoicesPage() {
         </CardContent>
       </Card>
 
-      {/* Create PI Dialog */}
-      {showForm && (
-        <PIFormDialog
-          suppliers={suppliers}
-          materialOptions={materialOptions}
-          autoScan={autoScan}
-          onSave={handleCreatePI}
-          onClose={() => {
-            setShowForm(false);
-            setAutoScan(false);
-          }}
-        />
-      )}
     </div>
   );
 }

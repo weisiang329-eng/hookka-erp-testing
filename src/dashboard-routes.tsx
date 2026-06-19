@@ -70,6 +70,7 @@ const GRNDetail = lazy(() => import('./pages/procurement/grn-detail'))
 const InTransit = lazy(() => import('./pages/procurement/in-transit'))
 const ProcurementMaintenance = lazy(() => import('./pages/procurement/maintenance'))
 const PI = lazy(() => import('./pages/procurement/pi'))
+const PICreate = lazy(() => import('./pages/procurement/pi/create'))
 const PIDetail = lazy(() => import('./pages/procurement/PurchaseInvoiceDetail'))
 const ProcurementPricing = lazy(() => import('./pages/procurement/pricing'))
 const SupplierDetail = lazy(() => import('./pages/suppliers/detail'))
@@ -338,6 +339,9 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/procurement/in-transit', element: <S><InTransit /></S> },
   { path: '/procurement/maintenance', element: <S><ProcurementMaintenance /></S> },
   { path: '/procurement/pi', element: <S><PI /></S> },
+  // /procurement/pi/create must come before /procurement/pi/:id so React
+  // Router matches the literal "create" path first (same pattern as /procurement/create).
+  { path: '/procurement/pi/create', element: <S><PICreate /></S> },
   { path: '/procurement/pi/:id', element: <S><PIDetail /></S> },
   { path: '/procurement/pricing', element: <S><ProcurementPricing /></S> },
 

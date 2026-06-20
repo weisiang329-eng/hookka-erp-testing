@@ -20,7 +20,13 @@
   --color-accent-amber: #D97706;
   --color-accent-red: #DC2626;
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+  /* Code / number fields (.font-mono) follow the main UI font — the previous
+     "JetBrains Mono"/"Fira Code" stack was never loaded as a web font, so codes
+     like "AVANI 01" fell back to the OS default monospace (Courier-ish) and
+     looked off vs the rest of the app (owner 2026-06-20). The .font-mono class
+     still applies slashed-zero + tabular figures so "0" can't be misread as
+     "O" on documents — only the family changes to match --font-sans. */
+  --font-mono: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
 body {

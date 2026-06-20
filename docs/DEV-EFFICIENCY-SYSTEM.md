@@ -49,6 +49,23 @@ This is non-negotiable and overrides the urge to "just start coding the first th
 
 ---
 
+## How this stays current (self-maintenance)
+
+The CoE is **not** a one-time snapshot — it stays current by two no-cost mechanisms (chosen
+over a token-burning scheduled re-scan):
+
+1. **Update-on-touch.** Whenever you work a module, refresh its `NAVIGATION-MAP` entry as a
+   byproduct — you're already in those files. Line numbers drift as files grow; the section
+   *names* stay stable, so grep the named function near the listed line if it's off by a bit.
+2. **Knowledge self-growth.** Every bug → `BUG-HISTORY.md` + a regression test; a task done
+   3+ times → a new `PLAYBOOKS` entry; a new trap → `HOOKKA-GOTCHAS.md`.
+
+*Optional, OFF by default (costs tokens):* a scheduled monthly re-run of the mapping workflow
+for a full line-number refresh + auto-pickup of new modules. Turn on only if hands-off
+automation is worth the token cost.
+
+---
+
 ## What else do big ERPs / CoEs have? (the full menu — what we have / build / skip)
 
 | ERP / CoE asset | Plain meaning | Us |

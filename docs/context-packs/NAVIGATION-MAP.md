@@ -3,6 +3,10 @@
 Look up the module here BEFORE searching the repo — go straight to the listed files and line ranges.
 Built to cut token usage: open the named file at the named line range instead of grepping the codebase.
 
+> **Keeping it fresh (update-on-touch):** line numbers drift as files grow — when you edit a
+> module, refresh its entry here as a byproduct. The section *names* stay stable even when the
+> exact line moves, so grep the named function/section near the listed line if it's off by a bit.
+
 ---
 
 ## Sales (Sales Orders + Consignment Orders/Notes + Sofa Combos)

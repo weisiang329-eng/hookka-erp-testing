@@ -457,57 +457,107 @@ export default function InvoiceDetailPage() {
         }
       />
 
+      {/* KPI Strip — Total / Paid / Balance */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <Card className="border-[#E2DDD8]">
+          <CardContent className="p-5">
+            <p className="text-xs font-semibold text-[#9CA3AF] uppercase tracking-wide mb-2">
+              Invoice Total
+            </p>
+            <p className="text-2xl font-bold text-[#1F1D1B] tabular-nums">
+              {formatCurrency(invoice.totalSen)}
+            </p>
+            <p className="text-xs text-[#9CA3AF] mt-1">
+              {invoice.items.length} line{invoice.items.length !== 1 ? "s" : ""} · {totalQty} units
+            </p>
+          </CardContent>
+        </Card>
+        <Card className="border-[#E2DDD8]">
+          <CardContent className="p-5">
+            <p className="text-xs font-semibold text-[#9CA3AF] uppercase tracking-wide mb-2">
+              Amount Paid
+            </p>
+            <p className="text-2xl font-bold text-[#16A34A] tabular-nums">
+              {invoice.paidAmount > 0 ? formatCurrency(invoice.paidAmount) : "RM 0.00"}
+            </p>
+            <p className="text-xs text-[#9CA3AF] mt-1">
+              {payments.length > 0
+                ? `${payments.length} payment${payments.length !== 1 ? "s" : ""} recorded`
+                : "No payments yet"}
+            </p>
+          </CardContent>
+        </Card>
+        <Card className={`border-2 ${balanceSen > 0 ? "border-[#DC2626]/30 bg-[#FEF2F2]" : "border-[#16A34A]/30 bg-[#F0FDF4]"}`}>
+          <CardContent className="p-5">
+            <p className="text-xs font-semibold text-[#9CA3AF] uppercase tracking-wide mb-2">
+              Balance Due
+            </p>
+            <p className={`text-2xl font-bold tabular-nums ${balanceSen > 0 ? "text-[#DC2626]" : "text-[#16A34A]"}`}>
+              {balanceSen > 0 ? formatCurrency(balanceSen) : "PAID"}
+            </p>
+            <p className="text-xs text-[#9CA3AF] mt-1">
+              {balanceSen > 0
+                ? `Due ${formatDate(invoice.dueDate)}`
+                : "Fully settled"}
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
         {/* Left Column: Invoice Info */}
         <div className="lg:col-span-2 space-y-6">
-          {/* Company & Customer Info */}
-          <Card>
-            <CardContent className="p-6">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                {/* From */}
-                <div>
-                  <div className="flex items-center gap-2 mb-3">
-                    <Building2 className="h-4 w-4 text-[#6B5C32]" />
-                    <h3 className="text-sm font-bold text-[#6B5C32] uppercase">
-                      From
-                    </h3>
-                  </div>
-                  <p className="font-bold text-[#1F1D1B]">
-                    HOOKKA INDUSTRIES SDN BHD
-                  </p>
-                  <p className="text-xs text-[#6B7280]">
-                    Manufacturer of Premium Upholstered Furniture
-                  </p>
-                  <p className="text-xs text-[#6B7280]">
-                    Tel: +60X-XXXXXXX
-                  </p>
+          {/* From + Bill To as side-by-side cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* From */}
+            <Card>
+              <CardContent className="p-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <Building2 className="h-4 w-4 text-[#6B5C32]" />
+                  <h3 className="text-xs font-bold text-[#6B5C32] uppercase tracking-wide">
+                    From
+                  </h3>
                 </div>
+                <p className="font-bold text-[#1F1D1B] text-base">
+                  HOOKKA INDUSTRIES SDN BHD
+                </p>
+                <p className="text-sm text-[#6B7280] mt-1">
+                  Manufacturer of Premium Upholstered Furniture
+                </p>
+                <p className="text-sm text-[#6B7280]">
+                  Tel: +60X-XXXXXXX
+                </p>
+              </CardContent>
+            </Card>
 
-                {/* Bill To */}
-                <div>
-                  <div className="flex items-center gap-2 mb-3">
-                    <Building2 className="h-4 w-4 text-[#6B5C32]" />
-                    <h3 className="text-sm font-bold text-[#6B5C32] uppercase">
-                      Bill To
-                    </h3>
-                  </div>
-                  <p className="font-bold text-[#1F1D1B]">
-                    {invoice.customerName}
-                  </p>
-                  <p className="text-xs text-[#6B7280]">
-                    State: {invoice.customerState}
-                  </p>
+            {/* Bill To */}
+            <Card>
+              <CardContent className="p-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <Building2 className="h-4 w-4 text-[#6B5C32]" />
+                  <h3 className="text-xs font-bold text-[#6B5C32] uppercase tracking-wide">
+                    Bill To
+                  </h3>
                 </div>
-              </div>
-            </CardContent>
-          </Card>
+                <p className="font-bold text-[#1F1D1B] text-base">
+                  {invoice.customerName}
+                </p>
+                <p className="text-sm text-[#6B7280] mt-1">
+                  {invoice.customerState}
+                </p>
+              </CardContent>
+            </Card>
+          </div>
 
           {/* Invoice Dates & References */}
           <Card>
             <CardContent className="p-6">
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+              <h3 className="text-xs font-bold text-[#6B5C32] uppercase tracking-wide mb-4">
+                Invoice Details
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-6">
                 <div>
-                  <div className="flex items-center gap-1.5 mb-1">
+                  <div className="flex items-center gap-1.5 mb-2">
                     <Calendar className="h-3.5 w-3.5 text-[#9CA3AF]" />
                     <p className="text-xs text-[#9CA3AF] uppercase">Invoice Date</p>
                   </div>
@@ -516,7 +566,7 @@ export default function InvoiceDetailPage() {
                   </p>
                 </div>
                 <div>
-                  <div className="flex items-center gap-1.5 mb-1">
+                  <div className="flex items-center gap-1.5 mb-2">
                     <Calendar className="h-3.5 w-3.5 text-[#9CA3AF]" />
                     <p className="text-xs text-[#9CA3AF] uppercase">Due Date</p>
                   </div>
@@ -524,7 +574,7 @@ export default function InvoiceDetailPage() {
                     className={`font-medium ${
                       new Date(invoice.dueDate) < new Date() &&
                       !["PAID", "CANCELLED"].includes(invoice.status)
-                        ? "text-[#9A3A2D]"
+                        ? "text-[#DC2626]"
                         : "text-[#1F1D1B]"
                     }`}
                   >
@@ -532,13 +582,20 @@ export default function InvoiceDetailPage() {
                   </p>
                 </div>
                 <div>
-                  <div className="flex items-center gap-1.5 mb-1">
+                  <div className="flex items-center gap-1.5 mb-2">
                     <Package className="h-3.5 w-3.5 text-[#9CA3AF]" />
                     <p className="text-xs text-[#9CA3AF] uppercase">DO Ref</p>
                   </div>
                   <p className="font-medium text-[#1F1D1B] doc-number">
                     {invoice.doNo}
                   </p>
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <FileText className="h-3.5 w-3.5 text-[#9CA3AF]" />
+                    <p className="text-xs text-[#9CA3AF] uppercase">Status</p>
+                  </div>
+                  <Badge variant="status" status={invoice.status} />
                 </div>
               </div>
             </CardContent>
@@ -549,37 +606,40 @@ export default function InvoiceDetailPage() {
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <FileText className="h-5 w-5 text-[#6B5C32]" />
-                Items ({invoice.items.length} lines, {totalQty} qty)
+                Line Items
+                <span className="text-sm font-normal text-[#9CA3AF]">
+                  — {invoice.items.length} line{invoice.items.length !== 1 ? "s" : ""}, {totalQty} units
+                </span>
               </CardTitle>
             </CardHeader>
-            <CardContent>
+            <CardContent className="pt-0">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                      <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
+                    <tr className="border-b-2 border-[#E2DDD8] bg-[#F0ECE9]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
                         #
                       </th>
-                      <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
                         SO
                       </th>
-                      <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
                         Product
                       </th>
-                      <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
                         Size
                       </th>
-                      <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
                         Fabric
                       </th>
-                      <th className="text-right py-2 px-3 text-xs font-bold text-[#4B5563]">
+                      <th className="text-right py-3 px-4 text-xs font-bold text-[#4B5563]">
                         Qty
                       </th>
-                      <th className="text-right py-2 px-3 text-xs font-bold text-[#4B5563]">
+                      <th className="text-right py-3 px-4 text-xs font-bold text-[#4B5563]">
                         Unit Price
                       </th>
-                      <th className="text-right py-2 px-3 text-xs font-bold text-[#4B5563]">
-                        Total
+                      <th className="text-right py-3 px-4 text-xs font-bold text-[#4B5563]">
+                        Line Total
                       </th>
                     </tr>
                   </thead>
@@ -661,53 +721,53 @@ export default function InvoiceDetailPage() {
                           key={item.id}
                           className="border-b border-[#E2DDD8] hover:bg-[#F0ECE9]/50"
                         >
-                          <td className="py-2.5 px-3 text-[#9CA3AF] align-top">
+                          <td className="py-3.5 px-4 text-[#9CA3AF] align-top">
                             {idx + 1}
                           </td>
-                          <td className="py-2.5 px-3 align-top doc-number font-medium text-[#1F1D1B] whitespace-nowrap">
+                          <td className="py-3.5 px-4 align-top doc-number font-medium text-[#1F1D1B] whitespace-nowrap">
                             {companySO}
                           </td>
-                          <td className="py-2.5 px-3 align-top">
+                          <td className="py-3.5 px-4 align-top">
                             <p className="font-medium text-[#1F1D1B]">
                               {item.productName}
                             </p>
-                            <p className="text-xs text-[#9CA3AF]">
+                            <p className="text-xs text-[#9CA3AF] mt-0.5">
                               {item.productCode}
                             </p>
                             {refBits && (
-                              <p className="text-[11px] text-[#6B7280] mt-0.5 tabular-nums">
+                              <p className="text-[11px] text-[#6B7280] mt-1 tabular-nums">
                                 {refBits}
                               </p>
                             )}
                             {specBits && (
-                              <p className="text-[11px] text-[#9CA3AF]">
+                              <p className="text-[11px] text-[#9CA3AF] mt-0.5">
                                 {specBits}
                               </p>
                             )}
                           </td>
-                          <td className="py-2.5 px-3 text-[#4B5563] align-top">
+                          <td className="py-3.5 px-4 text-[#4B5563] align-top whitespace-nowrap">
                             {item.sizeLabel}
                           </td>
-                          <td className="py-2.5 px-3 text-[#4B5563] align-top whitespace-nowrap">
+                          <td className="py-3.5 px-4 text-[#4B5563] align-top whitespace-nowrap">
                             {item.fabricCode}
                           </td>
-                          <td className="py-2.5 px-3 text-right font-medium text-[#1F1D1B] align-top">
+                          <td className="py-3.5 px-4 text-right font-medium text-[#1F1D1B] align-top tabular-nums">
                             {item.quantity}
                           </td>
-                          <td className="py-2.5 px-3 text-right text-[#4B5563] align-top">
+                          <td className="py-3.5 px-4 text-right text-[#4B5563] align-top">
                             {editingPrices ? (
-                              <div className="space-y-1">
+                              <div className="space-y-1.5">
                                 {priceInput("Base", "base")}
                                 {priceInput("Divan", "divan")}
                                 {priceInput("Leg", "leg")}
                                 {priceInput("Special", "special")}
-                                <p className="text-[11px] text-[#6B5C32] font-medium pt-0.5">
+                                <p className="text-[11px] text-[#6B5C32] font-medium pt-1">
                                   Unit {formatCurrency(liveUnit)}
                                 </p>
                               </div>
                             ) : ex &&
                               (ex.divanSen || ex.legSen || ex.specialSen) ? (
-                              <div className="text-xs leading-relaxed">
+                              <div className="text-xs leading-relaxed tabular-nums">
                                 <div>Base {formatCurrency(ex.baseSen)}</div>
                                 {!!ex.divanSen && (
                                   <div>+ Divan {formatCurrency(ex.divanSen)}</div>
@@ -720,15 +780,15 @@ export default function InvoiceDetailPage() {
                                     + Special {formatCurrency(ex.specialSen)}
                                   </div>
                                 )}
-                                <div className="font-medium text-[#1F1D1B]">
+                                <div className="font-semibold text-[#1F1D1B] border-t border-[#E2DDD8] pt-0.5 mt-0.5">
                                   = {formatCurrency(liveUnit)}
                                 </div>
                               </div>
                             ) : (
-                              formatCurrency(liveUnit)
+                              <span className="tabular-nums">{formatCurrency(liveUnit)}</span>
                             )}
                           </td>
-                          <td className="py-2.5 px-3 text-right font-medium text-[#1F1D1B] align-top">
+                          <td className="py-3.5 px-4 text-right font-semibold text-[#1F1D1B] align-top tabular-nums">
                             {formatCurrency(liveUnit * qty)}
                           </td>
                         </tr>
@@ -754,22 +814,22 @@ export default function InvoiceDetailPage() {
                           <tr className="border-t-2 border-[#E2DDD8]">
                             <td
                               colSpan={7}
-                              className="py-2.5 px-3 text-right font-medium text-[#6B7280]"
+                              className="py-3 px-4 text-right font-medium text-[#6B7280]"
                             >
                               Subtotal
                             </td>
-                            <td className="py-2.5 px-3 text-right font-medium text-[#1F1D1B]">
+                            <td className="py-3 px-4 text-right font-medium text-[#1F1D1B] tabular-nums">
                               {formatCurrency(liveSubtotal)}
                             </td>
                           </tr>
                           <tr className="bg-[#F0ECE9]">
                             <td
                               colSpan={7}
-                              className="py-3 px-3 text-right font-bold text-[#6B5C32]"
+                              className="py-4 px-4 text-right font-bold text-[#6B5C32] text-base"
                             >
                               TOTAL
                             </td>
-                            <td className="py-3 px-3 text-right font-bold text-[#6B5C32] text-lg">
+                            <td className="py-4 px-4 text-right font-bold text-[#6B5C32] text-xl tabular-nums">
                               {formatCurrency(liveSubtotal)}
                             </td>
                           </tr>
@@ -787,32 +847,35 @@ export default function InvoiceDetailPage() {
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Clock className="h-5 w-5 text-[#6B5C32]" />
-                Payment History ({payments.length})
+                Payment History
+                <span className="text-sm font-normal text-[#9CA3AF]">
+                  — {payments.length} record{payments.length !== 1 ? "s" : ""}
+                </span>
               </CardTitle>
             </CardHeader>
-            <CardContent>
+            <CardContent className="pt-0">
               {payments.length === 0 ? (
-                <p className="text-sm text-[#9CA3AF] text-center py-6">
+                <p className="text-sm text-[#9CA3AF] text-center py-8">
                   No payments recorded yet.
                 </p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
-                      <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                        <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
+                      <tr className="border-b-2 border-[#E2DDD8] bg-[#F0ECE9]">
+                        <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
                           #
                         </th>
-                        <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
+                        <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
                           Date
                         </th>
-                        <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
+                        <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
                           Method
                         </th>
-                        <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
+                        <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
                           Reference
                         </th>
-                        <th className="text-right py-2 px-3 text-xs font-bold text-[#4B5563]">
+                        <th className="text-right py-3 px-4 text-xs font-bold text-[#4B5563]">
                           Amount
                         </th>
                       </tr>
@@ -823,28 +886,28 @@ export default function InvoiceDetailPage() {
                           key={payment.id}
                           className="border-b border-[#E2DDD8] hover:bg-[#F0ECE9]/50"
                         >
-                          <td className="py-2.5 px-3 text-[#9CA3AF]">{idx + 1}</td>
-                          <td className="py-2.5 px-3 text-[#4B5563]">
+                          <td className="py-3.5 px-4 text-[#9CA3AF]">{idx + 1}</td>
+                          <td className="py-3.5 px-4 text-[#4B5563]">
                             {formatDate(payment.date)}
                           </td>
-                          <td className="py-2.5 px-3 text-[#4B5563]">
+                          <td className="py-3.5 px-4 text-[#4B5563]">
                             {payment.method.replace(/_/g, " ")}
                           </td>
-                          <td className="py-2.5 px-3 text-[#4B5563] font-mono text-xs">
+                          <td className="py-3.5 px-4 text-[#4B5563] font-mono text-xs">
                             {payment.reference || "-"}
                           </td>
-                          <td className="py-2.5 px-3 text-right font-medium text-[#4F7C3A]">
+                          <td className="py-3.5 px-4 text-right font-semibold text-[#16A34A] tabular-nums">
                             {formatCurrency(payment.amountSen)}
                           </td>
                         </tr>
                       ))}
                     </tbody>
                     <tfoot>
-                      <tr className="border-t-2 border-[#E2DDD8]">
-                        <td colSpan={4} className="py-2.5 px-3 text-right font-bold text-[#6B7280]">
+                      <tr className="border-t-2 border-[#E2DDD8] bg-[#F0ECE9]">
+                        <td colSpan={4} className="py-3 px-4 text-right font-bold text-[#6B7280]">
                           Total Paid
                         </td>
-                        <td className="py-2.5 px-3 text-right font-bold text-[#4F7C3A]">
+                        <td className="py-3 px-4 text-right font-bold text-[#16A34A] tabular-nums">
                           {formatCurrency(payments.reduce((s, p) => s + p.amountSen, 0))}
                         </td>
                       </tr>
@@ -965,64 +1028,24 @@ export default function InvoiceDetailPage() {
           </Card>
         </div>
 
-        {/* Right Column: Payment Summary */}
+        {/* Right Column: Actions + Status */}
         <div className="space-y-6">
-          {/* Payment Summary */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <DollarSign className="h-5 w-5 text-[#6B5C32]" />
-                Payment Summary
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-[#6B7280]">Total Amount</span>
-                <span className="font-bold text-[#1F1D1B]">
-                  {formatCurrency(invoice.totalSen)}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-[#6B7280]">Paid</span>
-                <span className="font-bold text-[#4F7C3A]">
-                  {invoice.paidAmount > 0
-                    ? formatCurrency(invoice.paidAmount)
-                    : "-"}
-                </span>
-              </div>
-              <div className="border-t border-[#E2DDD8] pt-3 flex justify-between items-center">
-                <span className="text-sm font-bold text-[#1F1D1B]">Balance Due</span>
-                <span
-                  className={`text-lg font-bold ${
-                    balanceSen > 0 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"
-                  }`}
-                >
-                  {balanceSen > 0 ? formatCurrency(balanceSen) : "PAID"}
-                </span>
-              </div>
-
-              {invoice.paymentDate && (
-                <div className="border-t border-[#E2DDD8] pt-3 space-y-2">
-                  <div className="flex justify-between">
-                    <span className="text-xs text-[#9CA3AF]">Last Payment Date</span>
-                    <span className="text-sm text-[#4B5563]">
-                      {formatDate(invoice.paymentDate)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-xs text-[#9CA3AF]">Payment Method</span>
-                    <span className="text-sm text-[#4B5563]">
-                      {invoice.paymentMethod.replace(/_/g, " ")}
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {/* Record Payment Button */}
-              {(invoice.status === "SENT" || invoice.status === "PARTIAL_PAID") && (
+          {/* Record Payment — shown only when there's an outstanding balance */}
+          {(invoice.status === "SENT" || invoice.status === "PARTIAL_PAID") && (
+            <Card className="border-[#6B5C32]/30 bg-[#FAF9F7]">
+              <CardContent className="p-5">
+                <p className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide mb-3">
+                  Outstanding Balance
+                </p>
+                <p className="text-3xl font-bold text-[#DC2626] tabular-nums mb-1">
+                  {formatCurrency(balanceSen)}
+                </p>
+                <p className="text-xs text-[#9CA3AF] mb-4">
+                  Due {formatDate(invoice.dueDate)}
+                </p>
                 <Button
                   variant="primary"
-                  className="w-full mt-2"
+                  className="w-full"
                   onClick={() => {
                     setPaymentAmount(String(balanceSen / 100));
                     setPaymentDate(new Date().toISOString().split("T")[0]);
@@ -1033,17 +1056,49 @@ export default function InvoiceDetailPage() {
                   <CreditCard className="h-4 w-4" />
                   Record Payment
                 </Button>
-              )}
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Last payment details — shown when a payment has been recorded */}
+          {invoice.paymentDate && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <DollarSign className="h-5 w-5 text-[#6B5C32]" />
+                  Last Payment
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-[#9CA3AF]">Date</span>
+                  <span className="text-sm font-medium text-[#4B5563]">
+                    {formatDate(invoice.paymentDate)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-[#9CA3AF]">Method</span>
+                  <span className="text-sm font-medium text-[#4B5563]">
+                    {invoice.paymentMethod.replace(/_/g, " ")}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center border-t border-[#E2DDD8] pt-3">
+                  <span className="text-xs text-[#9CA3AF]">Balance</span>
+                  <span className={`text-base font-bold tabular-nums ${balanceSen > 0 ? "text-[#DC2626]" : "text-[#16A34A]"}`}>
+                    {balanceSen > 0 ? formatCurrency(balanceSen) : "PAID"}
+                  </span>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Status Timeline */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Status</CardTitle>
+              <CardTitle className="text-base">Invoice Lifecycle</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-3">
+              <div className="space-y-4">
                 {["DRAFT", "SENT", "PAID"].map((st) => {
                   const isCurrent = invoice.status === st;
                   const isPast =
@@ -1057,9 +1112,9 @@ export default function InvoiceDetailPage() {
                   return (
                     <div key={st} className="flex items-center gap-3">
                       <div
-                        className={`h-3 w-3 rounded-full border-2 ${
+                        className={`h-3.5 w-3.5 rounded-full border-2 flex-shrink-0 ${
                           isPast || (isCurrent && st === "PAID")
-                            ? "bg-[#4F7C3A] border-[#C6DBA8]"
+                            ? "bg-[#16A34A] border-[#16A34A]"
                             : isCurrent || isPartial
                             ? "bg-[#6B5C32] border-[#6B5C32]"
                             : "bg-white border-[#E2DDD8]"
@@ -1068,7 +1123,7 @@ export default function InvoiceDetailPage() {
                       <span
                         className={`text-sm ${
                           isPast || isCurrent || isPartial
-                            ? "font-medium text-[#1F1D1B]"
+                            ? "font-semibold text-[#1F1D1B]"
                             : "text-[#9CA3AF]"
                         }`}
                       >
@@ -1076,6 +1131,11 @@ export default function InvoiceDetailPage() {
                           ? "PARTIAL PAID"
                           : st.replace(/_/g, " ")}
                       </span>
+                      {isCurrent && (
+                        <span className="ml-auto text-xs bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5 rounded-full font-medium">
+                          Now
+                        </span>
+                      )}
                     </div>
                   );
                 })}
@@ -1085,16 +1145,19 @@ export default function InvoiceDetailPage() {
 
           {/* Quick Info */}
           <Card>
-            <CardContent className="p-4 space-y-2">
-              <div className="flex justify-between">
+            <CardContent className="p-5 space-y-3">
+              <p className="text-xs font-semibold text-[#9CA3AF] uppercase tracking-wide">
+                Record
+              </p>
+              <div className="flex justify-between items-center">
                 <span className="text-xs text-[#9CA3AF]">Created</span>
-                <span className="text-xs text-[#6B7280]">
+                <span className="text-sm text-[#6B7280]">
                   {formatDate(invoice.createdAt)}
                 </span>
               </div>
-              <div className="flex justify-between">
+              <div className="flex justify-between items-center">
                 <span className="text-xs text-[#9CA3AF]">Last Updated</span>
-                <span className="text-xs text-[#6B7280]">
+                <span className="text-sm text-[#6B7280]">
                   {formatDate(invoice.updatedAt)}
                 </span>
               </div>

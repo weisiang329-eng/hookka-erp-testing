@@ -25,7 +25,12 @@ import {
   Download,
   Plus,
   ScanLine,
+  FolderInput,
 } from "lucide-react";
+import {
+  FromSourceModal,
+  type SourceSelection,
+} from "@/components/from-source-modal";
 
 // ============================================================
 // Types
@@ -69,6 +74,14 @@ export default function PurchaseInvoicesPage() {
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
+
+  // From PO / GRN picker
+  const [fromSourceOpen, setFromSourceOpen] = useState(false);
+  const handleFromSource = (sel: SourceSelection) => {
+    const param =
+      sel.type === "po" ? `poId=${sel.id}` : `grnId=${sel.id}`;
+    navigate(`/procurement/pi/create?${param}`);
+  };
 
   // Wired to /api/purchase-invoices 2026-04-26 — replaces the previous
   // generateMockPIs + invoiceOverrides client-side state. Status changes
@@ -308,6 +321,13 @@ export default function PurchaseInvoicesPage() {
           >
             <ScanLine className="h-4 w-4" /> Scan PI
           </Button>
+          <Button
+            variant="outline"
+            onClick={() => setFromSourceOpen(true)}
+            title="Import from a Purchase Order or Goods Receipt"
+          >
+            <FolderInput className="h-4 w-4" /> From PO / GRN
+          </Button>
           <Button variant="primary" onClick={() => navigate("/procurement/pi/create")}>
             <Plus className="h-4 w-4" /> Create Invoice
           </Button>
@@ -467,6 +487,12 @@ export default function PurchaseInvoicesPage() {
         </CardContent>
       </Card>
 
+      {/* From PO / GRN picker — navigates to PI create with pre-fill param */}
+      <FromSourceModal
+        open={fromSourceOpen}
+        onClose={() => setFromSourceOpen(false)}
+        onSelect={handleFromSource}
+      />
     </div>
   );
 }

@@ -28,11 +28,15 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency } from "@/lib/utils";
 import type { Supplier, RawMaterial } from "@/types";
 import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
-import { ArrowLeft, Plus, Save, Trash2, ScanLine } from "lucide-react";
+import { ArrowLeft, Plus, Save, Trash2, ScanLine, FolderInput } from "lucide-react";
 import {
   ScanSupplierModal,
   type SupplierExtraction,
 } from "@/components/scan-supplier-modal";
+import {
+  FromSourceModal,
+  type SourceSelection,
+} from "@/components/from-source-modal";
 
 // ── Source-doc shapes (minimal fields we need for pre-fill) ────────────────
 type POItemShape = {
@@ -135,6 +139,7 @@ function CreatePurchaseInvoicePage() {
   const [remarks, setRemarks] = useState("");
   const [lines, setLines] = useState<PILineDraft[]>([emptyPILine()]);
   const [scanOpen, setScanOpen] = useState(false);
+  const [fromSourceOpen, setFromSourceOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // ── Source PO id to include in POST body for lineage ─────────────────────
@@ -280,6 +285,13 @@ function CreatePurchaseInvoicePage() {
     });
   };
 
+  // ── From-source picker handler — navigates to same page with new param ──────
+  const handleFromSource = (sel: SourceSelection) => {
+    const param =
+      sel.type === "po" ? `poId=${sel.id}` : `grnId=${sel.id}`;
+    navigate(`/procurement/pi/create?${param}`);
+  };
+
   // ── Derived totals ────────────────────────────────────────────────────────
   const validLines = lines.filter((l) => l.materialName.trim() !== "");
   const totalRM = validLines.reduce(
@@ -390,6 +402,13 @@ function CreatePurchaseInvoicePage() {
             Procurement &rarr; Purchase Invoices &rarr; New
           </p>
         </div>
+        <Button
+          variant="outline"
+          onClick={() => setFromSourceOpen(true)}
+          title="Import line items from a Purchase Order or Goods Receipt"
+        >
+          <FolderInput className="h-4 w-4" /> From PO / GRN
+        </Button>
         <Button
           variant="outline"
           onClick={() => navigate("/procurement/pi")}
@@ -689,6 +708,13 @@ function CreatePurchaseInvoicePage() {
           )}
         </CardContent>
       </Card>
+
+      {/* From PO / GRN picker */}
+      <FromSourceModal
+        open={fromSourceOpen}
+        onClose={() => setFromSourceOpen(false)}
+        onSelect={handleFromSource}
+      />
 
       {/* Scan modal — wired to the same applyOcr handler */}
       <ScanSupplierModal

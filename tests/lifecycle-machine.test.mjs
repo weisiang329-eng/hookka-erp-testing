@@ -15,7 +15,9 @@ test("nextState transitions", () => {
 
 test("hiddenTargets per state", () => {
   assert.deepEqual(hiddenTargets("ACTIVE"), { original: 0, reversal: 1 });
-  assert.deepEqual(hiddenTargets("VOID"), { original: 0, reversal: 0 });
+  // Void hides BOTH legs from the GL (same as delete); the doc stays in its
+  // list. Void and delete differ only in list visibility, not GL.
+  assert.deepEqual(hiddenTargets("VOID"), { original: 1, reversal: 1 });
   assert.deepEqual(hiddenTargets("DELETED"), { original: 1, reversal: 1 });
 });
 

@@ -1,9 +1,14 @@
 // ---------------------------------------------------------------------------
 // lifecycle-machine.ts — pure state machine for document lifecycle (F3).
-// State ACTIVE/VOID/DELETED. Void = visible reversal (both legs shown).
-// Delete = hidden from GL (both legs hidden). Unvoid = back to active
-// (reversal hidden, original shown). hidden flags are non-hashed ledger
-// metadata; the reversal entry is created once and thereafter only its
+// State ACTIVE/VOID/DELETED.
+//   Void   = reversed AND hidden from the GL (both legs hidden); the document
+//            still appears in its own list (VOID badge, restorable). The
+//            "trace" is the list entry, not the GL.
+//   Delete = same GL hiding, but also removed from its list (Audit Log only).
+//   Unvoid = back to active (reversal hidden, original shown).
+// Both void and delete keep the document OUT of the GL — they differ only in
+// list visibility (owner clarification 2026-06-19). hidden flags are non-hashed
+// ledger metadata; the reversal entry is created once and thereafter only its
 // (and the original's) `hidden` flag toggles.
 // ---------------------------------------------------------------------------
 
@@ -23,7 +28,7 @@ export function nextState(cur: DocState, action: LifecycleAction): DocState | nu
 export function hiddenTargets(state: DocState): { original: 0 | 1; reversal: 0 | 1 } {
   switch (state) {
     case "ACTIVE": return { original: 0, reversal: 1 };
-    case "VOID": return { original: 0, reversal: 0 };
+    case "VOID": return { original: 1, reversal: 1 };
     case "DELETED": return { original: 1, reversal: 1 };
   }
 }

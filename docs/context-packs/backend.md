@@ -2,6 +2,8 @@
 
 Use this pack for Hono routes, middleware, API contracts, server-side business logic, queues, and integrations.
 
+> Before any DB write or new column: read `docs/HOOKKA-GOTCHAS.md` (migration self-apply + snake_case rename-map — both silently break prod writes if skipped). For how deep to review a given change, see `docs/DEV-OPERATING-FRAMEWORK.md`.
+
 ## Read first
 
 - `functions/api/[[route]].ts`

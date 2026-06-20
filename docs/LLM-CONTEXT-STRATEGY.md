@@ -8,7 +8,7 @@ Use this prompt at the beginning of a new assistant conversation:
 
 ```text
 You are working on Hookka ERP. Do not scan the whole repository unless I explicitly ask.
-First read docs/LLM-CONTEXT-STRATEGY.md and docs/AI-DEVELOPMENT-MODES.md.
+First read docs/DEV-OPERATING-FRAMEWORK.md, docs/LLM-CONTEXT-STRATEGY.md and docs/AI-DEVELOPMENT-MODES.md.
 Classify the task as Fast lane, Focused change, Flow change, or Deep review.
 Then read the one context pack I name and propose the smallest file set needed before editing.
 ```

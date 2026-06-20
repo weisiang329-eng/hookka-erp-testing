@@ -2,6 +2,8 @@
 
 Use this pack for login/session handling, CSRF, OAuth, TOTP, worker portal access, permissions, tenancy, and audit trails.
 
+> Security / auth / RBAC / tenancy is **always deep review** — never fast-lane it (`docs/DEV-OPERATING-FRAMEWORK.md`). Note the SUPER_ADMIN tier gate (`requireSuperAdmin`) on user-account mutations in `users.ts`.
+
 ## Read first
 
 - `src/lib/api-client.ts`

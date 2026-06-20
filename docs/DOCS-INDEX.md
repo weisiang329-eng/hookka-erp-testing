@@ -9,6 +9,9 @@ This file organizes key documentation so implementation and operations are easy 
 
 
 ## AI / LLM Context Management
+- `docs/DEV-OPERATING-FRAMEWORK.md` — **the operating manual (read first)**: when to review-all vs not (快·准·省 + risk tiers), the high-risk areas that always need deep review, and the durable task-tracking cadence.
+- `docs/HOOKKA-GOTCHAS.md` — hard-won Hookka-specific traps (migration self-apply, snake_case rename-map, build:strict). Read before any schema/money/SQL/ship work — these are the real time-savers.
+- `docs/WORK-TRACKER.md` — living list of assigned / in-progress / shipped work so nothing is forgotten across a long session.
 - `docs/LLM-CONTEXT-STRATEGY.md` — token-saving workflow for Claude/Codex sessions; start here before asking an assistant to inspect the repo.
 - `docs/context-packs/` — small task-specific file maps so AI sessions can load only the relevant frontend, backend, DB, or security slice.
 - `docs/ENGINEERING-ONBOARDING-SOP.md` — onboarding and change-impact workflow for engineers and AI assistants.

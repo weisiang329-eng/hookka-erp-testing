@@ -2,6 +2,8 @@
 
 Use this pack for broad system understanding, architecture review, deployment questions, or cross-module refactors.
 
+> Deploys run from `main` to Cloudflare Pages but do NOT replay Postgres migration files — new columns self-apply at runtime (see `docs/HOOKKA-GOTCHAS.md`). Cross-module/refactor work is deep review (`docs/DEV-OPERATING-FRAMEWORK.md`).
+
 ## Read first
 
 - `README.md`

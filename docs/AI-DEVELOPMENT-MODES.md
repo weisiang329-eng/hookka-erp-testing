@@ -8,6 +8,8 @@ Do not run a full Pass A/B/C/D review before every development task. Use the sma
 
 A full pass is useful for audits, rewrites, migrations, security work, or cross-module changes. For normal module work, start with a focused context pack and proceed after a small impact check.
 
+The concrete HIGH-RISK areas that always need deep review — schema/migrations, money/accounting/ledger, payroll, inventory cascade, status lifecycle, security/RBAC/tenancy, shared libraries, and the supabase-compat camelCase layer — are listed with their key files in `docs/DEV-OPERATING-FRAMEWORK.md`.
+
 ## Modes
 
 | Mode | Use when | Context to load first | Expected behavior |

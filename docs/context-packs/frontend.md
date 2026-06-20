@@ -2,6 +2,8 @@
 
 Use this pack for React pages, routing, UI components, forms, tables, and browser-side API calls.
 
+> Reuse the shared primitives — don't hand-roll: `PageHeader`/`ObjectPageHeader`, `DataGrid`, `useConfirm`, `MoneyInput`, `DiscountInput`, `SearchableSelect` (UI/PDF/grid standards in `docs/UI-CONVENTIONS.md`). If a new DB column reads back `undefined` on the frontend, suspect the camelCase fold — the API row is `toCamel`'d, so read `r.camelCase ?? r.snake_case` (see `docs/HOOKKA-GOTCHAS.md`).
+
 ## Read first
 
 - `src/main.tsx`

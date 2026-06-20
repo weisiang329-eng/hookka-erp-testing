@@ -184,6 +184,7 @@
   "distributedAt": "distributed_at",
   "divanHeightInches": "divan_height_inches",
   "divanPriceSen": "divan_price_sen",
+  "discountSen": "discount_sen",
   "doId": "do_id",
   "doNo": "do_no",
   "doQrCode": "do_qr_code",

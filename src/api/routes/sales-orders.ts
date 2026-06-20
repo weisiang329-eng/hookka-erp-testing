@@ -139,6 +139,9 @@ export type SalesOrderItemRow = {
   basePriceSen: number;
   unitPriceSen: number;
   lineTotalSen: number;
+  // Per-line discount (migration 0179). snake_case DB column `discount_sen`
+  // mapped via column-rename-map.json → reads back as `discountSen`.
+  discountSen: number;
   notes: string | null;
   // Service-order Repair Scope (0160). JSON
   // {"preset":"FULL|FABRIC|FRAME|FOAM|CUSTOM","depts":[...]} or NULL
@@ -258,6 +261,8 @@ function rowToItem(r: SalesOrderItemRow) {
     basePriceSen: r.basePriceSen,
     unitPriceSen: r.unitPriceSen,
     lineTotalSen: r.lineTotalSen,
+    // Per-line discount (migration 0179). Default 0 for rows predating the column.
+    discountSen: r.discountSen ?? 0,
     notes: r.notes ?? "",
     // Repair Scope (0160) — dual-key read; runtime-added column comes back
     // as the folded-lowercase key on SELECT * rows.
@@ -2133,7 +2138,10 @@ app.post("/", async (c) => {
           specialOrderPriceSen,
         });
         const quantity = Number(item.quantity) || 0;
-        const lineTotalSen = calculateLineTotal(unitPriceSen, quantity);
+        // Per-line discount (migration 0179). Applied AFTER unit price × qty.
+        // Clamped ≥ 0 so a negative discount can't inflate the line total.
+        const discountSen = Math.max(0, Math.round(Number(item.discountSen) || 0));
+        const lineTotalSen = Math.max(0, calculateLineTotal(unitPriceSen, quantity) - discountSen);
         const lineNo = idx + 1;
         const lineSuffix = `-${String(lineNo).padStart(2, "0")}`;
         // Free-text custom specials per line (migration 0074). Sanitized
@@ -2210,6 +2218,7 @@ app.post("/", async (c) => {
           customSpecials: cleanedCustomSpecials,
           basePriceSen,
           unitPriceSen,
+          discountSen,
           lineTotalSen,
           notes: (item.notes as string) || "",
           // Canonical Repair Scope from the gate above (null = FULL).
@@ -2348,8 +2357,8 @@ app.post("/", async (c) => {
              productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
              fabricCode, quantity, gapInches, divanHeightInches,
              divanPriceSen, legHeightInches, legPriceSen, specialOrder,
-             specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, lineTotalSen, notes, repairScope)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes, repairScope)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           soId,
@@ -2373,6 +2382,7 @@ app.post("/", async (c) => {
           serializeCustomSpecials(item.customSpecials),
           item.basePriceSen,
           item.unitPriceSen,
+          item.discountSen,
           item.lineTotalSen,
           item.notes,
           item.repairScope,
@@ -3515,7 +3525,9 @@ app.put("/:id", async (c) => {
           specialOrderPriceSen,
         });
         const quantity = Number(item.quantity) || 0;
-        const lineTotalSen = calculateLineTotal(unitPriceSen, quantity);
+        // Per-line discount (migration 0179). Clamped ≥ 0.
+        const discountSen = Math.max(0, Math.round(Number(item.discountSen) || 0));
+        const lineTotalSen = Math.max(0, calculateLineTotal(unitPriceSen, quantity) - discountSen);
         const lineNo = idx + 1;
         const lineSuffix = `-${String(lineNo).padStart(2, "0")}`;
 
@@ -3597,6 +3609,7 @@ app.put("/:id", async (c) => {
           customSpecials: cleanedCustomSpecials,
           basePriceSen,
           unitPriceSen,
+          discountSen,
           lineTotalSen,
           notes: (item.notes as string) || "",
           // Canonical Repair Scope from the gate above (null = FULL).
@@ -3640,8 +3653,8 @@ app.put("/:id", async (c) => {
                productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
                fabricCode, quantity, gapInches, divanHeightInches,
                divanPriceSen, legHeightInches, legPriceSen, specialOrder,
-               specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, lineTotalSen, notes, repairScope)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes, repairScope)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             item.id,
             id,
@@ -3665,6 +3678,7 @@ app.put("/:id", async (c) => {
             serializeCustomSpecials(item.customSpecials),
             item.basePriceSen,
             item.unitPriceSen,
+            item.discountSen,
             item.lineTotalSen,
             item.notes,
             item.repairScope,
@@ -3778,6 +3792,7 @@ app.put("/:id", async (c) => {
             ),
             basePriceSen: Number(item.basePriceSen) || 0,
             unitPriceSen: 0,
+            discountSen: 0,
             lineTotalSen: 0,
             notes: (item.notes as string) || "",
           }))
@@ -3854,6 +3869,7 @@ app.put("/:id", async (c) => {
             ),
             basePriceSen: Number(item.basePriceSen) || 0,
             unitPriceSen: 0,
+            discountSen: 0,
             lineTotalSen: 0,
             notes: (item.notes as string) || "",
             // Repair Scope — the items gate above already validated every

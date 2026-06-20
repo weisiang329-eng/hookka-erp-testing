@@ -784,6 +784,9 @@ export type SalesOrderItem = {
   basePriceSen: number;
   unitPriceSen: number; // base + divan + leg + special
   lineTotalSen: number;
+  // Per-line discount (migration 0179). 0 = no discount. Optional so existing
+  // mock-data literals don't all need updating; backend always emits this field.
+  discountSen?: number;
   notes: string;
 };
 

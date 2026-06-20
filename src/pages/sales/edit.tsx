@@ -16,6 +16,7 @@ import {
   formatSofaQtyError,
 } from "@/lib/so-category";
 import { ArrowLeft, Plus, Trash2, Save, AlertTriangle, ChevronDown, ChevronUp, X } from "lucide-react";
+import { DiscountInput } from "@/components/ui/discount-input";
 import type { Customer, Product, FabricItem, SalesOrder } from "@/types";
 import {
   SEAT_HEIGHT_OPTIONS,
@@ -63,6 +64,8 @@ type LineItem = {
   specialOrderPriceSen: number;
   customSpecials: CustomSpecial[];
   notes: string;
+  // Per-line discount (migration 0179). In sen; 0 = no discount.
+  discountSen: number;
   // Service-order Repair Scope (0160). The edit page has no scope picker —
   // it just round-trips the stored value through the PUT payload so an SO
   // edit can't silently wipe a line's scope. Picker lives on the create
@@ -78,6 +81,7 @@ const EMPTY_LINE: LineItem = {
   legHeightInches: null, legPriceSen: 0,
   specialOrders: [], specialOrder: "", specialOrderPriceSen: 0,
   customSpecials: [], notes: "",
+  discountSen: 0,
   repairScope: null,
 };
 
@@ -649,6 +653,9 @@ export default function EditSalesOrderPage() {
                     }))
                 : [],
               notes: (item.notes as string) || "",
+              // Per-line discount (migration 0179). Default 0 for rows
+              // predating the column (backend rowToItem already defaults to 0).
+              discountSen: (item.discountSen as number) || 0,
               // Repair Scope (0160) — pass-through only; preserved into the
               // PUT payload so editing a service order keeps each line's
               // scope intact.
@@ -752,7 +759,9 @@ export default function EditSalesOrderPage() {
   const getUnitPrice = (item: LineItem) =>
     item.basePriceSen + item.divanPriceSen + item.legPriceSen + item.specialOrderPriceSen;
 
-  const getLineTotal = (item: LineItem) => getUnitPrice(item) * item.quantity;
+  // Line total = (unit price × qty) − per-line discount, clamped ≥ 0.
+  const getLineTotal = (item: LineItem) =>
+    Math.max(0, getUnitPrice(item) * item.quantity - (item.discountSen || 0));
 
   const subtotal = items.reduce((sum, item) => sum + getLineTotal(item), 0);
   const totalQty = items.reduce((sum, item) => sum + item.quantity, 0);
@@ -1446,6 +1455,23 @@ export default function EditSalesOrderPage() {
                     </div>
                   );
                 })()}
+
+                {/* Per-line Discount (migration 0179) */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-[#9CA3AF] mb-1">Discount (RM or %)</label>
+                    <DiscountInput
+                      baseAmountSen={getUnitPrice(item) * item.quantity}
+                      valueSen={item.discountSen || null}
+                      onChange={(sen) => updateItem(idx, { discountSen: sen ?? 0 })}
+                      className="h-8"
+                    />
+                  </div>
+                  <div className="flex flex-col justify-end">
+                    <span className="text-xs text-[#9CA3AF] mb-1">Line Total</span>
+                    <span className="text-sm font-semibold text-[#1F1D1B] amount">{formatCurrency(getLineTotal(item))}</span>
+                  </div>
+                </div>
 
                 <div>
                   <label className="block text-xs text-[#9CA3AF] mb-1">Line Notes</label>

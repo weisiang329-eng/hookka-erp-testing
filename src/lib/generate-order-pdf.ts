@@ -53,6 +53,8 @@ export type OrderItemForPdf = {
   specialOrderPriceSen: number;
   basePriceSen: number;
   unitPriceSen: number;
+  // Per-line discount (migration 0179). 0 = no discount.
+  discountSen?: number;
   lineTotalSen: number;
   quantity: number;
 };
@@ -238,12 +240,13 @@ export function generateOrderPdf(
       { content: "Amount\n(RM)", styles: { halign: "right" } },
     ],
   ];
-  // Tag each row: "main" | "charge" | "total" for styling
+  // Tag each row: "main" | "charge" | "total" | "discount" for styling
   const rowTags: string[] = [];
   const tableBody: (string | number)[][] = [];
 
   order.items.forEach((item, idx) => {
     const hasSurcharge = item.unitPriceSen !== item.basePriceSen;
+    const lineDiscountSen = item.discountSen ?? 0;
 
     // Compute individual surcharges; if individual fields are 0 but
     // unitPriceSen > basePriceSen, show the difference as "Customization"
@@ -287,25 +290,58 @@ export function generateOrderPdf(
         rowTags.push("charge");
       }
 
-      // Total row: shows final unit price + line total
-      tableBody.push(["", "", "", "", "", "", "", "", "", `= ${fmtCurrency(item.unitPriceSen)}`, fmtCurrency(item.lineTotalSen)]);
+      // Total row: shows final unit price + gross line total
+      const grossLineSen = item.unitPriceSen * item.quantity;
+      tableBody.push(["", "", "", "", "", "", "", "", "", `= ${fmtCurrency(item.unitPriceSen)}`, fmtCurrency(grossLineSen)]);
       rowTags.push("total");
+
+      // Per-line discount sub-row (only when non-zero)
+      if (lineDiscountSen > 0) {
+        tableBody.push(["", "", "   Discount", "", "", "", "", "", "", "", `- ${fmtCurrency(lineDiscountSen)}`]);
+        rowTags.push("discount");
+        // Net line total
+        tableBody.push(["", "", "", "", "", "", "", "", "", "Net", fmtCurrency(item.lineTotalSen)]);
+        rowTags.push("total");
+      }
     } else {
-      // Simple row: no surcharges, show unit price + amount directly
-      tableBody.push([
-        String(idx + 1),
-        item.productCode,
-        item.productName,
-        item.sizeLabel,
-        item.fabricCode,
-        item.gapInches ? `${item.gapInches}"` : "-",
-        item.divanHeightInches ? `${item.divanHeightInches}"` : "-",
-        item.legHeightInches ? `${item.legHeightInches}"` : "-",
-        String(item.quantity),
-        fmtCurrency(item.unitPriceSen),
-        fmtCurrency(item.lineTotalSen),
-      ]);
-      rowTags.push("main");
+      if (lineDiscountSen > 0) {
+        // Simple row with discount: show unit price + gross, then discount sub-row
+        const grossLineSen = item.unitPriceSen * item.quantity;
+        tableBody.push([
+          String(idx + 1),
+          item.productCode,
+          item.productName,
+          item.sizeLabel,
+          item.fabricCode,
+          item.gapInches ? `${item.gapInches}"` : "-",
+          item.divanHeightInches ? `${item.divanHeightInches}"` : "-",
+          item.legHeightInches ? `${item.legHeightInches}"` : "-",
+          String(item.quantity),
+          fmtCurrency(item.unitPriceSen),
+          fmtCurrency(grossLineSen),
+        ]);
+        rowTags.push("main");
+        tableBody.push(["", "", "   Discount", "", "", "", "", "", "", "", `- ${fmtCurrency(lineDiscountSen)}`]);
+        rowTags.push("discount");
+        tableBody.push(["", "", "", "", "", "", "", "", "", "Net", fmtCurrency(item.lineTotalSen)]);
+        rowTags.push("total");
+      } else {
+        // Simple row: no surcharges, no discount — show unit price + amount directly
+        tableBody.push([
+          String(idx + 1),
+          item.productCode,
+          item.productName,
+          item.sizeLabel,
+          item.fabricCode,
+          item.gapInches ? `${item.gapInches}"` : "-",
+          item.divanHeightInches ? `${item.divanHeightInches}"` : "-",
+          item.legHeightInches ? `${item.legHeightInches}"` : "-",
+          String(item.quantity),
+          fmtCurrency(item.unitPriceSen),
+          fmtCurrency(item.lineTotalSen),
+        ]);
+        rowTags.push("main");
+      }
     }
   });
 
@@ -356,6 +392,10 @@ export function generateOrderPdf(
         // Surcharge sub-rows: muted italic
         data.cell.styles.textColor = PDF.muted;
         data.cell.styles.fontStyle = "italic";
+      } else if (tag === "discount") {
+        // Per-line discount sub-rows: muted italic, amount column only visible
+        data.cell.styles.textColor = PDF.muted;
+        data.cell.styles.fontStyle = "italic";
       } else if (tag === "total") {
         // Total row: bold ink for the price columns, hide the empty cells
         if (data.column.index === 9 || data.column.index === 10) {
@@ -375,9 +415,10 @@ export function generateOrderPdf(
       const tag = rowTags[data.row.index];
       const next = rowTags[data.row.index + 1];
       // Draw the separator at the END of a logical item: a standalone main row
-      // (no following charge/total) or the total row that closes a build-up.
+      // (no following charge/total/discount) or the total row that closes a build-up.
+      // A "discount" row always precedes a closing "total", so it never draws here.
       const closesItem =
-        tag === "total" || (tag === "main" && next !== "charge" && next !== "total");
+        tag === "total" || (tag === "main" && next !== "charge" && next !== "total" && next !== "discount");
       if (!closesItem) return;
       const yy = data.cell.y + data.cell.height;
       doc.setDrawColor(...PDF.rule);

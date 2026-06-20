@@ -34,3 +34,15 @@ export function calculateUnitPrice(input: PricingInput): number {
 export function calculateLineTotal(unitPriceSen: number, quantity: number): number {
   return unitPriceSen * quantity;
 }
+
+/**
+ * Line total with a per-line discount applied (migration 0179).
+ * discount is subtracted AFTER qty×price; result is clamped ≥ 0.
+ */
+export function calculateLineTotalWithDiscount(
+  unitPriceSen: number,
+  quantity: number,
+  discountSen: number,
+): number {
+  return Math.max(0, unitPriceSen * quantity - discountSen);
+}

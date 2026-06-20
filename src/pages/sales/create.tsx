@@ -18,6 +18,7 @@ import {
   formatSofaQtyError,
 } from "@/lib/so-category";
 import { ArrowLeft, Plus, Trash2, Save, ChevronDown, ChevronUp, Check, AlertTriangle, X } from "lucide-react";
+import { DiscountInput } from "@/components/ui/discount-input";
 import type { Customer, Product, FabricItem } from "@/types";
 import {
   divanHeightOptions,
@@ -87,6 +88,8 @@ type LineItem = {
   specialOrder: string; // comma-joined text for submission (predefined names + "OTHER: <desc>" suffixes)
   customSpecials: CustomSpecial[]; // free-text per-line specials
   notes: string;
+  // Per-line discount (migration 0179). In sen; 0 = no discount.
+  discountSen: number;
   // Service-order Repair Scope (0160). Canonical JSON string
   // {"preset":...,"depts":[...]} or null (= Full remake). Only ever set in
   // service-order mode; normal SOs always submit null.
@@ -109,6 +112,7 @@ const makeEmptyLine = (): LineItem => ({
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0, totalHeightPriceSen: 0,
   specialOrders: [], specialOrderPriceSen: 0, specialOrder: "", customSpecials: [], notes: "",
+  discountSen: 0,
   repairScope: null,
   price1Sen: null, seatHeightPrices: [],
 });
@@ -1536,7 +1540,11 @@ function CreateSalesOrderPage() {
       specialOrderPriceSen: item.specialOrderPriceSen,
     });
 
-  const getLineTotal = (item: LineItem) => calculateLineTotal(getUnitPrice(item), item.quantity);
+  // Line total = (unit price × qty) − per-line discount, clamped ≥ 0.
+  // The per-line discount is applied AFTER the combo-adjusted base price and AFTER
+  // all surcharges (divan/leg/special) — it's a manual operator adjustment on top.
+  const getLineTotal = (item: LineItem) =>
+    Math.max(0, calculateLineTotal(getUnitPrice(item), item.quantity) - (item.discountSen || 0));
 
   const getTotalHeight = (item: LineItem) => {
     const gap = item.gapInches || 0;
@@ -3542,6 +3550,23 @@ function LineItemCard({
         </div>
       </div>
       )}
+
+      {/* Per-line Discount (migration 0179) */}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-[#9CA3AF] mb-1">Discount (RM or %)</label>
+          <DiscountInput
+            baseAmountSen={getUnitPrice(item) * item.quantity}
+            valueSen={item.discountSen || null}
+            onChange={(sen) => onUpdate(idx, { discountSen: sen ?? 0 })}
+            className="h-8"
+          />
+        </div>
+        <div className="flex flex-col justify-end">
+          <span className="text-xs text-[#9CA3AF] mb-1">Line Total</span>
+          <span className="text-sm font-semibold text-[#1F1D1B] amount">{formatCurrency(lineTotal)}</span>
+        </div>
+      </div>
 
       {/* Line Notes */}
       <div>

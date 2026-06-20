@@ -34,6 +34,39 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-20-002 — Per-line discount migration not wired to the runtime self-applier (would break SO/CO/Invoice saves)
+
+🟢 **Fixed** · `data-migration` `sales-orders`
+
+**Near-miss (caught in verify-live, before any operator hit it):** the new
+per-line discount feature added `discount_sen` to `sales_order_items`,
+`consignment_order_items`, `invoice_items` via migration files
+(`migrations-postgres/0179` + `migrations/0101`). But **`deploy.yml` does NOT
+auto-replay Postgres migration files** ("applied manually" — see the LEGACY-
+RETIRED note at deploy.yml:163) and the column was **not** added to the runtime
+`ensurePendingMigrations` self-applier. So the column never reached prod, while
+the SO/CO/Invoice INSERTs now wrote `discountSen` — meaning the first save of
+any of those documents would 500 on a missing column.
+
+**Root cause:** schema that must be live in Hookka has to go through a RUNTIME
+self-apply (`ensurePendingMigrations` in sales-orders.ts runs idempotent
+`ALTER ... ADD COLUMN IF NOT EXISTS` per isolate) — migration files alone are
+inert on prod. The feature agent created the files but didn't wire the runtime
+apply.
+
+**Fix (`07af4e4a`):** added the 3 `discount_sen` `ALTER ... ADD COLUMN IF NOT
+EXISTS` to the SO `ensurePendingMigrations`, plus a per-isolate
+`ensureDiscountColumn` self-apply in the CO and Invoice POST+PUT handlers (so a
+CO/Invoice write can't race ahead of an SO request). The ensure runs BEFORE the
+INSERT in each handler, so even the first write post-deploy creates the column
+then succeeds — no broken window. Same proven mechanism that applies caseid /
+repairScope / customerPOImageB64 to prod.
+
+**Verified:** SO edit page renders live with the per-line Discount fields; tsc
+clean; 993 tests pass.
+
+---
+
 ## BUG-2026-06-20-001 — Completed ACCESSORY orders (sofa pillows) stuck out of Pending Delivery — un-shippable
 
 🟢 **Fixed** · `delivery-orders` `production-orders`

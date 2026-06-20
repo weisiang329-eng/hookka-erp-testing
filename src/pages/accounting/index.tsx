@@ -3478,11 +3478,15 @@ function MonthlyPlTab() {
   const toggle = (gid: string) => setCollapsed((s) => { const n = new Set(s); if (n.has(gid)) n.delete(gid); else n.add(gid); return n; });
 
   const buildExport = (): (string | number)[][] => {
-    const aoa: (string | number)[][] = [["Item", ...cols.map((c) => c.label)]];
+    // Each column → two cells: RM amount + % of net sales (beside, not below).
+    const header: (string | number)[] = ["Item"];
+    for (const c of cols) { header.push(c.label, "%"); }
+    const aoa: (string | number)[][] = [header];
     for (const r of rows) {
       if (r.kind === "gap") continue;
-      aoa.push([r.label, ...r.values.map((v) => (v / 100).toFixed(2))]);
-      aoa.push(["  % of net sales", ...r.pctValues.map((p) => `${p.toFixed(1)}%`)]);
+      const row: (string | number)[] = [r.label];
+      r.values.forEach((v, j) => { row.push((v / 100).toFixed(2), `${(r.pctValues[j] ?? 0).toFixed(1)}%`); });
+      aoa.push(row);
     }
     return aoa;
   };
@@ -3510,28 +3514,35 @@ function MonthlyPlTab() {
           <table className="text-[13px] min-w-full">
             <thead>
               <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                <th className="px-3 py-2 text-left sticky left-0 bg-white">Item</th>
-                {cols.map((c) => <th key={c.key} className={`px-3 py-2 text-right whitespace-nowrap ${c.accum ? "font-semibold text-[#3E6570]" : ""}`}>{c.label}</th>)}
+                <th rowSpan={2} className="px-3 py-2 text-left sticky left-0 bg-white align-bottom">Item</th>
+                {cols.map((c) => <th key={c.key} colSpan={2} className={`px-3 py-2 text-center whitespace-nowrap border-l border-[#F0ECE9] ${c.accum ? "font-semibold text-[#3E6570]" : ""}`}>{c.label}</th>)}
+              </tr>
+              <tr className="border-b border-[#E2DDD8] text-[10px] text-[#9CA3AF]">
+                {cols.map((c) => (
+                  <React.Fragment key={c.key}>
+                    <th className="px-3 py-1 text-right border-l border-[#F0ECE9]">RM</th>
+                    <th className="px-2 py-1 text-right">%</th>
+                  </React.Fragment>
+                ))}
               </tr>
             </thead>
             <tbody>
               {visible.map((r, i) => {
-                if (r.kind === "gap") return <tr key={`gap${i}`}><td colSpan={cols.length + 1} className="py-1"></td></tr>;
+                if (r.kind === "gap") return <tr key={`gap${i}`}><td colSpan={cols.length * 2 + 1} className="py-1"></td></tr>;
                 const isGroup = r.kind === "group";
                 const isTot = r.kind === "total" || r.kind === "grandtotal";
                 const open = isGroup && r.groupId ? !collapsed.has(r.groupId) : false;
                 const rowCls = r.kind === "grandtotal" ? "font-semibold border-t border-[#C9C2BA] bg-[#F7F5F2]" : isTot ? "font-medium border-t border-[#E2DDD8]" : isGroup ? "font-medium" : "";
                 return (
-                  <React.Fragment key={i}>
-                    <tr className={`${rowCls} ${isGroup ? "cursor-pointer" : ""}`} onClick={isGroup && r.groupId ? () => toggle(r.groupId!) : undefined}>
-                      <td className="px-3 py-1.5 sticky left-0 bg-white" style={{ paddingLeft: `${12 + r.depth * 16}px` }}>{isGroup ? (open ? "▾ " : "▸ ") : ""}{r.label}</td>
-                      {r.values.map((v, j) => <td key={j} className={`px-3 py-1.5 text-right tabular-nums ${v < 0 ? "text-[#9A3A2D]" : ""}`}>{fmt(v)}</td>)}
-                    </tr>
-                    <tr className="text-[11px] text-[#9CA3AF]">
-                      <td className="px-3 pb-1 sticky left-0 bg-white" style={{ paddingLeft: `${12 + r.depth * 16}px` }}>% of net sales</td>
-                      {r.pctValues.map((p, j) => <td key={j} className="px-3 pb-1 text-right tabular-nums">{p.toFixed(1)}%</td>)}
-                    </tr>
-                  </React.Fragment>
+                  <tr key={i} className={`${rowCls} ${isGroup ? "cursor-pointer" : ""}`} onClick={isGroup && r.groupId ? () => toggle(r.groupId!) : undefined}>
+                    <td className="px-3 py-1.5 sticky left-0 bg-white" style={{ paddingLeft: `${12 + r.depth * 16}px` }}>{isGroup ? (open ? "▾ " : "▸ ") : ""}{r.label}</td>
+                    {r.values.map((v, j) => (
+                      <React.Fragment key={j}>
+                        <td className={`px-3 py-1.5 text-right tabular-nums border-l border-[#F0ECE9] ${v < 0 ? "text-[#9A3A2D]" : ""}`}>{fmt(v)}</td>
+                        <td className="px-2 py-1.5 text-right tabular-nums text-[11px] text-[#9CA3AF]">{(r.pctValues[j] ?? 0).toFixed(1)}%</td>
+                      </React.Fragment>
+                    ))}
+                  </tr>
                 );
               })}
             </tbody>

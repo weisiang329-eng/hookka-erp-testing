@@ -4783,11 +4783,12 @@ app.get("/pl-monthly", async (c) => {
   }
 
   const override = await getPnlSectionMap(c.var.DB);
-  const monthLabel = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleString("en", { month: "short", timeZone: "UTC" });
+  const monthLabel = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleString("en", { month: "short", year: "numeric", timeZone: "UTC" });
 
   const cols: PnlMatrixCol[] = [];
   cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, fyStartYm, lastYm, line, override) });
-  for (const ym of months) {
+  // Months newest-first (after Accumulated) per owner layout (F4 #7).
+  for (const ym of [...months].reverse()) {
     cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, ym, ym, line, override) });
   }
 

@@ -28,6 +28,9 @@ import {
   Trash2,
   TrendingUp,
   X,
+  Info,
+  ChevronUp,
+  ChevronDown,
 } from "lucide-react";
 
 // ============================================================
@@ -100,6 +103,173 @@ function ScoreBar({ label, value }: { label: string; value: number }) {
   );
 }
 
+// ── Badge legend tooltip ─────────────────────────────────────────────────────
+function BadgeLegend() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 underline decoration-dotted"
+        aria-label="Badge legend"
+      >
+        <Info className="h-3.5 w-3.5" />
+        Badge legend
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-6 z-20 bg-white border border-[#E2DDD8] rounded-lg shadow-lg p-3 w-64 space-y-2 text-xs text-gray-700">
+            <p className="font-semibold text-gray-900 mb-1">Badge meanings</p>
+            <div className="flex items-start gap-2">
+              <Badge className="bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] text-[10px] shrink-0">Cheapest</Badge>
+              <span>Lowest unit price among all suppliers for this material.</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <Badge className="bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2] text-[10px] shrink-0">Fastest</Badge>
+              <span>Shortest lead time among all suppliers for this material.</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <Badge className="bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597] text-[10px] shrink-0">Main</Badge>
+              <span>Designated primary supplier for this material (set on the supplier-material binding).</span>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Supplier card for one material ───────────────────────────────────────────
+function SupplierCard({
+  b,
+  isCheapest,
+  isFastest,
+  supplierMap,
+  scorecardMap,
+}: {
+  b: SupplierMaterialBinding;
+  isCheapest: boolean;
+  isFastest: boolean;
+  supplierMap: Record<string, string>;
+  scorecardMap: Record<string, SupplierScorecard>;
+}) {
+  const scorecard = scorecardMap[b.supplierId];
+  let borderClass = "border-[#E2DDD8]";
+  if (isCheapest && isFastest) borderClass = "border-[#C6DBA8] ring-1 ring-[#C6DBA8]";
+  else if (isCheapest) borderClass = "border-[#C6DBA8] ring-1 ring-[#C6DBA8]";
+  else if (isFastest) borderClass = "border-[#A8CAD2] ring-1 ring-[#A8CAD2]";
+
+  return (
+    <Card className={`${borderClass} relative`}>
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between">
+          <CardTitle className="text-base">
+            {supplierMap[b.supplierId] ?? b.supplierId}
+          </CardTitle>
+          <div className="flex gap-1 flex-wrap justify-end">
+            {isCheapest && (
+              <Badge className="bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] text-[10px]">
+                Cheapest
+              </Badge>
+            )}
+            {isFastest && (
+              <Badge className="bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2] text-[10px]">
+                Fastest
+              </Badge>
+            )}
+            {b.isMainSupplier && (
+              <Badge className="bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597] text-[10px]">
+                Main
+              </Badge>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-2 gap-2 text-sm">
+          <div>
+            <span className="text-gray-500">SKU</span>
+            <p className="font-mono text-xs font-medium">{b.supplierSku}</p>
+          </div>
+          <div>
+            <span className="text-gray-500">Unit Price</span>
+            <p className="font-semibold">{formatCurrency(b.unitPrice, b.currency)}</p>
+          </div>
+          <div>
+            <span className="text-gray-500">Lead Time</span>
+            <p className="font-medium">{b.leadTimeDays} days</p>
+          </div>
+          <div>
+            <span className="text-gray-500">MOQ</span>
+            <p className="font-medium">{b.moq}</p>
+          </div>
+        </div>
+
+        {scorecard && (
+          <div className="border-t border-[#E2DDD8] pt-3">
+            <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
+              Scorecard
+            </p>
+            <div className="space-y-1.5">
+              <ScoreBar label="On-Time" value={scorecard.onTimeRate} />
+              <ScoreBar label="Quality" value={scorecard.qualityRate} />
+              <ScoreBar label="Lead Acc." value={scorecard.leadTimeAccuracy} />
+            </div>
+            <div className="flex items-center justify-between mt-2 text-xs">
+              <span className="text-gray-500">
+                Price Trend:{" "}
+                <span className={scorecard.avgPriceTrend > 5 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}>
+                  +{scorecard.avgPriceTrend}%
+                </span>
+              </span>
+              <span className="text-gray-500">
+                Rating: {"*".repeat(scorecard.overallRating)}
+              </span>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Sort types ────────────────────────────────────────────────────────────────
+type SortField = "supplierName" | "unitPrice" | "leadTimeDays";
+type SortDir = "asc" | "desc";
+
+function SortButton({
+  field,
+  label,
+  active,
+  sortDir,
+  onToggle,
+}: {
+  field: SortField;
+  label: string;
+  active: boolean;
+  sortDir: SortDir;
+  onToggle: (field: SortField) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onToggle(field)}
+      className={`inline-flex items-center gap-0.5 rounded px-2 py-1 text-xs font-medium border transition-colors ${
+        active
+          ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+          : "bg-white text-gray-600 border-[#E2DDD8] hover:bg-[#F9F8F6]"
+      }`}
+    >
+      {label}
+      {active ? (
+        sortDir === "asc" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />
+      ) : null}
+    </button>
+  );
+}
+
 function ComparisonTab({
   bindings,
   supplierMap,
@@ -111,140 +281,339 @@ function ComparisonTab({
   scorecardMap: Record<string, SupplierScorecard>;
   materialCodes: string[];
 }) {
-  const [selectedMaterial, setSelectedMaterial] = useState("");
+  // Multi-select: set of selected material codes
+  const [selectedMaterials, setSelectedMaterials] = useState<string[]>([]);
+  // Filter input for narrowing the materials dropdown list
+  const [materialSearch, setMaterialSearch] = useState("");
+  // Per-card sort + filter within the supplier cards section
+  const [filterSupplier, setFilterSupplier] = useState("");
+  const [sortField, setSortField] = useState<SortField>("unitPrice");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
 
-  const materialBindings = useMemo(
-    () => (selectedMaterial ? bindings.filter((b) => b.materialCode === selectedMaterial) : []),
-    [bindings, selectedMaterial]
-  );
-  const cheapestPrice = useMemo(() => {
-    if (materialBindings.length === 0) return 0;
-    return Math.min(...materialBindings.map((b) => b.unitPrice));
-  }, [materialBindings]);
-  const fastestLead = useMemo(() => {
-    if (materialBindings.length === 0) return 0;
-    return Math.min(...materialBindings.map((b) => b.leadTimeDays));
-  }, [materialBindings]);
+  // Derive a stable label for each material code
+  const materialLabel = useMemo(() => {
+    const map: Record<string, string> = {};
+    bindings.forEach((b) => {
+      if (!map[b.materialCode]) map[b.materialCode] = b.materialName;
+    });
+    return map;
+  }, [bindings]);
+
+  // Filtered material list for the dropdown
+  const filteredMaterialCodes = useMemo(() => {
+    if (!materialSearch.trim()) return materialCodes;
+    const q = materialSearch.toLowerCase();
+    return materialCodes.filter(
+      (c) =>
+        c.toLowerCase().includes(q) ||
+        (materialLabel[c] ?? "").toLowerCase().includes(q)
+    );
+  }, [materialCodes, materialSearch, materialLabel]);
+
+  function toggleMaterial(code: string) {
+    setSelectedMaterials((prev) =>
+      prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]
+    );
+  }
+
+  function clearAll() {
+    setSelectedMaterials([]);
+  }
+
+  // For each selected material: compute per-material cheapest / fastest values
+  const materialGroups = useMemo(() => {
+    return selectedMaterials.map((code) => {
+      const group = bindings.filter((b) => b.materialCode === code);
+      const cheapestPrice =
+        group.length > 0 ? Math.min(...group.map((b) => b.unitPrice)) : 0;
+      const fastestLead =
+        group.length > 0 ? Math.min(...group.map((b) => b.leadTimeDays)) : 0;
+      return { code, label: materialLabel[code] ?? code, group, cheapestPrice, fastestLead };
+    });
+  }, [selectedMaterials, bindings, materialLabel]);
+
+  // Sort helper applied to each material's supplier cards
+  function sortedAndFiltered(group: SupplierMaterialBinding[]): SupplierMaterialBinding[] {
+    let rows = group;
+    if (filterSupplier.trim()) {
+      const q = filterSupplier.toLowerCase();
+      rows = rows.filter((b) =>
+        (supplierMap[b.supplierId] ?? b.supplierId).toLowerCase().includes(q) ||
+        b.supplierSku.toLowerCase().includes(q)
+      );
+    }
+    return [...rows].sort((a, b) => {
+      let cmp = 0;
+      if (sortField === "unitPrice") cmp = a.unitPrice - b.unitPrice;
+      else if (sortField === "leadTimeDays") cmp = a.leadTimeDays - b.leadTimeDays;
+      else {
+        const na = (supplierMap[a.supplierId] ?? a.supplierId).toLowerCase();
+        const nb = (supplierMap[b.supplierId] ?? b.supplierId).toLowerCase();
+        cmp = na < nb ? -1 : na > nb ? 1 : 0;
+      }
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }
+
+  // Cross-material summary table rows
+  const crossMaterialRows = useMemo(() => {
+    return materialGroups
+      .filter((mg) => mg.group.length > 0)
+      .map((mg) => {
+        const cheapestBinding = mg.group.reduce((best, b) =>
+          b.unitPrice < best.unitPrice ? b : best
+        );
+        const mainBinding = mg.group.find((b) => b.isMainSupplier);
+        const fastestBinding = mg.group.reduce((best, b) =>
+          b.leadTimeDays < best.leadTimeDays ? b : best
+        );
+        return {
+          code: mg.code,
+          label: mg.label,
+          cheapestSupplier: supplierMap[cheapestBinding.supplierId] ?? cheapestBinding.supplierId,
+          cheapestPrice: cheapestBinding.unitPrice,
+          cheapestCurrency: cheapestBinding.currency,
+          mainSupplier: mainBinding ? (supplierMap[mainBinding.supplierId] ?? mainBinding.supplierId) : "—",
+          mainPrice: mainBinding ? mainBinding.unitPrice : null,
+          mainCurrency: mainBinding?.currency,
+          fastestSupplier: supplierMap[fastestBinding.supplierId] ?? fastestBinding.supplierId,
+          fastestLeadDays: fastestBinding.leadTimeDays,
+        };
+      });
+  }, [materialGroups, supplierMap]);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
+      {/* Controls card */}
       <Card>
         <CardHeader>
-          <CardTitle>Supplier Comparison</CardTitle>
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <CardTitle>Supplier Comparison</CardTitle>
+            <BadgeLegend />
+          </div>
         </CardHeader>
-        <CardContent>
-          <div className="max-w-sm">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Select Material</label>
-            <select
-              value={selectedMaterial}
-              onChange={(e) => setSelectedMaterial(e.target.value)}
-              className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
-            >
-              <option value="">-- Choose a material --</option>
-              {materialCodes.map((code) => {
-                const binding = bindings.find((b) => b.materialCode === code);
+        <CardContent className="space-y-4">
+          {/* Material multi-select */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Select Materials{" "}
+              <span className="text-xs font-normal text-gray-400">(pick one or more)</span>
+            </label>
+            <div className="flex gap-2 mb-2">
+              <Input
+                placeholder="Search materials…"
+                value={materialSearch}
+                onChange={(e) => setMaterialSearch(e.target.value)}
+                className="max-w-xs h-8 text-sm"
+              />
+              {selectedMaterials.length > 0 && (
+                <button
+                  type="button"
+                  onClick={clearAll}
+                  className="text-xs text-gray-500 hover:text-gray-700 underline"
+                >
+                  Clear all ({selectedMaterials.length})
+                </button>
+              )}
+            </div>
+            <div className="border border-[#E2DDD8] rounded-md overflow-auto max-h-40 bg-white">
+              {filteredMaterialCodes.length === 0 ? (
+                <p className="text-xs text-gray-400 px-3 py-2">No materials match</p>
+              ) : (
+                filteredMaterialCodes.map((code) => {
+                  const checked = selectedMaterials.includes(code);
+                  return (
+                    <label
+                      key={code}
+                      className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer text-sm transition-colors ${
+                        checked ? "bg-[#F3F0E8]" : "hover:bg-[#F9F8F6]"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleMaterial(code)}
+                        className="h-3.5 w-3.5 accent-[#6B5C32]"
+                      />
+                      <span className="font-mono text-xs font-medium text-[#1F1D1B]">{code}</span>
+                      <span className="text-gray-500 text-xs truncate">{materialLabel[code] ?? ""}</span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+            {/* Selected chips */}
+            {selectedMaterials.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {selectedMaterials.map((code) => (
+                  <span
+                    key={code}
+                    className="inline-flex items-center gap-1 bg-[#F3F0E8] text-[#6B5C32] border border-[#D4C9A8] rounded-full px-2 py-0.5 text-xs font-medium"
+                  >
+                    {code}
+                    <button
+                      type="button"
+                      onClick={() => toggleMaterial(code)}
+                      className="hover:text-[#4A3E22]"
+                      aria-label={`Remove ${code}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Sort + filter bar — shown only when materials are selected */}
+          {selectedMaterials.length > 0 && (
+            <div className="flex items-center gap-3 flex-wrap border-t border-[#E2DDD8] pt-3">
+              <span className="text-xs text-gray-500 font-medium">Sort by:</span>
+              {(["unitPrice", "leadTimeDays", "supplierName"] as SortField[]).map((f) => {
+                const labels: Record<SortField, string> = {
+                  unitPrice: "Unit Price",
+                  leadTimeDays: "Lead Time",
+                  supplierName: "Supplier Name",
+                };
                 return (
-                  <option key={code} value={code}>
-                    {code} - {binding?.materialName ?? ""}
-                  </option>
+                  <SortButton
+                    key={f}
+                    field={f}
+                    label={labels[f]}
+                    active={sortField === f}
+                    sortDir={sortDir}
+                    onToggle={(clicked) => {
+                      if (sortField === clicked) {
+                        setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+                      } else {
+                        setSortField(clicked);
+                        setSortDir("asc");
+                      }
+                    }}
+                  />
                 );
               })}
-            </select>
-          </div>
+              <div className="ml-auto">
+                <Input
+                  placeholder="Filter by supplier / SKU…"
+                  value={filterSupplier}
+                  onChange={(e) => setFilterSupplier(e.target.value)}
+                  className="h-7 text-xs w-52"
+                />
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 
-      {selectedMaterial && materialBindings.length === 0 && (
-        <p className="text-center text-gray-400 py-8">No suppliers found for this material</p>
-      )}
-
-      {materialBindings.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {materialBindings.map((b) => {
-            const isCheapest = b.unitPrice === cheapestPrice;
-            const isFastest = b.leadTimeDays === fastestLead;
-            const scorecard = scorecardMap[b.supplierId];
-
-            let borderClass = "border-[#E2DDD8]";
-            if (isCheapest && isFastest) borderClass = "border-[#C6DBA8] ring-1 ring-[#C6DBA8]";
-            else if (isCheapest) borderClass = "border-[#C6DBA8] ring-1 ring-[#C6DBA8]";
-            else if (isFastest) borderClass = "border-[#A8CAD2] ring-1 ring-[#A8CAD2]";
-
-            return (
-              <Card key={b.id} className={`${borderClass} relative`}>
-                <CardHeader className="pb-3">
-                  <div className="flex items-start justify-between">
-                    <CardTitle className="text-base">
-                      {supplierMap[b.supplierId] ?? b.supplierId}
-                    </CardTitle>
-                    <div className="flex gap-1">
-                      {isCheapest && (
-                        <Badge className="bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] text-[10px]">
-                          Cheapest
-                        </Badge>
-                      )}
-                      {isFastest && (
-                        <Badge className="bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2] text-[10px]">
-                          Fastest
-                        </Badge>
-                      )}
-                      {b.isMainSupplier && (
-                        <Badge className="bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597] text-[10px]">
-                          Main
-                        </Badge>
-                      )}
-                    </div>
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="grid grid-cols-2 gap-2 text-sm">
-                    <div>
-                      <span className="text-gray-500">SKU</span>
-                      <p className="font-mono text-xs font-medium">{b.supplierSku}</p>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Unit Price</span>
-                      <p className="font-semibold">{formatCurrency(b.unitPrice, b.currency)}</p>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Lead Time</span>
-                      <p className="font-medium">{b.leadTimeDays} days</p>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">MOQ</span>
-                      <p className="font-medium">{b.moq}</p>
-                    </div>
-                  </div>
-
-                  {scorecard && (
-                    <div className="border-t border-[#E2DDD8] pt-3">
-                      <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
-                        Scorecard
-                      </p>
-                      <div className="space-y-1.5">
-                        <ScoreBar label="On-Time" value={scorecard.onTimeRate} />
-                        <ScoreBar label="Quality" value={scorecard.qualityRate} />
-                        <ScoreBar label="Lead Acc." value={scorecard.leadTimeAccuracy} />
-                      </div>
-                      <div className="flex items-center justify-between mt-2 text-xs">
-                        <span className="text-gray-500">
-                          Price Trend:{" "}
-                          <span className={scorecard.avgPriceTrend > 5 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}>
-                            +{scorecard.avgPriceTrend}%
+      {/* Cross-material comparison table */}
+      {crossMaterialRows.length >= 2 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Cross-Material Summary</CardTitle>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Side-by-side best values across selected materials.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8]">
+                    <th className="text-left py-2 px-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Material</th>
+                    <th className="text-left py-2 px-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      <Badge className="bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] text-[10px]">Cheapest</Badge>
+                      {" "}Supplier & Price
+                    </th>
+                    <th className="text-left py-2 px-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      <Badge className="bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597] text-[10px]">Main</Badge>
+                      {" "}Supplier & Price
+                    </th>
+                    <th className="text-left py-2 px-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      <Badge className="bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2] text-[10px]">Fastest</Badge>
+                      {" "}Supplier
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {crossMaterialRows.map((row, idx) => (
+                    <tr
+                      key={row.code}
+                      className={`border-b border-[#F0EDE8] ${idx % 2 === 0 ? "bg-white" : "bg-[#FAFAF8]"}`}
+                    >
+                      <td className="py-2.5 px-3">
+                        <span className="font-mono text-xs font-semibold text-[#1F1D1B]">{row.code}</span>
+                        <span className="text-xs text-gray-400 ml-1.5">{row.label}</span>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span className="font-medium text-[#1F1D1B]">{row.cheapestSupplier}</span>
+                        <span className="text-xs text-[#4F7C3A] ml-2 font-semibold">
+                          {formatCurrency(row.cheapestPrice, row.cheapestCurrency)}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span className="font-medium text-[#1F1D1B]">{row.mainSupplier}</span>
+                        {row.mainPrice !== null && row.mainCurrency && (
+                          <span className="text-xs text-[#9C6F1E] ml-2 font-semibold">
+                            {formatCurrency(row.mainPrice, row.mainCurrency)}
                           </span>
-                        </span>
-                        <span className="text-gray-500">
-                          Rating: {"*".repeat(scorecard.overallRating)}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span className="font-medium text-[#1F1D1B]">{row.fastestSupplier}</span>
+                        <span className="text-xs text-[#3E6570] ml-2">{row.fastestLeadDays}d</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
       )}
+
+      {/* Per-material supplier card groups */}
+      {selectedMaterials.length === 0 && (
+        <p className="text-center text-gray-400 py-12 text-sm">
+          Select one or more materials above to see supplier comparisons.
+        </p>
+      )}
+
+      {materialGroups.map(({ code, label, group, cheapestPrice, fastestLead }) => {
+        const displayed = sortedAndFiltered(group);
+        return (
+          <div key={code} className="space-y-3">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-[#1F1D1B]">
+                <span className="font-mono">{code}</span>
+                {label && label !== code && (
+                  <span className="text-gray-500 font-normal ml-1.5">— {label}</span>
+                )}
+              </h3>
+              <span className="text-xs text-gray-400">
+                {group.length} supplier{group.length === 1 ? "" : "s"}
+              </span>
+            </div>
+
+            {displayed.length === 0 ? (
+              <p className="text-xs text-gray-400 py-2">No suppliers match the current filter.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {displayed.map((b) => (
+                  <SupplierCard
+                    key={b.id}
+                    b={b}
+                    isCheapest={b.unitPrice === cheapestPrice}
+                    isFastest={b.leadTimeDays === fastestLead}
+                    supplierMap={supplierMap}
+                    scorecardMap={scorecardMap}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

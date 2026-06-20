@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { formatCurrency } from "@/lib/utils";
 import type { SupplierMaterialBinding, SupplierScorecard } from "@/types";
 import {
@@ -249,6 +250,226 @@ function ComparisonTab({
 }
 
 // ============================================================
+// Batch Edit Dialog
+// ============================================================
+type BatchField = "paymentTerms" | "purchaseOrgCode" | "status" | "rating";
+
+function SupplierBatchEditDialog({
+  suppliers,
+  orgOptions,
+  onClose,
+  onDone,
+  onOptimisticUpdate,
+  confirm,
+}: {
+  suppliers: Supplier[];
+  orgOptions: OrgOption[];
+  onClose: () => void;
+  onDone: (ok: number, failed: string[]) => void;
+  onOptimisticUpdate: (field: BatchField, value: string, ids: Set<string>) => void;
+  confirm: ReturnType<typeof useConfirm>["confirm"];
+}) {
+  const [field, setField] = useState<BatchField>("paymentTerms");
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+
+  // Reset value when field changes so stale values don't carry over.
+  function handleFieldChange(f: BatchField) {
+    setField(f);
+    setValue("");
+  }
+
+  const fieldLabel: Record<BatchField, string> = {
+    paymentTerms: "Payment Terms",
+    purchaseOrgCode: "Purchase Company",
+    status: "Status",
+    rating: "Rating (1–5)",
+  };
+
+  const canApply = value.trim() !== "" && !busy;
+
+  async function handleApply() {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+
+    const confirmed = await confirm({
+      title: `Apply to ${suppliers.length} supplier${suppliers.length === 1 ? "" : "s"}?`,
+      message: `Set ${fieldLabel[field]} to "${field === "rating" ? `${trimmed} star${trimmed === "1" ? "" : "s"}` : trimmed}" on every selected supplier. This cannot be undone in bulk.`,
+      confirmLabel: "Apply",
+      cancelLabel: "Cancel",
+    });
+    if (!confirmed) return;
+
+    // Optimistic update before the network loop starts.
+    const ids = new Set(suppliers.map((s) => s.id));
+    onOptimisticUpdate(field, trimmed, ids);
+
+    setBusy(true);
+    setProgress({ done: 0, total: suppliers.length });
+    let ok = 0;
+    const failed: string[] = [];
+    for (let i = 0; i < suppliers.length; i++) {
+      const s = suppliers[i];
+      try {
+        const payload: Record<string, unknown> = { ...s, [field]: field === "rating" ? Number(trimmed) : trimmed };
+        delete payload.id;
+        const res = await fetch(`/api/suppliers/${s.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) ok++;
+        else failed.push(s.code || s.id);
+      } catch {
+        failed.push(s.code || s.id);
+      }
+      setProgress({ done: i + 1, total: suppliers.length });
+    }
+    setBusy(false);
+    onDone(ok, failed);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/40" onClick={() => !busy && onClose()} />
+      <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4">
+        {/* Header */}
+        <div className="flex items-center justify-between p-5 border-b border-[#E2DDD8]">
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">
+            Batch Edit — {suppliers.length} supplier{suppliers.length === 1 ? "" : "s"}
+          </h2>
+          <button
+            type="button"
+            onClick={() => !busy && onClose()}
+            className="text-[#9CA3AF] hover:text-[#374151]"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-[#6B7280]">
+            Only the chosen field changes on every selected supplier.
+            Names and codes are never touched.
+          </p>
+
+          {/* Field picker */}
+          <div>
+            <label className="block text-xs font-medium text-[#374151] mb-1">Field to change</label>
+            <div className="grid grid-cols-2 gap-2">
+              {(["paymentTerms", "purchaseOrgCode", "status", "rating"] as BatchField[]).map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => handleFieldChange(f)}
+                  className={`rounded-md border px-3 py-2 text-sm text-left transition-colors ${
+                    field === f
+                      ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                      : "bg-white text-[#6B7280] border-[#E2DDD8] hover:bg-[#F3F4F6]"
+                  }`}
+                >
+                  {fieldLabel[f]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Value picker — varies by field */}
+          <div>
+            <label className="block text-xs font-medium text-[#374151] mb-1">
+              New value (applies to all selected)
+            </label>
+            {field === "paymentTerms" && (
+              <select
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+              >
+                <option value="">Pick terms…</option>
+                <option value="COD">COD</option>
+                <option value="NET15">Net 15</option>
+                <option value="NET30">Net 30</option>
+                <option value="NET45">Net 45</option>
+                <option value="NET60">Net 60</option>
+              </select>
+            )}
+            {field === "purchaseOrgCode" && (
+              <select
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+              >
+                <option value="">Pick a company…</option>
+                {(orgOptions.length > 0
+                  ? orgOptions.map((o) => ({ value: o.code, label: `${o.code} — ${o.name}` }))
+                  : [{ value: "HOOKKA", label: "HOOKKA INDUSTRIES SDN BHD" }]
+                ).map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            )}
+            {field === "status" && (
+              <select
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+              >
+                <option value="">Pick a status…</option>
+                <option value="ACTIVE">Active</option>
+                <option value="INACTIVE">Inactive</option>
+                <option value="BLACKLISTED">Blacklisted</option>
+              </select>
+            )}
+            {field === "rating" && (
+              <select
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+              >
+                <option value="">Pick a rating…</option>
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <option key={n} value={String(n)}>
+                    {"★".repeat(n)}{"☆".repeat(5 - n)} ({n}/5)
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          {/* Progress bar while applying */}
+          {busy && progress && (
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs text-[#6B7280]">
+                <span>Applying…</span>
+                <span>{progress.done}/{progress.total}</span>
+              </div>
+              <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-[#6B5C32] rounded-full transition-all"
+                  style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 p-5 border-t border-[#E2DDD8]">
+          <Button variant="outline" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void handleApply()} disabled={!canApply}>
+            {busy ? "Applying…" : `Apply to ${suppliers.length}`}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // Main Page
 // ============================================================
 export default function SupplierMaintenancePage() {
@@ -266,9 +487,6 @@ export default function SupplierMaintenancePage() {
   // Batch edit (multi-select → set ONE safe shared field on all selected).
   const [selectedSuppliers, setSelectedSuppliers] = useState<Supplier[]>([]);
   const [showBatchEdit, setShowBatchEdit] = useState(false);
-  const [batchField, setBatchField] = useState<"paymentTerms" | "purchaseOrgCode" | "status">("paymentTerms");
-  const [batchValue, setBatchValue] = useState("");
-  const [batchBusy, setBatchBusy] = useState(false);
 
   const { data: suppliersResp } = useCachedJson<{ success?: boolean; data?: Record<string, unknown>[] } | Record<string, unknown>[]>("/api/suppliers");
 
@@ -545,44 +763,7 @@ export default function SupplierMaintenancePage() {
     }
   };
 
-  // Batch edit — set ONE safe shared field on every selected supplier. Sends
-  // the FULL supplier row with that one field changed (safe whether the PUT
-  // merges or replaces). Names/codes are never offered (unique per supplier).
-  const applyBatchEdit = async () => {
-    const val = batchValue.trim();
-    if (!val) { toast.error("Pick a value to apply."); return; }
-    if (selectedSuppliers.length === 0) return;
-    setBatchBusy(true);
-    const ids = new Set(selectedSuppliers.map((s) => s.id));
-    // Optimistic (mirrors handleSaveSupplier); invalidateCache reconciles after.
-    setSuppliers((prev) => prev.map((s) => (ids.has(s.id) ? { ...s, [batchField]: val } : s)));
-    let ok = 0;
-    const failed: string[] = [];
-    for (const s of selectedSuppliers) {
-      try {
-        const payload: Record<string, unknown> = { ...s, [batchField]: val };
-        delete payload.id;
-        const res = await fetch(`/api/suppliers/${s.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (res.ok) ok++;
-        else failed.push(s.code || s.id);
-      } catch {
-        failed.push(s.code || s.id);
-      }
-    }
-    invalidateCache("/api/suppliers");
-    setBatchBusy(false);
-    setShowBatchEdit(false);
-    setSelectedSuppliers([]);
-    if (failed.length === 0) {
-      toast.success(`Updated ${ok} supplier(s).`);
-    } else {
-      toast.error(`${ok} updated, ${failed.length} failed: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}`);
-    }
-  };
+  const { confirm } = useConfirm();
 
   // KPIs
   const activeSuppliers = suppliers.filter((s) => s.status === "ACTIVE").length;
@@ -688,7 +869,7 @@ export default function SupplierMaintenancePage() {
             />
           </div>
           {selectedSuppliers.length > 0 && (
-            <Button variant="outline" onClick={() => { setBatchValue(""); setShowBatchEdit(true); }}>
+            <Button variant="outline" onClick={() => setShowBatchEdit(true)}>
               <Pencil className="h-4 w-4" />
               Batch Edit ({selectedSuppliers.length})
             </Button>
@@ -727,88 +908,34 @@ export default function SupplierMaintenancePage() {
 
       {/* Batch Edit dialog — set ONE safe shared field on all selected suppliers */}
       {showBatchEdit && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => !batchBusy && setShowBatchEdit(false)} />
-          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4">
-            <div className="flex items-center justify-between p-5 border-b border-[#E2DDD8]">
-              <h2 className="text-lg font-semibold text-[#1F1D1B]">
-                Batch Edit — {selectedSuppliers.length} supplier{selectedSuppliers.length === 1 ? "" : "s"}
-              </h2>
-              <button
-                type="button"
-                onClick={() => !batchBusy && setShowBatchEdit(false)}
-                className="text-[#9CA3AF] hover:text-[#374151]"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-            <div className="p-5 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-[#374151] mb-1">Field to change</label>
-                <select
-                  value={batchField}
-                  onChange={(e) => { setBatchField(e.target.value as typeof batchField); setBatchValue(""); }}
-                  className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-                >
-                  <option value="paymentTerms">Payment Terms</option>
-                  <option value="purchaseOrgCode">Purchase Company</option>
-                  <option value="status">Status</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-[#374151] mb-1">New value (applies to all selected)</label>
-                {batchField === "purchaseOrgCode" ? (
-                  <select
-                    value={batchValue}
-                    onChange={(e) => setBatchValue(e.target.value)}
-                    className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-                  >
-                    <option value="">Pick a company…</option>
-                    {(orgOptions.length > 0
-                      ? orgOptions.map((o) => ({ value: o.code, label: `${o.code} — ${o.name}` }))
-                      : [{ value: "HOOKKA", label: "HOOKKA INDUSTRIES SDN BHD" }]
-                    ).map((o) => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
-                    ))}
-                  </select>
-                ) : batchField === "status" ? (
-                  <select
-                    value={batchValue}
-                    onChange={(e) => setBatchValue(e.target.value)}
-                    className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-                  >
-                    <option value="">Pick a status…</option>
-                    <option value="ACTIVE">Active</option>
-                    <option value="INACTIVE">Inactive</option>
-                    <option value="BLACKLISTED">Blacklisted</option>
-                  </select>
-                ) : (
-                  <select
-                    value={batchValue}
-                    onChange={(e) => setBatchValue(e.target.value)}
-                    className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-                  >
-                    <option value="">Pick terms…</option>
-                    <option value="COD">COD</option>
-                    <option value="NET15">Net 15</option>
-                    <option value="NET30">Net 30</option>
-                    <option value="NET45">Net 45</option>
-                    <option value="NET60">Net 60</option>
-                  </select>
-                )}
-              </div>
-              <p className="text-xs text-[#9CA3AF]">
-                Only this one field changes on the {selectedSuppliers.length} selected supplier{selectedSuppliers.length === 1 ? "" : "s"}. Names and codes are never touched.
-              </p>
-            </div>
-            <div className="flex items-center justify-end gap-2 p-5 border-t border-[#E2DDD8]">
-              <Button variant="outline" onClick={() => setShowBatchEdit(false)} disabled={batchBusy}>Cancel</Button>
-              <Button variant="primary" onClick={applyBatchEdit} disabled={batchBusy || !batchValue}>
-                {batchBusy ? "Applying…" : `Apply to ${selectedSuppliers.length}`}
-              </Button>
-            </div>
-          </div>
-        </div>
+        <SupplierBatchEditDialog
+          suppliers={selectedSuppliers}
+          orgOptions={orgOptions}
+          onClose={() => setShowBatchEdit(false)}
+          onDone={(ok, failed) => {
+            // Optimistic local update: re-fetch to reconcile.
+            invalidateCache("/api/suppliers");
+            setShowBatchEdit(false);
+            setSelectedSuppliers([]);
+            if (failed.length === 0) {
+              toast.success(`Updated ${ok} supplier${ok === 1 ? "" : "s"}.`);
+            } else {
+              toast.error(
+                `${ok} updated, ${failed.length} failed: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}`,
+              );
+            }
+          }}
+          onOptimisticUpdate={(field, value, ids) => {
+            setSuppliers((prev) =>
+              prev.map((s) =>
+                ids.has(s.id)
+                  ? { ...s, [field]: field === "rating" ? Number(value) : value }
+                  : s,
+              ),
+            );
+          }}
+          confirm={confirm}
+        />
       )}
       </>)}
     </div>

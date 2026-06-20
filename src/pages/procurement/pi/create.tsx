@@ -22,6 +22,7 @@ import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency } from "@/lib/utils";
@@ -615,21 +616,13 @@ function CreatePurchaseInvoicePage() {
                           }
                         />
                       </td>
-                      {/* Unit Price (RM) — raw number state, same as modal */}
+                      {/* Unit Price (RM) */}
                       <td className="px-2 py-1.5">
-                        <Input
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          onFocus={(e) => e.currentTarget.select()}
-                          className="h-8 w-28 text-right ml-auto"
-                          value={line.unitPriceRM}
-                          onChange={(e) =>
-                            updateLine(
-                              idx,
-                              "unitPriceRM",
-                              Number(e.target.value),
-                            )
+                        <MoneyInput
+                          className="h-8 w-28 ml-auto"
+                          value={line.unitPriceRM === 0 ? null : line.unitPriceRM}
+                          onChange={(rm) =>
+                            updateLine(idx, "unitPriceRM", rm ?? 0)
                           }
                         />
                       </td>

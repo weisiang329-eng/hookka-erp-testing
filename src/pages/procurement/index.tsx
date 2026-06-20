@@ -5,6 +5,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MoneyInput } from "@/components/ui/money-input";
 import { PageSkeleton } from "@/components/ui/skeleton";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
@@ -685,23 +686,11 @@ function POFormDialog({
                         </div>
                         <div>
                           <label className="block text-xs text-[#6B7280] mb-1">Price (RM)</label>
-                          {/* Editable — defaults to the supplier-material-binding price but
-                              operator can override per-line (negotiated discount, special quote).
-                              Operator types RM (e.g. "25.50") for human-readable entry; we
-                              convert to sen on every keystroke (× 100, rounded) so storage +
-                              API stay in sen. Empty string keeps the same Qty trick — a 0
-                              default clears cleanly without the operator having to backspace. */}
-                          <Input
+                          <MoneyInput
                             className="h-8 text-xs"
-                            type="number"
-                            step="0.01"
-                            inputMode="decimal"
-                            onFocus={(e) => e.currentTarget.select()}
-                            min={0}
-                            value={item.unitPriceSen === 0 ? "" : (item.unitPriceSen / 100).toFixed(2)}
-                            onChange={(e) => {
-                              const rm = parseFloat(e.target.value);
-                              const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                            value={item.unitPriceSen === 0 ? null : item.unitPriceSen / 100}
+                            onChange={(rm) => {
+                              const sen = rm !== null && rm >= 0 ? Math.round(rm * 100) : 0;
                               updateItemPrice(idx, sen);
                             }}
                           />

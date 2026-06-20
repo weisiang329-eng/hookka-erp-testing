@@ -28,6 +28,8 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavGuard } from "@/lib/use-nav-guard";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
+import { MoneyInput } from "@/components/ui/money-input";
+import { DiscountInput } from "@/components/ui/discount-input";
 import type { RawMaterial } from "@/types";
 
 const VALID_LINE_TYPES: LineType[] = ["STOCKED", "FEE", "TAX", "REBATE", "DISCOUNT", "OTHER"];
@@ -262,6 +264,15 @@ export default function PurchaseInvoiceDetailPage() {
 
   const draftTotalSen = dLines.reduce(
     (s, l) => s + Math.round((parseFloat(l.unitPriceRm) || 0) * 100) * (parseFloat(l.qty) || 0),
+    0,
+  );
+
+  // Base for %-discount: sum of non-DISCOUNT line totals (what the operator is discounting off).
+  const discountBaseAmountSen = dLines.reduce(
+    (s, l) =>
+      l.lineType === "DISCOUNT"
+        ? s
+        : s + Math.round((parseFloat(l.unitPriceRm) || 0) * 100) * (parseFloat(l.qty) || 0),
     0,
   );
 
@@ -633,14 +644,23 @@ export default function PurchaseInvoiceDetailPage() {
                           />
                         </td>
                         <td className="px-2 py-1.5">
-                          <Input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            className="text-right"
-                            value={l.unitPriceRm}
-                            onChange={(e) => patchLine(i, { unitPriceRm: e.target.value })}
-                          />
+                          {l.lineType === "DISCOUNT" ? (
+                            <DiscountInput
+                              baseAmountSen={discountBaseAmountSen}
+                              valueSen={Math.round((parseFloat(l.unitPriceRm) || 0) * 100) || null}
+                              onChange={(sen) =>
+                                patchLine(i, { unitPriceRm: sen === null ? "0" : (sen / 100).toFixed(2) })
+                              }
+                            />
+                          ) : (
+                            <MoneyInput
+                              value={parseFloat(l.unitPriceRm) || null}
+                              onChange={(rm) =>
+                                patchLine(i, { unitPriceRm: rm === null ? "0" : String(rm) })
+                              }
+                              className="text-right"
+                            />
+                          )}
                         </td>
                         <td className="px-2 py-1.5">
                           <select

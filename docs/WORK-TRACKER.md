@@ -20,10 +20,11 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
   by `toCamel` (`purchase-orders.ts` rowToItem `material_code`; `grn.ts` rowToGRN
   arrival/shipment/landed-cost). Pushed `cdfcae69`. **TODO: confirm deploy + verify
   live** (PO item code stores+reads real code; GRN arrival transition sticks on read).
-- 🔵 **Employees summary stale-on-date + system sweep** (task #55) — top Summary only
-  followed the Working Hours tab; wire all 6 date-bearing tabs to push date changes
-  to the page summary live, then sweep system for the same KPI/summary-not-reacting
-  class. Agent running on a worktree branch. **TODO: review + ship.**
+- ✅ **Employees summary stale-on-date FIX** (task #55) — wired all 6 date-bearing tabs
+  (handleSummaryDateChange + onDateChange prop on Efficiency/Dept-Labor/Employee-Detail/
+  Dept-Performance/Labor-Cost). Done myself via NAVIGATION-MAP (read ~250 lines not 10,951).
+  tsc clean, shipped `4157cf88`. **TODO left: system-wide sweep for the same KPI-stale class
+  (dashboard/reports/command-center) + verify-live.**
 - 🔵 **Supplier Pricing → Supplier merge** (task #54) — premium unified module
   ([Suppliers | Price Comparison] tabs; supplier detail [Pricing & SKUs | Price
   History]; retire "Supplier Pricing" nav; `/procurement/pricing` redirect). Built

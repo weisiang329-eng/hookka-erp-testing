@@ -18,6 +18,7 @@
 // excludes catalog price-autofill (prior owner decision). Code + name only.
 // ---------------------------------------------------------------------------
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 
 export type MaterialOption = {
@@ -63,6 +64,12 @@ export function MaterialPicker({
   const [draft, setDraft] = useState<string | null>(null);
   const query = draft ?? value ?? "";
   const wrapRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  // The dropdown renders into <body> via a portal (position:fixed) so it ESCAPES
+  // any overflow-hidden ancestor — the PI/GRN create pages wrap the line table in
+  // a rounded `overflow-hidden` div, which was clipping the suggestions list.
+  // `coords` = the input's on-screen rect; null = closed.
+  const [coords, setCoords] = useState<{ top: number; left: number; width: number } | null>(null);
 
   // Suggestions — match on code OR description, code-prefix matches first.
   // Capped so a 350-row catalog doesn't render a giant list.
@@ -115,11 +122,19 @@ export function MaterialPicker({
     else onTyped(typed);
   }, [draft, options, onPick, onTyped]);
 
-  // Close the dropdown on outside click and commit the typed value.
+  // Measure the input's on-screen rect for the portaled dropdown's fixed position.
+  const measure = useCallback(() => {
+    const r = wrapRef.current?.getBoundingClientRect();
+    if (r) setCoords({ top: r.bottom + 4, left: r.left, width: r.width });
+  }, []);
+
+  // Close the dropdown on outside click and commit the typed value. The menu is
+  // portaled to <body>, so "inside" means the input wrap OR the portaled menu.
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+      const t = e.target as Node;
+      if (!wrapRef.current?.contains(t) && !menuRef.current?.contains(t)) {
         setOpen(false);
         commitTyped();
       }
@@ -127,6 +142,19 @@ export function MaterialPicker({
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open, commitTyped]);
+
+  // While open, keep the portaled dropdown tracking the input on scroll/resize.
+  // Initial position is measured in the open handlers (not here) so the effect
+  // never calls setState synchronously in its body.
+  useEffect(() => {
+    if (!open) return;
+    window.addEventListener("scroll", measure, true);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("scroll", measure, true);
+      window.removeEventListener("resize", measure);
+    };
+  }, [open, measure]);
 
   return (
     <div ref={wrapRef} className={cn("relative", className)}>
@@ -136,11 +164,13 @@ export function MaterialPicker({
         placeholder={placeholder}
         onFocus={(e) => {
           setOpen(true);
+          measure();
           e.currentTarget.select();
         }}
         onChange={(e) => {
           setDraft(e.target.value);
           setOpen(true);
+          measure();
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -163,8 +193,13 @@ export function MaterialPicker({
           inputClassName,
         )}
       />
-      {open && (
-        <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-md border border-[#E2DDD8] bg-white shadow-lg">
+      {open && coords &&
+        createPortal(
+          <div
+            ref={menuRef}
+            style={{ position: "fixed", top: coords.top, left: coords.left, width: coords.width }}
+            className="z-[60] max-h-56 overflow-y-auto rounded-md border border-[#E2DDD8] bg-white shadow-lg"
+          >
           {suggestions.length === 0 ? (
             <div className="px-3 py-2 text-xs text-[#9CA3AF]">
               No catalog match — “{query.trim()}” will be kept as a custom item.
@@ -198,8 +233,9 @@ export function MaterialPicker({
               )}
             </>
           )}
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

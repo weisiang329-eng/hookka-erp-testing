@@ -4060,8 +4060,72 @@ function useOtherPartiesList(): OtherParty[] {
   return parties;
 }
 
+type AgingRowData = { partyId: string; partyName: string; current: number; d31_60: number; d61_90: number; d91_120: number; d120plus: number; totalSen: number };
+type AgingBillLite = { partyId: string; partyName: string; billNo: string; billDate: string; outstandingSen: number };
+
+// Per-party aging at the top of the Bills page (F4 #3). Live from unpaid bills;
+// click a party to drill into its unpaid bills.
+function OtherPartyAging({ side }: { side: "DEBTOR" | "CREDITOR" }) {
+  const [data, setData] = useState<{ aging: AgingRowData[]; bills: AgingBillLite[] } | null>(null);
+  const [openParty, setOpenParty] = useState<string | null>(null);
+  useEffect(() => {
+    fetch(`/api/accounting/other-party-aging?type=${side}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { aging: AgingRowData[]; bills: AgingBillLite[] } }>)
+      .then((j) => { if (j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+  }, [side]);
+  if (!data || data.aging.length === 0) return null;
+  const grand = data.aging.reduce((s, r) => s + r.totalSen, 0);
+  const cell = (v: number, danger = false) => <td className={`px-4 py-1.5 text-right tabular-nums ${danger && v ? "text-[#9A3A2D]" : ""}`}>{v ? formatCurrency(v) : "—"}</td>;
+  return (
+    <Card><CardContent className="p-0 overflow-x-auto">
+      <div className="px-4 pt-3 pb-1 text-sm font-semibold text-[#3E6570]">Outstanding by {side === "DEBTOR" ? "debtor" : "creditor"} — aging</div>
+      <table className="w-full text-sm">
+        <thead><tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+          <th className="px-4 py-2 text-left">Party</th>
+          <th className="px-4 py-2 text-right">Current</th>
+          <th className="px-4 py-2 text-right">31-60</th>
+          <th className="px-4 py-2 text-right">61-90</th>
+          <th className="px-4 py-2 text-right">91-120</th>
+          <th className="px-4 py-2 text-right">120+</th>
+          <th className="px-4 py-2 text-right">Total</th>
+        </tr></thead>
+        <tbody>
+          {data.aging.map((r) => (
+            <React.Fragment key={r.partyId}>
+              <tr className="border-b border-[#F0ECE9] cursor-pointer hover:bg-[#FAF8F5]" onClick={() => setOpenParty(openParty === r.partyId ? null : r.partyId)}>
+                <td className="px-4 py-1.5 font-medium">{openParty === r.partyId ? "▾ " : "▸ "}{r.partyName}</td>
+                {cell(r.current)}{cell(r.d31_60)}{cell(r.d61_90)}{cell(r.d91_120)}{cell(r.d120plus, true)}
+                <td className="px-4 py-1.5 text-right tabular-nums font-semibold">{formatCurrency(r.totalSen)}</td>
+              </tr>
+              {openParty === r.partyId && data.bills.filter((b) => b.partyId === r.partyId).map((b) => (
+                <tr key={b.billNo} className="border-b border-[#F0ECE9] bg-[#FAF8F5] text-xs text-[#6B7280]">
+                  <td className="px-4 py-1 pl-8">{b.billNo} · {b.billDate}</td>
+                  <td colSpan={5} />
+                  <td className="px-4 py-1 text-right tabular-nums">{formatCurrency(b.outstandingSen)}</td>
+                </tr>
+              ))}
+            </React.Fragment>
+          ))}
+          <tr className="border-t border-[#C9C2BA] bg-[#F7F5F2] font-semibold">
+            <td className="px-4 py-1.5">Total outstanding</td>
+            <td colSpan={5} />
+            <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(grand)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </CardContent></Card>
+  );
+}
+
 function OtherPartyBillsTab({ accounts, side }: { accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
-  return <OtherPartyBillsManager parties={useOtherPartiesList()} accounts={accounts} side={side} />;
+  const parties = useOtherPartiesList();
+  return (
+    <div className="space-y-4">
+      <OtherPartyAging side={side} />
+      <OtherPartyBillsManager parties={parties} accounts={accounts} side={side} />
+    </div>
+  );
 }
 
 function OtherPartyPaymentsTab({ accounts, side }: { accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {

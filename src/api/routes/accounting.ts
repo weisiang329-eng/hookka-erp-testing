@@ -47,6 +47,7 @@ import {
 } from "../../lib/other-party-payment";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
+import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 
@@ -2871,6 +2872,40 @@ app.get("/audit-log", async (c) => {
     };
   });
   return c.json({ success: true, data });
+});
+
+// ---------------------------------------------------------------------------
+// GET /other-party-aging?type=DEBTOR|CREDITOR — per-party aging for Other
+// Debtor/Creditor bills (F4 #3). Live: reads unpaid bills (outstanding > 0,
+// excluding voided/deleted) and buckets by age. Returns the aging rows plus
+// the raw unpaid bills (for the bills page's per-party drill-down).
+// ---------------------------------------------------------------------------
+app.get("/other-party-aging", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const type = c.req.query("type");
+  if (type !== "DEBTOR" && type !== "CREDITOR") {
+    return c.json({ success: false, error: "type must be DEBTOR or CREDITOR" }, 400);
+  }
+  const rows =
+    (
+      await c.var.DB.prepare(
+        `SELECT b.partyId AS partyId, b.partyName AS partyName, b.billNo AS billNo, b.billDate AS billDate,
+                (b.totalSen - b.paidAmountSen) AS amt
+           FROM other_party_bills b
+           LEFT JOIN document_lifecycle dl
+             ON dl.orgId = b.orgId AND dl.sourceType = 'other_party_bill' AND dl.sourceId = b.billNo
+          WHERE b.orgId = ? AND b.partyType = ? AND (b.totalSen - b.paidAmountSen) > 0
+            AND (dl.state IS NULL OR dl.state NOT IN ('DELETED','VOID'))
+          ORDER BY b.billDate ASC`,
+      )
+        .bind(orgId, type)
+        .all<{ partyId: string; partyName: string; billNo: string; billDate: string; amt: number }>()
+    ).results ?? [];
+  const bills = rows.map((r) => ({ partyId: r.partyId, partyName: r.partyName, billNo: r.billNo, billDate: r.billDate, outstandingSen: r.amt }));
+  const today = new Date().toISOString().slice(0, 10);
+  return c.json({ success: true, data: { aging: bucketAging(bills, today), bills } });
 });
 
 // Shared internal builder (NOT a route): used by both the rewired /void

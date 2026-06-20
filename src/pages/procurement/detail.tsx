@@ -46,9 +46,8 @@ function getStepIndex(status: string): number {
 // Edit-mode line item shape — mirrors POFormDialog's POLineItem so the
 // inline edit form is identical to creation. We carry through the
 // existing item id (when present) so the PUT replace-all picks up the
-// same row identity, and we split materialName ("rmCode - description")
-// back into its parts so the operator gets the same fields they see in
-// the create modal.
+// same row identity. For new POs materialCode is a real field; for old
+// rows we fall back to splitting "CODE - DESCRIPTION" out of materialName.
 type EditLine = {
   id?: string;
   rmCode: string;
@@ -64,10 +63,18 @@ type EditLine = {
 };
 
 function poItemToEditLine(it: POItem): EditLine {
-  const name = it.materialName || "";
-  const dashIdx = name.indexOf(" - ");
-  const rmCode = dashIdx > 0 ? name.slice(0, dashIdx).trim() : name.trim();
-  const rmDescription = dashIdx > 0 ? name.slice(dashIdx + 3).trim() : "";
+  // Prefer the real materialCode field for new POs; split for old rows.
+  let rmCode: string;
+  let rmDescription: string;
+  if (it.materialCode) {
+    rmCode = it.materialCode.trim();
+    rmDescription = (it.materialName || "").trim();
+  } else {
+    const name = it.materialName || "";
+    const dashIdx = name.indexOf(" - ");
+    rmCode = dashIdx > 0 ? name.slice(0, dashIdx).trim() : name.trim();
+    rmDescription = dashIdx > 0 ? name.slice(dashIdx + 3).trim() : "";
+  }
   return {
     id: it.id,
     rmCode,
@@ -359,7 +366,8 @@ export default function PurchaseOrderDetailPage() {
         items: editLines.map((l) => ({
           id: l.id,
           materialCategory: l.materialCategory,
-          materialName: `${l.rmCode} - ${l.rmDescription}`,
+          materialCode: l.rmCode,
+          materialName: l.rmDescription,
           supplierSKU: l.supplierSku,
           quantity: l.quantity,
           unitPriceSen: l.unitPriceSen,
@@ -1019,19 +1027,26 @@ export default function PurchaseOrderDetailPage() {
                     {po.items.map((item, idx) => {
                       const isComplete = item.receivedQty >= item.quantity;
                       const hasPartial = item.receivedQty > 0 && item.receivedQty < item.quantity;
-                      // materialName stores "<rmCode> - <description>" (same
-                      // shape POFormDialog writes on create + poItemToEditLine
-                      // splits on edit). Pull the prefix as the internal RM
-                      // code; the rest is the human-readable description.
-                      // Falls back to the raw string if no " - " separator
-                      // (legacy rows or supplier-only items).
-                      const dashIdx = (item.materialName ?? "").indexOf(" - ");
-                      const internalCode = dashIdx > 0
-                        ? item.materialName.slice(0, dashIdx).trim()
-                        : (item.materialName ?? "").trim();
-                      const description = dashIdx > 0
-                        ? item.materialName.slice(dashIdx + 3).trim()
-                        : "";
+                      // Prefer the real materialCode field (new POs). For old
+                      // rows where materialCode is absent and materialName is
+                      // still "CODE - DESCRIPTION", fall back to splitting.
+                      const hasMaterialCode = !!item.materialCode;
+                      const internalCode = hasMaterialCode
+                        ? item.materialCode!.trim()
+                        : (() => {
+                            const dashIdx = (item.materialName ?? "").indexOf(" - ");
+                            return dashIdx > 0
+                              ? item.materialName.slice(0, dashIdx).trim()
+                              : (item.materialName ?? "").trim();
+                          })();
+                      const description = hasMaterialCode
+                        ? (item.materialName ?? "").trim()
+                        : (() => {
+                            const dashIdx = (item.materialName ?? "").indexOf(" - ");
+                            return dashIdx > 0
+                              ? item.materialName.slice(dashIdx + 3).trim()
+                              : "";
+                          })();
                       const supplierSku = (item.supplierSKU ?? "").trim();
                       return (
                         <tr key={item.id} className={`border-b border-[#E2DDD8] ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}>

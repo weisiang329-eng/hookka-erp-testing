@@ -334,7 +334,8 @@ function CreatePurchaseOrderPage() {
     notes,
     items: items.map((it) => ({
       materialCategory: it.materialCategory,
-      materialName: `${it.rmCode} - ${it.rmDescription}`,
+      materialCode: it.rmCode,
+      materialName: it.rmDescription,
       supplierSKU: it.supplierSku,
       quantity: it.quantity,
       unitPriceSen: it.unitPriceSen,
@@ -414,7 +415,8 @@ function CreatePurchaseOrderPage() {
       notes,
       items: lines.map((it) => ({
         materialCategory: it.materialCategory,
-        materialName: `${it.rmCode} - ${it.rmDescription}`,
+        materialCode: it.rmCode,
+        materialName: it.rmDescription,
         supplierSKU: it.supplierSku,
         quantity: it.quantity,
         unitPriceSen: it.unitPriceSen,

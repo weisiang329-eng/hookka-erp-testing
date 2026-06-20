@@ -3701,6 +3701,7 @@ export type Supplier = {
 export type POItem = {
   id: string;
   materialCategory: string;
+  materialCode?: string;
   materialName: string;
   supplierSKU: string;
   quantity: number;

@@ -43,6 +43,7 @@ type PurchaseOrderItemRow = {
   id: string;
   purchaseOrderId: string;
   materialCategory: string | null;
+  material_code: string | null;
   materialName: string | null;
   supplierSKU: string | null;
   quantity: number;
@@ -72,6 +73,7 @@ function rowToItem(r: PurchaseOrderItemRow) {
   return {
     id: r.id,
     materialCategory: r.materialCategory ?? "",
+    materialCode: r.material_code ?? "",
     materialName: r.materialName ?? "",
     supplierSKU: r.supplierSKU ?? "",
     quantity: r.quantity,
@@ -246,6 +248,7 @@ app.post("/", async (c) => {
       return {
         id: genItemId(),
         materialCategory: (item.materialCategory as string) ?? "",
+        materialCode: (item.materialCode as string) ?? "",
         materialName: (item.materialName as string) ?? "",
         supplierSKU: (item.supplierSKU as string) ?? "",
         quantity,
@@ -291,13 +294,14 @@ app.post("/", async (c) => {
         ...items.map((item) =>
           c.var.DB.prepare(
             `INSERT INTO purchase_order_items (id, purchaseOrderId,
-               materialCategory, materialName, supplierSKU, quantity,
+               materialCategory, material_code, materialName, supplierSKU, quantity,
                unitPriceSen, totalSen, receivedQty, unit)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             item.id,
             poId,
             item.materialCategory,
+            item.materialCode,
             item.materialName,
             item.supplierSKU,
             item.quantity,
@@ -491,6 +495,7 @@ app.put("/:id", async (c) => {
         return {
           id: (item.id as string) || genItemId(),
           materialCategory: (item.materialCategory as string) ?? "",
+          materialCode: (item.materialCode as string) ?? "",
           materialName: (item.materialName as string) ?? "",
           supplierSKU: (item.supplierSKU as string) ?? "",
           quantity,
@@ -510,13 +515,14 @@ app.put("/:id", async (c) => {
         statements.push(
           c.var.DB.prepare(
             `INSERT INTO purchase_order_items (id, purchaseOrderId,
-               materialCategory, materialName, supplierSKU, quantity,
+               materialCategory, material_code, materialName, supplierSKU, quantity,
                unitPriceSen, totalSen, receivedQty, unit)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             item.id,
             id,
             item.materialCategory,
+            item.materialCode,
             item.materialName,
             item.supplierSKU,
             item.quantity,
@@ -650,6 +656,8 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       // 5.3 — concurrency guard for generatePoNo. The retry wrapper in
       // POST / depends on this index existing.
       "CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_orders_po_no ON purchase_orders(poNo)",
+      // 0181 — real material_code column so new POs don't mash code into name.
+      "ALTER TABLE purchase_order_items ADD COLUMN IF NOT EXISTS material_code TEXT",
     ];
     for (const sql of stmts) {
       try {

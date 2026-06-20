@@ -362,7 +362,8 @@ function POFormDialog({
         notes,
         items: lines.map((it) => ({
           materialCategory: it.materialCategory,
-          materialName: `${it.rmCode} - ${it.rmDescription}`,
+          materialCode: it.rmCode,
+          materialName: it.rmDescription,
           supplierSKU: it.supplierSku,
           quantity: it.quantity,
           unitPriceSen: it.unitPriceSen,
@@ -391,7 +392,8 @@ function POFormDialog({
       notes,
       items: items.map((it) => ({
         materialCategory: it.materialCategory,
-        materialName: `${it.rmCode} - ${it.rmDescription}`,
+        materialCode: it.rmCode,
+        materialName: it.rmDescription,
         supplierSKU: it.supplierSku,
         quantity: it.quantity,
         unitPriceSen: it.unitPriceSen,

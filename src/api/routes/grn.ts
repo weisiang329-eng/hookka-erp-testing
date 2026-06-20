@@ -135,6 +135,7 @@ type PurchaseOrderItemRow = {
   id: string;
   purchaseOrderId: string;
   materialCategory: string | null;
+  material_code: string | null;
   materialName: string | null;
   supplierSKU: string | null;
   quantity: number;
@@ -726,7 +727,7 @@ app.post("/", async (c) => {
         const poItem = poItems[item.poItemIndex];
         return {
           poItemIndex: item.poItemIndex,
-          materialCode: poItem?.supplierSKU ?? "",
+          materialCode: poItem?.material_code || poItem?.supplierSKU || "",
           materialName: poItem?.materialName ?? "",
           orderedQty: poItem?.quantity ?? 0,
           receivedQty: item.receivedQty,

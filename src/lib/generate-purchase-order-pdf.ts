@@ -196,9 +196,13 @@ export function generatePurchaseOrderPdf(
   y = drawSectionLabel(doc, `Order Items (${po.items.length} lines, ${totalQty} qty)`, y);
 
   const tableBody = po.items.map((item, idx) => {
-    // PO items have no dedicated code column — recover the code from the
-    // "CODE - DESCRIPTION" materialName so the Item Code column isn't blank.
-    const { code, description } = splitCodeName(item.supplierSKU, item.materialName);
+    // Prefer the real materialCode field (new POs); fall back to splitting
+    // the "CODE - DESCRIPTION" materialName for old rows (splitCodeName uses
+    // supplierSKU as a secondary hint when the name has no separator).
+    const { code, description } = splitCodeName(
+      item.materialCode || item.supplierSKU,
+      item.materialName,
+    );
     return [
       String(idx + 1),
       code,

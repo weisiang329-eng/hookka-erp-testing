@@ -106,6 +106,17 @@ export function getStatusColor(status: string): SemanticStyle {
     return SUCCESS;
   }
 
+  // arrival pipeline — AT_CUSTOMS maps to WARNING (attention), ARRIVED to SUCCESS
+  if (status === "AT_CUSTOMS") {
+    return WARNING;
+  }
+  if (status === "NOT_ARRIVED") {
+    return NEUTRAL;
+  }
+  if (status === "ARRIVED") {
+    return SUCCESS;
+  }
+
   // in-motion / in-progress family
   if (
     status === "IN_PROGRESS" ||

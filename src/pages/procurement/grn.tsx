@@ -9,7 +9,8 @@ import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { GoodsReceiptNote, PurchaseOrder } from "@/types";
+import type { GoodsReceiptNote, PurchaseOrder, ArrivalState } from "@/types";
+import { Ship } from "lucide-react";
 import {
   Plus,
   Package,
@@ -350,12 +351,14 @@ export default function GRNPage() {
   const [filterSupplier, setFilterSupplier] = useState("");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
+  const [filterArrivalState, setFilterArrivalState] = useState<ArrivalState | "">("");
   const [showFilters, setShowFilters] = useState(false);
 
   // Bulk "Download PDF" — merge every selected GRN into one file. Rows come
   // back from the DataGrid via `onSelectionChange`.
   const [selectedGrns, setSelectedGrns] = useState<GoodsReceiptNote[]>([]);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const [bulkArrivalBusy, setBulkArrivalBusy] = useState(false);
 
   const { data: grnResp, loading: grnLoading, refresh: refreshGrns } = useCachedJson<{ success?: boolean; data?: GoodsReceiptNote[] } | GoodsReceiptNote[]>("/api/grn");
   const { loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] } | PurchaseOrder[]>("/api/purchase-orders");
@@ -376,13 +379,14 @@ export default function GRNPage() {
   }, [refreshGrns, refreshPOs]);
 
   // ---- Filters ----
-  const hasActiveFilters = filterStatus || filterSupplier || filterDateFrom || filterDateTo;
+  const hasActiveFilters = filterStatus || filterSupplier || filterDateFrom || filterDateTo || filterArrivalState;
 
   const clearFilters = () => {
     setFilterStatus("");
     setFilterSupplier("");
     setFilterDateFrom("");
     setFilterDateTo("");
+    setFilterArrivalState("");
   };
 
   const filteredGRNs = useMemo(() => {
@@ -401,9 +405,10 @@ export default function GRNPage() {
         const rd = grn.receiveDate?.split("T")[0] ?? "";
         if (rd > filterDateTo) return false;
       }
+      if (filterArrivalState && grn.arrival_state !== filterArrivalState) return false;
       return true;
     });
-  }, [grns, filterStatus, filterSupplier, filterDateFrom, filterDateTo]);
+  }, [grns, filterStatus, filterSupplier, filterDateFrom, filterDateTo, filterArrivalState]);
 
   // ---- Export CSV ----
   const exportCSV = () => {
@@ -503,6 +508,51 @@ export default function GRNPage() {
     return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
   }, [grns]);
 
+  // ---- Bulk arrival transition ----
+  // Mirrors runBulkDoTransition from delivery/index.tsx: sequential per-row
+  // PUTs to /api/grn/:id/arrival, then refresh.
+  const VALID_ARRIVAL_TRANSITIONS: Record<ArrivalState, ArrivalState[]> = {
+    NOT_ARRIVED: ["IN_TRANSIT", "ARRIVED"],
+    IN_TRANSIT: ["AT_CUSTOMS", "ARRIVED"],
+    AT_CUSTOMS: ["ARRIVED"],
+    ARRIVED: [],
+  };
+
+  const runBulkArrivalTransition = useCallback(async (target: ArrivalState, verb: string) => {
+    if (selectedGrns.length === 0 || bulkArrivalBusy) return;
+    // Only transition rows whose current state allows the target
+    const eligible = selectedGrns.filter(g =>
+      (VALID_ARRIVAL_TRANSITIONS[g.arrival_state] ?? []).includes(target),
+    );
+    if (eligible.length === 0) {
+      toast.error(`No selected GRNs can be moved to ${verb} from their current arrival state.`);
+      return;
+    }
+    setBulkArrivalBusy(true);
+    let ok = 0;
+    let failed = 0;
+    for (const grn of eligible) {
+      try {
+        const res = await fetch(`/api/grn/${grn.id}/arrival`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ arrival_state: target }),
+        });
+        const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+        if (!res.ok || !j?.success) { failed++; } else { ok++; }
+      } catch { failed++; }
+    }
+    setBulkArrivalBusy(false);
+    invalidateCachePrefix("/api/grn");
+    fetchData();
+    if (failed > 0) {
+      toast.error(`${ok} marked ${verb}; ${failed} failed (check arrival state transitions).`);
+    } else {
+      toast.success(`${ok} GRN${ok !== 1 ? "s" : ""} marked ${verb}.`);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedGrns, bulkArrivalBusy, toast, fetchData]);
+
   // ---- Columns ----
   const grnGridColumns: Column<GoodsReceiptNote>[] = useMemo(() => [
     { key: "grnNumber", label: "GRN No.", type: "docno", width: "130px", sortable: true },
@@ -513,6 +563,13 @@ export default function GRNPage() {
       render: (_v: unknown, row: GoodsReceiptNote) => <span>{row.items.length}</span>,
     },
     { key: "totalAmount", label: "Total", type: "currency", width: "120px", sortable: true },
+    { key: "arrival_state", label: "Arrival", type: "status", width: "130px", sortable: true,
+      render: (_v: unknown, row: GoodsReceiptNote) => (
+        <Badge variant="status" status={row.arrival_state}>
+          {row.arrival_state.replace(/_/g, " ")}
+        </Badge>
+      ),
+    },
     { key: "qcStatus", label: "QC Status", type: "status", width: "110px", sortable: true },
     { key: "status", label: "Status", type: "status", width: "110px", sortable: true },
   ], []);
@@ -681,7 +738,7 @@ export default function GRNPage() {
 
       {/* Status Pipeline */}
       <Card>
-        <CardContent className="p-4">
+        <CardContent className="p-4 space-y-3">
           <div className="flex items-center justify-between overflow-x-auto gap-2">
             {statusCounts.map((s, i) => (
               <div key={s.label} className="flex items-center gap-2">
@@ -695,6 +752,30 @@ export default function GRNPage() {
                 {i < statusCounts.length - 1 && <ArrowRight className="h-4 w-4 text-[#D1CBC5] shrink-0" />}
               </div>
             ))}
+          </div>
+          {/* Arrival state filter chips */}
+          <div className="flex items-center gap-2 pt-2 border-t border-[#E2DDD8]">
+            <Ship className="h-3.5 w-3.5 text-[#6B7280] shrink-0" />
+            <span className="text-xs text-[#6B7280] shrink-0">Arrival:</span>
+            {(["NOT_ARRIVED", "IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"] as ArrivalState[]).map((state) => {
+              const count = grns.filter(g => g.arrival_state === state).length;
+              const isActive = filterArrivalState === state;
+              return (
+                <button
+                  key={state}
+                  onClick={() => setFilterArrivalState(isActive ? "" : state)}
+                  className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium border transition-all cursor-pointer ${
+                    isActive ? "border-[#6B5C32] bg-[#F0ECE9] text-[#6B5C32]" : "border-[#E2DDD8] text-[#6B7280] hover:border-[#6B5C32]/40"
+                  }`}
+                >
+                  <Badge variant="status" status={state} className="h-1.5 w-1.5 rounded-full p-0 border-0" />
+                  {state.replace(/_/g, " ")} ({count})
+                </button>
+              );
+            })}
+            {filterArrivalState && (
+              <button onClick={() => setFilterArrivalState("")} className="text-xs text-[#9CA3AF] hover:text-[#374151] cursor-pointer">Clear</button>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -763,19 +844,48 @@ export default function GRNPage() {
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               {selectedGrns.length > 0 && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={downloadingPdf}
-                  onClick={downloadSelectedPdf}
-                >
-                  <Download className="h-4 w-4" />{" "}
-                  {downloadingPdf
-                    ? "Preparing…"
-                    : `Download PDF (${selectedGrns.length})`}
-                </Button>
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={bulkArrivalBusy}
+                    onClick={() => runBulkArrivalTransition("IN_TRANSIT", "In Transit")}
+                    title="Mark selected GRNs as In Transit (only those currently NOT_ARRIVED)"
+                  >
+                    <Ship className="h-4 w-4" /> Mark In Transit ({selectedGrns.length})
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={bulkArrivalBusy}
+                    onClick={() => runBulkArrivalTransition("AT_CUSTOMS", "At Customs")}
+                    title="Mark selected GRNs as At Customs (only those currently IN_TRANSIT)"
+                  >
+                    <Ship className="h-4 w-4" /> Mark At Customs ({selectedGrns.length})
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={bulkArrivalBusy}
+                    onClick={() => runBulkArrivalTransition("ARRIVED", "Arrived")}
+                    title="Mark selected GRNs as Arrived (IN_TRANSIT or AT_CUSTOMS)"
+                  >
+                    <Ship className="h-4 w-4" /> Mark Arrived ({selectedGrns.length})
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={downloadingPdf}
+                    onClick={downloadSelectedPdf}
+                  >
+                    <Download className="h-4 w-4" />{" "}
+                    {downloadingPdf
+                      ? "Preparing…"
+                      : `Download PDF (${selectedGrns.length})`}
+                  </Button>
+                </>
               )}
               <Button variant="outline" size="sm" onClick={exportCSV}>
                 <Download className="h-4 w-4" /> Export CSV

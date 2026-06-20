@@ -1467,6 +1467,8 @@ export type GRNItem = {
   unitPrice: number;
 };
 
+export type ArrivalState = "NOT_ARRIVED" | "IN_TRANSIT" | "AT_CUSTOMS" | "ARRIVED";
+
 export type GoodsReceiptNote = {
   id: string;
   grnNumber: string;
@@ -1481,6 +1483,22 @@ export type GoodsReceiptNote = {
   qcStatus: "PENDING" | "PASSED" | "PARTIAL" | "FAILED";
   status: "DRAFT" | "CONFIRMED" | "POSTED";
   notes: string;
+  // Arrival pipeline
+  arrival_state: ArrivalState;
+  shipping_method: string | null;
+  carrier_name: string | null;
+  tracking_number: string | null;
+  container_number: string | null;
+  expected_arrival: string | null;
+  shipped_date: string | null;
+  actual_arrival: string | null;
+  customs_status: string | null;
+  customs_clearance_date: string | null;
+  shipping_cost_sen: number;
+  customs_duty_sen: number;
+  exchange_rate: number | null;
+  currency: string | null;
+  landed_cost_sen: number;
 };
 
 export type ThreeWayMatch = {

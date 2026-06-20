@@ -17,16 +17,57 @@
 // ---------------------------------------------------------------------------
 import { useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, FileText, Package, CheckCircle2, PackageCheck, Receipt, Printer } from "lucide-react";
+import {
+  ArrowLeft, FileText, Package, CheckCircle2, PackageCheck, Receipt, Printer,
+  Ship, ChevronDown, ChevronUp, DollarSign,
+} from "lucide-react";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { MoneyInput } from "@/components/ui/money-input";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import type { ArrivalState } from "@/types";
+
+// Arrival state pipeline sequences for the stepper
+const ARRIVAL_SEQUENCE: ArrivalState[] = ["NOT_ARRIVED", "IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"];
+
+// Color per arrival state
+const ARRIVAL_COLORS: Record<ArrivalState, string> = {
+  NOT_ARRIVED: "#9CA3AF",
+  IN_TRANSIT: "#3B82F6",
+  AT_CUSTOMS: "#F97316",
+  ARRIVED: "#10B981",
+};
+
+// Labels for display
+const ARRIVAL_LABELS: Record<ArrivalState, string> = {
+  NOT_ARRIVED: "Not Arrived",
+  IN_TRANSIT: "In Transit",
+  AT_CUSTOMS: "At Customs",
+  ARRIVED: "Arrived",
+};
+
+// Which state does the "advance" button target?
+function nextArrivalState(current: ArrivalState): ArrivalState | null {
+  if (current === "NOT_ARRIVED") return "IN_TRANSIT";
+  if (current === "IN_TRANSIT") return "AT_CUSTOMS";
+  if (current === "AT_CUSTOMS") return "ARRIVED";
+  return null; // ARRIVED is terminal
+}
+
+// Label for the advance button
+function advanceLabel(current: ArrivalState): string {
+  if (current === "NOT_ARRIVED") return "Mark In Transit";
+  if (current === "IN_TRANSIT") return "Mark At Customs";
+  if (current === "AT_CUSTOMS") return "Mark Arrived";
+  return "";
+}
 
 type GRNItem = {
   poItemIndex: number;
@@ -54,6 +95,22 @@ type GRNDetail = {
   qcStatus: string;
   status: string;
   notes: string | null;
+  // Arrival pipeline
+  arrival_state: ArrivalState;
+  shipping_method: string | null;
+  carrier_name: string | null;
+  tracking_number: string | null;
+  container_number: string | null;
+  expected_arrival: string | null;
+  shipped_date: string | null;
+  actual_arrival: string | null;
+  customs_status: string | null;
+  customs_clearance_date: string | null;
+  shipping_cost_sen: number;
+  customs_duty_sen: number;
+  exchange_rate: number | null;
+  currency: string | null;
+  landed_cost_sen: number;
 };
 
 export default function GRNDetailPage() {
@@ -62,6 +119,28 @@ export default function GRNDetailPage() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const [busy, setBusy] = useState(false);
+  // Shipment card expansion
+  const [shipmentOpen, setShipmentOpen] = useState(true);
+  // Landed cost section expansion
+  const [landedOpen, setLandedOpen] = useState(false);
+  // Local editable shipment / landed cost fields (dirty when changed from server values)
+  const [shipmentEdit, setShipmentEdit] = useState<{
+    shipping_method: string;
+    carrier_name: string;
+    tracking_number: string;
+    container_number: string;
+    expected_arrival: string;
+    actual_arrival: string;
+    customs_status: string;
+    customs_clearance_date: string;
+  } | null>(null);
+  const [landedEdit, setLandedEdit] = useState<{
+    shipping_cost_sen: number;
+    customs_duty_sen: number;
+    exchange_rate: string;
+    currency: string;
+  } | null>(null);
+
   const { data: resp, loading, error: fetchError, refresh } = useCachedJson<{
     success?: boolean;
     data?: GRNDetail;
@@ -116,6 +195,110 @@ export default function GRNDetailPage() {
       refresh();
     } catch {
       toast.error(`${label} failed — network error`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Advance the arrival state by one step via PUT /api/grn/:id/arrival
+  async function advanceArrival() {
+    if (!grn) return;
+    const target = nextArrivalState(grn.arrival_state);
+    if (!target) return;
+    const label = advanceLabel(grn.arrival_state);
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/grn/${grn.id}/arrival`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ arrival_state: target }),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || `${label} failed (${res.status})`);
+        return;
+      }
+      toast.success(`${label} — done`);
+      invalidateCachePrefix("/api/grn");
+      refresh();
+    } catch {
+      toast.error(`${label} failed — network error`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Save shipment details via PUT /api/grn/:id/arrival (same state = fields-only update)
+  async function saveShipment() {
+    if (!grn || !shipmentEdit) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/grn/${grn.id}/arrival`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          arrival_state: grn.arrival_state, // same-state → field-only update
+          shipping_method: shipmentEdit.shipping_method || null,
+          carrier_name: shipmentEdit.carrier_name || null,
+          tracking_number: shipmentEdit.tracking_number || null,
+          container_number: shipmentEdit.container_number || null,
+          expected_arrival: shipmentEdit.expected_arrival || null,
+          actual_arrival: shipmentEdit.actual_arrival || null,
+          customs_status: shipmentEdit.customs_status || null,
+          customs_clearance_date: shipmentEdit.customs_clearance_date || null,
+        }),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || "Save shipment failed");
+        return;
+      }
+      toast.success("Shipment details saved");
+      setShipmentEdit(null);
+      invalidateCachePrefix("/api/grn");
+      refresh();
+    } catch {
+      toast.error("Save shipment failed — network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Save landed cost fields via PUT /api/grn/:id/arrival
+  async function saveLandedCost() {
+    if (!grn || !landedEdit) return;
+    setBusy(true);
+    try {
+      const body: Record<string, unknown> = {
+        arrival_state: grn.arrival_state,
+        shipping_cost_sen: landedEdit.shipping_cost_sen,
+        customs_duty_sen: landedEdit.customs_duty_sen,
+        currency: landedEdit.currency || null,
+      };
+      const exRate = parseFloat(landedEdit.exchange_rate);
+      if (Number.isFinite(exRate) && exRate > 0) {
+        body.exchange_rate = exRate;
+      }
+      // Compute and send landed_cost_sen = product total + shipping + duty
+      const productSen = grn.totalAmount;
+      body.landed_cost_sen = productSen + landedEdit.shipping_cost_sen + landedEdit.customs_duty_sen;
+
+      const res = await fetch(`/api/grn/${grn.id}/arrival`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || "Save landed cost failed");
+        return;
+      }
+      toast.success("Landed cost saved");
+      setLandedEdit(null);
+      invalidateCachePrefix("/api/grn");
+      refresh();
+    } catch {
+      toast.error("Save landed cost failed — network error");
     } finally {
       setBusy(false);
     }
@@ -251,6 +434,8 @@ export default function GRNDetailPage() {
 
   const isPosted = grn.status === "POSTED";
   const isConfirmed = grn.status === "CONFIRMED";
+  const isArrived = grn.arrival_state === "ARRIVED";
+  const advanceTarget = nextArrivalState(grn.arrival_state);
 
   return (
     <div className="space-y-6">
@@ -262,6 +447,9 @@ export default function GRNDetailPage() {
         badges={
           <>
             <Badge variant="status" status={grn.status} />
+            <Badge variant="status" status={grn.arrival_state}>
+              {ARRIVAL_LABELS[grn.arrival_state]}
+            </Badge>
             {grn.qcStatus ? (
               <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-[#F0ECE9] text-[#6B5C32]">
                 QC: {grn.qcStatus}
@@ -274,19 +462,29 @@ export default function GRNDetailPage() {
             <Button type="button" variant="outline" size="sm" onClick={printPdf} disabled={busy}>
               <Printer className="h-3.5 w-3.5" /> Print
             </Button>
+            {/* Arrival advance button — contextual, hidden when ARRIVED */}
+            {advanceTarget && (
+              <Button type="button" variant="outline" size="sm" onClick={advanceArrival} disabled={busy}>
+                <Ship className="h-3.5 w-3.5" /> {advanceLabel(grn.arrival_state)}
+              </Button>
+            )}
             {!isConfirmed && !isPosted && (
               <Button type="button" variant="outline" size="sm" onClick={() => setStatus("CONFIRMED", "Approve")} disabled={busy}>
                 <CheckCircle2 className="h-3.5 w-3.5" /> Approve
               </Button>
             )}
             {!isPosted && (
+              /* Post to Stock is DISABLED unless arrival_state === 'ARRIVED'.
+                 The backend enforces this via a 409 gate; the UI mirrors it
+                 with a disabled state + tooltip so the operator knows why. */
               <Button
                 type="button"
                 variant="primary"
                 size="sm"
                 onClick={() => setStatus("POSTED", "Post to Stock")}
-                disabled={busy}
-                className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+                disabled={busy || !isArrived}
+                title={!isArrived ? "Mark arrived first before posting to stock" : undefined}
+                className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a] disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <PackageCheck className="h-3.5 w-3.5" /> Post to Stock
               </Button>
@@ -335,6 +533,39 @@ export default function GRNDetailPage() {
 
               <span className="text-[#6B7280]">Status</span>
               <span><Badge variant="status" status={grn.status} /></span>
+
+              <span className="text-[#6B7280]">Arrival</span>
+              <span><Badge variant="status" status={grn.arrival_state}>{ARRIVAL_LABELS[grn.arrival_state]}</Badge></span>
+            </div>
+
+            {/* Arrival stepper */}
+            <div className="pt-3 border-t border-[#E2DDD8]">
+              <p className="text-xs font-medium text-[#6B7280] mb-2">Arrival Progress</p>
+              <div className="flex items-center gap-1">
+                {ARRIVAL_SEQUENCE.map((s, i) => {
+                  const currentIdx = ARRIVAL_SEQUENCE.indexOf(grn.arrival_state);
+                  const isActive = i <= currentIdx;
+                  const color = ARRIVAL_COLORS[s];
+                  return (
+                    <div key={s} className="flex items-center">
+                      <div
+                        className="h-2.5 w-2.5 rounded-full transition-all"
+                        style={{ backgroundColor: isActive ? color : "#E2DDD8" }}
+                        title={ARRIVAL_LABELS[s]}
+                      />
+                      {i < ARRIVAL_SEQUENCE.length - 1 && (
+                        <div
+                          className="h-0.5 w-6"
+                          style={{
+                            backgroundColor: i < currentIdx ? ARRIVAL_COLORS[ARRIVAL_SEQUENCE[i + 1]] : "#E2DDD8",
+                          }}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+                <span className="ml-2 text-xs text-[#6B7280]">{ARRIVAL_LABELS[grn.arrival_state]}</span>
+              </div>
             </div>
 
             {grn.notes && (
@@ -404,6 +635,277 @@ export default function GRNDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* ── Shipment Card (PO-linked GRNs only) ────────────────────────────── */}
+      {grn.poId && (
+        <Card>
+          <button
+            className="w-full text-left cursor-pointer"
+            onClick={() => setShipmentOpen(!shipmentOpen)}
+          >
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <Ship className="h-4 w-4 text-[#6B5C32]" /> Shipment Details
+                </CardTitle>
+                <div className="flex items-center gap-3">
+                  <Badge variant="status" status={grn.arrival_state}>{ARRIVAL_LABELS[grn.arrival_state]}</Badge>
+                  {shipmentOpen ? <ChevronUp className="h-4 w-4 text-[#6B7280]" /> : <ChevronDown className="h-4 w-4 text-[#6B7280]" />}
+                </div>
+              </div>
+            </CardHeader>
+          </button>
+          {shipmentOpen && (
+            <CardContent className="border-t border-[#E2DDD8] pt-4">
+              {/* Read view */}
+              {!shipmentEdit ? (
+                <div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-4">
+                    <div className="space-y-2">
+                      <h4 className="text-xs font-semibold text-[#6B7280] uppercase tracking-wider">Shipping</h4>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex gap-2"><span className="text-[#6B7280] w-28 shrink-0">Method</span><span className="font-medium">{grn.shipping_method || "—"}</span></div>
+                        <div className="flex gap-2"><span className="text-[#6B7280] w-28 shrink-0">Carrier</span><span className="font-medium">{grn.carrier_name || "—"}</span></div>
+                        <div className="flex gap-2"><span className="text-[#6B7280] w-28 shrink-0">Tracking #</span><span className="font-mono text-xs bg-[#F0ECE9] px-1.5 py-0.5 rounded">{grn.tracking_number || "—"}</span></div>
+                        <div className="flex gap-2"><span className="text-[#6B7280] w-28 shrink-0">Container #</span><span className="font-mono text-xs bg-[#F0ECE9] px-1.5 py-0.5 rounded">{grn.container_number || "—"}</span></div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <h4 className="text-xs font-semibold text-[#6B7280] uppercase tracking-wider">Timeline</h4>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex gap-2"><span className="text-[#6B7280] w-28 shrink-0">Expected Arrival</span><span className="font-medium">{grn.expected_arrival || "—"}</span></div>
+                        <div className="flex gap-2"><span className="text-[#6B7280] w-28 shrink-0">Actual Arrival</span><span className="font-medium">{grn.actual_arrival || "—"}</span></div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <h4 className="text-xs font-semibold text-[#6B7280] uppercase tracking-wider">Customs</h4>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex gap-2"><span className="text-[#6B7280] w-32 shrink-0">Customs Status</span><span className="font-medium">{grn.customs_status || "N/A"}</span></div>
+                        <div className="flex gap-2"><span className="text-[#6B7280] w-32 shrink-0">Clearance Date</span><span className="font-medium">{grn.customs_clearance_date || "—"}</span></div>
+                      </div>
+                    </div>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setShipmentEdit({
+                    shipping_method: grn.shipping_method || "",
+                    carrier_name: grn.carrier_name || "",
+                    tracking_number: grn.tracking_number || "",
+                    container_number: grn.container_number || "",
+                    expected_arrival: grn.expected_arrival || "",
+                    actual_arrival: grn.actual_arrival || "",
+                    customs_status: grn.customs_status || "",
+                    customs_clearance_date: grn.customs_clearance_date || "",
+                  })}>
+                    Edit Shipment Details
+                  </Button>
+                </div>
+              ) : (
+                /* Edit view */
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Shipping Method</label>
+                      <select
+                        value={shipmentEdit.shipping_method}
+                        onChange={(e) => setShipmentEdit(prev => prev ? { ...prev, shipping_method: e.target.value } : prev)}
+                        className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                      >
+                        <option value="">Select…</option>
+                        <option value="SEA">SEA</option>
+                        <option value="AIR">AIR</option>
+                        <option value="LAND">LAND</option>
+                        <option value="COURIER">COURIER</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Carrier Name</label>
+                      <Input value={shipmentEdit.carrier_name} onChange={(e) => setShipmentEdit(prev => prev ? { ...prev, carrier_name: e.target.value } : prev)} placeholder="e.g. COSCO, DHL" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Tracking Number</label>
+                      <Input value={shipmentEdit.tracking_number} onChange={(e) => setShipmentEdit(prev => prev ? { ...prev, tracking_number: e.target.value } : prev)} placeholder="e.g. MRKU1234567" className="font-mono" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Container Number</label>
+                      <Input value={shipmentEdit.container_number} onChange={(e) => setShipmentEdit(prev => prev ? { ...prev, container_number: e.target.value } : prev)} placeholder="e.g. MSCU1234567" className="font-mono" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Expected Arrival</label>
+                      <Input type="date" value={shipmentEdit.expected_arrival} onChange={(e) => setShipmentEdit(prev => prev ? { ...prev, expected_arrival: e.target.value } : prev)} />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Actual Arrival</label>
+                      <Input type="date" value={shipmentEdit.actual_arrival} onChange={(e) => setShipmentEdit(prev => prev ? { ...prev, actual_arrival: e.target.value } : prev)} />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Customs Status</label>
+                      <select
+                        value={shipmentEdit.customs_status}
+                        onChange={(e) => setShipmentEdit(prev => prev ? { ...prev, customs_status: e.target.value } : prev)}
+                        className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                      >
+                        <option value="">N/A</option>
+                        <option value="PENDING">PENDING</option>
+                        <option value="CLEARED">CLEARED</option>
+                        <option value="HELD">HELD</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Customs Clearance Date</label>
+                      <Input type="date" value={shipmentEdit.customs_clearance_date} onChange={(e) => setShipmentEdit(prev => prev ? { ...prev, customs_clearance_date: e.target.value } : prev)} />
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={() => setShipmentEdit(null)} disabled={busy}>Cancel</Button>
+                    <Button type="button" size="sm" onClick={saveShipment} disabled={busy} className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]">
+                      Save Shipment Details
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          )}
+        </Card>
+      )}
+
+      {/* ── Landed Cost ─────────────────────────────────────────────────────── */}
+      {grn.poId && (
+        <Card>
+          <button
+            className="w-full text-left cursor-pointer"
+            onClick={() => setLandedOpen(!landedOpen)}
+          >
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <DollarSign className="h-4 w-4 text-[#6B5C32]" /> Landed Cost
+                </CardTitle>
+                <div className="flex items-center gap-3">
+                  {grn.landed_cost_sen > 0 && (
+                    <span className="text-sm font-medium text-green-700">{formatCurrency(grn.landed_cost_sen)}</span>
+                  )}
+                  {landedOpen ? <ChevronUp className="h-4 w-4 text-[#6B7280]" /> : <ChevronDown className="h-4 w-4 text-[#6B7280]" />}
+                </div>
+              </div>
+            </CardHeader>
+          </button>
+          {landedOpen && (
+            <CardContent className="border-t border-[#E2DDD8] pt-4">
+              {!landedEdit ? (
+                <div className="space-y-4">
+                  {/* Cost waterfall */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between py-2 border-b border-[#E2DDD8]">
+                      <span className="text-sm text-[#6B7280]">Product Cost</span>
+                      <span className="text-sm font-medium text-[#1F1D1B]">{formatCurrency(grn.totalAmount)}</span>
+                    </div>
+                    <div className="flex items-center justify-between py-2 border-b border-[#E2DDD8]">
+                      <span className="text-sm text-[#6B7280]">+ Shipping Cost</span>
+                      <span className="text-sm font-medium text-blue-700">{formatCurrency(grn.shipping_cost_sen)}</span>
+                    </div>
+                    <div className="flex items-center justify-between py-2 border-b border-[#E2DDD8]">
+                      <span className="text-sm text-[#6B7280]">+ Customs Duty</span>
+                      <span className="text-sm font-medium text-orange-700">{formatCurrency(grn.customs_duty_sen)}</span>
+                    </div>
+                    {grn.exchange_rate && (
+                      <div className="flex items-center justify-between py-2 border-b border-[#E2DDD8] bg-purple-50/50 px-2 rounded">
+                        <span className="text-sm text-purple-700">Exchange Rate ({grn.currency || "?"} to MYR)</span>
+                        <span className="text-sm font-bold text-purple-700">{grn.exchange_rate}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between py-3 bg-green-50 px-3 rounded-lg">
+                      <span className="text-sm font-semibold text-green-800">
+                        Total Landed Cost (MYR)
+                        {grn.landed_cost_sen === 0 && <span className="ml-1 text-xs font-normal text-green-700">— enter costs below</span>}
+                      </span>
+                      <span className="text-lg font-bold text-green-800">
+                        {formatCurrency(grn.landed_cost_sen > 0 ? grn.landed_cost_sen : grn.totalAmount + grn.shipping_cost_sen + grn.customs_duty_sen)}
+                      </span>
+                    </div>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setLandedEdit({
+                    shipping_cost_sen: grn.shipping_cost_sen,
+                    customs_duty_sen: grn.customs_duty_sen,
+                    exchange_rate: grn.exchange_rate != null ? String(grn.exchange_rate) : "",
+                    currency: grn.currency || "",
+                  })}>
+                    Edit Landed Cost
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Shipping Cost (RM)</label>
+                      <MoneyInput
+                        value={landedEdit.shipping_cost_sen / 100}
+                        onChange={(v) => setLandedEdit(prev => prev ? { ...prev, shipping_cost_sen: Math.round((v ?? 0) * 100) } : prev)}
+                        placeholder="0.00"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Customs Duty (RM)</label>
+                      <MoneyInput
+                        value={landedEdit.customs_duty_sen / 100}
+                        onChange={(v) => setLandedEdit(prev => prev ? { ...prev, customs_duty_sen: Math.round((v ?? 0) * 100) } : prev)}
+                        placeholder="0.00"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Currency</label>
+                      <select
+                        value={landedEdit.currency}
+                        onChange={(e) => setLandedEdit(prev => prev ? { ...prev, currency: e.target.value } : prev)}
+                        className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                      >
+                        <option value="">MYR (default)</option>
+                        <option value="RMB">RMB</option>
+                        <option value="USD">USD</option>
+                        <option value="EUR">EUR</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-[#6B7280] mb-1">Exchange Rate (to MYR)</label>
+                      <Input
+                        type="number"
+                        step="0.0001"
+                        min={0}
+                        value={landedEdit.exchange_rate}
+                        onChange={(e) => setLandedEdit(prev => prev ? { ...prev, exchange_rate: e.target.value } : prev)}
+                        placeholder="e.g. 0.65"
+                      />
+                    </div>
+                  </div>
+                  {/* Live waterfall preview */}
+                  <div className="bg-[#F0ECE9] rounded-lg p-3 space-y-1.5 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-[#6B7280]">Product Cost</span>
+                      <span className="font-medium">{formatCurrency(grn.totalAmount)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-[#6B7280]">+ Shipping</span>
+                      <span className="font-medium text-blue-700">{formatCurrency(landedEdit.shipping_cost_sen)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-[#6B7280]">+ Customs Duty</span>
+                      <span className="font-medium text-orange-700">{formatCurrency(landedEdit.customs_duty_sen)}</span>
+                    </div>
+                    <div className="flex justify-between pt-1 border-t border-[#D1CBC5] font-bold">
+                      <span className="text-[#6B5C32]">Landed Cost (MYR)</span>
+                      <span className="text-green-700">{formatCurrency(grn.totalAmount + landedEdit.shipping_cost_sen + landedEdit.customs_duty_sen)}</span>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={() => setLandedEdit(null)} disabled={busy}>Cancel</Button>
+                    <Button type="button" size="sm" onClick={saveLandedCost} disabled={busy} className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]">
+                      Save Landed Cost
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          )}
+        </Card>
+      )}
 
       <AuditHistoryPanel resource="grn" resourceId={grn.id} />
     </div>

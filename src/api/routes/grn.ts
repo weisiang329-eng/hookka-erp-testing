@@ -1068,7 +1068,9 @@ app.put("/:id/arrival", async (c) => {
     const currentState = deriveArrivalState(existing);
     const allowedNext = VALID_ARRIVAL_TRANSITIONS[currentState] ?? [];
 
-    if (!allowedNext.includes(targetState)) {
+    // Allow same-state call for fields-only updates (no state transition).
+    // Only reject when targeting a truly invalid next state.
+    if (targetState !== currentState && !allowedNext.includes(targetState)) {
       return c.json(
         {
           success: false,

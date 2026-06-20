@@ -30,7 +30,7 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { PurchaseOrder, Supplier } from "@/types";
-import { ArrowLeft, Save, ScanLine, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Save, ScanLine, Plus, Trash2, ChevronDown, ChevronUp, Ship } from "lucide-react";
 import {
   ScanSupplierModal,
   type SupplierExtraction,
@@ -146,6 +146,14 @@ function GRNCreatePage() {
   const [notes, setNotes] = useState("");
   const [scanOpen, setScanOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // ── Shipment details (PO mode only) ──────────────────────────────────────
+  // When filled, the GRN is created with arrival_state=NOT_ARRIVED + the
+  // shipment fields. Manual mode stays defaulting to ARRIVED (goods in hand).
+  const [shipmentOpen, setShipmentOpen] = useState(false);
+  const [shipmentMethod, setShipmentMethod] = useState("");
+  const [shipmentCarrier, setShipmentCarrier] = useState("");
+  const [shipmentExpectedArrival, setShipmentExpectedArrival] = useState("");
 
   // ── PO-mode state ─────────────────────────────────────────────────────────
   const [selectedPO, setSelectedPO] = useState(seedPoId);
@@ -368,11 +376,20 @@ function GRNCreatePage() {
       let body: Record<string, unknown>;
 
       if (mode === "po") {
+        // Include shipment fields if the operator filled them in.
+        // Presence of any shipment field signals "NOT_ARRIVED" default.
+        const hasShipment = shipmentMethod || shipmentCarrier || shipmentExpectedArrival;
         body = {
           poId: po!.id,
           receivedBy: receivedBy.trim(),
           notes: notes.trim(),
           items: poItemEntries.filter((ie) => ie.receivedQty > 0),
+          ...(hasShipment ? {
+            arrival_state: "NOT_ARRIVED",
+            shipping_method: shipmentMethod || null,
+            carrier_name: shipmentCarrier || null,
+            expected_arrival: shipmentExpectedArrival || null,
+          } : {}),
         };
       } else {
         const validLines = manualItems.filter(
@@ -622,6 +639,63 @@ function GRNCreatePage() {
                 placeholder="Optional delivery notes, discrepancy remarks..."
               />
             </div>
+
+            {/* Shipment Details — PO mode only; optional collapsible */}
+            {mode === "po" && (
+              <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShipmentOpen(!shipmentOpen)}
+                  className="w-full flex items-center justify-between px-4 py-3 bg-[#FAF9F7] hover:bg-[#F0ECE9] transition-colors text-left cursor-pointer"
+                >
+                  <div className="flex items-center gap-2">
+                    <Ship className="h-4 w-4 text-[#6B5C32]" />
+                    <span className="text-sm font-medium text-[#374151]">Shipment Details</span>
+                    <span className="text-xs text-[#9CA3AF]">optional — fills in carrier &amp; expected arrival</span>
+                  </div>
+                  {shipmentOpen ? <ChevronUp className="h-4 w-4 text-[#6B7280]" /> : <ChevronDown className="h-4 w-4 text-[#6B7280]" />}
+                </button>
+                {shipmentOpen && (
+                  <div className="p-4 border-t border-[#E2DDD8] space-y-3 bg-white">
+                    <p className="text-xs text-[#6B7280]">
+                      If this is an imported shipment (goods not yet arrived), fill in the shipping details below. The GRN will be created with arrival status <b>Not Arrived</b> and can be advanced as the shipment progresses. Leave blank for local / walk-in deliveries.
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-[#374151] mb-1">Shipping Method</label>
+                        <select
+                          value={shipmentMethod}
+                          onChange={(e) => setShipmentMethod(e.target.value)}
+                          className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                        >
+                          <option value="">Select…</option>
+                          <option value="SEA">SEA</option>
+                          <option value="AIR">AIR</option>
+                          <option value="LAND">LAND</option>
+                          <option value="COURIER">COURIER</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-[#374151] mb-1">Carrier</label>
+                        <Input
+                          value={shipmentCarrier}
+                          onChange={(e) => setShipmentCarrier(e.target.value)}
+                          placeholder="e.g. COSCO, DHL"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-[#374151] mb-1">Expected Arrival</label>
+                        <Input
+                          type="date"
+                          value={shipmentExpectedArrival}
+                          onChange={(e) => setShipmentExpectedArrival(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
 

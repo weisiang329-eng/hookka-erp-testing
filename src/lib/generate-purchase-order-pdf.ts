@@ -3,6 +3,7 @@ import autoTable from "jspdf-autotable";
 import type { PurchaseOrder } from "@/lib/mock-data";
 import {
   fmtCurrency,
+  splitCodeName,
   fmtRM,
   fmtDate,
   drawLetterhead,
@@ -194,15 +195,20 @@ export function generatePurchaseOrderPdf(
   const totalQty = po.items.reduce((s, i) => s + i.quantity, 0);
   y = drawSectionLabel(doc, `Order Items (${po.items.length} lines, ${totalQty} qty)`, y);
 
-  const tableBody = po.items.map((item, idx) => [
-    String(idx + 1),
-    item.supplierSKU,
-    item.materialName,
-    item.unit,
-    String(item.quantity),
-    fmtCurrency(item.unitPriceSen),
-    fmtCurrency(item.totalSen),
-  ]);
+  const tableBody = po.items.map((item, idx) => {
+    // PO items have no dedicated code column — recover the code from the
+    // "CODE - DESCRIPTION" materialName so the Item Code column isn't blank.
+    const { code, description } = splitCodeName(item.supplierSKU, item.materialName);
+    return [
+      String(idx + 1),
+      code,
+      description,
+      item.unit,
+      String(item.quantity),
+      fmtCurrency(item.unitPriceSen),
+      fmtCurrency(item.totalSen),
+    ];
+  });
 
   autoTable(doc, {
     startY: y,

@@ -7,6 +7,7 @@ import {
   drawSectionLabel,
   drawDocFooter,
   PDF,
+  splitCodeName,
 } from "@/lib/pdf-utils";
 import type { LetterheadInfo } from "@/lib/generate-purchase-order-pdf";
 
@@ -105,15 +106,20 @@ export function generateGRNPdf(
   const items: GRNItem[] = data.items ?? [];
   y = drawSectionLabel(doc, `Received Items (${items.length} lines)`, y);
 
-  const tableBody = items.map((item, idx) => [
-    String(idx + 1),
-    item.itemCode ?? "",
-    item.description ?? "",
-    String(item.poQty ?? 0),
-    String(item.receivedQty ?? 0),
-    String(item.rejectedQty ?? 0),
-    String(item.acceptedQty ?? 0),
-  ]);
+  const tableBody = items.map((item, idx) => {
+    // PO-derived GRN lines inherit the PO's blank code + "CODE - DESCRIPTION"
+    // name; recover the code so the Item Code column isn't empty.
+    const { code, description } = splitCodeName(item.itemCode, item.description);
+    return [
+      String(idx + 1),
+      code,
+      description,
+      String(item.poQty ?? 0),
+      String(item.receivedQty ?? 0),
+      String(item.rejectedQty ?? 0),
+      String(item.acceptedQty ?? 0),
+    ];
+  });
 
   autoTable(doc, {
     startY: y,

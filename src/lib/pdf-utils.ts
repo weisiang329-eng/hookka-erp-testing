@@ -247,6 +247,29 @@ export function fmtCurrencyPlain(sen: number): string {
 }
 
 /**
+ * Split a line into a separate Item Code + Description for the doc tables.
+ *
+ * Purchase-order items have no dedicated code column — the operator-set code is
+ * baked into the name as "CODE - DESCRIPTION" (e.g. "PS41463C - C-POCKET
+ * SPRING ..."), which left the PDF's "Item Code" column blank and the code
+ * buried in Description (owner 2026-06-20). When an explicit code is present
+ * (GRN / PI carry a real material_code) it wins; otherwise we recover the code
+ * by splitting the name on the FIRST " - " (codes use "-" without spaces, so the
+ * spaced separator is unambiguous). No DB change — works on existing rows.
+ */
+export function splitCodeName(
+  code: string | null | undefined,
+  name: string | null | undefined,
+): { code: string; description: string } {
+  const c = (code ?? "").trim();
+  const n = (name ?? "").trim();
+  if (c && c !== "-") return { code: c, description: n };
+  const i = n.indexOf(" - ");
+  if (i > 0) return { code: n.slice(0, i).trim(), description: n.slice(i + 3).trim() };
+  return { code: c, description: n };
+}
+
+/**
  * Format ISO date string as "16 Apr 2026".
  * Returns "-" for empty, null, undefined, or unparseable values so PDFs
  * never render a blank "Invalid Date" cell.

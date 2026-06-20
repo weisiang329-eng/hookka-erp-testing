@@ -8,6 +8,7 @@ import {
   drawSectionLabel,
   drawDocFooter,
   PDF,
+  splitCodeName,
 } from "@/lib/pdf-utils";
 import { COMPANY } from "@/lib/constants";
 import type { LetterheadInfo } from "@/lib/generate-purchase-order-pdf";
@@ -139,21 +140,31 @@ export function generatePurchaseInvoicePdf(
 
   // Item Code column shows the material code for STOCKED lines, else the
   // line-type tag (FEE / TAX / REBATE / …) so non-stock charges read clearly.
-  const codeFor = (l: PurchaseInvoicePdfLine): string => {
-    const lt = (l.lineType || "STOCKED").toUpperCase();
-    if (lt === "STOCKED") return l.materialCode || "-";
-    return lt;
-  };
-
-  const tableBody = items.map((item, idx) => [
-    String(idx + 1),
-    codeFor(item),
-    item.materialName,
-    item.supplierSku || "-",
-    String(item.qty),
-    fmtCurrency(item.unitPriceSen),
-    fmtCurrency(item.lineTotalSen),
-  ]);
+  const tableBody = items.map((item, idx) => {
+    const lt = (item.lineType || "STOCKED").toUpperCase();
+    let code: string;
+    let description: string;
+    if (lt === "STOCKED") {
+      // Real material_code wins; for PO-sourced lines with a blank code +
+      // "CODE - DESCRIPTION" name, recover the code by splitting.
+      const s = splitCodeName(item.materialCode, item.materialName);
+      code = s.code || "-";
+      description = s.description;
+    } else {
+      // Non-stock charge (FEE / TAX / REBATE …): the tag is the "code".
+      code = lt;
+      description = item.materialName;
+    }
+    return [
+      String(idx + 1),
+      code,
+      description,
+      item.supplierSku || "-",
+      String(item.qty),
+      fmtCurrency(item.unitPriceSen),
+      fmtCurrency(item.lineTotalSen),
+    ];
+  });
 
   autoTable(doc, {
     startY: y,

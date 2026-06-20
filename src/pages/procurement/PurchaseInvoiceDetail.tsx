@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
+import { PurchaseLineageBar } from "@/components/ui/purchase-lineage-bar";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -135,6 +136,13 @@ export default function PurchaseInvoiceDetailPage() {
     [invResp],
   );
 
+  // Lineage: GRNs linked to the same PO (matched client-side by poId).
+  // Same /api/grn endpoint the PO detail page uses — useCachedJson dedupes.
+  const { data: grnListResp } = useCachedJson<{
+    success?: boolean;
+    data?: Array<{ id: string; grnNumber?: string; poId: string | null; status?: string | null }>;
+  }>("/api/grn");
+
   const pi: PurchaseInvoiceDetail | null = useMemo(
     () => (resp?.success ? resp.data ?? null : null),
     [resp],
@@ -145,6 +153,15 @@ export default function PurchaseInvoiceDetailPage() {
   const items = pi?.items ?? [];
   const totalQty = items.reduce((s, it) => s + (Number(it.qty) || 0), 0);
   const totalAmount = items.reduce((s, it) => s + (Number(it.lineTotalSen) || 0), 0);
+
+  // GRNs linked to the same PO as this PI — derived client-side.
+  const relatedGrns = useMemo(
+    () =>
+      pi?.purchaseOrderId
+        ? (grnListResp?.data ?? []).filter((g) => g.poId === pi.purchaseOrderId)
+        : [],
+    [grnListResp, pi],
+  );
 
   // Status transition (PUT {status}) — surfaces failures incl. the backend's
   // GL-posting errors on APPROVED/PAID (do NOT optimistically flip the badge).
@@ -734,6 +751,35 @@ export default function PurchaseInvoiceDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Document lineage: parent PO + GRNs from the same PO */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium text-[#6B7280]">Document Lineage</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <PurchaseLineageBar
+            parent={
+              pi.purchaseOrderId
+                ? { type: "PO", docNo: pi.poRef || pi.purchaseOrderId, href: `/procurement/${pi.purchaseOrderId}` }
+                : null
+            }
+            links={[
+              {
+                type: "GRN",
+                label: relatedGrns.length === 1 ? (relatedGrns[0].grnNumber || "GRN") : "GRNs",
+                count: relatedGrns.length,
+                items: relatedGrns.map((g) => ({
+                  id: g.id,
+                  docNo: g.grnNumber || g.id,
+                  href: `/procurement/grn/${g.id}`,
+                  status: g.status ?? null,
+                })),
+              },
+            ]}
+          />
+        </CardContent>
+      </Card>
 
       {/* Audit trail for this PI */}
       <AuditHistoryPanel resource="purchase-invoices" resourceId={pi.id} />

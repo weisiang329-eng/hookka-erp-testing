@@ -10,6 +10,7 @@ import { formatCurrency, formatDate, formatDateTime } from "@/lib/utils";
 // PDF generators dynamic-imported at click handlers so the 1MB jspdf
 // vendor chunk only ships when the user actually downloads.
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { PurchaseLineageBar } from "@/components/ui/purchase-lineage-bar";
 import type {
   PurchaseOrder,
   POItem,
@@ -1224,55 +1225,42 @@ export default function PurchaseOrderDetailPage() {
         </div>
       )}
 
-      {/* Document lineage — GRNs received + PIs raised against this PO, as
-          clickable chips so the operator can jump across the PO↔GRN↔PI chain. */}
-      {(relatedGrns.length > 0 || relatedPis.length > 0) && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-[#6B7280]">Related Documents</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div>
-              <p className="text-xs font-medium text-[#9CA3AF] mb-1.5">Goods Received Notes ({relatedGrns.length})</p>
-              {relatedGrns.length === 0 ? (
-                <p className="text-xs text-[#9CA3AF] italic">None yet.</p>
-              ) : (
-                <div className="flex flex-wrap gap-2">
-                  {relatedGrns.map((g) => (
-                    <Link
-                      key={g.id}
-                      to={`/procurement/grn/${g.id}`}
-                      className="inline-flex items-center gap-1.5 rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1 text-xs font-medium text-[#6B5C32] hover:bg-[#F3F0EA] transition-colors"
-                    >
-                      <Package className="h-3.5 w-3.5" /> {g.grnNumber || g.id}
-                      {g.status ? <span className="text-[#9CA3AF]">· {g.status}</span> : null}
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div>
-              <p className="text-xs font-medium text-[#9CA3AF] mb-1.5">Purchase Invoices ({relatedPis.length})</p>
-              {relatedPis.length === 0 ? (
-                <p className="text-xs text-[#9CA3AF] italic">None yet.</p>
-              ) : (
-                <div className="flex flex-wrap gap-2">
-                  {relatedPis.map((p) => (
-                    <Link
-                      key={p.id}
-                      to={`/procurement/pi/${p.id}`}
-                      className="inline-flex items-center gap-1.5 rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1 text-xs font-medium text-[#6B5C32] hover:bg-[#F3F0EA] transition-colors"
-                    >
-                      <FileText className="h-3.5 w-3.5" /> {p.piNo || p.id}
-                      {p.status ? <span className="text-[#9CA3AF]">· {p.status}</span> : null}
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {/* Document lineage — GRNs received + PIs raised against this PO.
+          Always rendered (pills disabled/greyed when count is 0) so the
+          operator can see the chain at a glance even before any GRN exists. */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium text-[#6B7280]">Document Lineage</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <PurchaseLineageBar
+            links={[
+              {
+                type: "GRN",
+                label: relatedGrns.length === 1 ? (relatedGrns[0].grnNumber || "GRN") : "GRNs",
+                count: relatedGrns.length,
+                items: relatedGrns.map((g) => ({
+                  id: g.id,
+                  docNo: g.grnNumber || g.id,
+                  href: `/procurement/grn/${g.id}`,
+                  status: g.status ?? null,
+                })),
+              },
+              {
+                type: "PI",
+                label: relatedPis.length === 1 ? (relatedPis[0].piNo || "Invoice") : "Invoices",
+                count: relatedPis.length,
+                items: relatedPis.map((p) => ({
+                  id: p.id,
+                  docNo: p.piNo || p.id,
+                  href: `/procurement/pi/${p.id}`,
+                  status: p.status ?? null,
+                })),
+              },
+            ]}
+          />
+        </CardContent>
+      </Card>
 
       {/* Three-Way Match panel (Phase 4.3) — collapsible "tab" surfacing
           PO ↔ GRN ↔ PI variance per material. Hidden until the user clicks

@@ -15,7 +15,7 @@
 //   Post to Stock:  → POSTED  (commits inventory + cascades PO; idempotent)
 //   Convert to PI:  POSTED-only (reuses the GRN list's exact payload)
 // ---------------------------------------------------------------------------
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import {
   ArrowLeft, FileText, Package, CheckCircle2, PackageCheck, Receipt, Printer,
@@ -28,6 +28,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { MoneyInput } from "@/components/ui/money-input";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
+import { PurchaseLineageBar } from "@/components/ui/purchase-lineage-bar";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -152,11 +153,28 @@ export default function GRNDetailPage() {
   const { data: supResp } = useCachedJson<{ data?: Array<{ id: string; purchaseOrgCode?: string }> }>("/api/suppliers");
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
 
+  // Lineage: PIs raised against the parent PO (matched client-side by purchaseOrderId).
+  // Same endpoint the PO detail page uses — useCachedJson dedupes in-flight requests.
+  const { data: piListResp } = useCachedJson<{
+    success?: boolean;
+    data?: Array<{ id: string; piNo?: string; purchaseOrderId?: string | null; status?: string | null }>;
+  }>("/api/purchase-invoices");
+
   const grn: GRNDetail | null = resp?.success ? resp.data ?? null : null;
   const error: string | null =
     fetchError ?? (resp && resp.success === false ? resp.error || "GRN not found" : null);
 
   const items = grn?.items ?? [];
+
+  // PIs that reference the same PO as this GRN — derived client-side from the
+  // shared PI list (no extra endpoint needed; list is small).
+  const relatedPis = useMemo(
+    () =>
+      grn?.poId
+        ? (piListResp?.data ?? []).filter((p) => p.purchaseOrderId === grn.poId)
+        : [],
+    [piListResp, grn],
+  );
 
   // PUT a status transition; surface failures (verified-save spirit), and on a
   // Post-to-Stock surface the backend's unresolved-lines warning if any.
@@ -906,6 +924,35 @@ export default function GRNDetailPage() {
           )}
         </Card>
       )}
+
+      {/* Document lineage: parent PO + any PIs raised from the same PO */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium text-[#6B7280]">Document Lineage</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <PurchaseLineageBar
+            parent={
+              grn.poId
+                ? { type: "PO", docNo: grn.poNumber || grn.poId, href: `/procurement/${grn.poId}` }
+                : null
+            }
+            links={[
+              {
+                type: "PI",
+                label: relatedPis.length === 1 ? (relatedPis[0].piNo || "Invoice") : "Invoices",
+                count: relatedPis.length,
+                items: relatedPis.map((p) => ({
+                  id: p.id,
+                  docNo: p.piNo || p.id,
+                  href: `/procurement/pi/${p.id}`,
+                  status: p.status ?? null,
+                })),
+              },
+            ]}
+          />
+        </CardContent>
+      </Card>
 
       <AuditHistoryPanel resource="grn" resourceId={grn.id} />
     </div>

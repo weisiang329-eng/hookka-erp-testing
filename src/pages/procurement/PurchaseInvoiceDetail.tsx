@@ -494,15 +494,28 @@ export default function PurchaseInvoiceDetailPage() {
                   <tbody>
                     {items.map((it, idx) => {
                       const isStocked = it.lineType === "STOCKED";
+                      // PI STOCKED lines sourced from a PO may have a blank
+                      // materialCode while materialName stores "CODE - DESCRIPTION".
+                      // Recover the code by splitting on the first " - " separator
+                      // (codes use "-" without spaces, so the spaced separator is
+                      // unambiguous) — mirrors the splitCodeName helper used in the
+                      // PI PDF (generate-purchase-invoice-pdf.ts).
+                      const dashIdx = isStocked ? (it.materialName ?? "").indexOf(" - ") : -1;
+                      const resolvedCode = isStocked
+                        ? (it.materialCode?.trim() || (dashIdx > 0 ? it.materialName.slice(0, dashIdx).trim() : ""))
+                        : "";
+                      const resolvedDescription = (isStocked && !it.materialCode?.trim() && dashIdx > 0)
+                        ? it.materialName.slice(dashIdx + 3).trim()
+                        : it.materialName;
                       return (
                         <tr
                           key={it.id}
                           className={`border-b border-[#E2DDD8] ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}
                         >
                           <td className="h-12 px-3 text-[#6B7280]">{idx + 1}</td>
-                          <td className="h-12 px-3 text-[#1F1D1B]">{it.materialName}</td>
+                          <td className="h-12 px-3 text-[#1F1D1B]">{resolvedDescription}</td>
                           <td className="h-12 px-3 font-medium text-[#6B5C32]">
-                            {isStocked && it.materialCode ? it.materialCode : (
+                            {isStocked && resolvedCode ? resolvedCode : (
                               <span className="text-[#9CA3AF]">—</span>
                             )}
                           </td>

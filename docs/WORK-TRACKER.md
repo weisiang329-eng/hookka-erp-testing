@@ -23,8 +23,11 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 - ✅ **Employees summary stale-on-date FIX** (task #55) — wired all 6 date-bearing tabs
   (handleSummaryDateChange + onDateChange prop on Efficiency/Dept-Labor/Employee-Detail/
   Dept-Performance/Labor-Cost). Done myself via NAVIGATION-MAP (read ~250 lines not 10,951).
-  tsc clean, shipped `4157cf88`. **TODO left: system-wide sweep for the same KPI-stale class
-  (dashboard/reports/command-center) + verify-live.**
+  tsc clean, shipped `4157cf88`, verified-live (renders clean). **SWEEP DONE (2026-06-21, CLEAN):**
+  audited dashboard-b month switcher, reports, daily-report, analytics, ~10 accounting date-tabs,
+  planning — all correctly put the date in the URL/deps → react. **Employees was the only real
+  instance.** 2 minor non-same-class notes: reports.tsx "Generate" gate (change-date-forget-to-click
+  → stale display, intentional UX); accounting AR cards mount-once (no date picker). **Task #55 DONE.**
 - ✅ **Supplier Pricing → Supplier merge** (task #54) — cherry-picked `5064505c` onto main
   ([Suppliers | Price Comparison] tabs in maintenance.tsx; supplier detail [Pricing & SKUs |
   Price History]; nav "Suppliers"→maintenance; `/procurement/pricing` redirects). Reviewed diff:

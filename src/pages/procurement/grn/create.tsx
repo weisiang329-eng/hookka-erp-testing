@@ -139,7 +139,9 @@ function GRNCreatePage() {
   );
 
   // ── Mode state ────────────────────────────────────────────────────────────
-  const [mode, setMode] = useState<GRNMode>("po");
+  const [mode, setMode] = useState<GRNMode>(
+    searchParams.get("manual") === "1" ? "manual" : "po",
+  );
 
   // ── Shared form state ─────────────────────────────────────────────────────
   const [receivedBy, setReceivedBy] = useState("");

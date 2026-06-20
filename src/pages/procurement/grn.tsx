@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, getStatusColor } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { GoodsReceiptNote, PurchaseOrder, ArrivalState } from "@/types";
 import { Ship } from "lucide-react";
@@ -26,6 +26,7 @@ import {
   DollarSign,
   FileText,
   ScanLine,
+  FolderInput,
 } from "lucide-react";
 import {
   ScanSupplierModal,
@@ -728,10 +729,16 @@ export default function GRNPage() {
             <ScanLine className="h-4 w-4" /> Scan GRN
           </Button>
           <Button
+            variant="outline"
+            onClick={() => navigate("/procurement/grn/create?manual=1")}
+          >
+            <Plus className="h-4 w-4" /> Manual Receipt
+          </Button>
+          <Button
             variant="primary"
             onClick={() => navigate("/procurement/grn/create")}
           >
-            <Plus className="h-4 w-4" /> Create GRN
+            <FolderInput className="h-4 w-4" /> From PO
           </Button>
         </div>
       </div>
@@ -768,7 +775,7 @@ export default function GRNPage() {
                     isActive ? "border-[#6B5C32] bg-[#F0ECE9] text-[#6B5C32]" : "border-[#E2DDD8] text-[#6B7280] hover:border-[#6B5C32]/40"
                   }`}
                 >
-                  <Badge variant="status" status={state} className="h-1.5 w-1.5 rounded-full p-0 border-0" />
+                  <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ backgroundColor: getStatusColor(state).hex }} />
                   {state.replace(/_/g, " ")} ({count})
                 </button>
               );

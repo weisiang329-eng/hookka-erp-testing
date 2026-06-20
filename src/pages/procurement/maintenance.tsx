@@ -1,19 +1,24 @@
 // ---------------------------------------------------------------------------
-// Supplier Maintenance — the supplier MASTER (information + rating + scorecard
-// entry point + batch edit). Supplier-material SKU / pricing / costing now
-// lives on /procurement/pricing (folded together 2026-06-20 so the binding
-// list is in exactly ONE place). Per-supplier SKU drill-down + scorecard is on
-// /suppliers/:id.
+// Suppliers — unified module home (2026-06-20).
+//   Tab 1 — Suppliers    : supplier master CRUD + KPI tiles (formerly /procurement/maintenance)
+//   Tab 2 — Price Comparison : cross-supplier material compare + scorecards
+//                              (ported from /procurement/pricing's Comparison tab)
+//
+// Per-supplier drill-down (Info + Scorecard + Pricing & SKUs + Price History)
+// lives on /suppliers/:id.
 // ---------------------------------------------------------------------------
 import { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { SupplierFormDialog, type OrgOption } from "./supplier-form-dialog";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
+import { formatCurrency } from "@/lib/utils";
+import type { SupplierMaterialBinding, SupplierScorecard } from "@/types";
 import {
   Plus,
   Building2,
@@ -78,10 +83,179 @@ function ratingStars(rating: number) {
 }
 
 // ============================================================
+// Price Comparison helpers (ported from /procurement/pricing)
+// ============================================================
+function ScoreBar({ label, value }: { label: string; value: number }) {
+  const color =
+    value >= 90 ? "bg-[#4F7C3A]" : value >= 75 ? "bg-[#9C6F1E]" : "bg-[#9A3A2D]";
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-gray-600 w-16 shrink-0">{label}</span>
+      <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${value}%` }} />
+      </div>
+      <span className="text-xs font-medium w-8 text-right">{value}%</span>
+    </div>
+  );
+}
+
+function ComparisonTab({
+  bindings,
+  supplierMap,
+  scorecardMap,
+  materialCodes,
+}: {
+  bindings: SupplierMaterialBinding[];
+  supplierMap: Record<string, string>;
+  scorecardMap: Record<string, SupplierScorecard>;
+  materialCodes: string[];
+}) {
+  const [selectedMaterial, setSelectedMaterial] = useState("");
+
+  const materialBindings = useMemo(
+    () => (selectedMaterial ? bindings.filter((b) => b.materialCode === selectedMaterial) : []),
+    [bindings, selectedMaterial]
+  );
+  const cheapestPrice = useMemo(() => {
+    if (materialBindings.length === 0) return 0;
+    return Math.min(...materialBindings.map((b) => b.unitPrice));
+  }, [materialBindings]);
+  const fastestLead = useMemo(() => {
+    if (materialBindings.length === 0) return 0;
+    return Math.min(...materialBindings.map((b) => b.leadTimeDays));
+  }, [materialBindings]);
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Supplier Comparison</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="max-w-sm">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Select Material</label>
+            <select
+              value={selectedMaterial}
+              onChange={(e) => setSelectedMaterial(e.target.value)}
+              className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+            >
+              <option value="">-- Choose a material --</option>
+              {materialCodes.map((code) => {
+                const binding = bindings.find((b) => b.materialCode === code);
+                return (
+                  <option key={code} value={code}>
+                    {code} - {binding?.materialName ?? ""}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+        </CardContent>
+      </Card>
+
+      {selectedMaterial && materialBindings.length === 0 && (
+        <p className="text-center text-gray-400 py-8">No suppliers found for this material</p>
+      )}
+
+      {materialBindings.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {materialBindings.map((b) => {
+            const isCheapest = b.unitPrice === cheapestPrice;
+            const isFastest = b.leadTimeDays === fastestLead;
+            const scorecard = scorecardMap[b.supplierId];
+
+            let borderClass = "border-[#E2DDD8]";
+            if (isCheapest && isFastest) borderClass = "border-[#C6DBA8] ring-1 ring-[#C6DBA8]";
+            else if (isCheapest) borderClass = "border-[#C6DBA8] ring-1 ring-[#C6DBA8]";
+            else if (isFastest) borderClass = "border-[#A8CAD2] ring-1 ring-[#A8CAD2]";
+
+            return (
+              <Card key={b.id} className={`${borderClass} relative`}>
+                <CardHeader className="pb-3">
+                  <div className="flex items-start justify-between">
+                    <CardTitle className="text-base">
+                      {supplierMap[b.supplierId] ?? b.supplierId}
+                    </CardTitle>
+                    <div className="flex gap-1">
+                      {isCheapest && (
+                        <Badge className="bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] text-[10px]">
+                          Cheapest
+                        </Badge>
+                      )}
+                      {isFastest && (
+                        <Badge className="bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2] text-[10px]">
+                          Fastest
+                        </Badge>
+                      )}
+                      {b.isMainSupplier && (
+                        <Badge className="bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597] text-[10px]">
+                          Main
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <div>
+                      <span className="text-gray-500">SKU</span>
+                      <p className="font-mono text-xs font-medium">{b.supplierSku}</p>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Unit Price</span>
+                      <p className="font-semibold">{formatCurrency(b.unitPrice, b.currency)}</p>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Lead Time</span>
+                      <p className="font-medium">{b.leadTimeDays} days</p>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">MOQ</span>
+                      <p className="font-medium">{b.moq}</p>
+                    </div>
+                  </div>
+
+                  {scorecard && (
+                    <div className="border-t border-[#E2DDD8] pt-3">
+                      <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
+                        Scorecard
+                      </p>
+                      <div className="space-y-1.5">
+                        <ScoreBar label="On-Time" value={scorecard.onTimeRate} />
+                        <ScoreBar label="Quality" value={scorecard.qualityRate} />
+                        <ScoreBar label="Lead Acc." value={scorecard.leadTimeAccuracy} />
+                      </div>
+                      <div className="flex items-center justify-between mt-2 text-xs">
+                        <span className="text-gray-500">
+                          Price Trend:{" "}
+                          <span className={scorecard.avgPriceTrend > 5 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}>
+                            +{scorecard.avgPriceTrend}%
+                          </span>
+                        </span>
+                        <span className="text-gray-500">
+                          Rating: {"*".repeat(scorecard.overallRating)}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // Main Page
 // ============================================================
 export default function SupplierMaintenancePage() {
   const navigate = useNavigate();
+
+  // Top-level tab: Suppliers list vs. Price Comparison
+  const [activeTab, setActiveTab] = useState<"suppliers" | "price-comparison">("suppliers");
 
   // Supplier state — D1 is source of truth, mirrored into mutable local state
   // for optimistic UI.
@@ -103,6 +277,38 @@ export default function SupplierMaintenancePage() {
   const { data: orgsResp } = useCachedJson<{
     organisations?: Array<{ code: string; name: string; isActive?: boolean }>;
   }>("/api/organisations");
+
+  // Price Comparison data — fetched lazily once the tab is activated (the
+  // SWR-style useCachedJson hook dedupes; no re-fetch overhead if already warm).
+  const { data: bindingsResp } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>(
+    activeTab === "price-comparison" ? "/api/supplier-materials" : null
+  );
+  const { data: scorecardsResp } = useCachedJson<{ success?: boolean; data?: SupplierScorecard[] } | SupplierScorecard[]>(
+    activeTab === "price-comparison" ? "/api/supplier-scorecards" : null
+  );
+
+  const bindings: SupplierMaterialBinding[] = useMemo(
+    () => ((bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? (Array.isArray(bindingsResp) ? bindingsResp as SupplierMaterialBinding[] : [])),
+    [bindingsResp]
+  );
+  const scorecards: SupplierScorecard[] = useMemo(
+    () => ((scorecardsResp as { data?: SupplierScorecard[] } | undefined)?.data ?? (Array.isArray(scorecardsResp) ? scorecardsResp as SupplierScorecard[] : [])),
+    [scorecardsResp]
+  );
+  const supplierMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    suppliers.forEach((s) => { map[s.id] = s.name; });
+    return map;
+  }, [suppliers]);
+  const scorecardMap = useMemo(() => {
+    const map: Record<string, SupplierScorecard> = {};
+    scorecards.forEach((s) => { map[s.supplierId] = s; });
+    return map;
+  }, [scorecards]);
+  const materialCodes = useMemo(() => {
+    const codes = Array.from(new Set(bindings.map((b) => b.materialCode)));
+    return codes.sort();
+  }, [bindings]);
   const orgOptions: OrgOption[] = useMemo(() => {
     const list = orgsResp?.organisations ?? [];
     return list
@@ -386,16 +592,50 @@ export default function SupplierMaintenancePage() {
     ? (suppliers.reduce((sum, s) => sum + s.rating, 0) / suppliers.length).toFixed(1)
     : "0";
 
+  const tabs = [
+    { key: "suppliers" as const, label: "Suppliers" },
+    { key: "price-comparison" as const, label: "Price Comparison" },
+  ];
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-xl font-bold text-[#1F1D1B]">Supplier Maintenance</h1>
+        <h1 className="text-xl font-bold text-[#1F1D1B]">Suppliers</h1>
         <p className="text-xs text-[#6B7280] mt-0.5">
-          Manage supplier information, rating and status. SKU mappings, pricing &amp; costing
-          live on the Pricing page.
+          Manage supplier information and compare material pricing across suppliers.
         </p>
       </div>
+
+      {/* Top-level tab bar */}
+      <div className="flex gap-1 border-b border-[#E2DDD8]">
+        {tabs.map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === tab.key
+                ? "border-[#6B5C32] text-[#6B5C32]"
+                : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Price Comparison tab — cross-supplier global view */}
+      {activeTab === "price-comparison" && (
+        <ComparisonTab
+          bindings={bindings}
+          supplierMap={supplierMap}
+          scorecardMap={scorecardMap}
+          materialCodes={materialCodes}
+        />
+      )}
+
+      {/* Suppliers tab */}
+      {activeTab === "suppliers" && (<>
 
       {/* Summary Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
@@ -570,6 +810,7 @@ export default function SupplierMaintenancePage() {
           </div>
         </div>
       )}
+      </>)}
     </div>
   );
 }

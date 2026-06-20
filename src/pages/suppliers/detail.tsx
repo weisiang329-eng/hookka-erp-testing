@@ -1,18 +1,19 @@
 // ---------------------------------------------------------------------------
-// Phase 4.1 — Supplier detail page (scorecard panel)
+// Supplier Detail — unified per-supplier page (2026-06-20).
 //
 // Reads:
-//   GET /api/suppliers/:id            { success, data: Supplier }
-//   GET /api/supplier-scorecards/:id  { success, data: { onTimeRate, defectRate,
-//                                       averageLeadDays, last10POs[] } }
+//   GET /api/suppliers/:id                    Supplier info
+//   GET /api/supplier-scorecards/:id          Scorecard + last-10 POs
+//   GET /api/supplier-materials?supplierId=   Pricing & SKUs
+//   GET /api/price-history?supplierId=        Price History trail
 //
 // Layout:
-//   - Header card: code, name, contact, payment terms, status
-//   - Scorecard tile: 3 KPI tiles (on-time rate %, defect rate %, average
-//     lead days). Source: live aggregation server-side, NOT the cached
-//     supplier_scorecards row.
-//   - Last 10 POs table: poNo, status, ordered/received qty, expected vs
-//     actual delivery date.
+//   - ObjectPageHeader: supplier code/name/status, Edit + Quotation PDF buttons
+//   - Supplier Info card: contact, email, phone, payment terms, address
+//   - Scorecard tiles (3 KPI cards) + Last 10 POs table
+//   - Sub-tabs: [ Pricing & SKUs | Price History ]
+//     • Pricing & SKUs : SKU mappings CRUD (DataGrid + SKUFormDialog)
+//     • Price History  : price_histories trail for this supplier
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
@@ -25,7 +26,7 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { humanizeError } from "@/lib/humanize-error";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import type { Supplier } from "@/types";
+import type { Supplier, PriceHistory } from "@/types";
 import {
   SKUFormDialog,
   type SupplierSKU,
@@ -196,6 +197,22 @@ export default function SupplierDetailPage() {
       .filter((o) => o.isActive !== false)
       .map((o) => ({ code: o.code, name: o.name }));
   }, [orgsResp]);
+
+  // Sub-tabs: Pricing & SKUs | Price History
+  const [skuTab, setSkuTab] = useState<"pricing" | "price-history">("pricing");
+
+  // Price History — fetched lazily when the tab is first opened
+  const { data: historyResp } = useCachedJson<{ success?: boolean; data?: PriceHistory[] } | PriceHistory[]>(
+    skuTab === "price-history" && id ? `/api/price-history?supplierId=${id}` : null
+  );
+  const priceHistory: PriceHistory[] = useMemo(
+    () => ((historyResp as { data?: PriceHistory[] } | undefined)?.data ?? (Array.isArray(historyResp) ? historyResp as PriceHistory[] : [])),
+    [historyResp]
+  );
+  const sortedHistory = useMemo(
+    () => [...priceHistory].sort((a, b) => b.changedDate.localeCompare(a.changedDate)),
+    [priceHistory]
+  );
 
   // SKU dialog state
   const [showSKUForm, setShowSKUForm] = useState(false);
@@ -552,50 +569,138 @@ export default function SupplierDetailPage() {
         </Card>
       </div>
 
-      {/* SKU mappings — per-supplier code/description list */}
+      {/* Pricing & SKUs + Price History sub-tabs */}
       <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <Package className="h-4 w-4 text-[#6B5C32]" />
-              SKU Mappings
-              <span className="text-xs text-[#9CA3AF] font-normal">
-                ({skus.length} {skus.length === 1 ? "code" : "codes"})
-              </span>
-            </CardTitle>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => {
-                setEditingSKU(null);
-                setShowSKUForm(true);
-              }}
-            >
-              <Plus className="h-4 w-4" /> Add SKU Mapping
-            </Button>
+        <CardHeader className="pb-0">
+          <div className="flex items-center justify-between flex-wrap gap-2 pb-3">
+            <div className="flex gap-1 border-b border-[#E2DDD8] w-full pb-0">
+              {(["pricing", "price-history"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setSkuTab(tab)}
+                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    skuTab === tab
+                      ? "border-[#6B5C32] text-[#6B5C32]"
+                      : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                  }`}
+                >
+                  {tab === "pricing" ? (
+                    <span className="flex items-center gap-1.5">
+                      <Package className="h-3.5 w-3.5" />
+                      Pricing &amp; SKUs
+                      <span className="text-xs text-[#9CA3AF] font-normal">({skus.length})</span>
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      <TrendingUp className="h-3.5 w-3.5" />
+                      Price History
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
           </div>
         </CardHeader>
-        <CardContent>
-          {skus.length === 0 ? (
-            <p className="text-sm text-[#9CA3AF] py-6 text-center">
-              No SKU mappings yet for this supplier.
-            </p>
-          ) : (
-            <DataGrid<SkuBinding>
-              columns={skuColumns}
-              data={skus}
-              keyField="id"
-              gridId="supplier-detail-sku-mappings"
-              onDoubleClick={(row) => {
-                setEditingSKU(bindingToSKU(row));
-                setShowSKUForm(true);
-              }}
-              emptyMessage="No SKU mappings yet for this supplier."
-              stickyHeader
-              maxHeight="calc(100vh - 360px)"
-            />
-          )}
-        </CardContent>
+
+        {/* Pricing & SKUs tab */}
+        {skuTab === "pricing" && (
+          <>
+            <CardHeader className="pt-2 pb-3">
+              <div className="flex items-center justify-end">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => {
+                    setEditingSKU(null);
+                    setShowSKUForm(true);
+                  }}
+                >
+                  <Plus className="h-4 w-4" /> Add SKU Mapping
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {skus.length === 0 ? (
+                <p className="text-sm text-[#9CA3AF] py-6 text-center">
+                  No SKU mappings yet for this supplier.
+                </p>
+              ) : (
+                <DataGrid<SkuBinding>
+                  columns={skuColumns}
+                  data={skus}
+                  keyField="id"
+                  gridId="supplier-detail-sku-mappings"
+                  onDoubleClick={(row) => {
+                    setEditingSKU(bindingToSKU(row));
+                    setShowSKUForm(true);
+                  }}
+                  emptyMessage="No SKU mappings yet for this supplier."
+                  stickyHeader
+                  maxHeight="calc(100vh - 420px)"
+                />
+              )}
+            </CardContent>
+          </>
+        )}
+
+        {/* Price History tab */}
+        {skuTab === "price-history" && (
+          <CardContent className="pt-4">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <th className="pb-3 pr-4">Date</th>
+                    <th className="pb-3 pr-4">Material</th>
+                    <th className="pb-3 pr-4 text-right">Old Price</th>
+                    <th className="pb-3 pr-4 text-right">New Price</th>
+                    <th className="pb-3 pr-4 text-right">Change %</th>
+                    <th className="pb-3 pr-4">Changed By</th>
+                    <th className="pb-3">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E2DDD8]">
+                  {sortedHistory.map((h) => {
+                    const pct = h.oldPrice === 0 ? "N/A" : (() => {
+                      const p = ((h.newPrice - h.oldPrice) / h.oldPrice) * 100;
+                      return `${p > 0 ? "+" : ""}${p.toFixed(1)}%`;
+                    })();
+                    const isIncrease = h.newPrice > h.oldPrice;
+                    const statusColors: Record<string, string> = {
+                      APPROVED: "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8]",
+                      PENDING: "bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]",
+                      REJECTED: "bg-[#F9E1DA] text-[#9A3A2D] border-[#E8B2A1]",
+                    };
+                    return (
+                      <tr key={h.id} className="hover:bg-[#F0ECE9]/50">
+                        <td className="py-3 pr-4">{formatDate(h.changedDate)}</td>
+                        <td className="py-3 pr-4 font-mono text-xs">{h.materialCode}</td>
+                        <td className="py-3 pr-4 text-right">{formatCurrency(h.oldPrice, h.currency)}</td>
+                        <td className="py-3 pr-4 text-right font-medium">{formatCurrency(h.newPrice, h.currency)}</td>
+                        <td className={`py-3 pr-4 text-right font-medium ${pct === "N/A" ? "text-gray-400" : isIncrease ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}`}>
+                          {pct}
+                        </td>
+                        <td className="py-3 pr-4">{h.changedBy}</td>
+                        <td className="py-3">
+                          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${statusColors[h.approvalStatus] ?? "bg-gray-100 text-gray-600 border-gray-300"}`}>
+                            {h.approvalStatus}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {sortedHistory.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="py-8 text-center text-gray-400">
+                        No price history for this supplier
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        )}
       </Card>
 
       {/* Last 10 POs */}

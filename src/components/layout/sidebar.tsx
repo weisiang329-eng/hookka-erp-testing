@@ -37,7 +37,6 @@ import {
   FilePlus,
   CreditCard,
   Shirt,
-  DollarSign,
   Scale,
   Tag,
   Clock,
@@ -150,9 +149,8 @@ const navigationGroups: NavGroup[] = [
       { name: "Purchase Order", href: "/procurement", icon: ShoppingCart },
       { name: "GRN", href: "/procurement/grn", icon: ClipboardList },
       { name: "Purchase Invoice", href: "/procurement/pi", icon: CreditCard },
-      { name: "Supplier Pricing", href: "/procurement/pricing", icon: DollarSign },
       { name: "MRP", href: "/planning/mrp", icon: Layers },
-      { name: "Supplier", href: "/procurement/maintenance", icon: Building2 },
+      { name: "Suppliers", href: "/procurement/maintenance", icon: Building2 },
     ],
   },
   {
@@ -598,11 +596,8 @@ export function Sidebar({
     if (href === "/procurement/in-transit") {
       return pathname === "/procurement/in-transit" || pathname.startsWith("/procurement/in-transit/");
     }
-    if (href === "/procurement/pricing") {
-      return pathname === "/procurement/pricing" || pathname.startsWith("/procurement/pricing/");
-    }
     if (href === "/procurement") {
-      return pathname === "/procurement" || (pathname.startsWith("/procurement/") && !pathname.startsWith("/procurement/grn") && !pathname.startsWith("/procurement/pi") && !pathname.startsWith("/procurement/maintenance") && !pathname.startsWith("/procurement/in-transit") && !pathname.startsWith("/procurement/pricing"));
+      return pathname === "/procurement" || (pathname.startsWith("/procurement/") && !pathname.startsWith("/procurement/grn") && !pathname.startsWith("/procurement/pi") && !pathname.startsWith("/procurement/maintenance") && !pathname.startsWith("/procurement/in-transit"));
     }
     if (href === "/consignment/note") {
       return pathname === "/consignment/note" || pathname.startsWith("/consignment/note/");

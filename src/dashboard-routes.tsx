@@ -71,7 +71,6 @@ const ProcurementMaintenance = lazy(() => import('./pages/procurement/maintenanc
 const PI = lazy(() => import('./pages/procurement/pi'))
 const PICreate = lazy(() => import('./pages/procurement/pi/create'))
 const PIDetail = lazy(() => import('./pages/procurement/PurchaseInvoiceDetail'))
-const ProcurementPricing = lazy(() => import('./pages/procurement/pricing'))
 const SupplierDetail = lazy(() => import('./pages/suppliers/detail'))
 
 // Inventory
@@ -342,7 +341,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // Router matches the literal "create" path first (same pattern as /procurement/create).
   { path: '/procurement/pi/create', element: <S><PICreate /></S> },
   { path: '/procurement/pi/:id', element: <S><PIDetail /></S> },
-  { path: '/procurement/pricing', element: <S><ProcurementPricing /></S> },
+  { path: '/procurement/pricing', element: <Navigate to="/procurement/maintenance" replace /> },
 
   // Suppliers — Phase 4.1 supplier scorecard panel
   { path: '/suppliers/:id', element: <S><SupplierDetail /></S> },
@@ -548,7 +547,6 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/procurement/grn': () => import('./pages/procurement/grn'),
   '/procurement/grn/create': () => import('./pages/procurement/grn/create'),
   '/procurement/pi': () => import('./pages/procurement/pi'),
-  '/procurement/pricing': () => import('./pages/procurement/pricing'),
   '/procurement/maintenance': () => import('./pages/procurement/maintenance'),
   '/rd': () => import('./pages/rd'),
   '/rd/maintenance': () => import('./pages/rd/maintenance'),

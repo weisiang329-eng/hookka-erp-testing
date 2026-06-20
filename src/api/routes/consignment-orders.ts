@@ -469,9 +469,25 @@ app.get("/", async (c) => {
 // <OrderLineItemEditor> form on the frontend can submit identical payloads
 // to either endpoint.
 // ---------------------------------------------------------------------------
+// 0179 self-apply — Postgres migration files are applied manually (deploy.yml
+// does NOT replay them), so ensure the per-line discount column exists before
+// any CO write touches it. Idempotent ADD COLUMN IF NOT EXISTS, once per isolate.
+let _coDiscountColMig: Promise<void> | null = null;
+function ensureDiscountColumn(db: D1Database): Promise<void> {
+  if (!_coDiscountColMig) {
+    _coDiscountColMig = db
+      .prepare("ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0")
+      .run()
+      .then(() => undefined)
+      .catch(() => undefined);
+  }
+  return _coDiscountColMig;
+}
+
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "consignments", "create");
   if (denied) return denied;
+  await ensureDiscountColumn(c.var.DB);
   // Idempotency — a duplicate retry (e.g. a dropped create response) returns
   // the cached result instead of creating a second CO. No-op without the
   // Idempotency-Key header. Mirrors the sales-orders create path.
@@ -1342,6 +1358,7 @@ app.post("/:id/confirm", async (c) => {
 app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "consignments", "update");
   if (denied) return denied;
+  await ensureDiscountColumn(c.var.DB);
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(

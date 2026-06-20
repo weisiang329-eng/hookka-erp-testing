@@ -1841,6 +1841,17 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       // rule); service-cases.ts reads it to merge SV orders into the case's
       // "Service Orders" panel. NULL on every normal sales order.
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS caseid TEXT",
+      // 0179 — Per-line discount (RM amount in sen) on the three price-bearing
+      // line tables. snake_case column (no rename-map dependency on the column
+      // itself; the route SQL's camelCase `discountSen` maps via the adapter).
+      // Applied here at runtime because Postgres migration files are applied
+      // MANUALLY (deploy.yml does NOT auto-replay them) — without this the
+      // INSERTs that now write discountSen would fail against prod. All three
+      // tables are altered here so an SO request warms the column for CO/Invoice
+      // too; CO + Invoice routes also self-apply their own (no cross-route race).
+      "ALTER TABLE sales_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
     ];
     for (const sql of stmts) {
       try {

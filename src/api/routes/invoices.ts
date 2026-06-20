@@ -970,10 +970,26 @@ app.get("/stats", async (c) => {
 });
 
 // POST /api/invoices — create from a DELIVERED delivery order.
+// 0179 self-apply — Postgres migration files are applied manually (deploy.yml
+// does NOT replay them), so ensure the per-line discount column exists before
+// any invoice write touches it. Idempotent ADD COLUMN IF NOT EXISTS, once/isolate.
+let _invDiscountColMig: Promise<void> | null = null;
+function ensureDiscountColumn(db: D1Database): Promise<void> {
+  if (!_invDiscountColMig) {
+    _invDiscountColMig = db
+      .prepare("ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0")
+      .run()
+      .then(() => undefined)
+      .catch(() => undefined);
+  }
+  return _invDiscountColMig;
+}
+
 app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — invoices:create.
   const denied = await requirePermission(c, "invoices", "create");
   if (denied) return denied;
+  await ensureDiscountColumn(c.var.DB);
   // Sprint 3 #4 — idempotency. POSTing an invoice for the same DO twice
   // produces two distinct invoice rows today (the only guard is DO status
   // = DELIVERED, which the first request flips to INVOICED — but the
@@ -1565,6 +1581,7 @@ app.put("/:id", async (c) => {
   //   • *     → CANCELLED  (the "void" action)   ⇒ invoices:void
   const baseDenied = await requirePermission(c, "invoices", "update");
   if (baseDenied) return baseDenied;
+  await ensureDiscountColumn(c.var.DB);
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(

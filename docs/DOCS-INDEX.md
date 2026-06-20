@@ -7,7 +7,16 @@ This file organizes key documentation so implementation and operations are easy 
 - `docs/SETUP.md` — development environment setup and troubleshooting.
 - `docs/ARCHITECTURE.md` — current system architecture and extension points.
 
+
+## AI / LLM Context Management
+- `docs/LLM-CONTEXT-STRATEGY.md` — token-saving workflow for Claude/Codex sessions; start here before asking an assistant to inspect the repo.
+- `docs/context-packs/` — small task-specific file maps so AI sessions can load only the relevant frontend, backend, DB, or security slice.
+- `docs/ENGINEERING-ONBOARDING-SOP.md` — onboarding and change-impact workflow for engineers and AI assistants.
+- `docs/AI-DEVELOPMENT-MODES.md` — decision guide for choosing fast-lane vs focused vs deep AI-assisted development.
+- `docs/AI-CONTEXT-IMPROVEMENT-BACKLOG.md` — prioritized next steps for improving AI context quality without over-documenting.
+
 ## Program / Execution
+- `docs/GITHUB-WORKFLOW-GOVERNANCE.md` — GitHub PR/workflow organization, staging/canary rules, and bug-prevention guidance.
 - `docs/PROGRAM-90D-EXECUTION.md` — **active**. 90-day enterprise upgrade plan (CI gates → RBAC/audit → scheduler → SDK → observability). Updates weekly.
 - `docs/UPGRADE-CONTROL-BOARD.md` — **active**. Single source of truth for status (Backlog / In Progress / Blocked / Done). Update on every state change.
 - `docs/ENTERPRISE-ERP-ARCHITECTURE.md` — target enterprise architecture blueprint (SAP/Oracle reference shape).
@@ -18,6 +27,7 @@ This file organizes key documentation so implementation and operations are easy 
 - `docs/MODULES.md` — module-by-module product reference.
 - `docs/API.md` — API endpoint inventory and conventions.
 - `docs/DESIGN-SYSTEM.md` — UI tokens and shared component conventions.
+- `docs/UI-DATA-DOCUMENT-STANDARDS.md` — standards for DataGrid columns, filters, sorting, numeric inputs, and business document layouts.
 - `docs/B-FLOW.md` — production/delivery test flow (B-flow).
 
 ## Cloudflare / Deployment / Migration

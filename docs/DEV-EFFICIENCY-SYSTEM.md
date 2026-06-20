@@ -14,7 +14,7 @@ that makes every future task start *fast, without long searching*. Read `docs/DO
 | 1 | **Governance** | when to review-all vs not; 快准省; risk tiers | ✅ have | `DEV-OPERATING-FRAMEWORK`, `AI-DEVELOPMENT-MODES`, `LLM-CONTEXT-STRATEGY` |
 | 2 | **Knowledge** | the traps + standards, don't relearn | ✅ strong | `HOOKKA-GOTCHAS`, `BUG-HISTORY`, `UI-CONVENTIONS`, MEMORY |
 | 3 | **Reliability / Tracking** | never forget an ask, never skip a message | ⚠️ exists — must be USED (see below) | `WORK-TRACKER` + intake discipline |
-| 4 | **Navigation** | go straight to the files — **no searching** | ✅ built | `context-packs/NAVIGATION-MAP.md` (9 modules + line-range index for 16 monster files) |
+| 4 | **Navigation** | go straight to the files — **no searching** | ✅ built | `context-packs/NAVIGATION-MAP.md` (**15 modules = whole system** + line-range index for ~30 monster files) |
 | 5 | **Methodology** | fixed steps for recurring tasks | ✅ built | `PLAYBOOKS.md` (8 procedures) |
 | 6 | **Data model** | entities/relationships + business glossary | ⚪ optional | ERD map + glossary |
 

@@ -47,7 +47,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odebtor" | "ocreditor" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "audit" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "audit" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -195,7 +195,11 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   { key: "ar", label: "Debtor Aging", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "ap", label: "Creditor Aging", icon: <Building2 className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "odebtor", label: "Other Debtor", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "odebtorbills", label: "Other Debtor Bills", icon: <BookOpen className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "odebtorpay", label: "Other Debtor Receipts", icon: <Wallet className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "ocreditor", label: "Other Creditor", icon: <Building2 className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "ocreditorbills", label: "Other Creditor Bills", icon: <BookOpen className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "ocreditorpay", label: "Other Creditor Payments", icon: <Wallet className="h-4 w-4" />, group: "Debtor / Creditor" },
   // Maintenance
   { key: "coa", label: "Chart of Accounts", icon: <List className="h-4 w-4" />, group: "Maintenance" },
   { key: "labor", label: "Labour", icon: <Users className="h-4 w-4" />, group: "Maintenance" },
@@ -384,8 +388,12 @@ export default function AccountingPage() {
               <APTab apData={apData} onRefresh={fetchAll} />
             </div>
           )}
-          {tab === "odebtor" && <OtherPartiesTab accounts={accounts} side="DEBTOR" />}
-          {tab === "ocreditor" && <OtherPartiesTab accounts={accounts} side="CREDITOR" />}
+          {tab === "odebtor" && <OtherPartiesTab side="DEBTOR" />}
+          {tab === "odebtorbills" && <OtherPartyBillsTab accounts={accounts} side="DEBTOR" />}
+          {tab === "odebtorpay" && <OtherPartyPaymentsTab accounts={accounts} side="DEBTOR" />}
+          {tab === "ocreditor" && <OtherPartiesTab side="CREDITOR" />}
+          {tab === "ocreditorbills" && <OtherPartyBillsTab accounts={accounts} side="CREDITOR" />}
+          {tab === "ocreditorpay" && <OtherPartyPaymentsTab accounts={accounts} side="CREDITOR" />}
           {tab === "payments" && <PaymentsTab accounts={accounts} />}
           {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
           {tab === "transfer" && <FundTransferTab accounts={accounts} />}
@@ -3818,7 +3826,7 @@ type OtherParty = {
   isActive: boolean;
 };
 
-function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
+function OtherPartiesTab({ side }: { side: "DEBTOR" | "CREDITOR" }) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const [parties, setParties] = useState<OtherParty[] | null>(null);
@@ -4035,15 +4043,29 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
           )}
         </CardContent>
       </Card>
-      <div className="pt-4 mt-2 border-t border-[#E2DDD8]">
-        <h3 className="text-sm font-semibold text-[#3E6570] mb-3">Bills</h3>
-        <OtherPartyBillsManager parties={parties ?? []} accounts={accounts} side={side} />
-      </div>
-      <div className="pt-4 mt-2 border-t border-[#E2DDD8]">
-        <OtherPartyPaymentsManager parties={parties ?? []} accounts={accounts} side={side} />
-      </div>
     </div>
   );
+}
+
+// Bills / Payments are their own sidebar pages now (F4 #4) — thin wrappers
+// that fetch the party roster (for the form dropdowns) and render the manager.
+function useOtherPartiesList(): OtherParty[] {
+  const [parties, setParties] = useState<OtherParty[]>([]);
+  useEffect(() => {
+    fetch("/api/accounting/other-parties")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: OtherParty[] }>)
+      .then((j) => { if (j?.success) setParties(j.data ?? []); })
+      .catch(() => {});
+  }, []);
+  return parties;
+}
+
+function OtherPartyBillsTab({ accounts, side }: { accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
+  return <OtherPartyBillsManager parties={useOtherPartiesList()} accounts={accounts} side={side} />;
+}
+
+function OtherPartyPaymentsTab({ accounts, side }: { accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
+  return <OtherPartyPaymentsManager parties={useOtherPartiesList()} accounts={accounts} side={side} />;
 }
 
 type BillLineDraft = { counterAccount: string; amountStr: string; description: string };

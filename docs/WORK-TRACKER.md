@@ -16,10 +16,10 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
   coverage**, line-range index for ~30 monster files, spot-verified); Layer 5 **Methodology** = [PLAYBOOKS.md](PLAYBOOKS.md)
   (8 procedures); 9 Codex docs tailored; DOCS-INDEX surfaces all. **Still optional:** light docs reorg
   (merge UI-DATA-DOCUMENT-STANDARDS→UI-CONVENTIONS), Data-dictionary/glossary, ERD map, Test-selection matrix.
-- 🔵 **#3 / GRN read-bug fix** — dual-key read for snake_case cols folded to camelCase
-  by `toCamel` (`purchase-orders.ts` rowToItem `material_code`; `grn.ts` rowToGRN
-  arrival/shipment/landed-cost). Pushed `cdfcae69`. **TODO: confirm deploy + verify
-  live** (PO item code stores+reads real code; GRN arrival transition sticks on read).
+- ✅ **#3 / GRN read-bug fix** — dual-key read for snake_case cols folded to camelCase by
+  `toCamel`. Shipped `cdfcae69`. **VERIFIED LIVE 2026-06-20:** create→read→delete round-trip on
+  prod (`PO-2606-006` throwaway) → `materialCode` stored as "VERIFY-CODE-001" and **read back
+  correctly** (was "" before the fix), name clean, deleted 200. GRN arrival reads dual-keyed too.
 - ✅ **Employees summary stale-on-date FIX** (task #55) — wired all 6 date-bearing tabs
   (handleSummaryDateChange + onDateChange prop on Efficiency/Dept-Labor/Employee-Detail/
   Dept-Performance/Labor-Cost). Done myself via NAVIGATION-MAP (read ~250 lines not 10,951).

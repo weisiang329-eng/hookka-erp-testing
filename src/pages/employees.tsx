@@ -3625,6 +3625,7 @@ function EfficiencyOverviewTab({
   workers,
   departments,
   onJumpToEmployeeDetail,
+  onDateChange,
 }: {
   workers: Worker[];
   departments: DepartmentLite[];
@@ -3632,6 +3633,7 @@ function EfficiencyOverviewTab({
   // chosen worker preselected. Wired up at the EmployeesPage level — here we
   // just call back with the workerId.
   onJumpToEmployeeDetail?: (workerId: string) => void;
+  onDateChange?: (from: string, to: string) => void;
 }) {
   const { toast } = useToast();
   // Tablet/narrow-viewport breakpoint — used to default-hide the informational
@@ -3651,7 +3653,8 @@ function EfficiencyOverviewTab({
   );
   useEffect(() => {
     writePersistedDateRange("employees:efficiency-overview:dateRange", dateFrom, dateTo);
-  }, [dateFrom, dateTo]);
+    onDateChange?.(dateFrom, dateTo);
+  }, [dateFrom, dateTo, onDateChange]);
 
   // Per-worker × per-dept hours pivot — mirrors the Google Sheet HOURS
   // DASHBOARD layout. Aggregation lives server-side (one SQL GROUP BY) so
@@ -4187,10 +4190,12 @@ function DepartmentLaborTab({
   workers,
   departments,
   refreshDepartments,
+  onDateChange,
 }: {
   workers: Worker[];
   departments: DepartmentLite[];
   refreshDepartments: () => void;
+  onDateChange?: (from: string, to: string) => void;
 }) {
   // Department CRUD - moved here from Labor Cost so departments live with
   // the dept-cost view. Toggle reveals the existing DepartmentsManager
@@ -4232,7 +4237,8 @@ function DepartmentLaborTab({
   );
   useEffect(() => {
     writePersistedDateRange("employees:department-labor:dateRange", dateFrom, dateTo);
-  }, [dateFrom, dateTo]);
+    onDateChange?.(dateFrom, dateTo);
+  }, [dateFrom, dateTo, onDateChange]);
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -5128,6 +5134,7 @@ function EmployeeDetailTab({
   workers,
   departments,
   initialWorkerId,
+  onDateChange,
 }: {
   workers: Worker[];
   departments: DepartmentLite[];
@@ -5138,6 +5145,7 @@ function EmployeeDetailTab({
   // and back unmounts + remounts us — meaning a fresh initialWorkerId is
   // always honored as the starting selection.
   initialWorkerId?: string;
+  onDateChange?: (from: string, to: string) => void;
 }) {
   // Production dept codes for the Avg Efficiency denominator. Per user
   // 2026-04-28: only time spent in PRODUCTION depts counts as "available
@@ -5165,7 +5173,8 @@ function EmployeeDetailTab({
   );
   useEffect(() => {
     writePersistedDateRange("employees:employee-detail:dateRange", dateFrom, dateTo);
-  }, [dateFrom, dateTo]);
+    onDateChange?.(dateFrom, dateTo);
+  }, [dateFrom, dateTo, onDateChange]);
 
   const selectedWorker = workers.find((w) => w.id === selectedEmployeeId);
 
@@ -5760,8 +5769,10 @@ function sevenDaysAgoStr(): string {
 
 function DepartmentPerformanceTab({
   departments,
+  onDateChange,
 }: {
   departments: DepartmentLite[];
+  onDateChange?: (from: string, to: string) => void;
 }) {
   // Fall back to seed depts so the dropdown doesn't flash empty on first
   // render before /api/departments resolves. Sorted: production first
@@ -5794,7 +5805,8 @@ function DepartmentPerformanceTab({
   );
   useEffect(() => {
     writePersistedDateRange("employees:dept-perf:dateRange", dateFrom, dateTo);
-  }, [dateFrom, dateTo]);
+    onDateChange?.(dateFrom, dateTo);
+  }, [dateFrom, dateTo, onDateChange]);
 
   const url = `/api/department-performance?from=${dateFrom}&to=${dateTo}&departmentCode=${encodeURIComponent(departmentCode)}&category=${encodeURIComponent(category)}`;
   const { data: resp, loading } = useCachedJson<DeptPerfResponse>(url);
@@ -7806,10 +7818,12 @@ function LaborCostTab({
   workers,
   departments,
   productionDeptCodes,
+  onDateChange,
 }: {
   workers: Worker[];
   departments: DepartmentLite[];
   productionDeptCodes: Set<string>;
+  onDateChange?: (from: string, to: string) => void;
 }) {
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
@@ -7861,7 +7875,8 @@ function LaborCostTab({
   );
   useEffect(() => {
     writePersistedDateRange("employees:labor-cost:dateRange", fromDate, toDate);
-  }, [fromDate, toDate]);
+    onDateChange?.(fromDate, toDate);
+  }, [fromDate, toDate, onDateChange]);
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -10692,7 +10707,7 @@ export default function EmployeesPage() {
       return { from: persisted.from ?? today, to: persisted.to ?? today };
     },
   );
-  const handleWorkingHoursDateChange = useCallback(
+  const handleSummaryDateChange = useCallback(
     (from: string, to: string) => {
       setSummaryRange((prev) =>
         prev.from === from && prev.to === to ? prev : { from, to },
@@ -10890,7 +10905,7 @@ export default function EmployeesPage() {
           refreshAttendance={refreshAttendance}
           departments={departments}
           productionDeptCodes={productionDeptCodes}
-          onDateChange={handleWorkingHoursDateChange}
+          onDateChange={handleSummaryDateChange}
         />
       )}
 
@@ -10908,6 +10923,7 @@ export default function EmployeesPage() {
             setPendingDetailWorkerId(workerId);
             setActiveTab("detail");
           }}
+          onDateChange={handleSummaryDateChange}
         />
       )}
 
@@ -10916,6 +10932,7 @@ export default function EmployeesPage() {
           workers={workers}
           departments={departments}
           refreshDepartments={refreshDeptsHook}
+          onDateChange={handleSummaryDateChange}
         />
       )}
 
@@ -10924,11 +10941,12 @@ export default function EmployeesPage() {
           workers={workers}
           departments={departments}
           initialWorkerId={pendingDetailWorkerId}
+          onDateChange={handleSummaryDateChange}
         />
       )}
 
       {activeTab === "department-performance" && (
-        <DepartmentPerformanceTab departments={departments} />
+        <DepartmentPerformanceTab departments={departments} onDateChange={handleSummaryDateChange} />
       )}
 
       {activeTab === "labor-cost" && (
@@ -10936,6 +10954,7 @@ export default function EmployeesPage() {
           workers={workers}
           departments={departments}
           productionDeptCodes={productionDeptCodes}
+          onDateChange={handleSummaryDateChange}
         />
       )}
 

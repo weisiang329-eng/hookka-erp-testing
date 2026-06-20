@@ -8170,7 +8170,24 @@ type BackfillDoc = {
   supplierCode?: string;
   items?: BackfillDocItem[];
 };
-type BackfillBody = { documents?: BackfillDoc[] };
+type BackfillPOItem = {
+  description?: string;
+  materialCode?: string | null;
+  supplierSKU?: string;
+  qty: number;
+  unitPriceSen: number;
+};
+type BackfillPODoc = {
+  poNo: string;
+  docDate: string;
+  supplierCode: string;
+  items: BackfillPOItem[];
+};
+type BackfillBody = {
+  documents?: BackfillDoc[];
+  skipStock?: boolean;
+  purchaseOrders?: BackfillPODoc[];
+};
 
 app.post("/historical-purchases-backfill", async (c) => {
   const denied = await requirePermission(c, "purchase-orders", "create");
@@ -8182,10 +8199,19 @@ app.post("/historical-purchases-backfill", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid JSON body" }, 400);
   }
-  const docs = Array.isArray(body.documents) ? body.documents : null;
-  if (!docs) {
+  const docs = Array.isArray(body.documents) ? body.documents : [];
+  const skipStock = body.skipStock === true;
+  const purchaseOrdersOnly = Array.isArray(body.purchaseOrders)
+    ? body.purchaseOrders
+    : [];
+
+  if (docs.length === 0 && purchaseOrdersOnly.length === 0) {
     return c.json(
-      { success: false, error: "body.documents must be an array" },
+      {
+        success: false,
+        error:
+          "body.documents or body.purchaseOrders (or both) must be a non-empty array",
+      },
       400,
     );
   }
@@ -8194,6 +8220,7 @@ app.post("/historical-purchases-backfill", async (c) => {
   let posCreated = 0;
   let grnsCreated = 0;
   let pisCreated = 0;
+  let posOnlyCreated = 0;
   let lineItemsTotal = 0;
   let documentsProcessed = 0;
   let skipped = 0;
@@ -8418,7 +8445,7 @@ app.post("/historical-purchases-backfill", async (c) => {
             ),
         );
 
-        if (it.rmId && it.qty > 0) {
+        if (!skipStock && it.rmId && it.qty > 0) {
           const batchId = `rmb-grn-${grnId}-${i + 1}`;
           const ledgerId = `cl-${crypto.randomUUID().slice(0, 8)}`;
           const totalCostSen = Math.round(it.qty * it.unitPriceSen);
@@ -8553,13 +8580,143 @@ app.post("/historical-purchases-backfill", async (c) => {
     }
   }
 
+  // ----- Standalone PO seeding (original numbers, no GRN/PI/stock) -----
+  for (const po of purchaseOrdersOnly) {
+    const poNo = String(po?.poNo ?? "").trim();
+    const docDate = String(po?.docDate ?? "").trim();
+    const supplierCode = String(po?.supplierCode ?? "").trim();
+    const itemsIn = Array.isArray(po?.items) ? po.items : [];
+
+    if (!poNo || !docDate || !supplierCode || itemsIn.length === 0) {
+      errors.push({
+        docNo: poNo || "(missing)",
+        message: "poNo, docDate, supplierCode, items required for purchaseOrders entry",
+      });
+      continue;
+    }
+
+    try {
+      // Idempotency: skip if a purchase_orders row with this poNo already exists.
+      const existingPo = await db
+        .prepare("SELECT id FROM purchase_orders WHERE poNo = ? LIMIT 1")
+        .bind(poNo)
+        .first<{ id: string }>();
+      if (existingPo) {
+        skipped++;
+        continue;
+      }
+
+      const supplier = await resolveSupplier(supplierCode);
+      if (!supplier) {
+        errors.push({
+          docNo: poNo,
+          message: `unknown supplier code ${supplierCode}`,
+        });
+        continue;
+      }
+
+      // Resolve items — look up RM for description; fall back to item description.
+      const resolvedPoItems: Array<{
+        materialName: string;
+        supplierSKU: string;
+        qty: number;
+        unitPriceSen: number;
+        lineTotal: number;
+      }> = [];
+      for (const it of itemsIn) {
+        const qty = Number(it?.qty) || 0;
+        const unitPriceSen = Math.round(Number(it?.unitPriceSen) || 0);
+        const desc = String(it?.description ?? "").trim();
+        const matCode = it?.materialCode ? String(it.materialCode).trim() : null;
+        const supSku = String(it?.supplierSKU ?? matCode ?? "").trim();
+        let materialName = desc;
+        if (matCode) {
+          const rmRow = await resolveRm(matCode);
+          if (rmRow) materialName = rmRow.description;
+        }
+        resolvedPoItems.push({
+          materialName: materialName || matCode || "",
+          supplierSKU: supSku,
+          qty,
+          unitPriceSen,
+          lineTotal: Math.round(qty * unitPriceSen),
+        });
+      }
+
+      const subtotalSen = Math.round(
+        resolvedPoItems.reduce((s, r) => s + r.qty * r.unitPriceSen, 0),
+      );
+      const nowIso = new Date().toISOString();
+      const poId = `po-${crypto.randomUUID().slice(0, 8)}`;
+
+      const poStatements: D1PreparedStatement[] = [];
+
+      poStatements.push(
+        db
+          .prepare(
+            `INSERT INTO purchase_orders (id, poNo, supplierId, supplierName,
+               subtotalSen, totalSen, status, orderDate, expectedDate,
+               receivedDate, notes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, NULL, ?, ?, ?)`,
+          )
+          .bind(
+            poId,
+            poNo,
+            supplier.id,
+            supplier.name,
+            subtotalSen,
+            subtotalSen,
+            docDate,
+            docDate,
+            `Imported historical PO ${poNo}`,
+            nowIso,
+            nowIso,
+          ),
+      );
+
+      for (let i = 0; i < resolvedPoItems.length; i++) {
+        const it = resolvedPoItems[i];
+        const poItemId = `poi-${crypto.randomUUID().slice(0, 8)}`;
+        poStatements.push(
+          db
+            .prepare(
+              `INSERT INTO purchase_order_items (id, purchaseOrderId,
+                 materialCategory, materialName, supplierSKU, quantity,
+                 unitPriceSen, totalSen, receivedQty, unit)
+               VALUES (?, ?, '', ?, ?, ?, ?, ?, 0, 'pcs')`,
+            )
+            .bind(
+              poItemId,
+              poId,
+              it.materialName,
+              it.supplierSKU,
+              it.qty,
+              it.unitPriceSen,
+              it.lineTotal,
+            ),
+        );
+      }
+
+      await db.batch(poStatements);
+
+      posOnlyCreated++;
+      lineItemsTotal += resolvedPoItems.length;
+    } catch (err) {
+      errors.push({
+        docNo: poNo,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   return c.json({
     success: true,
-    total: docs.length,
+    total: docs.length + purchaseOrdersOnly.length,
     documentsProcessed,
     posCreated,
     grnsCreated,
     pisCreated,
+    posOnlyCreated,
     lineItemsTotal,
     skipped,
     errors,

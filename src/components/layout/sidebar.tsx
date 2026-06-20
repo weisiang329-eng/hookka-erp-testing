@@ -37,7 +37,6 @@ import {
   FilePlus,
   CreditCard,
   Shirt,
-  Route,
   DollarSign,
   Scale,
   Tag,
@@ -149,7 +148,6 @@ const navigationGroups: NavGroup[] = [
     label: "PROCUREMENT",
     items: [
       { name: "Purchase Order", href: "/procurement", icon: ShoppingCart },
-      { name: "In Transit", href: "/procurement/in-transit", icon: Route },
       { name: "GRN", href: "/procurement/grn", icon: ClipboardList },
       { name: "Purchase Invoice", href: "/procurement/pi", icon: CreditCard },
       { name: "Supplier Pricing", href: "/procurement/pricing", icon: DollarSign },

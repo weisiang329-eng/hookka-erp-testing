@@ -67,7 +67,6 @@ const ProcurementDetail = lazy(() => import('./pages/procurement/detail'))
 const GRN = lazy(() => import('./pages/procurement/grn'))
 const GRNCreate = lazy(() => import('./pages/procurement/grn/create'))
 const GRNDetail = lazy(() => import('./pages/procurement/grn-detail'))
-const InTransit = lazy(() => import('./pages/procurement/in-transit'))
 const ProcurementMaintenance = lazy(() => import('./pages/procurement/maintenance'))
 const PI = lazy(() => import('./pages/procurement/pi'))
 const PICreate = lazy(() => import('./pages/procurement/pi/create'))
@@ -336,7 +335,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // as the :id wildcard and opens the GRN detail for a non-existent record).
   { path: '/procurement/grn/create', element: <S><GRNCreate /></S> },
   { path: '/procurement/grn/:id', element: <S><GRNDetail /></S> },
-  { path: '/procurement/in-transit', element: <S><InTransit /></S> },
+  { path: '/procurement/in-transit', element: <Navigate to="/procurement/grn" replace /> },
   { path: '/procurement/maintenance', element: <S><ProcurementMaintenance /></S> },
   { path: '/procurement/pi', element: <S><PI /></S> },
   // /procurement/pi/create must come before /procurement/pi/:id so React
@@ -546,7 +545,6 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/inventory/adjustments': () => import('./pages/inventory/adjustments'),
   '/warehouse': () => import('./pages/warehouse'),
   '/procurement': () => import('./pages/procurement'),
-  '/procurement/in-transit': () => import('./pages/procurement/in-transit'),
   '/procurement/grn': () => import('./pages/procurement/grn'),
   '/procurement/grn/create': () => import('./pages/procurement/grn/create'),
   '/procurement/pi': () => import('./pages/procurement/pi'),

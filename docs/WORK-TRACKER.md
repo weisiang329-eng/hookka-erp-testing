@@ -9,6 +9,15 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-06-21
+
+- ✅ **GRN list: arrival chips fixed + explicit From PO entry** — (1) arrival filter chips were
+  misaligned (dot used `<Badge variant=status>` which renders the status TEXT in a 6px dot →
+  overflow/overlap); swapped for a plain `getStatusColor(state).hex` dot. (2) Header only showed
+  "Create GRN" though create.tsx already defaults to PO mode → added explicit **From PO / Manual
+  Receipt (`?manual=1`) / Scan GRN**. tsc clean, shipped `5bcbbcd3`, **verified live** (chips clean,
+  3 buttons present). Found via owner screenshot; fixed via NAVIGATION-MAP (Procurement module).
+
 ## 2026-06-20
 
 - ✅ **CoE / Dev-Efficiency System built** — the "big plan" ([DEV-EFFICIENCY-SYSTEM.md](DEV-EFFICIENCY-SYSTEM.md)):

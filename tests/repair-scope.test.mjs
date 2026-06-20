@@ -753,14 +753,21 @@ test("cascade: material filter runs before consumption, keyed off the PO's stamp
   assert.match(cascadeSrc, /ownerDeptCodes/);
 });
 
-test("delivery-pipeline: no-UPH fallback exists and is keyed on the scope, not card absence", () => {
+test("delivery-pipeline: no-UPH fallback is gated on COMPLETED status / scope, not card absence", () => {
   assert.match(pipelineSrc, /function repairScopeExcludesUph\(/);
+  // poInPlanning still gates its no-UPH fallback on the repair scope.
   assert.equal(
     (pipelineSrc.match(/if \(!repairScopeExcludesUph\(po\)\) return false;/g) ?? []).length,
-    2,
-    "both poInPlanning and poReadyForDelivery must gate the fallback on the scope",
+    1,
+    "poInPlanning must still gate its no-UPH fallback on the scope",
   );
-  // Zero job cards never qualifies.
+  // poReadyForDelivery's no-UPH fallback (BUG-2026-06-20-001: ACCESSORY
+  // pillows have no upholstery card) is gated on the PO's own COMPLETED status
+  // OR the repair scope — never on card absence alone, so a half-made
+  // (IN_PROGRESS) non-upholstered PO can't slip through.
+  assert.match(pipelineSrc, /if \(po\.status === "COMPLETED"\) return allDone;/);
+  assert.match(pipelineSrc, /if \(repairScopeExcludesUph\(po\)\) return allDone;/);
+  // Zero job cards never qualifies (both predicates).
   assert.equal(
     (pipelineSrc.match(/if \(jcs\.length === 0\) return false;/g) ?? []).length,
     2,

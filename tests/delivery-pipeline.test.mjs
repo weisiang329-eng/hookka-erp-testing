@@ -332,10 +332,51 @@ test("poReadyForDelivery: PO already on a DO (in linkedPOIds) -> false", () => {
   );
 });
 
-test("poReadyForDelivery: no upholstery cards -> false", () => {
+test("poReadyForDelivery: no upholstery cards, NOT yet COMPLETED -> false", () => {
+  // Default status here is IN_PROGRESS — a non-upholstered route only becomes
+  // ready once the PO itself flips to COMPLETED (see accessory tests below).
   assert.equal(
     dp.poReadyForDelivery(
       po({ jobCards: [{ departmentCode: "PACKING", status: "COMPLETED" }] }),
+      EMPTY_LINKED,
+    ),
+    false,
+  );
+});
+
+test("poReadyForDelivery: COMPLETED accessory (no upholstery, all cards done) -> true", () => {
+  // ACCESSORY pillows / cushions finish via FAB_CUT -> FAB_SEW -> PACKING and
+  // never get an UPHOLSTERY card. A COMPLETED PO with every card done is ready
+  // to ship (BUG-2026-06-20-001: these used to be stuck out of Pending Delivery).
+  assert.equal(
+    dp.poReadyForDelivery(
+      po({
+        status: "COMPLETED",
+        itemCategory: "ACCESSORY",
+        jobCards: [
+          { departmentCode: "FAB_CUT", status: "COMPLETED" },
+          { departmentCode: "FAB_SEW", status: "COMPLETED" },
+          { departmentCode: "PACKING", status: "COMPLETED" },
+        ],
+      }),
+      EMPTY_LINKED,
+    ),
+    true,
+  );
+});
+
+test("poReadyForDelivery: in-progress accessory (no upholstery, a card pending) -> false", () => {
+  // Not COMPLETED yet -> stays excluded so half-made accessories can't ship.
+  assert.equal(
+    dp.poReadyForDelivery(
+      po({
+        status: "IN_PROGRESS",
+        itemCategory: "ACCESSORY",
+        jobCards: [
+          { departmentCode: "FAB_CUT", status: "COMPLETED" },
+          { departmentCode: "PACKING", status: "PENDING" },
+        ],
+      }),
       EMPTY_LINKED,
     ),
     false,

@@ -88,10 +88,24 @@ export function poReadyForDelivery(po: PipelinePO, linkedPOIds: Set<string>): bo
   if (linkedPOIds.has(po.id)) return false;
   const uphCards = pickRelevantUphCards(po);
   if (uphCards.length === 0) {
-    if (!repairScopeExcludesUph(po)) return false;
     const jcs = po.jobCards || [];
     if (jcs.length === 0) return false;
-    return jcs.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
+    const allDone = jcs.every(
+      (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
+    );
+    // Products whose production route has NO upholstery step — ACCESSORY
+    // pillows / cushions finish via FAB_CUT -> FAB_SEW -> PACKING and never
+    // get an UPHOLSTERY job card. Without this branch they were COMPLETED yet
+    // permanently stuck out of Pending Delivery (BUG-2026-06-20-001: 16 sofa-
+    // pillow POs across 7 SOs un-shippable). The backend only flips a PO to
+    // COMPLETED once every RELEVANT dept is done, so a sofa still mid-
+    // production stays IN_PRODUCTION (its uncompleted upholstery cards keep it
+    // out) — trusting the COMPLETED status here can't let a half-made sofa slip
+    // through.
+    if (po.status === "COMPLETED") return allDone;
+    // Scoped repair that excludes upholstery (0160): ready when all cards done.
+    if (repairScopeExcludesUph(po)) return allDone;
+    return false;
   }
   return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
 }

@@ -34,6 +34,43 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-20-001 — Completed ACCESSORY orders (sofa pillows) stuck out of Pending Delivery — un-shippable
+
+🟢 **Fixed** · `delivery-orders` `production-orders`
+
+**Symptom (owner):** SO-2606-172 (Houzs Century, sofa square pillows) was fully
+produced and shows "Pending Delivery" in the Sales Order list, yet never
+appeared in the Delivery page's Pending Delivery staging — so there was no way
+to raise a DO and ship it.
+
+**Root cause:** `poReadyForDelivery` in `src/lib/delivery-pipeline.ts` (the
+single gate the Delivery page AND the dashboard "Pending Delivery" card share)
+treats "all UPHOLSTERY job cards done" as the proxy for "production complete".
+ACCESSORY items (pillows / cushions) run FAB_CUT → FAB_SEW → PACKING with **no
+upholstery step**, so they have zero upholstery cards. The zero-UPH fallback
+only let a row through if it was a scoped repair (`repairScopeExcludesUph`);
+a normal accessory PO — `COMPLETED`, every card done — fell straight to
+`return false` and was permanently un-shippable. System sweep of all 1,490
+production orders found **16 stuck POs across 7 SOs, ALL category ACCESSORY**
+(no other category drifts — sofas have upholstery cards, bedframes are handled).
+
+**Fix:** `src/lib/delivery-pipeline.ts` `poReadyForDelivery` — in the
+zero-upholstery-card branch, qualify the row when `po.status === "COMPLETED"`
+and every job card is COMPLETED/TRANSFERRED. The backend only flips a PO to
+COMPLETED once every *relevant* department is done, so a sofa still
+mid-production stays IN_PROGRESS (its uncompleted upholstery cards keep it out)
+— trusting COMPLETED here can't let a half-made item slip through. The scoped-
+repair path is preserved. `poInPlanning` left as-is (an in-production accessory
+not previewing in the Planning tab is a separate, lower-impact gap; it's still
+tracked in the Production module).
+
+**Verified:** `tests/delivery-pipeline.test.mjs` +2 cases (COMPLETED accessory →
+ready; in-progress accessory → not ready); `tests/repair-scope.test.mjs`
+source-guard updated to the new intent; 986 tests pass. Live: the 16 POs / 7 SOs
+now appear in Pending Delivery on prod.
+
+---
+
 ## BUG-2026-06-19-001 — Cross-audit vs the 2990s ERP: purchasing/invoicing integrity guards + frontend/date hygiene (13 fixes)
 
 🟢 **Fixed** · `purchasing` `data-integrity` `ui-frontend`

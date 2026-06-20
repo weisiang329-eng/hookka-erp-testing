@@ -11,6 +11,11 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ## 2026-06-20
 
+- ✅ **CoE / Dev-Efficiency System built** — the "big plan" ([DEV-EFFICIENCY-SYSTEM.md](DEV-EFFICIENCY-SYSTEM.md)):
+  Layer 4 **Navigation** = [NAVIGATION-MAP.md](context-packs/NAVIGATION-MAP.md) (9 modules + line-range
+  index for 16 monster files, verified accurate); Layer 5 **Methodology** = [PLAYBOOKS.md](PLAYBOOKS.md)
+  (8 procedures); 9 Codex docs tailored; DOCS-INDEX surfaces all. **Still optional:** light docs reorg
+  (merge UI-DATA-DOCUMENT-STANDARDS→UI-CONVENTIONS), Data-dictionary/glossary, ERD map, Test-selection matrix.
 - 🔵 **#3 / GRN read-bug fix** — dual-key read for snake_case cols folded to camelCase
   by `toCamel` (`purchase-orders.ts` rowToItem `material_code`; `grn.ts` rowToGRN
   arrival/shipment/landed-cost). Pushed `cdfcae69`. **TODO: confirm deploy + verify

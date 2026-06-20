@@ -71,7 +71,9 @@ function ensureGrnMigrations(db: D1Database): Promise<void> {
 // Arrival state machine
 // ---------------------------------------------------------------------------
 export const VALID_ARRIVAL_TRANSITIONS: Record<string, string[]> = {
-  NOT_ARRIVED: ["IN_TRANSIT", "ARRIVED"],
+  // Any forward jump is allowed: local goods go straight to ARRIVED,
+  // imports may skip AT_CUSTOMS if cleared informally.
+  NOT_ARRIVED: ["IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"],
   IN_TRANSIT: ["AT_CUSTOMS", "ARRIVED"],
   AT_CUSTOMS: ["ARRIVED"],
   ARRIVED: [],

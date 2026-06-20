@@ -46,9 +46,9 @@ const ARRIVAL_COLORS: Record<ArrivalState, string> = {
   ARRIVED: "#10B981",
 };
 
-// Labels for display
+// Labels for display — NOT_ARRIVED shows as "Planning" to match DO pipeline.
 const ARRIVAL_LABELS: Record<ArrivalState, string> = {
-  NOT_ARRIVED: "Not Arrived",
+  NOT_ARRIVED: "Planning",
   IN_TRANSIT: "In Transit",
   AT_CUSTOMS: "At Customs",
   ARRIVED: "Arrived",

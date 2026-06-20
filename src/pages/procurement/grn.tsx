@@ -512,8 +512,20 @@ export default function GRNPage() {
   // ---- Bulk arrival transition ----
   // Mirrors runBulkDoTransition from delivery/index.tsx: sequential per-row
   // PUTs to /api/grn/:id/arrival, then refresh.
+
+  // Display labels for arrival states — DB value stays unchanged.
+  // NOT_ARRIVED is shown as "Planning" to match the DO pipeline vocabulary.
+  const ARRIVAL_LABELS: Record<ArrivalState, string> = {
+    NOT_ARRIVED: "Planning",
+    IN_TRANSIT: "In Transit",
+    AT_CUSTOMS: "At Customs",
+    ARRIVED: "Arrived",
+  };
+
+  // Any forward jump is allowed: local goods go straight to ARRIVED,
+  // imports may skip AT_CUSTOMS if cleared informally. Mirrors grn.ts.
   const VALID_ARRIVAL_TRANSITIONS: Record<ArrivalState, ArrivalState[]> = {
-    NOT_ARRIVED: ["IN_TRANSIT", "ARRIVED"],
+    NOT_ARRIVED: ["IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"],
     IN_TRANSIT: ["AT_CUSTOMS", "ARRIVED"],
     AT_CUSTOMS: ["ARRIVED"],
     ARRIVED: [],
@@ -567,7 +579,7 @@ export default function GRNPage() {
     { key: "arrival_state", label: "Arrival", type: "status", width: "130px", sortable: true,
       render: (_v: unknown, row: GoodsReceiptNote) => (
         <Badge variant="status" status={row.arrival_state}>
-          {row.arrival_state.replace(/_/g, " ")}
+          {ARRIVAL_LABELS[row.arrival_state as ArrivalState] ?? row.arrival_state.replace(/_/g, " ")}
         </Badge>
       ),
     },
@@ -760,29 +772,40 @@ export default function GRNPage() {
               </div>
             ))}
           </div>
-          {/* Arrival state filter chips */}
-          <div className="flex items-center gap-2 pt-2 border-t border-[#E2DDD8]">
-            <Ship className="h-3.5 w-3.5 text-[#6B7280] shrink-0" />
-            <span className="text-xs text-[#6B7280] shrink-0">Arrival:</span>
-            {(["NOT_ARRIVED", "IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"] as ArrivalState[]).map((state) => {
-              const count = grns.filter(g => g.arrival_state === state).length;
-              const isActive = filterArrivalState === state;
-              return (
-                <button
-                  key={state}
-                  onClick={() => setFilterArrivalState(isActive ? "" : state)}
-                  className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium border transition-all cursor-pointer ${
-                    isActive ? "border-[#6B5C32] bg-[#F0ECE9] text-[#6B5C32]" : "border-[#E2DDD8] text-[#6B7280] hover:border-[#6B5C32]/40"
-                  }`}
-                >
-                  <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ backgroundColor: getStatusColor(state).hex }} />
-                  {state.replace(/_/g, " ")} ({count})
-                </button>
-              );
-            })}
-            {filterArrivalState && (
-              <button onClick={() => setFilterArrivalState("")} className="text-xs text-[#9CA3AF] hover:text-[#374151] cursor-pointer">Clear</button>
-            )}
+          {/* Arrival pipeline tabs — styled to match the DO delivery pipeline */}
+          <div className="pt-2 border-t border-[#E2DDD8]">
+            <div className="flex items-center gap-1 mb-1">
+              <Ship className="h-3.5 w-3.5 text-[#6B7280] shrink-0" />
+              <span className="text-xs text-[#6B7280]">Arrival Pipeline</span>
+              {filterArrivalState && (
+                <button onClick={() => setFilterArrivalState("")} className="ml-2 text-xs text-[#9CA3AF] hover:text-[#374151] cursor-pointer">Clear</button>
+              )}
+            </div>
+            <nav className="flex gap-4 overflow-x-auto border-b border-[#E2DDD8]" aria-label="Arrival stages">
+              {(["NOT_ARRIVED", "IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"] as ArrivalState[]).map((state) => {
+                const count = grns.filter(g => g.arrival_state === state).length;
+                const isActive = filterArrivalState === state;
+                return (
+                  <button
+                    key={state}
+                    onClick={() => setFilterArrivalState(isActive ? "" : state)}
+                    className={`flex items-center gap-2 pb-2 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+                      isActive
+                        ? "border-[#6B5C32] text-[#6B5C32]"
+                        : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
+                    }`}
+                  >
+                    <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: getStatusColor(state).hex }} />
+                    {ARRIVAL_LABELS[state]}
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                      isActive ? "bg-[#6B5C32] text-white" : "bg-[#F0ECE9] text-[#6B7280]"
+                    }`}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </nav>
           </div>
         </CardContent>
       </Card>
@@ -859,7 +882,7 @@ export default function GRNPage() {
                     size="sm"
                     disabled={bulkArrivalBusy}
                     onClick={() => runBulkArrivalTransition("IN_TRANSIT", "In Transit")}
-                    title="Mark selected GRNs as In Transit (only those currently NOT_ARRIVED)"
+                    title="Mark selected GRNs as In Transit (only those currently Planning, In Transit eligible)"
                   >
                     <Ship className="h-4 w-4" /> Mark In Transit ({selectedGrns.length})
                   </Button>
@@ -868,7 +891,7 @@ export default function GRNPage() {
                     size="sm"
                     disabled={bulkArrivalBusy}
                     onClick={() => runBulkArrivalTransition("AT_CUSTOMS", "At Customs")}
-                    title="Mark selected GRNs as At Customs (only those currently IN_TRANSIT)"
+                    title="Mark selected GRNs as At Customs (Planning or In Transit allowed)"
                   >
                     <Ship className="h-4 w-4" /> Mark At Customs ({selectedGrns.length})
                   </Button>
@@ -877,7 +900,7 @@ export default function GRNPage() {
                     size="sm"
                     disabled={bulkArrivalBusy}
                     onClick={() => runBulkArrivalTransition("ARRIVED", "Arrived")}
-                    title="Mark selected GRNs as Arrived (IN_TRANSIT or AT_CUSTOMS)"
+                    title="Mark selected GRNs as Arrived (any forward state allowed)"
                   >
                     <Ship className="h-4 w-4" /> Mark Arrived ({selectedGrns.length})
                   </Button>

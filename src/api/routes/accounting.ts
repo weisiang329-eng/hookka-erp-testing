@@ -2813,7 +2813,64 @@ app.get("/audit-log", async (c) => {
           actorUserId: string | null;
         }>()
     ).results ?? [];
-  return c.json({ success: true, data: rows });
+
+  // Enrich each entry with the human-readable reference + party/amount/date by
+  // looking up the source document per type. sourceId is the doc id for
+  // PV/OR/JV (so we fetch the number) and already the doc number for the
+  // others. Lookups key on the unique id/number — NOT orgId (payment_vouchers/
+  // official_receipts/journal_entries have no org_id column).
+  type Info = { reference: string; party: string; amountSen: number; docDate: string };
+  const info = new Map<string, Info>();
+  const idsOf = (t: string) => [...new Set(rows.filter((r) => r.sourceType === t).map((r) => r.sourceId))];
+  const marks = (n: number) => Array.from({ length: n }, () => "?").join(",");
+
+  const pvIds = idsOf("payment_voucher");
+  if (pvIds.length) {
+    for (const d of (await c.var.DB.prepare(`SELECT id, pvNo, date, payee, totalSen FROM payment_vouchers WHERE id IN (${marks(pvIds.length)})`).bind(...pvIds).all<{ id: string; pvNo: string; date: string; payee: string | null; totalSen: number }>()).results ?? [])
+      info.set(`payment_voucher|${d.id}`, { reference: d.pvNo, party: d.payee ?? "", amountSen: d.totalSen, docDate: d.date });
+  }
+  const orIds = idsOf("official_receipt");
+  if (orIds.length) {
+    for (const d of (await c.var.DB.prepare(`SELECT id, orNo, date, receivedFrom, totalSen FROM official_receipts WHERE id IN (${marks(orIds.length)})`).bind(...orIds).all<{ id: string; orNo: string; date: string; receivedFrom: string | null; totalSen: number }>()).results ?? [])
+      info.set(`official_receipt|${d.id}`, { reference: d.orNo, party: d.receivedFrom ?? "", amountSen: d.totalSen, docDate: d.date });
+  }
+  const jvIds = idsOf("manual");
+  if (jvIds.length) {
+    for (const d of (await c.var.DB.prepare(`SELECT id, entryNo, date, description FROM journal_entries WHERE id IN (${marks(jvIds.length)})`).bind(...jvIds).all<{ id: string; entryNo: string; date: string; description: string | null }>()).results ?? [])
+      info.set(`manual|${d.id}`, { reference: d.entryNo, party: d.description ?? "", amountSen: 0, docDate: d.date });
+  }
+  const billIds = idsOf("other_party_bill");
+  if (billIds.length) {
+    for (const d of (await c.var.DB.prepare(`SELECT billNo, partyName, billDate, totalSen FROM other_party_bills WHERE billNo IN (${marks(billIds.length)})`).bind(...billIds).all<{ billNo: string; partyName: string; billDate: string; totalSen: number }>()).results ?? [])
+      info.set(`other_party_bill|${d.billNo}`, { reference: d.billNo, party: d.partyName, amountSen: d.totalSen, docDate: d.billDate });
+  }
+  const oppIds = idsOf("other_party_payment");
+  if (oppIds.length) {
+    for (const d of (await c.var.DB.prepare(`SELECT paymentNo, MAX(partyName) AS partyName, MAX(date) AS date, SUM(amountSen) AS amt FROM other_party_payments WHERE paymentNo IN (${marks(oppIds.length)}) GROUP BY paymentNo`).bind(...oppIds).all<{ paymentNo: string; partyName: string | null; date: string; amt: number }>()).results ?? [])
+      info.set(`other_party_payment|${d.paymentNo}`, { reference: d.paymentNo, party: d.partyName ?? "", amountSen: d.amt ?? 0, docDate: d.date });
+  }
+  const spIds = idsOf("supplier_payment");
+  if (spIds.length) {
+    for (const d of (await c.var.DB.prepare(`SELECT paymentNo, MAX(supplierName) AS supplierName, MAX(date) AS date, SUM(bookedSen) AS amt FROM supplier_payments WHERE paymentNo IN (${marks(spIds.length)}) GROUP BY paymentNo`).bind(...spIds).all<{ paymentNo: string; supplierName: string | null; date: string; amt: number }>()).results ?? [])
+      info.set(`supplier_payment|${d.paymentNo}`, { reference: d.paymentNo, party: d.supplierName ?? "", amountSen: d.amt ?? 0, docDate: d.date });
+  }
+  const ftIds = idsOf("fund_transfer");
+  if (ftIds.length) {
+    for (const d of (await c.var.DB.prepare(`SELECT sourceId, MAX(debitSen) AS amt, MIN(postedAt) AS dt FROM ledger_journal_entries WHERE sourceType = 'fund_transfer' AND sourceId IN (${marks(ftIds.length)}) GROUP BY sourceId`).bind(...ftIds).all<{ sourceId: string; amt: number; dt: string | null }>()).results ?? [])
+      info.set(`fund_transfer|${d.sourceId}`, { reference: d.sourceId, party: "", amountSen: d.amt ?? 0, docDate: (d.dt ?? "").slice(0, 10) });
+  }
+
+  const data = rows.map((r) => {
+    const i = info.get(`${r.sourceType}|${r.sourceId}`);
+    return {
+      ...r,
+      reference: i?.reference ?? r.sourceId,
+      party: i?.party ?? "",
+      amountSen: i?.amountSen ?? 0,
+      docDate: i?.docDate ?? "",
+    };
+  });
+  return c.json({ success: true, data });
 });
 
 // Shared internal builder (NOT a route): used by both the rewired /void

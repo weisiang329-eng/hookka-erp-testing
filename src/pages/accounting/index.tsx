@@ -220,6 +220,10 @@ type AuditRow = {
   state: string;
   actionAt: string | null;
   actorUserId: string | null;
+  reference?: string;
+  party?: string;
+  amountSen?: number;
+  docDate?: string;
 };
 
 const AUDIT_DOC_MAP: Record<string, { label: string; base: string }> = {
@@ -278,6 +282,9 @@ function AuditLogTab() {
                   <th className="px-3 py-2 text-left">When</th>
                   <th className="px-3 py-2 text-left">Type</th>
                   <th className="px-3 py-2 text-left">Reference</th>
+                  <th className="px-3 py-2 text-left">Doc Date</th>
+                  <th className="px-3 py-2 text-left">Party</th>
+                  <th className="px-3 py-2 text-right">Amount</th>
                   <th className="px-3 py-2 text-left">State</th>
                   <th className="px-3 py-2 text-left">By</th>
                   <th className="px-3 py-2" />
@@ -288,7 +295,10 @@ function AuditLogTab() {
                   <tr key={r.id} className="border-b border-[#F0ECE9]">
                     <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.actionAt ? r.actionAt.slice(0, 19).replace("T", " ") : "—"}</td>
                     <td className="px-3 py-1.5 text-xs">{AUDIT_DOC_MAP[r.sourceType]?.label ?? r.sourceType}</td>
-                    <td className="px-3 py-1.5 tabular-nums text-xs">{r.sourceId}</td>
+                    <td className="px-3 py-1.5 tabular-nums text-xs font-medium">{r.reference ?? r.sourceId}</td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.docDate || "—"}</td>
+                    <td className="px-3 py-1.5 text-xs">{r.party || "—"}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-xs">{r.amountSen ? formatCurrency(r.amountSen) : "—"}</td>
                     <td className="px-3 py-1.5"><LifecycleBadge state={r.state} /></td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.actorUserId ?? "—"}</td>
                     <td className="px-3 py-1.5 text-right">

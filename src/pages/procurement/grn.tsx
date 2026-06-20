@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
-import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -344,7 +343,6 @@ const ALL_GRN_STATUSES = [
 // ============================================================
 export default function GRNPage() {
   const { toast } = useToast();
-  const { confirm } = useConfirm();
   const navigate = useNavigate();
 
   // Filters
@@ -635,72 +633,8 @@ export default function GRNPage() {
         // PI page; we don't auto-approve.
         label: "Convert to Invoice",
         icon: <FileText className="h-3.5 w-3.5" />,
-        action: async () => {
-          const grnTotalRM = (row.totalAmount / 100).toFixed(2);
-          const ok = await confirm({
-            title: "Create Purchase Invoice?",
-            message: `Create Purchase Invoice from GRN ${row.grnNumber}? Total: ${grnTotalRM}`,
-            danger: false,
-          });
-          if (!ok) return;
-          // Phase 3.6 multi-currency (rate keyed per document): an import
-          // supplier's GRN was keyed in the supplier's currency — declare
-          // it here and the PI books everything in MYR at this rate.
-          const currency = (window.prompt(
-            "Invoice currency — keep MYR, or type USD / CNY for a foreign supplier invoice:",
-            "MYR",
-          ) || "").trim().toUpperCase();
-          if (!currency) return;
-          let fxRate: number | undefined;
-          if (currency !== "MYR") {
-            const r = parseFloat(window.prompt(`Booking exchange rate — MYR per 1 ${currency} (invoice-date rate):`, "") || "");
-            if (!Number.isFinite(r) || r <= 0) {
-              toast.error("A positive exchange rate is required for a foreign invoice");
-              return;
-            }
-            fxRate = r;
-          }
-          try {
-            const today = new Date().toISOString().split("T")[0];
-            const items = row.items
-              .filter((it) => it.acceptedQty > 0)
-              .map((it) => ({
-                materialCode: it.materialCode,
-                materialName: it.materialName,
-                qty: it.acceptedQty,
-                unitPriceSen: it.unitPrice,
-                lineType: "STOCKED" as const,
-              }));
-            const res = await fetch("/api/purchase-invoices", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                purchaseOrderId: row.poId,
-                supplierId: row.supplierId,
-                supplierName: row.supplierName,
-                invoiceDate: today,
-                amountSen: row.totalAmount,
-                remarks: `Auto-created from GRN ${row.grnNumber}`,
-                items,
-                currency,
-                fxRate,
-              }),
-            });
-            const j = (await res.json().catch(() => null)) as
-              | { success?: boolean; error?: string; data?: { id: string; piNo: string } }
-              | null;
-            if (!res.ok || !j?.success || !j.data) {
-              toast.error(j?.error || "Failed to create invoice");
-              return;
-            }
-            invalidateCachePrefix("/api/grn");
-            invalidateCachePrefix("/api/purchase-invoices");
-            fetchData();
-            toast.success(`Invoice ${j.data.piNo} created from GRN ${row.grnNumber}`);
-            navigate(`/procurement/pi/${j.data.id}`);
-          } catch {
-            toast.error("Failed to create invoice");
-          }
+        action: () => {
+          navigate(`/procurement/pi/create?grnId=${row.id}`);
         },
         disabled: row.status !== "POSTED",
       },

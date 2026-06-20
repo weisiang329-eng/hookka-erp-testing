@@ -32,6 +32,35 @@ import {
   type SupplierExtraction,
 } from "@/components/scan-supplier-modal";
 
+// ── Source-doc shapes (minimal fields we need for pre-fill) ────────────────
+type POItemShape = {
+  materialName: string;
+  supplierSKU?: string | null;
+  quantity: number;
+  unitPriceSen: number;
+};
+type POShape = {
+  id: string;
+  poNo: string;
+  supplierId: string;
+  supplierName: string;
+  items: POItemShape[];
+};
+type GRNItemShape = {
+  materialCode?: string | null;
+  materialName: string;
+  acceptedQty: number;
+  unitPrice: number; // sen
+};
+type GRNShape = {
+  id: string;
+  grnNumber: string;
+  poId: string | null;
+  supplierId: string;
+  supplierName: string;
+  items: GRNItemShape[];
+};
+
 // ── Line-item draft type — mirrors PIFormDialog exactly ───────────────────
 type PILineDraft = {
   materialCode: string;
@@ -106,14 +135,68 @@ function CreatePurchaseInvoicePage() {
   const [scanOpen, setScanOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Auto-open scan modal when ?scan=1 (mirrors autoScan prop from modal).
-  // Runs once on mount only — same behaviour as the modal's useEffect.
-  /* eslint-disable react-hooks/set-state-in-effect */
+  // ── Source PO id to include in POST body for lineage ─────────────────────
+  const [sourcePurchaseOrderId, setSourcePurchaseOrderId] = useState<
+    string | null
+  >(null);
+
+  // ── Pre-fill from ?poId or ?grnId on first mount ─────────────────────────
   useEffect(() => {
-    if (searchParams.get("scan") === "1") setScanOpen(true);
+    const poId = searchParams.get("poId");
+    const grnId = searchParams.get("grnId");
+
+    if (poId) {
+      fetch(`/api/purchase-orders/${poId}`)
+        .then((r) => r.json())
+        .then((j) => {
+          const resp = j as { success?: boolean; data?: POShape };
+          const po = resp.data;
+          if (!po) return;
+          setSupplierId(po.supplierId);
+          setRemarks(`Created from PO ${po.poNo}`);
+          setSourcePurchaseOrderId(po.id);
+          const prefilled = po.items.map((it) => ({
+            materialCode: "",
+            materialName: it.materialName,
+            supplierSku: it.supplierSKU ?? "",
+            qty: it.quantity,
+            unitPriceRM: it.unitPriceSen / 100,
+          }));
+          setLines(prefilled.length > 0 ? prefilled : [emptyPILine()]);
+        })
+        .catch(() => {
+          // leave blank form; user will notice and can fill manually
+        });
+    } else if (grnId) {
+      fetch(`/api/grn/${grnId}`)
+        .then((r) => r.json())
+        .then((j) => {
+          const resp = j as { success?: boolean; data?: GRNShape };
+          const grn = resp.data;
+          if (!grn) return;
+          setSupplierId(grn.supplierId);
+          setRemarks(`From GRN ${grn.grnNumber}`);
+          if (grn.poId) setSourcePurchaseOrderId(grn.poId);
+          const prefilled = grn.items
+            .filter((it) => it.acceptedQty > 0)
+            .map((it) => ({
+              materialCode: it.materialCode ?? "",
+              materialName: it.materialName,
+              supplierSku: "",
+              qty: it.acceptedQty,
+              unitPriceRM: it.unitPrice / 100,
+            }));
+          setLines(prefilled.length > 0 ? prefilled : [emptyPILine()]);
+        })
+        .catch(() => {
+          // leave blank form
+        });
+    } else if (searchParams.get("scan") === "1") {
+      /* eslint-disable-next-line react-hooks/set-state-in-effect */
+      setScanOpen(true);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   const supplier = suppliers.find((s) => s.id === supplierId);
 
@@ -217,23 +300,27 @@ function CreatePurchaseInvoicePage() {
     if (saving) return;
     setSaving(true);
     try {
+      const payload: Record<string, unknown> = {
+        supplierId: supplier.id,
+        supplierName: supplier.name,
+        invoiceDate,
+        remarks,
+        items: validLines.map((l) => ({
+          materialCode: l.materialCode.trim() || null,
+          materialName: l.materialName.trim(),
+          supplierSku: l.supplierSku.trim() || null,
+          qty: Number(l.qty) || 0,
+          unitPriceSen: Math.round((Number(l.unitPriceRM) || 0) * 100),
+          lineType: "STOCKED" as const,
+        })),
+      };
+      if (sourcePurchaseOrderId) {
+        payload.purchaseOrderId = sourcePurchaseOrderId;
+      }
       const res = await fetch("/api/purchase-invoices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          supplierId: supplier.id,
-          supplierName: supplier.name,
-          invoiceDate,
-          remarks,
-          items: validLines.map((l) => ({
-            materialCode: l.materialCode.trim() || null,
-            materialName: l.materialName.trim(),
-            supplierSku: l.supplierSku.trim() || null,
-            qty: Number(l.qty) || 0,
-            unitPriceSen: Math.round((Number(l.unitPriceRM) || 0) * 100),
-            lineType: "STOCKED" as const,
-          })),
-        }),
+        body: JSON.stringify(payload),
       });
       const j = (await res.json().catch(() => null)) as
         | { success?: boolean; error?: string; data?: { piNo?: string } }

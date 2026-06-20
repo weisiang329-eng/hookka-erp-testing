@@ -166,7 +166,6 @@ export default function PurchaseOrderDetailPage() {
 
   // ------- Email-PO state (3.1) -------
   const [emailing, setEmailing] = useState(false);
-  const [creatingInvoice, setCreatingInvoice] = useState(false);
 
   // GRN creation from a PO now routes to the full-page /procurement/grn/create
   // (with ?poId= pre-selecting this PO), so the inline modal that used to live
@@ -491,59 +490,6 @@ export default function PurchaseOrderDetailPage() {
     }
   };
 
-  // Convert PO → Purchase Invoice (DRAFT). Skips the GRN/receiving step — for
-  // when the supplier invoices the whole order up front. Lines map name / SKU /
-  // qty / price (POs carry no internal material code); created as a DRAFT in
-  // MYR so the operator reviews / edits (incl. material codes, currency via the
-  // GRN→PI path) before approving. Foreign-supplier invoicing should go through
-  // the GRN→PI convert, which prompts for the booking rate.
-  const createInvoiceFromPo = async () => {
-    if (!po) return;
-    const ok = await confirm({
-      title: "Create Purchase Invoice?",
-      message: `Create a draft Purchase Invoice from ${po.poNo}? It lists all ${po.items.length} line(s); you can edit it before approving.`,
-      danger: false,
-    });
-    if (!ok) return;
-    setCreatingInvoice(true);
-    try {
-      const today = new Date().toISOString().split("T")[0];
-      const items = po.items.map((it) => ({
-        materialName: it.materialName,
-        supplierSku: it.supplierSKU,
-        qty: it.quantity,
-        unitPriceSen: it.unitPriceSen,
-        lineType: "STOCKED" as const,
-      }));
-      const res = await fetch("/api/purchase-invoices", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          purchaseOrderId: po.id,
-          supplierId: po.supplierId,
-          supplierName: po.supplierName,
-          invoiceDate: today,
-          remarks: `Created from PO ${po.poNo}`,
-          items,
-        }),
-      });
-      const j = (await res.json().catch(() => null)) as
-        | { success?: boolean; error?: string; data?: { id: string; piNo: string } }
-        | null;
-      if (!res.ok || !j?.success || !j.data) {
-        toast.error(j?.error || "Could not create the invoice.");
-        return;
-      }
-      invalidateCachePrefix("/api/purchase-invoices");
-      toast.success(`Invoice ${j.data.piNo} created — review & approve`);
-      navigate(`/procurement/pi/${j.data.id}`);
-    } catch {
-      toast.error("Could not create the invoice — network error.");
-    } finally {
-      setCreatingInvoice(false);
-    }
-  };
-
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -688,11 +634,11 @@ export default function PurchaseOrderDetailPage() {
               return (
                 <Button
                   variant="outline"
-                  onClick={createInvoiceFromPo}
-                  disabled={creatingInvoice || hasLivePi}
+                  onClick={() => navigate(`/procurement/pi/create?poId=${po.id}`)}
+                  disabled={hasLivePi}
                   title={hasLivePi ? "This PO already has an invoice. Cancel it first to re-invoice." : undefined}
                 >
-                  <Receipt className="h-4 w-4" /> {creatingInvoice ? "Creating…" : hasLivePi ? "Invoiced" : "Create Invoice"}
+                  <Receipt className="h-4 w-4" /> {hasLivePi ? "Invoiced" : "Create Invoice"}
                 </Button>
               );
             })()}

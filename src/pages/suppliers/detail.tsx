@@ -6,6 +6,7 @@
 //   GET /api/supplier-scorecards/:id          Scorecard + last-10 POs
 //   GET /api/supplier-materials?supplierId=   Pricing & SKUs
 //   GET /api/price-history?supplierId=        Price History trail
+//   GET /api/purchase-orders                  All POs (filtered to this supplier in FE)
 //
 // Layout:
 //   - ObjectPageHeader: supplier code/name/status, Edit + Quotation PDF buttons
@@ -13,7 +14,7 @@
 //   - Scorecard tiles (3 KPI cards) + Last 10 POs table
 //   - Sub-tabs: [ Pricing & SKUs | Price History ]
 //     • Pricing & SKUs : SKU mappings CRUD (DataGrid + SKUFormDialog)
-//     • Price History  : price_histories trail for this supplier
+//     • Price History  : PO-based purchase history (primary) + price_histories trail
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
@@ -25,7 +26,7 @@ import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { humanizeError } from "@/lib/humanize-error";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate, formatRM } from "@/lib/utils";
 import type { Supplier, PriceHistory } from "@/types";
 import {
   SKUFormDialog,
@@ -52,6 +53,8 @@ import {
   Pencil,
   Trash2,
   FileText,
+  Search,
+  ShoppingCart,
 } from "lucide-react";
 
 type SkuBinding = {
@@ -93,6 +96,36 @@ type ScorecardDetail = {
   onTimeCount: number;
   overallRating: number;
   last10POs: ScorecardLastPO[];
+};
+
+// One row per PO line item for the purchase history DataGrid.
+type POLineRow = {
+  id: string;        // unique: `${poId}-${itemId}`
+  poId: string;
+  poNo: string;
+  orderDate: string;
+  materialCode: string;
+  materialName: string;
+  qty: number;
+  unitPriceSen: number;
+  lineTotalSen: number;
+};
+
+type RawPOItem = {
+  id: string;
+  materialCode: string;
+  materialName: string;
+  quantity: number;
+  unitPriceSen: number;
+  totalSen: number;
+};
+
+type RawPO = {
+  id: string;
+  poNo: string;
+  supplierId: string;
+  orderDate: string;
+  items: RawPOItem[];
 };
 
 function deliveryDelta(po: ScorecardLastPO): {
@@ -213,6 +246,77 @@ export default function SupplierDetailPage() {
     () => [...priceHistory].sort((a, b) => b.changedDate.localeCompare(a.changedDate)),
     [priceHistory]
   );
+
+  // PO purchase history — fetched lazily when Price History tab opens.
+  // /api/purchase-orders returns ALL POs; we filter to this supplier client-side.
+  const { data: allPOsResp } = useCachedJson<{ success?: boolean; data?: RawPO[] }>(
+    skuTab === "price-history" && id ? "/api/purchase-orders" : null
+  );
+  const poLines: POLineRow[] = useMemo(() => {
+    const pos: RawPO[] = allPOsResp?.success ? (allPOsResp.data ?? []) : [];
+    const rows: POLineRow[] = [];
+    for (const po of pos) {
+      if (po.supplierId !== id) continue;
+      for (const item of po.items ?? []) {
+        rows.push({
+          id: `${po.id}-${item.id}`,
+          poId: po.id,
+          poNo: po.poNo,
+          orderDate: po.orderDate ?? "",
+          materialCode: item.materialCode ?? "",
+          materialName: item.materialName ?? "",
+          qty: item.quantity,
+          unitPriceSen: item.unitPriceSen,
+          lineTotalSen: item.totalSen,
+        });
+      }
+    }
+    // Newest order first by default
+    return rows.sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.poNo.localeCompare(b.poNo));
+  }, [allPOsResp, id]);
+
+  // Filter state for the PO lines table
+  const [poFilter, setPoFilter] = useState("");
+  const [matFilter, setMatFilter] = useState("");
+
+  const filteredPoLines = useMemo(() => {
+    const pf = poFilter.trim().toLowerCase();
+    const mf = matFilter.trim().toLowerCase();
+    return poLines.filter((r) => {
+      if (pf && !r.poNo.toLowerCase().includes(pf)) return false;
+      if (mf && !r.materialCode.toLowerCase().includes(mf) && !r.materialName.toLowerCase().includes(mf)) return false;
+      return true;
+    });
+  }, [poLines, poFilter, matFilter]);
+
+  // Sort state for the PO lines table
+  const [poSort, setPoSort] = useState<{ key: keyof POLineRow; dir: "asc" | "desc" }>({
+    key: "orderDate",
+    dir: "desc",
+  });
+
+  function toggleSort(key: keyof POLineRow) {
+    setPoSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: "asc" }
+    );
+  }
+
+  const sortedPoLines = useMemo(() => {
+    const { key, dir } = poSort;
+    return [...filteredPoLines].sort((a, b) => {
+      const av = a[key];
+      const bv = b[key];
+      let cmp = 0;
+      if (typeof av === "number" && typeof bv === "number") {
+        cmp = av - bv;
+      } else {
+        cmp = String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true });
+      }
+      return dir === "asc" ? cmp : -cmp;
+    });
+  }, [filteredPoLines, poSort]);
 
   // SKU dialog state
   const [showSKUForm, setShowSKUForm] = useState(false);
@@ -592,8 +696,11 @@ export default function SupplierDetailPage() {
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
-                      <TrendingUp className="h-3.5 w-3.5" />
+                      <ShoppingCart className="h-3.5 w-3.5" />
                       Price History
+                      {poLines.length > 0 && (
+                        <span className="text-xs text-[#9CA3AF] font-normal">({poLines.length} lines)</span>
+                      )}
                     </span>
                   )}
                 </button>
@@ -645,60 +752,196 @@ export default function SupplierDetailPage() {
 
         {/* Price History tab */}
         {skuTab === "price-history" && (
-          <CardContent className="pt-4">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-[#E2DDD8] text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    <th className="pb-3 pr-4">Date</th>
-                    <th className="pb-3 pr-4">Material</th>
-                    <th className="pb-3 pr-4 text-right">Old Price</th>
-                    <th className="pb-3 pr-4 text-right">New Price</th>
-                    <th className="pb-3 pr-4 text-right">Change %</th>
-                    <th className="pb-3 pr-4">Changed By</th>
-                    <th className="pb-3">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#E2DDD8]">
-                  {sortedHistory.map((h) => {
-                    const pct = h.oldPrice === 0 ? "N/A" : (() => {
-                      const p = ((h.newPrice - h.oldPrice) / h.oldPrice) * 100;
-                      return `${p > 0 ? "+" : ""}${p.toFixed(1)}%`;
-                    })();
-                    const isIncrease = h.newPrice > h.oldPrice;
-                    const statusColors: Record<string, string> = {
-                      APPROVED: "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8]",
-                      PENDING: "bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]",
-                      REJECTED: "bg-[#F9E1DA] text-[#9A3A2D] border-[#E8B2A1]",
-                    };
-                    return (
-                      <tr key={h.id} className="hover:bg-[#F0ECE9]/50">
-                        <td className="py-3 pr-4">{formatDate(h.changedDate)}</td>
-                        <td className="py-3 pr-4 font-mono text-xs">{h.materialCode}</td>
-                        <td className="py-3 pr-4 text-right">{formatCurrency(h.oldPrice, h.currency)}</td>
-                        <td className="py-3 pr-4 text-right font-medium">{formatCurrency(h.newPrice, h.currency)}</td>
-                        <td className={`py-3 pr-4 text-right font-medium ${pct === "N/A" ? "text-gray-400" : isIncrease ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}`}>
-                          {pct}
-                        </td>
-                        <td className="py-3 pr-4">{h.changedBy}</td>
-                        <td className="py-3">
-                          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${statusColors[h.approvalStatus] ?? "bg-gray-100 text-gray-600 border-gray-300"}`}>
-                            {h.approvalStatus}
+          <CardContent className="pt-4 space-y-8">
+
+            {/* ── Section 1: PO Purchase History ── */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <ShoppingCart className="h-4 w-4 text-[#6B5C32]" />
+                <h3 className="text-sm font-semibold text-[#1F1D1B]">
+                  Purchase Order History
+                </h3>
+                <span className="text-xs text-[#9CA3AF]">— all PO lines for this supplier</span>
+              </div>
+
+              {/* Filter bar */}
+              <div className="flex flex-wrap gap-2 mb-3">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#9CA3AF]" />
+                  <input
+                    type="text"
+                    placeholder="Filter by PO No."
+                    value={poFilter}
+                    onChange={(e) => setPoFilter(e.target.value)}
+                    className="pl-8 pr-3 h-8 text-sm border border-[#E2DDD8] rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-[#6B5C32] w-44"
+                  />
+                </div>
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#9CA3AF]" />
+                  <input
+                    type="text"
+                    placeholder="Filter by material"
+                    value={matFilter}
+                    onChange={(e) => setMatFilter(e.target.value)}
+                    className="pl-8 pr-3 h-8 text-sm border border-[#E2DDD8] rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-[#6B5C32] w-52"
+                  />
+                </div>
+                {(poFilter || matFilter) && (
+                  <button
+                    onClick={() => { setPoFilter(""); setMatFilter(""); }}
+                    className="h-8 px-3 text-xs text-[#9CA3AF] hover:text-[#6B5C32] border border-[#E2DDD8] rounded-md"
+                  >
+                    Clear
+                  </button>
+                )}
+                {(poFilter || matFilter) && (
+                  <span className="self-center text-xs text-[#9CA3AF]">
+                    {sortedPoLines.length} of {poLines.length} lines
+                  </span>
+                )}
+              </div>
+
+              {/* Sortable table */}
+              <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-[#F0ECE9] border-b border-[#E2DDD8]">
+                      {(
+                        [
+                          { key: "poNo" as const, label: "PO No.", align: "left" },
+                          { key: "orderDate" as const, label: "Order Date", align: "left" },
+                          { key: "materialCode" as const, label: "Material Code", align: "left" },
+                          { key: "materialName" as const, label: "Description", align: "left" },
+                          { key: "qty" as const, label: "Qty", align: "right" },
+                          { key: "unitPriceSen" as const, label: "Unit Price", align: "right" },
+                          { key: "lineTotalSen" as const, label: "Line Total", align: "right" },
+                        ] as { key: keyof POLineRow; label: string; align: string }[]
+                      ).map(({ key, label, align }) => (
+                        <th
+                          key={key}
+                          onClick={() => toggleSort(key)}
+                          className={`h-10 px-3 font-medium text-[#374151] cursor-pointer select-none whitespace-nowrap text-${align} hover:bg-[#E8E3DD]`}
+                        >
+                          <span className="inline-flex items-center gap-1">
+                            {label}
+                            {poSort.key === key ? (
+                              <span className="text-[#6B5C32]">{poSort.dir === "asc" ? "↑" : "↓"}</span>
+                            ) : (
+                              <span className="text-[#D1CBC3]">↕</span>
+                            )}
                           </span>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedPoLines.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="py-10 text-center text-sm text-[#9CA3AF]">
+                          {poLines.length === 0
+                            ? "No purchase orders found for this supplier."
+                            : "No lines match the current filters."}
                         </td>
                       </tr>
-                    );
-                  })}
-                  {sortedHistory.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="py-8 text-center text-gray-400">
-                        No price history for this supplier
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                    ) : (
+                      sortedPoLines.map((row, idx) => (
+                        <tr
+                          key={row.id}
+                          className={`border-b border-[#E2DDD8] last:border-b-0 ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""} hover:bg-[#F0ECE9]/60`}
+                        >
+                          <td className="h-10 px-3 font-medium text-[#6B5C32]">
+                            <Link to={`/procurement/${row.poId}`} className="hover:underline">
+                              {row.poNo}
+                            </Link>
+                          </td>
+                          <td className="h-10 px-3 text-[#6B7280] tabular-nums">
+                            {row.orderDate ? formatDate(row.orderDate) : "—"}
+                          </td>
+                          <td className="h-10 px-3 font-mono text-xs text-[#374151]">
+                            {row.materialCode || "—"}
+                          </td>
+                          <td className="h-10 px-3 text-[#374151]">
+                            {row.materialName || "—"}
+                          </td>
+                          <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
+                            {row.qty}
+                          </td>
+                          <td className="h-10 px-3 text-right tabular-nums text-[#1F1D1B]">
+                            {formatRM(row.unitPriceSen)}
+                          </td>
+                          <td className="h-10 px-3 text-right tabular-nums font-medium text-[#1F1D1B]">
+                            {formatRM(row.lineTotalSen)}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
+
+            {/* ── Section 2: Price Change Log ── */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <TrendingUp className="h-4 w-4 text-[#6B5C32]" />
+                <h3 className="text-sm font-semibold text-[#1F1D1B]">Price Change Log</h3>
+                <span className="text-xs text-[#9CA3AF]">— tracked unit-price edits on SKU mappings</span>
+              </div>
+              <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9] text-left text-xs font-medium text-[#374151]">
+                      <th className="h-10 px-3">Date</th>
+                      <th className="h-10 px-3">Material</th>
+                      <th className="h-10 px-3 text-right">Old Price</th>
+                      <th className="h-10 px-3 text-right">New Price</th>
+                      <th className="h-10 px-3 text-right">Change %</th>
+                      <th className="h-10 px-3">Changed By</th>
+                      <th className="h-10 px-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#E2DDD8]">
+                    {sortedHistory.map((h) => {
+                      const pct = h.oldPrice === 0 ? "N/A" : (() => {
+                        const p = ((h.newPrice - h.oldPrice) / h.oldPrice) * 100;
+                        return `${p > 0 ? "+" : ""}${p.toFixed(1)}%`;
+                      })();
+                      const isIncrease = h.newPrice > h.oldPrice;
+                      const statusColors: Record<string, string> = {
+                        APPROVED: "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8]",
+                        PENDING: "bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]",
+                        REJECTED: "bg-[#F9E1DA] text-[#9A3A2D] border-[#E8B2A1]",
+                      };
+                      return (
+                        <tr key={h.id} className="hover:bg-[#F0ECE9]/50">
+                          <td className="py-3 px-3">{formatDate(h.changedDate)}</td>
+                          <td className="py-3 px-3 font-mono text-xs">{h.materialCode}</td>
+                          <td className="py-3 px-3 text-right">{formatCurrency(h.oldPrice, h.currency)}</td>
+                          <td className="py-3 px-3 text-right font-medium">{formatCurrency(h.newPrice, h.currency)}</td>
+                          <td className={`py-3 px-3 text-right font-medium ${pct === "N/A" ? "text-gray-400" : isIncrease ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}`}>
+                            {pct}
+                          </td>
+                          <td className="py-3 px-3">{h.changedBy}</td>
+                          <td className="py-3 px-3">
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${statusColors[h.approvalStatus] ?? "bg-gray-100 text-gray-600 border-gray-300"}`}>
+                              {h.approvalStatus}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {sortedHistory.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="py-8 text-center text-[#9CA3AF]">
+                          No price change records for this supplier
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
           </CardContent>
         )}
       </Card>

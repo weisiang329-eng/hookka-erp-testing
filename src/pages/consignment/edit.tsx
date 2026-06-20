@@ -8,6 +8,7 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
+import { calculateLineTotalWithDiscount } from "@/lib/pricing";
 import {
   hasMixedSofaBedframe,
   SO_MIXED_CATEGORY_ERROR,
@@ -15,6 +16,7 @@ import {
   formatSofaQtyError,
 } from "@/lib/so-category";
 import { ArrowLeft, Plus, Trash2, Save, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
+import { DiscountInput } from "@/components/ui/discount-input";
 import type { Customer, Product, FabricItem } from "@/types";
 import type { ConsignmentOrder as SalesOrder } from "@/types";
 import {
@@ -55,6 +57,8 @@ type LineItem = {
   specialOrder: string;
   specialOrderPriceSen: number;
   notes: string;
+  // Per-line discount (migration 0179). In sen; 0 = no discount.
+  discountSen: number;
 };
 
 const EMPTY_LINE: LineItem = {
@@ -64,6 +68,7 @@ const EMPTY_LINE: LineItem = {
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0,
   specialOrders: [], specialOrder: "", specialOrderPriceSen: 0, notes: "",
+  discountSen: 0,
 };
 
 /** Parse inches from a height string like '14"', '10.5"', or 'No Leg'.
@@ -374,6 +379,9 @@ export default function EditSalesOrderPage() {
               specialOrder: (item.specialOrder as string) || "",
               specialOrderPriceSen: (item.specialOrderPriceSen as number) || 0,
               notes: (item.notes as string) || "",
+              // Per-line discount (migration 0179). Default 0 for rows
+              // predating the column (backend rowToItem already defaults to 0).
+              discountSen: (item.discountSen as number) || 0,
             };
           }));
         }
@@ -447,7 +455,9 @@ export default function EditSalesOrderPage() {
   const getUnitPrice = (item: LineItem) =>
     item.basePriceSen + item.divanPriceSen + item.legPriceSen + item.specialOrderPriceSen;
 
-  const getLineTotal = (item: LineItem) => getUnitPrice(item) * item.quantity;
+  // Line total = (unit price × qty) − per-line discount, clamped ≥ 0.
+  const getLineTotal = (item: LineItem) =>
+    calculateLineTotalWithDiscount(getUnitPrice(item), item.quantity, item.discountSen || 0);
 
   const subtotal = items.reduce((sum, item) => sum + getLineTotal(item), 0);
   const totalQty = items.reduce((sum, item) => sum + item.quantity, 0);
@@ -1004,6 +1014,23 @@ export default function EditSalesOrderPage() {
                     </div>
                   );
                 })()}
+
+                {/* Per-line Discount (migration 0179) */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-[#9CA3AF] mb-1">Discount (RM or %)</label>
+                    <DiscountInput
+                      baseAmountSen={getUnitPrice(item) * item.quantity}
+                      valueSen={item.discountSen || null}
+                      onChange={(sen) => updateItem(idx, { discountSen: sen ?? 0 })}
+                      className="h-8"
+                    />
+                  </div>
+                  <div className="flex flex-col justify-end">
+                    <span className="text-xs text-[#9CA3AF] mb-1">Line Total</span>
+                    <span className="text-sm font-semibold text-[#1F1D1B] amount">{formatCurrency(getLineTotal(item))}</span>
+                  </div>
+                </div>
 
                 <div>
                   <label className="block text-xs text-[#9CA3AF] mb-1">Line Notes</label>

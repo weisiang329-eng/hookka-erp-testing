@@ -8,7 +8,7 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
-import { calculateUnitPrice, calculateLineTotal } from "@/lib/pricing";
+import { calculateUnitPrice, calculateLineTotalWithDiscount } from "@/lib/pricing";
 import {
   hasMixedSofaBedframe,
   SO_MIXED_CATEGORY_ERROR,
@@ -16,6 +16,7 @@ import {
   formatSofaQtyError,
 } from "@/lib/so-category";
 import { ArrowLeft, Plus, Trash2, Save, ChevronDown, ChevronUp, Check, AlertTriangle, X } from "lucide-react";
+import { DiscountInput } from "@/components/ui/discount-input";
 import type { Customer, Product, FabricItem } from "@/types";
 import {
   divanHeightOptions,
@@ -71,6 +72,8 @@ type LineItem = {
   specialOrderPriceSen: number;
   specialOrder: string; // comma-joined text for submission
   notes: string;
+  // Per-line discount (migration 0179). In sen; 0 = no discount.
+  discountSen: number;
   // Price hints cached on the line so seat-height / fabric pickers can resolve
   // the correct tier without re-fetching. Populated from the customer-aware
   // price endpoint when a customer is selected; otherwise falls back to the
@@ -89,6 +92,7 @@ const makeEmptyLine = (): LineItem => ({
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0, totalHeightPriceSen: 0,
   specialOrders: [], specialOrderPriceSen: 0, specialOrder: "", notes: "",
+  discountSen: 0,
   price1Sen: null, seatHeightPrices: [],
 });
 
@@ -729,7 +733,10 @@ function CreateConsignmentOrderPage() {
       specialOrderPriceSen: item.specialOrderPriceSen,
     });
 
-  const getLineTotal = (item: LineItem) => calculateLineTotal(getUnitPrice(item), item.quantity);
+  // Line total = (unit price × qty) − per-line discount, clamped ≥ 0.
+  // The discount is an additional operator adjustment applied after all surcharges.
+  const getLineTotal = (item: LineItem) =>
+    calculateLineTotalWithDiscount(getUnitPrice(item), item.quantity, item.discountSen || 0);
 
   const getTotalHeight = (item: LineItem) => {
     const gap = item.gapInches || 0;
@@ -1640,6 +1647,23 @@ function LineItemCard({
         )}
       </div>
       )}
+
+      {/* Per-line Discount (migration 0179) */}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-[#9CA3AF] mb-1">Discount (RM or %)</label>
+          <DiscountInput
+            baseAmountSen={getUnitPrice(item) * item.quantity}
+            valueSen={item.discountSen || null}
+            onChange={(sen) => onUpdate(idx, { discountSen: sen ?? 0 })}
+            className="h-8"
+          />
+        </div>
+        <div className="flex flex-col justify-end">
+          <span className="text-xs text-[#9CA3AF] mb-1">Line Total</span>
+          <span className="text-sm font-semibold text-[#1F1D1B] amount">{formatCurrency(getLineTotal(item))}</span>
+        </div>
+      </div>
 
       {/* Line Notes */}
       <div>

@@ -142,6 +142,9 @@ export type ConsignmentOrderItemRow = {
   specialOrderPriceSen: number;
   basePriceSen: number;
   unitPriceSen: number;
+  // Per-line discount (migration 0179). snake_case DB column `discount_sen`
+  // mapped via column-rename-map.json → reads back as `discountSen`.
+  discountSen: number;
   lineTotalSen: number;
   notes: string | null;
 };
@@ -213,6 +216,8 @@ function rowToCOListItem(it: ConsignmentOrderItemRow) {
     specialOrderPriceSen: it.specialOrderPriceSen,
     basePriceSen: it.basePriceSen,
     unitPriceSen: it.unitPriceSen,
+    // Per-line discount (migration 0179). Default 0 for rows predating the column.
+    discountSen: it.discountSen ?? 0,
     lineTotalSen: it.lineTotalSen,
   };
 }
@@ -250,6 +255,8 @@ function rowToItem(it: ConsignmentOrderItemRow) {
     specialOrderPriceSen: it.specialOrderPriceSen,
     basePriceSen: it.basePriceSen,
     unitPriceSen: it.unitPriceSen,
+    // Per-line discount (migration 0179). Default 0 for rows predating the column.
+    discountSen: it.discountSen ?? 0,
     lineTotalSen: it.lineTotalSen,
     notes: it.notes ?? "",
   };
@@ -632,6 +639,8 @@ app.post("/", async (c) => {
               })
             : incomingBase;
         const unitPrice = basePrice + divanPrice + legPrice + specialPrice;
+        // Per-line discount (migration 0179). Clamped ≥ 0.
+        const discountSen = Math.max(0, Math.round(Number(it.discountSen) || 0));
         return {
           id: genItemId(),
           consignmentOrderId: id,
@@ -656,7 +665,8 @@ app.post("/", async (c) => {
           specialOrderPriceSen: specialPrice,
           basePriceSen: basePrice,
           unitPriceSen: unitPrice,
-          lineTotalSen: unitPrice * qty,
+          discountSen,
+          lineTotalSen: Math.max(0, unitPrice * qty - discountSen),
           notes: (it.notes as string) ?? null,
         };
       },
@@ -710,8 +720,8 @@ app.post("/", async (c) => {
              productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
              fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
              legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
-             basePriceSen, unitPriceSen, lineTotalSen, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           it.id,
           it.consignmentOrderId,
@@ -734,6 +744,7 @@ app.post("/", async (c) => {
           it.specialOrderPriceSen,
           it.basePriceSen,
           it.unitPriceSen,
+          it.discountSen,
           it.lineTotalSen,
           it.notes,
         ),
@@ -1705,6 +1716,8 @@ app.put("/:id", async (c) => {
                 })
               : incomingBase;
           const unitPrice = basePrice + divanPrice + legPrice + specialPrice;
+          // Per-line discount (migration 0179). Clamped ≥ 0.
+          const discountSen = Math.max(0, Math.round(Number(it.discountSen) || 0));
           return {
             id: (it.id as string) || `coi-${crypto.randomUUID().slice(0, 8)}`,
             consignmentOrderId: id,
@@ -1729,7 +1742,8 @@ app.put("/:id", async (c) => {
             specialOrderPriceSen: specialPrice,
             basePriceSen: basePrice,
             unitPriceSen: unitPrice,
-            lineTotalSen: unitPrice * qty,
+            discountSen,
+            lineTotalSen: Math.max(0, unitPrice * qty - discountSen),
             notes: (it.notes as string) ?? null,
           };
         }),
@@ -1745,8 +1759,8 @@ app.put("/:id", async (c) => {
                productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
                fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
                legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
-               basePriceSen, unitPriceSen, lineTotalSen, notes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             r.id,
             r.consignmentOrderId,
@@ -1769,6 +1783,7 @@ app.put("/:id", async (c) => {
             r.specialOrderPriceSen,
             r.basePriceSen,
             r.unitPriceSen,
+            r.discountSen,
             r.lineTotalSen,
             r.notes,
           ),

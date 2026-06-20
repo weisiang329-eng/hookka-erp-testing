@@ -418,6 +418,8 @@ export type InvoiceItem = {
   fabricCode: string;
   quantity: number;
   unitPriceSen: number;
+  // Per-line discount (migration 0179). 0 = no discount.
+  discountSen?: number;
   totalSen: number;
 };
 

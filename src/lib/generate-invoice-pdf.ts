@@ -352,13 +352,37 @@ function buildInvoiceDoc(
       },
       ex,
     );
+    const lineDiscountSen = Number(it.discountSen) || 0;
+    const grossLineSen = (Number(it.unitPriceSen) || 0) * (Number(it.quantity) || 0);
+    // When there is a per-line discount, show the gross amount first, then a
+    // discount sub-row, then the net total (= it.totalSen). When no discount,
+    // totalSen already equals grossLineSen — show it directly.
     body.push([
       orderRefs(ex),
       desc,
       String(it.quantity ?? ""),
       priceLines(Number(it.unitPriceSen) || 0, ex),
-      fmtCurrency(Number(it.totalSen) || 0),
+      fmtCurrency(lineDiscountSen > 0 ? grossLineSen : Number(it.totalSen) || 0),
     ]);
+    if (lineDiscountSen > 0) {
+      // Discount sub-row: muted italic, spans description; net total in last col.
+      body.push([
+        {
+          content: "",
+          styles: { textColor: FAINT },
+        },
+        {
+          content: `Discount: - ${fmtCurrency(lineDiscountSen)}`,
+          styles: { fontStyle: "italic", textColor: FAINT, fontSize: 6.8 },
+        },
+        { content: "", styles: { textColor: FAINT } },
+        { content: "Net", styles: { fontStyle: "italic", textColor: FAINT, halign: "right" as const } },
+        {
+          content: fmtCurrency(Number(it.totalSen) || 0),
+          styles: { fontStyle: "bold", textColor: INK },
+        },
+      ]);
+    }
   }
 
   drawHeader();

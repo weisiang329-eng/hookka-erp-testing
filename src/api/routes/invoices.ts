@@ -271,6 +271,9 @@ type InvoiceItemRow = {
   legPriceSen: number | null;
   specialOrderPriceSen: number | null;
   priceEdited: number | null;
+  // Per-line discount (migration 0179). snake_case DB col `discount_sen`
+  // mapped via column-rename-map.json → reads back as `discountSen`.
+  discountSen: number | null;
 };
 
 type InvoicePaymentRow = {
@@ -300,6 +303,8 @@ function rowToItem(row: InvoiceItemRow) {
     fabricCode: row.fabricCode ?? "",
     quantity: row.quantity,
     unitPriceSen: row.unitPriceSen,
+    // Per-line discount (migration 0179). Default 0 for rows predating the column.
+    discountSen: row.discountSen ?? 0,
     totalSen: row.totalSen,
     basePriceSen: Number(row.basePriceSen) || 0,
     divanPriceSen: Number(row.divanPriceSen) || 0,
@@ -1131,8 +1136,8 @@ app.post("/", async (c) => {
         c.var.DB.prepare(
           `INSERT INTO invoice_items (
              id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-             quantity, unitPriceSen, totalSen
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             quantity, unitPriceSen, discountSen, totalSen
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           id,
@@ -1142,6 +1147,8 @@ app.post("/", async (c) => {
           item.fabricCode,
           item.quantity,
           item.unitPriceSen,
+          // Auto-created invoices (from DO) carry no discount by default.
+          0,
           item.totalSen,
         ),
       ),
@@ -1714,22 +1721,19 @@ app.put("/:id", async (c) => {
       for (const raw of body.items as Array<Record<string, unknown>>) {
         const quantity = Number(raw.quantity) || 0;
         const unitPriceSen = Number(raw.unitPriceSen) || 0;
-        // Tier D D4 fix 2026-05-21 — back-door write. Original code did
-        // `Number(raw.totalSen) || unitPriceSen * quantity`, which let
-        // the API caller pass an arbitrary totalSen that disagreed with
-        // qty × unitPriceSen (e.g. via curl). The operator UI has no
-        // input cell for totalSen — it's always displayed = qty × price.
-        // Per the memory rule feedback_no_back_door_writes.md, the
-        // backend must not accept a value the UI can't supply. Always
-        // recompute server-side now; raw.totalSen ignored if present.
-        const totalSen = unitPriceSen * quantity;
+        // Per-line discount (migration 0179). Clamped ≥ 0.
+        const discountSen = Math.max(0, Math.round(Number(raw.discountSen) || 0));
+        // Tier D D4 fix 2026-05-21 — back-door write. Always recompute
+        // totalSen server-side; caller-supplied totalSen is ignored.
+        // Line total = max(0, qty × unitPrice − discount).
+        const totalSen = Math.max(0, unitPriceSen * quantity - discountSen);
         computedSubtotal += totalSen;
         statements.push(
           c.var.DB.prepare(
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-               quantity, unitPriceSen, totalSen
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               quantity, unitPriceSen, discountSen, totalSen
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             (raw.id as string) || genInvoiceItemId(),
             id,
@@ -1739,6 +1743,7 @@ app.put("/:id", async (c) => {
             (raw.fabricCode as string) ?? "",
             quantity,
             unitPriceSen,
+            discountSen,
             totalSen,
           ),
         );
@@ -1791,7 +1796,7 @@ app.put("/:id", async (c) => {
       }
       const editById = new Map<
         string,
-        { base: number; divan: number; leg: number; special: number }
+        { base: number; divan: number; leg: number; special: number; discount: number }
       >();
       for (const e of body.priceEdits as Array<Record<string, unknown>>) {
         const lid = String(e.id || "");
@@ -1801,13 +1806,15 @@ app.put("/:id", async (c) => {
           divan: Math.max(0, Math.round(Number(e.divanSen) || 0)),
           leg: Math.max(0, Math.round(Number(e.legSen) || 0)),
           special: Math.max(0, Math.round(Number(e.specialSen) || 0)),
+          // Per-line discount (migration 0179). Clamped ≥ 0.
+          discount: Math.max(0, Math.round(Number(e.discountSen) || 0)),
         });
       }
       const allRes = await c.var.DB.prepare(
-        "SELECT id, quantity, unitPriceSen FROM invoice_items WHERE invoiceId = ?",
+        "SELECT id, quantity, unitPriceSen, discountSen FROM invoice_items WHERE invoiceId = ?",
       )
         .bind(id)
-        .all<{ id: string; quantity: number; unitPriceSen: number }>();
+        .all<{ id: string; quantity: number; unitPriceSen: number; discountSen: number | null }>();
       let newSubtotal = 0;
       let touched = 0;
       for (const r of allRes.results ?? []) {
@@ -1816,14 +1823,15 @@ app.put("/:id", async (c) => {
         if (ed) {
           touched++;
           const unit = ed.base + ed.divan + ed.leg + ed.special;
-          const lineTotal = unit * q;
+          // Line total = max(0, unit × qty − discount).
+          const lineTotal = Math.max(0, unit * q - ed.discount);
           newSubtotal += lineTotal;
           statements.push(
             c.var.DB.prepare(
               `UPDATE invoice_items SET
                  basePriceSen = ?, divanPriceSen = ?, legPriceSen = ?,
-                 specialOrderPriceSen = ?, unitPriceSen = ?, totalSen = ?,
-                 priceEdited = 1
+                 specialOrderPriceSen = ?, unitPriceSen = ?, discountSen = ?,
+                 totalSen = ?, priceEdited = 1
                WHERE id = ?`,
             ).bind(
               ed.base,
@@ -1831,12 +1839,16 @@ app.put("/:id", async (c) => {
               ed.leg,
               ed.special,
               unit,
+              ed.discount,
               lineTotal,
               r.id,
             ),
           );
         } else {
-          newSubtotal += (Number(r.unitPriceSen) || 0) * q;
+          // Untouched line: re-use stored discount when computing subtotal.
+          const existingDiscount = Number(r.discountSen) || 0;
+          const existingUnit = Number(r.unitPriceSen) || 0;
+          newSubtotal += Math.max(0, existingUnit * q - existingDiscount);
         }
       }
       if (touched > 0) {

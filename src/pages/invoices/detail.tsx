@@ -30,6 +30,7 @@ import {
 // 1MB jspdf vendor chunk only ships when the user actually downloads.
 import type { Invoice } from "@/types";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
+import { DiscountInput } from "@/components/ui/discount-input";
 
 const PAYMENT_METHODS = [
   { value: "BANK_TRANSFER", label: "Bank Transfer" },
@@ -72,11 +73,13 @@ export default function InvoiceDetailPage() {
   );
 
   // Price editor state. `priceDraft` holds RM strings per line+component.
+  // `discountDraft` holds per-line discount in sen (integer).
   const [editingPrices, setEditingPrices] = useState(false);
   const [savingPrices, setSavingPrices] = useState(false);
   const [priceDraft, setPriceDraft] = useState<
     Record<string, { base: string; divan: string; leg: string; special: string }>
   >({});
+  const [discountDraft, setDiscountDraft] = useState<Record<string, number>>({});
   const rm = (sen: number) => (Math.round(Number(sen) || 0) / 100).toFixed(2);
   const sen = (s: string) => Math.max(0, Math.round((Number(s) || 0) * 100));
   // Edit allowed only on DRAFT or unpaid SENT (no payment recorded).
@@ -91,6 +94,7 @@ export default function InvoiceDetailPage() {
       string,
       { base: string; divan: string; leg: string; special: string }
     > = {};
+    const dd: Record<string, number> = {};
     for (const it of invoice.items) {
       const ex = lineExtras[it.id];
       // Pre-fill from the resolved build-up (invoice's own if already
@@ -103,8 +107,11 @@ export default function InvoiceDetailPage() {
         leg: rm(ex?.legSen || 0),
         special: rm(ex?.specialSen || 0),
       };
+      // Per-line discount (migration 0179). Pre-fill from stored value.
+      dd[it.id] = Number(it.discountSen) || 0;
     }
     setPriceDraft(d);
+    setDiscountDraft(dd);
     setEditingPrices(true);
   };
 
@@ -124,15 +131,17 @@ export default function InvoiceDetailPage() {
         divanSen: sen(d.divan),
         legSen: sen(d.leg),
         specialSen: sen(d.special),
+        // Per-line discount (migration 0179).
+        discountSen: discountDraft[it.id] ?? 0,
       };
     });
-    // Expected new invoice total — sum of (base + divan + leg + special) × qty
-    // for each line. Backend recomputes the same way; comparing on totalAmount
-    // catches a stale-cache read that returned the pre-edit totals.
+    // Expected new invoice subtotal — sum of max(0, unit×qty − discount) per line.
+    // Backend recomputes identically; comparing on totalAmount catches stale reads.
     const expectedTotal = invoice.items.reduce((sum, it) => {
       const e = priceEdits.find((p) => p.id === it.id);
-      const per = (e?.baseSen ?? 0) + (e?.divanSen ?? 0) + (e?.legSen ?? 0) + (e?.specialSen ?? 0);
-      return sum + per * (Number(it.quantity) || 0);
+      const unit = (e?.baseSen ?? 0) + (e?.divanSen ?? 0) + (e?.legSen ?? 0) + (e?.specialSen ?? 0);
+      const discount = e?.discountSen ?? 0;
+      return sum + Math.max(0, unit * (Number(it.quantity) || 0) - discount);
     }, 0);
     // 2026-05-27 verifiedSave migration. Money-touching write — confirm
     // the new totalAmount actually persisted.
@@ -347,7 +356,19 @@ export default function InvoiceDetailPage() {
     );
   }
 
-  const balanceSen = invoice.totalSen - invoice.paidAmount;
+  // During price-edit mode, show a live-computed total based on the draft values
+  // so the operator sees the discount's impact before saving.
+  const liveInvoiceTotalSen = editingPrices
+    ? invoice.items.reduce((s, it) => {
+        const dd = priceDraft[it.id];
+        const u = dd
+          ? sen(dd.base) + sen(dd.divan) + sen(dd.leg) + sen(dd.special)
+          : Number(it.unitPriceSen) || 0;
+        const disc = discountDraft[it.id] ?? 0;
+        return s + Math.max(0, u * (Number(it.quantity) || 0) - disc);
+      }, 0)
+    : invoice.totalSen;
+  const balanceSen = liveInvoiceTotalSen - invoice.paidAmount;
   const totalQty = invoice.items.reduce((s, i) => s + i.quantity, 0);
   const payments = invoice.payments || [];
   // Cascade lock — surfaced from /api/invoices/:id. Non-null when payment
@@ -465,7 +486,7 @@ export default function InvoiceDetailPage() {
               Invoice Total
             </p>
             <p className="text-2xl font-bold text-[#1F1D1B] tabular-nums">
-              {formatCurrency(invoice.totalSen)}
+              {formatCurrency(liveInvoiceTotalSen)}
             </p>
             <p className="text-xs text-[#9CA3AF] mt-1">
               {invoice.items.length} line{invoice.items.length !== 1 ? "s" : ""} · {totalQty} units
@@ -652,6 +673,11 @@ export default function InvoiceDetailPage() {
                         editingPrices && d
                           ? sen(d.base) + sen(d.divan) + sen(d.leg) + sen(d.special)
                           : Number(item.unitPriceSen) || 0;
+                      // Per-line discount (migration 0179).
+                      const liveDiscount = editingPrices
+                        ? (discountDraft[item.id] ?? 0)
+                        : (Number(item.discountSen) || 0);
+                      const liveLineTotal = Math.max(0, liveUnit * qty - liveDiscount);
                       // Our company SO is its own column (left of Product);
                       // the customer's PO / SO / REF stay as a sub-line.
                       const companySO =
@@ -764,6 +790,21 @@ export default function InvoiceDetailPage() {
                                 <p className="text-[11px] text-[#6B5C32] font-medium pt-1">
                                   Unit {formatCurrency(liveUnit)}
                                 </p>
+                                {/* Per-line Discount (migration 0179) */}
+                                <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-[#E2DDD8]">
+                                  <span className="text-[10px] text-[#9CA3AF] w-12 text-right">Discount</span>
+                                  <DiscountInput
+                                    baseAmountSen={liveUnit * qty}
+                                    valueSen={discountDraft[item.id] ?? null}
+                                    onChange={(discSen) =>
+                                      setDiscountDraft((prev) => ({
+                                        ...prev,
+                                        [item.id]: discSen ?? 0,
+                                      }))
+                                    }
+                                    className="h-7 w-24 text-xs"
+                                  />
+                                </div>
                               </div>
                             ) : ex &&
                               (ex.divanSen || ex.legSen || ex.specialSen) ? (
@@ -789,7 +830,15 @@ export default function InvoiceDetailPage() {
                             )}
                           </td>
                           <td className="py-3.5 px-4 text-right font-semibold text-[#1F1D1B] align-top tabular-nums">
-                            {formatCurrency(liveUnit * qty)}
+                            {liveDiscount > 0 && !editingPrices ? (
+                              <div className="text-xs space-y-0.5">
+                                <div className="text-[#9CA3AF] line-through">{formatCurrency(liveUnit * qty)}</div>
+                                <div className="text-[11px] text-[#9CA3AF]">- {formatCurrency(liveDiscount)}</div>
+                                <div className="font-semibold text-[#1F1D1B]">{formatCurrency(liveLineTotal)}</div>
+                              </div>
+                            ) : (
+                              formatCurrency(liveLineTotal)
+                            )}
                           </td>
                         </tr>
                       );
@@ -806,7 +855,8 @@ export default function InvoiceDetailPage() {
                                 sen(dd.leg) +
                                 sen(dd.special)
                               : Number(it.unitPriceSen) || 0;
-                            return s + u * (Number(it.quantity) || 0);
+                            const disc = discountDraft[it.id] ?? 0;
+                            return s + Math.max(0, u * (Number(it.quantity) || 0) - disc);
                           }, 0)
                         : Number(invoice.subtotalSen) || 0;
                       return (

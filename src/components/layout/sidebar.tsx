@@ -226,12 +226,16 @@ const navigationGroups: NavGroup[] = [
         ],
       },
       {
-        name: "Debtor / Creditor", href: "/accounting?tab=ar", icon: Users, children: [
+        name: "Debtor / Other Debtor", href: "/accounting?tab=ar", icon: Users, children: [
           { name: "Debtor Aging", href: "/accounting?tab=ar", icon: Users },
-          { name: "Creditor Aging", href: "/accounting?tab=ap", icon: Building2 },
           { name: "Other Debtor", href: "/accounting?tab=odebtor", icon: Users },
           { name: "Other Debtor Bills", href: "/accounting?tab=odebtorbills", icon: BookOpen },
           { name: "Other Debtor Receipts", href: "/accounting?tab=odebtorpay", icon: Wallet },
+        ],
+      },
+      {
+        name: "Creditor / Other Creditor", href: "/accounting?tab=ap", icon: Building2, children: [
+          { name: "Creditor Aging", href: "/accounting?tab=ap", icon: Building2 },
           { name: "Other Creditor", href: "/accounting?tab=ocreditor", icon: Building2 },
           { name: "Other Creditor Bills", href: "/accounting?tab=ocreditorbills", icon: BookOpen },
           { name: "Other Creditor Payments", href: "/accounting?tab=ocreditorpay", icon: Wallet },

@@ -108,6 +108,22 @@ type GRNRow = {
   exchange_rate: number | null;
   currency: string | null;
   landed_cost_sen: number | null;
+  // toCamel folds the snake_case DB columns to camelCase on read — dual-key
+  // the reads below so the stored arrival/shipment/cost values are recovered.
+  arrivalState?: string | null;
+  shippingMethod?: string | null;
+  carrierName?: string | null;
+  trackingNumber?: string | null;
+  containerNumber?: string | null;
+  expectedArrival?: string | null;
+  shippedDate?: string | null;
+  actualArrival?: string | null;
+  customsStatus?: string | null;
+  customsClearanceDate?: string | null;
+  shippingCostSen?: number | null;
+  customsDutySen?: number | null;
+  exchangeRate?: number | null;
+  landedCostSen?: number | null;
 };
 
 type GRNItemRow = {
@@ -164,7 +180,8 @@ const COMMITTED_STATUSES = new Set(["CONFIRMED", "POSTED"]);
 // - Manual receipt (no poId) → ARRIVED (goods already in hand).
 // - PO-linked receipt → NOT_ARRIVED (assume imported / en-route by default).
 function deriveArrivalState(row: GRNRow): ArrivalState {
-  if (row.arrival_state) return row.arrival_state as ArrivalState;
+  const stored = row.arrivalState ?? row.arrival_state;
+  if (stored) return stored as ArrivalState;
   return row.poId ? "NOT_ARRIVED" : "ARRIVED";
 }
 
@@ -206,20 +223,20 @@ function rowToGRN(row: GRNRow, items: GRNItemRow[] = []) {
     status: (row.status ?? "DRAFT") as "DRAFT" | "CONFIRMED" | "POSTED",
     // Arrival pipeline
     arrival_state: deriveArrivalState(row),
-    shipping_method: row.shipping_method ?? null,
-    carrier_name: row.carrier_name ?? null,
-    tracking_number: row.tracking_number ?? null,
-    container_number: row.container_number ?? null,
-    expected_arrival: row.expected_arrival ?? null,
-    shipped_date: row.shipped_date ?? null,
-    actual_arrival: row.actual_arrival ?? null,
-    customs_status: row.customs_status ?? null,
-    customs_clearance_date: row.customs_clearance_date ?? null,
-    shipping_cost_sen: row.shipping_cost_sen ?? 0,
-    customs_duty_sen: row.customs_duty_sen ?? 0,
-    exchange_rate: row.exchange_rate ?? null,
+    shipping_method: row.shippingMethod ?? row.shipping_method ?? null,
+    carrier_name: row.carrierName ?? row.carrier_name ?? null,
+    tracking_number: row.trackingNumber ?? row.tracking_number ?? null,
+    container_number: row.containerNumber ?? row.container_number ?? null,
+    expected_arrival: row.expectedArrival ?? row.expected_arrival ?? null,
+    shipped_date: row.shippedDate ?? row.shipped_date ?? null,
+    actual_arrival: row.actualArrival ?? row.actual_arrival ?? null,
+    customs_status: row.customsStatus ?? row.customs_status ?? null,
+    customs_clearance_date: row.customsClearanceDate ?? row.customs_clearance_date ?? null,
+    shipping_cost_sen: row.shippingCostSen ?? row.shipping_cost_sen ?? 0,
+    customs_duty_sen: row.customsDutySen ?? row.customs_duty_sen ?? 0,
+    exchange_rate: row.exchangeRate ?? row.exchange_rate ?? null,
     currency: row.currency ?? null,
-    landed_cost_sen: row.landed_cost_sen ?? 0,
+    landed_cost_sen: row.landedCostSen ?? row.landed_cost_sen ?? 0,
     notes: row.notes ?? "",
   };
 }

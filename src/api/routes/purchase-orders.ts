@@ -43,7 +43,10 @@ type PurchaseOrderItemRow = {
   id: string;
   purchaseOrderId: string;
   materialCategory: string | null;
-  material_code: string | null;
+  // toCamel folds the snake_case DB column to materialCode on read; keep both
+  // keys so the dual-key read works whether or not the adapter camel-cased it.
+  material_code?: string | null;
+  materialCode?: string | null;
   materialName: string | null;
   supplierSKU: string | null;
   quantity: number;
@@ -73,7 +76,7 @@ function rowToItem(r: PurchaseOrderItemRow) {
   return {
     id: r.id,
     materialCategory: r.materialCategory ?? "",
-    materialCode: r.material_code ?? "",
+    materialCode: r.materialCode ?? r.material_code ?? "",
     materialName: r.materialName ?? "",
     supplierSKU: r.supplierSKU ?? "",
     quantity: r.quantity,

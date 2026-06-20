@@ -16,6 +16,7 @@ import { getOrgId } from "../lib/tenant";
 import { supplierPoEmailTemplate } from "../lib/email";
 import { enqueueEmail } from "../lib/email-outbox";
 import { emitAudit } from "../lib/audit";
+import { availableQty as computeAvailableQty } from "../../lib/convert-chain";
 
 const app = new Hono<Env>();
 
@@ -73,6 +74,9 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 };
 
 function rowToItem(r: PurchaseOrderItemRow) {
+  // Convert-chain: per-line available-to-receive = quantity − receivedQty
+  // (floored at 0). Exposed so the GRN convert picker can show remaining qty.
+  const receivedQty = Number(r.receivedQty) || 0;
   return {
     id: r.id,
     materialCategory: r.materialCategory ?? "",
@@ -82,7 +86,8 @@ function rowToItem(r: PurchaseOrderItemRow) {
     quantity: r.quantity,
     unitPriceSen: r.unitPriceSen,
     totalSen: r.totalSen,
-    receivedQty: r.receivedQty,
+    receivedQty,
+    availableQty: computeAvailableQty(Number(r.quantity) || 0, receivedQty),
     unit: r.unit ?? "pcs",
   };
 }

@@ -19,6 +19,37 @@ import {
 } from "../lib/journal-hash";
 import { nextMonthDueDate } from "../../lib/terms";
 import { issueDocNumber } from "../lib/doc-number-service";
+import { checkConvertAvailability, clampDecrement, type ConvertLineRequest } from "../../lib/convert-chain";
+
+// ---------------------------------------------------------------------------
+// Runtime schema self-apply — convert-chain columns (PO→GRN→PI). All
+// snake_case so no column-rename-map.json entry is needed. Awaited at the top
+// of POST / PUT / DELETE before any write that touches them. Idempotent; a
+// sibling self-apply in grn.ts may have already added these (whichever route
+// boots first wins).
+//   • purchase_invoices.grn_id        — the GRN this PI was raised from
+//   • purchase_invoice_items.grn_item_id — the grn_items row a line consumed
+//   • grn_items.invoiced_qty          — qty pulled into a PI off that GRN line
+// ---------------------------------------------------------------------------
+let piMigrationPromise: Promise<void> | null = null;
+function ensurePiMigrations(db: D1Database): Promise<void> {
+  if (piMigrationPromise) return piMigrationPromise;
+  piMigrationPromise = (async () => {
+    const stmts = [
+      "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS grn_id TEXT",
+      "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS grn_item_id TEXT",
+      "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS invoiced_qty NUMERIC DEFAULT 0",
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[pi] ensurePiMigrations:", sql, err);
+      }
+    }
+  })();
+  return piMigrationPromise;
+}
 
 const AP_CONTROL = "400-0000"; // Trade Creditors
 const FX_GAIN_ACCT = "530-0000"; // GAIN ON FOREIGN EXCHANGE (realised; debit = loss)
@@ -163,6 +194,7 @@ export type PurchaseInvoiceItem = {
   lineTotalSen: number;
   lineType: PurchaseInvoiceItemLineType;
   notes: string | null;
+  grnItemId: string | null;
   created_at: string | null;
   updated_at: string | null;
 };
@@ -185,6 +217,8 @@ type PurchaseInvoiceItemRow = {
   line_type?: string;
   lineType?: string;
   notes: string | null;
+  grn_item_id?: string | null;
+  grnItemId?: string | null;
   created_at: string | null;
   updated_at: string | null;
 };
@@ -214,12 +248,15 @@ function rowToPI(r: PurchaseInvoiceRow) {
     foreignAmountSen?: number | null;
     payFxRate?: number | null;
     paid_amount_sen?: number | null;
+    grnId?: string | null;
+    grn_id?: string | null;
   };
   return {
     id: r.id,
     piNo: r.piNo,
     purchaseOrderId: r.purchaseOrderId ?? "",
     poRef: r.poRef ?? "",
+    grnId: fx.grnId ?? fx.grn_id ?? "",
     supplierId: r.supplierId,
     supplier: r.supplierName, // SPA reads `.supplier` (legacy field name)
     supplierName: r.supplierName,
@@ -254,6 +291,7 @@ function rowToItem(r: PurchaseInvoiceItemRow): PurchaseInvoiceItem {
     lineTotalSen: Number(r.line_total_sen ?? r.lineTotalSen) || 0,
     lineType: VALID_LINE_TYPES.includes(lineType) ? lineType : "OTHER",
     notes: r.notes ?? null,
+    grnItemId: r.grnItemId ?? r.grn_item_id ?? null,
     created_at: r.created_at ?? null,
     updated_at: r.updated_at ?? null,
   };
@@ -267,6 +305,10 @@ type PurchaseInvoiceItemInput = {
   unitPriceSen?: number;
   lineType?: string;
   notes?: string | null;
+  // Convert-chain: when this line is sourced from a GRN line, the grn_items
+  // row id (BIGSERIAL → number, but accepted as string too). Drives the
+  // grn_items.invoiced_qty increment + the restore on delete/cancel.
+  grnItemId?: string | number | null;
 };
 
 // Validate + normalize an items[] payload. Returns either an array of
@@ -283,6 +325,7 @@ function normalizeItems(
     lineTotalSen: number;
     lineType: PurchaseInvoiceItemLineType;
     notes: string | null;
+    grnItemId: string | null;
   }> } | { ok: false; error: string } {
   if (!Array.isArray(items)) {
     return { ok: false, error: "items must be an array" };
@@ -297,6 +340,7 @@ function normalizeItems(
     lineTotalSen: number;
     lineType: PurchaseInvoiceItemLineType;
     notes: string | null;
+    grnItemId: string | null;
   }> = [];
   for (let i = 0; i < items.length; i++) {
     const it = items[i] as PurchaseInvoiceItemInput;
@@ -324,6 +368,10 @@ function normalizeItems(
     }
     const matCode = it.materialCode == null ? null : String(it.materialCode).trim() || null;
     const supSku = it.supplierSku == null ? null : String(it.supplierSku).trim() || null;
+    const grnItemId =
+      it.grnItemId == null || String(it.grnItemId).trim() === ""
+        ? null
+        : String(it.grnItemId).trim();
     rows.push({
       id: `pii-${crypto.randomUUID().slice(0, 8)}`,
       materialCode: matCode,
@@ -334,6 +382,7 @@ function normalizeItems(
       lineTotalSen: Math.round(qty * unitPriceSen),
       lineType,
       notes: it.notes == null ? null : String(it.notes),
+      grnItemId,
     });
   }
   return { ok: true, rows };
@@ -350,6 +399,57 @@ async function loadItemsForPI(
     .bind(piId)
     .all<PurchaseInvoiceItemRow>();
   return (res.results ?? []).map(rowToItem);
+}
+
+// ---------------------------------------------------------------------------
+// Convert-chain RESTORE: build the UPDATE statements that decrement
+// grn_items.invoiced_qty for every PI line that was sourced from a GRN line.
+// Used on PI delete and on PI cancel so the consumed GRN qty becomes
+// available again. Reads the line's grn_item_id (dual-keyed) and clamps each
+// decrement so a double-restore can't drive invoiced_qty below 0.
+// Returns prepared statements to run in the caller's batch (atomic with the
+// delete / status flip).
+// ---------------------------------------------------------------------------
+async function buildGrnRestoreStatements(
+  db: D1Database,
+  piId: string,
+): Promise<D1PreparedStatement[]> {
+  const linesRes = await db
+    .prepare(
+      "SELECT grn_item_id, qty FROM purchase_invoice_items WHERE pi_id = ?",
+    )
+    .bind(piId)
+    .all<{ grn_item_id?: string | null; grnItemId?: string | null; qty: number }>();
+  const lines = linesRes.results ?? [];
+
+  // Group requested qty by grn_item_id so we can clamp against the CURRENT
+  // invoiced_qty per GRN line (multiple PI lines could point at one GRN line).
+  const wantByGrnItem = new Map<string, number>();
+  for (const ln of lines) {
+    const giId = ln.grnItemId ?? ln.grn_item_id ?? null;
+    if (!giId) continue;
+    const q = Number(ln.qty) || 0;
+    if (q <= 0) continue;
+    wantByGrnItem.set(String(giId), (wantByGrnItem.get(String(giId)) ?? 0) + q);
+  }
+  if (wantByGrnItem.size === 0) return [];
+
+  const statements: D1PreparedStatement[] = [];
+  for (const [giId, want] of wantByGrnItem) {
+    const gi = await db
+      .prepare("SELECT invoiced_qty FROM grn_items WHERE id = ?")
+      .bind(giId)
+      .first<{ invoiced_qty?: number | null; invoicedQty?: number | null }>();
+    const current = Number(gi?.invoicedQty ?? gi?.invoiced_qty ?? 0) || 0;
+    const dec = clampDecrement(current, want);
+    if (dec <= 0) continue;
+    statements.push(
+      db
+        .prepare("UPDATE grn_items SET invoiced_qty = invoiced_qty - ? WHERE id = ?")
+        .bind(dec, giId),
+    );
+  }
+  return statements;
 }
 
 // Generate next PI number for the current YYMM. Pattern: PI-YYMM-NNN.
@@ -436,8 +536,12 @@ app.post("/", async (c) => {
   if (denied) return denied;
 
   const db = c.var.DB;
+  // Convert-chain columns must exist before the line-availability guard reads
+  // grn_items.invoiced_qty and before the insert writes grn_id / grn_item_id.
+  await ensurePiMigrations(db);
   const body = await c.req.json().catch(() => ({})) as {
     purchaseOrderId?: string;
+    grnId?: string;
     supplierId?: string;
     supplierName?: string;
     invoiceDate?: string;
@@ -494,26 +598,122 @@ app.post("/", async (c) => {
       .bind(body.purchaseOrderId)
       .first<{ poNo: string }>();
     poRef = po?.poNo ?? null;
+  }
 
-    // Guard against double-billing: the PO→PI convert copies every PO line at
-    // full quantity, so a second convert (a double-click, or re-opening the PO
-    // and converting again) produces a full-value duplicate invoice and double
-    // AP liability. Block when a non-CANCELLED PI already exists for this PO —
-    // the operator cancels or edits that one instead of stacking a duplicate.
-    const existingPi = await db
+  // ── LINE-LEVEL double-bill guard (replaces the old PO-level 409) ─────────
+  // The old guard blocked ANY 2nd invoice for a PO even when quantity
+  // remained — that wrongly stopped legitimate multi-shipment invoicing. Now
+  // we validate PER LINE that requested qty ≤ that source line's AVAILABLE:
+  //   • GRN source (body.grnId): available = accepted_qty − invoiced_qty.
+  //   • PO source (body.purchaseOrderId, no grnId): available = quantity −
+  //     already-invoiced (summed across this PO's live PIs).
+  // Only an over-drawn line is rejected; a 2nd PI is allowed when qty remains.
+  // grnId resolves the GRN → its PO so poRef/header stay populated.
+  let sourceGrnId: string | null = null;
+  if (body.grnId) {
+    const grn = await db
+      .prepare("SELECT id, poId, poNumber FROM grns WHERE id = ?")
+      .bind(body.grnId)
+      .first<{ id: string; poId: string | null; poNumber: string | null }>();
+    if (!grn) {
+      return c.json({ success: false, error: "Source GRN not found" }, 404);
+    }
+    sourceGrnId = grn.id;
+    if (!poRef) poRef = grn.poNumber ?? null;
+
+    if (normalizedItems && normalizedItems.ok) {
+      // Load this GRN's lines (accepted + already-invoiced) keyed by id.
+      const giRes = await db
+        .prepare(
+          "SELECT id, materialName, acceptedQty, invoiced_qty FROM grn_items WHERE grnId = ?",
+        )
+        .bind(sourceGrnId)
+        .all<{
+          id: number | string;
+          materialName: string | null;
+          acceptedQty: number;
+          invoiced_qty?: number | null;
+          invoicedQty?: number | null;
+        }>();
+      const giById = new Map<string, (typeof giRes.results)[number]>();
+      for (const gi of giRes.results ?? []) giById.set(String(gi.id), gi);
+
+      const lines: ConvertLineRequest[] = [];
+      for (const r of normalizedItems.rows) {
+        if (!r.grnItemId) continue; // fee/tax/non-stocked lines don't draw down
+        const gi = giById.get(String(r.grnItemId));
+        if (!gi) {
+          return c.json(
+            {
+              success: false,
+              error: `Line "${r.materialName}" references grn item ${r.grnItemId}, which is not part of GRN ${body.grnId}.`,
+            },
+            400,
+          );
+        }
+        lines.push({
+          ref: gi.materialName ?? r.materialName,
+          orderedQty: Number(gi.acceptedQty) || 0,
+          consumedQty: Number(gi.invoicedQty ?? gi.invoiced_qty ?? 0) || 0,
+          requestedQty: r.qty,
+        });
+      }
+      const guard = checkConvertAvailability(lines);
+      if (!guard.ok) {
+        return c.json({ success: false, error: guard.error }, 409);
+      }
+    }
+  } else if (body.purchaseOrderId && normalizedItems && normalizedItems.ok) {
+    // PO source without a GRN: cap each requested qty at the PO line's
+    // remaining (quantity − already-invoiced across live PIs). Match lines to
+    // PO lines by materialCode (the stable per-line key on both sides).
+    const poItemsRes = await db
       .prepare(
-        "SELECT piNo FROM purchase_invoices WHERE purchaseOrderId = ? AND status != 'CANCELLED' LIMIT 1",
+        "SELECT material_code, materialName, quantity FROM purchase_order_items WHERE purchaseOrderId = ?",
       )
       .bind(body.purchaseOrderId)
-      .first<{ piNo: string }>();
-    if (existingPi) {
-      return c.json(
-        {
-          success: false,
-          error: `This purchase order already has invoice ${existingPi.piNo}. Cancel it first, or edit that invoice instead of creating a duplicate.`,
-        },
-        409,
-      );
+      .all<{ material_code?: string | null; materialCode?: string | null; materialName: string | null; quantity: number }>();
+    // Already-invoiced per material_code across this PO's live PIs.
+    const invRes = await db
+      .prepare(
+        `SELECT pii.material_code AS mc, COALESCE(SUM(pii.qty), 0) AS qty
+           FROM purchase_invoice_items pii
+           JOIN purchase_invoices pi ON pi.id = pii.pi_id
+          WHERE pi.purchaseOrderId = ? AND pi.status != 'CANCELLED'
+          GROUP BY pii.material_code`,
+      )
+      .bind(body.purchaseOrderId)
+      .all<{ mc?: string | null; material_code?: string | null; qty: number }>();
+    const invByCode = new Map<string, number>();
+    for (const row of invRes.results ?? []) {
+      const code = String(row.mc ?? row.material_code ?? "");
+      if (code) invByCode.set(code, Number(row.qty) || 0);
+    }
+    const orderedByCode = new Map<string, { name: string; qty: number }>();
+    for (const po of poItemsRes.results ?? []) {
+      const code = String(po.material_code ?? po.materialCode ?? "");
+      if (!code) continue;
+      const prev = orderedByCode.get(code);
+      orderedByCode.set(code, {
+        name: po.materialName ?? code,
+        qty: (prev?.qty ?? 0) + (Number(po.quantity) || 0),
+      });
+    }
+    const lines: ConvertLineRequest[] = [];
+    for (const r of normalizedItems.rows) {
+      const code = r.materialCode ?? "";
+      const ordered = code ? orderedByCode.get(code) : undefined;
+      if (!ordered) continue; // line not matched to a PO line → not guarded here
+      lines.push({
+        ref: ordered.name,
+        orderedQty: ordered.qty,
+        consumedQty: invByCode.get(code) ?? 0,
+        requestedQty: r.qty,
+      });
+    }
+    const guard = checkConvertAvailability(lines);
+    if (!guard.ok) {
+      return c.json({ success: false, error: guard.error }, 409);
     }
   }
 
@@ -540,17 +740,18 @@ app.post("/", async (c) => {
     db
       .prepare(
         `INSERT INTO purchase_invoices (
-           id, piNo, purchaseOrderId, poRef, supplierId, supplierName,
+           id, piNo, purchaseOrderId, poRef, grn_id, supplierId, supplierName,
            invoiceDate, dueDate, amountSen, status, remarks,
            currency, fxRate, foreignAmountSen,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
         piNo,
         body.purchaseOrderId ?? null,
         poRef,
+        sourceGrnId,
         body.supplierId,
         body.supplierName,
         piInvoiceDate,
@@ -574,8 +775,8 @@ app.post("/", async (c) => {
             `INSERT INTO purchase_invoice_items (
                id, pi_id, material_code, material_name, supplier_sku,
                qty, unit_price_sen, line_total_sen, line_type, notes,
-               created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               grn_item_id, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             r.id,
@@ -588,10 +789,25 @@ app.post("/", async (c) => {
             toHome(r.lineTotalSen),
             r.lineType,
             r.notes,
+            r.grnItemId,
             now,
             null,
           ),
       );
+      // Convert-chain: when this line is sourced from a GRN line, increment
+      // that grn_items.invoiced_qty IN THE SAME batch as the PI insert — this
+      // is what makes the consume atomic (two concurrent PIs can't both bill
+      // the same available qty: the second batch's guard already ran, and the
+      // increment lands transactionally with the line write).
+      if (r.grnItemId && r.qty > 0) {
+        statements.push(
+          db
+            .prepare(
+              "UPDATE grn_items SET invoiced_qty = COALESCE(invoiced_qty, 0) + ? WHERE id = ?",
+            )
+            .bind(r.qty, r.grnItemId),
+        );
+      }
     }
   }
 
@@ -608,16 +824,19 @@ app.post("/", async (c) => {
         400,
       );
     }
+    // Legacy column list (no multi-currency cols). grn_id is kept — it is
+    // self-applied by ensurePiMigrations() at the top of this handler, so it
+    // reliably exists even on a pre-0162 DB.
     statements[0] = db
       .prepare(
         `INSERT INTO purchase_invoices (
-           id, piNo, purchaseOrderId, poRef, supplierId, supplierName,
+           id, piNo, purchaseOrderId, poRef, grn_id, supplierId, supplierName,
            invoiceDate, dueDate, amountSen, status, remarks,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
-        id, piNo, body.purchaseOrderId ?? null, poRef, body.supplierId,
+        id, piNo, body.purchaseOrderId ?? null, poRef, sourceGrnId, body.supplierId,
         body.supplierName, piInvoiceDate, piDueDate, amountSen, status,
         body.remarks ?? null, now, now,
       );
@@ -658,6 +877,9 @@ app.put("/:id", async (c) => {
 
   const id = c.req.param("id");
   const db = c.var.DB;
+  // Convert-chain columns must exist before we read/write invoiced_qty on a
+  // cancel or items-replace.
+  await ensurePiMigrations(db);
   const existing = await db
     .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
     .bind(id)
@@ -744,7 +966,14 @@ app.put("/:id", async (c) => {
   // Replace-all semantics for items[] when provided: DELETE existing, then
   // INSERT new. CASCADE on the FK doesn't help us here — that's only on PI
   // delete. Doing it inside the same batch keeps the swap atomic.
+  //
+  // Convert-chain re-sync (DRAFT-only — guarded above): the OLD lines may have
+  // consumed grn_items.invoiced_qty. Decrement that consumption first, then
+  // the new lines re-increment below — net effect leaves invoiced_qty correct
+  // for whatever the operator changed the lines to.
   if (normalizedItems && normalizedItems.ok) {
+    const restoreOld = await buildGrnRestoreStatements(db, id);
+    statements.push(...restoreOld);
     statements.push(
       db.prepare("DELETE FROM purchase_invoice_items WHERE pi_id = ?").bind(id),
     );
@@ -755,8 +984,8 @@ app.put("/:id", async (c) => {
             `INSERT INTO purchase_invoice_items (
                id, pi_id, material_code, material_name, supplier_sku,
                qty, unit_price_sen, line_total_sen, line_type, notes,
-               created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               grn_item_id, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             r.id,
@@ -769,11 +998,37 @@ app.put("/:id", async (c) => {
             r.lineTotalSen,
             r.lineType,
             r.notes,
+            r.grnItemId,
             now,
             null,
           ),
       );
+      // Convert-chain: re-increment grn_items.invoiced_qty for the new lines
+      // (the old consumption was decremented just above). Same atomic batch.
+      if (r.grnItemId && r.qty > 0) {
+        statements.push(
+          db
+            .prepare(
+              "UPDATE grn_items SET invoiced_qty = COALESCE(invoiced_qty, 0) + ? WHERE id = ?",
+            )
+            .bind(r.qty, r.grnItemId),
+        );
+      }
     }
+  }
+
+  // Convert-chain RESTORE on cancel: if this PUT moves the PI to CANCELLED,
+  // give back the GRN consumption. (CANCELLED is not in VALID_TRANSITIONS
+  // today — the live remove path is DELETE — but if a cancel status is ever
+  // wired this keeps invoiced_qty honest. Skipped when items[] was provided
+  // since that branch already re-synced consumption.)
+  if (
+    !normalizedItems &&
+    body.status === "CANCELLED" &&
+    existing.status !== "CANCELLED"
+  ) {
+    const restore = await buildGrnRestoreStatements(db, id);
+    statements.push(...restore);
   }
 
   // ---- GL posting on status transitions (Phase 7b APPROVED / 7c PAID) ----
@@ -1015,6 +1270,11 @@ app.put("/:id", async (c) => {
 // Approved / paid PIs are kept for audit (use PUT to flip back to DRAFT
 // first if you really need to delete one). Line items are removed by the
 // purchase_invoice_items.pi_id ON DELETE CASCADE FK — no app-side delete.
+//
+// Convert-chain RESTORE: any line that consumed a GRN line's invoiced_qty
+// gives it back so the GRN line is available to invoice again. The decrement
+// runs in the SAME batch as the row delete (atomic) and is computed BEFORE
+// the delete, since the FK cascade is about to remove the lines it reads.
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "purchase-invoices", "delete");
@@ -1022,6 +1282,7 @@ app.delete("/:id", async (c) => {
 
   const id = c.req.param("id");
   const db = c.var.DB;
+  await ensurePiMigrations(db);
   const existing = await db
     .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
     .bind(id)
@@ -1036,10 +1297,16 @@ app.delete("/:id", async (c) => {
       409,
     );
   }
-  await db
-    .prepare("DELETE FROM purchase_invoices WHERE id = ?")
-    .bind(id)
-    .run();
+
+  // Restore GRN availability for every line this PI consumed, then delete —
+  // both in one atomic batch so a partial failure can't leave invoiced_qty
+  // double-counted with the rows gone.
+  const restore = await buildGrnRestoreStatements(db, id);
+  await db.batch([
+    ...restore,
+    db.prepare("DELETE FROM purchase_invoices WHERE id = ?").bind(id),
+  ]);
+
   await emitAudit(c, {
     resource: "purchase-invoices",
     resourceId: id,

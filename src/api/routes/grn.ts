@@ -25,6 +25,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { makeLedgerEntry } from "../../lib/costing";
 import { emitAudit } from "../lib/audit";
+import { availableQty as computeAvailableQty, clampDecrement } from "../../lib/convert-chain";
 
 const app = new Hono<Env>();
 
@@ -53,6 +54,16 @@ function ensureGrnMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS exchange_rate REAL",
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS currency TEXT",
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS landed_cost_sen INTEGER DEFAULT 0",
+      // Convert-chain (PO→GRN→PI): per-line consumed-by-PI tracking. A GRN
+      // line's available-to-invoice = accepted_qty − invoiced_qty. snake_case
+      // so no column-rename-map.json entry is needed; self-applied here AND in
+      // purchase-invoices.ts (whichever route boots first wins, idempotent).
+      "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS invoiced_qty NUMERIC DEFAULT 0",
+      // purchase_invoices.grn_id — the GRN this PI was raised from. Owned by
+      // purchase-invoices.ts but also self-applied here so the GRN DELETE
+      // guard ("already invoiced?") never 500s on a missing column when the
+      // GRN route boots first.
+      "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS grn_id TEXT",
     ];
     for (const sql of stmts) {
       try {
@@ -140,6 +151,10 @@ type GRNItemRow = {
   rejectedQty: number;
   rejectionReason: string | null;
   unitPrice: number;
+  // Convert-chain: qty already pulled into a PI off this GRN line. Postgres
+  // folds invoiced_qty → invoicedQty on read; dual-key for raw/mock rows.
+  invoicedQty?: number | null;
+  invoiced_qty?: number | null;
 };
 
 type PurchaseOrderRow = {
@@ -188,7 +203,12 @@ function deriveArrivalState(row: GRNRow): ArrivalState {
 }
 
 function rowToItem(r: GRNItemRow) {
+  // Convert-chain: invoiced_qty may be absent on rows predating the column
+  // (defaults to 0). available = accepted − invoiced, floored at 0. Exposed
+  // so the PI picker can show remaining-to-invoice per GRN line.
+  const invoicedQty = Number(r.invoicedQty ?? r.invoiced_qty ?? 0) || 0;
   return {
+    id: r.id,
     poItemIndex: r.poItemIndex ?? 0,
     materialCode: r.materialCode ?? "",
     materialName: r.materialName ?? "",
@@ -198,6 +218,8 @@ function rowToItem(r: GRNItemRow) {
     rejectedQty: r.rejectedQty,
     rejectionReason: r.rejectionReason,
     unitPrice: r.unitPrice,
+    invoicedQty,
+    availableQty: computeAvailableQty(Number(r.acceptedQty) || 0, invoicedQty),
   };
 }
 
@@ -572,6 +594,116 @@ async function cascadePOStatusAfterGRNPost(
       .bind(nowIso, poId)
       .run();
   }
+}
+
+// ---------------------------------------------------------------------------
+// RESTORE the parent PO's per-line availability when a posted GRN is
+// un-posted, cancelled, or deleted. The inverse of
+// cascadePOStatusAfterGRNPost: decrements purchase_order_items.receivedQty by
+// each GRN line's acceptedQty (clamped at 0 so a double-restore can't drive a
+// line negative) and recomputes the PO status:
+//   - no items received → CONFIRMED (back to the pre-receipt committed state)
+//   - some received      → PARTIAL_RECEIVED
+//   - all still full      → RECEIVED (unchanged — e.g. another GRN covered it)
+//
+// Scope note: this only restores the AVAILABILITY counter. The inventory the
+// GRN posted (rm_batches / cost_ledger / raw_materials.balanceQty) is NOT
+// reversed here — postGRNToStock stays intact (a stock reversal is a separate
+// concern). Returns the qty restored per PO line for the caller's audit/notes.
+// ---------------------------------------------------------------------------
+async function restorePOReceivedQtyForGRN(
+  db: D1Database,
+  grnId: string,
+): Promise<{ poId: string | null; restored: { poItemId: string; qty: number }[] }> {
+  const grn = await db
+    .prepare("SELECT poId FROM grns WHERE id = ?")
+    .bind(grnId)
+    .first<{ poId: string | null }>();
+  if (!grn?.poId) return { poId: null, restored: [] };
+  const poId = grn.poId;
+
+  const grnItemsRes = await db
+    .prepare(
+      "SELECT poItemIndex, acceptedQty FROM grn_items WHERE grnId = ? ORDER BY id ASC",
+    )
+    .bind(grnId)
+    .all<{ poItemIndex: number | null; acceptedQty: number }>();
+  const grnItems = grnItemsRes.results ?? [];
+
+  const poItemsRes = await db
+    .prepare(
+      // Same deterministic ORDER BY id as the post cascade — GRN lines key to
+      // PO lines by index, so scan order must match the original mapping.
+      "SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ORDER BY id",
+    )
+    .bind(poId)
+    .all<{ id: string; quantity: number; receivedQty: number }>();
+  const poItemsOrdered = poItemsRes.results ?? [];
+
+  const statements: D1PreparedStatement[] = [];
+  const restored: { poItemId: string; qty: number }[] = [];
+  for (const gi of grnItems) {
+    const idx = gi.poItemIndex ?? -1;
+    if (idx < 0 || idx >= poItemsOrdered.length) continue;
+    const poItem = poItemsOrdered[idx];
+    // Clamp so a re-delete / double-restore never drives receivedQty < 0.
+    const dec = clampDecrement(
+      Number(poItem.receivedQty) || 0,
+      Number(gi.acceptedQty) || 0,
+    );
+    if (dec <= 0) continue;
+    statements.push(
+      db
+        .prepare(
+          "UPDATE purchase_order_items SET receivedQty = receivedQty - ? WHERE id = ?",
+        )
+        .bind(dec, poItem.id),
+    );
+    restored.push({ poItemId: poItem.id, qty: dec });
+  }
+  if (statements.length > 0) {
+    await db.batch(statements);
+  }
+
+  // Recompute PO status from the post-restore receivedQty totals.
+  const afterRes = await db
+    .prepare(
+      "SELECT quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
+    )
+    .bind(poId)
+    .all<{ quantity: number; receivedQty: number }>();
+  const after = afterRes.results ?? [];
+  if (after.length === 0) return { poId, restored };
+  const allFull = after.every(
+    (r) => (Number(r.receivedQty) || 0) >= (Number(r.quantity) || 0),
+  );
+  const anyReceived = after.some((r) => (Number(r.receivedQty) || 0) > 0);
+
+  const nowIso = new Date().toISOString();
+  if (allFull) {
+    // Still fully received (another GRN covers it) — leave status RECEIVED.
+    return { poId, restored };
+  }
+  if (anyReceived) {
+    await db
+      .prepare(
+        "UPDATE purchase_orders SET status = 'PARTIAL_RECEIVED', receivedDate = NULL, updated_at = ? WHERE id = ?",
+      )
+      .bind(nowIso, poId)
+      .run();
+  } else {
+    // Nothing received anymore — drop back to CONFIRMED (the committed,
+    // pre-receipt state). Only move a PO that was sitting in a received
+    // status; never resurrect a CANCELLED/CLOSED/DRAFT PO.
+    await db
+      .prepare(
+        `UPDATE purchase_orders SET status = 'CONFIRMED', receivedDate = NULL, updated_at = ?
+           WHERE id = ? AND status IN ('RECEIVED','PARTIAL_RECEIVED')`,
+      )
+      .bind(nowIso, poId)
+      .run();
+  }
+  return { poId, restored };
 }
 
 // GET /api/grn — list all GRNs (optional ?poId=&supplierId= filters)
@@ -1033,8 +1165,27 @@ app.put("/:id", async (c) => {
       }
     }
 
+    // Un-post / cancel: leaving a committed status (POSTED/CONFIRMED) back to
+    // DRAFT/CANCELLED RESTORES the parent PO's per-line availability — the
+    // receivedQty bumped at post time is decremented and the PO status is
+    // recomputed (RECEIVED → PARTIAL_RECEIVED / CONFIRMED). The posted stock
+    // (rm_batches/cost_ledger) is intentionally NOT reversed here.
+    let restoreSummary: { poId: string | null; restored: unknown[] } | undefined;
+    if (
+      newStatus !== prevStatus &&
+      COMMITTED_STATUSES.has(prevStatus) &&
+      !COMMITTED_STATUSES.has(newStatus)
+    ) {
+      restoreSummary = await restorePOReceivedQtyForGRN(c.var.DB, id);
+    }
+
     const updated = await fetchGRN(c.var.DB, id);
-    return c.json({ success: true, data: updated, costing: postSummary });
+    return c.json({
+      success: true,
+      data: updated,
+      costing: postSummary,
+      restore: restoreSummary,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[PUT /api/grn/:id] failed:", msg, err);
@@ -1149,6 +1300,79 @@ app.put("/:id/arrival", async (c) => {
       return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
     }
     return c.json({ success: false, error: msg || "Internal error updating arrival state" }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/grn/:id — delete a GRN and RESTORE the parent PO's per-line
+// availability.
+//
+// Guards:
+//   • A GRN already consumed by a purchase invoice (purchase_invoices.grn_id
+//     points here, status != CANCELLED) cannot be deleted — cancel/delete the
+//     PI first so the PI side's restore runs and the books stay consistent.
+//
+// Restore: if the GRN was POSTED/CONFIRMED, its acceptedQty had bumped
+// purchase_order_items.receivedQty — that is decremented back and the PO
+// status recomputed (RECEIVED → PARTIAL_RECEIVED / CONFIRMED). The grn_items
+// rows go via the ON DELETE CASCADE FK. Posted stock (rm_batches/cost_ledger)
+// is intentionally NOT reversed — out of scope for this phase.
+// ---------------------------------------------------------------------------
+app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "grn", "delete");
+  if (denied) return denied;
+
+  await ensureGrnMigrations(c.var.DB);
+
+  const id = c.req.param("id");
+  try {
+    const existing = await c.var.DB.prepare("SELECT * FROM grns WHERE id = ?")
+      .bind(id)
+      .first<GRNRow>();
+    if (!existing) {
+      return c.json({ success: false, error: "GRN not found" }, 404);
+    }
+
+    // Block delete when a live PI was raised from this GRN — the PI must be
+    // cancelled/deleted first so its own restore (grn_items.invoiced_qty)
+    // runs. Dual-key the column read for raw/mock rows.
+    const linkedPi = await c.var.DB.prepare(
+      "SELECT piNo FROM purchase_invoices WHERE grn_id = ? AND status != 'CANCELLED' LIMIT 1",
+    )
+      .bind(id)
+      .first<{ piNo: string }>();
+    if (linkedPi) {
+      return c.json(
+        {
+          success: false,
+          error: `This goods receipt has been invoiced (${linkedPi.piNo}). Cancel or delete that invoice before deleting the GRN.`,
+        },
+        409,
+      );
+    }
+
+    const prevStatus = existing.status ?? "DRAFT";
+    // Restore PO availability BEFORE the row is gone (the helper reads
+    // grn_items, which the cascade is about to remove).
+    let restoreSummary: { poId: string | null; restored: unknown[] } | undefined;
+    if (COMMITTED_STATUSES.has(prevStatus)) {
+      restoreSummary = await restorePOReceivedQtyForGRN(c.var.DB, id);
+    }
+
+    await c.var.DB.prepare("DELETE FROM grns WHERE id = ?").bind(id).run();
+
+    await emitAudit(c, {
+      resource: "grn",
+      resourceId: id,
+      action: "delete",
+      before: rowToGRN(existing),
+    });
+
+    return c.json({ success: true, restore: restoreSummary });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[DELETE /api/grn/:id] failed:", msg, err);
+    return c.json({ success: false, error: msg || "Internal error deleting GRN" }, 500);
   }
 });
 

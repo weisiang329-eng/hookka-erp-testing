@@ -489,93 +489,167 @@ app.get("/", async (c) => {
   return c.json({ success: true, data });
 });
 
-// POST /api/grn — create a new DRAFT GRN from a PO + line info
+// POST /api/grn — create a new DRAFT GRN.
+//
+// Two modes:
+//   PO mode   — body.poId present; derives line fields from the PO.
+//   Manual    — body.supplierId present (no poId); client supplies all line
+//               fields. poId / poNumber / po_item_index stored as null.
+//
+// Guard: items must be non-empty AND (poId OR supplierId) must be present.
 app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — grn:create.
   const denied = await requirePermission(c, "grn", "create");
   if (denied) return denied;
   try {
     const body = await c.req.json();
-    const { poId, items, receivedBy, notes, qcStatus } = body;
-    if (!poId || !Array.isArray(items) || items.length === 0) {
+    const {
+      poId,
+      supplierId: bodySupplierId,
+      supplierName: bodySupplierName,
+      items,
+      receivedBy,
+      notes,
+      qcStatus,
+    } = body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return c.json({ success: false, error: "items are required" }, 400);
+    }
+    if (!poId && !bodySupplierId) {
       return c.json(
-        { success: false, error: "poId and items are required" },
+        {
+          success: false,
+          error: "Provide either a purchase order (poId) or a supplier (supplierId)",
+        },
         400,
       );
     }
 
-    // Fetch PO + its items
-    const [po, poItemsRes] = await Promise.all([
-      c.var.DB.prepare(
-        "SELECT id, poNo, supplierId, supplierName FROM purchase_orders WHERE id = ?",
-      )
-        .bind(poId)
-        .first<PurchaseOrderRow>(),
-      c.var.DB.prepare(
-        "SELECT * FROM purchase_order_items WHERE purchaseOrderId = ?",
-      )
-        .bind(poId)
-        .all<PurchaseOrderItemRow>(),
-    ]);
-    if (!po) {
-      return c.json({ success: false, error: "Purchase order not found" }, 404);
-    }
-
-    // PO items are in insertion order — index used as poItemIndex
-    const poItems = poItemsRes.results ?? [];
-
-    // Over-receipt validation (110% tolerance, same as in-memory route)
-    for (const item of items as Array<{
-      poItemIndex: number;
-      receivedQty: number;
-    }>) {
-      const poItem = poItems[item.poItemIndex];
-      if (poItem) {
-        const tolerance = poItem.quantity * 1.1;
-        if (item.receivedQty > tolerance) {
-          return c.json(
-            {
-              success: false,
-              error: `Over-receipt for ${poItem.materialName}: received ${item.receivedQty} exceeds 110% of ordered ${poItem.quantity}. Requires ADMIN approval.`,
-            },
-            400,
-          );
-        }
-      }
-    }
-
-    const grnItems = (
-      items as Array<{
-        poItemIndex: number;
-        receivedQty: number;
-        acceptedQty: number;
-        rejectedQty: number;
-        rejectionReason: string | null;
-      }>
-    ).map((item) => {
-      const poItem = poItems[item.poItemIndex];
-      return {
-        poItemIndex: item.poItemIndex,
-        materialCode: poItem?.supplierSKU ?? "",
-        materialName: poItem?.materialName ?? "",
-        orderedQty: poItem?.quantity ?? 0,
-        receivedQty: item.receivedQty,
-        acceptedQty: item.acceptedQty,
-        rejectedQty: item.rejectedQty,
-        rejectionReason: item.rejectionReason || null,
-        unitPrice: poItem?.unitPriceSen ?? 0,
-      };
-    });
-
-    const totalAmount = grnItems.reduce(
-      (sum, i) => sum + i.acceptedQty * i.unitPrice,
-      0,
-    );
     const grnId = genGrnId();
     const grnNumber = await generateGrnNumber(c.var.DB);
     const receiveDate =
       body.receiveDate || new Date().toISOString().split("T")[0];
     const finalQcStatus = (qcStatus as string) || "PENDING";
+
+    let grnPoId: string | null = null;
+    let grnPoNumber: string | null = null;
+    let grnSupplierId: string | null = null;
+    let grnSupplierName: string | null = null;
+    let grnItems: Array<{
+      poItemIndex: number | null;
+      materialCode: string;
+      materialName: string;
+      orderedQty: number;
+      receivedQty: number;
+      acceptedQty: number;
+      rejectedQty: number;
+      rejectionReason: string | null;
+      unitPrice: number;
+    }>;
+
+    if (poId) {
+      // ── PO mode ─────────────────────────────────────────────────────────
+      const [po, poItemsRes] = await Promise.all([
+        c.var.DB.prepare(
+          "SELECT id, poNo, supplierId, supplierName FROM purchase_orders WHERE id = ?",
+        )
+          .bind(poId)
+          .first<PurchaseOrderRow>(),
+        c.var.DB.prepare(
+          "SELECT * FROM purchase_order_items WHERE purchaseOrderId = ?",
+        )
+          .bind(poId)
+          .all<PurchaseOrderItemRow>(),
+      ]);
+      if (!po) {
+        return c.json({ success: false, error: "Purchase order not found" }, 404);
+      }
+
+      const poItems = poItemsRes.results ?? [];
+
+      // Over-receipt validation (110% tolerance)
+      for (const item of items as Array<{
+        poItemIndex: number;
+        receivedQty: number;
+      }>) {
+        const poItem = poItems[item.poItemIndex];
+        if (poItem) {
+          const tolerance = poItem.quantity * 1.1;
+          if (item.receivedQty > tolerance) {
+            return c.json(
+              {
+                success: false,
+                error: `Over-receipt for ${poItem.materialName}: received ${item.receivedQty} exceeds 110% of ordered ${poItem.quantity}. Requires ADMIN approval.`,
+              },
+              400,
+            );
+          }
+        }
+      }
+
+      grnPoId = po.id;
+      grnPoNumber = po.poNo;
+      grnSupplierId = po.supplierId;
+      grnSupplierName = po.supplierName ?? "";
+
+      grnItems = (
+        items as Array<{
+          poItemIndex: number;
+          receivedQty: number;
+          acceptedQty: number;
+          rejectedQty: number;
+          rejectionReason: string | null;
+        }>
+      ).map((item) => {
+        const poItem = poItems[item.poItemIndex];
+        return {
+          poItemIndex: item.poItemIndex,
+          materialCode: poItem?.supplierSKU ?? "",
+          materialName: poItem?.materialName ?? "",
+          orderedQty: poItem?.quantity ?? 0,
+          receivedQty: item.receivedQty,
+          acceptedQty: item.acceptedQty,
+          rejectedQty: item.rejectedQty,
+          rejectionReason: item.rejectionReason || null,
+          unitPrice: poItem?.unitPriceSen ?? 0,
+        };
+      });
+    } else {
+      // ── Manual mode — no PO ──────────────────────────────────────────────
+      grnPoId = null;
+      grnPoNumber = null;
+      grnSupplierId = String(bodySupplierId);
+      grnSupplierName = String(bodySupplierName ?? "");
+
+      grnItems = (
+        items as Array<{
+          materialName: string;
+          materialCode?: string | null;
+          receivedQty: number;
+          acceptedQty: number;
+          rejectedQty: number;
+          rejectionReason?: string | null;
+          unitPriceSen?: number | null;
+        }>
+      ).map((item) => ({
+        poItemIndex: null,
+        materialCode: item.materialCode ?? "",
+        materialName: item.materialName ?? "",
+        // orderedQty has no PO reference — mirror receivedQty so it reads sensibly
+        orderedQty: item.receivedQty,
+        receivedQty: item.receivedQty,
+        acceptedQty: item.acceptedQty,
+        rejectedQty: item.rejectedQty,
+        rejectionReason: item.rejectionReason || null,
+        unitPrice: item.unitPriceSen ?? 0,
+      }));
+    }
+
+    const totalAmount = grnItems.reduce(
+      (sum, i) => sum + i.acceptedQty * i.unitPrice,
+      0,
+    );
 
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
@@ -586,10 +660,10 @@ app.post("/", async (c) => {
       ).bind(
         grnId,
         grnNumber,
-        po.id,
-        po.poNo,
-        po.supplierId,
-        po.supplierName ?? "",
+        grnPoId,
+        grnPoNumber,
+        grnSupplierId,
+        grnSupplierName,
         receiveDate,
         receivedBy || "",
         totalAmount,

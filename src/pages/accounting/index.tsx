@@ -5047,11 +5047,14 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const bankCash = accounts.filter(
     (a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH",
   );
+  // Accrual must land in an accrued-EXPENSE account (410-x). 405-0000 (Other
+  // Creditors) is deliberately excluded — to record a creditor liability,
+  // raise an Other Creditor bill so it shows in that creditor's aging (F4 #5).
   const accrualOpts = accounts.filter(
     (a) =>
       a.type === "LIABILITY" &&
       a.isPostable !== false &&
-      (a.code.startsWith("410") || a.code.startsWith("405")),
+      a.code.startsWith("410"),
   );
   const lineAccounts = accounts.filter(
     (a) =>

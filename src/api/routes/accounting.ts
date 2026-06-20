@@ -5366,10 +5366,18 @@ app.post("/payment-vouchers", async (c) => {
     let accrualAccount: string | null = null;
     if (accrued) {
       accrualAccount = String(body.accrualAccount || "");
+      // 405-x (Other Creditors) is not a valid expense-accrual target — record
+      // creditor liabilities via an Other Creditor bill instead (F4 #5).
+      if (accrualAccount.startsWith("405")) {
+        return c.json(
+          { success: false, error: "Expense accrual must use a 410-x accrued-expense account, not 405 Other Creditors. To owe a creditor, raise an Other Creditor bill." },
+          400,
+        );
+      }
       const acct = coa.get(accrualAccount);
       if (!acct || acct.type !== "LIABILITY" || (acct.isPostable ?? 1) !== 1) {
         return c.json(
-          { success: false, error: "Pick a postable LIABILITY accrual account (410-x or 405-0000)" },
+          { success: false, error: "Pick a postable LIABILITY accrual account (410-x)" },
           400,
         );
       }

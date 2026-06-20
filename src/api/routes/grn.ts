@@ -14,6 +14,11 @@
 // Schema-note: grns has no created_at/updated_at columns. Items are stored
 // in grn_items with a synthetic INTEGER id; the API returns items as a
 // nested array without that id (to match the in-memory GRNItem shape).
+//
+// Arrival pipeline (separate from status): arrival_state tracks
+// NOT_ARRIVED → IN_TRANSIT → AT_CUSTOMS → ARRIVED independently of the
+// DRAFT/CONFIRMED/POSTED commitment lifecycle. Post-to-stock requires
+// arrival_state = 'ARRIVED'.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
@@ -22,6 +27,57 @@ import { makeLedgerEntry } from "../../lib/costing";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
+
+// ---------------------------------------------------------------------------
+// Runtime schema self-apply — runs once per isolate boot.
+// All columns are snake_case so no column-rename-map.json entry is needed.
+// ---------------------------------------------------------------------------
+let grnMigrationPromise: Promise<void> | null = null;
+
+function ensureGrnMigrations(db: D1Database): Promise<void> {
+  if (grnMigrationPromise) return grnMigrationPromise;
+  grnMigrationPromise = (async () => {
+    const stmts = [
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS arrival_state TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS shipping_method TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS carrier_name TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS tracking_number TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS container_number TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS expected_arrival TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS shipped_date TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS actual_arrival TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS customs_status TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS customs_clearance_date TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS shipping_cost_sen INTEGER DEFAULT 0",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS customs_duty_sen INTEGER DEFAULT 0",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS exchange_rate REAL",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS currency TEXT",
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS landed_cost_sen INTEGER DEFAULT 0",
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        // ADD COLUMN IF NOT EXISTS is idempotent; log unexpected errors but
+        // do not abort — a missing column is better caught on first write.
+        console.warn("[grn] ensureGrnMigrations:", sql, err);
+      }
+    }
+  })();
+  return grnMigrationPromise;
+}
+
+// ---------------------------------------------------------------------------
+// Arrival state machine
+// ---------------------------------------------------------------------------
+export const VALID_ARRIVAL_TRANSITIONS: Record<string, string[]> = {
+  NOT_ARRIVED: ["IN_TRANSIT", "ARRIVED"],
+  IN_TRANSIT: ["AT_CUSTOMS", "ARRIVED"],
+  AT_CUSTOMS: ["ARRIVED"],
+  ARRIVED: [],
+};
+
+type ArrivalState = "NOT_ARRIVED" | "IN_TRANSIT" | "AT_CUSTOMS" | "ARRIVED";
 
 type GRNRow = {
   id: string;
@@ -36,6 +92,22 @@ type GRNRow = {
   qcStatus: string | null;
   status: string | null;
   notes: string | null;
+  // Arrival pipeline columns (nullable — may not exist on old rows)
+  arrival_state: string | null;
+  shipping_method: string | null;
+  carrier_name: string | null;
+  tracking_number: string | null;
+  container_number: string | null;
+  expected_arrival: string | null;
+  shipped_date: string | null;
+  actual_arrival: string | null;
+  customs_status: string | null;
+  customs_clearance_date: string | null;
+  shipping_cost_sen: number | null;
+  customs_duty_sen: number | null;
+  exchange_rate: number | null;
+  currency: string | null;
+  landed_cost_sen: number | null;
 };
 
 type GRNItemRow = {
@@ -86,6 +158,15 @@ type SupplierBindingRow = {
 
 const COMMITTED_STATUSES = new Set(["CONFIRMED", "POSTED"]);
 
+// Derive default arrival_state from the GRN row.
+// - If the column is already set, use it.
+// - Manual receipt (no poId) → ARRIVED (goods already in hand).
+// - PO-linked receipt → NOT_ARRIVED (assume imported / en-route by default).
+function deriveArrivalState(row: GRNRow): ArrivalState {
+  if (row.arrival_state) return row.arrival_state as ArrivalState;
+  return row.poId ? "NOT_ARRIVED" : "ARRIVED";
+}
+
 function rowToItem(r: GRNItemRow) {
   return {
     poItemIndex: r.poItemIndex ?? 0,
@@ -122,6 +203,22 @@ function rowToGRN(row: GRNRow, items: GRNItemRow[] = []) {
       | "PARTIAL"
       | "FAILED",
     status: (row.status ?? "DRAFT") as "DRAFT" | "CONFIRMED" | "POSTED",
+    // Arrival pipeline
+    arrival_state: deriveArrivalState(row),
+    shipping_method: row.shipping_method ?? null,
+    carrier_name: row.carrier_name ?? null,
+    tracking_number: row.tracking_number ?? null,
+    container_number: row.container_number ?? null,
+    expected_arrival: row.expected_arrival ?? null,
+    shipped_date: row.shipped_date ?? null,
+    actual_arrival: row.actual_arrival ?? null,
+    customs_status: row.customs_status ?? null,
+    customs_clearance_date: row.customs_clearance_date ?? null,
+    shipping_cost_sen: row.shipping_cost_sen ?? 0,
+    customs_duty_sen: row.customs_duty_sen ?? 0,
+    exchange_rate: row.exchange_rate ?? null,
+    currency: row.currency ?? null,
+    landed_cost_sen: row.landed_cost_sen ?? 0,
     notes: row.notes ?? "",
   };
 }
@@ -497,10 +594,19 @@ app.get("/", async (c) => {
 //               fields. poId / poNumber / po_item_index stored as null.
 //
 // Guard: items must be non-empty AND (poId OR supplierId) must be present.
+//
+// arrival_state defaults:
+//   Manual (no poId) → ARRIVED  (goods already physically in hand)
+//   PO-linked        → NOT_ARRIVED (shipment yet to depart / arrive)
+//   Caller can override by passing arrival_state in the body.
 app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — grn:create.
   const denied = await requirePermission(c, "grn", "create");
   if (denied) return denied;
+
+  // Ensure arrival-pipeline columns exist before any INSERT
+  await ensureGrnMigrations(c.var.DB);
+
   try {
     const body = await c.req.json();
     const {
@@ -531,6 +637,21 @@ app.post("/", async (c) => {
     const receiveDate =
       body.receiveDate || new Date().toISOString().split("T")[0];
     const finalQcStatus = (qcStatus as string) || "PENDING";
+
+    // Arrival state: caller may override; otherwise apply the default rule.
+    // Manual receipt (no poId) → goods in hand → ARRIVED.
+    // PO-linked (imported/shipped) → NOT_ARRIVED.
+    const defaultArrivalState: ArrivalState = poId ? "NOT_ARRIVED" : "ARRIVED";
+    const initialArrivalState: ArrivalState =
+      (body.arrival_state as ArrivalState) ?? defaultArrivalState;
+
+    // Validate caller-supplied arrival_state is a known value
+    if (!Object.prototype.hasOwnProperty.call(VALID_ARRIVAL_TRANSITIONS, initialArrivalState)) {
+      return c.json(
+        { success: false, error: `Invalid arrival_state: ${initialArrivalState}` },
+        400,
+      );
+    }
 
     let grnPoId: string | null = null;
     let grnPoNumber: string | null = null;
@@ -655,8 +776,14 @@ app.post("/", async (c) => {
       c.var.DB.prepare(
         `INSERT INTO grns (id, grnNumber, poId, poNumber, supplierId,
            supplierName, receiveDate, receivedBy, totalAmount, qcStatus,
-           status, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)`,
+           status, notes,
+           arrival_state, shipping_method, carrier_name, tracking_number,
+           container_number, expected_arrival, shipped_date, actual_arrival,
+           customs_status, customs_clearance_date,
+           shipping_cost_sen, customs_duty_sen, exchange_rate, currency,
+           landed_cost_sen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         grnId,
         grnNumber,
@@ -669,6 +796,22 @@ app.post("/", async (c) => {
         totalAmount,
         finalQcStatus,
         notes || "",
+        // arrival pipeline
+        initialArrivalState,
+        body.shipping_method ?? null,
+        body.carrier_name ?? null,
+        body.tracking_number ?? null,
+        body.container_number ?? null,
+        body.expected_arrival ?? null,
+        body.shipped_date ?? null,
+        body.actual_arrival ?? null,
+        body.customs_status ?? null,
+        body.customs_clearance_date ?? null,
+        body.shipping_cost_sen ?? 0,
+        body.customs_duty_sen ?? 0,
+        body.exchange_rate ?? null,
+        body.currency ?? null,
+        body.landed_cost_sen ?? 0,
       ),
       ...grnItems.map((item) =>
         c.var.DB.prepare(
@@ -727,12 +870,20 @@ app.get("/:id", async (c) => {
 });
 
 // PUT /api/grn/:id — update status/qc/items; post to stock on DRAFT → committed
+//
+// Arrival gate: if body.status is moving into CONFIRMED or POSTED, and
+// arrival_state is NOT 'ARRIVED', the request is rejected 409 with a clear
+// message. The arrival_state must be advanced first via PUT /api/grn/:id/arrival.
 app.put("/:id", async (c) => {
   // RBAC gate (P3.3-followup) — grn:update covers status / item edits.
   // The 0045 seed only has read/create/update/delete for grn (no separate
   // post/commit action), so reuse update for the DRAFT → POSTED flip.
   const denied = await requirePermission(c, "grn", "update");
   if (denied) return denied;
+
+  // Ensure arrival-pipeline columns exist before any UPDATE
+  await ensureGrnMigrations(c.var.DB);
+
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -754,6 +905,25 @@ app.put("/:id", async (c) => {
       body.receivedBy !== undefined
         ? String(body.receivedBy)
         : (existing.receivedBy ?? "");
+
+    // ── Arrival gate on post-to-stock ────────────────────────────────────
+    // Crossing into a committed status requires goods to have physically
+    // arrived. This is checked against the effective arrival_state (column
+    // value or the legacy-default fallback).
+    const effectiveArrivalState = deriveArrivalState(existing);
+    if (
+      COMMITTED_STATUSES.has(newStatus) &&
+      !COMMITTED_STATUSES.has(prevStatus) &&
+      effectiveArrivalState !== "ARRIVED"
+    ) {
+      return c.json(
+        {
+          success: false,
+          error: `Goods not yet marked arrived (current arrival state: ${effectiveArrivalState}). Advance arrival_state to ARRIVED before posting to stock.`,
+        },
+        409,
+      );
+    }
 
     const statements: D1PreparedStatement[] = [];
     let totalAmount = existing.totalAmount;
@@ -852,6 +1022,111 @@ app.put("/:id", async (c) => {
       return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
     }
     return c.json({ success: false, error: msg || "Internal error updating GRN" }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/grn/:id/arrival — advance the arrival_state of a GRN.
+//
+// Body:
+//   arrival_state  (required) — target state; must be a valid next state
+//   shipping_method, carrier_name, tracking_number, container_number,
+//   expected_arrival, shipped_date, actual_arrival, customs_status,
+//   customs_clearance_date, shipping_cost_sen, customs_duty_sen,
+//   exchange_rate, currency, landed_cost_sen  (all optional, updated in place)
+//
+// Invalid transitions → 409.
+// ---------------------------------------------------------------------------
+app.put("/:id/arrival", async (c) => {
+  const denied = await requirePermission(c, "grn", "update");
+  if (denied) return denied;
+
+  // Ensure columns exist before any UPDATE
+  await ensureGrnMigrations(c.var.DB);
+
+  const id = c.req.param("id");
+  try {
+    const existing = await c.var.DB.prepare(
+      "SELECT * FROM grns WHERE id = ?",
+    )
+      .bind(id)
+      .first<GRNRow>();
+    if (!existing) {
+      return c.json({ success: false, error: "GRN not found" }, 404);
+    }
+
+    const body = await c.req.json();
+    const targetState = body.arrival_state as string | undefined;
+
+    if (!targetState) {
+      return c.json(
+        { success: false, error: "arrival_state is required" },
+        400,
+      );
+    }
+
+    const currentState = deriveArrivalState(existing);
+    const allowedNext = VALID_ARRIVAL_TRANSITIONS[currentState] ?? [];
+
+    if (!allowedNext.includes(targetState)) {
+      return c.json(
+        {
+          success: false,
+          error: `Invalid arrival transition: ${currentState} → ${targetState}. Allowed: [${allowedNext.join(", ") || "none"}]`,
+        },
+        409,
+      );
+    }
+
+    // Build update — only overwrite columns that are present in the body
+    await c.var.DB.prepare(
+      `UPDATE grns SET
+         arrival_state             = ?,
+         shipping_method           = COALESCE(?, shipping_method),
+         carrier_name              = COALESCE(?, carrier_name),
+         tracking_number           = COALESCE(?, tracking_number),
+         container_number          = COALESCE(?, container_number),
+         expected_arrival          = COALESCE(?, expected_arrival),
+         shipped_date              = COALESCE(?, shipped_date),
+         actual_arrival            = COALESCE(?, actual_arrival),
+         customs_status            = COALESCE(?, customs_status),
+         customs_clearance_date    = COALESCE(?, customs_clearance_date),
+         shipping_cost_sen         = COALESCE(?, shipping_cost_sen),
+         customs_duty_sen          = COALESCE(?, customs_duty_sen),
+         exchange_rate             = COALESCE(?, exchange_rate),
+         currency                  = COALESCE(?, currency),
+         landed_cost_sen           = COALESCE(?, landed_cost_sen)
+       WHERE id = ?`,
+    )
+      .bind(
+        targetState,
+        body.shipping_method ?? null,
+        body.carrier_name ?? null,
+        body.tracking_number ?? null,
+        body.container_number ?? null,
+        body.expected_arrival ?? null,
+        body.shipped_date ?? null,
+        body.actual_arrival ?? null,
+        body.customs_status ?? null,
+        body.customs_clearance_date ?? null,
+        body.shipping_cost_sen ?? null,
+        body.customs_duty_sen ?? null,
+        body.exchange_rate ?? null,
+        body.currency ?? null,
+        body.landed_cost_sen ?? null,
+        id,
+      )
+      .run();
+
+    const updated = await fetchGRN(c.var.DB, id);
+    return c.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[PUT /api/grn/:id/arrival] failed:", msg, err);
+    if (err instanceof SyntaxError) {
+      return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
+    }
+    return c.json({ success: false, error: msg || "Internal error updating arrival state" }, 500);
   }
 });
 

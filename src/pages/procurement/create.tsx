@@ -552,7 +552,7 @@ function CreatePurchaseOrderPage() {
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-[#374151] mb-1.5">Delivery Date</label>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">Expected Delivery Date</label>
                 <Input
                   type="date"
                   value={expectedDate}
@@ -560,6 +560,33 @@ function CreatePurchaseOrderPage() {
                 />
               </div>
             </div>
+
+            {/* Supplier info bar — shown once supplier resolves from line items */}
+            {!hasMixedSuppliers && !hasUnboundLines && headerSupplierId && (() => {
+              const sup = allSuppliers.find((s) => s.id === headerSupplierId);
+              if (!sup) return null;
+              return (
+                <div className="rounded-md bg-[#FAF9F7] border border-[#E2DDD8] p-3 text-sm">
+                  <div className="flex flex-wrap gap-x-6 gap-y-1">
+                    {sup.contactPerson && (
+                      <span className="text-[#6B7280]">Contact: <span className="font-medium text-[#1F1D1B]">{sup.contactPerson}</span></span>
+                    )}
+                    {sup.phone && (
+                      <span className="text-[#6B7280]">Phone: <span className="font-medium text-[#1F1D1B]">{sup.phone}</span></span>
+                    )}
+                    {sup.email && (
+                      <span className="text-[#6B7280]">Email: <span className="font-medium text-[#1F1D1B]">{sup.email}</span></span>
+                    )}
+                    {sup.paymentTerms && (
+                      <span className="text-[#6B7280]">Terms: <span className="font-medium text-[#1F1D1B]">{sup.paymentTerms}</span></span>
+                    )}
+                    {sup.address && (
+                      <span className="text-[#6B7280]">Address: <span className="font-medium text-[#1F1D1B]">{sup.address}</span></span>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
 
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1.5">Notes</label>
@@ -578,18 +605,26 @@ function CreatePurchaseOrderPage() {
           <CardHeader className="pb-3"><CardTitle>Summary</CardTitle></CardHeader>
           <CardContent className="space-y-3">
             <div className="flex justify-between text-sm">
+              <span className="text-[#6B7280]">Supplier</span>
+              <span className="font-medium text-right max-w-[60%] truncate">
+                {items.length === 0 ? (
+                  <span className="text-[#9CA3AF]">—</span>
+                ) : hasMixedSuppliers ? (
+                  <span className="text-[#9C6F1E]">{distinctSupplierCount} suppliers</span>
+                ) : hasUnboundLines ? (
+                  <span className="text-[#9A3A2D]">Missing</span>
+                ) : (
+                  headerSupplierName
+                )}
+              </span>
+            </div>
+            <div className="flex justify-between text-sm">
               <span className="text-[#6B7280]">Total Qty</span>
               <span className="font-medium">{totalQty}</span>
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-[#6B7280]">Line Items</span>
               <span className="font-medium">{items.length}</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-[#6B7280]">Suppliers</span>
-              <span className={`font-medium ${hasMixedSuppliers ? "text-[#9C6F1E]" : ""}`}>
-                {distinctSupplierCount}
-              </span>
             </div>
             <hr className="border-[#E2DDD8]" />
             <div className="flex justify-between text-lg font-bold">

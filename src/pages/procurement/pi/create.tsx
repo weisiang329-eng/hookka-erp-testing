@@ -22,6 +22,7 @@ import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency } from "@/lib/utils";
 import type { Supplier, RawMaterial } from "@/types";
@@ -417,19 +418,12 @@ function CreatePurchaseInvoicePage() {
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">
                   Supplier *
                 </label>
-                <select
-                  className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+                <SearchableSelect
                   value={supplierId}
-                  onChange={(e) => setSupplierId(e.target.value)}
-                  required
-                >
-                  <option value="">Select supplier...</option>
-                  {suppliers.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setSupplierId}
+                  options={suppliers.map((s) => ({ value: s.id, label: `${s.code} - ${s.name}` }))}
+                  placeholder="Select supplier..."
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">
@@ -443,6 +437,30 @@ function CreatePurchaseInvoicePage() {
                 />
               </div>
             </div>
+
+            {/* Supplier info bar — matches SO create's customer info bar style */}
+            {supplier && (
+              <div className="rounded-md bg-[#FAF9F7] border border-[#E2DDD8] p-3 text-sm">
+                <div className="flex flex-wrap gap-x-6 gap-y-1">
+                  {supplier.contactPerson && (
+                    <span className="text-[#6B7280]">Contact: <span className="font-medium text-[#1F1D1B]">{supplier.contactPerson}</span></span>
+                  )}
+                  {supplier.phone && (
+                    <span className="text-[#6B7280]">Phone: <span className="font-medium text-[#1F1D1B]">{supplier.phone}</span></span>
+                  )}
+                  {supplier.email && (
+                    <span className="text-[#6B7280]">Email: <span className="font-medium text-[#1F1D1B]">{supplier.email}</span></span>
+                  )}
+                  {supplier.paymentTerms && (
+                    <span className="text-[#6B7280]">Terms: <span className="font-medium text-[#1F1D1B]">{supplier.paymentTerms}</span></span>
+                  )}
+                  {supplier.address && (
+                    <span className="text-[#6B7280]">Address: <span className="font-medium text-[#1F1D1B]">{supplier.address}</span></span>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1.5">
                 Remarks
@@ -464,7 +482,7 @@ function CreatePurchaseInvoicePage() {
             <div className="flex justify-between text-sm">
               <span className="text-[#6B7280]">Supplier</span>
               <span className="font-medium text-right max-w-[60%] truncate">
-                {supplier ? supplier.name : (
+                {supplier ? `${supplier.code} - ${supplier.name}` : (
                   <span className="text-[#9CA3AF]">Not selected</span>
                 )}
               </span>

@@ -47,6 +47,7 @@ import {
 } from "../../lib/other-party-payment";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
+import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 
@@ -2873,6 +2874,40 @@ app.get("/audit-log", async (c) => {
   return c.json({ success: true, data });
 });
 
+// ---------------------------------------------------------------------------
+// GET /other-party-aging?type=DEBTOR|CREDITOR — per-party aging for Other
+// Debtor/Creditor bills (F4 #3). Live: reads unpaid bills (outstanding > 0,
+// excluding voided/deleted) and buckets by age. Returns the aging rows plus
+// the raw unpaid bills (for the bills page's per-party drill-down).
+// ---------------------------------------------------------------------------
+app.get("/other-party-aging", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const type = c.req.query("type");
+  if (type !== "DEBTOR" && type !== "CREDITOR") {
+    return c.json({ success: false, error: "type must be DEBTOR or CREDITOR" }, 400);
+  }
+  const rows =
+    (
+      await c.var.DB.prepare(
+        `SELECT b.partyId AS partyId, b.partyName AS partyName, b.billNo AS billNo, b.billDate AS billDate,
+                (b.totalSen - b.paidAmountSen) AS amt
+           FROM other_party_bills b
+           LEFT JOIN document_lifecycle dl
+             ON dl.orgId = b.orgId AND dl.sourceType = 'other_party_bill' AND dl.sourceId = b.billNo
+          WHERE b.orgId = ? AND b.partyType = ? AND (b.totalSen - b.paidAmountSen) > 0
+            AND (dl.state IS NULL OR dl.state NOT IN ('DELETED','VOID'))
+          ORDER BY b.billDate ASC`,
+      )
+        .bind(orgId, type)
+        .all<{ partyId: string; partyName: string; billNo: string; billDate: string; amt: number }>()
+    ).results ?? [];
+  const bills = rows.map((r) => ({ partyId: r.partyId, partyName: r.partyName, billNo: r.billNo, billDate: r.billDate, outstandingSen: r.amt }));
+  const today = new Date().toISOString().slice(0, 10);
+  return c.json({ success: true, data: { aging: bucketAging(bills, today), bills } });
+});
+
 // Shared internal builder (NOT a route): used by both the rewired /void
 // endpoint and the new /lifecycle endpoint. Builds the lifecycle statements
 // (GL reversal / hidden flags / document_lifecycle state via applyLifecycle)
@@ -4783,11 +4818,12 @@ app.get("/pl-monthly", async (c) => {
   }
 
   const override = await getPnlSectionMap(c.var.DB);
-  const monthLabel = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleString("en", { month: "short", timeZone: "UTC" });
+  const monthLabel = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleString("en", { month: "short", year: "numeric", timeZone: "UTC" });
 
   const cols: PnlMatrixCol[] = [];
   cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, fyStartYm, lastYm, line, override) });
-  for (const ym of months) {
+  // Months newest-first (after Accumulated) per owner layout (F4 #7).
+  for (const ym of [...months].reverse()) {
     cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, ym, ym, line, override) });
   }
 
@@ -5366,10 +5402,18 @@ app.post("/payment-vouchers", async (c) => {
     let accrualAccount: string | null = null;
     if (accrued) {
       accrualAccount = String(body.accrualAccount || "");
+      // 405-x (Other Creditors) is not a valid expense-accrual target — record
+      // creditor liabilities via an Other Creditor bill instead (F4 #5).
+      if (accrualAccount.startsWith("405")) {
+        return c.json(
+          { success: false, error: "Expense accrual must use a 410-x accrued-expense account, not 405 Other Creditors. To owe a creditor, raise an Other Creditor bill." },
+          400,
+        );
+      }
       const acct = coa.get(accrualAccount);
       if (!acct || acct.type !== "LIABILITY" || (acct.isPostable ?? 1) !== 1) {
         return c.json(
-          { success: false, error: "Pick a postable LIABILITY accrual account (410-x or 405-0000)" },
+          { success: false, error: "Pick a postable LIABILITY accrual account (410-x)" },
           400,
         );
       }

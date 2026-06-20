@@ -11,6 +11,7 @@ This file organizes key documentation so implementation and operations are easy 
 ## AI / LLM Context Management
 - `docs/DEV-EFFICIENCY-SYSTEM.md` — **the big plan**: the 6-layer ERP Center-of-Excellence (Governance/Knowledge/Reliability/Navigation/Methodology/Data-model), what we have vs need, and the build roadmap.
 - `docs/context-packs/NAVIGATION-MAP.md` — **find code fast (no searching)**: every module → pages / API routes / tables / tests + a line-range section index for the 16 monster files. Look here BEFORE grepping.
+- `docs/PLAYBOOKS.md` — **fixed steps for recurring tasks** (add a field, fix a camelCase read bug, ship+verify, money field, fix-then-sweep, new grid/PDF, touching a monster file). Follow the playbook instead of re-deriving.
 - `docs/DEV-OPERATING-FRAMEWORK.md` — **the operating manual (read first)**: when to review-all vs not (快·准·省 + risk tiers), the high-risk areas that always need deep review, and the durable task-tracking cadence.
 - `docs/HOOKKA-GOTCHAS.md` — hard-won Hookka-specific traps (migration self-apply, snake_case rename-map, build:strict). Read before any schema/money/SQL/ship work — these are the real time-savers.
 - `docs/WORK-TRACKER.md` — living list of assigned / in-progress / shipped work so nothing is forgotten across a long session.

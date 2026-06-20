@@ -3813,6 +3813,8 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
   const [parties, setParties] = useState<OtherParty[] | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [q, setQ] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"ALL" | "ACTIVE" | "INACTIVE">("ALL");
   const [form, setForm] = useState({
     type: side as "DEBTOR" | "CREDITOR",
     name: "",
@@ -3884,7 +3886,14 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
     else toast.error(j?.error || "Failed to update party");
   };
 
-  const visible = (parties ?? []).filter((p) => p.type === side);
+  const kw = q.trim().toLowerCase();
+  const visible = (parties ?? []).filter((p) => {
+    if (p.type !== side) return false;
+    if (statusFilter === "ACTIVE" && !p.isActive) return false;
+    if (statusFilter === "INACTIVE" && p.isActive) return false;
+    if (kw && ![p.name, p.email, p.contactPerson, p.phone].some((s) => (s ?? "").toLowerCase().includes(kw))) return false;
+    return true;
+  });
 
   return (
     <div className="space-y-4">
@@ -3907,7 +3916,15 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
         )}
       </div>
 
-      <div className="flex flex-wrap items-center justify-end gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name / email / contact" className="rounded-md border border-[#E2DDD8] px-3 py-1.5 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as "ALL" | "ACTIVE" | "INACTIVE")} className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm">
+            <option value="ALL">All status</option>
+            <option value="ACTIVE">Active</option>
+            <option value="INACTIVE">Inactive</option>
+          </select>
+        </div>
         <Button variant="primary" size="sm" onClick={() => { setEditingId(null); setForm({ type: side, name: "", contactPerson: "", phone: "", email: "", tin: "", registrationNo: "", address: "", notes: "" }); setShowForm(!showForm); }}>
           <Plus className="h-4 w-4" /> Add Party
         </Button>
@@ -3970,6 +3987,7 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
                   <th className="px-4 py-2 text-left">Name</th>
                   <th className="px-4 py-2 text-left">TIN / Reg No</th>
                   <th className="px-4 py-2 text-left">Contact</th>
+                  <th className="px-4 py-2 text-left">Email</th>
                   <th className="px-4 py-2 text-left">Phone</th>
                   <th className="px-4 py-2 text-left">Notes</th>
                   <th className="px-4 py-2 text-right">Status</th>
@@ -3986,6 +4004,7 @@ function OtherPartiesTab({ accounts, side }: { accounts: ChartOfAccount[]; side:
                     <td className="px-4 py-1.5 text-[#1F1D1B] font-medium">{p.name}{p.address ? <span className="block text-[11px] font-normal text-[#9CA3AF]">{p.address}</span> : null}</td>
                     <td className="px-4 py-1.5 text-[#6B7280] text-xs tabular-nums">{[p.tin, p.registrationNo].filter(Boolean).join(" / ")}</td>
                     <td className="px-4 py-1.5 text-[#6B7280]">{p.contactPerson}</td>
+                    <td className="px-4 py-1.5 text-[#6B7280] text-xs">{p.email}</td>
                     <td className="px-4 py-1.5 text-[#6B7280]">{p.phone}</td>
                     <td className="px-4 py-1.5 text-[#6B7280] text-xs">{p.notes}</td>
                     <td className="px-4 py-1.5 text-right">

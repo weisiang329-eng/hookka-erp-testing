@@ -4146,6 +4146,8 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   const { confirm } = useConfirm();
   const [bills, setBills] = useState<OtherPartyBill[] | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [q, setQ] = useState("");
+  const [openBill, setOpenBill] = useState<string | null>(null);
   const today = new Date().toISOString().slice(0, 10);
   const blankLine = (): BillLineDraft => ({ counterAccount: "", amountStr: "", description: "" });
   const [form, setForm] = useState({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()] });
@@ -4187,6 +4189,27 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
       load();
     } else toast.error(j?.error || "Failed to create bill");
   };
+
+  // Copy = open a fresh bill prefilled from an existing one (bills are
+  // immutable, so "edit" is really "copy to a new bill"). F4 #1.
+  const copyBill = (b: OtherPartyBill) => {
+    setForm({
+      partyId: b.partyId,
+      billDate: today,
+      referenceNo: "",
+      description: b.description ?? "",
+      taxStr: b.taxSen ? (b.taxSen / 100).toString() : "",
+      lines: b.items.length
+        ? b.items.map((it) => ({ counterAccount: it.counterAccount, amountStr: (it.amountSen / 100).toString(), description: it.description ?? "" }))
+        : [blankLine()],
+    });
+    setShowForm(true);
+  };
+
+  const kw = q.trim().toLowerCase();
+  const visibleBills = (bills ?? []).filter((b) =>
+    !kw || [b.billNo, b.partyName, b.referenceNo, b.description].some((s) => (s ?? "").toLowerCase().includes(kw)),
+  );
 
   const handleLifecycle = async (billNo: string, action: "void" | "delete" | "unvoid") => {
     const verb = action === "unvoid" ? "Restore" : action === "delete" ? "Delete" : "Void";
@@ -4289,6 +4312,9 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
         </CardContent></Card>
       )}
 
+      <div className="flex items-center">
+        <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search bill no / party / reference / description" className="rounded-md border border-[#E2DDD8] px-3 py-1.5 text-sm w-80 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
+      </div>
       <Card><CardContent className="p-0 overflow-x-auto">
         {bills === null ? (
           <div className="py-10 text-center text-[#6B7280] text-sm">Loading…</div>
@@ -4298,34 +4324,59 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
           <table className="w-full text-sm">
             <thead><tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
               <th className="px-4 py-2 text-left">Bill No</th><th className="px-4 py-2 text-left">Party</th>
+              <th className="px-4 py-2 text-left">Description</th>
               <th className="px-4 py-2 text-left">Date</th><th className="px-4 py-2 text-right">Total</th>
               <th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Outstanding</th>
               <th className="px-4 py-2 text-center">Status</th><th className="px-4 py-2 text-right"></th>
             </tr></thead>
             <tbody>
-              {bills.map((b) => (
-                <tr key={b.id} className="border-b border-[#F0ECE9]">
-                  <td className="px-4 py-1.5 font-mono text-xs">{b.billNo}</td>
-                  <td className="px-4 py-1.5">{b.partyName}</td>
-                  <td className="px-4 py-1.5">{b.billDate}</td>
-                  <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(b.totalSen)}</td>
-                  <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(b.paidAmountSen)}</td>
-                  <td className="px-4 py-1.5 text-right tabular-nums font-medium">{formatCurrency(b.outstandingSen)}</td>
-                  <td className="px-4 py-1.5 text-center text-xs">
-                    <LifecycleBadge state={b.lifecycleState} />
-                    {(b.lifecycleState ?? "ACTIVE") === "ACTIVE" && b.status}
-                  </td>
-                  <td className="px-4 py-1.5 text-right">
-                    <LifecycleActions
-                      state={b.lifecycleState}
-                      disabled={(b.lifecycleState ?? "ACTIVE") === "ACTIVE" && b.paidAmountSen > 0}
-                      onVoid={() => handleLifecycle(b.billNo, "void")}
-                      onDelete={() => handleLifecycle(b.billNo, "delete")}
-                      onUnvoid={() => handleLifecycle(b.billNo, "unvoid")}
-                    />
-                  </td>
-                </tr>
+              {visibleBills.map((b) => (
+                <React.Fragment key={b.id}>
+                  <tr className="border-b border-[#F0ECE9]">
+                    <td className="px-4 py-1.5 font-mono text-xs">
+                      <button onClick={() => setOpenBill(openBill === b.id ? null : b.id)} className="cursor-pointer hover:underline">{openBill === b.id ? "▾ " : "▸ "}{b.billNo}</button>
+                    </td>
+                    <td className="px-4 py-1.5">{b.partyName}</td>
+                    <td className="px-4 py-1.5 text-xs text-[#6B7280] max-w-[16rem] truncate">{[b.referenceNo, b.description].filter(Boolean).join(" · ")}</td>
+                    <td className="px-4 py-1.5">{b.billDate}</td>
+                    <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(b.totalSen)}</td>
+                    <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(b.paidAmountSen)}</td>
+                    <td className="px-4 py-1.5 text-right tabular-nums font-medium">{formatCurrency(b.outstandingSen)}</td>
+                    <td className="px-4 py-1.5 text-center text-xs">
+                      <LifecycleBadge state={b.lifecycleState} />
+                      {(b.lifecycleState ?? "ACTIVE") === "ACTIVE" && b.status}
+                    </td>
+                    <td className="px-4 py-1.5 text-right whitespace-nowrap">
+                      <button onClick={() => copyBill(b)} className="text-[#6B5C32] hover:underline text-xs mr-3">Copy</button>
+                      <LifecycleActions
+                        state={b.lifecycleState}
+                        disabled={(b.lifecycleState ?? "ACTIVE") === "ACTIVE" && b.paidAmountSen > 0}
+                        onVoid={() => handleLifecycle(b.billNo, "void")}
+                        onDelete={() => handleLifecycle(b.billNo, "delete")}
+                        onUnvoid={() => handleLifecycle(b.billNo, "unvoid")}
+                      />
+                    </td>
+                  </tr>
+                  {openBill === b.id && (
+                    <tr className="border-b border-[#F0ECE9] bg-[#FAF8F5]">
+                      <td colSpan={9} className="px-8 py-2">
+                        <div className="text-xs text-[#6B7280] space-y-0.5">
+                          {b.items.map((it, i) => (
+                            <div key={i} className="flex justify-between max-w-md">
+                              <span>{it.counterAccount}{it.description ? ` · ${it.description}` : ""}</span>
+                              <span className="tabular-nums">{formatCurrency(it.amountSen)}</span>
+                            </div>
+                          ))}
+                          {b.taxSen ? <div className="flex justify-between max-w-md border-t border-[#E2DDD8] mt-0.5 pt-0.5"><span>Tax / SST</span><span className="tabular-nums">{formatCurrency(b.taxSen)}</span></div> : null}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               ))}
+              {visibleBills.length === 0 && (
+                <tr><td colSpan={9} className="px-4 py-8 text-center text-sm text-[#9CA3AF]">No bills match</td></tr>
+              )}
             </tbody>
           </table>
         )}

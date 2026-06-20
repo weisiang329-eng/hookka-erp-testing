@@ -13,9 +13,9 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ### 🔵 IN FLIGHT — parallel agents (owner: "全部做完，不要紧" + ultracode; review+test+confirm before prod)
 - **Convert-chain backend foundation** — agent `af7f29ff` (opus, worktree) — invoiced_qty + grn_id + line-level guard + consume/restore + availableQty. HIGH-RISK, I review+test cascade.
-- **Supplier Price History → PO view + filter/sort** — agent `a16a8ed0` (worktree) — suppliers/detail.tsx.
-- **GRN arrival DO-parity** — agent `a22f3ae8` (worktree) — Planning rename (NOT_ARRIVED label), forward-jump transitions (FE grn.tsx + BE grn.ts arrival map only), DO-style layout.
-- **Price Comparison multi-select + cross-material** — agent `a7a9fb91` (worktree) — maintenance.tsx ComparisonTab: multi-select materials, A-vs-B compare table, badge legend (Fastest=lead/ Cheapest=price/ Main=preferred), filter+sort.
+- ✅ **Supplier Price History → PO view + filter/sort** — shipped `774ed7ff` (suppliers/detail.tsx).
+- ✅ **GRN arrival DO-parity** — Planning rename + forward jumps (FE+BE) + DO tab layout. Shipped `dc6a880a`.
+- ✅ **Price Comparison multi-select + cross-material** — multi-select, A-vs-B table, badge legend, filter+sort. Shipped `e695c3c1`.
 - **NEXT after backend lands:** P2 convert UX (Convert-from buttons + line-pick pickers, drop GRN Manual toggle), P3 multi-doc consolidation endpoints, P4 PI→COGS cascade.
 
 - 🔵 **PURCHASING CONVERT-CHAIN ALIGNMENT (the big one, owner directive + 2990 ref)** — owner wants

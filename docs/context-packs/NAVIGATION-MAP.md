@@ -478,4 +478,278 @@ Built to cut token usage: open the named file at the named line range instead of
 
 ---
 
+## Planning (Production Planning / Scheduling / MRP / Lead Times)
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/planning/index.tsx` — 4-tab PlanningPage (Capacity Overview / Capacity Loading / Lead Times / Master Tracker) + DrilldownModal (3709) | `src/api/routes/planning-schedule.ts` — per-dept daily schedule data (GET /schedule/fabric-cutting, /schedule/:dept) | `production_orders` (read: active POs, due dates, progress) | `tests/planning-scheduler.test.mjs` |
+| `src/pages/planning/mrp.tsx` — MRP view (reads/posts /api/mrp) | `src/api/routes/production-leadtimes.ts` — lead-time config + history (GET /, PUT /settings, PUT /, POST /recalc-all, GET /history, POST /schedule, DELETE /history/:id) | `job_cards` (read: per-PO dept sequence, wipKey, earliest pending due date) | `tests/scheduler.test.mjs` |
+| `src/pages/planning/LeadTimeHistoryDialog.tsx` — lead-time history + scheduled changes | `src/api/routes/mrp.ts` — MRP runs (GET /, GET /runs, GET /runs/:id) | `production_lead_times` (legacy) / `production_lead_times_history` | `tests/scheduling.test.mjs` |
+| `src/pages/planning/dept/_DepartmentSchedulePage.tsx` — shared generic dept-schedule renderer (calendar, by-day lanes, grouped cards) | `src/api/routes/scheduling.ts` — GET /, POST /, GET /capacity | `hookka_dd_buffer_history` (due-date buffer history) | |
+| `src/pages/planning/dept/_PlainDeptSchedulePage.tsx` — plain-table dept variant | `src/api/routes/production-orders.ts` — 7606 lines; Planning READS only (Production-owned) | `mrp_runs` / `mrp_requirements` | |
+| `src/pages/planning/dept/fabric-cutting.tsx` / `fabric-sewing.tsx` / `wood-cutting.tsx` — dept config shells | `src/api/routes/production-folders.ts` — folder grouping (peripheral) | `kv_config` (public_holidays / schedule settings) | |
+| `src/pages/planning/dept/foam-bonding.tsx` / `framing.tsx` / `webbing.tsx` / `upholstery.tsx` / `packing.tsx` — dept config shells | | | |
+
+**Big-file section index**
+- `src/pages/planning/index.tsx`
+  - Constants + TABS def (LOADING_CHART windows, TABS, TabId, DEPT route map) — L154-204
+  - Master Tracker helpers + TrackerSortIcon component — L205-439
+  - PlanningPage component (default export) — state incl activeTab — L440-1862
+  - Tab bar render (isActive = activeTab === tab.id) — L1843-1863
+  - Tab: Capacity Overview panel — L1864-2339
+  - Tab: Capacity Loading (chart) panel — L2340-2594
+  - Tab: Master Tracker panel — L2595-2903
+  - Tab: Lead Times panel (inline Save Lead Times form) — L2904-3211
+  - DrilldownModal component — L3212-3709
+- `src/api/routes/production-orders.ts`
+  - NOTE: 7606-line route — Planning only READS it (production_orders/job_cards for capacity, tracker, lead-time recalc). Not a Planning-owned file; grep targeted handlers rather than reading whole. — L1-7606
+
+**Gotchas**
+- Backend planning logic lives in `src/api/lib` (NOT routes): planning-capacity.ts, planning-chain.ts, planning-scheduler.ts, lead-times.ts — change schedule/capacity math there, the routes are thin.
+- Lead-time recalc (production-leadtimes.ts POST /recalc-all) walks production_orders + every job_cards row and re-derives wipKey — coupled to the shared deriveTopLevelWipKey formula; don't re-implement wip keys here.
+- All `dept/*` daily-schedule pages are config-only shells over the ONE shared renderer `_DepartmentSchedulePage.tsx`; layout/column changes belong in the shared file, not per-dept copies.
+- index.tsx PlanningPage is one ~3270-line component with TAB-gated render blocks keyed off activeTab — section is selected by the activeTab string, not separate files; edit the matching tab block (line ranges above).
+- production_lead_times is legacy; history/buffer tables are the live source. The inline /planning Save Lead Times form and LeadTimeHistoryDialog both hit /api/production/leadtimes — keep them consistent (dialog comment flags this).
+- Capacity Loading chart uses working-day (Mon-Sat, Sundays excluded) windows of 14 past / 21 future days (constants at index.tsx:193-194), not calendar days — matches divisor conventions used elsewhere in the ERP.
+- Many root-level *.xlsx + scripts/*.py (build_*_xlsx.py, dept_flow_scheduler.py) in the repo are throwaway export/planning-data tooling, NOT part of the app's Planning module — ignore them when editing the module.
+
+**Start here:** For most Planning tasks open `src/pages/planning/index.tsx` (3709 lines, the 4-tab PlanningPage: Capacity Overview / Capacity Loading / Lead Times / Master Tracker); for per-department daily schedules the real renderer is `src/pages/planning/dept/_DepartmentSchedulePage.tsx` fed by `src/api/routes/planning-schedule.ts`.
+
+---
+
+## Dashboard & Command Center
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/dashboard-b/index.tsx` — the entire Command Center (2469); KPI rail + month switcher + all widgets | `src/api/routes/dashboard-overview.ts` — single GET / (2009), 60s KV-cached, owns ALL dashboard data | `sales_orders` / `sales_order_items` | `tests/snapshot-freshness.test.mjs` |
+| `src/pages/dashboard-b/charts.tsx` — lazy recharts wrappers (RevenueChart, CustomerPieChart) (240) | `src/api/lib/dashboard-snapshot.ts` — daily snapshot for cumulative revenue | `invoices` / `delivery_orders` / `delivery_order_items` / `consignment_order_items` | `tests/snapshot-freshness-latestts.test.mjs` |
+| `src/dashboard-routes.tsx` — maps /dashboard → dashboard-b; redirects legacy /dashboard-b → /dashboard | `src/api/lib/dashboard-state-snapshot.ts` — daily point-in-time state snapshot (upsert on org_id+snap_date) | `production_orders` / `job_cards` / `cost_ledger` | |
+| | | `purchase_orders` / `purchase_order_items` / `grns` | |
+| | | `products` / `raw_materials` / `workers` / `kv_config` (snapshot/cache storage) | |
+
+**Big-file section index**
+- `src/pages/dashboard-b/index.tsx`
+  - Header comment + lazy chart imports (RevenueChart, CustomerPieChart) — L1-28
+  - Type/interface declarations for overview payload (csRevenueSen, monthlyRevenue, weeklyRevenue, topSellers, monthlySalesByCustomer, fabric) — L29-249
+  - Constants: PROD_DEPTS set, DEPT_LABEL map, CUR_YM, PIE_COLORS, brand color tokens — L250-345
+  - Small presentational helpers: Spark sparkline, DeltaChip — L346-390
+  - KTile (the KPI card component used by the four Command Center cards) — L391-472
+  - SectionRowsSkeleton (per-section loading placeholder) — L473-487
+  - Modal helper — L488-529
+  - MiniTable helper — L530-574
+  - SectionTitle helper — L575-599
+  - Gauge helper — L600-653
+  - DashboardBPage main component — state + month default + parallel staged fetches (ovL/soL/pendingL), Pending Delivery computation, useMemos for pipeline/sparklines/labels — L654-1040
+  - JSX: Header — L1041-1064
+  - JSX: KPI rail — Sales / Invoices / Pending Delivery / Outstanding cards — L1065-1124
+  - JSX: Daily Report (process/SOP exceptions) — L1125-1196
+  - JSX: Revenue chart + Plant Load — L1197-1492
+  - JSX: Order Pipeline + Worker efficiency — L1493-1632
+  - JSX: Revenue by Customer (concentration exhibit, category modes) — L1633-1945
+  - JSX: Top sellers (bedframe/sofa) — L1946-2058
+  - JSX: Fabric usage (past/next 30d by category) — L2059-2296
+  - JSX: Department backlog + Purchasing (to end) — L2297-2469
+
+**Gotchas**
+- Naming trap: the file/folder is 'dashboard-b' and the API file is 'dashboard-overview', but this IS the production Command Center on the '/dashboard' route — there is no separate 'dashboard' page. '/dashboard-b' just redirects to '/dashboard' (src/dashboard-routes.tsx:203).
+- The entire backend is ONE GET '/' handler ~2000 lines with no sub-routes — every dashboard number flows through it. It's 60s KV-cached, so edits won't reflect for up to a minute on live.
+- Month-awareness is snapshot-driven: current-state-only tables (pending delivery, outstanding) are captured into a DAILY snapshot (dashboard-state-snapshot, upsert on org_id+snap_date). For a PAST month it serves the stored snapshot; never write an old snapshot back as 'today' (guarded in the handler ~line 77). Snapshot freshness is the only thing the two tests cover.
+- KPI semantics are owner-pinned (2026-06-12, see MEMORY): Sales = confirmed-SO value; Invoices = invoice-sourced (Σ invoice totals by invoice date, excl. cancelled); Pending Delivery is the consolidated made-but-not-shipped card; Outstanding is point-in-time/'live'. Don't redefine these card sources.
+- Sales/Delivery value figures in the overview endpoint are intentionally NOT recomputed live (cached/snapshot) — see header comment at top of dashboard-overview.ts; cross-check with sales-orders stats endpoint which the page also calls for pipeline.
+- Frontend fetches are staged (ovL/soL/pendingL) so KPI numbers paint before heavy sections; each section shows SectionRowsSkeleton until its own fetch lands — don't collapse into one fetch.
+- recharts is lazy-loaded via ./charts.tsx (~357KB). Keep chart code there, not in index.tsx, or you regress first-paint.
+
+**Start here:** Open `src/pages/dashboard-b/index.tsx` — it IS the Command Center (the `/dashboard` route lazy-loads it); its live data all comes from the single GET handler in `src/api/routes/dashboard-overview.ts`.
+
+---
+
+## Service & Repair
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/service-cases/index.tsx` — Service Cases list (1522) | `src/api/routes/service-cases.ts` — service_cases CRUD + status + photos + stock top-ups (959) | `service_cases` / `service_orders` / `service_order_lines` / `service_order_returns` | `tests/case-pipeline.test.mjs` |
+| `src/pages/service-cases/detail.tsx` — Service Case command center (3275) | `src/api/routes/service-orders.ts` — SV-order returns/repair lifecycle + mode/scope (1569) | `sales_orders` (caseid links SV→case; isServiceOrder mode flag) / `sales_order_items` | `tests/repair-scope.test.mjs` |
+| `src/pages/service-orders/index.tsx` — SV-order list + CreateServiceOrderModal (1224) | `src/api/routes/sales-orders.ts` — co-owns the SO MODE (isServiceOrder) for the re-export pages | `production_orders` (repairscope) / `job_cards` / `fg_batches` | `tests/service-cases-rootcauses.test.mjs` |
+| `src/pages/service-orders/detail.tsx` — SV-order detail (returns, repair scope) (933) | | `stock_adjustments` / `stock_movements` / `cost_ledger` | `tests/service-hub-chain.test.mjs` |
+| `src/pages/service-order/index.tsx` — thin re-export of @/pages/sales in SV mode (18) | | `consignment_orders` / `products` | |
+| `src/pages/service-order/create.tsx` / `detail.tsx` / `edit.tsx` — re-exports of @/pages/sales/* in SV mode | | | |
+
+**Big-file section index**
+- `src/pages/service-cases/detail.tsx`
+  - ServiceCaseDetailPage (default export — main detail page, header/tabs/orchestration) — L191-811
+  - CasePipeline — auto-computed display-only progress stepper — L812-889
+  - RootCausePanel — multi root-cause editor with explicit Add/Save — L890-1168
+  - IssueDescriptionPanel — editable issue description (5W template) — L1169-1273
+  - CategoryDetailsForm — per-category structured second-level inputs — L1274-1834
+  - DamagedPartOption type + CaseDamagedPartsEditor — L1835-1948
+  - AffectedProductsPanel — attach 0..N product SKUs to the case — L1949-2255
+  - StockTopUpPanel — stock-only part top-ups recorded against the case — L2256-2611
+  - PhotosPanel — view/add/remove case photos after creation — L2612-2756
+  - ActionLogPanel — service-agent action log over case lifetime — L2757-2905
+  - SpawnServiceOrderModal — spawn an SV order under this case — L2906-3275
+
+**Gotchas**
+- TWO parallel directories with confusingly similar names: src/pages/service-order/* (SINGULAR) = thin re-exports of the Sales pages running in Service-Order mode via useSOMode() (src/lib/so-mode.ts); src/pages/service-orders/* (PLURAL) = a real, separate repair/returns module with its own list+detail. Don't confuse them.
+- The /service-order (singular) pages have NO own data model — they hit /api/sales-orders with isServiceOrder:true. Editing service-order behavior often means editing src/pages/sales/* (NOT a fork) or src/api/routes/sales-orders.ts. Memory: 'never fork the 1400-line sales list'.
+- sales_orders.caseid (mig 0165) links SV orders onto a case; Replacement Parts on a case = stock_adjustments with reason SERVICE_REPLACEMENT + stock_adjustments.caseid (mig 0164) — NO production order created. Don't route replacement parts through production.
+- Repair scope lives on production_orders.repairscope (FULL=null=byte-identical legacy path); component-level picks stored on affectedProducts[].components and resolved via shared deriveTopLevelWipKey — ONE wipKey formula, never re-implement. Stale picks throw at confirm.
+- Owner ruling: Service orders price RM 0 by default (auto-pricing fully skipped, BUG-016) — don't reintroduce auto-pricing on SV orders. Locked SO headers (production COMPLETED + DO delivered) cannot be zeroed.
+- service_order_returns scrap path (POST /:id/returns/:rid/scrap) writes stock_movements/cost_ledger — integrity-sensitive, mind idempotency.
+- UI must stay 100% English; window.confirm replaced by useConfirm; manual-save surfaces here use verifiedSave + unsaved-nav guard (RootCausePanel is the reference impl).
+
+**Start here:** For a typical Service Case task open `src/pages/service-cases/detail.tsx` (the 3275-line command center) paired with `src/api/routes/service-cases.ts`; for repair/return ORDER behavior open the PLURAL `src/pages/service-orders/detail.tsx` + `src/api/routes/service-orders.ts` — and remember the SINGULAR `src/pages/service-order/*` is just a re-export of the Sales pages in SV mode (edit sales-orders.ts / src/pages/sales/* instead).
+
+---
+
+## Reports & Analytics
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/reports.tsx` — tabbed hub (Sales/Production/Inventory/Financial/Employee) (1396) | `src/api/routes/reports.ts` — /api/reports/* efficiency/schedule/overdue (GET+JSON+send) + compliance.json (545) | `sales_orders` / `sales_order_items` / `invoices` | `tests/efficiency-allowance.test.mjs` |
+| `src/pages/daily-report.tsx` — newspaper-style compliance exceptions (1815) | `src/api/routes/dashboard-overview.ts` — single GET / consolidated dashboard payload (2009) | `purchase_orders` / `purchase_order_items` / `purchase_invoices` / `grns` | |
+| `src/pages/analytics/forecast.tsx` — demand forecast vs historical sales | `src/api/routes/forecasts.ts` — demand-forecast data (131) | `production_orders` / `job_cards` / `delivery_orders` / `delivery_order_items` | |
+| `src/pages/dashboard-b/index.tsx` — experimental Dashboard B / reporting view | | `products` / `workers` / `attendance_records` / `working_hour_entries` / `piece_pics` | |
+| `src/pages/dashboard-b/charts.tsx` — lazy recharts/d3 chart chunk | | `departments` / `bom_templates` / `rd_projects` / `cost_ledger` / `per_po` / `kv_config` / `users` | |
+
+**Big-file section index**
+- `src/pages/reports.tsx`
+  - Types mirroring API response shapes — L19-111
+  - Date helpers — L112-147
+  - CSV helper — L148-173
+  - Shared Components (Spinner / DateRangeSelector / SummaryCard / ReportTable) — L174-295
+  - Tab definitions — L296-319
+  - SalesReportTab — L320-546
+  - ProductionReportTab — L547-740
+  - InventoryReportTab — L741-871
+  - FinancialReportTab — L872-1123
+  - EmployeeReportTab — L1124-1314
+  - ReportsPage (default export, tab router + ?tab= URL sync) — L1315-1396
+
+**Gotchas**
+- No page file exceeds the ~2000-line threshold (reports.tsx 1396, daily-report.tsx 1815), so bigFileSections is only provided for reports.tsx as the highest-value map; daily-report.tsx is large but a single page. The 2009-line file is src/api/routes/dashboard-overview.ts, a ROUTE not a page.
+- reports.tsx tabs do NOT call /api/reports/* — each tab fetches the source module's own list API (sales-orders, invoices, production-orders, products, purchase-orders, workers) and computes its own summaries client-side. Only daily-report.tsx consumes /api/reports/compliance.json. Don't expect the Reports hub and the reports.ts route to share data shapes.
+- Heavy business logic lives in src/api/lib/* not in the route file: compliance-report.ts (1291 lines, the Daily Report engine), efficiency-report.ts (644), schedule-overdue-report.ts. The route file (reports.ts, 545) is a thin wrapper around these. Edit logic in lib, not the route.
+- Two shared client engines: src/lib/print-report.ts (305 lines, THE dashboard print/report engine — see MEMORY arch_report_print_engine; WYSIWYG, wire onFilteredDataChange for sort-follow) and src/lib/export-report.ts (74, export helper). Reuse these — don't hand-roll print/export.
+- dashboard-b/ is explicitly disposable/experimental and mirrors /dashboard numbers; charts.tsx is lazy-loaded to defer the ~357KB recharts/d3 bundle. Don't import recharts eagerly into index.tsx or you reintroduce the load-order regression.
+- reports.ts exposes both HTML/JSON GET pairs AND POST .../send email endpoints (efficiency/schedule/overdue) that pull recipients from kv_config + users — sending touches the email/cron path, not just reads.
+- Routes mounted in src/api/app.ts (there is no src/api/index.ts): /api/reports + /api/internal/reports (reports.ts), /api/forecasts (forecasts.ts), plus dashboard-overview.
+
+**Start here:** For a Reports & Analytics task, open `src/pages/reports.tsx` first if it's the tabbed hub UI, or `src/api/lib/compliance-report.ts` if it's the Daily Report / exception logic; the thin route shim is `src/api/routes/reports.ts` and the print/export engines are `src/lib/print-report.ts` and `src/lib/export-report.ts`.
+
+---
+
+## R&D / New-Model Development
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/rd/index.tsx` — R&D home, tabbed views + Create Project dialog (1566) | `src/api/routes/rd-projects.ts` — full R&D lifecycle: CRUD + transitions + pricing + material issuance + labour hours (2261) | `rd_projects` / `rd_prototypes` | No dedicated R&D test files exist under tests/ (verified). R&D module is currently untested. |
+| `src/pages/rd/detail.tsx` — single-project dashboard (3143) | `src/api/routes/rd-team-members.ts` — rd_team_members CRUD (feeds labour cost) (305) | `rd_team_members` / `rd_labour_hours` | |
+| `src/pages/rd/maintenance.tsx` — R&D Team Members CRUD grid (488) | | `rd_material_issuances` | |
+| `src/pages/rd/health.ts` — project health-scoring helper (non-page) (135) | | `stock_movements` (written on material issuance / reversal) | |
+
+**Big-file section index**
+- `src/pages/rd/detail.tsx`
+  - Helpers + constants (getStageLabels by projectType, makeBlankIssuanceLine, MilestoneStatusChip, ModalOverlay) — L78-221
+  - RDProjectDetailPage component start — state, data load, save/edit handlers, status-flip + clone logic — L222-1356
+  - Derived totals + photo/crop handlers (issuance totals, cover/milestone photo replace) — L1036-1356
+  - Render: Project Info card + Pricing Targets + material-vs-target gauge + R&D Cost Breakdown — L1504-1700
+  - Render: Status action buttons (Hold/Resume/Complete/Reopen/Move-to-Draft/advance stage) — L1764-1858
+  - Render: Header banner + 2-column layout + Stage Timeline — L1859-1953
+  - Render: Clone source card (CLONE projects only) — L1954-2000
+  - Render: Milestones (full-width, editable target dates + photos) — L2001-2136
+  - Render: Prototypes (split by Improvements / Defects) — L2137-2224
+  - Render: Material Issuance Log — L2228-2301
+  - Render: Labour Hours table (rd_labour_hours joined to team members) — L2302-2389
+  - Render: Right rail (sticky cover + project info) + per-record Audit trail — L2390-2420
+  - Edit Project Modal (incl. clone-source fieldset + pricing targets) — L2421-2628
+  - Add/Edit Prototype Modal — L2629-2738
+  - Issue Material Modal — L2742-end
+- `src/pages/rd/index.tsx`
+  - Constants + StageProgressBar + ProjectHealthChips — L42-196
+  - DraftCard + ProjectCard — L197-484
+  - SummaryView + KpiCard — L485-715
+  - PipelineView — L716-775
+  - ReportsView — L776-983
+  - CreateProjectDialog — L984-1489
+  - Main page render — tab switcher + activeTab routing (summary/drafts/projects/completed/pipeline/reports) — L1490-1566
+
+**Gotchas**
+- Material issuance writes real stock_movements (rd-projects.ts ~lines 1224, 1460, 1699, 1852) and updates rd_projects.actualCost — issuance/reversal must roll back cleanly or you get orphan stock_movements with no matching issuance row. Treat issue-material as an inventory-affecting cascade, not a log.
+- Labour cost is auto-computed from rd_labour_hours JOIN rd_team_members: FULL_TIME rows contribute hours*hourlyRateSen; PART_TIME rows contribute ZERO to project cost (rd-projects.ts ~232-281). Don't 'fix' PT contributing 0 — it's intentional.
+- Stage labels are project-type dependent: getStageLabels() returns different labels for IMPROVEMENT and CLONE projects (detail.tsx 78-95). CLONE projects also surface a clone-source card + sourcePriceSen fields.
+- Pricing-target columns are snake_case in SQL (target_selling_price_sen, target_material_cost_sen, started_at) while most other R&D columns are camelCase (projectId, productCategory). Per the column-rename-map gotcha, prefer snake_case for new columns; camelCase write columns need a rename-map entry or they silently 400.
+- Project status model: DRAFT / ACTIVE / ON_HOLD / COMPLETED / CANCELLED with dedicated transition endpoints (start/hold/resume/complete/move-to-draft/reopen) — change status via these, not a raw PUT, so audit trail + started_at stay consistent.
+- No automated tests cover R&D — verify lifecycle + issuance changes manually before shipping.
+- Production BOM was removed (Task #8); leftover comments at detail.tsx ~2225 and ~2739 are dead markers, not a missing feature.
+
+**Start here:** For most R&D tasks open `src/pages/rd/detail.tsx` (the 3143-line project dashboard) for UI, paired with `src/api/routes/rd-projects.ts` for the lifecycle/issuance/labour backend; `src/pages/rd/index.tsx` is the entry list page.
+
+---
+
+## Quality, Warehouse, Scanning & Platform
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/quality.tsx` — QC Inspections (Pending/History/Templates) (977) | `src/api/routes/qc-inspections.ts` — QC inspections CRUD (qc_inspections + qc_defects) | `qc_inspections` / `qc_defects` / `qc_templates` / `qc_template_items` / `qc_tags` | `tests/audit.test.mjs` |
+| `src/pages/warehouse.tsx` — Grid / Stock In-Out / Movement History (1368) | `src/api/routes/qc-pending.ts` — cron generates PENDING inspections from templates (12:00/16:00) | `stock_movements` / `stock_adjustments` / `fg_units` | `tests/do-scan-sort.test.mjs` |
+| `src/pages/do-scan.tsx` — mobile DO sticker scanning | `src/api/routes/qc-templates.ts` — checklist templates (qc_templates + qc_template_items) | `fabric_trackings` / `audit_events` / `edit_presence` / `file_assets` | `tests/dept-scan-split.test.mjs` |
+| `src/pages/rack-scan.tsx` — rack QR stock-in (1097) | `src/api/routes/public-rack-qr.ts` — PUBLIC no-login rack stock-in (auth-bypassed, idempotent) (711) | `kv_config` / `hookka_erp_metrics` | `tests/scan-per-piece.test.mjs` |
+| `src/pages/notifications.tsx` — in-app notifications | `src/api/routes/admin.ts` — archive/restore (writes *_archive tables) (705) | `sales_orders_archive` / `job_cards_archive` / `production_orders_archive` / `sales_order_items_archive` | `tests/security-public-endpoints.test.mjs` |
+| `src/pages/maintenance.tsx` — Equipment List / Schedule / History | `src/api/routes/admin-health.ts` — platform health/metrics aggregation (1569) | | `tests/security-permission-matrix.test.mjs` |
+| `src/pages/track/index.tsx` — public order/fabric tracking timeline | `src/api/routes/audit-events.ts` — audit log read/write | | `tests/tenant-isolation.test.mjs` |
+| `src/pages/admin/health.tsx` — admin health dashboard (1791) | `src/api/routes/presence.ts` — edit-presence (edit_presence) | | |
+| `src/pages/settings/index.tsx` — Company/Numbering/Production/System tabs (1069) | `src/api/routes/fe-rum.ts` — frontend RUM perf ingest | | |
+| `src/pages/settings/organisations.tsx` — sister-company / org mgmt | `src/api/routes/sheets-sync.ts` — Google Sheets sync | | |
+| `src/pages/settings/Users.tsx` — (adjacent; owned by RBAC/Users module) | `src/api/routes/kv-config.ts` — generic KV config (kv_config) / `files.ts` — file assets (/api/files) / `fabric-tracking.ts` — fabric_trackings CRUD | | |
+
+**Big-file section index**
+- `src/pages/warehouse.tsx`
+  - WarehousePage (root) — L122-1252
+  - Grid tab (rack/stock view) — L649-1003
+  - Stock In/Out tab — L1004-1197
+  - History tab — L1198-1252
+  - MovementTable helper — L1253-1368
+- `src/pages/admin/health.tsx`
+  - Sparkline — L62-94
+  - KpiCard — L95-181
+  - DailyTrendChart — L182-332
+  - HourlyErrorChart — L333-400
+  - SectionHeader — L401-421
+  - HealthStatusCard — L422-448
+  - AdminHealthPage (root) — L449-1791
+- `src/pages/settings/index.tsx`
+  - SaveToast — L245-278
+  - SettingsPage (root, tab state) — L279-1069
+  - Company tab (renderCompanyTab) — L1063
+  - Numbering tab (renderNumberingTab) — L1064
+  - Production tab (renderProductionTab) — L1065
+  - System tab (renderSystemTab) — L1066
+- `src/pages/quality.tsx`
+  - QualityPage (root) — L150-187
+  - PendingTab + PendingRow — L207-341
+  - DoInspectionForm — L342-603
+  - HistoryTab — L604-672
+  - TemplatesTab + TemplateEditor — L673-977
+- `src/pages/rack-scan.tsx`
+  - RackScanPage (single component) — L103-1097
+- `src/pages/maintenance.tsx`
+  - MaintenancePage (root) — L76-356
+  - Tab 1 Equipment List — L369-536
+  - Tab 2 Maintenance Schedule — L538-713
+  - Tab 3 Maintenance History — L715-812
+
+**Gotchas**
+- public-rack-qr.ts is auth-BYPASSED via PUBLIC_PREFIXES ('/api/public/rack-qr/'). Any new endpoint added under that prefix is exposed with no login — guard tenancy/idempotency manually. Covered by tests/security-public-endpoints.test.mjs.
+- QC Phase 2 is DESCOPED (memory project_qc_phase2_descoped): qc_tags rows still get written on FAIL but owner does NOT want them surfaced in Inventory or as DO warnings. Don't re-surface qc_tags.
+- files.ts serves images via attachment Content-Disposition yet <img src=/api/files/:id/download> still renders — relied on by the Products Catalog modular photo grid. Don't change disposition.
+- rack stock-in is move-aware and idempotent (writes fg_units / job_cards). WIP idempotency uses wip_cascade_log claim (created at runtime, opt-in via orgId) — see arch_wip_idempotency_gap; don't double-apply.
+- admin.ts archive/restore writes to *_archive shadow tables (sales_orders_archive etc.); restore must repopulate child tables in FK order.
+- kv_config is the generic config store (public_holidays consumed by payroll/costing). A bad key here silently breaks unrelated modules.
+- New columns referenced in route SQL writes need a column-rename-map.json entry or they 400 'Invalid request body' (CI-guarded); prefer snake_case for new columns (arch_column_rename_map_gotcha).
+- do-scan / rack-scan are mobile-first floor tools; per-piece scan splits are tested (dept-scan-split, scan-per-piece) — keep wipKey derivation via the shared deriveTopLevelWipKey, never re-implement.
+
+**Start here:** For QC work open `src/api/routes/qc-pending.ts` + `src/pages/quality.tsx`; for warehouse/stock-scan work open `src/api/routes/public-rack-qr.ts` (the auth-bypassed stock-in flow) and `src/pages/warehouse.tsx`; for platform/admin work start at `src/api/routes/admin-health.ts`.
+
+---
+
 Before schema/money/ship work read docs/HOOKKA-GOTCHAS.md; for review depth see docs/DEV-OPERATING-FRAMEWORK.md.

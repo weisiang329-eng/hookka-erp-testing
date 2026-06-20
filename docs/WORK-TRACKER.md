@@ -25,10 +25,11 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
   Dept-Performance/Labor-Cost). Done myself via NAVIGATION-MAP (read ~250 lines not 10,951).
   tsc clean, shipped `4157cf88`. **TODO left: system-wide sweep for the same KPI-stale class
   (dashboard/reports/command-center) + verify-live.**
-- 🔵 **Supplier Pricing → Supplier merge** (task #54) — premium unified module
-  ([Suppliers | Price Comparison] tabs; supplier detail [Pricing & SKUs | Price
-  History]; retire "Supplier Pricing" nav; `/procurement/pricing` redirect). Built
-  on worktree branch, commit `5064505c`. **TODO: integrate + build:strict + ship + verify.**
+- ✅ **Supplier Pricing → Supplier merge** (task #54) — cherry-picked `5064505c` onto main
+  ([Suppliers | Price Comparison] tabs in maintenance.tsx; supplier detail [Pricing & SKUs |
+  Price History]; nav "Suppliers"→maintenance; `/procurement/pricing` redirects). Reviewed diff:
+  ComparisonTab was PORTED from pricing.tsx → **deleted the now-dead pricing.tsx** so there's one
+  comparison surface (no drift). tsc clean. Shipped `b3b42b6c`. **TODO left: verify-live.**
 - ✅ **Dev Operating Framework + Work Tracker** — this doc set + the 快准省 / review-
   discipline answer + durable tracking cadence. Committed.
 - ✅ **Codex docs read + efficiency framework adopted** — read all context-packs +

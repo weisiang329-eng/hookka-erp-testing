@@ -69,6 +69,14 @@ body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* On narrow viewports (phones) allow doc numbers to wrap rather than
+   forcing horizontal scroll on the detail info cards. */
+@media (max-width: 480px) {
+  .doc-number {
+    white-space: normal;
+    word-break: break-all;
+  }
+}
 
 /* Code / ID cells (document numbers, SO IDs, product codes, customer PO).
    Force a slashed zero + tabular figures so "0" can never be misread as

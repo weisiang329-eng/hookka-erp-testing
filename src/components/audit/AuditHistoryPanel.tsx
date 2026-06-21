@@ -84,7 +84,20 @@ function humanizeKey(key: string): string {
 
 function formatDefault(value: unknown): string {
   if (value === null || value === undefined) return "—";
-  if (typeof value === "string") return value.length > 100 ? value.slice(0, 100) + "…" : value;
+  if (typeof value === "string") {
+    // Base64 data-URIs and raw base64 blobs are unbreakable strings that
+    // overflow narrow viewports (a 100-char base64 snippet is ~718 px wide at
+    // default font size). Redact them so the audit log stays readable on mobile.
+    if (value.startsWith("data:image/") || value.startsWith("data:application/")) {
+      return "[image]";
+    }
+    // Heuristic: pure base64 payload (64-char alphabet + padding, no spaces,
+    // length > 64). Catches raw b64 blobs stored without a data-URI prefix.
+    if (value.length > 64 && /^[A-Za-z0-9+/]+=*$/.test(value)) {
+      return "[binary data]";
+    }
+    return value.length > 100 ? value.slice(0, 100) + "…" : value;
+  }
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "true" : "false";
   if (Array.isArray(value)) return `[${value.length} items]`;
@@ -190,7 +203,7 @@ export function AuditHistoryPanel({
             No audit events recorded for this record yet.
           </div>
         ) : (
-          <div className="divide-y divide-[#E2DDD8]">
+          <div className="divide-y divide-[#E2DDD8] overflow-hidden">
             {events.map((e) => (
               <AuditRow
                 key={e.id}
@@ -275,26 +288,26 @@ function AuditRow({
           {expanded && diffs.length > 0 && (
             <ul className="mt-2 space-y-1 text-xs">
               {diffs.map((d) => (
-                <li key={d.key} className="text-gray-600">
+                <li key={d.key} className="text-gray-600 break-words min-w-0">
                   <span className="text-gray-500">updated </span>
-                  <span className="font-semibold text-[#1F1D1B]">{label(d.key)}</span>
+                  <span className="font-semibold text-[#1F1D1B] break-all">{label(d.key)}</span>
                   {event.before == null ? (
                     <>
                       <span className="text-gray-500"> to </span>
-                      <span className="font-semibold text-[#4F7C3A]">{fmt(d.key, d.after)}</span>
+                      <span className="font-semibold text-[#4F7C3A] break-all">{fmt(d.key, d.after)}</span>
                     </>
                   ) : event.after == null ? (
                     <>
                       <span className="text-gray-500"> (was </span>
-                      <span className="font-semibold text-[#9A3A2D]">{fmt(d.key, d.before)}</span>
+                      <span className="font-semibold text-[#9A3A2D] break-all">{fmt(d.key, d.before)}</span>
                       <span className="text-gray-500">)</span>
                     </>
                   ) : (
                     <>
                       <span className="text-gray-500"> from </span>
-                      <span className="font-semibold text-[#9A3A2D]">{fmt(d.key, d.before)}</span>
+                      <span className="font-semibold text-[#9A3A2D] break-all">{fmt(d.key, d.before)}</span>
                       <span className="text-gray-500"> to </span>
-                      <span className="font-semibold text-[#4F7C3A]">{fmt(d.key, d.after)}</span>
+                      <span className="font-semibold text-[#4F7C3A] break-all">{fmt(d.key, d.after)}</span>
                     </>
                   )}
                 </li>

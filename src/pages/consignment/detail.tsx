@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+﻿import { useState, useMemo, useCallback } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
@@ -596,7 +596,7 @@ export default function SalesOrderDetailPage() {
   const isOnHold = order.status === "ON_HOLD";
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       <LockBanner reason={lockReason} />
 
       {/* Confirmation Modal */}
@@ -994,7 +994,7 @@ export default function SalesOrderDetailPage() {
         <Card className="lg:col-span-2">
           <CardHeader className="pb-3"><CardTitle>Order Information</CardTitle></CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+            <div className="grid grid-cols-2 sm:grid-cols-4 max-sm:grid-cols-1 gap-4 text-sm">
               <div><p className="text-xs text-[#9CA3AF]">Customer</p><p className="font-medium">{order.customerName}</p></div>
               <div>
                 <p className="text-xs text-[#9CA3AF]">Delivery Hub</p>

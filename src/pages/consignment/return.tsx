@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useDeferredValue } from "react";
+﻿import { useState, useEffect, useMemo, useCallback, useDeferredValue } from "react";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -394,16 +394,16 @@ export default function ConsignmentReturnPage() {
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Consignment Returns</h1>
           <p className="text-xs text-[#6B7280]">
             Track and process consignment returns from branches
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Button variant="outline" onClick={handleExportCSV}>
             <Download className="h-4 w-4" /> Export CSV
           </Button>

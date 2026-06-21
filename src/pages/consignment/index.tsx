@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+﻿import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -563,13 +563,13 @@ export default function SalesPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6 max-md:space-y-4">
+      <div className="flex items-center justify-between flex-wrap">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Consignment Orders</h1>
           <p className="text-xs text-[#6B7280]">Manage consignment orders from creation to delivery</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Button variant="outline" onClick={() => setScanPOOpen(true)}>
             <ScanLine className="h-4 w-4" /> Scan PO
           </Button>
@@ -602,8 +602,8 @@ export default function SalesPage() {
       {/* Filters */}
       <Card>
         <CardContent className="p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
+          <div className="flex items-center justify-between mb-3 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
               <Button
                 variant={showFilters ? "primary" : "outline"}
                 size="sm"

@@ -4161,9 +4161,9 @@ export default function DeliveryPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       {/* Top-level tab bar */}
-      <div className="flex items-center gap-1 border-b border-[#E2DDD8]">
+      <div className="flex items-center gap-1 border-b border-[#E2DDD8] overflow-x-auto">
         <button
           onClick={() => setPageTab("orders")}
           className={`flex items-center gap-2 px-4 pb-3 pt-1 text-sm font-medium border-b-2 transition-colors cursor-pointer ${
@@ -4188,7 +4188,7 @@ export default function DeliveryPage() {
 
       {pageTab === "orders" && <>
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Delivery Orders</h1>
           <p className="text-xs text-[#6B7280]">
@@ -4428,7 +4428,7 @@ export default function DeliveryPage() {
               <CardTitle className="flex items-center gap-2">
                 <Truck className="h-5 w-5 text-[#6B5C32]" /> Delivery Orders
               </CardTitle>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 {filteredOrders.length > 0 && (
                   <div className="flex items-center gap-2">
                     <input
@@ -4483,7 +4483,7 @@ export default function DeliveryPage() {
             />
 
             {/* Pagination footer */}
-            <div className="flex items-center justify-between border-t border-[#E2DDD8] pt-3 mt-3 text-sm text-[#6B7280]">
+            <div className="flex items-center justify-between border-t border-[#E2DDD8] pt-3 mt-3 text-sm text-[#6B7280] flex-wrap gap-2">
               <span>
                 {totalDOsServer.toLocaleString()} delivery order
                 {totalDOsServer === 1 ? "" : "s"}
@@ -5262,7 +5262,7 @@ export default function DeliveryPage() {
                       ))}
                   </select>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
                   <div>
                     <label className="text-xs text-[#6B7280] font-medium">Lorry</label>
                     <select
@@ -5350,7 +5350,7 @@ export default function DeliveryPage() {
               <p className="text-xs text-[#6B7280]">Create sales invoice from delivered DO</p>
             </div>
             <div className="px-6 py-5 space-y-4">
-              <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="grid grid-cols-2 gap-3 text-sm max-sm:grid-cols-1">
                 <div>
                   <p className="text-[#9CA3AF] text-xs mb-0.5">DO Number</p>
                   <p className="font-medium font-mono">{invoiceDialog.doNo}</p>
@@ -5478,7 +5478,7 @@ export default function DeliveryPage() {
             </div>
 
             {/* Body */}
-            <div className="px-6 py-5 space-y-5">
+            <div className="px-6 py-5 space-y-5 max-md:px-4 max-sm:px-3">
               {/* Status */}
               <div className="flex items-center gap-3">
                 <Badge variant="status" status={detailDO.status}>
@@ -5492,7 +5492,7 @@ export default function DeliveryPage() {
               {/* Info Grid — View or Edit */}
               {editMode ? (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-3 gap-4 text-sm">
+                  <div className="grid grid-cols-3 gap-4 text-sm max-sm:grid-cols-1">
                     <div>
                       <p className="text-[#9CA3AF] text-xs mb-0.5">DO Number</p>
                       <p className="font-medium doc-number">{detailDO.doNo}</p>
@@ -5506,7 +5506,7 @@ export default function DeliveryPage() {
                       <p className="font-medium">{detailDO.hubBranch}</p>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-2 gap-4 max-sm:grid-cols-1">
                     <div>
                       <label className="text-xs text-[#6B7280] font-medium">3PL Provider</label>
                       <select
@@ -5591,7 +5591,7 @@ export default function DeliveryPage() {
                       className="mt-1 w-full px-3 py-2 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] resize-none"
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-2 gap-4 max-sm:grid-cols-1">
                     <div>
                       <label className="text-xs text-[#6B7280] font-medium">Contact Person</label>
                       <input
@@ -5611,7 +5611,7 @@ export default function DeliveryPage() {
                       />
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-2 gap-4 max-sm:grid-cols-1">
                     <div>
                       <label className="text-xs text-[#6B7280] font-medium">
                         Delivery Date <span className="text-[#9CA3AF]">(planned)</span>
@@ -5647,7 +5647,7 @@ export default function DeliveryPage() {
                    not the recipient at the address), and vehicle plate. */
                 <div className="space-y-4">
                   {/* DO Basics */}
-                  <div className="grid grid-cols-3 gap-4 text-sm">
+                  <div className="grid grid-cols-3 gap-4 text-sm max-sm:grid-cols-1">
                     <div>
                       <p className="text-[#9CA3AF] text-xs mb-0.5">DO Number</p>
                       <p className="font-medium doc-number">{detailDO.doNo}</p>
@@ -5699,7 +5699,7 @@ export default function DeliveryPage() {
                       captured. */}
                   <div className="border-t border-[#E2DDD8] pt-3">
                     <p className="text-xs text-[#6B7280] font-medium mb-2">Provider</p>
-                    <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div className="grid grid-cols-2 gap-4 text-sm max-sm:grid-cols-1">
                       <div>
                         <p className="text-[#9CA3AF] text-xs mb-0.5">Name</p>
                         <p className="font-medium">
@@ -5718,7 +5718,7 @@ export default function DeliveryPage() {
 
                   <div className="border-t border-[#E2DDD8] pt-3">
                     <p className="text-xs text-[#6B7280] font-medium mb-2">Vehicle</p>
-                    <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div className="grid grid-cols-2 gap-4 text-sm max-sm:grid-cols-1">
                       <div>
                         <p className="text-[#9CA3AF] text-xs mb-0.5">Plate No.</p>
                         <p className="font-medium doc-number">{detailDO.vehicleNo || "-"}</p>
@@ -5732,7 +5732,7 @@ export default function DeliveryPage() {
 
                   <div className="border-t border-[#E2DDD8] pt-3">
                     <p className="text-xs text-[#6B7280] font-medium mb-2">Driver</p>
-                    <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div className="grid grid-cols-2 gap-4 text-sm max-sm:grid-cols-1">
                       <div>
                         <p className="text-[#9CA3AF] text-xs mb-0.5">Name</p>
                         <p className="font-medium">{detailDO.driverName || "-"}</p>
@@ -5829,7 +5829,7 @@ export default function DeliveryPage() {
                           </div>
                         );
                       })()}
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-2 gap-4 max-sm:grid-cols-1">
                         <div>
                           <p className="text-[#9CA3AF] text-xs mb-0.5">Recipient Contact</p>
                           <p className="font-medium">{detailDO.contactPerson || "-"}</p>
@@ -5839,7 +5839,7 @@ export default function DeliveryPage() {
                           <p className="font-medium doc-number">{detailDO.contactPhone || "-"}</p>
                         </div>
                       </div>
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-2 gap-4 max-sm:grid-cols-1">
                         <div>
                           <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery Date</p>
                           <p className="font-medium">
@@ -6372,7 +6372,7 @@ export default function DeliveryPage() {
                 <div className="px-6 py-5 space-y-5">
                   {/* --- Section 1: Info — company-level fields --- */}
                   {providerDialogTab === "info" && (
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-2 gap-4 max-sm:grid-cols-1">
                     <div className="col-span-2">
                       <label className="text-xs text-[#6B7280] font-medium">Name *</label>
                       <input
@@ -6616,7 +6616,7 @@ export default function DeliveryPage() {
                         <div className="text-xs font-semibold text-[#6B5C32] mb-2">
                           {vehicleEditing === "new" ? "Add Vehicle" : "Edit Vehicle"}
                         </div>
-                        <div className="grid grid-cols-3 gap-2">
+                        <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
                           <div>
                             <label className="text-[10px] text-[#6B7280] font-medium">Plate No *</label>
                             <input
@@ -6796,7 +6796,7 @@ export default function DeliveryPage() {
                         <div className="text-xs font-semibold text-[#6B5C32] mb-2">
                           {driverEditing === "new" ? "Add Driver" : "Edit Driver"}
                         </div>
-                        <div className="grid grid-cols-3 gap-2">
+                        <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
                           <div>
                             <label className="text-[10px] text-[#6B7280] font-medium">Name *</label>
                             <input

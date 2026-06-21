@@ -223,7 +223,7 @@ export default function EInvoicePage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -239,7 +239,7 @@ export default function EInvoicePage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-[#E2DDD8]">
+      <div className="flex gap-1 border-b border-[#E2DDD8] overflow-x-auto">
         {(
           [
             { id: "dashboard" as TabId, label: "Dashboard", icon: BarChart3 },
@@ -660,7 +660,7 @@ export default function EInvoicePage() {
               ) : (
                 <div>
                   {/* Meta info */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4 max-sm:grid-cols-1">
                     <div className="bg-[#F0ECE9] rounded-md p-3">
                       <p className="text-xs text-[#6B7280]">Submission ID</p>
                       <p className="text-sm font-mono font-medium text-[#1F1D1B] truncate">

@@ -455,7 +455,7 @@ export default function InvoicesPage() {
   // so nothing flashes a misleading "0". Pure display change — no data path
   // touched. (Front-end loading-smoothness pass.)
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -515,7 +515,7 @@ export default function InvoicesPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-[#E2DDD8]">
+      <div className="flex gap-1 border-b border-[#E2DDD8] overflow-x-auto">
         <button
           className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
             activeTab === "list"

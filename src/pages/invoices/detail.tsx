@@ -376,7 +376,7 @@ export default function InvoiceDetailPage() {
   const lockReason = (invResp as { lockReason?: string | null } | undefined)?.lockReason ?? null;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       <LockBanner reason={lockReason} />
       {/* Toast */}
       {toast && (
@@ -532,7 +532,7 @@ export default function InvoiceDetailPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {/* From */}
             <Card>
-              <CardContent className="p-6">
+              <CardContent className="p-6 max-md:p-4 max-sm:p-3">
                 <div className="flex items-center gap-2 mb-4">
                   <Building2 className="h-4 w-4 text-[#6B5C32]" />
                   <h3 className="text-xs font-bold text-[#6B5C32] uppercase tracking-wide">
@@ -553,7 +553,7 @@ export default function InvoiceDetailPage() {
 
             {/* Bill To */}
             <Card>
-              <CardContent className="p-6">
+              <CardContent className="p-6 max-md:p-4 max-sm:p-3">
                 <div className="flex items-center gap-2 mb-4">
                   <Building2 className="h-4 w-4 text-[#6B5C32]" />
                   <h3 className="text-xs font-bold text-[#6B5C32] uppercase tracking-wide">
@@ -572,11 +572,11 @@ export default function InvoiceDetailPage() {
 
           {/* Invoice Dates & References */}
           <Card>
-            <CardContent className="p-6">
+            <CardContent className="p-6 max-md:p-4 max-sm:p-3">
               <h3 className="text-xs font-bold text-[#6B5C32] uppercase tracking-wide mb-4">
                 Invoice Details
               </h3>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-6">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-6 max-sm:grid-cols-1">
                 <div>
                   <div className="flex items-center gap-1.5 mb-2">
                     <Calendar className="h-3.5 w-3.5 text-[#9CA3AF]" />

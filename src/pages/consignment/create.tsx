@@ -1,4 +1,4 @@
-import { useState, useEffect, Suspense, useMemo } from "react";
+﻿import { useState, useEffect, Suspense, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -883,7 +883,7 @@ function CreateConsignmentOrderPage() {
   const selectedCustomer = customers.find(c => c.id === customerId);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       {/* BOM Incomplete Modal — shown on 422 from /confirm after create. */}
       {bomError.open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -959,7 +959,7 @@ function CreateConsignmentOrderPage() {
         </div>
       )}
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4 flex-wrap">
         <Button variant="ghost" size="icon" onClick={() => navigate("/consignment")}>
           <ArrowLeft className="h-5 w-5" />
         </Button>

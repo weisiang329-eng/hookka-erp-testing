@@ -439,7 +439,7 @@ export default function DeliveryDetailPage() {
   const lockReason = (doResp as { lockReason?: string | null } | undefined)?.lockReason ?? null;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       <LockBanner reason={lockReason} />
       <PresenceBanner holders={otherEditors} />
       <ObjectPageHeader
@@ -571,7 +571,7 @@ export default function DeliveryDetailPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-4 max-sm:grid-cols-1">
               <div>
                 <p className="text-xs text-[#9CA3AF]">Customer Name</p>
                 <p className="font-medium text-[#1F1D1B]">{order.customerName}</p>
@@ -621,7 +621,7 @@ export default function DeliveryDetailPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-4 max-sm:grid-cols-1">
               <div>
                 <p className="text-xs text-[#9CA3AF]">Delivery Date</p>
                 <p className="font-medium">{order.deliveryDate ? formatDate(order.deliveryDate) : "-"}</p>
@@ -668,7 +668,7 @@ export default function DeliveryDetailPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 gap-4 mb-4">
+            <div className="grid grid-cols-2 gap-4 mb-4 max-sm:grid-cols-1">
               <div>
                 <p className="text-xs text-[#9CA3AF]">Total M&sup3;</p>
                 <p className="text-xl font-bold text-[#1F1D1B]">{order.totalM3.toFixed(2)}</p>
@@ -731,7 +731,7 @@ export default function DeliveryDetailPage() {
         <CardContent>
           {order.proofOfDelivery ? (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4 max-sm:grid-cols-1">
                 <div>
                   <p className="text-xs text-[#9CA3AF]">Receiver Name</p>
                   <p className="font-medium text-[#111827]">
@@ -825,7 +825,7 @@ export default function DeliveryDetailPage() {
           <CardTitle>Items ({order.items.length})</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
+          <div className="rounded-md border border-[#E2DDD8] overflow-hidden overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">

@@ -249,7 +249,7 @@ export default function PaymentsPage() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 space-y-6 max-md:p-4 max-sm:p-3 max-md:space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -345,7 +345,7 @@ export default function PaymentsPage() {
                 </select>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 max-sm:grid-cols-1">
                 {/* Amount — raw string while typing; sen derived per keystroke
                     but the FIELD never re-formats (the old toFixed(2)
                     round-trip made amounts impossible to type). */}

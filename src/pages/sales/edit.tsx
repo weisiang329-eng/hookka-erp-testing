@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+﻿import { useState, useEffect, useMemo, useRef } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { useSOMode, soBasePath, soSingularNoun } from "@/lib/so-mode";
@@ -956,10 +956,10 @@ export default function EditSalesOrderPage() {
   const isLocked = !!lockReason;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       <LockBanner reason={lockReason} />
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4 flex-wrap">
         <Button variant="ghost" size="icon" onClick={() => navigate(`${basePath}/${id}`)}>
           <ArrowLeft className="h-5 w-5" />
         </Button>

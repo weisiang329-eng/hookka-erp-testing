@@ -1,4 +1,4 @@
-import * as React from "react";
+﻿import * as React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -349,7 +349,7 @@ export default function AccountingPage() {
   }, [refreshCoa, refreshJe, refreshAging]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -3316,7 +3316,7 @@ function CostExpenseClassesTab() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Cost &amp; Expense Classes</h2>
         {data && (
           <div className="ml-auto flex items-center gap-2">
@@ -7660,9 +7660,9 @@ function BalanceSheetTab() {
   );
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       <YearCloseCard />
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <label className="text-xs font-semibold text-[#1F1D1B]">As at month-end</label>
         <select value={period} onChange={(e) => setPeriod(e.target.value)} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
           {months.map((m) => <option key={m} value={m}>{m}</option>)}

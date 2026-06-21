@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+﻿import { useState, useMemo, useCallback } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -94,9 +94,9 @@ export default function CashFlowPage() {
 
   if (loading) {
     return (
-      <div className="p-6 space-y-4">
+      <div className="p-6 max-md:p-4 max-sm:p-3 space-y-4">
         <div className="h-8 w-64 bg-[#F0ECE9] rounded animate-pulse" />
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-4 gap-4 max-xl:grid-cols-2 max-sm:grid-cols-1">
           {[...Array(4)].map((_, i) => (
             <div key={i} className="h-28 bg-[#F0ECE9] rounded-lg animate-pulse" />
           ))}
@@ -109,7 +109,7 @@ export default function CashFlowPage() {
   if (!data) return <div className="p-6 text-[#9A3A2D]">Failed to load cash flow data.</div>;
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 max-md:p-4 max-sm:p-3 space-y-6 max-md:space-y-4">
       {/* Header */}
       <div>
         <h1 className="text-xl font-bold text-[#1F1D1B]">Cash Flow & Bank Reconciliation</h1>
@@ -120,7 +120,7 @@ export default function CashFlowPage() {
 
       {/* Tabs */}
       <div className="border-b border-[#E2DDD8]">
-        <div className="flex gap-0">
+        <div className="flex gap-0 overflow-x-auto">
           {TABS.map((tab) => (
             <button
               key={tab}
@@ -189,7 +189,7 @@ function ForecastTab({ data }: { data: CashFlowData }) {
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       {/* KPI cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {kpis.map((kpi) => (
@@ -369,7 +369,7 @@ function ReconciliationTab({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       {/* Account selector + summary */}
       <div className="flex flex-col lg:flex-row gap-4">
         <Card className="flex-1">
@@ -430,7 +430,7 @@ function ReconciliationTab({
 
       {/* Match button */}
       {(selectedBankTx || selectedJE) && (
-        <div className="flex items-center gap-3 p-3 bg-[#F0ECE9] rounded-lg border border-[#E2DDD8]">
+        <div className="flex flex-wrap items-center gap-3 p-3 bg-[#F0ECE9] rounded-lg border border-[#E2DDD8]">
           <span className="text-sm text-[#6B7280]">
             {selectedBankTx && selectedJE
               ? "Both selected - ready to match"
@@ -643,7 +643,7 @@ function BankAccountsTab({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       {/* Total */}
       <Card>
         <CardContent className="p-5">
@@ -828,3 +828,4 @@ function BankAccountsTab({
     </div>
   );
 }
+

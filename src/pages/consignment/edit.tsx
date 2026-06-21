@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+﻿import { useState, useEffect, useMemo, useRef } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -597,10 +597,10 @@ export default function EditSalesOrderPage() {
   const isLocked = !!lockReason;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-md:space-y-4">
       <LockBanner reason={lockReason} />
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4 flex-wrap">
         <Button variant="ghost" size="icon" onClick={() => navigate(`/consignment/${id}`)}>
           <ArrowLeft className="h-5 w-5" />
         </Button>
@@ -817,7 +817,7 @@ export default function EditSalesOrderPage() {
                   // Module shown via the top Module dropdown — the side-by-side
                   // readonly field that used to display sizeCode here was
                   // mislabeled (sizeCode is the seat SIZE, not the module).
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 max-sm:grid-cols-1 gap-3">
                     <div>
                       <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
                       <Input type="number" onFocus={(e) => e.currentTarget.select()} min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
@@ -900,7 +900,7 @@ export default function EditSalesOrderPage() {
                   </div>
                 ) : (
                   <>
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-5 max-sm:grid-cols-2 gap-3">
                       <div>
                         <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
                         <Input type="number" onFocus={(e) => e.currentTarget.select()} min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
@@ -924,7 +924,7 @@ export default function EditSalesOrderPage() {
                     </div>
 
                     {(item.divanHeightInches || item.legHeightInches || item.specialOrder) && (
-                      <div className="grid grid-cols-3 gap-3">
+                      <div className="grid grid-cols-3 max-md:grid-cols-2 max-sm:grid-cols-1 gap-3">
                         {item.divanHeightInches && (
                           <div>
                             <label className="block text-xs text-[#9CA3AF] mb-1">Divan Surcharge (RM)</label>
@@ -1016,7 +1016,7 @@ export default function EditSalesOrderPage() {
                 })()}
 
                 {/* Per-line Discount (migration 0179) */}
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 max-md:grid-cols-1 gap-3">
                   <div>
                     <label className="block text-xs text-[#9CA3AF] mb-1">Discount (RM or %)</label>
                     <DiscountInput

@@ -736,21 +736,21 @@ export default function GRNPage() {
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
-            onClick={() => navigate("/procurement/grn/create?scan=1")}
-          >
-            <ScanLine className="h-4 w-4" /> Scan GRN
-          </Button>
-          <Button
-            variant="outline"
             onClick={() => navigate("/procurement/grn/create?manual=1")}
           >
-            <Plus className="h-4 w-4" /> Manual Receipt
+            <Plus className="h-4 w-4" /> Create GRN
           </Button>
           <Button
             variant="primary"
-            onClick={() => navigate("/procurement/grn/create")}
+            onClick={() => navigate("/procurement/grn/create?from=po")}
           >
             <FolderInput className="h-4 w-4" /> From PO
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => navigate("/procurement/grn/create?scan=1")}
+          >
+            <ScanLine className="h-4 w-4" /> Scan GRN
           </Button>
         </div>
       </div>

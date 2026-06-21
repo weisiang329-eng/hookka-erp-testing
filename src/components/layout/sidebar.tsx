@@ -147,7 +147,7 @@ const navigationGroups: NavGroup[] = [
     label: "PROCUREMENT",
     items: [
       { name: "Purchase Order", href: "/procurement", icon: ShoppingCart },
-      { name: "GRN", href: "/procurement/grn", icon: ClipboardList },
+      { name: "Goods Receipt", href: "/procurement/grn", icon: ClipboardList },
       { name: "Purchase Invoice", href: "/procurement/pi", icon: CreditCard },
       { name: "MRP", href: "/planning/mrp", icon: Layers },
       { name: "Suppliers", href: "/procurement/maintenance", icon: Building2 },

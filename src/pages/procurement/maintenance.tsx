@@ -285,6 +285,9 @@ function ComparisonTab({
   const [selectedMaterials, setSelectedMaterials] = useState<string[]>([]);
   // Filter input for narrowing the materials dropdown list
   const [materialSearch, setMaterialSearch] = useState("");
+  // Collapsible materials list — closed by default so it doesn't sit open forever
+  // (owner: "why won't this Search close, it stays open"). Opens on focus/typing.
+  const [materialOpen, setMaterialOpen] = useState(false);
   // Per-card sort + filter within the supplier cards section
   const [filterSupplier, setFilterSupplier] = useState("");
   const [sortField, setSortField] = useState<SortField>("unitPrice");
@@ -399,13 +402,22 @@ function ComparisonTab({
               Select Materials{" "}
               <span className="text-xs font-normal text-gray-400">(pick one or more)</span>
             </label>
-            <div className="flex gap-2 mb-2">
+            <div className="flex items-center gap-2 mb-2">
               <Input
                 placeholder="Search materials…"
                 value={materialSearch}
-                onChange={(e) => setMaterialSearch(e.target.value)}
+                onFocus={() => setMaterialOpen(true)}
+                onChange={(e) => { setMaterialSearch(e.target.value); setMaterialOpen(true); }}
+                onKeyDown={(e) => { if (e.key === "Escape") setMaterialOpen(false); }}
                 className="max-w-xs h-8 text-sm"
               />
+              <button
+                type="button"
+                onClick={() => setMaterialOpen((o) => !o)}
+                className="text-xs text-[#6B5C32] hover:underline"
+              >
+                {materialOpen ? "Done" : "Browse"}
+              </button>
               {selectedMaterials.length > 0 && (
                 <button
                   type="button"
@@ -416,6 +428,7 @@ function ComparisonTab({
                 </button>
               )}
             </div>
+            {materialOpen && (
             <div className="border border-[#E2DDD8] rounded-md overflow-auto max-h-40 bg-white">
               {filteredMaterialCodes.length === 0 ? (
                 <p className="text-xs text-gray-400 px-3 py-2">No materials match</p>
@@ -442,6 +455,7 @@ function ComparisonTab({
                 })
               )}
             </div>
+            )}
             {/* Selected chips */}
             {selectedMaterials.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mt-2">

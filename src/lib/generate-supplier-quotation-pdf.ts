@@ -106,7 +106,7 @@ export function generateSupplierQuotationPdf(
   // =========================================================================
   let y = drawLetterhead(doc, {
     docTitle: "SUPPLIER QUOTATION",
-    docNo: supplier.code,
+    docNo: `Supplier: ${supplier.code}`,
     docDate: fmtDate(today),
     logo: isHookka,
     companyInfo: co.info,

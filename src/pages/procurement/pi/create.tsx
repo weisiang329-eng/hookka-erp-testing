@@ -806,7 +806,7 @@ function CreatePurchaseInvoicePage() {
                     colSpan={4}
                     className="px-3 py-2 text-right text-sm font-medium text-[#6B7280]"
                   >
-                    Grand total
+                    TOTAL
                   </td>
                   <td className="px-3 py-2 text-right text-base font-bold text-[#6B5C32]">
                     {totalRM.toLocaleString("en-MY", {

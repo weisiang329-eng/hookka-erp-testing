@@ -1147,7 +1147,7 @@ export default function SalesOrderDetailPage() {
             <div className="flex justify-between text-sm"><span className="text-[#6B7280]">Subtotal</span><span className="font-medium amount">{formatCurrency(order.subtotalSen)}</span></div>
             <hr className="border-[#E2DDD8]" />
             <div className="flex justify-between text-lg font-bold">
-              <span>Grand Total</span>
+              <span>TOTAL</span>
               <span className="text-[#6B5C32]">{formatCurrency(order.totalSen)}</span>
             </div>
           </CardContent>
@@ -1292,7 +1292,7 @@ export default function SalesOrderDetailPage() {
               </tbody>
               <tfoot>
                 <tr className="bg-[#F0ECE9]">
-                  <td colSpan={10} className="px-3 py-3 text-right font-semibold text-[#374151]">Grand Total</td>
+                  <td colSpan={10} className="px-3 py-3 text-right font-semibold text-[#374151]">TOTAL</td>
                   <td className="px-3 py-3 text-right font-bold text-lg text-[#6B5C32]">{formatCurrency(order.totalSen)}</td>
                 </tr>
               </tfoot>

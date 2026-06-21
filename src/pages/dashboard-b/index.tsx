@@ -584,7 +584,7 @@ function SectionTitle({
   right?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-end justify-between mb-3">
+    <div className="flex items-end justify-between mb-3 flex-wrap gap-y-2">
       <div>
         <h3 className="text-sm font-bold text-[#1F1D1B] tracking-[-0.2px]">
           {title}
@@ -1204,7 +1204,7 @@ export default function DashboardBPage() {
               title={revTitle}
               sub="Sales Orders · Invoices · Production · click a legend to toggle"
               right={
-                <div className="flex gap-3 text-xs">
+                <div className="flex flex-wrap gap-3 text-xs">
                   {(
                     [
                       ["Sales Orders", C_SO],
@@ -1645,7 +1645,7 @@ export default function DashboardBPage() {
                   : "sofa only — avg per set · click a customer for the monthly breakdown"
             }
             right={
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <div className="flex items-center gap-1">
                   {(
                     [
@@ -2072,7 +2072,7 @@ export default function DashboardBPage() {
               · {fabGran === "quarter" ? "quarterly trend" : "monthly trend"}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <div className="flex items-center gap-1">
               {(["prev", "next"] as const).map((m) => (
                 <button

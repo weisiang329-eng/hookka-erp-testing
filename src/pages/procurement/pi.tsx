@@ -21,11 +21,11 @@ import {
   Printer,
   RefreshCw,
   ArrowRight,
-  Filter,
   Download,
   Plus,
   ScanLine,
   FolderInput,
+  List,
 } from "lucide-react";
 import {
   FromSourceModal,
@@ -68,12 +68,14 @@ export default function PurchaseInvoicesPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
 
+  // Tabs — single "Purchase Invoices" tab, same skeleton as Sales Invoice list
+  const [activeTab] = useState<"list">("list");
+
   // Filters
   const [filterStatus, setFilterStatus] = useState("");
   const [filterSupplier, setFilterSupplier] = useState("");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
-  const [showFilters, setShowFilters] = useState(false);
 
   // From PO / GRN picker
   const [fromSourceOpen, setFromSourceOpen] = useState(false);
@@ -296,16 +298,10 @@ export default function PurchaseInvoicesPage() {
         action: () => fetchData(),
       },
     ];
-  }, [navigate, toast, fetchData, updateStatus]);
+  }, [navigate, toast, fetchData, updateStatus, suppliers, orgsResp]);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
-      </div>
-    );
-  }
-
+  // Shell renders immediately — grid shows skeleton rows (loading prop) until
+  // data lands. Mirrors the Sales Invoice list (no full-page loading gate).
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -334,158 +330,195 @@ export default function PurchaseInvoicesPage() {
         </div>
       </div>
 
-      {/* Status Pipeline */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex items-center justify-between overflow-x-auto gap-2">
-            {statusCounts.map((s, i) => (
-              <div key={s.label} className="flex items-center gap-2">
-                <div
-                  className="text-center min-w-[80px] cursor-pointer"
-                  onClick={() => { setFilterStatus(filterStatus === s.status ? "" : s.status); setShowFilters(true); }}
-                >
-                  <Badge variant="status" status={s.status}>{s.count}</Badge>
-                  <p className={`text-xs mt-1 ${filterStatus === s.status ? "text-[#6B5C32] font-medium" : "text-[#6B7280]"}`}>{s.label}</p>
-                </div>
-                {i < statusCounts.length - 1 && <ArrowRight className="h-4 w-4 text-[#D1CBC5] shrink-0" />}
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Summary Cards */}
+      {/* KPI Cards — gold card style: p-4 flex items-center gap-3, colored icon-box left, text-2xl font-bold */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <FileText className="h-5 w-5 text-[#6B5C32]" />
+            </div>
             <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{totalPIs}</p>
               <p className="text-xs text-[#6B7280]">Total PIs</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{totalPIs}</p>
             </div>
-            <FileText className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+              <Clock className="h-5 w-5 text-[#9C6F1E]" />
+            </div>
             <div>
+              <p className="text-2xl font-bold text-[#9C6F1E]">{pendingPayment}</p>
               <p className="text-xs text-[#6B7280]">Pending Payment</p>
-              <p className="text-xl font-bold text-amber-600">{pendingPayment}</p>
             </div>
-            <Clock className="h-5 w-5 text-amber-500" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#FDECEA] p-2.5">
+              <AlertTriangle className="h-5 w-5 text-[#9A3A2D]" />
+            </div>
             <div>
+              <p className="text-2xl font-bold text-[#9A3A2D]">{overdue}</p>
               <p className="text-xs text-[#6B7280]">Overdue</p>
-              <p className={`text-xl font-bold ${overdue > 0 ? "text-red-600" : "text-[#1F1D1B]"}`}>{overdue}</p>
             </div>
-            <AlertTriangle className={`h-5 w-5 ${overdue > 0 ? "text-red-500" : "text-[#E2DDD8]"}`} />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-[#6B7280]">Total Value</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(totalValueSen)}</p>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <DollarSign className="h-5 w-5 text-[#6B5C32]" />
             </div>
-            <DollarSign className="h-5 w-5 text-[#6B5C32]" />
+            <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{formatCurrency(totalValueSen)}</p>
+              <p className="text-xs text-[#6B7280]">Total Value</p>
+            </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Filters */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <Button
-                variant={showFilters ? "primary" : "outline"}
-                size="sm"
-                onClick={() => setShowFilters(!showFilters)}
-              >
-                <Filter className="h-4 w-4" /> Filters
-                {hasActiveFilters && <span className="ml-1 bg-white text-[#6B5C32] text-xs rounded-full h-5 w-5 flex items-center justify-center font-bold">!</span>}
-              </Button>
-              {hasActiveFilters && (
-                <Button variant="ghost" size="sm" onClick={clearFilters} className="text-[#9CA3AF] hover:text-[#374151]">
-                  <X className="h-4 w-4" /> Clear
+      {/* Tabs — single tab bar matching Sales Invoice list skeleton */}
+      <div className="flex gap-1 border-b border-[#E2DDD8]">
+        <button
+          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === "list"
+              ? "border-[#6B5C32] text-[#6B5C32]"
+              : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
+          }`}
+        >
+          <List className="h-4 w-4" />
+          Purchase Invoices
+        </button>
+      </div>
+
+      {activeTab === "list" && (
+        <>
+          {/* Status Pipeline */}
+          <Card>
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between overflow-x-auto gap-2">
+                {statusCounts.map((s, i) => (
+                  <div key={s.label} className="flex items-center gap-2">
+                    <div
+                      className="text-center min-w-[80px] cursor-pointer"
+                      onClick={() => setFilterStatus(filterStatus === s.status ? "" : s.status)}
+                    >
+                      <Badge variant="status" status={s.status}>{s.count}</Badge>
+                      <p className={`text-xs mt-1 ${filterStatus === s.status ? "text-[#6B5C32] font-medium" : "text-[#6B7280]"}`}>{s.label}</p>
+                    </div>
+                    {i < statusCounts.length - 1 && <ArrowRight className="h-4 w-4 text-[#D1CBC5] shrink-0" />}
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Filters — always-visible, matching Sales Invoice list style */}
+          <Card>
+            <CardContent className="p-4">
+              <div className="flex flex-wrap items-end gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-[#6B7280] mb-1">
+                    Status
+                  </label>
+                  <select
+                    className="border border-[#E2DDD8] rounded-md px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30"
+                    value={filterStatus}
+                    onChange={(e) => setFilterStatus(e.target.value)}
+                  >
+                    {ALL_PI_STATUSES.map(s => (
+                      <option key={s.value} value={s.value}>{s.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-[#6B7280] mb-1">
+                    Supplier
+                  </label>
+                  <select
+                    className="border border-[#E2DDD8] rounded-md px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30"
+                    value={filterSupplier}
+                    onChange={(e) => setFilterSupplier(e.target.value)}
+                  >
+                    <option value="">All Suppliers</option>
+                    {uniqueSuppliers.map(([id, name]) => (
+                      <option key={id} value={id}>{name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-[#6B7280] mb-1">
+                    From Date
+                  </label>
+                  <Input
+                    type="date"
+                    value={filterDateFrom}
+                    onChange={(e) => setFilterDateFrom(e.target.value)}
+                    className="border border-[#E2DDD8] rounded-md px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-[#6B7280] mb-1">
+                    To Date
+                  </label>
+                  <Input
+                    type="date"
+                    value={filterDateTo}
+                    onChange={(e) => setFilterDateTo(e.target.value)}
+                    className="border border-[#E2DDD8] rounded-md px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30"
+                  />
+                </div>
+                {hasActiveFilters && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-[#6B7280]"
+                    onClick={clearFilters}
+                  >
+                    <X className="h-3 w-3" />
+                    Clear
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* PI DataGrid */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <FileText className="h-5 w-5 text-[#6B5C32]" />
+                  All Purchase Invoices
+                  {hasActiveFilters && (
+                    <span className="text-sm font-normal text-[#6B7280]">
+                      ({filteredInvoices.length} of {invoices.length})
+                    </span>
+                  )}
+                </div>
+                <Button variant="outline" size="sm" onClick={exportCSV}>
+                  <Download className="h-4 w-4" /> Export CSV
                 </Button>
-              )}
-              {hasActiveFilters && (
-                <span className="text-sm text-[#6B7280]">
-                  Showing {filteredInvoices.length} of {invoices.length} invoices
-                </span>
-              )}
-            </div>
-            <Button variant="outline" size="sm" onClick={exportCSV}>
-              <Download className="h-4 w-4" /> Export CSV
-            </Button>
-          </div>
-
-          {showFilters && (
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-3 border-t border-[#E2DDD8]">
-              <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">Status</label>
-                <select
-                  value={filterStatus}
-                  onChange={(e) => setFilterStatus(e.target.value)}
-                  className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-                >
-                  {ALL_PI_STATUSES.map(s => (
-                    <option key={s.value} value={s.value}>{s.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">Supplier</label>
-                <select
-                  value={filterSupplier}
-                  onChange={(e) => setFilterSupplier(e.target.value)}
-                  className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-                >
-                  <option value="">All Suppliers</option>
-                  {uniqueSuppliers.map(([id, name]) => (
-                    <option key={id} value={id}>{name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">Date From</label>
-                <Input type="date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} />
-              </div>
-              <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">Date To</label>
-                <Input type="date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} />
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* PI DataGrid */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2">
-            <FileText className="h-5 w-5 text-[#6B5C32]" />
-            Purchase Invoices
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <DataGrid<PurchaseInvoice>
-            columns={piGridColumns}
-            data={filteredInvoices}
-            keyField="id"
-            virtualize
-            loading={loading}
-            stickyHeader={true}
-            onDoubleClick={(row) => navigate(`/procurement/pi/${row.id}`)}
-            contextMenuItems={piGridContextMenu}
-            maxHeight="calc(100vh - 300px)"
-            emptyMessage="No purchase invoices found."
-          />
-        </CardContent>
-      </Card>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <DataGrid<PurchaseInvoice>
+                columns={piGridColumns}
+                data={filteredInvoices}
+                keyField="id"
+                virtualize
+                loading={loading}
+                stickyHeader={true}
+                onDoubleClick={(row) => navigate(`/procurement/pi/${row.id}`)}
+                contextMenuItems={piGridContextMenu}
+                maxHeight="calc(100vh - 300px)"
+                emptyMessage="No purchase invoices found."
+              />
+            </CardContent>
+          </Card>
+        </>
+      )}
 
       {/* From PO / GRN picker — navigates to PI create with pre-fill param */}
       <FromSourceModal

@@ -42,6 +42,13 @@ export type PurchaseInvoicePdfData = {
   purchaseOrderId?: string;
   supplierId?: string;
   supplierName: string;
+  // Supplier party details for the Supplier block (mirrors the Sales Invoice
+  // Bill To: address + contact). The FE looks these up from /api/suppliers by
+  // supplierId and passes them in.
+  supplierAddress?: string | null;
+  supplierContact?: string | null;
+  supplierPhone?: string | null;
+  supplierEmail?: string | null;
   invoiceDate?: string;
   dueDate?: string;
   amountSen: number;
@@ -106,13 +113,13 @@ export function generatePurchaseInvoicePdf(
   doc.setTextColor(...PDF.ink);
 
   // --- Reference block (DO/SI lblVal two-column style) ---
-  const labelW = 24;
   const lblVal = (
     x: number,
     yy: number,
     k: string,
     v: string,
     maxW: number,
+    lw = 24,
   ): number => {
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8);
@@ -121,18 +128,30 @@ export function generatePurchaseInvoicePdf(
     doc.setFont("helvetica", "bold");
     doc.setTextColor(...PDF.ink);
     const lines = doc.splitTextToSize(v || "-", maxW);
-    doc.text(lines, x + labelW, yy);
+    doc.text(lines, x + lw, yy);
     return yy + Math.max(1, lines.length) * 4.3 + 0.8;
   };
 
   const leftX = margin;
-  const leftMaxW = cw * 0.55 - labelW;
+  const leftMaxW = cw * 0.55 - 24;
   let ly = 40;
   ly = lblVal(leftX, ly, "Supplier", pi.supplierName, leftMaxW);
-  ly = lblVal(leftX, ly, "Supplier ID", pi.supplierId || "-", leftMaxW);
+  // Supplier party details — mirror the Sales Invoice "Bill To" block. Each
+  // line only renders when present so the block stays tidy.
+  const supAddr = (pi.supplierAddress ?? "").toString().trim();
+  if (supAddr) ly = lblVal(leftX, ly, "Address", supAddr, leftMaxW);
+  const supContact = (pi.supplierContact ?? "").toString().trim();
+  if (supContact) ly = lblVal(leftX, ly, "Contact", supContact, leftMaxW);
+  const supPhone = (pi.supplierPhone ?? "").toString().trim();
+  if (supPhone) ly = lblVal(leftX, ly, "Phone", supPhone, leftMaxW);
+  const supEmail = (pi.supplierEmail ?? "").toString().trim();
+  if (supEmail) ly = lblVal(leftX, ly, "Email", supEmail, leftMaxW);
 
   const rightX = pageW / 2 + 12;
-  const rightMaxW = pageW - margin - rightX - labelW;
+  // Wider label column (32) so long labels like "Supplier Invoice No." don't
+  // overlap the value — labelW 24 was too narrow and the text ran in.
+  const RLW = 32;
+  const rightMaxW = pageW - margin - rightX - RLW;
   // Dual-key supplier reference numbers (API returns snake_case; toCamel
   // converts on some paths — accept both spellings, same as the GRN).
   const supplierInvoiceNo =
@@ -140,13 +159,13 @@ export function generatePurchaseInvoicePdf(
   const supplierDoNo =
     (pi.supplierDoNo ?? pi.supplier_do_no ?? "").trim() || "-";
   let ry = 40;
-  ry = lblVal(rightX, ry, "PI No.", pi.piNo || "-", rightMaxW);
-  ry = lblVal(rightX, ry, "Supplier Invoice No.", supplierInvoiceNo, rightMaxW);
-  ry = lblVal(rightX, ry, "Supplier DO No.", supplierDoNo, rightMaxW);
-  ry = lblVal(rightX, ry, "Linked PO", pi.poRef || (pi.purchaseOrderId ? pi.purchaseOrderId : "-"), rightMaxW);
-  ry = lblVal(rightX, ry, "Invoice Date", fmtDate(pi.invoiceDate), rightMaxW);
-  ry = lblVal(rightX, ry, "Due Date", fmtDate(pi.dueDate), rightMaxW);
-  lblVal(rightX, ry, "Status", pi.status.replace(/_/g, " "), rightMaxW);
+  ry = lblVal(rightX, ry, "PI No.", pi.piNo || "-", rightMaxW, RLW);
+  ry = lblVal(rightX, ry, "Supplier Invoice No.", supplierInvoiceNo, rightMaxW, RLW);
+  ry = lblVal(rightX, ry, "Supplier DO No.", supplierDoNo, rightMaxW, RLW);
+  ry = lblVal(rightX, ry, "Linked PO", pi.poRef || (pi.purchaseOrderId ? pi.purchaseOrderId : "-"), rightMaxW, RLW);
+  ry = lblVal(rightX, ry, "Invoice Date", fmtDate(pi.invoiceDate), rightMaxW, RLW);
+  ry = lblVal(rightX, ry, "Due Date", fmtDate(pi.dueDate), rightMaxW, RLW);
+  lblVal(rightX, ry, "Status", pi.status.replace(/_/g, " "), rightMaxW, RLW);
 
   let y = Math.max(ly, ry) + 2;
 

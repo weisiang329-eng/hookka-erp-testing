@@ -247,7 +247,13 @@ export default function PurchaseInvoicesPage() {
             const sup = suppliers.find((s) => s.id === supId);
             const lh = letterheadForPurchaseOrg(sup?.purchaseOrgCode || "HOOKKA", orgsResp?.organisations);
             generatePurchaseInvoicePdf(
-              j.data as unknown as Parameters<typeof generatePurchaseInvoicePdf>[0],
+              {
+                ...(j.data as unknown as Parameters<typeof generatePurchaseInvoicePdf>[0]),
+                supplierAddress: sup?.address,
+                supplierContact: sup?.contactPerson,
+                supplierPhone: sup?.phone,
+                supplierEmail: sup?.email,
+              },
               lh,
             );
           } catch {

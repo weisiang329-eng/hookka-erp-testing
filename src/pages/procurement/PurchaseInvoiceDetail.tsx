@@ -121,7 +121,7 @@ export default function PurchaseInvoiceDetailPage() {
   // Purchase Company letterhead — print the PI under the supplier's buying
   // company (HOOKKA / OHANA / any sister co in the registry) while the
   // accounting entity stays HOOKKA ("borrow the letterhead"). Lightweight JSON.
-  const { data: supResp } = useCachedJson<{ data?: Array<{ id: string; purchaseOrgCode?: string }> }>("/api/suppliers");
+  const { data: supResp } = useCachedJson<{ data?: Array<{ id: string; purchaseOrgCode?: string; address?: string; contactPerson?: string; phone?: string; email?: string }> }>("/api/suppliers");
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
 
   // Raw-materials catalog — powers the line-editor's Material Code picker so
@@ -207,7 +207,16 @@ export default function PurchaseInvoiceDetailPage() {
       const sup = (supResp?.data ?? []).find((s) => s.id === pi.supplierId);
       const purchaseOrgCode = sup?.purchaseOrgCode || "HOOKKA";
       const lh = letterheadForPurchaseOrg(purchaseOrgCode, orgsResp?.organisations);
-      generatePurchaseInvoicePdf(pi, lh);
+      generatePurchaseInvoicePdf(
+        {
+          ...pi,
+          supplierAddress: sup?.address,
+          supplierContact: sup?.contactPerson,
+          supplierPhone: sup?.phone,
+          supplierEmail: sup?.email,
+        },
+        lh,
+      );
     } catch {
       toast.error("Could not generate the PDF.");
     }

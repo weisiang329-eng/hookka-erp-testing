@@ -34,6 +34,24 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-21-001 — Mobile: whole page scrolls sideways ("排版歪掉") on phones — bare `<table>`s not in a scroll box
+
+🟢 **Fixed** · `ui-frontend`
+
+**Symptom:** on a phone, many pages (incl. the Command Center home) looked skewed / shifted when scrolling — a horizontal **page** scroll appeared. **Root cause:** plain `<table>` elements NOT wrapped in an `overflow-x-auto` container are wider than the phone screen, so they force the whole document wider than the viewport. (The shared `DataGrid` was already wrapped; these were custom tables inside cards — dashboard, accounting, etc.) **How seen:** the desktop browser couldn't be resized below 1536 and DevTools/F12 wouldn't open via automation, so I injected a **same-origin iframe at 360px** loading the app (shares the login) — that renders + measures the real mobile view. Home overflow measured +36px. **Fix (`9d0bf3e5` → `802af2b2`):** wrapped every bare `<table>` app-wide (21 files) in `overflow-x-auto` + added `min-w-0` to chart containers. **Verified** via the iframe: home / accounting / invoices / procurement overflow **+36 → −5 (zero)** at 360px. (Residual at ≤320px fold widths from a few non-wrapping flex rows — separate follow-up.)
+
+## BUG-2026-06-21-002 — Responsive rollout doubled desktop page padding (regression)
+
+🟢 **Fixed** · `ui-frontend`
+
+**Symptom:** after the phone/tablet rollout, ~15 pages (Production / Products / Inventory / Accounting) showed visibly more whitespace on **desktop** — breaking the "desktop byte-identical" promise. **Root cause:** rollout agents added `p-6` to page-root `<div>`s that already sit inside `<main className="p-4 pb-24 md:p-6">`, so desktop got **48px** (24 + 24) instead of 24. **Fix (`7eac4a25`):** stripped the added `p-6 max-md:p-4 max-sm:p-3` from the 15 page roots (main already provides page padding; roots only need `space-y-*`). **Verified** via iframe: Production root padding 24→0 (single layer), `docOverflowX:0`.
+
+## BUG-2026-06-21-003 — One-time purge endpoint used unmapped camelCase `piId` (would error mid-run)
+
+🟢 **Fixed (caught before running on prod)** · `data-migration`
+
+**Near-miss:** the one-time `POST /api/admin/purge-pre-april-2026` endpoint filtered/deleted `purchase_invoice_items` via `piId`, but **`piId` is NOT in `column-rename-map.json`** (the other 10 columns it used were). `translateSql` only rewrites mapped camelCase, so `piId` would reach Postgres as `piid` → "column does not exist" → the purge would have thrown (safely — single transaction, nothing half-deleted — but wouldn't complete). **Fix:** `piId` → `pi_id` (the real column) before deploying/running. Then ran clean: 1,665 pre-April PO/GRN/PI deleted, **stock + cost preserved** (RM balance 660,216 unchanged, verified). Reinforces the column-rename-map gotcha (prefer real snake_case in one-off SQL).
+
 ## BUG-2026-06-20-002 — Per-line discount migration not wired to the runtime self-applier (would break SO/CO/Invoice saves)
 
 🟢 **Fixed** · `data-migration` `sales-orders`

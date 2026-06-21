@@ -89,6 +89,9 @@ type PurchaseInvoiceDetail = {
   amountSen: number;
   status: string;
   remarks: string;
+  // Supplier reference numbers (dual-keyed on read by the backend).
+  supplierInvoiceNo?: string | null;
+  supplierDoNo?: string | null;
   items?: PurchaseInvoiceItem[];
 };
 
@@ -238,6 +241,8 @@ export default function PurchaseInvoiceDetailPage() {
   const [dInvoiceDate, setDInvoiceDate] = useState("");
   const [dDueDate, setDDueDate] = useState("");
   const [dRemarks, setDRemarks] = useState("");
+  const [dSupplierInvoiceNo, setDSupplierInvoiceNo] = useState("");
+  const [dSupplierDoNo, setDSupplierDoNo] = useState("");
   const [dLines, setDLines] = useState<DraftLine[]>([]);
   useNavGuard(editing && dirty, "You have unsaved invoice edits. Leave without saving?");
 
@@ -246,6 +251,8 @@ export default function PurchaseInvoiceDetailPage() {
     setDInvoiceDate((pi.invoiceDate || "").split("T")[0]);
     setDDueDate((pi.dueDate || "").split("T")[0]);
     setDRemarks(pi.remarks || "");
+    setDSupplierInvoiceNo(pi.supplierInvoiceNo || "");
+    setDSupplierDoNo(pi.supplierDoNo || "");
     setDLines(
       (pi.items ?? []).map((it) => ({
         materialCode: it.materialCode || "",
@@ -322,6 +329,8 @@ export default function PurchaseInvoiceDetailPage() {
           invoiceDate: dInvoiceDate || undefined,
           dueDate: dDueDate || undefined,
           remarks: dRemarks,
+          supplierInvoiceNo: dSupplierInvoiceNo.trim() || null,
+          supplierDoNo: dSupplierDoNo.trim() || null,
           items,
         }),
       });
@@ -463,6 +472,12 @@ export default function PurchaseInvoiceDetailPage() {
                   <span className="text-[#9CA3AF]">—</span>
                 )}
               </span>
+
+              <span className="text-[#6B7280]">Supplier Invoice No.</span>
+              <span className="text-[#4B5563]">{pi.supplierInvoiceNo || "—"}</span>
+
+              <span className="text-[#6B7280]">Supplier DO No.</span>
+              <span className="text-[#4B5563]">{pi.supplierDoNo || "—"}</span>
             </div>
 
             {pi.remarks && (
@@ -601,6 +616,22 @@ export default function PurchaseInvoiceDetailPage() {
                   value={dRemarks}
                   onChange={(e) => { setDRemarks(e.target.value); setDirty(true); }}
                   placeholder="Optional notes"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9CA3AF] mb-1">Supplier Invoice No.</label>
+                <Input
+                  value={dSupplierInvoiceNo}
+                  onChange={(e) => { setDSupplierInvoiceNo(e.target.value); setDirty(true); }}
+                  placeholder="Supplier's invoice number"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9CA3AF] mb-1">Supplier DO No.</label>
+                <Input
+                  value={dSupplierDoNo}
+                  onChange={(e) => { setDSupplierDoNo(e.target.value); setDirty(true); }}
+                  placeholder="Supplier's delivery order number"
                 />
               </div>
             </div>

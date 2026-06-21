@@ -39,6 +39,11 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS grn_id TEXT",
       "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS grn_item_id TEXT",
       "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS invoiced_qty NUMERIC DEFAULT 0",
+      // Supplier reference numbers (owner 2026-06-21): the supplier's own
+      // invoice number AND their delivery-order number. snake_case → no
+      // column-rename-map.json entry needed.
+      "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS supplier_invoice_no TEXT",
+      "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS supplier_do_no TEXT",
     ];
     for (const sql of stmts) {
       try {
@@ -250,6 +255,10 @@ function rowToPI(r: PurchaseInvoiceRow) {
     paid_amount_sen?: number | null;
     grnId?: string | null;
     grn_id?: string | null;
+    supplierInvoiceNo?: string | null;
+    supplier_invoice_no?: string | null;
+    supplierDoNo?: string | null;
+    supplier_do_no?: string | null;
   };
   return {
     id: r.id,
@@ -266,6 +275,10 @@ function rowToPI(r: PurchaseInvoiceRow) {
     paidAmountSen: Number(fx.paid_amount_sen ?? r.paidAmountSen ?? 0),
     status: r.status,
     remarks: r.remarks ?? "",
+    // Supplier reference numbers — toCamel folds snake_case to camelCase on
+    // read in workers, but raw Postgres/mock rows stay snake_case; dual-key.
+    supplierInvoiceNo: fx.supplierInvoiceNo ?? fx.supplier_invoice_no ?? "",
+    supplierDoNo: fx.supplierDoNo ?? fx.supplier_do_no ?? "",
     currency: fx.currency ?? "MYR",
     fxRate: fx.fxRate ?? null,
     foreignAmountSen: fx.foreignAmountSen ?? null,
@@ -549,6 +562,8 @@ app.post("/", async (c) => {
     amountSen?: number;
     remarks?: string;
     status?: string;
+    supplierInvoiceNo?: string | null;
+    supplierDoNo?: string | null;
     items?: PurchaseInvoiceItemInput[];
     currency?: string;
     fxRate?: number;
@@ -580,6 +595,15 @@ app.post("/", async (c) => {
   if (!VALID_TRANSITIONS[status] && status !== "DRAFT") {
     return c.json({ success: false, error: `Invalid initial status: ${status}` }, 400);
   }
+  // Supplier reference numbers — trimmed, empty → null.
+  const supplierInvoiceNo =
+    body.supplierInvoiceNo == null || String(body.supplierInvoiceNo).trim() === ""
+      ? null
+      : String(body.supplierInvoiceNo).trim();
+  const supplierDoNo =
+    body.supplierDoNo == null || String(body.supplierDoNo).trim() === ""
+      ? null
+      : String(body.supplierDoNo).trim();
 
   // Validate items[] up-front so we can fail before any insert.
   let normalizedItems: ReturnType<typeof normalizeItems> | null = null;
@@ -742,9 +766,10 @@ app.post("/", async (c) => {
         `INSERT INTO purchase_invoices (
            id, piNo, purchaseOrderId, poRef, grn_id, supplierId, supplierName,
            invoiceDate, dueDate, amountSen, status, remarks,
+           supplier_invoice_no, supplier_do_no,
            currency, fxRate, foreignAmountSen,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
@@ -759,6 +784,8 @@ app.post("/", async (c) => {
         amountSen,
         status,
         body.remarks ?? null,
+        supplierInvoiceNo,
+        supplierDoNo,
         currency,
         isForeign ? fxRate : null,
         isForeign ? foreignTotalSen : null,
@@ -832,13 +859,14 @@ app.post("/", async (c) => {
         `INSERT INTO purchase_invoices (
            id, piNo, purchaseOrderId, poRef, grn_id, supplierId, supplierName,
            invoiceDate, dueDate, amountSen, status, remarks,
+           supplier_invoice_no, supplier_do_no,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id, piNo, body.purchaseOrderId ?? null, poRef, sourceGrnId, body.supplierId,
         body.supplierName, piInvoiceDate, piDueDate, amountSen, status,
-        body.remarks ?? null, now, now,
+        body.remarks ?? null, supplierInvoiceNo, supplierDoNo, now, now,
       );
     await db.batch(statements);
   }
@@ -892,6 +920,8 @@ app.put("/:id", async (c) => {
     invoiceDate?: string;
     dueDate?: string;
     amountSen?: number;
+    supplierInvoiceNo?: string | null;
+    supplierDoNo?: string | null;
     items?: PurchaseInvoiceItemInput[];
   };
 
@@ -935,12 +965,28 @@ app.put("/:id", async (c) => {
     ? normalizedItems.rows.reduce((s, r) => s + r.lineTotalSen, 0)
     : null;
 
+  const existingRefs = existing as unknown as {
+    supplierInvoiceNo?: string | null;
+    supplier_invoice_no?: string | null;
+    supplierDoNo?: string | null;
+    supplier_do_no?: string | null;
+  };
+  const normRef = (v: string | null | undefined): string | null =>
+    v == null || String(v).trim() === "" ? null : String(v).trim();
   const merged = {
     status: body.status ?? existing.status,
     remarks: body.remarks ?? existing.remarks,
     invoiceDate: body.invoiceDate ?? existing.invoiceDate,
     dueDate: body.dueDate ?? existing.dueDate,
     amountSen: recomputedAmount ?? body.amountSen ?? existing.amountSen,
+    supplierInvoiceNo:
+      body.supplierInvoiceNo !== undefined
+        ? normRef(body.supplierInvoiceNo)
+        : (existingRefs.supplierInvoiceNo ?? existingRefs.supplier_invoice_no ?? null),
+    supplierDoNo:
+      body.supplierDoNo !== undefined
+        ? normRef(body.supplierDoNo)
+        : (existingRefs.supplierDoNo ?? existingRefs.supplier_do_no ?? null),
   };
   const now = new Date().toISOString();
 
@@ -949,6 +995,7 @@ app.put("/:id", async (c) => {
       .prepare(
         `UPDATE purchase_invoices SET
            status = ?, remarks = ?, invoiceDate = ?, dueDate = ?, amountSen = ?,
+           supplier_invoice_no = ?, supplier_do_no = ?,
            updated_at = ?
          WHERE id = ?`,
       )
@@ -958,6 +1005,8 @@ app.put("/:id", async (c) => {
         merged.invoiceDate,
         merged.dueDate,
         merged.amountSen,
+        merged.supplierInvoiceNo,
+        merged.supplierDoNo,
         now,
         id,
       ),

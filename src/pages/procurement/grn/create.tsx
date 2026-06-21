@@ -142,6 +142,8 @@ function GRNCreatePage() {
   // ── Shared form state ─────────────────────────────────────────────────────
   const [receivedBy, setReceivedBy] = useState("");
   const [notes, setNotes] = useState("");
+  // Supplier's own delivery-order number on this receipt (owner 2026-06-21).
+  const [supplierDoNo, setSupplierDoNo] = useState("");
   const [scanOpen, setScanOpen] = useState(false);
   const [convertOpen, setConvertOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -418,6 +420,7 @@ function GRNCreatePage() {
           poId: selectedPO,
           receivedBy: receivedBy.trim(),
           notes: notes.trim(),
+          supplier_do_no: supplierDoNo.trim() || null,
           items: poItemEntries.filter((ie) => ie.receivedQty > 0),
           ...(hasShipment ? {
             arrival_state: "NOT_ARRIVED",
@@ -435,6 +438,7 @@ function GRNCreatePage() {
           supplierName,
           receivedBy: receivedBy.trim(),
           notes: notes.trim(),
+          supplier_do_no: supplierDoNo.trim() || null,
           items: validLines.map((m) => ({
             materialName: m.materialName.trim(),
             materialCode: m.materialCode.trim(),
@@ -621,6 +625,18 @@ function GRNCreatePage() {
                   value={receivedBy}
                   onChange={(e) => setReceivedBy(e.target.value)}
                   placeholder="e.g. Ahmad bin Ismail"
+                />
+              </div>
+
+              {/* Supplier DO No. — the supplier's delivery-order number */}
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">
+                  Supplier DO No.
+                </label>
+                <Input
+                  value={supplierDoNo}
+                  onChange={(e) => setSupplierDoNo(e.target.value)}
+                  placeholder="Supplier's delivery order number"
                 />
               </div>
             </div>

@@ -112,6 +112,7 @@ type GRNDetail = {
   exchange_rate: number | null;
   currency: string | null;
   landed_cost_sen: number;
+  supplier_do_no: string | null;
 };
 
 export default function GRNDetailPage() {
@@ -120,6 +121,8 @@ export default function GRNDetailPage() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const [busy, setBusy] = useState(false);
+  // Supplier DO No. inline edit — null = read view, string = editing.
+  const [supplierDoEdit, setSupplierDoEdit] = useState<string | null>(null);
   // Shipment card expansion
   const [shipmentOpen, setShipmentOpen] = useState(true);
   // Landed cost section expansion
@@ -213,6 +216,32 @@ export default function GRNDetailPage() {
       refresh();
     } catch {
       toast.error(`${label} failed — network error`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Save the supplier's DO number via the main PUT /api/grn/:id.
+  async function saveSupplierDoNo() {
+    if (!grn || supplierDoEdit === null) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/grn/${grn.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ supplier_do_no: supplierDoEdit.trim() || null }),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || "Save Supplier DO No. failed");
+        return;
+      }
+      toast.success("Supplier DO No. saved");
+      setSupplierDoEdit(null);
+      invalidateCachePrefix("/api/grn");
+      refresh();
+    } catch {
+      toast.error("Save Supplier DO No. failed — network error");
     } finally {
       setBusy(false);
     }
@@ -548,6 +577,48 @@ export default function GRNDetailPage() {
 
               <span className="text-[#6B7280]">Received By</span>
               <span className="text-[#4B5563]">{grn.receivedBy || "-"}</span>
+
+              <span className="text-[#6B7280]">Supplier DO No.</span>
+              <span className="text-[#4B5563]">
+                {supplierDoEdit === null ? (
+                  <span className="inline-flex items-center gap-2">
+                    {grn.supplier_do_no || "—"}
+                    <button
+                      type="button"
+                      className="text-xs font-medium text-[#6B5C32] underline hover:text-[#5a4d2a]"
+                      onClick={() => setSupplierDoEdit(grn.supplier_do_no || "")}
+                      disabled={busy}
+                    >
+                      Edit
+                    </button>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5">
+                    <Input
+                      value={supplierDoEdit}
+                      onChange={(e) => setSupplierDoEdit(e.target.value)}
+                      placeholder="Supplier's DO number"
+                      className="h-7 text-sm w-40"
+                    />
+                    <button
+                      type="button"
+                      className="text-xs font-medium text-[#6B5C32] hover:underline"
+                      onClick={saveSupplierDoNo}
+                      disabled={busy}
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      className="text-xs font-medium text-[#9CA3AF] hover:underline"
+                      onClick={() => setSupplierDoEdit(null)}
+                      disabled={busy}
+                    >
+                      Cancel
+                    </button>
+                  </span>
+                )}
+              </span>
 
               <span className="text-[#6B7280]">Status</span>
               <span><Badge variant="status" status={grn.status} /></span>

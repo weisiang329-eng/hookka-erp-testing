@@ -152,10 +152,20 @@ function CreatePurchaseInvoicePage() {
     () => new Date().toISOString().split("T")[0],
   );
   const [remarks, setRemarks] = useState("");
+  // Supplier reference numbers (owner 2026-06-21): the supplier's own invoice
+  // number AND their delivery-order number, captured on the PI for matching.
+  const [supplierInvoiceNo, setSupplierInvoiceNo] = useState("");
+  const [supplierDoNo, setSupplierDoNo] = useState("");
   const [lines, setLines] = useState<PILineDraft[]>([emptyPILine()]);
   const [scanOpen, setScanOpen] = useState(false);
   const [convertOpen, setConvertOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  // OCR gate (owner ruling 2026-06-21): a MANUAL create lands the PI in its
+  // first active non-DRAFT state (PENDING_APPROVAL, locked from editing); only
+  // an OCR/scan-built PI lands as DRAFT (editable, like a Sales Order). This
+  // flag flips true when the form is built via the scan path (?scan=1 deep-link
+  // or the in-form Scan modal's applyOcr).
+  const [ocrUsed, setOcrUsed] = useState(false);
 
   // ── Source PO id to include in POST body for lineage ─────────────────────
   const [sourcePurchaseOrderId, setSourcePurchaseOrderId] = useState<
@@ -229,6 +239,9 @@ function CreatePurchaseInvoicePage() {
     } else if (searchParams.get("scan") === "1") {
       /* eslint-disable-next-line react-hooks/set-state-in-effect */
       setScanOpen(true);
+      // Arriving via the scan deep-link = the OCR path → PI lands as DRAFT.
+      /* eslint-disable-next-line react-hooks/set-state-in-effect */
+      setOcrUsed(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -283,6 +296,10 @@ function CreatePurchaseInvoicePage() {
 
   // OCR apply — verbatim from PIFormDialog.applyOcr
   const applyOcr = (ex: SupplierExtraction) => {
+    // Using OCR to build the lines = the scan path → this PI lands as DRAFT
+    // (editable), matching the Sales Order rule. A manual create stays
+    // non-draft (active + locked).
+    setOcrUsed(true);
     const norm = (s: string | null | undefined) =>
       String(s ?? "")
         .toUpperCase()
@@ -393,6 +410,12 @@ function CreatePurchaseInvoicePage() {
         supplierName: supplier.name,
         invoiceDate,
         remarks,
+        // Owner ruling 2026-06-21: manual create → PENDING_APPROVAL (active,
+        // non-draft, locked from line edits — re-edit via the OCR-draft path);
+        // OCR/scan create → DRAFT (editable, like a Sales Order).
+        status: ocrUsed ? "DRAFT" : "PENDING_APPROVAL",
+        supplierInvoiceNo: supplierInvoiceNo.trim() || null,
+        supplierDoNo: supplierDoNo.trim() || null,
         items: validLines.map((l) => ({
           materialCode: l.materialCode.trim() || null,
           materialName: l.materialName.trim(),
@@ -448,6 +471,8 @@ function CreatePurchaseInvoicePage() {
     const hasData =
       supplierId !== "" ||
       remarks !== "" ||
+      supplierInvoiceNo !== "" ||
+      supplierDoNo !== "" ||
       lines.some(
         (l) =>
           l.materialName.trim() !== "" ||
@@ -462,7 +487,7 @@ function CreatePurchaseInvoicePage() {
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [supplierId, remarks, lines]);
+  }, [supplierId, remarks, supplierInvoiceNo, supplierDoNo, lines]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -563,6 +588,31 @@ function CreatePurchaseInvoicePage() {
               </div>
             )}
 
+            {/* Supplier reference numbers — the supplier's own invoice # and
+                their delivery-order # (for three-way matching). */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">
+                  Supplier Invoice No.
+                </label>
+                <Input
+                  value={supplierInvoiceNo}
+                  onChange={(e) => setSupplierInvoiceNo(e.target.value)}
+                  placeholder="Supplier's invoice number"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">
+                  Supplier DO No.
+                </label>
+                <Input
+                  value={supplierDoNo}
+                  onChange={(e) => setSupplierDoNo(e.target.value)}
+                  placeholder="Supplier's delivery order number"
+                />
+              </div>
+            </div>
+
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1.5">
                 Remarks
@@ -603,7 +653,9 @@ function CreatePurchaseInvoicePage() {
               <span className="text-[#6B5C32]">{formatCurrency(totalSen)}</span>
             </div>
             <div className="text-xs text-[#9CA3AF]">
-              Status will be set to DRAFT
+              {ocrUsed
+                ? "Scanned invoice — status will be set to DRAFT (editable)"
+                : "Status will be set to PENDING APPROVAL (locked from editing)"}
             </div>
           </CardContent>
         </Card>

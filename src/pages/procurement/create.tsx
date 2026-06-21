@@ -386,9 +386,14 @@ function CreatePurchaseOrderPage() {
   const distinctSupplierCount = distinctSupplierIds.length;
 
   // ── Submit handlers ───────────────────────────────────────────
+  // Owner ruling 2026-06-21: a MANUALLY-created PO goes straight to its active
+  // CONFIRMED state (no Draft). PO has no OCR path, so every create here is
+  // manual. The backend POST takes body.status verbatim (defaults to DRAFT
+  // only when omitted) — send CONFIRMED so the PO is active on creation.
   const buildPayload = () => ({
     supplierId: headerSupplierId,
     supplierName: headerSupplierName,
+    status: "CONFIRMED",
     expectedDate,
     notes,
     items: items.map((it) => ({
@@ -470,6 +475,7 @@ function CreatePurchaseOrderPage() {
     const groups = Array.from(bySupplier.entries()).map(([sid, lines]) => ({
       supplierId: sid,
       supplierName: lines[0].supplierName,
+      status: "CONFIRMED",
       expectedDate,
       notes,
       items: lines.map((it) => ({
@@ -584,7 +590,7 @@ function CreatePurchaseOrderPage() {
           }
         >
           <Save className="h-4 w-4" />
-          {saving ? "Saving..." : "Save as Draft"}
+          {saving ? "Saving..." : "Create Purchase Order"}
         </Button>
       </div>
 
@@ -716,7 +722,7 @@ function CreatePurchaseOrderPage() {
               <span>Total</span>
               <span className="text-[#6B5C32]">{formatCurrency(subtotal)}</span>
             </div>
-            <div className="text-xs text-[#9CA3AF]">Status will be set to DRAFT</div>
+            <div className="text-xs text-[#9CA3AF]">Status will be set to CONFIRMED</div>
           </CardContent>
         </Card>
       </div>

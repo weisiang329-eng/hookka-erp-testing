@@ -54,6 +54,10 @@ function ensureGrnMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS exchange_rate REAL",
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS currency TEXT",
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS landed_cost_sen INTEGER DEFAULT 0",
+      // Supplier reference number (owner 2026-06-21): the supplier's own
+      // delivery-order number on this receipt. snake_case → no
+      // column-rename-map.json entry needed.
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS supplier_do_no TEXT",
       // Convert-chain (PO→GRN→PI): per-line consumed-by-PI tracking. A GRN
       // line's available-to-invoice = accepted_qty − invoiced_qty. snake_case
       // so no column-rename-map.json entry is needed; self-applied here AND in
@@ -121,6 +125,8 @@ type GRNRow = {
   exchange_rate: number | null;
   currency: string | null;
   landed_cost_sen: number | null;
+  supplier_do_no: string | null;
+  supplierDoNo?: string | null;
   // toCamel folds the snake_case DB columns to camelCase on read — dual-key
   // the reads below so the stored arrival/shipment/cost values are recovered.
   arrivalState?: string | null;
@@ -261,6 +267,7 @@ function rowToGRN(row: GRNRow, items: GRNItemRow[] = []) {
     exchange_rate: row.exchangeRate ?? row.exchange_rate ?? null,
     currency: row.currency ?? null,
     landed_cost_sen: row.landedCostSen ?? row.landed_cost_sen ?? 0,
+    supplier_do_no: row.supplierDoNo ?? row.supplier_do_no ?? null,
     notes: row.notes ?? "",
   };
 }
@@ -933,9 +940,9 @@ app.post("/", async (c) => {
            container_number, expected_arrival, shipped_date, actual_arrival,
            customs_status, customs_clearance_date,
            shipping_cost_sen, customs_duty_sen, exchange_rate, currency,
-           landed_cost_sen)
+           landed_cost_sen, supplier_do_no)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?,
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         grnId,
         grnNumber,
@@ -964,6 +971,7 @@ app.post("/", async (c) => {
         body.exchange_rate ?? null,
         body.currency ?? null,
         body.landed_cost_sen ?? 0,
+        body.supplier_do_no ?? null,
       ),
       ...grnItems.map((item) =>
         c.var.DB.prepare(
@@ -1057,6 +1065,14 @@ app.put("/:id", async (c) => {
       body.receivedBy !== undefined
         ? String(body.receivedBy)
         : (existing.receivedBy ?? "");
+    // Supplier DO No. — only overwrite when present in the body; trimmed, empty
+    // → null. Read existing dual-keyed (toCamel folds the snake_case column).
+    const existingSupplierDoNo =
+      (existing as GRNRow).supplierDoNo ?? existing.supplier_do_no ?? null;
+    const newSupplierDoNo =
+      body.supplier_do_no !== undefined
+        ? (String(body.supplier_do_no ?? "").trim() || null)
+        : existingSupplierDoNo;
 
     // ── Lock POSTED (received) GRNs from un-posting ──────────────────────
     // Owner ruling 2026-06-21 (option A): once a GRN is POSTED its stock is in
@@ -1156,8 +1172,8 @@ app.put("/:id", async (c) => {
     statements.push(
       c.var.DB.prepare(
         `UPDATE grns SET qcStatus = ?, status = ?, notes = ?,
-           receivedBy = ?, totalAmount = ? WHERE id = ?`,
-      ).bind(newQcStatus, newStatus, newNotes, newReceivedBy, totalAmount, id),
+           receivedBy = ?, totalAmount = ?, supplier_do_no = ? WHERE id = ?`,
+      ).bind(newQcStatus, newStatus, newNotes, newReceivedBy, totalAmount, newSupplierDoNo, id),
     );
 
     await c.var.DB.batch(statements);

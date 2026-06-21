@@ -510,3 +510,152 @@ test("a POSTED (received) GRN is LOCKED — delete is blocked (owner option A)",
   const poi = db.tables.purchase_order_items.find((r) => r.id === "poi-1");
   assert.equal(poi.receivedQty, 10);
 });
+
+// ---------------------------------------------------------------------------
+// No-Draft create-status mapping (owner ruling 2026-06-21).
+//
+// Manual create is a REAL document, not a throwaway draft:
+//   • OCR/scan (body.ocrUsed)                 → DRAFT  (parked for review)
+//   • local goods arrived (default ARRIVED)   → POSTED (stock in now)
+//   • import in transit (arrival_state set)   → DRAFT  (arrival-pipeline tracked)
+// Posting to stock happens ONLY when arrival === ARRIVED — the arrival gate is
+// never bypassed at create time.
+// ---------------------------------------------------------------------------
+
+// Seed an open PO (CONFIRMED, nothing received) the create endpoint can receive.
+function seedOpenPo(db) {
+  db.tables.suppliers.push({ id: "sup-9", code: "S9", name: "OPEN CO", email: null });
+  db.tables.purchase_orders.push({
+    id: "po-9", poNo: "PO-9", supplierId: "sup-9", supplierName: "OPEN CO",
+    subtotalSen: 50000, totalSen: 50000, status: "CONFIRMED", orderDate: "2026-06-01",
+    expectedDate: "", receivedDate: "", notes: "", orgId: "org-test",
+  });
+  db.tables.purchase_order_items.push({
+    id: "poi-9", purchaseOrderId: "po-9", materialCategory: "FOAM",
+    material_code: "FOAM-9", materialName: "FOAM-9 - Foam block", supplierSKU: "",
+    quantity: 5, unitPriceSen: 10000, totalSen: 50000, receivedQty: 0, unit: "pcs",
+    orgId: "org-test",
+  });
+}
+
+test("manual GRN (goods in hand) is born POSTED and posts to stock", async () => {
+  const db = makeDb();
+  const grnRoot = mount(grnApp, db);
+
+  // Manual receipt: no poId, no arrival override → backend default ARRIVED →
+  // status POSTED (No-Draft: a real document, stock in immediately).
+  const res = await grnRoot.request("/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      supplierId: "sup-9",
+      supplierName: "OPEN CO",
+      receivedBy: "Ahmad",
+      items: [
+        { materialName: "Loose foam", materialCode: "F-LOOSE", receivedQty: 3, acceptedQty: 3, rejectedQty: 0 },
+      ],
+    }),
+  });
+  assert.equal(res.status, 201);
+  const data = (await res.json()).data;
+  assert.equal(data.status, "POSTED", "manual arrived GRN must be born POSTED, not DRAFT");
+  assert.equal(data.arrival_state, "ARRIVED");
+});
+
+test("OCR/scan GRN lands as DRAFT for review (not posted)", async () => {
+  const db = makeDb();
+  const grnRoot = mount(grnApp, db);
+
+  const res = await grnRoot.request("/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      supplierId: "sup-9",
+      supplierName: "OPEN CO",
+      receivedBy: "Ahmad",
+      ocrUsed: true, // built from a scanned supplier document
+      items: [
+        { materialName: "Scanned foam", materialCode: "F-SCAN", receivedQty: 3, acceptedQty: 3, rejectedQty: 0 },
+      ],
+    }),
+  });
+  assert.equal(res.status, 201);
+  const data = (await res.json()).data;
+  assert.equal(data.status, "DRAFT", "scanned GRN must be DRAFT for review");
+});
+
+test("import in transit (PO-linked, not arrived) is DRAFT and does NOT post to stock", async () => {
+  const db = makeDb();
+  seedOpenPo(db);
+  const grnRoot = mount(grnApp, db);
+
+  // PO-linked receipt with goods still en-route: defaults NOT_ARRIVED → DRAFT.
+  const res = await grnRoot.request("/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      poId: "po-9",
+      receivedBy: "Ahmad",
+      arrival_state: "NOT_ARRIVED",
+      items: [{ poItemIndex: 0, receivedQty: 5, acceptedQty: 5, rejectedQty: 0 }],
+    }),
+  });
+  assert.equal(res.status, 201);
+  const data = (await res.json()).data;
+  assert.equal(data.status, "DRAFT", "in-transit import must stay DRAFT (arrival-pipeline tracked)");
+  assert.equal(data.arrival_state, "NOT_ARRIVED");
+
+  // NOT posted to stock → the parent PO line's receivedQty stays 0 (no cascade).
+  const poi = db.tables.purchase_order_items.find((r) => r.id === "poi-9");
+  assert.equal(Number(poi.receivedQty) || 0, 0, "in-transit GRN must not bump PO receivedQty");
+});
+
+test("PO-linked + arrival ARRIVED at create → POSTED + receivedQty cascades", async () => {
+  const db = makeDb();
+  seedOpenPo(db);
+  const grnRoot = mount(grnApp, db);
+
+  // Goods physically arrived against the PO at receipt time → arrival ARRIVED →
+  // born POSTED → postGRNToStock + cascadePOStatusAfterGRNPost run.
+  const res = await grnRoot.request("/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      poId: "po-9",
+      receivedBy: "Ahmad",
+      arrival_state: "ARRIVED",
+      items: [{ poItemIndex: 0, receivedQty: 5, acceptedQty: 5, rejectedQty: 0 }],
+    }),
+  });
+  assert.equal(res.status, 201);
+  const data = (await res.json()).data;
+  assert.equal(data.status, "POSTED");
+
+  // receivedQty cascade fired: PO line went 0 → 5 and the PO is now RECEIVED.
+  const poi = db.tables.purchase_order_items.find((r) => r.id === "poi-9");
+  assert.equal(Number(poi.receivedQty), 5, "post-on-create must cascade receivedQty");
+  const po = db.tables.purchase_orders.find((r) => r.id === "po-9");
+  assert.equal(po.status, "RECEIVED");
+});
+
+test("explicit body.status DRAFT forces DRAFT even for arrived goods", async () => {
+  const db = makeDb();
+  const grnRoot = mount(grnApp, db);
+
+  const res = await grnRoot.request("/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      supplierId: "sup-9",
+      supplierName: "OPEN CO",
+      receivedBy: "Ahmad",
+      status: "DRAFT", // caller forces review even though goods are in hand
+      items: [
+        { materialName: "Loose foam", materialCode: "F-LOOSE", receivedQty: 1, acceptedQty: 1, rejectedQty: 0 },
+      ],
+    }),
+  });
+  assert.equal(res.status, 201);
+  const data = (await res.json()).data;
+  assert.equal(data.status, "DRAFT");
+});

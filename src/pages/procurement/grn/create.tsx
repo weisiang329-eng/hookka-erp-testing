@@ -147,6 +147,13 @@ function GRNCreatePage() {
   const [scanOpen, setScanOpen] = useState(false);
   const [convertOpen, setConvertOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  // OCR gate (owner ruling 2026-06-21, mirrors PI create): a GRN built from a
+  // scanned supplier document lands as DRAFT (parked for review, like a scanned
+  // Sales Order). A manual create is a REAL document — it posts straight to
+  // stock when the goods have arrived (local), or sits in the arrival pipeline
+  // when the goods are still in transit (import). Flips true on the ?scan=1
+  // deep-link or whenever the scan modal's applyOcr runs.
+  const [ocrUsed, setOcrUsed] = useState(false);
 
   // ── Shipment details (PO-linked only) ─────────────────────────────────────
   const [shipmentOpen, setShipmentOpen] = useState(false);
@@ -176,6 +183,11 @@ function GRNCreatePage() {
       setScanOpen(true);
     }
   }, [autoScan, po]);
+  // NOTE: ocrUsed is flipped in applyOcr (the authoritative moment a scanned
+  // document actually builds the lines), covering both the PO-linked and manual
+  // scan flows. We deliberately do NOT force it on the ?scan=1 deep-link alone:
+  // if the operator opens Scan but then keys the receipt by hand, it should
+  // follow the manual rule (post when arrived), not be stuck as a Draft.
 
   // ── Seed PO item entries when a deep-linked PO resolves ────────────────────
   // Only runs for the ?poId= deep-link path (locked PO). Convert-from-PO picks
@@ -280,6 +292,10 @@ function GRNCreatePage() {
 
   // ── OCR apply ────────────────────────────────────────────────────────────
   const applyOcr = (ex: SupplierExtraction) => {
+    // Building the receipt from a scanned document = the OCR path → this GRN
+    // lands as DRAFT (editable/parked for review), matching the Sales Order and
+    // Purchase Invoice scan rule. A manual create stays a real document.
+    setOcrUsed(true);
     if (isPoLinked) {
       // PO-linked — match against PO lines (existing behaviour)
       if (!po) return;
@@ -421,6 +437,10 @@ function GRNCreatePage() {
           receivedBy: receivedBy.trim(),
           notes: notes.trim(),
           supplier_do_no: supplierDoNo.trim() || null,
+          // No-Draft (owner 2026-06-21): OCR/scan → DRAFT (review); otherwise the
+          // backend derives the status from arrival (arrived → POSTED, in
+          // transit → DRAFT tracked by the arrival pipeline).
+          ocrUsed,
           items: poItemEntries.filter((ie) => ie.receivedQty > 0),
           ...(hasShipment ? {
             arrival_state: "NOT_ARRIVED",
@@ -439,6 +459,10 @@ function GRNCreatePage() {
           receivedBy: receivedBy.trim(),
           notes: notes.trim(),
           supplier_do_no: supplierDoNo.trim() || null,
+          // No-Draft (owner 2026-06-21): OCR/scan → DRAFT (review); a manual
+          // receipt with no arrival override defaults to ARRIVED → POSTED
+          // (local goods in hand, stock in now).
+          ocrUsed,
           items: validLines.map((m) => ({
             materialName: m.materialName.trim(),
             materialCode: m.materialCode.trim(),
@@ -459,7 +483,8 @@ function GRNCreatePage() {
       const resBody = (await res.json().catch(() => ({}))) as {
         success?: boolean;
         error?: string;
-        data?: { id?: string };
+        data?: { id?: string; status?: string };
+        costing?: { unresolvedLines?: unknown[] };
       };
       if (!res.ok || !resBody.success) {
         toast.error(
@@ -471,7 +496,20 @@ function GRNCreatePage() {
       invalidateCachePrefix("/api/purchase-orders");
       invalidateCachePrefix("/api/inventory");
       invalidateCachePrefix("/api/raw-materials");
-      toast.success("GRN created");
+      // Born-POSTED (local goods) → stock is in. Surface any line that had no
+      // matching raw material so the operator knows that stock did NOT land.
+      const unresolved = resBody.costing?.unresolvedLines?.length ?? 0;
+      if (resBody.data?.status === "POSTED") {
+        if (unresolved > 0) {
+          toast.error(
+            `GRN created & posted, but ${unresolved} line(s) had no matching raw material — that stock did NOT land.`,
+          );
+        } else {
+          toast.success("GRN created and posted to stock");
+        }
+      } else {
+        toast.success("GRN created");
+      }
       navigate("/procurement/grn");
     } catch (err) {
       toast.error(
@@ -487,6 +525,22 @@ function GRNCreatePage() {
   const summarySupplier = isPoLinked
     ? (po?.supplierName || convertSupplierName || "—")
     : supplierName || "—";
+
+  // ── No-Draft create-status hint (mirrors the backend mapping) ──────────────
+  // OCR/scan → DRAFT (review). A PO-linked receipt is treated as an import in
+  // transit (tracked by the arrival pipeline; posts to stock once it arrives).
+  // A plain manual receipt = local goods in hand → POSTED straight to stock.
+  const willPostNow = !ocrUsed && !isPoLinked;
+  const createStatusHint = ocrUsed
+    ? "Scanned receipt — status will be set to DRAFT for review"
+    : willPostNow
+      ? "Local goods — will be received and posted to stock on save"
+      : "Import in transit — tracked in the Arrival pipeline; posts to stock when marked Arrived";
+  const saveLabel = saving
+    ? "Saving..."
+    : willPostNow
+      ? "Receive & Post to Stock"
+      : "Create GRN";
 
   // ── Scan modal context ───────────────────────────────────────────────────
   const scanSupplierId = isPoLinked
@@ -564,7 +618,7 @@ function GRNCreatePage() {
           }
         >
           <Save className="h-4 w-4" />
-          {saving ? "Saving..." : "Create GRN"}
+          {saveLabel}
         </Button>
       </div>
 
@@ -761,7 +815,7 @@ function GRNCreatePage() {
                 </span>
               </div>
             )}
-            <div className="text-xs text-[#9CA3AF]">Status: DRAFT</div>
+            <div className="text-xs text-[#9CA3AF]">{createStatusHint}</div>
           </CardContent>
         </Card>
       </div>

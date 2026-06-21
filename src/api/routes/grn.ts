@@ -745,7 +745,7 @@ app.get("/", async (c) => {
   return c.json({ success: true, data });
 });
 
-// POST /api/grn — create a new DRAFT GRN.
+// POST /api/grn — create a GRN.
 //
 // Two modes:
 //   PO mode   — body.poId present; derives line fields from the PO.
@@ -758,6 +758,24 @@ app.get("/", async (c) => {
 //   Manual (no poId) → ARRIVED  (goods already physically in hand)
 //   PO-linked        → NOT_ARRIVED (shipment yet to depart / arrive)
 //   Caller can override by passing arrival_state in the body.
+//
+// No-Draft create status (owner ruling 2026-06-21): a manual GRN is a REAL
+// document, not a throwaway draft. The create status is derived from how the
+// goods arrived — NOT defaulted to DRAFT:
+//   • OCR / scan (body.ocrUsed === true, or body.status === 'DRAFT') → DRAFT.
+//     The scanned receipt is parked for operator review, like a scanned SO.
+//   • Goods already ARRIVED (local / walk-in: arrival_state === 'ARRIVED') →
+//     POSTED. Stock goes in immediately via postGRNToStock + the receivedQty
+//     cascade, exactly as the PUT DRAFT→POSTED path does. The arrival gate is
+//     satisfied (ARRIVED), so this is the same committed boundary, run at
+//     create time.
+//   • Import still in transit (arrival_state !== 'ARRIVED') → DRAFT at the
+//     document level, BUT the meaningful pre-arrival state is the arrival
+//     pipeline (Planning → In Transit → At Customs → Arrived). It is NOT
+//     posted to stock now; it posts later when the operator advances arrival to
+//     ARRIVED and posts (the existing arrival-gated flow). We never create a
+//     committed (CONFIRMED/POSTED) status before goods have ARRIVED — that
+//     would bypass the arrival gate the PUT enforces.
 app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — grn:create.
   const denied = await requirePermission(c, "grn", "create");
@@ -811,6 +829,20 @@ app.post("/", async (c) => {
         400,
       );
     }
+
+    // ── No-Draft create status (owner 2026-06-21) ────────────────────────────
+    // Derive the create status from how the goods arrived (see handler header):
+    //   OCR/scan         → DRAFT (parked for review)
+    //   arrived in hand  → POSTED (stock in now; arrival gate already passes)
+    //   import in transit→ DRAFT (document slot; tracked by the arrival pipeline,
+    //                      posts to stock only once arrival reaches ARRIVED)
+    // A caller may force DRAFT explicitly (body.status === 'DRAFT'); any other
+    // body.status is ignored here — committing is the PUT's arrival-gated job,
+    // never something the create endpoint does ahead of ARRIVED.
+    const ocrUsed =
+      body.ocrUsed === true || (body.status as string) === "DRAFT";
+    const initialStatus: "DRAFT" | "POSTED" =
+      !ocrUsed && initialArrivalState === "ARRIVED" ? "POSTED" : "DRAFT";
 
     let grnPoId: string | null = null;
     let grnPoNumber: string | null = null;
@@ -941,7 +973,7 @@ app.post("/", async (c) => {
            customs_status, customs_clearance_date,
            shipping_cost_sen, customs_duty_sen, exchange_rate, currency,
            landed_cost_sen, supplier_do_no)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         grnId,
@@ -954,6 +986,7 @@ app.post("/", async (c) => {
         receivedBy || "",
         totalAmount,
         finalQcStatus,
+        initialStatus,
         notes || "",
         // arrival pipeline
         initialArrivalState,
@@ -996,6 +1029,22 @@ app.post("/", async (c) => {
 
     await c.var.DB.batch(statements);
 
+    // ── Post to stock on a born-POSTED (arrived) GRN ─────────────────────────
+    // When the create status is POSTED (local / arrived goods), commit the
+    // receipt the SAME way the PUT DRAFT→POSTED boundary does: write
+    // rm_batches/cost_ledger/balanceQty (idempotent on grn.id) then cascade the
+    // parent PO's receivedQty + status. Import-in-transit / OCR GRNs land as
+    // DRAFT and skip this — they post later via the arrival-gated PUT. The
+    // arrival gate is implicitly honoured: initialStatus is POSTED only when
+    // initialArrivalState === 'ARRIVED'.
+    let postSummary:
+      | { batchesCreated: number; ledgerEntries: number; unresolvedLines: unknown[] }
+      | undefined;
+    if (initialStatus === "POSTED") {
+      postSummary = await postGRNToStock(c.var.DB, grnId);
+      await cascadePOStatusAfterGRNPost(c.var.DB, grnId);
+    }
+
     const created = await fetchGRN(c.var.DB, grnId);
     if (!created) {
       return c.json({ success: false, error: "Failed to create GRN" }, 500);
@@ -1007,7 +1056,7 @@ app.post("/", async (c) => {
       action: "create",
       after: created,
     });
-    return c.json({ success: true, data: created }, 201);
+    return c.json({ success: true, data: created, costing: postSummary }, 201);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[POST /api/grn] failed:", msg, err);

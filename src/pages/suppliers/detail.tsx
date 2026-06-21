@@ -425,43 +425,24 @@ export default function SupplierDetailPage() {
     [scoreResp],
   );
 
-  if (supLoading || scoreLoading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
-      </div>
-    );
-  }
-
-  if (!supplier) {
-    return (
-      <div className="space-y-4">
-        <Link to="/procurement/maintenance" className="inline-flex items-center gap-2 text-sm text-[#6B5C32] hover:underline">
-          <ArrowLeft className="h-4 w-4" /> Back to suppliers
-        </Link>
-        <Card>
-          <CardContent className="p-8 text-center">
-            <p className="text-sm text-[#6B7280]">Supplier not found.</p>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
-  const otr = score?.onTimeRate ?? 0;
-  const otrTone =
-    otr >= 90 ? "text-[#4F7C3A]" : otr >= 75 ? "text-[#9C6F1E]" : "text-[#9A3A2D]";
-  const defect = score?.defectRate ?? 0;
-  const defectTone =
-    defect <= 1 ? "text-[#4F7C3A]" : defect <= 3 ? "text-[#9C6F1E]" : "text-[#9A3A2D]";
-
   // SKU mappings grid columns. Replaces the old hand-rolled <table> so columns
   // are resizable (drag right edge, persisted per-user in localStorage) and
   // long descriptions clip instead of overflowing. The inline Edit + Delete
   // actions are preserved via a custom render on the Actions column so they
   // stay visible (not buried in a right-click menu). Double-click-to-edit is
   // wired through DataGrid's onDoubleClick below.
-  const skuColumns: Column<SkuBinding>[] = [
+  //
+  // MEMOISED (must be — and must sit above the early returns to keep hook order
+  // stable): a fresh `columns` array every render makes the DataGrid recompute
+  // visibleColumns → filteredData → sortedData on EVERY parent render. While the
+  // SKU dialog is open, each keystroke re-renders this page, so an unstable
+  // reference made the 11-row grid underneath re-filter/re-sort on every key —
+  // wasted work that pegs the main thread. The handlers it closes over
+  // (setEditingSKU/setShowSKUForm are stable; bindingToSKU/handleDeleteSKU are
+  // hoisted declarations) don't change between renders, so an empty dep list is
+  // correct here.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const skuColumns: Column<SkuBinding>[] = useMemo(() => [
     { key: "materialCode", label: "Internal Code", type: "docno", width: "130px", sortable: true },
     { key: "materialName", label: "Internal Description", type: "text", width: "260px", sortable: true },
     { key: "supplierSku", label: "Supplier Code", type: "text", width: "150px", sortable: true },
@@ -542,7 +523,37 @@ export default function SupplierDetailPage() {
         </div>
       ),
     },
-  ];
+  ], []);
+
+  if (supLoading || scoreLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
+      </div>
+    );
+  }
+
+  if (!supplier) {
+    return (
+      <div className="space-y-4">
+        <Link to="/procurement/maintenance" className="inline-flex items-center gap-2 text-sm text-[#6B5C32] hover:underline">
+          <ArrowLeft className="h-4 w-4" /> Back to suppliers
+        </Link>
+        <Card>
+          <CardContent className="p-8 text-center">
+            <p className="text-sm text-[#6B7280]">Supplier not found.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const otr = score?.onTimeRate ?? 0;
+  const otrTone =
+    otr >= 90 ? "text-[#4F7C3A]" : otr >= 75 ? "text-[#9C6F1E]" : "text-[#9A3A2D]";
+  const defect = score?.defectRate ?? 0;
+  const defectTone =
+    defect <= 1 ? "text-[#4F7C3A]" : defect <= 3 ? "text-[#9C6F1E]" : "text-[#9A3A2D]";
 
   return (
     <div className="space-y-6">

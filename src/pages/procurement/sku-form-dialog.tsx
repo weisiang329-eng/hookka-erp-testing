@@ -134,6 +134,7 @@ export function SKUFormDialog({
     setRmSearch("");
     setShowDescDropdown(false);
     setDescSearch("");
+    setFormError(null);
   };
   const [supplierId, setSupplierId] = useState(
     editData?.supplierId || presetSupplierId || "",
@@ -153,16 +154,45 @@ export function SKUFormDialog({
   const [effectiveFrom, setEffectiveFrom] = useState(
     editData?.effectiveFrom || new Date().toISOString().slice(0, 10),
   );
+  // Validation message for the Internal Material fields. The Internal Code /
+  // Description inputs CANNOT use the native HTML `required` attribute: their
+  // displayed value swaps to the (often empty) live search term whenever the
+  // field is focused (`value={showRmDropdown ? rmSearch : internalRMCode}`).
+  // So merely clicking into the Internal Code box blanked the input, and the
+  // browser's `required` check then blocked submit even though `internalRMCode`
+  // was correctly committed — a price-only edit silently refused to save
+  // ("Save 不到"). We validate the COMMITTED state in handleSubmit instead and
+  // surface the gap here. (Confirmed live on prod 2026-06-22.)
+  const [formError, setFormError] = useState<string | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // Validate the committed values — not the transient search-box text. The
+    // operator may have an empty search term showing (field focused) while the
+    // real code/description are already set; that must still save.
+    if (!internalRMCode.trim() || !materialName.trim()) {
+      setFormError(
+        "Pick an internal material (Internal Code + Description) before saving.",
+      );
+      return;
+    }
+    if (!supplierId) {
+      setFormError("Select a supplier before saving.");
+      return;
+    }
+    const price = Math.round(parseFloat(unitPrice) * 100);
+    if (!Number.isFinite(price) || price < 0) {
+      setFormError("Enter a valid unit price before saving.");
+      return;
+    }
+    setFormError(null);
     onSave({
       internalRMCode,
       materialName,
       supplierId,
       supplierSku,
       supplierDescription,
-      unitPriceSen: Math.round(parseFloat(unitPrice) * 100),
+      unitPriceSen: price,
       currency,
       leadTimeDays,
       moq,
@@ -206,6 +236,11 @@ export function SKUFormDialog({
             </h3>
             <div className="relative" ref={rmDropdownRef}>
               <label className="block text-sm font-medium text-[#374151] mb-1">Internal Code *</label>
+              {/* NOT `required`: the displayed value swaps to the live search
+                  term on focus (often empty), so a native required check fired
+                  the moment the operator clicked the field and silently blocked
+                  submit even with a committed code. handleSubmit validates the
+                  committed internalRMCode instead. */}
               <Input
                 value={showRmDropdown ? rmSearch : internalRMCode}
                 onChange={(e) => {
@@ -214,7 +249,6 @@ export function SKUFormDialog({
                 }}
                 onFocus={() => setShowRmDropdown(true)}
                 placeholder="Search by code or description (FG / WIP / RM)..."
-                required
                 autoComplete="off"
               />
               {showRmDropdown && (
@@ -245,6 +279,8 @@ export function SKUFormDialog({
             </div>
             <div className="relative" ref={descDropdownRef}>
               <label className="block text-sm font-medium text-[#374151] mb-1">Internal Description *</label>
+              {/* NOT `required` — same reason as Internal Code above; the
+                  committed materialName is validated in handleSubmit. */}
               <Input
                 value={showDescDropdown ? descSearch : materialName}
                 onChange={(e) => {
@@ -253,7 +289,6 @@ export function SKUFormDialog({
                 }}
                 onFocus={() => setShowDescDropdown(true)}
                 placeholder="Search by description..."
-                required
                 autoComplete="off"
               />
               {showDescDropdown && (
@@ -398,6 +433,11 @@ export function SKUFormDialog({
             </div>
           </div>
 
+          {formError && (
+            <p className="text-sm text-[#9A3A2D] text-right" role="alert">
+              {formError}
+            </p>
+          )}
           <div className="flex justify-end gap-3 pt-4 border-t border-[#E2DDD8]">
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
             <Button type="submit" variant="primary">{editData ? "Update" : "Add Mapping"}</Button>

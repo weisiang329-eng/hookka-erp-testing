@@ -827,7 +827,7 @@ app.post("/purge-pre-april-2026", async (c) => {
     const piItemCountRes = await db
       .prepare(
         piIds.length > 0
-          ? `SELECT COUNT(*) AS n FROM purchase_invoice_items WHERE piId IN (${piIds.map(() => "?").join(",")})`
+          ? `SELECT COUNT(*) AS n FROM purchase_invoice_items WHERE pi_id IN (${piIds.map(() => "?").join(",")})`
           : "SELECT 0 AS n",
       )
       .bind(...(piIds.length > 0 ? piIds : []))
@@ -881,7 +881,7 @@ app.post("/purge-pre-april-2026", async (c) => {
         ? [
             `CREATE TABLE IF NOT EXISTS zz_purge_backup_purchase_invoice_items AS
                SELECT pii.* FROM purchase_invoice_items pii
-                WHERE pii.piId IN (${piIds.map((id) => `'${id}'`).join(",")})`,
+                WHERE pii.pi_id IN (${piIds.map((id) => `'${id}'`).join(",")})`,
           ]
         : [
             `CREATE TABLE IF NOT EXISTS zz_purge_backup_purchase_invoice_items AS
@@ -998,7 +998,7 @@ app.post("/purge-pre-april-2026", async (c) => {
         db
           .prepare(
             `DELETE FROM purchase_invoice_items
-               WHERE piId IN (${piIds.map(() => "?").join(",")})`,
+               WHERE pi_id IN (${piIds.map(() => "?").join(",")})`,
           )
           .bind(...piIds),
       );

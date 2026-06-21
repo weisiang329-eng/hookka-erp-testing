@@ -20,7 +20,6 @@ import {
   Eye,
   Printer,
   RefreshCw,
-  ArrowRight,
   Filter,
   Download,
   DollarSign,
@@ -490,14 +489,6 @@ export default function GRNPage() {
   const approvedMTD = grns.filter((g) => g.status === "CONFIRMED" && (g.receiveDate ?? "") >= mtdStart).length;
   const totalValueSen = grns.reduce((sum, g) => sum + g.totalAmount, 0);
 
-  // ---- Status pipeline ----
-  const statusCounts = [
-    { label: "Draft", status: "DRAFT", count: grns.filter(g => g.status === "DRAFT").length },
-    { label: "QC Pending", status: "PENDING", count: grns.filter(g => g.qcStatus === "PENDING").length },
-    { label: "Approved", status: "CONFIRMED", count: grns.filter(g => g.status === "CONFIRMED").length },
-    { label: "Posted", status: "POSTED", count: grns.filter(g => g.status === "POSTED").length },
-  ];
-
   // ---- Unique suppliers ----
   const uniqueSuppliers = useMemo(() => {
     const map = new Map<string, string>();
@@ -755,119 +746,97 @@ export default function GRNPage() {
         </div>
       </div>
 
-      {/* Summary Cards — matches DO list card style */}
-      <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
+      {/* Summary Cards */}
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5 shrink-0">
               <Package className="h-5 w-5 text-[#6B5C32]" />
             </div>
-            <div>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{totalGRNs}</p>
-              <p className="text-xs text-[#6B7280]">Total GRNs</p>
+            <div className="min-w-0">
+              <p className="text-2xl font-bold text-[#1F1D1B] leading-none">{totalGRNs}</p>
+              <p className="text-xs text-[#6B7280] mt-1">Total GRNs</p>
             </div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5 shrink-0">
               <ClipboardCheck className="h-5 w-5 text-[#9C6F1E]" />
             </div>
-            <div>
-              <p className="text-2xl font-bold text-[#9C6F1E]">{pendingQC}</p>
-              <p className="text-xs text-[#6B7280]">Pending QC</p>
+            <div className="min-w-0">
+              <p className="text-2xl font-bold text-[#9C6F1E] leading-none">{pendingQC}</p>
+              <p className="text-xs text-[#6B7280] mt-1">Pending QC</p>
             </div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#EEF3E4] p-2.5">
+            <div className="rounded-lg bg-[#EEF3E4] p-2.5 shrink-0">
               <CheckCircle2 className="h-5 w-5 text-[#4F7C3A]" />
             </div>
-            <div>
-              <p className="text-2xl font-bold text-[#4F7C3A]">{approvedMTD}</p>
-              <p className="text-xs text-[#6B7280]">Approved (MTD)</p>
+            <div className="min-w-0">
+              <p className="text-2xl font-bold text-[#4F7C3A] leading-none">{approvedMTD}</p>
+              <p className="text-xs text-[#6B7280] mt-1">Approved (MTD)</p>
             </div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5 shrink-0">
               <DollarSign className="h-5 w-5 text-[#6B5C32]" />
             </div>
-            <div>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{formatCurrency(totalValueSen)}</p>
-              <p className="text-xs text-[#6B7280]">Total Value</p>
+            <div className="min-w-0">
+              <p className="text-xl font-bold text-[#1F1D1B] leading-none truncate">{formatCurrency(totalValueSen)}</p>
+              <p className="text-xs text-[#6B7280] mt-1">Total Value</p>
             </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Arrival pipeline tab bar + compact QC status strip — mirrors DO list structure */}
-      <div>
-        {/* Arrival tabs — primary navigation, DO-style border-b-2 */}
-        <div className="border-b border-[#E2DDD8]">
-          <nav className="flex gap-4 overflow-x-auto" aria-label="Arrival stages">
-            {/* "All" pseudo-tab to clear arrival filter */}
-            <button
-              onClick={() => setFilterArrivalState("")}
-              className={`flex items-center gap-2 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
-                !filterArrivalState
-                  ? "border-[#6B5C32] text-[#6B5C32]"
-                  : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
-              }`}
-            >
-              All GRNs
-              <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                !filterArrivalState ? "bg-[#6B5C32] text-white" : "bg-[#F0ECE9] text-[#6B7280]"
-              }`}>
-                {grns.length}
-              </span>
-            </button>
-            {(["NOT_ARRIVED", "IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"] as ArrivalState[]).map((state) => {
-              const count = grns.filter(g => g.arrival_state === state).length;
-              const isActive = filterArrivalState === state;
-              return (
-                <button
-                  key={state}
-                  onClick={() => setFilterArrivalState(isActive ? "" : state)}
-                  className={`flex items-center gap-2 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
-                    isActive
-                      ? "border-[#6B5C32] text-[#6B5C32]"
-                      : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
-                  }`}
-                >
-                  <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: getStatusColor(state).hex }} />
-                  {ARRIVAL_LABELS[state]}
-                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                    isActive ? "bg-[#6B5C32] text-white" : "bg-[#F0ECE9] text-[#6B7280]"
-                  }`}>
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
-          </nav>
-        </div>
-
-        {/* QC / workflow status compact strip — secondary context, not a tab */}
-        <div className="flex items-center gap-4 px-1 pt-2 pb-1 overflow-x-auto">
-          {statusCounts.map((s, i) => (
-            <div key={s.label} className="flex items-center gap-2 shrink-0">
+      {/* Arrival tab bar — primary navigation, DO-style border-b-2 */}
+      <div className="border-b border-[#E2DDD8]">
+        <nav className="flex gap-4 overflow-x-auto" aria-label="Arrival stages">
+          {/* "All" pseudo-tab to clear arrival filter */}
+          <button
+            onClick={() => setFilterArrivalState("")}
+            className={`flex items-center gap-2 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+              !filterArrivalState
+                ? "border-[#6B5C32] text-[#6B5C32]"
+                : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
+            }`}
+          >
+            All GRNs
+            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+              !filterArrivalState ? "bg-[#6B5C32] text-white" : "bg-[#F0ECE9] text-[#6B7280]"
+            }`}>
+              {grns.length}
+            </span>
+          </button>
+          {(["NOT_ARRIVED", "IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"] as ArrivalState[]).map((state) => {
+            const count = grns.filter(g => g.arrival_state === state).length;
+            const isActive = filterArrivalState === state;
+            return (
               <button
-                className="flex items-center gap-1.5 cursor-pointer"
-                onClick={() => { setFilterStatus(filterStatus === s.status ? "" : s.status); setShowFilters(true); }}
+                key={state}
+                onClick={() => setFilterArrivalState(isActive ? "" : state)}
+                className={`flex items-center gap-2 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+                  isActive
+                    ? "border-[#6B5C32] text-[#6B5C32]"
+                    : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
+                }`}
               >
-                <Badge variant="status" status={s.status}>{s.count}</Badge>
-                <span className={`text-xs ${filterStatus === s.status ? "text-[#6B5C32] font-medium" : "text-[#6B7280]"}`}>{s.label}</span>
+                <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: getStatusColor(state).hex }} />
+                {ARRIVAL_LABELS[state]}
+                <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                  isActive ? "bg-[#6B5C32] text-white" : "bg-[#F0ECE9] text-[#6B7280]"
+                }`}>
+                  {count}
+                </span>
               </button>
-              {i < statusCounts.length - 1 && <ArrowRight className="h-3.5 w-3.5 text-[#D1CBC5] shrink-0" />}
-            </div>
-          ))}
-          {filterStatus && (
-            <button onClick={() => setFilterStatus("")} className="ml-1 text-xs text-[#9CA3AF] hover:text-[#374151] cursor-pointer shrink-0">Clear filter</button>
-          )}
-        </div>
+            );
+          })}
+        </nav>
       </div>
 
       {/* Search / bulk actions / filters */}

@@ -1,6 +1,7 @@
 import { useMemo, useState, useCallback, useEffect } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import {
   Building2,
   Save,
@@ -278,14 +279,48 @@ export default function OrganisationsPage() {
               {saveMsg}
             </div>
           )}
-          <button
-            onClick={openAdd}
-            className="flex items-center gap-2 rounded-md bg-[#1F1D1B] px-4 py-2 text-sm font-medium text-white hover:bg-[#1F1D1B]/90 transition-colors"
-          >
+          <Button variant="primary" onClick={openAdd}>
             <Plus className="h-4 w-4" />
             Add Organisation
-          </button>
+          </Button>
         </div>
+      </div>
+
+      {/* KPI Cards */}
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
+        <Card>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <Building2 className="h-5 w-5 text-[#6B5C32]" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{visibleOrgs.length}</p>
+              <p className="text-xs text-[#6B7280]">Companies</p>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#EEF3E4] p-2.5">
+              <CheckCircle className="h-5 w-5 text-[#4F7C3A]" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{visibleOrgs.filter((o) => o.isActive).length}</p>
+              <p className="text-xs text-[#6B7280]">Active</p>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <ArrowRight className="h-5 w-5 text-[#6B5C32]" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{visibleOrgs.find((o) => o.isDefault)?.code ?? "—"}</p>
+              <p className="text-xs text-[#6B7280]">Default</p>
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       {/* Organisation Cards */}

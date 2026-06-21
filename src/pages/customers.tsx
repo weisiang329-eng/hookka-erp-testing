@@ -3088,6 +3088,7 @@ export default function CustomersPage() {
   );
   const [data, setData] = useState<Customer[]>([]);
   const [expandedCustomer, setExpandedCustomer] = useState<string | null>(null);
+  const [customerSearch, setCustomerSearch] = useState("");
 
   // add-form state
   const [showAdd, setShowAdd] = useState(false);
@@ -3432,6 +3433,18 @@ export default function CustomersPage() {
     },
   ];
 
+  const filteredData = customerSearch.trim()
+    ? data.filter((c) => {
+        const q = customerSearch.toLowerCase();
+        return (
+          (c.code ?? "").toLowerCase().includes(q) ||
+          (c.name ?? "").toLowerCase().includes(q) ||
+          (c.contactName ?? "").toLowerCase().includes(q) ||
+          (c.phone ?? "").toLowerCase().includes(q)
+        );
+      })
+    : data;
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -3442,54 +3455,56 @@ export default function CustomersPage() {
             Manage customer accounts, delivery hubs, and credit
           </p>
         </div>
-        <Button
-          variant="primary"
-          onClick={() => {
-            setShowAdd((v) => !v);
-          }}
-        >
-          {showAdd ? (
-            <>
-              <X className="h-4 w-4" />
-              Cancel
-            </>
-          ) : (
-            <>
-              <Plus className="h-4 w-4" />
-              Add Customer
-            </>
-          )}
-        </Button>
       </div>
 
       {/* KPI Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-[#6B7280]">Total Customers</p>
-            <p className="text-xl font-bold text-[#1F1D1B]">{totalCustomers}</p>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <Building2 className="h-5 w-5 text-[#6B5C32]" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{totalCustomers}</p>
+              <p className="text-xs text-[#6B7280]">Total Customers</p>
+            </div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-[#6B7280]">Delivery Hubs</p>
-            <p className="text-xl font-bold text-[#1F1D1B]">{totalHubs}</p>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <Warehouse className="h-5 w-5 text-[#6B5C32]" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{totalHubs}</p>
+              <p className="text-xs text-[#6B7280]">Delivery Hubs</p>
+            </div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-[#6B7280]">Total Outstanding</p>
-            <p className="text-xl font-bold text-[#1F1D1B]">
-              {formatCurrency(totalOutstanding)}
-            </p>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+              <AlertTriangle className="h-5 w-5 text-[#9C6F1E]" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#9C6F1E]">
+                {formatCurrency(totalOutstanding)}
+              </p>
+              <p className="text-xs text-[#6B7280]">Total Outstanding</p>
+            </div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-[#6B7280]">Total Credit Limit</p>
-            <p className="text-xl font-bold text-[#1F1D1B]">
-              {formatCurrency(totalCreditLimit)}
-            </p>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <Package className="h-5 w-5 text-[#6B5C32]" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">
+                {formatCurrency(totalCreditLimit)}
+              </p>
+              <p className="text-xs text-[#6B7280]">Total Credit Limit</p>
+            </div>
           </CardContent>
         </Card>
       </div>
@@ -3543,6 +3558,28 @@ export default function CustomersPage() {
       )}
 
       {/* Customer List */}
+      <div className="flex items-center justify-between">
+        <div className="w-80">
+          <Input
+            placeholder="Search code, name, contact..."
+            value={customerSearch}
+            onChange={(e) => setCustomerSearch(e.target.value)}
+          />
+        </div>
+        <Button variant="primary" onClick={() => setShowAdd((v) => !v)}>
+          {showAdd ? (
+            <>
+              <X className="h-4 w-4" />
+              Cancel
+            </>
+          ) : (
+            <>
+              <Plus className="h-4 w-4" />
+              Add Customer
+            </>
+          )}
+        </Button>
+      </div>
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2">
@@ -3553,7 +3590,7 @@ export default function CustomersPage() {
         <CardContent>
           <DataGrid<Customer>
             columns={columns}
-            data={data}
+            data={filteredData}
             keyField="id"
             virtualize
             gridId="customers"

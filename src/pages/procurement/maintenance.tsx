@@ -1204,39 +1204,47 @@ export default function SupplierMaintenancePage() {
       {/* Summary Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#EEF3E4] p-2.5">
+              <Building2 className="h-5 w-5 text-[#4F7C3A]" />
+            </div>
             <div>
+              <p className="text-2xl font-bold text-[#4F7C3A]">{activeSuppliers}</p>
               <p className="text-xs text-[#6B7280]">Active Suppliers</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{activeSuppliers}</p>
             </div>
-            <Building2 className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <Building2 className="h-5 w-5 text-[#6B5C32]" />
+            </div>
             <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{totalSuppliers}</p>
               <p className="text-xs text-[#6B7280]">Total Suppliers</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{totalSuppliers}</p>
             </div>
-            <Building2 className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#FEE2E2] p-2.5">
+              <X className="h-5 w-5 text-[#9A3A2D]" />
+            </div>
             <div>
+              <p className="text-2xl font-bold text-[#9A3A2D]">{blacklisted}</p>
               <p className="text-xs text-[#6B7280]">Blacklisted</p>
-              <p className="text-xl font-bold text-[#9A3A2D]">{blacklisted}</p>
             </div>
-            <X className="h-5 w-5 text-[#9A3A2D]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-[#6B7280]">Avg Rating</p>
-              <p className="text-xl font-bold text-amber-600">{avgRating}</p>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+              <Star className="h-5 w-5 text-amber-500 fill-amber-500" />
             </div>
-            <Star className="h-5 w-5 text-amber-400 fill-amber-400" />
+            <div>
+              <p className="text-2xl font-bold text-amber-600">{avgRating}</p>
+              <p className="text-xs text-[#6B7280]">Avg Rating</p>
+            </div>
           </CardContent>
         </Card>
       </div>

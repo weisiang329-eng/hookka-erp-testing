@@ -11,7 +11,14 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ## 2026-06-21
 
-### 🔵 Purchasing create: no-draft + supplier reference numbers (worktree branch, NOT pushed)
+### ⏸️ AWAITING OWNER — 3 decisions to finish the purchasing batch
+- **① PI import** — Excel reconcile done: all 15 Excel POs already in system; **19 PIs missing** (PI-2604-019→037, OCEAN SKY, RM 7,258, no PO link → manual). Plan: one-time import preserving original PI# + status APPROVED + supplier invoice#/DO#.
+- **② J cleanup** — delete ~1665 pre-1-Apr docs (PO 555 / GRN 555 / PI 555): (a) docs only, or (b) docs + their stock batches + cost ledger? Destructive → needs a one-time script (option-A lock blocks normal delete). Snapshot first.
+- **③ GRN no-draft** — imports-in-transit use the arrival pipeline (Planning→Arrived) instead of Draft; local goods → direct create + post. OK?
+
+### ✅ Effective-dated supplier pricing + Price Change Log + Supplier Quotation PDF (G/H) — shipped main `ba306a41` (effective_from, append-only price_histories, PDF matches Customer Quotation).
+
+### ✅ Purchasing create: no-draft (PO/PI) + supplier reference numbers — shipped main `8374fc6d`
 - ✅ **PART 1 — no-Draft on manual create** (owner: manual → active; only OCR → Draft, like SO).
   - **PO create** (`procurement/create.tsx`): button "Save as Draft"→"Create Purchase Order";
     payload sends `status: "CONFIRMED"` (POST takes body.status verbatim, else DRAFT). Split-by-Supplier

@@ -34,6 +34,12 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-21-004 — Employees summary KPIs froze when changing the date on non-Working-Hours tabs
+
+🟢 **Fixed** · `ui-frontend`
+
+**Symptom:** on the Employees page, changing the date on any tab other than Working Hours left the top summary cards (Present / Working Hours / Avg Efficiency) frozen on the previous period. **Root cause:** only `WorkingHoursTab` called back `onDateChange` → `summaryRange` → the `/api/department-performance` fetch; the other 5 date-bearing tabs (Efficiency, Dept Labor, Employee Detail, Dept Performance, Labor Cost) persisted their dates to localStorage but never updated the parent's `summaryRange`, so the KPI fetch kept using the old dates. **Fix (`4157cf88`):** added an `onDateChange` prop + invocation in the date-persist effect of all 5 remaining tabs and passed `handleSummaryDateChange` at each render site in `employees.tsx`; `useCachedJson` re-fetches when the URL changes. **Swept the whole app** for the same stale-dependency class — Employees was the ONLY genuine instance (dashboard / accounting / invoices / sales date filters all correctly key their fetch/useMemo on the date).
+
 ## BUG-2026-06-21-001 — Mobile: whole page scrolls sideways ("排版歪掉") on phones — bare `<table>`s not in a scroll box
 
 🟢 **Fixed** · `ui-frontend`

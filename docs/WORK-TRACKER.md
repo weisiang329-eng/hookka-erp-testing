@@ -12,7 +12,8 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 ## 2026-06-21
 
 ### 🔵 IN FLIGHT — parallel agents (owner: "全部做完，不要紧" + ultracode; review+test+confirm before prod)
-- **Convert-chain backend foundation** — agent `af7f29ff` (opus, worktree) — invoiced_qty + grn_id + line-level guard + consume/restore + availableQty. HIGH-RISK, I review+test cascade.
+- ✅ **Convert-chain backend foundation** — line-level invoice guard (partial/2nd PI ok, blocks over-draw) + per-line `availableQty` + `grn_item_id` link + **OPTION A** (owner: received/POSTED GRN LOCKED from delete+un-post → no stock-reversal hole). 17 tests. Shipped main `97a69de6`; **verified live** (DELETE posted GRN → 409). postGRNToStock untouched.
+- 🔵 **P2 convert UX** — agent `a63be18a` (worktree): "Convert from PO"/"Convert from Goods Receipt" line-pick pickers (show availableQty, send grnItemId, ≤ available), drop the GRN "From PO|Manual" toggle, carry materialCode/supplierSku.
 - ✅ **Supplier Price History → PO view + filter/sort** — shipped `774ed7ff` (suppliers/detail.tsx).
 - ✅ **GRN arrival DO-parity** — Planning rename + forward jumps (FE+BE) + DO tab layout. Shipped `dc6a880a`.
 - ✅ **Price Comparison multi-select + cross-material** — multi-select, A-vs-B table, badge legend, filter+sort. Shipped `e695c3c1`.

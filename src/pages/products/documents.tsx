@@ -157,7 +157,7 @@ export default function ProductDocumentsPage() {
   }
 
   return (
-    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
+    <div className="space-y-6">
       <Link to="/products" className="inline-flex items-center gap-2 text-sm text-[#6B5C32] hover:underline">
         <ArrowLeft className="h-4 w-4" /> Back to Products
       </Link>

@@ -6258,7 +6258,7 @@ export default function ProductionPage({
   // fixed badge so the filter UI remains live during refetch.
 
   return (
-    <div className="space-y-4 p-6 max-md:p-4 max-sm:p-3">
+    <div className="space-y-4">
       {loading && (
         <div className="fixed top-2 right-2 z-50 flex items-center gap-2 px-3 py-1.5 bg-white border border-[#E6E0D9] rounded shadow-sm text-xs text-[#6B5C32]">
           <div className="h-3 w-3 animate-spin rounded-full border-2 border-[#6B5C32] border-t-transparent" />

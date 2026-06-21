@@ -101,7 +101,7 @@ export default function FabricsPage() {
   }
 
   return (
-    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
+    <div className="space-y-6">
       {/* Header */}
       <div>
         <h1 className="text-xl font-bold text-gray-900">Fabric Tracking</h1>

@@ -94,7 +94,7 @@ export default function CashFlowPage() {
 
   if (loading) {
     return (
-      <div className="p-6 max-md:p-4 max-sm:p-3 space-y-4">
+      <div className="space-y-4">
         <div className="h-8 w-64 bg-[#F0ECE9] rounded animate-pulse" />
         <div className="grid grid-cols-4 gap-4 max-xl:grid-cols-2 max-sm:grid-cols-1">
           {[...Array(4)].map((_, i) => (
@@ -109,7 +109,7 @@ export default function CashFlowPage() {
   if (!data) return <div className="p-6 text-[#9A3A2D]">Failed to load cash flow data.</div>;
 
   return (
-    <div className="p-6 max-md:p-4 max-sm:p-3 space-y-6 max-md:space-y-4">
+    <div className="space-y-6 max-md:space-y-4">
       {/* Header */}
       <div>
         <h1 className="text-xl font-bold text-[#1F1D1B]">Cash Flow & Bank Reconciliation</h1>

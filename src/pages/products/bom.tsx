@@ -556,7 +556,7 @@ export default function BOMPage() {
   }
 
   return (
-    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
+    <div className="space-y-6">
       {/* Breadcrumb + Header */}
       <div>
         <Link to="/products" className="text-[#3E6570] hover:underline text-sm">

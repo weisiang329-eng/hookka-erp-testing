@@ -3020,7 +3020,7 @@ export default function ProductsPage() {
   }
 
   return (
-    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
+    <div className="space-y-6">
       {/* Header — wraps so the dense SKU Master toolbar drops onto its own
           line on narrower screens instead of squeezing the title. */}
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">

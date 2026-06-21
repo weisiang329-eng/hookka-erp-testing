@@ -643,7 +643,7 @@ export default function CncTemplatesPage() {
   // Render
   // -------------------------------------------------------------------------
   return (
-    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
+    <div className="space-y-6">
       {/* Header + breadcrumb */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>

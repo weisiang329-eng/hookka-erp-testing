@@ -6953,7 +6953,7 @@ export default function BOMManagementPage() {
   }
 
   return (
-    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
+    <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>

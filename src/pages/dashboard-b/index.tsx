@@ -1039,7 +1039,7 @@ export default function DashboardBPage() {
   return (
     <div className="space-y-5">
       {/* Header */}
-      <div className="flex items-end justify-between">
+      <div className="flex items-end justify-between flex-wrap gap-y-2">
         <div>
           <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#6B5C32]">
             Operations Intelligence
@@ -1067,7 +1067,7 @@ export default function DashboardBPage() {
           value; Invoices = invoice-sourced (owner 2026-06-12: "it captures
           straight from Invoices — when I deliver, the invoice is issued"), which
           replaced the old shipped-value Delivered card. */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 max-[360px]:grid-cols-1">
         {/* This Month Sales — confirmed-SO value for the selected month
             (all-time = cumulative). Owner 2026-06-12 kept this alongside the
             Invoices card. */}
@@ -1575,7 +1575,7 @@ export default function DashboardBPage() {
             {effL ? (
               <SectionRowsSkeleton rows={5} />
             ) : (
-            <div className="grid grid-cols-2 gap-5">
+            <div className="grid grid-cols-2 gap-5 max-sm:grid-cols-1">
               <div>
                 <p className="text-[11px] font-semibold text-[#15803D] mb-1.5">
                   Top 5
@@ -1952,7 +1952,7 @@ export default function DashboardBPage() {
               title="Top Sellers"
               sub="bedframe by units · sofa by sets"
             />
-            <div className="grid grid-cols-2 gap-5">
+            <div className="grid grid-cols-2 gap-5 max-sm:grid-cols-1">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550] mb-1.5">
                   Bedframe
@@ -2058,7 +2058,7 @@ export default function DashboardBPage() {
 
       {/* Fabric */}
       <div>
-        <div className="flex items-end justify-between mb-3">
+        <div className="flex items-end justify-between mb-3 flex-wrap gap-y-2">
           <div>
             <h3 className="text-sm font-bold text-[#1F1D1B] tracking-[-0.2px]">
               Fabric Usage — Bedframe vs Sofa

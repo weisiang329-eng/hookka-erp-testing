@@ -897,8 +897,8 @@ export default function SalesPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6 max-md:space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">{soPageTitle(mode)}</h1>
           <p className="text-xs text-[#6B7280]">
@@ -920,7 +920,7 @@ export default function SalesPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 grid-cols-1 sm:grid-cols-5">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-5 max-[360px]:grid-cols-1">
         {isServiceOrderMode ? (
           // Service Order mode: every card is count-based — SVs are priced
           // at 0 by default so Revenue / Outstanding RM are always 0.
@@ -1005,8 +1005,8 @@ export default function SalesPage() {
       {/* Filters */}
       <Card>
         <CardContent className="p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant={showFilters ? "primary" : "outline"}
                 size="sm"
@@ -1146,9 +1146,9 @@ export default function SalesPage() {
 
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle className="flex items-center gap-2"><ShoppingCart className="h-5 w-5 text-[#6B5C32]" /> {soPageTitle(mode)}</CardTitle>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {tab === "DRAFT" && draftCount > 0 && (
                 <Button
                   variant="outline"
@@ -1281,7 +1281,7 @@ export default function SalesPage() {
           />
 
           {/* Pagination footer */}
-          <div className="flex items-center justify-between border-t border-[#E2DDD8] pt-3 mt-3 text-sm text-[#6B7280]">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#E2DDD8] pt-3 mt-3 text-sm text-[#6B7280]">
             <span>
               {totalOrdersServer.toLocaleString()} sales order
               {totalOrdersServer === 1 ? "" : "s"}

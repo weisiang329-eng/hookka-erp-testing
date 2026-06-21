@@ -2011,11 +2011,11 @@ function CreateSalesOrderPage() {
         </div>
       )}
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4 flex-wrap">
         <Button variant="ghost" size="icon" onClick={() => navigate(basePath)}>
           <ArrowLeft className="h-5 w-5" />
         </Button>
-        <div className="flex-1">
+        <div className="flex-1 min-w-[160px]">
           <h1 className="text-xl font-bold text-[#1F1D1B]">
             {isClone
               ? `Clone ${soSingularNoun(mode)}`
@@ -2132,7 +2132,7 @@ function CreateSalesOrderPage() {
 
             {selectedCustomer && (
               <div className="rounded-md bg-[#FAF9F7] border border-[#E2DDD8] p-3 text-sm">
-                <div className="flex gap-6">
+                <div className="flex flex-wrap gap-x-6 gap-y-1">
                   <span className="text-[#6B7280]">Hubs: <span className="font-medium text-[#1F1D1B]">{selectedCustomer.deliveryHubs?.length || 0}</span></span>
                   <span className="text-[#6B7280]">Terms: <span className="font-medium text-[#1F1D1B]">{selectedCustomer.creditTerms}</span></span>
                   <span className="text-[#6B7280]">Limit: <span className="font-medium text-[#1F1D1B]">{formatCurrency(selectedCustomer.creditLimitSen)}</span></span>
@@ -3149,7 +3149,7 @@ function LineItemCard({
         // Model dropdown below to clear the picked product and re-enter
         // the checkbox picker. No category picker up front.
         return (
-          <div className={`grid gap-3 ${isSofa ? "grid-cols-[130px_1fr_140px_1fr]" : "grid-cols-[1fr_140px_1fr]"}`}>
+          <div className={`grid gap-3 ${isSofa ? "grid-cols-[130px_1fr_140px_1fr] max-sm:grid-cols-1" : "grid-cols-[1fr_140px_1fr] max-sm:grid-cols-1"}`}>
             {/* Sofa: Model selector */}
             {isSofa && (
               <div>

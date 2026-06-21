@@ -53,7 +53,7 @@ export function ObjectPageHeader({
   const handleBack = onBack ?? (backTo ? () => navigate(backTo) : undefined);
 
   return (
-    <div className="flex items-center gap-4">
+    <div className="flex items-center gap-4 max-md:flex-wrap max-md:gap-2">
       {handleBack && (
         <Button variant="ghost" size="icon" onClick={handleBack} aria-label="Back">
           <ArrowLeft className="h-5 w-5" />
@@ -68,9 +68,9 @@ export function ObjectPageHeader({
           <p className="text-xs text-[#6B7280] mt-0.5">{subtitle}</p>
         )}
       </div>
-      {pager && <div className="flex items-center">{pager}</div>}
+      {pager && <div className="flex items-center max-md:order-last max-md:w-full">{pager}</div>}
       {actions && (
-        <div className="flex items-center gap-2 flex-wrap justify-end">
+        <div className="flex items-center gap-2 flex-wrap justify-end max-md:w-full max-md:justify-start">
           {actions}
         </div>
       )}

@@ -42,7 +42,7 @@ export function PageHeader({
   return (
     <div
       className={cn(
-        "flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between",
+        "flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between max-md:gap-2",
         className,
       )}
     >
@@ -62,13 +62,13 @@ export function PageHeader({
             ))}
           </nav>
         )}
-        <h1 className="text-2xl font-bold text-[#1F1D1B] truncate">{title}</h1>
+        <h1 className="text-2xl font-bold text-[#1F1D1B] truncate max-[360px]:text-xl">{title}</h1>
         {subtitle && (
           <p className="mt-0.5 text-sm text-[#6B7280]">{subtitle}</p>
         )}
       </div>
       {actions && (
-        <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+        <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap max-md:w-full max-md:justify-start">
           {actions}
         </div>
       )}

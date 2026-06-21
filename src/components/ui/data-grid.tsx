@@ -2423,9 +2423,9 @@ export function DataGrid<T extends Record<string, any>>({
       {/* Toolbar */}
       {/* Tablet UX: bumped from py-1.5 / text-[11px] / h-~26px to h-9 (36px)
           search + h-9 buttons. Per-control sizing notes inline below. */}
-      <div className="flex items-center gap-2 border border-b-0 border-[#E2DDD8] bg-[#FAFAF8] px-2 py-1.5 rounded-t">
+      <div className="flex flex-wrap items-center gap-2 border border-b-0 border-[#E2DDD8] bg-[#FAFAF8] px-2 py-1.5 rounded-t">
         {/* Search — h-9 / text-sm for finger-target on iPad Safari */}
-        <div className="relative flex-1 max-w-[280px]">
+        <div className="relative flex-1 max-w-[280px] max-md:max-w-full">
           <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#999]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
           </svg>

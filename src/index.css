@@ -27,6 +27,7 @@
      still applies slashed-zero + tabular figures so "0" can't be misread as
      "O" on documents — only the family changes to match --font-sans. */
   --font-mono: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --breakpoint-xs: 360px;
 }
 
 body {

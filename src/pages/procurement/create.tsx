@@ -30,7 +30,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, formatRM } from "@/lib/utils";
 import type { Supplier, SupplierMaterialBinding, RawMaterial } from "@/types";
 import { ArrowLeft, Plus, Save, Trash2 } from "lucide-react";
 
@@ -98,6 +98,10 @@ function CreatePurchaseOrderPage() {
   const [rmSearch, setRmSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
   const [saving, setSaving] = useState(false);
+  // Primary supplier chosen in Order Details. Drives material picker
+  // filtering — only materials offered by this supplier appear in the
+  // add-material list once a supplier is selected.
+  const [selectedSupplierId, setSelectedSupplierId] = useState<string>("");
 
   // ── Derived: supplier helpers (ACTIVE-only filtering) ─────────
   const activeSupplierIds = useMemo(
@@ -142,20 +146,67 @@ function CreatePurchaseOrderPage() {
     [allSuppliers],
   );
 
+  // Returns bindings for a material sorted main-first, then by supplier name.
+  // Used in the per-line supplier dropdown so the main supplier appears first
+  // and the owner can compare prices at a glance.
+  const getSortedBindingsForRM = useCallback(
+    (materialCode: string): SupplierMaterialBinding[] => {
+      const bindings = getBindingsForRM(materialCode);
+      return [...bindings].sort((a, b) => {
+        if (a.isMainSupplier && !b.isMainSupplier) return -1;
+        if (!a.isMainSupplier && b.isMainSupplier) return 1;
+        return resolveSupplierName(a.supplierId).localeCompare(
+          resolveSupplierName(b.supplierId),
+        );
+      });
+    },
+    [getBindingsForRM, resolveSupplierName],
+  );
+
+  // Label shown in the per-line supplier dropdown: "CLM ETERNAL — RM 68.00"
+  // so the owner can compare prices without opening a separate page.
+  const supplierOptionLabel = useCallback(
+    (b: SupplierMaterialBinding): string => {
+      const name = resolveSupplierName(b.supplierId);
+      const price = b.unitPrice > 0 ? ` — ${formatRM(b.unitPrice)}` : "";
+      return `${name}${price}`;
+    },
+    [resolveSupplierName],
+  );
+
   // ── Derived: RM picker (category chips + search) ──────────────
   const activeRMs = useMemo(
     () => rawMaterials.filter((rm) => rm.isActive),
     [rawMaterials],
   );
 
+  // Set of normalised material codes offered by the selected supplier.
+  // When no supplier is selected this is null (no filtering applied).
+  const supplierMaterialCodes = useMemo<Set<string> | null>(() => {
+    if (!selectedSupplierId) return null;
+    const codes = new Set<string>();
+    for (const b of supplierMaterialBindings) {
+      if (b.supplierId === selectedSupplierId) {
+        codes.add(normMatCode(b.materialCode));
+      }
+    }
+    return codes;
+  }, [selectedSupplierId, supplierMaterialBindings]);
+
+  // Active RMs optionally filtered to the selected supplier's offerings.
+  const pickerRMs = useMemo(() => {
+    if (!supplierMaterialCodes) return activeRMs;
+    return activeRMs.filter((rm) => supplierMaterialCodes.has(normMatCode(rm.itemCode)));
+  }, [activeRMs, supplierMaterialCodes]);
+
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const rm of activeRMs) {
+    for (const rm of pickerRMs) {
       const cat = rm.itemGroup?.trim() || "(uncategorised)";
       counts[cat] = (counts[cat] ?? 0) + 1;
     }
     return counts;
-  }, [activeRMs]);
+  }, [pickerRMs]);
 
   const categories = useMemo(
     () => Object.keys(categoryCounts).sort((a, b) => a.localeCompare(b)),
@@ -177,7 +228,7 @@ function CreatePurchaseOrderPage() {
 
   const filteredRMs = useMemo(() => {
     const q = rmSearch.trim().toLowerCase();
-    return activeRMs
+    return pickerRMs
       .filter((rm) => {
         if (selectedCategory !== "ALL") {
           const cat = rm.itemGroup?.trim() || "(uncategorised)";
@@ -190,13 +241,21 @@ function CreatePurchaseOrderPage() {
         );
       })
       .sort((a, b) => a.itemCode.localeCompare(b.itemCode));
-  }, [activeRMs, rmSearch, selectedCategory]);
+  }, [pickerRMs, rmSearch, selectedCategory]);
 
   // ── Line-item mutators ─────────────────────────────────────────
   const addItemFromRM = (rmItemCode: string) => {
     const rm = rawMaterials.find((r) => r.itemCode === rmItemCode);
     if (!rm) return;
-    const mainBinding = getMainBinding(rmItemCode);
+    // When a primary supplier is selected, prefer its binding; fall back to
+    // the global main binding (isMainSupplier flag) if the chosen supplier
+    // has no binding for this material (shouldn't happen with filtered list,
+    // but guards against stale cache or a direct search-bypass).
+    const allBindings = getBindingsForRM(rmItemCode);
+    const mainBinding =
+      (selectedSupplierId
+        ? allBindings.find((b) => b.supplierId === selectedSupplierId)
+        : undefined) ?? getMainBinding(rmItemCode);
     const seedQty = mainBinding?.moq ?? 1;
     const newItem: POLineItem = {
       rmCode: rm.itemCode,
@@ -537,20 +596,40 @@ function CreatePurchaseOrderPage() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Supplier</label>
-                <div className="w-full rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm">
-                  {items.length === 0 ? (
-                    <span className="text-[#9CA3AF]">Auto-filled from line items</span>
-                  ) : hasMixedSuppliers ? (
+                {/* Explicit supplier picker — drives the material-add list
+                    below (only materials offered by this supplier are shown).
+                    The PO supplier header is still derived from line items
+                    for the save payload; this field is the filter anchor. */}
+                <select
+                  className="w-full h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  value={selectedSupplierId}
+                  onChange={(e) => {
+                    setSelectedSupplierId(e.target.value);
+                    // Reset picker filters when supplier changes so the
+                    // operator isn't stranded in a now-empty category.
+                    setSelectedCategory("ALL");
+                    setRmSearch("");
+                  }}
+                  aria-label="Select supplier for this purchase order"
+                >
+                  <option value="">— Pick a supplier —</option>
+                  {activeSuppliers.map((s) => (
+                    <option key={s.id} value={s.id}>{s.code} - {s.name}</option>
+                  ))}
+                </select>
+                {/* Status hint below the dropdown */}
+                <div className="mt-1 text-xs min-h-[1.2em]">
+                  {items.length > 0 && hasMixedSuppliers ? (
                     <span className="text-[#9C6F1E]">
                       Mixed ({distinctSupplierCount} suppliers) — use Split by Supplier
                     </span>
-                  ) : hasUnboundLines ? (
+                  ) : items.length > 0 && hasUnboundLines ? (
                     <span className="text-[#9A3A2D]">
                       {unboundCount} line{unboundCount === 1 ? "" : "s"} missing supplier
                     </span>
-                  ) : (
-                    <span className="text-[#1F1D1B] font-medium">{headerSupplierName}</span>
-                  )}
+                  ) : items.length > 0 && headerSupplierName ? (
+                    <span className="text-[#6B7280]">PO supplier: <span className="font-medium text-[#1F1D1B]">{headerSupplierName}</span></span>
+                  ) : null}
                 </div>
               </div>
               <div>
@@ -563,9 +642,13 @@ function CreatePurchaseOrderPage() {
               </div>
             </div>
 
-            {/* Supplier info bar — shown once supplier resolves from line items */}
-            {!hasMixedSuppliers && !hasUnboundLines && headerSupplierId && (() => {
-              const sup = allSuppliers.find((s) => s.id === headerSupplierId);
+            {/* Supplier info bar — shown as soon as a supplier is chosen
+                (either from the picker above or resolved from line items).
+                Prefers selectedSupplierId so the bar appears before any
+                lines are added. */}
+            {(selectedSupplierId || (!hasMixedSuppliers && !hasUnboundLines && headerSupplierId)) && (() => {
+              const resolvedId = selectedSupplierId || headerSupplierId;
+              const sup = allSuppliers.find((s) => s.id === resolvedId);
               if (!sup) return null;
               return (
                 <div className="rounded-md bg-[#FAF9F7] border border-[#E2DDD8] p-3 text-sm">
@@ -651,7 +734,9 @@ function CreatePurchaseOrderPage() {
               wider on the full page. */}
           <div className="space-y-2">
             <label className="block text-xs text-[#6B7280]">
-              Add material — search by code/description, or narrow by category
+              {selectedSupplierId
+                ? `Add material — showing ${pickerRMs.length} material${pickerRMs.length === 1 ? "" : "s"} offered by this supplier`
+                : "Add material — pick a supplier above to filter to their materials, or browse all"}
             </label>
 
             {/* Compact filter row: one category dropdown (grouped Bedframe /
@@ -665,7 +750,7 @@ function CreatePurchaseOrderPage() {
                 className="h-9 w-full sm:w-60 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
                 aria-label="Filter materials by category"
               >
-                <option value="ALL">All categories ({activeRMs.length})</option>
+                <option value="ALL">All categories ({pickerRMs.length})</option>
                 {groupedCategories.bedframe.length > 0 && (
                   <optgroup label="Bedframe">
                     {groupedCategories.bedframe.map((cat) => (
@@ -750,7 +835,7 @@ function CreatePurchaseOrderPage() {
                 </thead>
                 <tbody>
                   {items.map((item, idx) => {
-                    const bindings = getBindingsForRM(item.rmCode);
+                    const bindings = getSortedBindingsForRM(item.rmCode);
                     const prevCategory = idx > 0 ? items[idx - 1].materialCategory : null;
                     const showCategoryHeader = idx === 0 || prevCategory !== item.materialCategory;
                     return (
@@ -818,7 +903,7 @@ function CreatePurchaseOrderPage() {
                               >
                                 {bindings.map((b) => (
                                   <option key={b.id} value={b.supplierId}>
-                                    {resolveSupplierName(b.supplierId)}{b.isMainSupplier ? " (main)" : ""}
+                                    {supplierOptionLabel(b)}{b.isMainSupplier ? " ★" : ""}
                                   </option>
                                 ))}
                               </select>

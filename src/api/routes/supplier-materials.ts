@@ -31,12 +31,23 @@ type BindingRow = {
   leadTimeDays: number;
   paymentTerms: string | null;
   moq: number;
+  // Legacy validity window (deprecated). Kept on the row so historical
+  // bindings still read; the price model is now effective-dated (effectiveFrom).
   priceValidFrom: string | null;
   priceValidTo: string | null;
+  // The date THIS price takes effect (effective-dated model, like Customer
+  // Quotation / maintenance-config). Current price = newest effectiveFrom
+  // <= today. Older bindings predate the column → fall back to priceValidFrom
+  // (which was where the "from" date used to live).
+  effectiveFrom: string | null;
   isMainSupplier: number;
 };
 
 function rowToBinding(r: BindingRow) {
+  // Effective date: prefer the new column; fall back to the legacy
+  // priceValidFrom for rows that predate the migration (so existing bindings
+  // surface a sensible "Effective From" instead of blank).
+  const effectiveFrom = r.effectiveFrom ?? r.priceValidFrom ?? "";
   return {
     id: r.id,
     supplierId: r.supplierId,
@@ -49,10 +60,18 @@ function rowToBinding(r: BindingRow) {
     leadTimeDays: r.leadTimeDays,
     paymentTerms: r.paymentTerms ?? "NET30",
     moq: r.moq,
-    priceValidFrom: r.priceValidFrom ?? "",
+    effectiveFrom,
+    // Legacy fields kept in the response for any remaining old consumers; new
+    // UI reads effectiveFrom. priceValidFrom mirrors effectiveFrom so nothing
+    // that still references the old key breaks.
+    priceValidFrom: effectiveFrom,
     priceValidTo: r.priceValidTo ?? "",
     isMainSupplier: r.isMainSupplier === 1,
   };
+}
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 function genId(): string {
@@ -69,6 +88,8 @@ let bindingColumnsEnsured: Promise<void> | null = null;
 function ensureBindingColumns(db: D1Database): Promise<void> {
   if (bindingColumnsEnsured) return bindingColumnsEnsured;
   bindingColumnsEnsured = (async () => {
+    // Each ALTER is in its own try/catch so one failing column doesn't block
+    // the others (the column may already exist or DDL may transiently reject).
     try {
       await db
         .prepare(
@@ -76,7 +97,29 @@ function ensureBindingColumns(db: D1Database): Promise<void> {
         )
         .run();
     } catch {
-      // column may already exist / DDL transiently rejected — ignore
+      /* already exists / transient — ignore */
+    }
+    // Effective-dated pricing (migration 0183): the date this price takes
+    // effect. Current price = newest effectiveFrom <= today. Append-only audit
+    // trail lives in price_histories (also carrying effective_from so the
+    // Price Change Log shows the real effective date, not the system clock).
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE supplier_material_bindings ADD COLUMN IF NOT EXISTS effective_from TEXT",
+        )
+        .run();
+    } catch {
+      /* already exists / transient — ignore */
+    }
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE price_histories ADD COLUMN IF NOT EXISTS effective_from TEXT",
+        )
+        .run();
+    } catch {
+      /* already exists / transient — ignore */
     }
   })();
   return bindingColumnsEnsured;
@@ -131,6 +174,11 @@ app.post("/", async (c) => {
       );
     }
     const id = genId();
+    // Effective date: when this price takes effect. Accept effectiveFrom; fall
+    // back to the legacy priceValidFrom key, then to today. Owner ruling:
+    // "today's price effective today" — a blank value means now.
+    const effectiveFrom =
+      body.effectiveFrom ?? body.priceValidFrom ?? todayIso();
     const row = {
       id,
       supplierId: String(supplierId),
@@ -144,15 +192,16 @@ app.post("/", async (c) => {
       leadTimeDays: Number(body.leadTimeDays) || 7,
       paymentTerms: body.paymentTerms ?? "NET30",
       moq: Number(body.moq) || 1,
-      priceValidFrom:
-        body.priceValidFrom ?? new Date().toISOString().slice(0, 10),
-      priceValidTo: body.priceValidTo ?? "2026-12-31",
+      effectiveFrom: String(effectiveFrom),
       isMainSupplier: body.isMainSupplier ? 1 : 0,
     };
+    // Write both effectiveFrom (new) and priceValidFrom (legacy mirror) so the
+    // column is populated either way and old reads still resolve. priceValidTo
+    // is no longer collected; we leave it NULL going forward.
     await c.var.DB.prepare(
       `INSERT INTO supplier_material_bindings (id, supplierId, materialCode,
          materialName, supplierSku, supplierDescription, unitPrice, currency, leadTimeDays,
-         paymentTerms, moq, priceValidFrom, priceValidTo, isMainSupplier)
+         paymentTerms, moq, effectiveFrom, priceValidFrom, isMainSupplier)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
@@ -167,11 +216,39 @@ app.post("/", async (c) => {
         row.leadTimeDays,
         row.paymentTerms,
         row.moq,
-        row.priceValidFrom,
-        row.priceValidTo,
+        row.effectiveFrom,
+        row.effectiveFrom,
         row.isMainSupplier,
       )
       .run();
+    // Seed the Price Change Log with the opening price (old = 0 → "first
+    // price"). Append-only audit row carries the effective date so the log
+    // shows the real effective date, not the system clock. Best-effort.
+    try {
+      await c.var.DB.prepare(
+        `INSERT INTO price_histories (id, bindingId, supplierId, materialCode,
+           oldPrice, newPrice, currency, changedDate, effectiveFrom, changedBy,
+           reason, approvalStatus)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          `ph-${crypto.randomUUID().slice(0, 8)}`,
+          id,
+          row.supplierId,
+          row.materialCode,
+          0,
+          row.unitPrice,
+          row.currency,
+          todayIso(),
+          row.effectiveFrom,
+          body.changedBy ?? "System",
+          "Initial price",
+          "APPROVED",
+        )
+        .run();
+    } catch {
+      /* history is best-effort; the binding create already succeeded */
+    }
     const created = await c.var.DB.prepare(
       "SELECT * FROM supplier_material_bindings WHERE id = ?",
     )
@@ -217,6 +294,17 @@ app.put("/:id", async (c) => {
   }
   try {
     const body = await c.req.json();
+    const priceChanged =
+      body.unitPrice !== undefined &&
+      Number(body.unitPrice) !== existing.unitPrice;
+    const existingEffectiveFrom =
+      existing.effectiveFrom ?? existing.priceValidFrom ?? "";
+    // Effective-dated model: when the PRICE moves we stamp a new effective date
+    // (caller-provided effectiveFrom, else today). When price is unchanged we
+    // keep the existing effective date so a name/MOQ edit doesn't bump it.
+    const newEffectiveFrom = priceChanged
+      ? String(body.effectiveFrom ?? body.priceValidFrom ?? todayIso())
+      : String(body.effectiveFrom ?? body.priceValidFrom ?? existingEffectiveFrom);
     const merged = {
       supplierId: body.supplierId ?? existing.supplierId,
       materialCode: body.materialCode ?? existing.materialCode,
@@ -238,8 +326,7 @@ app.put("/:id", async (c) => {
           : existing.leadTimeDays,
       paymentTerms: body.paymentTerms ?? existing.paymentTerms ?? "NET30",
       moq: body.moq !== undefined ? Number(body.moq) : existing.moq,
-      priceValidFrom: body.priceValidFrom ?? existing.priceValidFrom ?? "",
-      priceValidTo: body.priceValidTo ?? existing.priceValidTo ?? "",
+      effectiveFrom: newEffectiveFrom,
       isMainSupplier:
         body.isMainSupplier === undefined
           ? existing.isMainSupplier
@@ -247,11 +334,13 @@ app.put("/:id", async (c) => {
             ? 1
             : 0,
     };
+    // Write effectiveFrom (new) and mirror into priceValidFrom (legacy) so the
+    // current price record always carries the effective date in both columns.
     await c.var.DB.prepare(
       `UPDATE supplier_material_bindings SET
          supplierId = ?, materialCode = ?, materialName = ?, supplierSku = ?,
          supplierDescription = ?, unitPrice = ?, currency = ?, leadTimeDays = ?,
-         paymentTerms = ?, moq = ?, priceValidFrom = ?, priceValidTo = ?,
+         paymentTerms = ?, moq = ?, effectiveFrom = ?, priceValidFrom = ?,
          isMainSupplier = ?
        WHERE id = ?`,
     )
@@ -266,25 +355,26 @@ app.put("/:id", async (c) => {
         merged.leadTimeDays,
         merged.paymentTerms,
         merged.moq,
-        merged.priceValidFrom,
-        merged.priceValidTo,
+        merged.effectiveFrom,
+        merged.effectiveFrom,
         merged.isMainSupplier,
         id,
       )
       .run();
-    // Record a price-history entry whenever the unit price actually moves.
-    // The `price_histories` table + GET /api/price-history already existed but
-    // nothing wrote to it, so the comparison/history view had no trail. Capture
-    // it here so our buy-price changes accumulate going forward. Fire-and-forget
-    // inside its own try/catch: a history-write failure must never fail the edit
-    // (matches the "binding write throws → 400" gotcha we already guard against).
-    if (existing.unitPrice !== merged.unitPrice) {
+    // Append a price-history entry whenever the unit price moves — the trail is
+    // APPEND-ONLY (a new row per change; the prior price is never overwritten),
+    // which is what makes the Price Change Log auditable. The row carries
+    // effectiveFrom so the log's Effective Date column is the price's effective
+    // date, not the system clock. Fire-and-forget inside its own try/catch: a
+    // history-write failure must never fail the edit (matches the "binding write
+    // throws → 400" gotcha we already guard against).
+    if (priceChanged) {
       try {
         await c.var.DB.prepare(
           `INSERT INTO price_histories (id, bindingId, supplierId, materialCode,
-             oldPrice, newPrice, currency, changedDate, changedBy, reason,
-             approvalStatus)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             oldPrice, newPrice, currency, changedDate, effectiveFrom, changedBy,
+             reason, approvalStatus)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             `ph-${crypto.randomUUID().slice(0, 8)}`,
@@ -294,8 +384,9 @@ app.put("/:id", async (c) => {
             existing.unitPrice,
             merged.unitPrice,
             merged.currency,
-            new Date().toISOString().slice(0, 10),
-            "System",
+            todayIso(),
+            merged.effectiveFrom,
+            body.changedBy ?? "System",
             "Price binding updated",
             "APPROVED",
           )

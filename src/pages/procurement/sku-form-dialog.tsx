@@ -22,8 +22,9 @@ export type SupplierSKU = {
   leadTimeDays: number;
   moq: number;
   isMainSupplier: boolean;
-  validFrom: string;
-  validTo: string;
+  // Effective-dated pricing (owner 2026-06-21, like Customer Quotation): the
+  // date this price takes effect. Replaces the old validFrom / validTo window.
+  effectiveFrom: string;
 };
 
 export type SkuFormSupplier = {
@@ -146,11 +147,12 @@ export function SKUFormDialog({
   const [leadTimeDays, setLeadTimeDays] = useState(editData?.leadTimeDays || 7);
   const [moq, setMoq] = useState(editData?.moq || 1);
   const [isMainSupplier, setIsMainSupplier] = useState(editData?.isMainSupplier || false);
-  // Valid From / To default to blank for a new mapping — the operator fills
-  // them only when a price has a real validity window. (Editing keeps whatever
-  // was stored.)
-  const [validFrom, setValidFrom] = useState(editData?.validFrom || "");
-  const [validTo, setValidTo] = useState(editData?.validTo || "");
+  // Effective From: the date this price takes effect (effective-dated model).
+  // A new mapping defaults to TODAY ("today's price effective today"); editing
+  // keeps the stored effective date until the operator changes the price.
+  const [effectiveFrom, setEffectiveFrom] = useState(
+    editData?.effectiveFrom || new Date().toISOString().slice(0, 10),
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -165,8 +167,7 @@ export function SKUFormDialog({
       leadTimeDays,
       moq,
       isMainSupplier,
-      validFrom,
-      validTo,
+      effectiveFrom,
     });
   };
 
@@ -369,20 +370,18 @@ export function SKUFormDialog({
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-[#374151] mb-1">Valid From</label>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Effective From</label>
                 <Input
                   type="date"
-                  value={validFrom}
-                  onChange={(e) => setValidFrom(e.target.value)}
+                  value={effectiveFrom}
+                  onChange={(e) => setEffectiveFrom(e.target.value)}
                 />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-[#374151] mb-1">Valid To</label>
-                <Input
-                  type="date"
-                  value={validTo}
-                  onChange={(e) => setValidTo(e.target.value)}
-                />
+                {/* Owner ruling: today's price effective today; a new price on
+                    Jun 30 is effective Jun 30 — not valid-from / valid-to. */}
+                <p className="mt-1 text-xs text-[#9CA3AF]">
+                  The date this price takes effect. Changing the price records a
+                  new entry in the Price Change Log.
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-2 pt-1">

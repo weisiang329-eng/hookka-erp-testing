@@ -876,6 +876,9 @@ export type SupplierMaterialBinding = {
   leadTimeDays: number;
   paymentTerms: string;
   moq: number;
+  // Effective-dated pricing: the date this price takes effect. The API mirrors
+  // it into priceValidFrom for back-compat; priceValidTo is deprecated.
+  effectiveFrom?: string;
   priceValidFrom: string;
   priceValidTo: string;
   isMainSupplier: boolean;
@@ -890,6 +893,9 @@ export type PriceHistory = {
   newPrice: number;
   currency: "MYR" | "RMB";
   changedDate: string;
+  // The date the price takes effect (effective-dated model). Falls back to
+  // changedDate for rows that predate the column.
+  effectiveFrom: string;
   changedBy: string;
   reason: string;
   approvalStatus: "APPROVED" | "PENDING" | "REJECTED";

@@ -68,6 +68,9 @@ type SkuBinding = {
   leadTimeDays: number;
   moq: number;
   isMainSupplier: boolean;
+  // Effective-dated pricing: the date this price takes effect. Legacy rows
+  // surface priceValidFrom (kept for back-compat reads).
+  effectiveFrom?: string;
   priceValidFrom?: string;
   priceValidTo?: string;
 };
@@ -243,7 +246,13 @@ export default function SupplierDetailPage() {
     [historyResp]
   );
   const sortedHistory = useMemo(
-    () => [...priceHistory].sort((a, b) => b.changedDate.localeCompare(a.changedDate)),
+    () =>
+      [...priceHistory].sort((a, b) => {
+        // Newest effective date first; tie-break on the recorded change date.
+        const ae = a.effectiveFrom || a.changedDate;
+        const be = b.effectiveFrom || b.changedDate;
+        return be.localeCompare(ae) || (b.changedDate || "").localeCompare(a.changedDate || "");
+      }),
     [priceHistory]
   );
 
@@ -357,8 +366,9 @@ export default function SupplierDetailPage() {
       leadTimeDays: b.leadTimeDays,
       moq: b.moq,
       isMainSupplier: b.isMainSupplier,
-      validFrom: b.priceValidFrom ?? "",
-      validTo: b.priceValidTo ?? "",
+      // Effective From (effective-dated model); fall back to the legacy
+      // priceValidFrom for rows that predate the migration.
+      effectiveFrom: b.effectiveFrom ?? b.priceValidFrom ?? "",
     };
   }
 
@@ -374,8 +384,7 @@ export default function SupplierDetailPage() {
       leadTimeDays: data.leadTimeDays,
       moq: data.moq,
       isMainSupplier: data.isMainSupplier,
-      priceValidFrom: data.validFrom,
-      priceValidTo: data.validTo,
+      effectiveFrom: data.effectiveFrom,
     };
     const url = editingSKU
       ? `/api/supplier-materials/${editingSKU.id}`
@@ -573,8 +582,7 @@ export default function SupplierDetailPage() {
                     currency: b.currency,
                     leadTimeDays: b.leadTimeDays,
                     moq: b.moq,
-                    priceValidFrom: b.priceValidFrom,
-                    priceValidTo: b.priceValidTo,
+                    effectiveFrom: b.effectiveFrom ?? b.priceValidFrom,
                   })),
                 );
               }}
@@ -885,13 +893,13 @@ export default function SupplierDetailPage() {
               <div className="flex items-center gap-2 mb-3">
                 <TrendingUp className="h-4 w-4 text-[#6B5C32]" />
                 <h3 className="text-sm font-semibold text-[#1F1D1B]">Price Change Log</h3>
-                <span className="text-xs text-[#9CA3AF]">— tracked unit-price edits on SKU mappings</span>
+                <span className="text-xs text-[#9CA3AF]">— effective-dated unit-price changes on SKU mappings</span>
               </div>
               <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9] text-left text-xs font-medium text-[#374151]">
-                      <th className="h-10 px-3">Date</th>
+                      <th className="h-10 px-3">Effective Date</th>
                       <th className="h-10 px-3">Material</th>
                       <th className="h-10 px-3 text-right">Old Price</th>
                       <th className="h-10 px-3 text-right">New Price</th>
@@ -902,9 +910,14 @@ export default function SupplierDetailPage() {
                   </thead>
                   <tbody className="divide-y divide-[#E2DDD8]">
                     {sortedHistory.map((h) => {
-                      const pct = h.oldPrice === 0 ? "N/A" : (() => {
+                      // Old price = the price before this change (the previous
+                      // effective row's price, stored as oldPrice when the change
+                      // was recorded). An opening price has oldPrice 0 → "first
+                      // price", so change % is not meaningful.
+                      const isFirst = h.oldPrice === 0;
+                      const pct = isFirst ? "—" : (() => {
                         const p = ((h.newPrice - h.oldPrice) / h.oldPrice) * 100;
-                        return `${p > 0 ? "+" : ""}${p.toFixed(1)}%`;
+                        return `${p > 0 ? "▲ +" : p < 0 ? "▼ " : ""}${p.toFixed(1)}%`;
                       })();
                       const isIncrease = h.newPrice > h.oldPrice;
                       const statusColors: Record<string, string> = {
@@ -914,11 +927,11 @@ export default function SupplierDetailPage() {
                       };
                       return (
                         <tr key={h.id} className="hover:bg-[#F0ECE9]/50">
-                          <td className="py-3 px-3">{formatDate(h.changedDate)}</td>
+                          <td className="py-3 px-3 tabular-nums">{formatDate(h.effectiveFrom || h.changedDate)}</td>
                           <td className="py-3 px-3 font-mono text-xs">{h.materialCode}</td>
-                          <td className="py-3 px-3 text-right">{formatCurrency(h.oldPrice, h.currency)}</td>
-                          <td className="py-3 px-3 text-right font-medium">{formatCurrency(h.newPrice, h.currency)}</td>
-                          <td className={`py-3 px-3 text-right font-medium ${pct === "N/A" ? "text-gray-400" : isIncrease ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}`}>
+                          <td className="py-3 px-3 text-right tabular-nums">{isFirst ? "—" : formatCurrency(h.oldPrice, h.currency)}</td>
+                          <td className="py-3 px-3 text-right font-medium tabular-nums">{formatCurrency(h.newPrice, h.currency)}</td>
+                          <td className={`py-3 px-3 text-right font-medium tabular-nums ${isFirst ? "text-gray-400" : isIncrease ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}`}>
                             {pct}
                           </td>
                           <td className="py-3 px-3">{h.changedBy}</td>

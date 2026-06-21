@@ -1,0 +1,21 @@
+-- 0183_supplier_binding_effective_from.sql
+-- Effective-dated supplier pricing (like Customer Quotation / maintenance_config).
+--
+-- The supplier↔material price binding used a Valid From / Valid To window. Owner
+-- ruling 2026-06-21: switch to an EFFECTIVE DATE model — "today's price effective
+-- today; a new price on Jun 30 is effective Jun 30 — not valid-from/valid-to."
+--   • supplier_material_bindings.effective_from = the date THIS price takes effect.
+--     The current price = the binding row (one row per supplier+material); a price
+--     change stamps a new effective_from and appends an audit row to price_histories.
+--   • price_histories.effective_from = the effective date of that recorded change,
+--     so the Price Change Log shows the real effective date (not the system clock).
+--
+-- Existing rows: effective_from is NULL; the API falls back to the legacy
+-- price_valid_from (which is where the "from" date used to live) so historical
+-- bindings still surface a sensible Effective From. No data backfill required.
+--
+-- Mirrors the runtime self-apply in ensureBindingColumns() (supplier-materials.ts)
+-- and ensureEffectiveFromColumn() (price-history.ts) so deploy ordering can't
+-- break the endpoints — the migration file is the permanent record.
+ALTER TABLE supplier_material_bindings ADD COLUMN IF NOT EXISTS effective_from TEXT;
+ALTER TABLE price_histories ADD COLUMN IF NOT EXISTS effective_from TEXT;

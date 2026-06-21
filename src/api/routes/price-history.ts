@@ -23,6 +23,9 @@ type PriceHistoryRow = {
   newPrice: number;
   currency: "MYR" | "RMB" | null;
   changedDate: string;
+  // The date the price takes effect (effective-dated model). Older rows
+  // predate the column → fall back to changedDate so the log never blanks.
+  effectiveFrom: string | null;
   changedBy: string;
   reason: string | null;
   approvalStatus: "APPROVED" | "PENDING" | "REJECTED" | null;
@@ -38,6 +41,7 @@ function rowToHistory(r: PriceHistoryRow) {
     newPrice: r.newPrice,
     currency: r.currency ?? "MYR",
     changedDate: r.changedDate,
+    effectiveFrom: r.effectiveFrom ?? r.changedDate,
     changedBy: r.changedBy,
     reason: r.reason ?? "",
     approvalStatus: r.approvalStatus ?? "PENDING",
@@ -73,10 +77,31 @@ app.get("/", async (c) => {
   return c.json({ success: true, data });
 });
 
+// Runtime self-apply for the effective_from column (effective-dated pricing,
+// migration 0183). Mirrors ensureBindingColumns in supplier-materials.ts so
+// this route can write effective_from even if it's hit before that route.
+let effectiveFromEnsured: Promise<void> | null = null;
+function ensureEffectiveFromColumn(db: D1Database): Promise<void> {
+  if (effectiveFromEnsured) return effectiveFromEnsured;
+  effectiveFromEnsured = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE price_histories ADD COLUMN IF NOT EXISTS effective_from TEXT",
+        )
+        .run();
+    } catch {
+      /* already exists / transient — ignore */
+    }
+  })();
+  return effectiveFromEnsured;
+}
+
 // POST /api/price-history — record a price change entry
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "price-history", "create");
   if (denied) return denied;
+  await ensureEffectiveFromColumn(c.var.DB);
   try {
     const body = await c.req.json();
     const { bindingId, supplierId, materialCode, oldPrice, newPrice } = body;
@@ -96,6 +121,7 @@ app.post("/", async (c) => {
       );
     }
     const id = genId();
+    const changedDate = body.changedDate ?? new Date().toISOString().slice(0, 10);
     const row = {
       id,
       bindingId: String(bindingId),
@@ -104,7 +130,9 @@ app.post("/", async (c) => {
       oldPrice: Number(oldPrice),
       newPrice: Number(newPrice),
       currency: body.currency === "RMB" ? "RMB" : "MYR",
-      changedDate: body.changedDate ?? new Date().toISOString().slice(0, 10),
+      changedDate,
+      // Effective date this price takes effect; default to the change date.
+      effectiveFrom: body.effectiveFrom ?? changedDate,
       changedBy: body.changedBy ?? "System",
       reason: body.reason ?? "",
       approvalStatus:
@@ -115,9 +143,9 @@ app.post("/", async (c) => {
     };
     await c.var.DB.prepare(
       `INSERT INTO price_histories (id, bindingId, supplierId, materialCode,
-         oldPrice, newPrice, currency, changedDate, changedBy, reason,
-         approvalStatus)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         oldPrice, newPrice, currency, changedDate, effectiveFrom, changedBy,
+         reason, approvalStatus)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         row.id,
@@ -128,6 +156,7 @@ app.post("/", async (c) => {
         row.newPrice,
         row.currency,
         row.changedDate,
+        row.effectiveFrom,
         row.changedBy,
         row.reason,
         row.approvalStatus,

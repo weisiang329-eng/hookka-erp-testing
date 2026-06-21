@@ -741,7 +741,24 @@ app.post("/", async (c) => {
     }
   }
 
-  const piNo = await generatePiNo(db);
+  // Import override: a one-time historical import can supply the original piNo
+  // (e.g. PI-2604-019 from the accounting system) so the number is preserved;
+  // otherwise auto-generate the next sequence. A duplicate number is rejected.
+  let piNo: string;
+  if (typeof body.piNo === "string" && /^PI-\d/.test(body.piNo.trim())) {
+    piNo = body.piNo.trim();
+    const dup = await db
+      .prepare("SELECT piNo FROM purchase_invoices WHERE piNo = ? LIMIT 1")
+      .bind(piNo)
+      .first<{ piNo: string }>();
+    if (dup)
+      return c.json(
+        { success: false, error: `Purchase invoice ${piNo} already exists` },
+        409,
+      );
+  } else {
+    piNo = await generatePiNo(db);
+  }
   const id = `pi-${crypto.randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
   // Owner term: fixed 1 month, by calendar month — due = end of next

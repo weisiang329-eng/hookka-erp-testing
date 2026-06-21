@@ -661,13 +661,15 @@ function CreatePurchaseInvoicePage() {
         </Card>
       </div>
 
-      {/* Invoice Items — full-width table */}
+      {/* Invoice Items — full-width table, matches PO create style */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle>Invoice Items ({validLines.length})</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle>Invoice Items ({validLines.length})</CardTitle>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
+          <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
             <table className="w-full text-sm">
               <thead className="bg-[#F0ECE9] border-b border-[#E2DDD8]">
                 <tr className="text-xs uppercase tracking-wide text-[#6B7280]">
@@ -676,29 +678,29 @@ function CreatePurchaseInvoicePage() {
                   </th>
                   <th
                     className="text-left px-3 py-2 font-medium"
-                    style={{ width: 140 }}
+                    style={{ minWidth: 140 }}
                   >
                     Supplier SKU
                   </th>
                   <th
                     className="text-right px-3 py-2 font-medium"
-                    style={{ width: 100 }}
+                    style={{ minWidth: 100 }}
                   >
                     Qty
                   </th>
                   <th
                     className="text-right px-3 py-2 font-medium"
-                    style={{ width: 130 }}
+                    style={{ minWidth: 130 }}
                   >
                     Unit Price (RM)
                   </th>
                   <th
                     className="text-right px-3 py-2 font-medium"
-                    style={{ width: 130 }}
+                    style={{ minWidth: 130 }}
                   >
                     Line Total
                   </th>
-                  <th style={{ width: 40 }} />
+                  <th style={{ minWidth: 40 }} />
                 </tr>
               </thead>
               <tbody>
@@ -798,15 +800,15 @@ function CreatePurchaseInvoicePage() {
                   );
                 })}
               </tbody>
-              <tfoot>
-                <tr className="bg-[#F0ECE9] border-t border-[#E2DDD8]">
+              <tfoot className="bg-[#FAF9F7] border-t border-[#E2DDD8]">
+                <tr>
                   <td
                     colSpan={4}
-                    className="px-3 py-2 font-semibold text-[#374151]"
+                    className="px-3 py-2 text-right text-sm font-medium text-[#6B7280]"
                   >
-                    Grand Total
+                    Grand total
                   </td>
-                  <td className="px-3 py-2 text-right font-bold text-[#6B5C32]">
+                  <td className="px-3 py-2 text-right text-base font-bold text-[#6B5C32]">
                     {totalRM.toLocaleString("en-MY", {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2,
@@ -820,9 +822,10 @@ function CreatePurchaseInvoicePage() {
 
           <Button
             type="button"
-            variant="ghost"
+            variant="outline"
             size="sm"
             onClick={addLine}
+            className="text-[#6B5C32] border-[#6B5C32]/30 hover:border-[#6B5C32] hover:bg-[#FAF9F7]"
           >
             <Plus className="h-4 w-4" /> Add line
           </Button>

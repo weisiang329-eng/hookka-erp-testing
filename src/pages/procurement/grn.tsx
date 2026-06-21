@@ -755,102 +755,122 @@ export default function GRNPage() {
         </div>
       </div>
 
-      {/* Status Pipeline */}
-      <Card>
-        <CardContent className="p-4 space-y-3">
-          <div className="flex items-center justify-between overflow-x-auto gap-2">
-            {statusCounts.map((s, i) => (
-              <div key={s.label} className="flex items-center gap-2">
-                <div
-                  className="text-center min-w-[80px] cursor-pointer"
-                  onClick={() => { setFilterStatus(filterStatus === s.status ? "" : s.status); setShowFilters(true); }}
-                >
-                  <Badge variant="status" status={s.status}>{s.count}</Badge>
-                  <p className={`text-xs mt-1 ${filterStatus === s.status ? "text-[#6B5C32] font-medium" : "text-[#6B7280]"}`}>{s.label}</p>
-                </div>
-                {i < statusCounts.length - 1 && <ArrowRight className="h-4 w-4 text-[#D1CBC5] shrink-0" />}
-              </div>
-            ))}
-          </div>
-          {/* Arrival pipeline tabs — styled to match the DO delivery pipeline */}
-          <div className="pt-2 border-t border-[#E2DDD8]">
-            <div className="flex items-center gap-1 mb-1">
-              <Ship className="h-3.5 w-3.5 text-[#6B7280] shrink-0" />
-              <span className="text-xs text-[#6B7280]">Arrival Pipeline</span>
-              {filterArrivalState && (
-                <button onClick={() => setFilterArrivalState("")} className="ml-2 text-xs text-[#9CA3AF] hover:text-[#374151] cursor-pointer">Clear</button>
-              )}
-            </div>
-            <nav className="flex gap-4 overflow-x-auto border-b border-[#E2DDD8]" aria-label="Arrival stages">
-              {(["NOT_ARRIVED", "IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"] as ArrivalState[]).map((state) => {
-                const count = grns.filter(g => g.arrival_state === state).length;
-                const isActive = filterArrivalState === state;
-                return (
-                  <button
-                    key={state}
-                    onClick={() => setFilterArrivalState(isActive ? "" : state)}
-                    className={`flex items-center gap-2 pb-2 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
-                      isActive
-                        ? "border-[#6B5C32] text-[#6B5C32]"
-                        : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
-                    }`}
-                  >
-                    <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: getStatusColor(state).hex }} />
-                    {ARRIVAL_LABELS[state]}
-                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                      isActive ? "bg-[#6B5C32] text-white" : "bg-[#F0ECE9] text-[#6B7280]"
-                    }`}>
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </nav>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Summary Cards */}
+      {/* Summary Cards — matches DO list card style */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <Package className="h-5 w-5 text-[#6B5C32]" />
+            </div>
             <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{totalGRNs}</p>
               <p className="text-xs text-[#6B7280]">Total GRNs</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{totalGRNs}</p>
             </div>
-            <Package className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+              <ClipboardCheck className="h-5 w-5 text-[#9C6F1E]" />
+            </div>
             <div>
+              <p className="text-2xl font-bold text-[#9C6F1E]">{pendingQC}</p>
               <p className="text-xs text-[#6B7280]">Pending QC</p>
-              <p className="text-xl font-bold text-[#9C6F1E]">{pendingQC}</p>
             </div>
-            <ClipboardCheck className="h-5 w-5 text-[#9C6F1E]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#EEF3E4] p-2.5">
+              <CheckCircle2 className="h-5 w-5 text-[#4F7C3A]" />
+            </div>
             <div>
+              <p className="text-2xl font-bold text-[#4F7C3A]">{approvedMTD}</p>
               <p className="text-xs text-[#6B7280]">Approved (MTD)</p>
-              <p className="text-xl font-bold text-[#4F7C3A]">{approvedMTD}</p>
             </div>
-            <CheckCircle2 className="h-5 w-5 text-[#4F7C3A]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-[#6B7280]">Total Value</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(totalValueSen)}</p>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <DollarSign className="h-5 w-5 text-[#6B5C32]" />
             </div>
-            <DollarSign className="h-5 w-5 text-[#6B5C32]" />
+            <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{formatCurrency(totalValueSen)}</p>
+              <p className="text-xs text-[#6B7280]">Total Value</p>
+            </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Filters */}
+      {/* Arrival pipeline tab bar + compact QC status strip — mirrors DO list structure */}
+      <div>
+        {/* Arrival tabs — primary navigation, DO-style border-b-2 */}
+        <div className="border-b border-[#E2DDD8]">
+          <nav className="flex gap-4 overflow-x-auto" aria-label="Arrival stages">
+            {/* "All" pseudo-tab to clear arrival filter */}
+            <button
+              onClick={() => setFilterArrivalState("")}
+              className={`flex items-center gap-2 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+                !filterArrivalState
+                  ? "border-[#6B5C32] text-[#6B5C32]"
+                  : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
+              }`}
+            >
+              All GRNs
+              <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                !filterArrivalState ? "bg-[#6B5C32] text-white" : "bg-[#F0ECE9] text-[#6B7280]"
+              }`}>
+                {grns.length}
+              </span>
+            </button>
+            {(["NOT_ARRIVED", "IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"] as ArrivalState[]).map((state) => {
+              const count = grns.filter(g => g.arrival_state === state).length;
+              const isActive = filterArrivalState === state;
+              return (
+                <button
+                  key={state}
+                  onClick={() => setFilterArrivalState(isActive ? "" : state)}
+                  className={`flex items-center gap-2 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+                    isActive
+                      ? "border-[#6B5C32] text-[#6B5C32]"
+                      : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
+                  }`}
+                >
+                  <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: getStatusColor(state).hex }} />
+                  {ARRIVAL_LABELS[state]}
+                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                    isActive ? "bg-[#6B5C32] text-white" : "bg-[#F0ECE9] text-[#6B7280]"
+                  }`}>
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+
+        {/* QC / workflow status compact strip — secondary context, not a tab */}
+        <div className="flex items-center gap-4 px-1 pt-2 pb-1 overflow-x-auto">
+          {statusCounts.map((s, i) => (
+            <div key={s.label} className="flex items-center gap-2 shrink-0">
+              <button
+                className="flex items-center gap-1.5 cursor-pointer"
+                onClick={() => { setFilterStatus(filterStatus === s.status ? "" : s.status); setShowFilters(true); }}
+              >
+                <Badge variant="status" status={s.status}>{s.count}</Badge>
+                <span className={`text-xs ${filterStatus === s.status ? "text-[#6B5C32] font-medium" : "text-[#6B7280]"}`}>{s.label}</span>
+              </button>
+              {i < statusCounts.length - 1 && <ArrowRight className="h-3.5 w-3.5 text-[#D1CBC5] shrink-0" />}
+            </div>
+          ))}
+          {filterStatus && (
+            <button onClick={() => setFilterStatus("")} className="ml-1 text-xs text-[#9CA3AF] hover:text-[#374151] cursor-pointer shrink-0">Clear filter</button>
+          )}
+        </div>
+      </div>
+
+      {/* Search / bulk actions / filters */}
       <Card>
         <CardContent className="p-4">
           <div className="flex items-center justify-between mb-3">

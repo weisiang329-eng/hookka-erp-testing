@@ -569,8 +569,10 @@ export default function SupplierDetailPage() {
                   {
                     code: supplier.code,
                     name: supplier.name,
+                    address: supplier.address,
                     contactPerson: supplier.contactPerson,
                     email: supplier.email,
+                    phone: supplier.phone,
                     purchaseOrgCode: supplier.purchaseOrgCode,
                   },
                   skus.map((b) => ({

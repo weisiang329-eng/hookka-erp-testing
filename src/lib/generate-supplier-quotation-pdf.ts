@@ -4,6 +4,7 @@ import { COMPANY } from "@/lib/constants";
 import {
   drawLetterhead,
   fmtDate,
+  PDF,
 } from "@/lib/pdf-utils";
 import type { LetterheadCompany } from "@/lib/pdf-utils";
 
@@ -28,6 +29,7 @@ export type SupplierQuotationSupplier = {
   contactPerson?: string | null;
   email?: string | null;
   phone?: string | null;
+  address?: string | null;
   purchaseOrgCode?: string | null;
 };
 
@@ -104,7 +106,7 @@ export function generateSupplierQuotationPdf(
   // =========================================================================
   let y = drawLetterhead(doc, {
     docTitle: "SUPPLIER QUOTATION",
-    docNo: `${supplier.code} - ${supplier.name}`,
+    docNo: supplier.code,
     docDate: fmtDate(today),
     logo: isHookka,
     companyInfo: co.info,
@@ -127,6 +129,7 @@ export function generateSupplierQuotationPdf(
   let yLeft = y + 10;
   const supplierFields: Array<[string, string]> = [
     ["Supplier", `${supplier.code} - ${supplier.name}`],
+    ["Address", supplier.address || "-"],
     ["Contact", supplier.contactPerson || "-"],
     ["Email", supplier.email || "-"],
     ["Phone", supplier.phone || "-"],
@@ -182,7 +185,7 @@ export function generateSupplierQuotationPdf(
   y += 6;
   doc.setFontSize(11);
   doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
+  doc.setTextColor(...PDF.accent);
   doc.text(`QUOTED ITEMS  (${lines.length})`, margin, y);
   y += 3;
 

@@ -268,12 +268,13 @@ export function generatePurchaseInvoicePdf(
       ? pi.items.reduce((s, i) => s + (Number(i.lineTotalSen) || 0), 0)
       : pi.amountSen);
   sumLine("Subtotal", fmtRM(subtotalSen), false);
-  // Rule clears the 11pt GRAND TOTAL cap height (matches the Invoice spacing).
+  // Rule clears the 11pt TOTAL cap height (matches the Sales Invoice spacing).
   y += 3;
   doc.setDrawColor(...PDF.rule);
   doc.setLineWidth(0.4);
   doc.line(lblX - 2, y - 5.5, valX, y - 5.5);
-  sumLine("GRAND TOTAL", fmtRM(pi.amountSen), true, true);
+  // "TOTAL" (not "GRAND TOTAL") to match the Sales Invoice label exactly.
+  sumLine("TOTAL", fmtRM(pi.amountSen), true, true);
 
   // Amount in words — mirrors the Sales Invoice confirmation line.
   doc.setFont("helvetica", "italic");

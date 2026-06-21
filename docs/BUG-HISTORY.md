@@ -34,6 +34,18 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-21-006 — Audit history printed a base64 image as text → 423px mobile overflow on SO/CO detail
+
+🟢 **Fixed** · `ui-frontend`
+
+**Symptom:** the SO + CO detail pages scrolled sideways on a phone (423px overflow at 360px). **Root cause:** the shared `AuditHistoryPanel` rendered before/after snapshot values as text; when a SO's audit snapshot captured `customerPOImageB64` (a `data:image/png;base64,…` URI), the ~718px unbreakable string forced the page wide. (`customerPOImageB64` is shown correctly as a "View original" button elsewhere — the audit panel printed the raw value.) **Fix (`4c3ca710`):** `formatDefault()` now collapses `data:` URIs → `[image]` and raw base64 blobs → `[binary data]`; value spans get `break-all`; `.doc-number` wraps under 480px. **Verified** via iframe: SO detail 360px overflow 423 → −6.
+
+## BUG-2026-06-21-005 — SO + CO detail 500'd: Order Progress used `GROUP_CONCAT` (no such Postgres function)
+
+🟢 **Fixed (same-day, self-introduced regression — caught before the owner hit it)** · `data-migration`
+
+**Symptom:** every Sales Order + CO detail page showed "Order not found". **Root cause:** the new Order Progress card's `completedBy` subquery (sales-orders.ts + consignment-orders.ts) used SQLite `GROUP_CONCAT(DISTINCT …)`; Postgres has no `group_concat`, and `translateSql` does NOT map it → `GET /api/sales-orders/:id` (+ CO) returned 500 `function group_concat(text) does not exist`. **Caught** by the same-origin-iframe verify (the detail page wouldn't load). **Fix (`508adea5`):** `GROUP_CONCAT(DISTINCT x)` → `string_agg(DISTINCT x, ', ')`. Verified API 200 + page loads. Lesson: use Postgres aggregates directly in route SQL; the D1-compat layer doesn't translate `group_concat`.
+
 ## BUG-2026-06-21-004 — Employees summary KPIs froze when changing the date on non-Working-Hours tabs
 
 🟢 **Fixed** · `ui-frontend`

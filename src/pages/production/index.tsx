@@ -6258,7 +6258,7 @@ export default function ProductionPage({
   // fixed badge so the filter UI remains live during refetch.
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 p-6 max-md:p-4 max-sm:p-3">
       {loading && (
         <div className="fixed top-2 right-2 z-50 flex items-center gap-2 px-3 py-1.5 bg-white border border-[#E6E0D9] rounded shadow-sm text-xs text-[#6B5C32]">
           <div className="h-3 w-3 animate-spin rounded-full border-2 border-[#6B5C32] border-t-transparent" />
@@ -6303,12 +6303,12 @@ export default function ProductionPage({
         </div>
       )}
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Production Tracking</h1>
           <p className="text-xs text-[#6B7280]">Real-time production status across all 8 departments</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button
             onClick={() => setStockDialogOpen(true)}
             className="bg-[#6B5C32] hover:bg-[#574A28] text-white gap-1.5"
@@ -6706,7 +6706,7 @@ export default function ProductionPage({
           (/production vs /production/<code>) navigate via the sidebar
           instead, so the in-page tab bar would be redundant. */}
       {mode === "full" && (
-      <div className="rounded-lg border border-[#E6E0D9] bg-[#FAF8F4] p-1">
+      <div className="rounded-lg border border-[#E6E0D9] bg-[#FAF8F4] p-1 overflow-x-auto">
         <div className="grid grid-cols-9 gap-1">
           <button
             onClick={() => setActiveTab("ALL")}

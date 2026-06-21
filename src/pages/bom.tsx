@@ -1383,7 +1383,7 @@ function BOMTreeView({ template, product, onEdit }: { template: BOMTemplate; pro
   return (
     <div className="space-y-4">
       {/* Header with Edit */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-semibold text-[#111827]">
           {product.code} — {product.name}
         </h2>
@@ -6953,7 +6953,7 @@ export default function BOMManagementPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>

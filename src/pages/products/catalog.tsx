@@ -142,7 +142,7 @@ export function ProductCatalog({ products }: { products: CatalogProduct[] }) {
   const withPhotos = filtered.filter((g) => (photos[g.baseModel] ?? []).length > 0).length;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 p-6 max-md:p-4 max-sm:p-3">
       {/* Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="inline-flex bg-[#F3F4F6] rounded-lg p-0.5">

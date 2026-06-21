@@ -780,8 +780,8 @@ export default function WipTimesPage() {
   );
 
   return (
-    <div className="space-y-4 p-4">
-      <div className="flex items-start justify-between gap-4">
+    <div className="space-y-4 p-4 max-sm:p-3">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-[#1F1D1B] flex items-center gap-2">
             <Clock className="h-6 w-6 text-[#6B5C32]" />
@@ -1017,7 +1017,7 @@ export default function WipTimesPage() {
                 </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 bg-[#FAF9F7] rounded-md p-3 text-sm">
+              <div className="grid grid-cols-2 gap-3 bg-[#FAF9F7] rounded-md p-3 text-sm max-sm:grid-cols-1">
                 <div>
                   <p className="text-xs text-[#6B7280]">Current BOM Time</p>
                   <p className="font-semibold text-[#1F1D1B] mt-0.5">
@@ -1188,7 +1188,7 @@ export default function WipTimesPage() {
             </div>
 
             <div className="px-5 py-4 space-y-4">
-              <div className="grid grid-cols-2 gap-3 bg-[#FAF9F7] rounded-md p-3 text-sm">
+              <div className="grid grid-cols-2 gap-3 bg-[#FAF9F7] rounded-md p-3 text-sm max-sm:grid-cols-1">
                 <div>
                   <p className="text-xs text-[#6B7280]">WIPs selected</p>
                   <p className="font-semibold text-[#1F1D1B] mt-0.5">

@@ -517,7 +517,7 @@ export default function ProductionFolderDetailPage() {
   }
 
   return (
-    <div className="p-4 max-w-7xl mx-auto">
+    <div className="p-4 max-sm:p-3 max-w-7xl mx-auto">
       <div className="mb-3 flex items-center gap-2">
         <Button size="sm" variant="ghost" onClick={() => navigate("/production/folders")} title="Back to folders">
           <ArrowLeft className="h-3.5 w-3.5 mr-1" /> Back

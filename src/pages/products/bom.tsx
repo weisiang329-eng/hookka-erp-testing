@@ -556,13 +556,13 @@ export default function BOMPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
       {/* Breadcrumb + Header */}
       <div>
         <Link to="/products" className="text-[#3E6570] hover:underline text-sm">
           &larr; Back to Products
         </Link>
-        <div className="flex items-center justify-between mt-3">
+        <div className="flex items-center justify-between flex-wrap gap-3 mt-3">
           <div>
             <h1 className="text-xl font-bold text-[#111827]">Bill of Materials</h1>
             <div className="flex items-center gap-3 mt-1">

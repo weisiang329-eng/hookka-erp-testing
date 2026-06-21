@@ -385,9 +385,9 @@ export default function MasterTrackerPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="icon" onClick={() => navigate("/production")}>
             <ArrowLeft className="h-5 w-5" />
@@ -399,7 +399,7 @@ export default function MasterTrackerPage() {
             </p>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => navigate("/production")}>
             Production Overview
           </Button>
@@ -502,7 +502,7 @@ export default function MasterTrackerPage() {
             </select>
 
             {/* Date Range */}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-[#6B7280]">From</span>
               <Input
                 type="date"

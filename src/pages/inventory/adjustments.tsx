@@ -382,7 +382,7 @@ export default function StockAdjustmentsPage() {
     "w-full rounded border border-[#E2DDD8] bg-white px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20";
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
       <div>
         <h1 className="text-xl font-bold text-[#1F1D1B]">Stock Adjustments</h1>
         <p className="text-xs text-[#6B7280]">
@@ -395,7 +395,7 @@ export default function StockAdjustmentsPage() {
       {/* ---------- Multi-row Entry ---------- */}
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <CardTitle>New Adjustments ({rows.length})</CardTitle>
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={addRow} disabled={submitting}>

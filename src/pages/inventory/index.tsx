@@ -1791,7 +1791,7 @@ export default function InventoryPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -1801,7 +1801,7 @@ export default function InventoryPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-[#E2DDD8]">
+      <div className="flex border-b border-[#E2DDD8] overflow-x-auto">
         {TABS.map(tab => (
           <button
             key={tab.key}

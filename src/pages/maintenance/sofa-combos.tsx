@@ -709,9 +709,9 @@ export default function SofaCombosPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Sofa Combo Pricing</h1>
           <p className="text-xs text-[#6B7280]">

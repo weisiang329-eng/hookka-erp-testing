@@ -101,7 +101,7 @@ export default function FabricsPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-6 max-md:p-4 max-sm:p-3">
       {/* Header */}
       <div>
         <h1 className="text-xl font-bold text-gray-900">Fabric Tracking</h1>
@@ -126,7 +126,7 @@ export default function FabricsPage() {
 
       {/* Tabs */}
       <div className="border-b border-gray-200">
-        <nav className="flex gap-6">
+        <nav className="flex gap-6 overflow-x-auto">
           {(
             [
               { key: "inventory", label: "Fabric Inventory", icon: Layers },

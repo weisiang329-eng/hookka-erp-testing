@@ -12,7 +12,7 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 ## 2026-06-21
 
 ### ⏸️ AWAITING OWNER — 3 decisions to finish the purchasing batch
-- **① PI import** — Excel reconcile done: all 15 Excel POs already in system; **19 PIs missing** (PI-2604-019→037, OCEAN SKY, RM 7,258, no PO link → manual). Plan: one-time import preserving original PI# + status APPROVED + supplier invoice#/DO#.
+- ✅ **① PI import DONE** — Excel reconcile: all 15 Excel POs already present; 19 PIs were missing (PI-2604-019→037, OCEAN SKY, RM 7,258) → imported via a piNo-override on the PI POST (commit `95bfd036`), preserving original numbers + status APPROVED + supplier Inv#/DO# + items. Verified live (19/19 present+APPROVED, line counts + amounts match Excel). Total PIs 592→611.
 - **② J cleanup** — delete ~1665 pre-1-Apr docs (PO 555 / GRN 555 / PI 555): (a) docs only, or (b) docs + their stock batches + cost ledger? Destructive → needs a one-time script (option-A lock blocks normal delete). Snapshot first.
 - **③ GRN no-draft** — imports-in-transit use the arrival pipeline (Planning→Arrived) instead of Draft; local goods → direct create + post. OK?
 

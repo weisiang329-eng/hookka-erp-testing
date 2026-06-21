@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
+import { MoneyInput } from "@/components/ui/money-input";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa } from "@/lib/export-report";
 import { COA_TYPE_COLOR, SUCCESS, DANGER, INFO, ACCENT_PLUM } from "@/lib/design-tokens";
@@ -47,7 +48,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "opening" | "audit" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "opening" | "audit" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -205,6 +206,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   { key: "labor", label: "Labour", icon: <Users className="h-4 w-4" />, group: "Maintenance" },
   { key: "stock", label: "Stock", icon: <List className="h-4 w-4" />, group: "Maintenance" },
   { key: "stockmap", label: "Stock Mapping", icon: <List className="h-4 w-4" />, group: "Maintenance" },
+  { key: "openstock", label: "Opening Stock", icon: <Scale className="h-4 w-4" />, group: "Maintenance" },
   { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" />, group: "Maintenance" },
   { key: "audit", label: "Audit Log", icon: <FileText className="h-4 w-4" />, group: "Maintenance" },
   { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" />, group: "Maintenance" },
@@ -408,6 +410,7 @@ export default function AccountingPage() {
               <StockMapCard accounts={accounts} />
             </div>
           )}
+          {tab === "openstock" && <OpeningStockTab />}
           {tab === "maint" && (
             <div className="space-y-4">
               <h2 className="text-lg font-semibold text-[#1F1D1B]">Account Maintenance</h2>
@@ -1105,6 +1108,219 @@ function StockMapCard({ accounts }: { accounts: ChartOfAccount[] }) {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+// =============== TAB: OPENING STOCK (F6 — material-cost FIFO seed) ===============
+//
+// Maintenance grid where the owner fills the per-material cutover layer the
+// FIFO cost engine seeds from: opening quantity + unit cost as of the switch
+// date. Fill once; later months roll forward automatically (this month's
+// closing becomes next month's opening). Amounts entered in RM, stored as
+// integer sen; quantity is a plain number. Rows are dual-keyed on read.
+type OpeningStockApiRow = {
+  id: string;
+  itemCode: string;
+  description: string;
+  itemGroup: string;
+  baseUOM: string;
+  qty: number | null;
+  unitCostSen: number | null;
+  asOfDate: string | null;
+};
+
+function OpeningStockTab() {
+  const { toast } = useToast();
+  // Per-row editable state, keyed by raw-material id. qty/costRm are the live
+  // input values (RM for cost); meta carries the read-only catalogue columns.
+  type RowState = {
+    id: string;
+    itemCode: string;
+    description: string;
+    itemGroup: string;
+    baseUOM: string;
+    qty: number | null;
+    costRm: number | null;
+  };
+  const [rows, setRows] = useState<RowState[] | null>(null);
+  const [asOfDate, setAsOfDate] = useState("");
+  const [search, setSearch] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let stale = false;
+    fetch("/api/accounting/material-opening-stock")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: OpeningStockApiRow[] }>)
+      .then((j) => {
+        if (stale || !j?.success || !j.data) return;
+        const data = j.data;
+        setRows(
+          data.map((r) => ({
+            id: r.id,
+            itemCode: r.itemCode,
+            description: r.description,
+            itemGroup: r.itemGroup,
+            baseUOM: r.baseUOM,
+            qty: r.qty ?? null,
+            costRm: r.unitCostSen != null ? r.unitCostSen / 100 : null,
+          })),
+        );
+        // Seed the global as-of date from the first material that already has
+        // one, so re-opening the page shows the previously saved cutover date.
+        const existing = data.find((r) => r.asOfDate)?.asOfDate ?? "";
+        setAsOfDate(existing);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, []);
+
+  const setCell = (id: string, field: "qty" | "costRm", v: number | null) =>
+    setRows((prev) => (prev ? prev.map((r) => (r.id === id ? { ...r, [field]: v } : r)) : prev));
+
+  const filtered = useMemo(() => {
+    if (!rows) return [];
+    const q = search.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(
+      (r) =>
+        r.itemCode.toLowerCase().includes(q) ||
+        r.description.toLowerCase().includes(q) ||
+        r.itemGroup.toLowerCase().includes(q),
+    );
+  }, [rows, search]);
+
+  const save = async () => {
+    if (!rows) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+      toast.error("Pick an as-of date (the cutover day) before saving");
+      return;
+    }
+    // Only send rows the owner actually filled (a qty or a cost). Each gets the
+    // single global as-of date. RM → integer sen at the boundary.
+    const payload = rows
+      .filter((r) => r.qty != null || r.costRm != null)
+      .map((r) => ({
+        rmId: r.id,
+        qty: r.qty ?? 0,
+        unitCostSen: r.costRm != null ? Math.round(r.costRm * 100) : 0,
+        asOfDate,
+      }));
+    setSaving(true);
+    try {
+      const res = await fetch("/api/accounting/material-opening-stock", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: payload }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) toast.success(`Opening stock saved (${payload.length} item${payload.length === 1 ? "" : "s"})`);
+      else toast.error(humanizeError(j?.error) || "Failed to save opening stock");
+    } catch {
+      toast.error("Failed to save opening stock");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">Opening Stock</h2>
+          <p className="text-xs text-[#6B7280] max-w-3xl">
+            Per-material cutover layer for the FIFO material-cost report: the
+            quantity on hand and its unit cost as of the switch date. Fill once
+            at cutover; later months roll automatically (this month&apos;s
+            closing becomes next month&apos;s opening).
+          </p>
+        </div>
+        <Button variant="primary" size="sm" onClick={save} disabled={saving || !rows}>
+          {saving ? "Saving…" : "Save"}
+        </Button>
+      </div>
+
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex flex-wrap items-end gap-4">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-[#6B7280]">As-of date (cutover)</label>
+              <input
+                type="date"
+                value={asOfDate}
+                onChange={(e) => setAsOfDate(e.target.value)}
+                className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] focus-visible:border-transparent"
+              />
+            </div>
+            <div className="flex flex-col gap-1 flex-1 min-w-[220px]">
+              <label className="text-xs text-[#6B7280]">Search</label>
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Filter by code, description, or group…"
+                className="h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] focus-visible:border-transparent"
+              />
+            </div>
+          </div>
+
+          {!rows ? (
+            <div className="py-8 text-center text-[#6B7280] text-sm">Loading materials…</div>
+          ) : filtered.length === 0 ? (
+            <div className="py-8 text-center text-[#6B7280] text-sm">
+              {rows.length === 0 ? "No active raw materials found." : "No materials match your search."}
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="text-sm w-full">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left">Item Code</th>
+                    <th className="px-3 py-2 text-left">Description</th>
+                    <th className="px-3 py-2 text-left">Group</th>
+                    <th className="px-3 py-2 text-left">UOM</th>
+                    <th className="px-3 py-2 text-right">Opening Qty</th>
+                    <th className="px-3 py-2 text-right">Unit Cost (RM)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((r) => (
+                    <tr key={r.id} className="border-b border-[#F0ECE9]">
+                      <td className="px-3 py-1.5 font-medium text-[#1F1D1B] whitespace-nowrap">{r.itemCode}</td>
+                      <td className="px-3 py-1.5 text-[#1F1D1B]">{r.description}</td>
+                      <td className="px-3 py-1.5 text-[#6B7280] whitespace-nowrap">{r.itemGroup || "—"}</td>
+                      <td className="px-3 py-1.5 text-[#6B7280] whitespace-nowrap">{r.baseUOM || "—"}</td>
+                      <td className="px-3 py-1 w-32">
+                        <input
+                          type="number"
+                          inputMode="decimal"
+                          step="any"
+                          min={0}
+                          value={r.qty ?? ""}
+                          onChange={(e) => {
+                            const v = e.target.value.trim();
+                            setCell(r.id, "qty", v === "" ? null : Number(v));
+                          }}
+                          className="h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-right text-[#1F1D1B] placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] focus-visible:border-transparent"
+                        />
+                      </td>
+                      <td className="px-3 py-1 w-32">
+                        <MoneyInput
+                          value={r.costRm}
+                          onChange={(v) => setCell(r.id, "costRm", v)}
+                          placeholder="0.00"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 

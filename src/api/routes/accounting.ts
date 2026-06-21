@@ -8144,4 +8144,228 @@ app.post("/opening-balance/post", async (c) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// MATERIAL OPENING STOCK (F6 — material-cost FIFO engine)
+//
+// The FIFO cost engine (src/lib/material-cost-fifo.ts) needs a per-material
+// "seed layer" at cutover: the quantity + unit cost on hand the day the old
+// perpetual stock ledger stopped (2026-03). The owner fills this once in
+// Maintenance → Opening Stock; thereafter each month's opening = last month's
+// closing and the engine rolls it forward automatically. Read-only on the
+// finance side — does NOT touch the operations rm_batches.
+//
+// ⚠️ Runtime self-apply (load-bearing): deploys do NOT run migration files, so
+// the table reaches prod ONLY via ensureMaterialOpeningStock — an idempotent
+// CREATE TABLE IF NOT EXISTS awaited at the top of every handler before the
+// first read/write. Mirrors migrations-postgres/0185_material_opening_stock.sql
+// (which is an inert double-track record). Pattern copied from
+// ensureThreePlStateRatesSchema in src/api/routes/three-pl-state-rates.ts:
+// module-level promise = one flight per isolate; per-statement try/catch so a
+// benign "already exists" never poisons the cached promise.
+// ---------------------------------------------------------------------------
+let pendingMosMigrations: Promise<void> | null = null;
+function ensureMaterialOpeningStock(db: D1Database): Promise<void> {
+  if (pendingMosMigrations) return pendingMosMigrations;
+  pendingMosMigrations = (async () => {
+    const stmts = [
+      `CREATE TABLE IF NOT EXISTS material_opening_stock (
+         id            TEXT PRIMARY KEY,
+         rm_id         TEXT NOT NULL,
+         qty           DOUBLE PRECISION NOT NULL DEFAULT 0,
+         unit_cost_sen INTEGER NOT NULL DEFAULT 0,
+         as_of_date    TEXT NOT NULL,
+         org_id        TEXT NOT NULL DEFAULT 'hookka',
+         created_at    TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
+         updated_at    TEXT
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_mos_key ON material_opening_stock (org_id, rm_id)`,
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[accounting.material-opening-stock] DDL skipped", {
+          sql: sql.split("\n")[0],
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return pendingMosMigrations;
+}
+
+type MaterialOpeningStockRow = {
+  rmId: string;
+  qty: number | null;
+  unitCostSen: number | null;
+  asOfDate: string | null;
+};
+
+// GET /api/accounting/material-opening-stock
+// Lists every ACTIVE raw material LEFT JOINed to its opening-stock row, so the
+// Maintenance grid always shows the full catalogue (qty/unitCostSen/asOfDate
+// null for materials not yet filled).
+app.get("/material-opening-stock", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  await ensureMaterialOpeningStock(c.var.DB);
+  const res = await c.var.DB.prepare(
+    `SELECT rm.id            AS id,
+            rm.itemCode      AS itemCode,
+            rm.description   AS description,
+            rm.itemGroup     AS itemGroup,
+            rm.baseUOM       AS baseUOM,
+            mos.qty          AS qty,
+            mos.unitCostSen  AS unitCostSen,
+            mos.asOfDate     AS asOfDate
+       FROM raw_materials rm
+       LEFT JOIN material_opening_stock mos
+         ON mos.rmId = rm.id AND mos.orgId = ?
+      WHERE rm.orgId = ? AND rm.status = 'ACTIVE'
+      ORDER BY rm.itemCode`,
+  )
+    .bind(orgId, orgId)
+    .all<{
+      id: string;
+      itemCode: string | null;
+      description: string | null;
+      itemGroup: string | null;
+      baseUOM: string | null;
+      qty: number | null;
+      unitCostSen: number | null;
+      asOfDate: string | null;
+    }>();
+  const data = (res.results ?? []).map((r) => ({
+    id: r.id,
+    itemCode: r.itemCode ?? "",
+    description: r.description ?? "",
+    itemGroup: r.itemGroup ?? "",
+    baseUOM: r.baseUOM ?? "",
+    qty: r.qty ?? null,
+    unitCostSen: r.unitCostSen ?? null,
+    asOfDate: r.asOfDate ?? null,
+  }));
+  return c.json({ success: true, data, total: data.length });
+});
+
+// PUT /api/accounting/material-opening-stock
+// Body: { rows: [{ rmId, qty, unitCostSen, asOfDate }] }
+// Upserts the whole batch (ON CONFLICT (org_id, rm_id)). Amounts are integer
+// sen; qty is a plain (possibly fractional) quantity. Validates everything up
+// front, then writes in one transaction.
+app.put("/material-opening-stock", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  try {
+    const body = (await c.req.json()) as {
+      rows?: {
+        rmId?: unknown;
+        qty?: unknown;
+        unitCostSen?: unknown;
+        asOfDate?: unknown;
+      }[];
+    };
+    if (!Array.isArray(body.rows)) {
+      return c.json({ success: false, error: "rows[] is required" }, 400);
+    }
+    await ensureMaterialOpeningStock(c.var.DB);
+
+    type CleanRow = {
+      rmId: string;
+      qty: number;
+      unitCostSen: number;
+      asOfDate: string;
+    };
+    const seen = new Set<string>();
+    const cleaned: CleanRow[] = [];
+    for (const raw of body.rows) {
+      const entry = (raw ?? {}) as Record<string, unknown>;
+      const rmId = typeof entry.rmId === "string" ? entry.rmId.trim() : "";
+      if (!rmId) {
+        return c.json({ success: false, error: "Each row needs an rmId" }, 400);
+      }
+      if (seen.has(rmId)) {
+        return c.json(
+          { success: false, error: `Duplicate rmId in rows: ${rmId}` },
+          400,
+        );
+      }
+      seen.add(rmId);
+      const qty = typeof entry.qty === "number" ? entry.qty : Number(entry.qty);
+      const unitCostSen =
+        typeof entry.unitCostSen === "number"
+          ? entry.unitCostSen
+          : Number(entry.unitCostSen);
+      if (!Number.isFinite(qty) || qty < 0) {
+        return c.json(
+          { success: false, error: `Invalid qty for ${rmId}: must be a non-negative number` },
+          400,
+        );
+      }
+      if (!Number.isInteger(unitCostSen) || unitCostSen < 0) {
+        return c.json(
+          {
+            success: false,
+            error: `Invalid unitCostSen for ${rmId}: must be a non-negative integer (sen)`,
+          },
+          400,
+        );
+      }
+      const asOfDate =
+        typeof entry.asOfDate === "string" ? entry.asOfDate.trim() : "";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+        return c.json(
+          { success: false, error: `Invalid asOfDate for ${rmId}: expected YYYY-MM-DD` },
+          400,
+        );
+      }
+      cleaned.push({ rmId, qty, unitCostSen, asOfDate });
+    }
+
+    if (cleaned.length > 0) {
+      const now = new Date().toISOString();
+      await c.var.DB.batch(
+        cleaned.map((r) =>
+          c.var.DB.prepare(
+            `INSERT INTO material_opening_stock
+               (id, rmId, qty, unitCostSen, asOfDate, orgId, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (orgId, rmId) DO UPDATE SET
+               qty = EXCLUDED.qty,
+               unitCostSen = EXCLUDED.unitCostSen,
+               asOfDate = EXCLUDED.asOfDate,
+               updated_at = EXCLUDED.updated_at`,
+          ).bind(
+            `mos-${crypto.randomUUID().slice(0, 12)}`,
+            r.rmId,
+            r.qty,
+            r.unitCostSen,
+            r.asOfDate,
+            orgId,
+            now,
+            now,
+          ),
+        ),
+      );
+    }
+
+    const res = await c.var.DB.prepare(
+      `SELECT rmId AS rmId, qty AS qty, unitCostSen AS unitCostSen, asOfDate AS asOfDate
+         FROM material_opening_stock
+        WHERE orgId = ?`,
+    )
+      .bind(orgId)
+      .all<MaterialOpeningStockRow>();
+    return c.json({
+      success: true,
+      data: { saved: cleaned.length },
+      total: (res.results ?? []).length,
+    });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
 export default app;

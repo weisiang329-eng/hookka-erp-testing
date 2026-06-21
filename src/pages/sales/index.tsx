@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
-import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine } from "lucide-react";
+import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine, DollarSign } from "lucide-react";
 // Note: generateSOPdf is dynamic-imported at the click handler so the
 // 1MB jspdf vendor chunk only ships when the user actually prints a SO.
 import { ScanPOModal } from "@/components/scan-po-modal";
@@ -925,34 +925,79 @@ export default function SalesPage() {
           // Service Order mode: every card is count-based — SVs are priced
           // at 0 by default so Revenue / Outstanding RM are always 0.
           <>
-            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Total Service Orders</p><p className="text-2xl font-bold">{statsTotal}</p></CardContent></Card>
-            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Outstanding</p><p className="text-xl font-bold text-[#9C6F1E]">{outstandingCount}</p></CardContent></Card>
-            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">In Production</p><p className="text-xl font-bold text-[#6B5C32]">{inProductionCount}</p></CardContent></Card>
-            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Pending Delivery</p><p className="text-xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p></CardContent></Card>
-            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Delivered</p><p className="text-xl font-bold text-[#4F7C3A]">{deliveredCount + completedCount}</p></CardContent></Card>
+            <Card>
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-[#F0ECE9] p-2.5"><ClipboardList className="h-5 w-5 text-[#6B5C32]" /></div>
+                <div><p className="text-2xl font-bold text-[#1F1D1B]">{statsTotal}</p><p className="text-xs text-[#6B7280]">Total Service Orders</p></div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-[#FAEFCB] p-2.5"><DollarSign className="h-5 w-5 text-[#9C6F1E]" /></div>
+                <div><p className="text-2xl font-bold text-[#9C6F1E]">{outstandingCount}</p><p className="text-xs text-[#6B7280]">Outstanding</p></div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-[#F0ECE9] p-2.5"><Package className="h-5 w-5 text-[#6B5C32]" /></div>
+                <div><p className="text-2xl font-bold text-[#6B5C32]">{inProductionCount}</p><p className="text-xs text-[#6B7280]">In Production</p></div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-[#E6F0F3] p-2.5"><Truck className="h-5 w-5 text-[#3E6570]" /></div>
+                <div><p className="text-2xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p><p className="text-xs text-[#6B7280]">Pending Delivery</p></div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-[#EEF3E4] p-2.5"><CheckCircle className="h-5 w-5 text-[#4F7C3A]" /></div>
+                <div><p className="text-2xl font-bold text-[#4F7C3A]">{deliveredCount + completedCount}</p><p className="text-xs text-[#6B7280]">Delivered</p></div>
+              </CardContent>
+            </Card>
           </>
         ) : (
           <>
-            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Total Orders</p><p className="text-2xl font-bold">{statsTotal}</p></CardContent></Card>
             <Card>
-              <CardContent className="p-2.5">
-                <p
-                  className="text-xs text-[#6B7280]"
-                  title={hasActiveFilters ? undefined : "Excludes Draft and Cancelled"}
-                >
-                  {hasActiveFilters ? "Revenue (filtered)" : "Revenue"}
-                </p>
-                <p className={cn(
-                  "text-xl font-bold",
-                  hasActiveFilters && "text-[#6B5C32]"
-                )}>
-                  {formatCurrency(displayRevenue)}
-                </p>
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-[#F0ECE9] p-2.5"><ShoppingCart className="h-5 w-5 text-[#6B5C32]" /></div>
+                <div><p className="text-2xl font-bold text-[#1F1D1B]">{statsTotal}</p><p className="text-xs text-[#6B7280]">Total Orders</p></div>
               </CardContent>
             </Card>
-            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Outstanding</p><p className="text-xl font-bold text-[#9C6F1E]">{outstandingCount}</p></CardContent></Card>
-            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Pending Delivery</p><p className="text-xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p></CardContent></Card>
-            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Completed</p><p className="text-xl font-bold text-[#4F7C3A]">{completedCount}</p></CardContent></Card>
+            <Card>
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-[#F0ECE9] p-2.5"><DollarSign className="h-5 w-5 text-[#6B5C32]" /></div>
+                <div>
+                  <p className={cn("text-2xl font-bold", hasActiveFilters ? "text-[#6B5C32]" : "text-[#1F1D1B]")}>
+                    {formatCurrency(displayRevenue)}
+                  </p>
+                  <p
+                    className="text-xs text-[#6B7280]"
+                    title={hasActiveFilters ? undefined : "Excludes Draft and Cancelled"}
+                  >
+                    {hasActiveFilters ? "Revenue (filtered)" : "Revenue"}
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-[#FAEFCB] p-2.5"><DollarSign className="h-5 w-5 text-[#9C6F1E]" /></div>
+                <div><p className="text-2xl font-bold text-[#9C6F1E]">{outstandingCount}</p><p className="text-xs text-[#6B7280]">Outstanding</p></div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-[#E6F0F3] p-2.5"><Truck className="h-5 w-5 text-[#3E6570]" /></div>
+                <div><p className="text-2xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p><p className="text-xs text-[#6B7280]">Pending Delivery</p></div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-[#EEF3E4] p-2.5"><CheckCircle className="h-5 w-5 text-[#4F7C3A]" /></div>
+                <div><p className="text-2xl font-bold text-[#4F7C3A]">{completedCount}</p><p className="text-xs text-[#6B7280]">Completed</p></div>
+              </CardContent>
+            </Card>
           </>
         )}
       </div>

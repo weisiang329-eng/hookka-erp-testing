@@ -473,43 +473,43 @@ export default function InvoicesPage() {
       {/* KPI Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5"><FileText className="h-5 w-5 text-[#6B5C32]" /></div>
             <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{invStatsResp ? totalInvoices : "—"}</p>
               <p className="text-xs text-[#6B7280]">Total Invoices</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{invStatsResp ? totalInvoices : "—"}</p>
             </div>
-            <FileText className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5"><DollarSign className="h-5 w-5 text-[#9C6F1E]" /></div>
             <div>
-              <p className="text-xs text-[#6B7280]">Outstanding</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">
+              <p className="text-2xl font-bold text-[#9C6F1E]">
                 {invStatsResp ? formatCurrency(outstandingSen) : "—"}
               </p>
+              <p className="text-xs text-[#6B7280]">Outstanding</p>
             </div>
-            <DollarSign className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#EEF3E4] p-2.5"><CheckCircle2 className="h-5 w-5 text-[#4F7C3A]" /></div>
             <div>
-              <p className="text-xs text-[#6B7280]">Collected (MTD)</p>
-              <p className="text-xl font-bold text-[#4F7C3A]">
+              <p className="text-2xl font-bold text-[#4F7C3A]">
                 {invStatsResp ? formatCurrency(paidMTDSen) : "—"}
               </p>
+              <p className="text-xs text-[#6B7280]">Collected (MTD)</p>
             </div>
-            <CheckCircle2 className="h-5 w-5 text-[#4F7C3A]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#FDECEA] p-2.5"><AlertTriangle className="h-5 w-5 text-[#9A3A2D]" /></div>
             <div>
+              <p className="text-2xl font-bold text-[#9A3A2D]">{invStatsResp ? overdueCount : "—"}</p>
               <p className="text-xs text-[#6B7280]">Overdue</p>
-              <p className="text-xl font-bold text-[#9A3A2D]">{invStatsResp ? overdueCount : "—"}</p>
             </div>
-            <AlertTriangle className="h-5 w-5 text-[#9A3A2D]" />
           </CardContent>
         </Card>
       </div>

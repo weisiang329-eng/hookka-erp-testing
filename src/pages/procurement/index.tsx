@@ -419,12 +419,12 @@ function POFormDialog({
               top-level supplier display (operator found it redundant and
               misleading mid-edit). 'Split by Supplier' button below still
               handles mixed-supplier carts. */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1">Delivery Date</label>
               <Input type="date" value={expectedDate} onChange={(e) => setExpectedDate(e.target.value)} />
             </div>
-            <div className="col-span-2">
+            <div className="col-span-2 max-md:col-span-1">
               <label className="block text-sm font-medium text-[#374151] mb-1">Notes</label>
               <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Order notes..." />
             </div>
@@ -567,9 +567,9 @@ function POFormDialog({
                           {item.materialCategory || "(uncategorised)"}
                         </div>
                       )}
-                    <div data-po-line-row="true" className="p-3 bg-[#FAF9F7] rounded border border-[#E2DDD8]">
+                    <div data-po-line-row="true" className="p-3 bg-[#FAF9F7] rounded border border-[#E2DDD8] overflow-x-auto">
                       {/* Row 1: RM code, description, supplier switcher */}
-                      <div className="grid grid-cols-8 gap-2 items-end">
+                      <div className="grid grid-cols-8 gap-2 items-end" style={{ minWidth: "560px" }}>
                         <div className="col-span-2">
                           <label className="block text-xs text-[#6B7280] mb-1">RM Code</label>
                           {/* Editable RM picker — type or pick from datalist
@@ -673,7 +673,7 @@ function POFormDialog({
                         </div>
                       </div>
                       {/* Row 2: Qty, Unit Price, Unit, Lead Time, Line Total */}
-                      <div className="grid grid-cols-8 gap-2 items-end mt-2">
+                      <div className="grid grid-cols-8 gap-2 items-end mt-2" style={{ minWidth: "560px" }}>
                         <div>
                           <label className="block text-xs text-[#6B7280] mb-1">Qty</label>
                           {/* Empty-string fallback so a 0 default doesn't stick after a backspace.
@@ -1580,7 +1580,7 @@ export default function ProcurementPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Purchase Orders</h1>
           <p className="text-xs text-[#6B7280]">Create and manage purchase orders using internal material codes</p>
@@ -1780,8 +1780,8 @@ export default function ProcurementPage() {
       {/* Filters */}
       <Card>
         <CardContent className="p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
+          <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
+            <div className="flex items-center gap-2 flex-wrap">
               <Button
                 variant={showFilters ? "primary" : "outline"}
                 size="sm"
@@ -1801,7 +1801,7 @@ export default function ProcurementPage() {
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               {/* Bulk Convert to GRN — appears as soon as any PO row is
                   selected, so the operator's first checkbox click reveals
                   the action. Disabled (with tooltip) when any selected PO

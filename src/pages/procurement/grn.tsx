@@ -187,7 +187,7 @@ export function GRNFormDialog({
           <Button variant="ghost" size="icon" onClick={onClose}><X className="h-4 w-4" /></Button>
         </div>
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1">Purchase Order *</label>
               {lockedPoId ? (
@@ -233,7 +233,7 @@ export function GRNFormDialog({
                   <ScanLine className="h-4 w-4" /> Scan supplier document
                 </Button>
               </div>
-              <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
+              <div className="border border-[#E2DDD8] rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead className="bg-[#F0ECE9]">
                     <tr>
@@ -728,12 +728,12 @@ export default function GRNPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Goods Receipt Notes</h1>
           <p className="text-xs text-[#6B7280]">Receive and verify incoming goods against purchase orders</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Button
             variant="outline"
             onClick={() => navigate("/procurement/grn/create?manual=1")}
@@ -873,8 +873,8 @@ export default function GRNPage() {
       {/* Search / bulk actions / filters */}
       <Card>
         <CardContent className="p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
+          <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
+            <div className="flex items-center gap-2 flex-wrap">
               <Button
                 variant={showFilters ? "primary" : "outline"}
                 size="sm"

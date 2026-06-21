@@ -752,7 +752,7 @@ export default function PurchaseOrderDetailPage() {
                 supplier display (operator found it redundant and misleading
                 mid-edit). Save still blocks on mixed suppliers via the
                 button's disabled state. */}
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
               <div>
                 <label className="block text-xs text-[#6B7280] mb-1">Delivery Date</label>
                 <Input
@@ -761,7 +761,7 @@ export default function PurchaseOrderDetailPage() {
                   onChange={(e) => setEditExpectedDate(e.target.value)}
                 />
               </div>
-              <div className="col-span-2">
+              <div className="col-span-2 max-md:col-span-1">
                 <label className="block text-xs text-[#6B7280] mb-1">Notes</label>
                 <Input
                   value={editNotes}
@@ -813,8 +813,8 @@ export default function PurchaseOrderDetailPage() {
                     (b) => b.materialCode === line.rmCode && activeSupplierIds.has(b.supplierId),
                   );
                   return (
-                    <div key={idx} className="p-3 bg-[#FAF9F7] rounded border border-[#E2DDD8]">
-                      <div className="grid grid-cols-8 gap-2 items-end">
+                    <div key={idx} className="p-3 bg-[#FAF9F7] rounded border border-[#E2DDD8] overflow-x-auto">
+                      <div className="grid grid-cols-8 gap-2 items-end" style={{ minWidth: "560px" }}>
                         <div className="col-span-2">
                           <label className="block text-xs text-[#6B7280] mb-1">RM Code</label>
                           <div className="h-8 flex items-center px-2 text-xs font-medium text-[#1F1D1B] bg-white rounded border border-[#E2DDD8]">
@@ -886,7 +886,7 @@ export default function PurchaseOrderDetailPage() {
                           </Button>
                         </div>
                       </div>
-                      <div className="grid grid-cols-8 gap-2 items-end mt-2">
+                      <div className="grid grid-cols-8 gap-2 items-end mt-2" style={{ minWidth: "560px" }}>
                         <div>
                           <label className="block text-xs text-[#6B7280] mb-1">Qty</label>
                           <Input
@@ -1009,7 +1009,7 @@ export default function PurchaseOrderDetailPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
+              <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">

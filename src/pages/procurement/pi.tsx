@@ -305,12 +305,12 @@ export default function PurchaseInvoicesPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Purchase Invoices</h1>
           <p className="text-xs text-[#6B7280]">Track supplier invoices and payment status</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Button
             variant="outline"
             onClick={() => navigate("/procurement/pi/create?scan=1")}

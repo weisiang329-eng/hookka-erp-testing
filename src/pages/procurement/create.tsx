@@ -549,7 +549,7 @@ function CreatePurchaseOrderPage() {
   return (
     <div className="space-y-6">
       {/* Header strip — matches sales/create + consignment/create. */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4 flex-wrap">
         <Button variant="ghost" size="icon" onClick={() => navigate("/procurement")}>
           <ArrowLeft className="h-5 w-5" />
         </Button>

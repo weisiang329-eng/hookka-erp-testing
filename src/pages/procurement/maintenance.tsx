@@ -1251,14 +1251,15 @@ export default function SupplierMaintenancePage() {
 
       {/* Supplier list */}
       <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="w-80">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div className="w-80 max-sm:w-full">
             <Input
               placeholder="Search code, name, contact..."
               value={supplierSearch}
               onChange={(e) => setSupplierSearch(e.target.value)}
             />
           </div>
+          <div className="flex items-center gap-2 flex-wrap">
           {selectedSuppliers.length > 0 && (
             <Button variant="outline" onClick={() => setShowBatchEdit(true)}>
               <Pencil className="h-4 w-4" />
@@ -1269,6 +1270,7 @@ export default function SupplierMaintenancePage() {
             <Plus className="h-4 w-4" />
             Add Supplier
           </Button>
+          </div>
         </div>
 
         <DataGrid<Supplier>

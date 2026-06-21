@@ -472,7 +472,7 @@ test("line guard BLOCKS over-invoicing but ALLOWS a 2nd PI for remaining qty", a
   assert.equal(Number(gi.invoiced_qty), 10);
 });
 
-test("un-posting a GRN restores the parent PO line's availableQty", async () => {
+test("a POSTED (received) GRN is LOCKED — un-post is blocked (owner option A)", async () => {
   const db = makeDb();
   seed(db);
   const grnRoot = mount(grnApp, db);
@@ -481,17 +481,32 @@ test("un-posting a GRN restores the parent PO line's availableQty", async () => 
   const poi = db.tables.purchase_order_items.find((r) => r.id === "poi-1");
   assert.equal(poi.receivedQty, 10);
 
-  // un-post the GRN: POSTED → DRAFT
+  // try to un-post the GRN: POSTED → DRAFT — must be REJECTED (stock is in;
+  // un-posting would free the PO line while the stock stays. Reverse via a
+  // stock adjustment instead).
   const res = await grnRoot.request("/grn-1", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ status: "DRAFT" }),
   });
-  assert.equal(res.status, 200);
+  assert.equal(res.status, 409);
 
-  // PO line receivedQty restored to 0 → 10 available again
-  assert.equal(poi.receivedQty, 0);
-  // and the PO dropped out of RECEIVED
+  // receivedQty stays consumed (NOT restored) — the received GRN is locked
+  assert.equal(poi.receivedQty, 10);
   const po = db.tables.purchase_orders.find((r) => r.id === "po-1");
-  assert.equal(po.status, "CONFIRMED");
+  assert.equal(po.status, "RECEIVED");
+});
+
+test("a POSTED (received) GRN is LOCKED — delete is blocked (owner option A)", async () => {
+  const db = makeDb();
+  seed(db);
+  const grnRoot = mount(grnApp, db);
+
+  const res = await grnRoot.request("/grn-1", { method: "DELETE" });
+  assert.equal(res.status, 409);
+
+  // GRN still exists, PO line still consumed
+  assert.ok(db.tables.grns.find((r) => r.id === "grn-1"));
+  const poi = db.tables.purchase_order_items.find((r) => r.id === "poi-1");
+  assert.equal(poi.receivedQty, 10);
 });

@@ -1058,6 +1058,21 @@ app.put("/:id", async (c) => {
         ? String(body.receivedBy)
         : (existing.receivedBy ?? "");
 
+    // ── Lock POSTED (received) GRNs from un-posting ──────────────────────
+    // Owner ruling 2026-06-21 (option A): once a GRN is POSTED its stock is in
+    // (rm_batches/cost_ledger/balanceQty). It must NOT be un-posted/cancelled by
+    // a status change — that would free the PO line while the stock stays, a
+    // double-count hole. To undo a receipt, do a deliberate stock adjustment.
+    if (prevStatus === "POSTED" && newStatus !== "POSTED") {
+      return c.json(
+        {
+          success: false,
+          error: "This GRN is already received into stock — it can't be un-posted. Reverse it with a stock adjustment instead.",
+        },
+        409,
+      );
+    }
+
     // ── Arrival gate on post-to-stock ────────────────────────────────────
     // Crossing into a committed status requires goods to have physically
     // arrived. This is checked against the effective arrival_state (column
@@ -1331,6 +1346,19 @@ app.delete("/:id", async (c) => {
       .first<GRNRow>();
     if (!existing) {
       return c.json({ success: false, error: "GRN not found" }, 404);
+    }
+
+    // Owner ruling 2026-06-21 (option A): a POSTED (received) GRN is locked —
+    // deleting it would free the PO line while the posted stock stays (a
+    // double-count hole). Undo a receipt with a stock adjustment, not by delete.
+    if ((existing.status ?? "DRAFT") === "POSTED") {
+      return c.json(
+        {
+          success: false,
+          error: "This GRN is already received into stock — it can't be deleted. Reverse it with a stock adjustment instead.",
+        },
+        409,
+      );
     }
 
     // Block delete when a live PI was raised from this GRN — the PI must be

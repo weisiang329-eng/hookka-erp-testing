@@ -433,7 +433,7 @@ export function MasterPriceHistoryDialog({
                 No scheduled or past price changes yet. The current displayed
                 price comes from the product master record.
               </p>
-            ) : (
+            ) : (<div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-[#6B7280]">
                   <tr className="border-b border-[#E2DDD8]">
@@ -589,7 +589,7 @@ export function MasterPriceHistoryDialog({
                   })}
                 </tbody>
               </table>
-            )}
+</div>)}
           </section>
         </div>
 

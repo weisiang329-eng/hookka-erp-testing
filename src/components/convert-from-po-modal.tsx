@@ -336,6 +336,7 @@ export function ConvertFromPOModal({ open, onClose, onConfirm }: Props) {
                 </p>
               )}
               {!detailLoading && lines.length > 0 && (
+                <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead className="bg-[#F0ECE9] border-b border-[#E2DDD8]">
                     <tr className="text-xs uppercase tracking-wide text-[#6B7280]">
@@ -425,6 +426,7 @@ export function ConvertFromPOModal({ open, onClose, onConfirm }: Props) {
                     })}
                   </tbody>
                 </table>
+                </div>
               )}
             </div>
             <div className="px-4 py-3 border-t border-[#E2DDD8] flex items-center justify-between">

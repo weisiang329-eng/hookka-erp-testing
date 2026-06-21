@@ -997,7 +997,7 @@ export default function SalesPage() {
                     <h3 className="text-sm font-medium text-[#1F1D1B] mb-2 flex items-center gap-2">
                       <Package className="h-4 w-4 text-[#6B5C32]" /> Items to Transfer
                     </h3>
-                    <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
+                    <div className="border border-[#E2DDD8] rounded-lg overflow-hidden overflow-x-auto">
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="bg-[#FAF9F7] border-b border-[#E2DDD8]">

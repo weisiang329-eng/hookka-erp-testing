@@ -1383,7 +1383,7 @@ function ThreeWayMatchPanel({ poId }: { poId: string }) {
                   {!data.hasGRN && data.hasPI && "Purchase invoice received but no posted GRN yet."}
                 </div>
               )}
-              <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
+              <div className="rounded-md border border-[#E2DDD8] overflow-hidden overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">

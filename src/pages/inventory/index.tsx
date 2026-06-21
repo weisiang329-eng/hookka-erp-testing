@@ -2462,6 +2462,7 @@ export default function InventoryPage() {
                 ) : fgSources.length === 0 ? (
                   <p className="text-xs text-[#9CA3AF] py-2">No fg_units rows for this product yet.</p>
                 ) : (
+                  <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-[#E2DDD8]">
@@ -2486,6 +2487,7 @@ export default function InventoryPage() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 )}
               </div>
             </div>
@@ -2576,6 +2578,7 @@ export default function InventoryPage() {
                 <span className="text-sm font-medium text-[#374151]">Total Qty: {wipDetail.totalQty}</span>
                 <span className="text-sm text-[#6B7280]">{wipDetail.sources.length} PO(s)</span>
               </div>
+              <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[#E2DDD8]">
@@ -2600,6 +2603,7 @@ export default function InventoryPage() {
                   ))}
                 </tbody>
               </table>
+              </div>
 
               {/* Job-Card-level breakdown — diagnoses qty mismatches between
                   Production Sheet and Inventory WIP. If two rows show the
@@ -2617,6 +2621,7 @@ export default function InventoryPage() {
                     <span className="text-sm font-medium text-[#374151]">Job Cards</span>
                     <span className="text-xs text-[#6B7280]">{wipDetail.sources.length} JC(s)</span>
                   </div>
+                  <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-[#E2DDD8]">
@@ -2637,6 +2642,7 @@ export default function InventoryPage() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 </div>
               )}
             </div>
@@ -2714,6 +2720,7 @@ export default function InventoryPage() {
                 ) : rmBatches.length === 0 ? (
                   <p className="text-xs text-[#9CA3AF] py-2">No batches recorded for this raw material yet.</p>
                 ) : (
+                  <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-[#E2DDD8]">
@@ -2742,6 +2749,7 @@ export default function InventoryPage() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 )}
               </div>
             </div>
@@ -3304,7 +3312,7 @@ function BatchEditRMDialog({
 
           {/* Table */}
           <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
-            <div className="max-h-[55vh] overflow-y-auto">
+            <div className="max-h-[55vh] overflow-y-auto overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-[#FAF9F7] sticky top-0 z-10">
                   <tr className="text-left text-xs text-gray-500 uppercase tracking-wider">

@@ -422,7 +422,7 @@ export default function PaymentsPage() {
                   {customerInvoices.length === 0 ? (
                     <p className="text-sm text-gray-400 italic">No outstanding invoices for this customer</p>
                   ) : (
-                    <div className="border rounded-md overflow-hidden">
+                    <div className="border rounded-md overflow-hidden overflow-x-auto">
                       <table className="w-full text-sm">
                         <thead className="bg-gray-50">
                           <tr>

@@ -327,7 +327,7 @@ export function SofaComboHistoryDialog({
               <p className="text-sm text-[#9CA3AF] py-6 text-center">
                 No history rows yet.
               </p>
-            ) : (
+            ) : (<div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-[#6B7280]">
                   <tr className="border-b border-[#E2DDD8]">
@@ -423,7 +423,7 @@ export function SofaComboHistoryDialog({
                   })}
                 </tbody>
               </table>
-            )}
+</div>)}
           </section>
         </div>
 

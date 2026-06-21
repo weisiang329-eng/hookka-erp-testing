@@ -6560,7 +6560,7 @@ function DeptPivotCategoryDialog({
 
           {/* Pivot table */}
           <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
-            <div ref={pivotScrollRef} className="max-h-[60vh] overflow-y-auto">
+            <div ref={pivotScrollRef} className="max-h-[60vh] overflow-y-auto overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-[#FAF9F7] sticky top-0 z-10">
                   <tr className="text-left text-xs text-gray-500 uppercase tracking-wider">

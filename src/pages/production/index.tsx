@@ -6624,7 +6624,7 @@ export default function ProductionPage({
               Close
             </button>
           </div>
-          <div className="max-h-[320px] overflow-y-auto">
+          <div className="max-h-[320px] overflow-y-auto overflow-x-auto">
             <table className="w-full text-xs">
               <thead className="bg-[#FFF7F6] border-b border-[#F1B5B0] sticky top-0">
                 <tr className="text-left text-[10px] uppercase tracking-wider text-[#A12C28]/80">

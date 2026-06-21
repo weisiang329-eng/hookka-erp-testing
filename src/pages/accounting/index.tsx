@@ -599,6 +599,7 @@ function ContraCard() {
           pis.length === 0 ? (
             <p className="text-xs text-[#9CA3AF]">No APPROVED (unpaid) purchase invoices for this supplier.</p>
           ) : (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
@@ -621,6 +622,7 @@ function ContraCard() {
                 ))}
               </tbody>
             </table>
+            </div>
           )
         )}
         <p className="text-[11px] text-[#9CA3AF]">
@@ -714,6 +716,7 @@ function LandedCostCard() {
           </p>
         )}
         {preview && (
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
@@ -738,6 +741,7 @@ function LandedCostCard() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </CardContent>
     </Card>
@@ -783,6 +787,7 @@ function DocNumberingCard({ accounts }: { accounts: ChartOfAccount[] }) {
           <Button variant="primary" size="sm" onClick={save} disabled={saving || !loaded} className="ml-auto">{saving ? "Saving…" : "Save"}</Button>
         </div>
         <p className="text-[11px] text-[#9CA3AF] mb-3">Number = prefix + voucher month + running no. Outgoing (Expense / Supplier payment) uses the OUT prefix; incoming (Customer payment / Receipt) uses the IN prefix. Per bank.</p>
+        <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-[12px] text-[#6B7280]">
@@ -802,6 +807,7 @@ function DocNumberingCard({ accounts }: { accounts: ChartOfAccount[] }) {
             {banks.length === 0 && <tr><td colSpan={3} className="py-3 text-[#9CA3AF] text-sm">No bank/cash accounts (SBK/SCH).</td></tr>}
           </tbody>
         </table>
+        </div>
       </CardContent>
     </Card>
   );
@@ -2892,6 +2898,7 @@ function APControlPanel() {
             </div>
           )}
           {pcns.length > 0 && (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
@@ -2922,6 +2929,7 @@ function APControlPanel() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -3723,6 +3731,7 @@ function PLStatementTab() {
           {loading ? (
             <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
           ) : (
+            <div className="overflow-x-auto">
             <table className="w-full text-[13px]">
               <thead>
                 <tr className="text-[12px] text-[#6B7280]">
@@ -3792,6 +3801,7 @@ function PLStatementTab() {
                 })}
               </tbody>
             </table>
+            </div>
           )}
           <p className="text-[11px] text-[#9CA3AF] mt-3">
             Stock (raw material / WIP / FG) is live from the cost ledger; labour, overhead, carriage, SST, revenue and
@@ -4260,6 +4270,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
             </div>
           </div>
 
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="text-xs text-[#6B7280]">
               <th className="text-left py-1">Account</th><th className="text-left py-1">Description</th>
@@ -4286,6 +4297,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
               ))}
             </tbody>
           </table>
+          </div>
           <Button variant="outline" size="sm" onClick={addLine}>+ Add Line</Button>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end pt-2 border-t border-[#F0ECE9]">
@@ -4502,6 +4514,7 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
         {partyId && (openBills.length === 0 ? (
           <p className="text-xs text-[#9CA3AF]">No outstanding bills for this party.</p>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="text-xs text-[#6B7280] text-left">
               <th className="py-1">Bill No</th><th className="py-1 text-right">Outstanding</th>
@@ -4528,6 +4541,7 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
               })}
             </tbody>
           </table>
+          </div>
         ))}
 
         <div className="flex items-center justify-end gap-4 pt-2 border-t border-[#F0ECE9]">
@@ -5118,6 +5132,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
               </tbody>
             </table>
           ) : all ? (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
@@ -5162,6 +5177,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 })}
               </tbody>
             </table>
+            </div>
           ) : null}
         </CardContent>
       </Card>
@@ -6654,6 +6670,7 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
             preview.rows.length === 0 ? (
               <p className="text-sm text-[#6B7280]">Nothing to depreciate for {runMonth} — already run, disposed, or fully depreciated.</p>
             ) : (
+              <div className="overflow-x-auto">
               <table className="w-full text-sm bg-white rounded">
                 <thead>
                   <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
@@ -6678,6 +6695,7 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   </tr>
                 </tbody>
               </table>
+              </div>
             )
           )}
         </CardContent>
@@ -7322,6 +7340,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
             <Button variant="outline" size="sm" onClick={handleAddAr}><Plus className="h-4 w-4" /> Add</Button>
           </div>
           {(data?.arInvoices.length ?? 0) > 0 && (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
@@ -7348,6 +7367,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -7372,6 +7392,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
             <Button variant="outline" size="sm" onClick={handleAddAp}><Plus className="h-4 w-4" /> Add</Button>
           </div>
           {(data?.apInvoices.length ?? 0) > 0 && (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
@@ -7396,6 +7417,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -7703,7 +7725,7 @@ function BalanceSheetTab() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
+          <div className="border border-[#E2DDD8] rounded-lg overflow-hidden overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-[#F0ECE9]">

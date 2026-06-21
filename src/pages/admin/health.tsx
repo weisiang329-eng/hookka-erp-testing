@@ -886,6 +886,7 @@ export default function AdminHealthPage() {
                     : "No nav timing yet — RUM auto-records every initial page load + SPA route change. Give it a few visits after deploy."}
                 </p>
               ) : (
+                <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
@@ -906,6 +907,7 @@ export default function AdminHealthPage() {
                     ))}
                   </tbody>
                 </table>
+                </div>
               )}
             </CardContent>
           </Card>
@@ -928,6 +930,7 @@ export default function AdminHealthPage() {
                     No data yet — AE collects on every request, give it 30 min after first deploy.
                   </p>
                 ) : (
+                  <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
@@ -954,6 +957,7 @@ export default function AdminHealthPage() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -976,6 +980,7 @@ export default function AdminHealthPage() {
                       <span className="text-[#9A3A2D] font-medium">Live</span> = errored within the last hour (worth acting on now).
                       An old "Last seen" (hours/days ago) usually means it was already fixed — just still inside the window.
                     </p>
+                    <div className="overflow-x-auto">
                     <table className="w-full text-xs">
                       <thead>
                         <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
@@ -1006,6 +1011,7 @@ export default function AdminHealthPage() {
                         })}
                       </tbody>
                     </table>
+                    </div>
                   </>
                 )}
               </CardContent>
@@ -1034,6 +1040,7 @@ export default function AdminHealthPage() {
                 {statusBreakdown.length === 0 ? (
                   <p className="text-xs text-[#4F7C3A]">No 4xx / 5xx in this window. Healthy.</p>
                 ) : (
+                  <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
@@ -1052,6 +1059,7 @@ export default function AdminHealthPage() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 )}
               </CardContent>
             </Card>

@@ -740,6 +740,7 @@ function TemplatesTab() {
             <CardTitle className="text-base">{STAGE_LABEL[stage as Stage]}</CardTitle>
           </CardHeader>
           <CardContent className="p-0">
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-muted/30 text-xs">
                 <tr>
@@ -778,6 +779,7 @@ function TemplatesTab() {
                 ))}
               </tbody>
             </table>
+            </div>
           </CardContent>
         </Card>
       ))}

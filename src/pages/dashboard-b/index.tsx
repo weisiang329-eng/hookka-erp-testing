@@ -537,6 +537,7 @@ function MiniTable({
   if (rows.length === 0)
     return <p className="text-xs text-[#9CA3AF]">Nothing here.</p>;
   return (
+    <div className="overflow-x-auto">
     <table className="w-full text-sm">
       <thead>
         <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
@@ -569,6 +570,7 @@ function MiniTable({
         ))}
       </tbody>
     </table>
+    </div>
   );
 }
 
@@ -1230,7 +1232,7 @@ export default function DashboardBPage() {
                 </div>
               }
             />
-            <div style={{ width: "100%", height: 260 }}>
+            <div className="min-w-0" style={{ width: "100%", height: 260 }}>
               {revChart.length === 0 ? (
                 <div className="flex items-center justify-center h-full text-xs text-[#9CA3AF]">
                   No revenue data.
@@ -1683,7 +1685,7 @@ export default function DashboardBPage() {
             <>
               <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 items-center">
                 <div
-                  className="lg:col-span-2 relative"
+                  className="lg:col-span-2 relative min-w-0"
                   style={{ width: "100%", height: 340 }}
                 >
                   <Suspense
@@ -1716,7 +1718,7 @@ export default function DashboardBPage() {
                     </span>
                   </div>
                 </div>
-                <div className="lg:col-span-3">
+                <div className="lg:col-span-3 overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-[11px] text-[#9CA3AF] border-b border-[#E2DDD8]">
@@ -2189,6 +2191,7 @@ export default function DashboardBPage() {
                         : "No fabric issued."}
                     </p>
                   ) : (
+                    <div className="overflow-x-auto">
                     <table className="w-full text-xs">
                       <thead>
                         <tr className="text-left text-[10px] text-[#9CA3AF] border-b border-[#F0ECE6]">
@@ -2244,6 +2247,7 @@ export default function DashboardBPage() {
                         ))}
                       </tbody>
                     </table>
+                    </div>
                   )}
                   <div className="mt-3 border-t border-[#F0ECE6] pt-2 space-y-1">
                     <p className="text-[11px] font-semibold text-[#5A5550] mb-1">

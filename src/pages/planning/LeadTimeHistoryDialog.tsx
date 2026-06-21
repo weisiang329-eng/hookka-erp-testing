@@ -379,7 +379,7 @@ export function LeadTimeHistoryDialog({
                 No scheduled or past changes yet. The current effective values
                 come from the inline /planning Save Lead Times form.
               </p>
-            ) : (
+            ) : (<div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-[#6B7280]">
                   <tr className="border-b border-[#E2DDD8]">
@@ -447,7 +447,7 @@ export function LeadTimeHistoryDialog({
                   })}
                 </tbody>
               </table>
-            )}
+</div>)}
           </section>
         </div>
 

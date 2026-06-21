@@ -2689,6 +2689,7 @@ function CustomerPriceHistoryDialog({
                 price comes from the customer-product record.
               </p>
             ) : (
+              <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-[#6B7280]">
                   <tr className="border-b border-[#E2DDD8]">
@@ -2862,6 +2863,7 @@ function CustomerPriceHistoryDialog({
                   })()}
                 </tbody>
               </table>
+              </div>
             )}
           </section>
         </div>

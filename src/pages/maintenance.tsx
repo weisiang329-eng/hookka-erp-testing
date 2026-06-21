@@ -443,7 +443,7 @@ export default function MaintenancePage() {
           {/* Equipment Table */}
           <Card>
             <CardContent className="p-0">
-              <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
+              <div className="rounded-md border border-[#E2DDD8] overflow-hidden overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
@@ -761,7 +761,7 @@ export default function MaintenancePage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="p-0">
-              <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
+              <div className="rounded-md border border-[#E2DDD8] overflow-hidden overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">

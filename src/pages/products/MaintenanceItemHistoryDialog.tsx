@@ -156,7 +156,7 @@ export function MaintenanceItemHistoryDialog({
               No history for this item yet. The first snapshot containing
               this row will appear here.
             </p>
-          ) : (
+          ) : (<div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead className="text-[#6B7280]">
                 <tr className="border-b border-[#E2DDD8]">
@@ -214,7 +214,7 @@ export function MaintenanceItemHistoryDialog({
                 })}
               </tbody>
             </table>
-          )}
+</div>)}
         </div>
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
           <Button variant="outline" onClick={onClose}>

@@ -3266,7 +3266,7 @@ function DrilldownModal(props: {
     title = `Daily Capacity — Past ${ROLLING_WINDOW_DAYS} Working Days`;
     subtitle = `Average: ${formatHours(totalCapacity)}/day across all production depts · working days only (excludes Sundays & public holidays)`;
     const maxMin = Math.max(1, ...Array.from(capacityByDay.values()));
-    body = (
+    body = (<div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
@@ -3310,7 +3310,7 @@ function DrilldownModal(props: {
           })}
         </tbody>
       </table>
-    );
+</div>);
   } else if (level.kind === "capacity-day") {
     title = `Production on ${level.date}`;
     const byDept = capacityForDate(level.date);
@@ -3319,7 +3319,7 @@ function DrilldownModal(props: {
     const entries = Array.from(byDept.entries()).sort((a, b) => b[1].total - a[1].total);
     body = entries.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No completed work on this date.</div>
-    ) : (
+    ) : (<div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
@@ -3356,7 +3356,7 @@ function DrilldownModal(props: {
           })}
         </tbody>
       </table>
-    );
+</div>);
   } else if (level.kind === "capacity-day-dept") {
     // Wei Siang 2026-05-15: this level NOW shows per-worker performance
     // for the (date × dept), not a flat JC list. Click a worker → next
@@ -3368,7 +3368,7 @@ function DrilldownModal(props: {
     subtitle = `${workers.length} worker${workers.length === 1 ? "" : "s"} · ${formatHours(deptTotal)} of production`;
     body = workers.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No completed work in this dept on this date.</div>
-    ) : (
+    ) : (<div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
@@ -3409,7 +3409,7 @@ function DrilldownModal(props: {
           })}
         </tbody>
       </table>
-    );
+</div>);
   } else if (level.kind === "capacity-day-dept-worker") {
     // Leaf level: per-JC list for the picked worker.
     const meta = deptNameByCode.get(level.deptCode);
@@ -3419,7 +3419,7 @@ function DrilldownModal(props: {
     subtitle = `${rows.length} job card${rows.length === 1 ? "" : "s"} · ${formatHours(workerTotal)} of production`;
     body = rows.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No completed JCs for this worker on this date.</div>
-    ) : (
+    ) : (<div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
@@ -3463,7 +3463,7 @@ function DrilldownModal(props: {
           })}
         </tbody>
       </table>
-    );
+</div>);
   } else if (level.kind === "load-by-dept") {
     title = `${scopeRange.label}'s Capacity — ${scopeRange.from}${scopeRange.from !== scopeRange.to ? ` → ${scopeRange.to}` : ""}`;
     const total = Array.from(loadByDept.values()).reduce((s, v) => s + v.total, 0);
@@ -3471,7 +3471,7 @@ function DrilldownModal(props: {
     const entries = Array.from(loadByDept.entries()).sort((a, b) => b[1].total - a[1].total);
     body = entries.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No active JCs scheduled in this range.</div>
-    ) : (
+    ) : (<div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
@@ -3508,7 +3508,7 @@ function DrilldownModal(props: {
           })}
         </tbody>
       </table>
-    );
+</div>);
   } else if (level.kind === "load-dept") {
     // Per-worker scheduled load for the picked dept.
     const meta = deptNameByCode.get(level.deptCode);
@@ -3518,7 +3518,7 @@ function DrilldownModal(props: {
     subtitle = `${workers.length} worker${workers.length === 1 ? "" : "s"} · ${formatHours(deptTotal)} of active work`;
     body = workers.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No active job cards in this dept for the selected range.</div>
-    ) : (
+    ) : (<div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
@@ -3559,7 +3559,7 @@ function DrilldownModal(props: {
           })}
         </tbody>
       </table>
-    );
+</div>);
   } else if (level.kind === "load-dept-worker") {
     // Leaf — per-JC list for the picked worker in this dept's scheduled load.
     const meta = deptNameByCode.get(level.deptCode);
@@ -3569,7 +3569,7 @@ function DrilldownModal(props: {
     subtitle = `${rows.length} active job card${rows.length === 1 ? "" : "s"} · ${formatHours(workerTotal)} of scheduled work`;
     body = rows.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No active job cards for this worker in this dept.</div>
-    ) : (
+    ) : (<div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
@@ -3607,7 +3607,7 @@ function DrilldownModal(props: {
           ))}
         </tbody>
       </table>
-    );
+</div>);
   } else if (level.kind === "backlog-by-dept") {
     // Wei Siang 2026-05-15: Total Backlog click → per-dept breakdown.
     // Each row shows SOFA + BEDFRAME backlog hours, total hours, and
@@ -3619,7 +3619,7 @@ function DrilldownModal(props: {
     subtitle = `${formatHours(grand)} of active work across ${backlogByDept.length} dept${backlogByDept.length === 1 ? "" : "s"}`;
     body = backlogByDept.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No active backlog.</div>
-    ) : (
+    ) : (<div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
@@ -3660,7 +3660,7 @@ function DrilldownModal(props: {
           })}
         </tbody>
       </table>
-    );
+</div>);
   }
 
   // z-index scales with stack depth so a deeper modal overlays its

@@ -210,6 +210,7 @@ Built to cut token usage: open the named file at the named line range instead of
   - Payment / Expense tab (PaymentsTab) — L5173-5524
   - Official Receipt tab (ReceiptsTab) — L5525-5760
   - Fund Transfer tab — L5761-5968
+  - Opening Stock tab (OpeningStockTab, F6 FIFO seed — GET/PUT /material-opening-stock) — after StockMapCard
   - Stock Summary tab + WipDetailCard — L5969-6222
   - Labour month-end posting tab + AddDeptMapRow — L6223-6446
   - Fixed Assets + Depreciation tab — L6447-6734

@@ -745,8 +745,9 @@ app.post("/", async (c) => {
   // (e.g. PI-2604-019 from the accounting system) so the number is preserved;
   // otherwise auto-generate the next sequence. A duplicate number is rejected.
   let piNo: string;
-  if (typeof body.piNo === "string" && /^PI-\d/.test(body.piNo.trim())) {
-    piNo = body.piNo.trim();
+  const importPiNo = (body as { piNo?: unknown }).piNo;
+  if (typeof importPiNo === "string" && /^PI-\d/.test(importPiNo.trim())) {
+    piNo = importPiNo.trim();
     const dup = await db
       .prepare("SELECT piNo FROM purchase_invoices WHERE piNo = ? LIMIT 1")
       .bind(piNo)

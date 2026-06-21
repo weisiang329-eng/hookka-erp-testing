@@ -787,34 +787,39 @@ function CreatePurchaseOrderPage() {
               />
             </div>
 
-            <div className="max-h-64 overflow-y-auto bg-white border border-[#E2DDD8] rounded-md">
-              {filteredRMs.length === 0 ? (
-                <div className="px-3 py-4 text-sm text-[#9CA3AF] text-center">
-                  No materials match this filter
-                </div>
-              ) : (
-                <>
-                  {filteredRMs.slice(0, 30).map((rm) => (
-                    <button
-                      key={rm.id}
-                      type="button"
-                      className="w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7] border-b border-[#E2DDD8] last:border-b-0 flex items-center gap-2"
-                      onClick={() => addItemFromRM(rm.itemCode)}
-                    >
-                      <Plus className="h-3 w-3 text-[#6B5C32] flex-shrink-0" />
-                      <span className="font-medium text-[#1F1D1B] flex-shrink-0">{rm.itemCode}</span>
-                      <span className="text-[#6B7280] truncate">{rm.description}</span>
-                      <span className="text-[#9CA3AF] ml-auto flex-shrink-0">({rm.baseUOM})</span>
-                    </button>
-                  ))}
-                  {filteredRMs.length > 30 && (
-                    <div className="px-3 py-2 text-xs text-[#9CA3AF] bg-[#FAF9F7]">
-                      Showing 30 of {filteredRMs.length}. Pick a category or refine search to narrow.
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
+            {/* List only appears once the operator has typed a search or
+                picked a specific category — keeps the panel tidy when nothing
+                is being searched. "ALL" with no search = hidden. */}
+            {(rmSearch.trim() !== "" || selectedCategory !== "ALL") && (
+              <div className="max-h-64 overflow-y-auto bg-white border border-[#E2DDD8] rounded-md">
+                {filteredRMs.length === 0 ? (
+                  <div className="px-3 py-4 text-sm text-[#9CA3AF] text-center">
+                    No materials match this filter
+                  </div>
+                ) : (
+                  <>
+                    {filteredRMs.slice(0, 100).map((rm) => (
+                      <button
+                        key={rm.id}
+                        type="button"
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7] border-b border-[#E2DDD8] last:border-b-0 flex items-center gap-2"
+                        onClick={() => addItemFromRM(rm.itemCode)}
+                      >
+                        <Plus className="h-3 w-3 text-[#6B5C32] flex-shrink-0" />
+                        <span className="font-medium text-[#1F1D1B] flex-shrink-0">{rm.itemCode}</span>
+                        <span className="text-[#6B7280] truncate">{rm.description}</span>
+                        <span className="text-[#9CA3AF] ml-auto flex-shrink-0">({rm.baseUOM})</span>
+                      </button>
+                    ))}
+                    {filteredRMs.length > 100 && (
+                      <div className="px-3 py-2 text-xs text-[#9CA3AF] bg-[#FAF9F7]">
+                        Showing 100 of {filteredRMs.length}. Refine your search to narrow further.
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Line item table — full-width, generous columns. The wrapper is
@@ -828,7 +833,7 @@ function CreatePurchaseOrderPage() {
                   <tr className="text-xs uppercase tracking-wide text-[#6B7280]">
                     <th className="text-left px-3 py-2 font-medium" style={{ minWidth: 140 }}>RM Code</th>
                     <th className="text-left px-3 py-2 font-medium" style={{ minWidth: 220 }}>Description</th>
-                    <th className="text-left px-3 py-2 font-medium" style={{ minWidth: 200 }}>Supplier</th>
+                    <th className="text-left px-3 py-2 font-medium" style={{ minWidth: 280 }}>Supplier</th>
                     <th className="text-left px-3 py-2 font-medium" style={{ minWidth: 140 }}>Supplier SKU</th>
                     <th className="text-right px-3 py-2 font-medium" style={{ minWidth: 90 }}>Qty</th>
                     <th className="text-right px-3 py-2 font-medium" style={{ minWidth: 110 }}>Price (RM)</th>

@@ -72,10 +72,11 @@ export function MaterialPicker({
   const [coords, setCoords] = useState<{ top: number; left: number; width: number } | null>(null);
 
   // Suggestions — match on code OR description, code-prefix matches first.
-  // Capped so a 350-row catalog doesn't render a giant list.
+  // Unfiltered (no search text): cap at 100 rows with a "refine to narrow" hint.
+  // When a search query or category filter is active: show all matches (up to 100).
   const suggestions = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return options.slice(0, 50);
+    if (!q) return options.slice(0, 100);
     const scored = options
       .map((o) => {
         const code = o.itemCode.toLowerCase();
@@ -88,7 +89,7 @@ export function MaterialPicker({
       })
       .filter((s) => s.score >= 0)
       .sort((a, b) => a.score - b.score || a.o.itemCode.localeCompare(b.o.itemCode))
-      .slice(0, 50)
+      .slice(0, 100)
       .map((s) => s.o);
     return scored;
   }, [options, query]);

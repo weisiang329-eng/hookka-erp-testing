@@ -840,7 +840,8 @@ function CasePipeline({ pipe }: { pipe: CasePipelineResult }) {
       <CardContent>
         {/* Full-width stepper: each step is an equal flex-1 column, the
             connector lines stretch to fill the row left-to-right. */}
-        <div className="flex w-full items-start">
+        <div className="overflow-x-auto">
+        <div className="flex w-full items-start min-w-[640px]">
           {CASE_PIPELINE_STEPS.map((label, i) => {
             const done = stepsDone[i];
             const current = i === currentIdx;
@@ -881,6 +882,7 @@ function CasePipeline({ pipe }: { pipe: CasePipelineResult }) {
               </div>
             );
           })}
+        </div>
         </div>
       </CardContent>
     </Card>
@@ -3072,7 +3074,7 @@ function SpawnServiceOrderModal({
               you're going to resolve. */}
           <div>
             <label className="block text-xs text-[#6B7280] mb-1">Resolution Mode</label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-3 gap-2 max-md:grid-cols-1">
               {(
                 [
                   { v: "REPRODUCE", t: "Reproduce", d: "Open new PO; ship when ready" },

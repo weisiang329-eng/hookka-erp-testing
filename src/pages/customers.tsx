@@ -1563,7 +1563,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
   return (
     <Card className="border-[#6B5C32] border-2 mt-4">
       <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <button
             onClick={() => setCollapsed((v) => !v)}
             className="flex items-center gap-2 text-base font-semibold text-[#1F1D1B] hover:text-[#6B5C32] transition-colors"
@@ -1583,7 +1583,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
               <Badge className="bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] text-[10px]">Snapshot</Badge>
             )}
           </button>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {seeded === true && (
               <>
                 <Button
@@ -3558,8 +3558,8 @@ export default function CustomersPage() {
       )}
 
       {/* Customer List */}
-      <div className="flex items-center justify-between">
-        <div className="w-80">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="w-80 max-w-full">
           <Input
             placeholder="Search code, name, contact..."
             value={customerSearch}
@@ -3611,12 +3611,12 @@ export default function CustomersPage() {
           <>
           <Card className="border-[#6B5C32] border-2">
             <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between flex-wrap gap-2">
                 <CardTitle className="flex items-center gap-2 text-base">
                   <Warehouse className="h-5 w-5 text-[#6B5C32]" />
                   {cust.name} — Delivery Hubs ({cust.deliveryHubs?.length || 0})
                 </CardTitle>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <Button variant="outline" size="sm" onClick={() => openEditCustomer(cust)}>
                     <Pencil className="h-4 w-4 mr-1" /> Edit
                   </Button>
@@ -3628,7 +3628,7 @@ export default function CustomersPage() {
                   </Button>
                 </div>
               </div>
-              <div className="flex items-center gap-4 mt-2 text-sm text-[#6B7280]">
+              <div className="flex items-center gap-4 mt-2 text-sm text-[#6B7280] flex-wrap">
                 <span>Credit Limit: <strong className="text-[#1F1D1B]">{formatRM(cust.creditLimitSen)}</strong></span>
                 <span>Outstanding: <strong className="text-[#1F1D1B]">{formatRM(cust.outstandingSen)}</strong></span>
                 <span>Terms: <Badge>{cust.creditTerms}</Badge></span>
@@ -3643,7 +3643,7 @@ export default function CustomersPage() {
                     editHubId === hub.id ? (
                       <div key={hub.id} className="p-4 rounded-lg border-2 border-[#6B5C32]/30 bg-[#FAF9F7] space-y-3">
                         <h3 className="text-sm font-semibold text-[#6B5C32]">Edit Hub — {hub.shortName}</h3>
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-md:grid-cols-1">
                           <div>
                             <label className="block text-xs text-[#6B7280] mb-1">Hub Name *</label>
                             <Input value={hubForm.shortName} onChange={(e) => setHubForm(f => ({ ...f, shortName: e.target.value }))} className="h-8" />
@@ -3815,7 +3815,7 @@ export default function CustomersPage() {
             </div>
             <div className="px-6 py-4 space-y-4">
               <h3 className="text-sm font-semibold text-[#6B5C32]">Company Information</h3>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Creditor Code *</label>
                   <Input value={editCustForm.code} onChange={(e) => setEditCustForm(f => ({ ...f, code: e.target.value }))} />
@@ -3849,7 +3849,7 @@ export default function CustomersPage() {
                 </div>
               </div>
               <h3 className="text-sm font-semibold text-[#6B5C32] pt-2">Credit & Terms</h3>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Credit Terms</label>
                   <select

@@ -533,7 +533,7 @@ export default function ServiceCasesListPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Service Cases</h1>
           <p className="text-xs text-[#6B7280] mt-1">
@@ -542,7 +542,7 @@ export default function ServiceCasesListPage() {
             log-only complaints / on-site fixes.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
             size="sm"
@@ -955,7 +955,7 @@ export function CreateServiceCaseModal({
 
         <div className="p-4 space-y-4">
           {/* Source picker */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
             <div>
               <label className="block text-xs text-[#6B7280] mb-1">Source Order Type</label>
               <select

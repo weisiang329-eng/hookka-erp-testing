@@ -3004,7 +3004,7 @@ function EmployeeMasterTab({
             <h4 className="mb-3 text-sm font-semibold text-[#1F1D1B]">
               New Employee
             </h4>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 max-md:grid-cols-1">
               <div>
                 <label className="text-xs text-[#6B7280]">Emp No</label>
                 <Input
@@ -5582,7 +5582,7 @@ function EmployeeDetailTab({
       {selectedWorker && (
         <Card>
           <CardContent className="p-4">
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 max-md:grid-cols-1">
               <div>
                 <p className="text-xs text-[#6B7280]">Name</p>
                 <p className="font-semibold text-[#1F1D1B]">
@@ -5618,7 +5618,7 @@ function EmployeeDetailTab({
       )}
 
       {/* Summary Stats */}
-      <div className="grid gap-4 grid-cols-2 sm:grid-cols-5">
+      <div className="grid gap-4 grid-cols-2 sm:grid-cols-5 max-sm:grid-cols-1">
         <Card>
           <CardContent className="p-4 text-center">
             <p className="text-2xl font-bold text-[#1F1D1B]">{daysPresent}</p>
@@ -5915,7 +5915,7 @@ function DepartmentPerformanceTab({
           (backend doesn't surface OT for dept aggregates). "Workers" replaces
           "Days Present" because the response gives us workerCount, not a
           per-worker presence count. */}
-      <div className="grid gap-4 grid-cols-2 sm:grid-cols-4">
+      <div className="grid gap-4 grid-cols-2 sm:grid-cols-4 max-sm:grid-cols-1">
         <Card>
           <CardContent className="p-4 text-center">
             <p className="text-2xl font-bold text-[#1F1D1B]">{totals?.workerCount ?? 0}</p>
@@ -7327,7 +7327,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
 
                       <div>
                         <p className="text-[11px] font-semibold text-[#6B5C32] uppercase tracking-wide mb-1">1 · Day & hour rate</p>
-                        <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+                        <div className="grid grid-cols-2 gap-2 md:grid-cols-3 max-md:grid-cols-1">
                           <label className="text-[11px] text-[#6B7280]">
                             Day rate = salary ÷ …
                             <select
@@ -7366,7 +7366,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
 
                       <div>
                         <p className="text-[11px] font-semibold text-[#6B5C32] uppercase tracking-wide mb-1">2 · Shift & lateness</p>
-                        <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+                        <div className="grid grid-cols-2 gap-2 md:grid-cols-5 max-md:grid-cols-2 max-sm:grid-cols-1">
                           {([
                             ["shiftStart", "Shift start (HH:MM)", "text"],
                             ["shiftEnd", "Shift end (HH:MM)", "text"],
@@ -7389,7 +7389,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
 
                       <div>
                         <p className="text-[11px] font-semibold text-[#6B5C32] uppercase tracking-wide mb-1">3 · Overtime & absence</p>
-                        <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+                        <div className="grid grid-cols-2 gap-2 md:grid-cols-3 max-md:grid-cols-1">
                           {([
                             ["sundayOtMultiplier", "Sunday OT ×", "number"],
                             ["holidayOtMultiplier", "Holiday OT ×", "number"],
@@ -7415,7 +7415,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                         <summary className="cursor-pointer text-[11px] font-semibold text-[#6B7280]">
                           4 · Statutory (EPF / SOCSO / EIS) — follows the law, usually leave as-is
                         </summary>
-                        <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-3">
+                        <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-3 max-md:grid-cols-1">
                           {([
                             ["epfEmployeePct", "EPF employee %", "number"],
                             ["epfEmployerPct", "EPF employer %", "number"],
@@ -7694,7 +7694,7 @@ function DepartmentsManager({
         </Button>
       </div>
       {creating && (
-        <div className="mb-3 rounded border border-[#6B5C32]/30 bg-white p-3 grid grid-cols-2 md:grid-cols-7 gap-2">
+        <div className="mb-3 rounded border border-[#6B5C32]/30 bg-white p-3 grid grid-cols-2 md:grid-cols-7 gap-2 max-md:grid-cols-2 max-sm:grid-cols-1">
           <div>
             <label className="text-xs text-[#6B7280]">Code</label>
             <Input value={draft.code} onChange={(e) => setDraft((d) => ({ ...d, code: e.target.value.toUpperCase() }))} placeholder="QC" className="h-8 text-xs" />
@@ -9237,7 +9237,7 @@ function LaborCostTab({
       </CardHeader>
       <CardContent>
         {/* KPI strip */}
-        <div className="grid gap-3 grid-cols-2 md:grid-cols-5 mb-4">
+        <div className="grid gap-3 grid-cols-2 md:grid-cols-5 mb-4 max-md:grid-cols-2 max-sm:grid-cols-1">
           <Card>
             <CardContent className="p-3">
               <p className="text-xs text-[#6B7280]">Production Labor Cost</p>
@@ -10177,7 +10177,7 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
           {showAddForm && (
             <div className="mb-6 rounded-lg border border-[#6B5C32]/30 bg-[#F0ECE9] p-4">
               <h4 className="mb-3 text-sm font-semibold text-[#1F1D1B]">New Leave Request</h4>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3 max-md:grid-cols-2 max-sm:grid-cols-1">
                 <div>
                   <label className="text-xs text-[#6B7280]">Worker</label>
                   <select
@@ -10817,7 +10817,7 @@ export default function EmployeesPage() {
           Summary for{" "}
           <span className="font-medium text-[#1F1D1B]">{summaryDateLabel}</span>
         </p>
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-4 max-xl:grid-cols-2 max-sm:grid-cols-1">
           <Card>
             <CardContent className="p-4 flex items-center gap-3">
               <div className="rounded-lg bg-[#E0EDF0] p-2.5">
@@ -10879,7 +10879,7 @@ export default function EmployeesPage() {
           Overview" etc. into two lines on a 1366-px viewport. Now
           text-xs + px-3.5 py-2.5 fits everything single-line. Smaller
           icons (h-3.5 w-3.5) match the new font scale. */}
-      <div className="border-b border-[#E2DDD8]">
+      <div className="border-b border-[#E2DDD8] overflow-x-auto">
         <nav className="flex gap-0 -mb-px">
           {TABS.map((tab) => (
             <button

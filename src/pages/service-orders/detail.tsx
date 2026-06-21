@@ -855,7 +855,7 @@ function SetModePanel({
           mode picker — it applies side effects (open PO / reserve FG) once you
           confirm.
         </p>
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-3 gap-2 max-md:grid-cols-1">
           {(
             [
               { v: "REPRODUCE", t: "Reproduce", d: "Open new PO; ship when ready" },

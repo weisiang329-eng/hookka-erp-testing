@@ -1037,7 +1037,7 @@ export default function SettingsPage() {
       </div>
 
       {/* Tab Navigation */}
-      <div className="flex gap-1 border-b border-[#E2DDD8]">
+      <div className="flex gap-1 border-b border-[#E2DDD8] overflow-x-auto">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;

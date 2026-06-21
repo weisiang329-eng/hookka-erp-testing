@@ -261,7 +261,7 @@ export default function OrganisationsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">
             Organisation Management
@@ -399,7 +399,7 @@ export default function OrganisationsPage() {
                 </div>
               </CardHeader>
               <CardContent>
-                <div className="grid grid-cols-2 gap-4 text-sm">
+                <div className="grid grid-cols-2 gap-4 text-sm max-md:grid-cols-1">
                   <ReadField label="Company Name" value={org.name} />
                   <ReadField label="Registration No." value={org.regNo} />
                   <ReadField label="TIN" value={org.tin} />

@@ -142,7 +142,7 @@ export default function ServiceOrdersListPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Repair Orders</h1>
           <p className="text-xs text-[#6B7280]">
@@ -628,7 +628,7 @@ function CreateServiceOrderModal({
             <label className="block text-xs text-[#6B7280] mb-1">
               Type of Service
             </label>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-2 max-md:grid-cols-1">
               {(
                 [
                   {
@@ -661,7 +661,7 @@ function CreateServiceOrderModal({
           </div>
 
           {/* Source picker */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
             <div>
               <label className="block text-xs text-[#6B7280] mb-1">
                 Source Order Type
@@ -752,7 +752,7 @@ function CreateServiceOrderModal({
             <label className="block text-xs text-[#6B7280] mb-1">
               Resolution Mode <span className="text-[#9CA3AF]">(optional — pick later if you're still gathering info)</span>
             </label>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-4 gap-2 max-xl:grid-cols-2 max-sm:grid-cols-1">
               {(
                 [
                   { v: null, t: "Decide later", d: "Open the case now; choose resolution after follow-up" },
@@ -1066,7 +1066,7 @@ function CreateServiceOrderModal({
             <label className="block text-xs text-[#6B7280] mb-1">
               Root Cause &amp; Prevention <span className="text-[#9CA3AF]">(optional)</span>
             </label>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-2 max-md:grid-cols-1">
               <select
                 value={rootCauseCategory}
                 onChange={(e) => setRootCauseCategory(e.target.value)}

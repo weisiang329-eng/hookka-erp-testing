@@ -26,9 +26,9 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency } from "@/lib/utils";
-import type { Supplier, RawMaterial } from "@/types";
+import type { Supplier, RawMaterial, SupplierMaterialBinding } from "@/types";
 import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
-import { ArrowLeft, Plus, Save, Trash2, ScanLine, FolderInput } from "lucide-react";
+import { ArrowLeft, Plus, Save, Trash2, FolderInput } from "lucide-react";
 import {
   ScanSupplierModal,
   type SupplierExtraction,
@@ -124,19 +124,27 @@ function CreatePurchaseInvoicePage() {
     success?: boolean;
     data?: { rawMaterials?: RawMaterial[] };
   }>("/api/inventory");
+  const { data: bindingsResp } = useCachedJson<
+    { success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]
+  >("/api/supplier-materials");
 
   const suppliers: Supplier[] = useMemo(
     () => supResp?.data ?? [],
     [supResp],
   );
 
-  const materialOptions: MaterialOption[] = useMemo(
+  const allRawMaterials: RawMaterial[] = useMemo(
     () =>
-      (invResp?.success ? invResp.data?.rawMaterials ?? [] : [])
-        .filter((rm) => rm.isActive)
-        .map((rm) => ({ itemCode: rm.itemCode, description: rm.description })),
+      (invResp?.success ? invResp.data?.rawMaterials ?? [] : []).filter(
+        (rm) => rm.isActive,
+      ),
     [invResp],
   );
+
+  const supplierMaterialBindings: SupplierMaterialBinding[] = useMemo(() => {
+    const b = (bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? bindingsResp;
+    return Array.isArray(b) ? b : [];
+  }, [bindingsResp]);
 
   // ── Form state ────────────────────────────────────────────────────────────
   const [supplierId, setSupplierId] = useState("");
@@ -226,6 +234,32 @@ function CreatePurchaseInvoicePage() {
   }, []);
 
   const supplier = suppliers.find((s) => s.id === supplierId);
+
+  // ── Supplier-filtered material picker options ─────────────────────────────
+  // When a supplier is selected, narrow the catalog to materials bound to that
+  // supplier via supplier_material_bindings. The picker still allows free-text
+  // for off-catalog items — this only changes the suggestions list.
+  // When no supplier is selected, materialOptions is empty and the picker shows
+  // a "Pick a supplier first" hint instead of catalog entries.
+  const materialOptions: MaterialOption[] = useMemo(() => {
+    if (!supplierId) return [];
+    const boundCodes = new Set(
+      supplierMaterialBindings
+        .filter((b) => b.supplierId === supplierId)
+        .map((b) => b.materialCode.trim().toUpperCase()),
+    );
+    if (boundCodes.size === 0) {
+      // Supplier has no bindings at all — fall back to the full catalog so the
+      // operator is never left with a completely empty picker.
+      return allRawMaterials.map((rm) => ({
+        itemCode: rm.itemCode,
+        description: rm.description,
+      }));
+    }
+    return allRawMaterials
+      .filter((rm) => boundCodes.has(rm.itemCode.trim().toUpperCase()))
+      .map((rm) => ({ itemCode: rm.itemCode, description: rm.description }));
+  }, [supplierId, supplierMaterialBindings, allRawMaterials]);
 
   // ── Line mutators — verbatim from PIFormDialog ────────────────────────────
   const updateLine = (
@@ -455,7 +489,7 @@ function CreatePurchaseInvoicePage() {
           onClick={() => setConvertOpen(true)}
           title="Pick a Goods Receipt (or Purchase Order) and its lines to pre-fill this invoice"
         >
-          <FolderInput className="h-4 w-4" /> Convert from Goods Receipt
+          <FolderInput className="h-4 w-4" /> Convert from GR or PO
         </Button>
         <Button
           variant="outline"
@@ -578,18 +612,7 @@ function CreatePurchaseInvoicePage() {
       {/* Invoice Items — full-width table */}
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <CardTitle>Invoice Items ({validLines.length})</CardTitle>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setScanOpen(true)}
-              title="Snap/upload a supplier invoice to auto-fill code, qty, and unit price"
-            >
-              <ScanLine className="h-4 w-4" /> Scan supplier document
-            </Button>
-          </div>
+          <CardTitle>Invoice Items ({validLines.length})</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
@@ -635,29 +658,37 @@ function CreatePurchaseInvoicePage() {
                       key={idx}
                       className="border-t border-[#E2DDD8] hover:bg-[#FAF9F7]"
                     >
-                      {/* Description — catalog picker, free-text OK */}
+                      {/* Description — catalog picker, filtered by supplier; free-text OK */}
                       <td className="px-2 py-1.5">
-                        <MaterialPicker
-                          className="h-8"
-                          inputClassName="h-8"
-                          placeholder="Search code or name..."
-                          value={line.materialName}
-                          options={materialOptions}
-                          onPick={(o) =>
-                            setLines((prev) => {
-                              const next = [...prev];
-                              next[idx] = {
-                                ...next[idx],
-                                materialCode: o.itemCode,
-                                materialName: o.description,
-                              };
-                              return next;
-                            })
-                          }
-                          onTyped={(text) =>
-                            updateLine(idx, "materialName", text)
-                          }
-                        />
+                        {!supplierId ? (
+                          <input
+                            disabled
+                            className="h-8 w-full rounded border border-[#E2DDD8] bg-[#F9F8F6] px-2 text-xs text-[#9CA3AF] cursor-not-allowed"
+                            placeholder="Pick a supplier first"
+                          />
+                        ) : (
+                          <MaterialPicker
+                            className="h-8"
+                            inputClassName="h-8"
+                            placeholder="Search code or name..."
+                            value={line.materialName}
+                            options={materialOptions}
+                            onPick={(o) =>
+                              setLines((prev) => {
+                                const next = [...prev];
+                                next[idx] = {
+                                  ...next[idx],
+                                  materialCode: o.itemCode,
+                                  materialName: o.description,
+                                };
+                                return next;
+                              })
+                            }
+                            onTyped={(text) =>
+                              updateLine(idx, "materialName", text)
+                            }
+                          />
+                        )}
                       </td>
                       {/* Supplier SKU */}
                       <td className="px-2 py-1.5">

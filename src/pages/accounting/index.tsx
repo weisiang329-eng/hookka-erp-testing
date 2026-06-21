@@ -3322,6 +3322,14 @@ type PnlStmtRow = {
   bucket?: string;
 };
 
+// Material data-quality warnings surfaced on the P&L (from the FIFO engine):
+// materials that went negative (need opening/GRN fixes) and item codes that
+// could not be resolved to a raw material.
+type PnlMaterialWarnings = {
+  negatives: { rmId: string; itemCode: string; units: number }[];
+  unresolved: { source: string; code: string }[];
+};
+
 // Phase 5.6 — Cost Structure: a FY, per material group, months as rows,
 // each group a block of O/P · Purchase · C/L · Spend; leading SALES column
 // and a Spend % of sales. Line filter by group prefix (B.* Bedframe,
@@ -3803,10 +3811,11 @@ function PLStatementTab() {
   const [line, setLine] = useState<"all" | "sofa" | "bedframe">("all");
   const [level, setLevel] = useState(4);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [data, setData] = useState<{ rows: PnlStmtRow[]; netSalesSen: number; fyLabel: string; periodLabel: string } | null>(null);
+  const [data, setData] = useState<{ rows: PnlStmtRow[]; netSalesSen: number; fyLabel: string; periodLabel: string; materialWarnings?: PnlMaterialWarnings } | null>(null);
   const loading = data === null;
   const { toast } = useToast();
   const [edit, setEdit] = useState(false);
+  const [showMatWarnings, setShowMatWarnings] = useState(false);
   const [pmap, setPmap] = useState<Record<string, string>>({});
   const [dragCode, setDragCode] = useState<string | null>(null);
   const [dragClass, setDragClass] = useState<"income" | "cost" | null>(null);
@@ -3905,8 +3914,51 @@ function PLStatementTab() {
   const yrNow = new Date().getUTCFullYear();
   const years = [yrNow, yrNow - 1];
 
+  const matWarn = data?.materialWarnings;
+  const negCount = matWarn?.negatives.length ?? 0;
+  const unresCount = matWarn?.unresolved.length ?? 0;
+  const hasMatWarnings = negCount > 0 || unresCount > 0;
+
   return (
     <div className="space-y-4">
+      {hasMatWarnings && (
+        <div className="rounded-md border border-[#F7C1C1] bg-[#FCEBEB] px-3 py-2">
+          <button
+            type="button"
+            onClick={() => setShowMatWarnings((v) => !v)}
+            className="flex w-full items-center gap-1.5 text-left text-sm font-semibold text-[#9A3A2D] cursor-pointer"
+          >
+            {showMatWarnings ? <ChevronDownIcon className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+            <span>
+              ⚠ {negCount} material{negCount === 1 ? "" : "s"} with negative stock and {unresCount} unresolved — material cost may be understated. Click to {showMatWarnings ? "hide" : "view"}.
+            </span>
+          </button>
+          {showMatWarnings && (
+            <div className="mt-2 space-y-3 pl-6 text-sm">
+              {negCount > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-[#9A3A2D] mb-1">Negative stock ({negCount}) — fix opening stock or GRN receipts so layers cover issues:</p>
+                  <div className="flex flex-wrap gap-2">
+                    {matWarn!.negatives.map((n) => (
+                      <span key={n.rmId} className="inline-flex items-center gap-1.5 rounded-full border border-[#F7C1C1] bg-white px-2 py-0.5 text-xs tabular-nums">{n.itemCode} · {n.units} units</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {unresCount > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-[#9A3A2D] mb-1">Unresolved item codes ({unresCount}) — no matching raw material; check the code or master data:</p>
+                  <div className="flex flex-wrap gap-2">
+                    {matWarn!.unresolved.map((u) => (
+                      <span key={`${u.source} ${u.code}`} className="inline-flex items-center rounded-full border border-[#F7C1C1] bg-white px-2 py-0.5 text-xs"><span className="tabular-nums mr-1">{u.code}</span><span className="text-[#6B7280]">{u.source}</span></span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         {lineTabs.map((t) => (
           <button key={t.k} onClick={() => setLine(t.k)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${line === t.k ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{t.label}</button>

@@ -4866,6 +4866,11 @@ async function computePnlWindow(
     expenseLines,
     expenseSen,
     netProfitSen,
+    // Material-wide data-quality warnings from the FIFO engine (negative stock
+    // / unresolved item codes). These are NOT period-specific — they reflect
+    // the whole replayed timeline — so the caller can take them from any one
+    // window (the broadest/accumulated call is the natural choice).
+    materialWarnings: mat.warnings,
   };
 }
 
@@ -5183,6 +5188,19 @@ app.get("/pl-statement", async (c) => {
     computePnlWindow(c.var.DB, orgId, startYm, endYm, line, pnlOverride),
     computePnlWindow(c.var.DB, orgId, fyStartYm, endYm, line, pnlOverride),
   ]);
+  // Material warnings are material-wide (whole-timeline), not period-specific —
+  // merge both windows' lists and de-dupe so the same material can't appear
+  // twice (by rmId for negatives, by source+code for unresolved).
+  const negMap = new Map<string, { itemCode: string; units: number }>();
+  const unresMap = new Map<string, { source: string; code: string }>();
+  for (const w of [p.materialWarnings, y.materialWarnings]) {
+    for (const n of w.negatives) negMap.set(n.rmId, { itemCode: n.itemCode, units: n.units });
+    for (const u of w.unresolved) unresMap.set(`${u.source} ${u.code}`, u);
+  }
+  const materialWarnings = {
+    negatives: [...negMap.entries()].map(([rmId, v]) => ({ rmId, itemCode: v.itemCode, units: v.units })),
+    unresolved: [...unresMap.values()],
+  };
   return c.json({
     success: true,
     data: {
@@ -5192,6 +5210,7 @@ app.get("/pl-statement", async (c) => {
       fyLabel: fyWin.label,
       netSalesSen: p.netSalesSen,
       rows: buildPnlRows(p, y, editable),
+      materialWarnings,
     },
   });
 });

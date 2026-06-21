@@ -25,7 +25,6 @@ import {
   Check,
   Layers,
   FileCheck,
-  QrCode,
   Wallet,
   Calculator,
   Package,
@@ -114,7 +113,9 @@ const navigationGroups: NavGroup[] = [
         { name: "Packing", href: "/production/packing", icon: Package },
       ]},
       { name: "Planning", href: "/planning", icon: Calendar },
-      { name: "Scanner", href: "/production/scan", icon: QrCode },
+      // "Scanner" (/production/scan) removed from the menu 2026-06-21 (owner) —
+      // the route + page stay live because printed job-card sticker QRs land there
+      // (generate-sticker-pdf.ts). Workers also scan via /worker/scan (a superset).
       // Archive of printed paper schedules — operator multi-selects rows on
       // a dept page → "Save to Folder" to find them back later.
       { name: "Folders", href: "/production/folders", icon: FolderOpen },

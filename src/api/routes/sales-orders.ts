@@ -2904,8 +2904,8 @@ app.get("/:id", async (c) => {
     // production_orders.id so we can merge into the PO list above.
     c.var.DB.prepare(
       `SELECT jc.productionOrderId,
-              GROUP_CONCAT(DISTINCT CASE WHEN jc.pic1Name IS NOT NULL AND jc.pic1Name <> '' THEN jc.pic1Name END) AS names1,
-              GROUP_CONCAT(DISTINCT CASE WHEN jc.pic2Name IS NOT NULL AND jc.pic2Name <> '' THEN jc.pic2Name END) AS names2
+              string_agg(DISTINCT CASE WHEN jc.pic1Name IS NOT NULL AND jc.pic1Name <> '' THEN jc.pic1Name END, ', ') AS names1,
+              string_agg(DISTINCT CASE WHEN jc.pic2Name IS NOT NULL AND jc.pic2Name <> '' THEN jc.pic2Name END, ', ') AS names2
          FROM job_cards jc
          JOIN production_orders po ON po.id = jc.productionOrderId
         WHERE po.salesOrderId = ?

@@ -41,9 +41,20 @@ type LinkedPO = {
   progress: number;
   currentDepartment: string;
   completedDate?: string | null;
+  completedBy?: string | null;
   // Per-line delivery: the DO this PO shipped on + that DO's raw status.
   deliveryDoNo?: string;
   deliveryStatus?: string;
+};
+
+type LinkedDO = {
+  id: string;
+  doNo: string;
+  status: string;
+  driverName?: string | null;
+  scheduledDate?: string | null;
+  dispatchedAt?: string | null;
+  deliveredAt?: string | null;
 };
 
 // Operator-facing words for a DO's raw status, matching the Delivery module
@@ -228,6 +239,101 @@ function StatusTimeline({ history }: { history: StatusChange[] }) {
   );
 }
 
+// --- Order Progress Card ---
+// Mobile-first summary of production + delivery state at a glance.
+// Single column on narrow screens; rows wrap; no horizontal overflow at 360px.
+function OrderProgressCard({
+  linkedPOs,
+  linkedDOs,
+}: {
+  linkedPOs: LinkedPO[];
+  linkedDOs: LinkedDO[];
+}) {
+  if (linkedPOs.length === 0 && linkedDOs.length === 0) return null;
+
+  // Derive a simple production summary label.
+  function productionLabel(po: LinkedPO): string {
+    if (po.status === "COMPLETED") {
+      const parts: string[] = [];
+      if (po.completedDate) parts.push(formatDate(po.completedDate));
+      if (po.completedBy) parts.push(`by ${po.completedBy}`);
+      return parts.length ? `Completed ${parts.join(" ")}` : "Completed";
+    }
+    if (po.status === "PENDING") return "Not started";
+    if (po.status === "ON_HOLD") return "On hold";
+    if (po.status === "CANCELLED") return "Cancelled";
+    // IN_PROGRESS (or any other active state)
+    const dept = (po.currentDepartment || "").replace(/_/g, " ");
+    return dept ? `In production — ${dept}` : "In production";
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Order Progress</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Production section */}
+        {linkedPOs.length > 0 && (
+          <div>
+            <p className="text-xs font-semibold text-[#9CA3AF] uppercase tracking-wide mb-2">Production</p>
+            <div className="space-y-2">
+              {linkedPOs.map((po) => (
+                <div key={po.id} className="flex flex-wrap items-center gap-2 min-w-0">
+                  <Badge variant="status" status={po.status} />
+                  <span className="text-xs font-medium doc-number text-[#6B5C32] shrink-0">
+                    {po.poNo.replace(/-\d+$/, po.itemCategory?.toUpperCase() === "SOFA" ? "" : po.poNo.slice(po.poNo.lastIndexOf("-")))}
+                  </span>
+                  <span className="text-xs text-[#4B5563] min-w-0 break-words">{productionLabel(po)}</span>
+                  {po.status !== "COMPLETED" && po.status !== "PENDING" && po.status !== "CANCELLED" && (
+                    <span className="text-xs text-[#9CA3AF] shrink-0">{po.progress}%</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Delivery section */}
+        {linkedDOs.length > 0 && (
+          <div>
+            <p className="text-xs font-semibold text-[#9CA3AF] uppercase tracking-wide mb-2">Delivery</p>
+            <div className="space-y-3">
+              {linkedDOs.map((d) => (
+                <div key={d.id} className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <a
+                      href="/delivery"
+                      className="text-xs font-medium doc-number text-[#6B5C32] underline underline-offset-2 hover:text-[#4a3f22]"
+                    >
+                      {d.doNo}
+                    </a>
+                    <Badge variant="status" status={d.status} />
+                    {d.driverName && (
+                      <span className="text-xs text-[#4B5563]">{d.driverName}</span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-[#6B7280]">
+                    {d.scheduledDate && (
+                      <span>Scheduled: {formatDate(d.scheduledDate)}</span>
+                    )}
+                    {d.dispatchedAt && (
+                      <span>Dispatched: {formatDate(d.dispatchedAt)}</span>
+                    )}
+                    {d.deliveredAt && (
+                      <span>Delivered: {formatDate(d.deliveredAt)}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function SalesOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -246,7 +352,7 @@ export default function SalesOrderDetailPage() {
     statusHistory?: StatusChange[];
     priceOverrides?: PriceOverrideRecord[];
     // Real downstream documents resolved server-side (handles consolidated DOs).
-    linkedDOs?: { id: string; doNo: string; status: string }[];
+    linkedDOs?: LinkedDO[];
     linkedInvoices?: { id: string; invoiceNo: string; status: string; totalSen: number; paidAmount: number; paymentDate: string | null }[];
     linkedPayments?: { id: string; receiptNumber: string; date: string; amount: number; status: string }[];
   }>(id ? `/api/sales-orders/${id}` : null);
@@ -1180,6 +1286,9 @@ export default function SalesOrderDetailPage() {
           fetchOrder();
         }}
       />
+
+      {/* Order Progress — production + delivery glance card, mobile-first */}
+      <OrderProgressCard linkedPOs={linkedPOs} linkedDOs={linkedDOs} />
 
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
         <Card className="lg:col-span-2">

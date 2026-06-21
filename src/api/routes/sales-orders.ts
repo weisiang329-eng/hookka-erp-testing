@@ -2857,7 +2857,7 @@ app.get("/:id", async (c) => {
       .first<{ id: string }>();
     if (byNo?.id) id = byNo.id;
   }
-  const [so, itemsRes, statusRes, overridesRes, posRes] = await Promise.all([
+  const [so, itemsRes, statusRes, overridesRes, posRes, completedByRes] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM sales_orders WHERE id = ?")
       .bind(id)
       .first<SalesOrderRow>(),
@@ -2898,6 +2898,23 @@ app.get("/:id", async (c) => {
         currentDepartment: string | null;
         completedDate: string | null;
       }>(),
+    // completedBy: names of workers who scanned the PACKING job card
+    // (the final dept, best proxy for "who finished the PO"). Derived from
+    // job_cards.pic1Name / pic2Name where the JC is COMPLETED. Keyed by
+    // production_orders.id so we can merge into the PO list above.
+    c.var.DB.prepare(
+      `SELECT jc.productionOrderId,
+              GROUP_CONCAT(DISTINCT CASE WHEN jc.pic1Name IS NOT NULL AND jc.pic1Name <> '' THEN jc.pic1Name END) AS names1,
+              GROUP_CONCAT(DISTINCT CASE WHEN jc.pic2Name IS NOT NULL AND jc.pic2Name <> '' THEN jc.pic2Name END) AS names2
+         FROM job_cards jc
+         JOIN production_orders po ON po.id = jc.productionOrderId
+        WHERE po.salesOrderId = ?
+          AND jc.status = 'COMPLETED'
+          AND (jc.pic1Name IS NOT NULL OR jc.pic2Name IS NOT NULL)
+        GROUP BY jc.productionOrderId`,
+    )
+      .bind(id)
+      .all<{ productionOrderId: string; names1: string | null; names2: string | null }>(),
   ]);
   if (!so) {
     return c.json({ success: false, error: "Order not found" }, 404);
@@ -2919,7 +2936,8 @@ app.get("/:id", async (c) => {
   // path skips, and faked the Invoice/Payment nodes from SO status alone.)
   const companySOId = so.companySOId ?? "";
   const dosRes = await c.var.DB.prepare(
-    `SELECT DISTINCT d.id, d.doNo, d.status
+    `SELECT DISTINCT d.id, d.doNo, d.status,
+            d.driverName, d.hookkaExpectedDD, d.dispatchedAt, d.deliveredAt
        FROM delivery_orders d
       WHERE d.salesOrderId = ?
          OR d.id IN (
@@ -2930,11 +2948,19 @@ app.get("/:id", async (c) => {
       ORDER BY d.doNo`,
   )
     .bind(id, companySOId)
-    .all<{ id: string; doNo: string | null; status: string | null }>();
+    .all<{
+      id: string; doNo: string | null; status: string | null;
+      driverName: string | null; hookkaExpectedDD: string | null;
+      dispatchedAt: string | null; deliveredAt: string | null;
+    }>();
   const linkedDOs = (dosRes.results ?? []).map((d) => ({
     id: d.id,
     doNo: d.doNo ?? "",
     status: d.status ?? "",
+    driverName: d.driverName ?? null,
+    scheduledDate: d.hookkaExpectedDD ?? null,
+    dispatchedAt: d.dispatchedAt ?? null,
+    deliveredAt: d.deliveredAt ?? null,
   }));
   const doIds = linkedDOs.map((d) => d.id);
 
@@ -3029,6 +3055,16 @@ app.get("/:id", async (c) => {
     }));
   }
 
+  // Build completedBy map: poId → comma-deduped worker names from scanned JCs.
+  const completedByMap = new Map<string, string>();
+  for (const cb of completedByRes.results ?? []) {
+    const parts = [
+      ...(cb.names1 ? cb.names1.split(",") : []),
+      ...(cb.names2 ? cb.names2.split(",") : []),
+    ].filter((n, i, a) => n && a.indexOf(n) === i); // distinct, non-empty
+    if (parts.length) completedByMap.set(cb.productionOrderId, parts.join(", "));
+  }
+
   return c.json({
     success: true,
     data: rowToSO(so, itemsRes.results ?? []),
@@ -3044,6 +3080,7 @@ app.get("/:id", async (c) => {
       progress: p.progress ?? 0,
       currentDepartment: p.currentDepartment ?? "",
       completedDate: p.completedDate ?? null,
+      completedBy: completedByMap.get(p.id) ?? null,
       deliveryDoNo: poDeliveryMap.get(p.id)?.doNo ?? "",
       deliveryStatus: poDeliveryMap.get(p.id)?.status ?? "",
     })),

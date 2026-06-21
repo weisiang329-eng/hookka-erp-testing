@@ -38,6 +38,17 @@ type LinkedPO = {
   status: string;
   progress: number;
   currentDepartment: string;
+  completedDate?: string | null;
+  completedBy?: string | null;
+};
+
+type LinkedCN = {
+  id: string;
+  noteNumber: string;
+  status: string;
+  dispatchedAt?: string | null;
+  deliveredAt?: string | null;
+  driverName?: string | null;
 };
 
 // SO ID display rule (mirrors src/pages/production/index.tsx):
@@ -174,6 +185,94 @@ function StatusTimeline({ history }: { history: StatusChange[] }) {
   );
 }
 
+// --- Order Progress Card (CO version — uses CNs instead of DOs) ---
+function OrderProgressCard({
+  linkedPOs,
+  linkedCNs,
+}: {
+  linkedPOs: LinkedPO[];
+  linkedCNs: LinkedCN[];
+}) {
+  if (linkedPOs.length === 0 && linkedCNs.length === 0) return null;
+
+  function productionLabel(po: LinkedPO): string {
+    if (po.status === "COMPLETED") {
+      const parts: string[] = [];
+      if (po.completedDate) parts.push(formatDate(po.completedDate));
+      if (po.completedBy) parts.push(`by ${po.completedBy}`);
+      return parts.length ? `Completed ${parts.join(" ")}` : "Completed";
+    }
+    if (po.status === "PENDING") return "Not started";
+    if (po.status === "ON_HOLD") return "On hold";
+    if (po.status === "CANCELLED") return "Cancelled";
+    const dept = (po.currentDepartment || "").replace(/_/g, " ");
+    return dept ? `In production — ${dept}` : "In production";
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Order Progress</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {linkedPOs.length > 0 && (
+          <div>
+            <p className="text-xs font-semibold text-[#9CA3AF] uppercase tracking-wide mb-2">Production</p>
+            <div className="space-y-2">
+              {linkedPOs.map((po) => (
+                <div key={po.id} className="flex flex-wrap items-center gap-2 min-w-0">
+                  <Badge variant="status" status={po.status} />
+                  <span className="text-xs font-medium doc-number text-[#6B5C32] shrink-0">
+                    {po.itemCategory?.toUpperCase() === "SOFA"
+                      ? po.poNo.replace(/-\d+$/, "")
+                      : po.poNo}
+                  </span>
+                  <span className="text-xs text-[#4B5563] min-w-0 break-words">{productionLabel(po)}</span>
+                  {po.status !== "COMPLETED" && po.status !== "PENDING" && po.status !== "CANCELLED" && (
+                    <span className="text-xs text-[#9CA3AF] shrink-0">{po.progress}%</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {linkedCNs.length > 0 && (
+          <div>
+            <p className="text-xs font-semibold text-[#9CA3AF] uppercase tracking-wide mb-2">Consignment Delivery</p>
+            <div className="space-y-3">
+              {linkedCNs.map((cn) => (
+                <div key={cn.id} className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <a
+                      href="/consignment"
+                      className="text-xs font-medium doc-number text-[#6B5C32] underline underline-offset-2 hover:text-[#4a3f22]"
+                    >
+                      {cn.noteNumber}
+                    </a>
+                    <Badge variant="status" status={cn.status} />
+                    {cn.driverName && (
+                      <span className="text-xs text-[#4B5563]">{cn.driverName}</span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-[#6B7280]">
+                    {cn.dispatchedAt && (
+                      <span>Dispatched: {formatDate(cn.dispatchedAt)}</span>
+                    )}
+                    {cn.deliveredAt && (
+                      <span>Delivered: {formatDate(cn.deliveredAt)}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function SalesOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -186,9 +285,8 @@ export default function SalesOrderDetailPage() {
     linkedPOs?: LinkedPO[];
     statusHistory?: StatusChange[];
     priceOverrides?: PriceOverrideRecord[];
-    // Linked Consignment Notes — used by the hub-edit gate to detect
-    // whether any dispatched CN has frozen the hub. Mirrors SO linkedDOs.
-    linkedCNs?: { id: string; noteNumber: string; status: string; dispatchedAt: string | null }[];
+    // Linked Consignment Notes — used by the hub-edit gate + Order Progress card.
+    linkedCNs?: LinkedCN[];
   }>(id ? `/api/consignment-orders/${id}` : null);
   const [updating, setUpdating] = useState(false);
   const [confirmSuccess, setConfirmSuccess] = useState<string | null>(null);
@@ -989,6 +1087,9 @@ export default function SalesOrderDetailPage() {
           fetchOrder();
         }}
       />
+
+      {/* Order Progress — production + delivery glance card, mobile-first */}
+      <OrderProgressCard linkedPOs={linkedPOs} linkedCNs={linkedCNs} />
 
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
         <Card className="lg:col-span-2">

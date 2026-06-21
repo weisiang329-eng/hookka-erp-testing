@@ -1183,7 +1183,7 @@ app.post("/:id/override-edit-lock", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const [row, items, cnsRes] = await Promise.all([
+  const [row, items, cnsRes, posRes, completedByRes] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM consignment_orders WHERE id = ?")
       .bind(id)
       .first<ConsignmentOrderRow>(),
@@ -1194,9 +1194,10 @@ app.get("/:id", async (c) => {
       .all<ConsignmentOrderItemRow>(),
     // Linked Consignment Notes — used by the FE hub-edit gate so the
     // operator can see whether the hub is still editable (no dispatched CN)
-    // before clicking the Edit pencil. Mirrors the SO route's linkedDOs.
+    // before clicking the Edit pencil. Expanded with delivery fields for the
+    // Order Progress card.
     c.var.DB.prepare(
-      `SELECT id, noteNumber, status, dispatchedAt
+      `SELECT id, noteNumber, status, dispatchedAt, deliveredAt, driverName
          FROM consignment_notes
         WHERE consignmentOrderId = ?
         ORDER BY noteNumber`,
@@ -1207,7 +1208,39 @@ app.get("/:id", async (c) => {
         noteNumber: string | null;
         status: string | null;
         dispatchedAt: string | null;
+        deliveredAt: string | null;
+        driverName: string | null;
       }>(),
+    // Linked production orders for the Order Progress card.
+    c.var.DB.prepare(
+      `SELECT id, poNo, productName, productCode, itemCategory, quantity,
+              status, progress, currentDepartment, completedDate
+         FROM production_orders
+        WHERE consignmentOrderId = ?
+        ORDER BY poNo`,
+    )
+      .bind(id)
+      .all<{
+        id: string; poNo: string; productName: string | null;
+        productCode: string | null; itemCategory: string | null;
+        quantity: number | null; status: string | null;
+        progress: number | null; currentDepartment: string | null;
+        completedDate: string | null;
+      }>(),
+    // completedBy: worker names from completed job_cards under this CO's POs.
+    c.var.DB.prepare(
+      `SELECT jc.productionOrderId,
+              GROUP_CONCAT(DISTINCT CASE WHEN jc.pic1Name IS NOT NULL AND jc.pic1Name <> '' THEN jc.pic1Name END) AS names1,
+              GROUP_CONCAT(DISTINCT CASE WHEN jc.pic2Name IS NOT NULL AND jc.pic2Name <> '' THEN jc.pic2Name END) AS names2
+         FROM job_cards jc
+         JOIN production_orders po ON po.id = jc.productionOrderId
+        WHERE po.consignmentOrderId = ?
+          AND jc.status = 'COMPLETED'
+          AND (jc.pic1Name IS NOT NULL OR jc.pic2Name IS NOT NULL)
+        GROUP BY jc.productionOrderId`,
+    )
+      .bind(id)
+      .all<{ productionOrderId: string; names1: string | null; names2: string | null }>(),
   ]);
   if (!row) {
     return c.json(
@@ -1224,12 +1257,36 @@ app.get("/:id", async (c) => {
     noteNumber: cn.noteNumber ?? "",
     status: cn.status ?? "",
     dispatchedAt: cn.dispatchedAt ?? null,
+    deliveredAt: cn.deliveredAt ?? null,
+    driverName: cn.driverName ?? null,
   }));
+  // Build completedBy map: poId → comma-deduped worker names.
+  const completedByMap = new Map<string, string>();
+  for (const cb of completedByRes.results ?? []) {
+    const parts = [
+      ...(cb.names1 ? cb.names1.split(",") : []),
+      ...(cb.names2 ? cb.names2.split(",") : []),
+    ].filter((n, i, a) => n && a.indexOf(n) === i);
+    if (parts.length) completedByMap.set(cb.productionOrderId, parts.join(", "));
+  }
   return c.json({
     success: true,
     data: rowToCO(row, items.results ?? []),
     lockReason,
     linkedCNs,
+    linkedPOs: (posRes.results ?? []).map((p) => ({
+      id: p.id,
+      poNo: p.poNo,
+      productName: p.productName ?? "",
+      productCode: p.productCode ?? "",
+      itemCategory: p.itemCategory ?? "",
+      quantity: p.quantity ?? 0,
+      status: p.status ?? "",
+      progress: p.progress ?? 0,
+      currentDepartment: p.currentDepartment ?? "",
+      completedDate: p.completedDate ?? null,
+      completedBy: completedByMap.get(p.id) ?? null,
+    })),
   });
 });
 

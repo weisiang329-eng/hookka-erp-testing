@@ -31,6 +31,7 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
 import { MoneyInput } from "@/components/ui/money-input";
 import { DiscountInput } from "@/components/ui/discount-input";
+import { isPiEditable } from "@/lib/purchase-edit-rules";
 import type { RawMaterial } from "@/types";
 
 const VALID_LINE_TYPES: LineType[] = ["STOCKED", "FEE", "TAX", "REBATE", "DISCOUNT", "OTHER"];
@@ -44,6 +45,11 @@ type DraftLine = {
   qty: string;
   unitPriceRm: string;
   lineType: LineType;
+  // Convert-chain link: when a line was sourced from a GRN line, carry its
+  // grn_items id so saving keeps grn_items.invoiced_qty in sync (the backend
+  // restores the old consumption then re-increments off this id). Dropping it
+  // would silently free the GRN line's invoiced qty on every edit.
+  grnItemId: string | null;
 };
 
 // Status lifecycle (matches backend VALID_TRANSITIONS in purchase-invoices.ts).
@@ -74,6 +80,7 @@ type PurchaseInvoiceItem = {
   lineTotalSen: number;
   lineType: LineType;
   notes: string | null;
+  grnItemId?: string | number | null;
 };
 
 type PurchaseInvoiceDetail = {
@@ -270,6 +277,7 @@ export default function PurchaseInvoiceDetailPage() {
         qty: String(it.qty ?? 0),
         unitPriceRm: (Number(it.unitPriceSen || 0) / 100).toFixed(2),
         lineType: it.lineType,
+        grnItemId: it.grnItemId == null ? null : String(it.grnItemId),
       })),
     );
     setDirty(false);
@@ -286,7 +294,7 @@ export default function PurchaseInvoiceDetailPage() {
   function addLine() {
     setDLines((p) => [
       ...p,
-      { materialCode: "", materialName: "", supplierSku: "", qty: "1", unitPriceRm: "0.00", lineType: "STOCKED" },
+      { materialCode: "", materialName: "", supplierSku: "", qty: "1", unitPriceRm: "0.00", lineType: "STOCKED", grnItemId: null },
     ]);
     setDirty(true);
   }
@@ -321,6 +329,17 @@ export default function PurchaseInvoiceDetailPage() {
         return;
       }
     }
+    // Editing an APPROVED invoice moves the books: the AP total + GL re-sync to
+    // the new amount. Confirm with the operator in plain words before saving
+    // (DRAFT invoices haven't posted to the GL, so they save without a prompt).
+    if (pi.status === "APPROVED" && draftTotalSen !== pi.amountSen) {
+      const ok = await confirm({
+        title: "Save changes to an approved invoice?",
+        message: `This invoice is already approved. Saving changes the amount payable from ${formatCurrency(pi.amountSen)} to ${formatCurrency(draftTotalSen)}, and posts a matching accounting correction. Continue?`,
+        danger: false,
+      });
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       const items = dLines.map((l) => ({
@@ -330,6 +349,8 @@ export default function PurchaseInvoiceDetailPage() {
         qty: parseFloat(l.qty) || 0,
         unitPriceSen: Math.round((parseFloat(l.unitPriceRm) || 0) * 100),
         lineType: l.lineType,
+        // Preserve the GRN-source link so the backend keeps invoiced_qty in sync.
+        grnItemId: l.grnItemId,
       }));
       const res = await fetch(`/api/purchase-invoices/${pi.id}`, {
         method: "PUT",
@@ -401,7 +422,7 @@ export default function PurchaseInvoiceDetailPage() {
                 <Printer className="h-3.5 w-3.5" /> Print
               </Button>
             )}
-            {!editing && pi.status === "DRAFT" && (
+            {!editing && isPiEditable(pi.status) && (
               <Button type="button" variant="outline" size="sm" onClick={startEdit} disabled={busy}>
                 <Pencil className="h-3.5 w-3.5" /> Edit
               </Button>

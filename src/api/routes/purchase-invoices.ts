@@ -20,6 +20,7 @@ import {
 import { nextMonthDueDate } from "../../lib/terms";
 import { issueDocNumber } from "../lib/doc-number-service";
 import { checkConvertAvailability, clampDecrement, type ConvertLineRequest } from "../../lib/convert-chain";
+import { isPiEditable, piEditBlockedError } from "../../lib/purchase-edit-rules";
 
 // ---------------------------------------------------------------------------
 // Runtime schema self-apply — convert-chain columns (PO→GRN→PI). All
@@ -463,6 +464,81 @@ async function buildGrnRestoreStatements(
     );
   }
   return statements;
+}
+
+// ---------------------------------------------------------------------------
+// Convert-chain CEILING guard for an items-replace edit. When a PI's lines are
+// rewritten (DRAFT or APPROVED), the OLD GRN consumption is given back and the
+// NEW lines re-consume. This verifies the NEW consumption can't push any GRN
+// line's invoiced_qty past its acceptedQty — the invoice must never claim more
+// than the GRN received.
+//
+// Per GRN line: projected = (currentInvoiced − thisPI'sOldQty) + thisPI'sNewQty
+// must be ≤ acceptedQty. We subtract this PI's own old consumption because the
+// edit replaces it (it does NOT stack on top of the existing rows).
+// ---------------------------------------------------------------------------
+async function checkInvoicedQtyCeilingAfterEdit(
+  db: D1Database,
+  piId: string,
+  newRows: Array<{ grnItemId: string | null; qty: number; materialName: string }>,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  // New requested qty per GRN line.
+  const newByGrnItem = new Map<string, { qty: number; name: string }>();
+  for (const r of newRows) {
+    if (!r.grnItemId || r.qty <= 0) continue;
+    const prev = newByGrnItem.get(r.grnItemId);
+    newByGrnItem.set(r.grnItemId, {
+      qty: (prev?.qty ?? 0) + r.qty,
+      name: prev?.name ?? r.materialName,
+    });
+  }
+  if (newByGrnItem.size === 0) return { ok: true };
+
+  // This PI's CURRENT (pre-edit) qty per GRN line — the consumption the edit
+  // releases.
+  const oldLinesRes = await db
+    .prepare(
+      "SELECT grn_item_id, qty FROM purchase_invoice_items WHERE pi_id = ?",
+    )
+    .bind(piId)
+    .all<{ grn_item_id?: string | null; grnItemId?: string | null; qty: number }>();
+  const oldByGrnItem = new Map<string, number>();
+  for (const ln of oldLinesRes.results ?? []) {
+    const giId = ln.grnItemId ?? ln.grn_item_id ?? null;
+    if (!giId) continue;
+    oldByGrnItem.set(String(giId), (oldByGrnItem.get(String(giId)) ?? 0) + (Number(ln.qty) || 0));
+  }
+
+  for (const [giId, { qty: newQty, name }] of newByGrnItem) {
+    const gi = await db
+      .prepare("SELECT acceptedQty, invoiced_qty FROM grn_items WHERE id = ?")
+      .bind(giId)
+      .first<{
+        acceptedQty?: number | null;
+        accepted_qty?: number | null;
+        invoiced_qty?: number | null;
+        invoicedQty?: number | null;
+      }>();
+    if (!gi) {
+      return {
+        ok: false,
+        error: `Line "${name}" references a goods-receipt line (${giId}) that no longer exists.`,
+      };
+    }
+    const accepted = Number(gi.acceptedQty ?? gi.accepted_qty ?? 0) || 0;
+    const currentInvoiced = Number(gi.invoicedQty ?? gi.invoiced_qty ?? 0) || 0;
+    const oldThisPi = oldByGrnItem.get(giId) ?? 0;
+    const projected = currentInvoiced - oldThisPi + newQty;
+    if (projected > accepted) {
+      const otherPIs = currentInvoiced - oldThisPi;
+      const remaining = accepted - otherPIs;
+      return {
+        ok: false,
+        error: `Line "${name}": invoicing ${newQty} would exceed the ${remaining} still available on its goods receipt (received ${accepted}, billed elsewhere ${otherPIs}).`,
+      };
+    }
+  }
+  return { ok: true };
 }
 
 // Generate next PI number for the current YYMM. Pattern: PI-YYMM-NNN.
@@ -961,21 +1037,35 @@ app.put("/:id", async (c) => {
   // If items[] is omitted, leave existing items + amountSen logic untouched.
   let normalizedItems: ReturnType<typeof normalizeItems> | null = null;
   if (body.items !== undefined) {
-    // Line-item edits are DRAFT-only — mirrors the Edit gate on the detail page.
-    // Rewriting lines after APPROVED/PAID would desync the already-posted GL
-    // entry (and the amountSen the GL was posted against). Reject, don't paper.
-    if (existing.status !== "DRAFT") {
+    // Line-item edits are allowed while DRAFT or APPROVED (owner ruling
+    // 2026-06-22 — "editable, with stock/ledger following the change"). PAID
+    // has a settled payment (+ realised FX) and CANCELLED has already released
+    // its GRN consumption, so both stay locked. The shared rule + message keep
+    // the frontend Save handler and this guard in lock-step.
+    if (!isPiEditable(existing.status)) {
       return c.json(
-        {
-          success: false,
-          error: `Line items can only be edited while the invoice is DRAFT (current: ${existing.status}).`,
-        },
+        { success: false, error: piEditBlockedError(existing.status) },
         409,
       );
     }
     normalizedItems = normalizeItems(body.items);
     if (!normalizedItems.ok) {
       return c.json({ success: false, error: normalizedItems.error }, 400);
+    }
+    // GRN-sourced lines drive grn_items.invoiced_qty. When this PI is being
+    // re-lined, the OLD consumption is decremented (buildGrnRestoreStatements)
+    // and the NEW lines re-increment. Before we commit, verify the NEW qty per
+    // GRN line does not push invoiced_qty PAST that line's acceptedQty — i.e.
+    // the edited invoice can't claim more than the GRN received. This is the
+    // ceiling counterpart to clampDecrement's floor; together they keep
+    // invoiced_qty in [0, acceptedQty].
+    const ceilGuard = await checkInvoicedQtyCeilingAfterEdit(
+      db,
+      id,
+      normalizedItems.rows,
+    );
+    if (!ceilGuard.ok) {
+      return c.json({ success: false, error: ceilGuard.error }, 409);
     }
   }
 
@@ -1034,10 +1124,12 @@ app.put("/:id", async (c) => {
   // INSERT new. CASCADE on the FK doesn't help us here — that's only on PI
   // delete. Doing it inside the same batch keeps the swap atomic.
   //
-  // Convert-chain re-sync (DRAFT-only — guarded above): the OLD lines may have
-  // consumed grn_items.invoiced_qty. Decrement that consumption first, then
-  // the new lines re-increment below — net effect leaves invoiced_qty correct
-  // for whatever the operator changed the lines to.
+  // Convert-chain re-sync (DRAFT or APPROVED — guarded above by isPiEditable +
+  // the ceiling check): the OLD lines may have consumed grn_items.invoiced_qty.
+  // Decrement that consumption first, then the new lines re-increment below —
+  // net effect leaves invoiced_qty correct for whatever the operator changed
+  // the lines to, never below 0 (clampDecrement) and never above acceptedQty
+  // (checkInvoicedQtyCeilingAfterEdit).
   if (normalizedItems && normalizedItems.ok) {
     const restoreOld = await buildGrnRestoreStatements(db, id);
     statements.push(...restoreOld);
@@ -1300,6 +1392,120 @@ app.put("/:id", async (c) => {
           success: false,
           error:
             "Failed to build the GL posting for this purchase invoice — the status change was NOT saved. Retry, and report if it persists.",
+        },
+        500,
+      );
+    }
+  }
+
+  // ---- GL CORRECTION on editing an already-APPROVED PI's amount ----
+  // An APPROVED PI already posted its purchase + AP legs at the OLD amount. The
+  // ledger is an append-only hash chain (journal-hash.ts) — we must NOT mutate
+  // those legs. Instead, when an edit changes the amount, post a CORRECTING
+  // double-entry for the DELTA against a fresh sourceId so the trial balance
+  // re-syncs to the new total. A reduction reverses (credit purchase / debit
+  // AP); an increase posts the same direction as the original. No transition is
+  // happening here — this is the amount-changed path, distinct from the
+  // status-transition block above. PAID/CANCELLED never reach here (the edit is
+  // blocked by isPiEditable), so we only ever correct an APPROVED PI.
+  if (
+    normalizedItems &&
+    normalizedItems.ok &&
+    existing.status === "APPROVED" &&
+    body.status === undefined && // pure edit, not a transition (handled above)
+    recomputedAmount !== null &&
+    recomputedAmount !== existing.amountSen
+  ) {
+    const editedItems = normalizedItems; // narrowed: ok-true for closure use
+    try {
+      const orgId = getOrgId(c);
+      const actorUserId =
+        (c as unknown as { get: (k: string) => string | undefined }).get(
+          "userId",
+        ) ?? null;
+      const piNo = (existing as unknown as { piNo?: string }).piNo ?? id;
+      const oldAmount = Math.round(Number(existing.amountSen) || 0);
+      const newAmount = Math.round(Number(recomputedAmount) || 0);
+      const delta = newAmount - oldAmount; // +ve → bill more, −ve → bill less
+
+      // Distribute the NEW total across purchase accounts, subtract the OLD
+      // distribution → per-account deltas. Each non-zero account delta debits
+      // (when +) or credits (when −) the purchase bucket; AP control takes the
+      // opposite side for the net delta. Reuses mapPurchaseLinesToAccounts so a
+      // correction lands in the SAME 70x accounts the original PI debited.
+      const newLines = editedItems.rows.map((r) => ({
+        mc: r.materialCode,
+        amt: r.lineTotalSen,
+        lt: r.lineType,
+      }));
+      const oldItemsRes = (
+        await db
+          .prepare("SELECT * FROM purchase_invoice_items WHERE pi_id = ?")
+          .bind(id)
+          .all<Record<string, unknown>>()
+      ).results ?? [];
+      const oldLines = oldItemsRes.map((r) => ({
+        mc: (r.material_code ?? r.materialCode ?? null) as string | null,
+        amt: Number(r.line_total_sen ?? r.lineTotalSen ?? 0),
+        lt: String(r.line_type ?? r.lineType ?? "STOCKED"),
+      }));
+      const { bucket: newBucket } = await mapPurchaseLinesToAccounts(db, newLines);
+      const { bucket: oldBucket, pdefault } = await mapPurchaseLinesToAccounts(db, oldLines);
+      const deltaBucket: Record<string, number> = {};
+      for (const acct of new Set([...Object.keys(newBucket), ...Object.keys(oldBucket)])) {
+        const d = (newBucket[acct] ?? 0) - (oldBucket[acct] ?? 0);
+        if (d !== 0) deltaBucket[acct] = d;
+      }
+      // Tie the sum of account deltas to the header delta (rounding / unmapped
+      // lines fall to the default purchase account, mirroring the post path).
+      const sumDeltas = Object.values(deltaBucket).reduce((s, v) => s + v, 0);
+      if (sumDeltas !== delta) {
+        deltaBucket[pdefault] = (deltaBucket[pdefault] ?? 0) + (delta - sumDeltas);
+      }
+
+      const correctionSourceId = `${id}:edit-${Date.now()}`;
+      const legs: Parameters<typeof buildJournalEntryStatements>[2] = [];
+      let legNo = 1;
+      for (const [acct, amt] of Object.entries(deltaBucket)) {
+        if (amt === 0) continue;
+        legs.push({
+          id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+          sourceType: "purchase_invoice",
+          sourceId: correctionSourceId,
+          legNo: legNo++,
+          accountCode: acct,
+          debitSen: amt > 0 ? amt : 0,
+          creditSen: amt < 0 ? -amt : 0,
+          description: `Purchase edit · PI ${piNo}`,
+          actorUserId,
+          orgId,
+        });
+      }
+      if (delta !== 0) {
+        legs.push({
+          id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+          sourceType: "purchase_invoice",
+          sourceId: correctionSourceId,
+          legNo: legNo++,
+          accountCode: AP_CONTROL,
+          debitSen: delta < 0 ? -delta : 0,
+          creditSen: delta > 0 ? delta : 0,
+          description: `AP edit · PI ${piNo} · ${existing.supplierName ?? ""}`,
+          actorUserId,
+          orgId,
+        });
+      }
+      if (legs.length > 0) {
+        const { statements: ls } = await buildJournalEntryStatements(db, orgId, legs);
+        statements.push(...ls);
+      }
+    } catch (e) {
+      console.error(`[ledger] failed to BUILD PI ${id} edit-correction — aborting:`, e);
+      return c.json(
+        {
+          success: false,
+          error:
+            "Failed to build the GL correction for this invoice edit — the change was NOT saved. Retry, and report if it persists.",
         },
         500,
       );

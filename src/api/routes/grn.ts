@@ -26,6 +26,7 @@ import { requirePermission } from "../lib/rbac";
 import { makeLedgerEntry } from "../../lib/costing";
 import { emitAudit } from "../lib/audit";
 import { availableQty as computeAvailableQty, clampDecrement } from "../../lib/convert-chain";
+import { checkGrnLineQtyEdit } from "../../lib/purchase-edit-rules";
 
 const app = new Hono<Env>();
 
@@ -495,6 +496,147 @@ async function postGRNToStock(
 }
 
 // ---------------------------------------------------------------------------
+// Compensating stock movement for editing a POSTED GRN line's accepted qty.
+//
+// A POSTED GRN already wrote one rm_batches row + one cost_ledger RM_RECEIPT +
+// a raw_materials.balanceQty bump per line (postGRNToStock). When the operator
+// corrects an accepted qty (e.g. 5 → 3), we post the DELTA the SAME way — using
+// the SAME helpers (resolveRmForGRNItem, makeLedgerEntry, genBatchId) so the
+// inventory + cost stay exactly in sync and editing-then-reverting is a true
+// no-op:
+//   • raw_materials.balanceQty += delta            (down on a reduction)
+//   • the original batch's originalQty/remainingQty += delta (clamped ≥ 0)
+//   • one cost_ledger entry for the delta: RM_RECEIPT IN for +delta, a signed
+//     ADJUSTMENT OUT for −delta (negative qty reduces inventory value).
+//
+// Returns the prepared statements to run in the caller's batch (atomic with the
+// grn_items rewrite). `lineDeltas` maps the ORIGINAL line index (0-based, the
+// post-time batch key) to its qty delta and the line's unit cost / material.
+// ---------------------------------------------------------------------------
+async function buildPostedGRNStockAdjustment(
+  db: D1Database,
+  grnId: string,
+  grnNumber: string,
+  lineDeltas: Array<{
+    lineIdx: number;
+    delta: number;
+    unitCostSen: number;
+    materialCode: string;
+    materialName: string;
+  }>,
+): Promise<{ statements: D1PreparedStatement[]; unresolved: { materialCode: string; materialName: string }[] }> {
+  const statements: D1PreparedStatement[] = [];
+  const unresolved: { materialCode: string; materialName: string }[] = [];
+  const nowIso = new Date().toISOString();
+
+  for (const ld of lineDeltas) {
+    const delta = Number(ld.delta) || 0;
+    if (delta === 0) continue;
+
+    const rm = await resolveRmForGRNItem(db, ld.materialCode, ld.materialName);
+    if (!rm) {
+      unresolved.push({ materialCode: ld.materialCode, materialName: ld.materialName });
+      continue;
+    }
+
+    const batchId = genBatchId(grnId, ld.lineIdx);
+    const unitCostSen = Number(ld.unitCostSen) || 0;
+
+    // Compensating cost_ledger entry. makeLedgerEntry stores qty as ABS and a
+    // signed totalCostSen = qty × unitCost; we set direction by the delta sign
+    // (IN = received more, OUT = received less / reversal). Same builder the
+    // post path uses, so aggregation stays consistent.
+    const ledgerEntry = makeLedgerEntry({
+      date: nowIso,
+      type: delta > 0 ? "RM_RECEIPT" : "ADJUSTMENT",
+      itemType: "RM",
+      itemId: rm.id,
+      batchId,
+      qty: Math.abs(delta),
+      direction: delta > 0 ? "IN" : "OUT",
+      unitCostSen,
+      refType: "GRN",
+      refId: grnId,
+      notes: `Edit ${grnNumber}: accepted qty adjusted by ${delta > 0 ? "+" : ""}${delta}`,
+    });
+
+    statements.push(
+      // 1) cost_ledger compensating entry
+      db
+        .prepare(
+          `INSERT INTO cost_ledger (id, date, type, itemType, itemId, batchId,
+             qty, direction, unitCostSen, totalCostSen, refType, refId, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          ledgerEntry.id,
+          ledgerEntry.date,
+          ledgerEntry.type,
+          ledgerEntry.itemType,
+          ledgerEntry.itemId,
+          ledgerEntry.batchId ?? null,
+          ledgerEntry.qty,
+          ledgerEntry.direction,
+          ledgerEntry.unitCostSen,
+          ledgerEntry.totalCostSen,
+          ledgerEntry.refType ?? null,
+          ledgerEntry.refId ?? null,
+          ledgerEntry.notes ?? null,
+        ),
+      // 2) bump the on-hand balance by the signed delta
+      db
+        .prepare("UPDATE raw_materials SET balanceQty = balanceQty + ? WHERE id = ?")
+        .bind(delta, rm.id),
+    );
+
+    // 3) keep the GRN's own batch row in step. The batch may not exist (line
+    // was unresolved at post time, or a metre line skipped). For a positive
+    // delta with no batch, create one so the added stock is FIFO-consumable;
+    // for a negative delta with no batch, the balance/ledger entries above are
+    // enough (nothing to shrink). Clamp remaining/original at ≥ 0 so a reversal
+    // can't drive the batch negative.
+    const batch = await db
+      .prepare("SELECT id, originalQty, remainingQty FROM rm_batches WHERE id = ?")
+      .bind(batchId)
+      .first<{ id: string; originalQty?: number | null; remainingQty?: number | null }>();
+    if (batch) {
+      statements.push(
+        db
+          .prepare(
+            `UPDATE rm_batches
+                SET originalQty = MAX(0, COALESCE(originalQty, 0) + ?),
+                    remainingQty = MAX(0, COALESCE(remainingQty, 0) + ?)
+              WHERE id = ?`,
+          )
+          .bind(delta, delta, batchId),
+      );
+    } else if (delta > 0) {
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO rm_batches (id, rmId, source, sourceRefId, receivedDate,
+               originalQty, remainingQty, unitCostSen, created_at, notes)
+             VALUES (?, ?, 'GRN', ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            batchId,
+            rm.id,
+            grnId,
+            nowIso,
+            delta,
+            delta,
+            unitCostSen,
+            nowIso,
+            `GRN ${grnNumber} line ${ld.lineIdx + 1} (added on edit)`,
+          ),
+      );
+    }
+  }
+
+  return { statements, unresolved };
+}
+
+// ---------------------------------------------------------------------------
 // Cascade GRN-POSTED side effects into the parent PO:
 //   1. Bump receivedQty on each matching purchase_order_items row
 //      (keyed by poItemIndex — the index of the PO line the GRN line
@@ -711,6 +853,99 @@ async function restorePOReceivedQtyForGRN(
       .run();
   }
   return { poId, restored };
+}
+
+// ---------------------------------------------------------------------------
+// Apply a SIGNED accepted-qty delta to the parent PO's receivedQty when a
+// POSTED GRN line is edited. Mirrors cascadePOStatusAfterGRNPost but moves each
+// PO line by the (possibly negative) delta instead of the full accepted qty,
+// then recomputes PO status (RECEIVED / PARTIAL_RECEIVED / CONFIRMED).
+// receivedQty is clamped at ≥ 0. Keyed by poItemIndex → PO line (deterministic
+// ORDER BY id, the same mapping the post cascade relies on).
+// ---------------------------------------------------------------------------
+async function cascadePOReceivedQtyDelta(
+  db: D1Database,
+  grnId: string,
+  deltas: { poItemIndex: number; delta: number }[],
+): Promise<void> {
+  const grn = await db
+    .prepare("SELECT poId FROM grns WHERE id = ?")
+    .bind(grnId)
+    .first<{ poId: string | null }>();
+  if (!grn?.poId) return;
+  const poId = grn.poId;
+
+  const poItemsRes = await db
+    .prepare(
+      "SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ORDER BY id",
+    )
+    .bind(poId)
+    .all<{ id: string; quantity: number; receivedQty: number }>();
+  const poItemsOrdered = poItemsRes.results ?? [];
+
+  const statements: D1PreparedStatement[] = [];
+  for (const d of deltas) {
+    const idx = d.poItemIndex ?? -1;
+    if (idx < 0 || idx >= poItemsOrdered.length) continue;
+    const poItem = poItemsOrdered[idx];
+    const delta = Number(d.delta) || 0;
+    if (delta === 0) continue;
+    if (delta > 0) {
+      statements.push(
+        db
+          .prepare("UPDATE purchase_order_items SET receivedQty = receivedQty + ? WHERE id = ?")
+          .bind(delta, poItem.id),
+      );
+    } else {
+      // Reduction — clamp so receivedQty can't go negative.
+      const dec = clampDecrement(Number(poItem.receivedQty) || 0, -delta);
+      if (dec <= 0) continue;
+      statements.push(
+        db
+          .prepare("UPDATE purchase_order_items SET receivedQty = receivedQty - ? WHERE id = ?")
+          .bind(dec, poItem.id),
+      );
+    }
+  }
+  if (statements.length > 0) await db.batch(statements);
+
+  // Recompute PO status from the post-edit receivedQty totals.
+  const afterRes = await db
+    .prepare(
+      "SELECT quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
+    )
+    .bind(poId)
+    .all<{ quantity: number; receivedQty: number }>();
+  const after = afterRes.results ?? [];
+  if (after.length === 0) return;
+  const allFull = after.every(
+    (r) => (Number(r.receivedQty) || 0) >= (Number(r.quantity) || 0),
+  );
+  const anyReceived = after.some((r) => (Number(r.receivedQty) || 0) > 0);
+
+  const nowIso = new Date().toISOString();
+  if (allFull) {
+    await db
+      .prepare(
+        "UPDATE purchase_orders SET status = 'RECEIVED', receivedDate = ?, updated_at = ? WHERE id = ? AND status IN ('CONFIRMED','PARTIAL_RECEIVED','RECEIVED')",
+      )
+      .bind(nowIso.split("T")[0], nowIso, poId)
+      .run();
+  } else if (anyReceived) {
+    await db
+      .prepare(
+        "UPDATE purchase_orders SET status = 'PARTIAL_RECEIVED', receivedDate = NULL, updated_at = ? WHERE id = ? AND status IN ('CONFIRMED','PARTIAL_RECEIVED','RECEIVED')",
+      )
+      .bind(nowIso, poId)
+      .run();
+  } else {
+    await db
+      .prepare(
+        "UPDATE purchase_orders SET status = 'CONFIRMED', receivedDate = NULL, updated_at = ? WHERE id = ? AND status IN ('RECEIVED','PARTIAL_RECEIVED')",
+      )
+      .bind(nowIso, poId)
+      .run();
+  }
 }
 
 // GET /api/grn — list all GRNs (optional ?poId=&supplierId= filters)
@@ -1159,62 +1394,170 @@ app.put("/:id", async (c) => {
 
     const statements: D1PreparedStatement[] = [];
     let totalAmount = existing.totalAmount;
+    // Compensating-stock summary for a POSTED-GRN qty edit (set below).
+    let editAdjustSummary:
+      | { lineDeltas: { lineIdx: number; delta: number }[]; unresolved: { materialCode: string; materialName: string }[] }
+      | undefined;
+    // PO receivedQty delta cascade for a POSTED-GRN qty edit (built below).
+    const poDeltaStatementsAfter: { run: () => Promise<void> }[] = [];
 
     // Replace items if provided; recompute totalAmount
     if (body.items) {
-      // Once a GRN is committed (POSTED/CONFIRMED) its receipt has already
-      // written rm_batches + cost_ledger + raw_materials.balanceQty. Re-writing
-      // grn_items/totalAmount here would silently desync the GRN record from
-      // that committed stock (the post is idempotent, so stock never re-applies
-      // — only the document drifts). Lock line edits to the pre-commit state.
       if (COMMITTED_STATUSES.has(prevStatus)) {
-        return c.json(
-          {
-            success: false,
-            error: "This GRN is already posted to stock — its line items are locked. Reverse the receipt before editing.",
-          },
-          409,
+        // ── POSTED / CONFIRMED line edit (owner ruling 2026-06-22) ──────────
+        // A committed GRN already wrote rm_batches + cost_ledger +
+        // raw_materials.balanceQty. The owner wants accepted-qty corrections
+        // with stock + cost FOLLOWING the change, not a hard lock. We match the
+        // incoming lines to the existing grn_items BY POSITION (the same
+        // line-index key postGRNToStock uses for its batch ids), compute each
+        // line's accepted-qty delta, BLOCK any line whose new qty drops below
+        // what a PI already invoiced, then post the compensating movement for
+        // the delta via the SAME helpers the post path uses. We do NOT touch
+        // invoiced_qty (PI-owned) and we keep status POSTED (no un-post).
+        //
+        // Only accepted qty (and the harmless display fields) move; we ignore
+        // any attempt to change grn↔PO line keying on a committed GRN.
+        const existingItemsRes = await c.var.DB
+          .prepare("SELECT * FROM grn_items WHERE grnId = ? ORDER BY id ASC")
+          .bind(id)
+          .all<GRNItemRow>();
+        const existingItems = existingItemsRes.results ?? [];
+        const rawItems: Array<Record<string, unknown>> = body.items;
+        if (rawItems.length !== existingItems.length) {
+          return c.json(
+            {
+              success: false,
+              error:
+                "A received GRN's lines can't be added or removed — only the accepted quantity on an existing line can be corrected. Reverse the receipt to restructure it.",
+            },
+            409,
+          );
+        }
+
+        const lineDeltas: Array<{
+          lineIdx: number;
+          delta: number;
+          unitCostSen: number;
+          materialCode: string;
+          materialName: string;
+        }> = [];
+        const poLineDeltas: { poItemIndex: number; delta: number }[] = [];
+        for (let i = 0; i < existingItems.length; i++) {
+          const ex = existingItems[i];
+          const incoming = rawItems[i];
+          const oldAccepted = Number(ex.acceptedQty) || 0;
+          const newAccepted = Number(incoming.acceptedQty);
+          const invoiced = Number(ex.invoicedQty ?? ex.invoiced_qty ?? 0) || 0;
+          const guard = checkGrnLineQtyEdit({
+            ref: ex.materialName ?? ex.materialCode ?? `Line ${i + 1}`,
+            oldAcceptedQty: oldAccepted,
+            newAcceptedQty: newAccepted,
+            invoicedQty: invoiced,
+          });
+          if (!guard.ok) {
+            return c.json({ success: false, error: guard.error }, 409);
+          }
+          const delta = guard.delta;
+          // Rewrite the line's accepted qty (+ received, to keep them coherent)
+          // and recompute totalAmount from the new accepted qtys. Material /
+          // index / unit price stay as the committed values.
+          const unitCostSen = Number(ex.unitPrice) || 0;
+          // Keep received coherent with the corrected accepted qty:
+          // received = accepted + rejected (the rejected count is preserved).
+          const newReceived = newAccepted + (Number(ex.rejectedQty) || 0);
+          statements.push(
+            c.var.DB
+              .prepare(
+                "UPDATE grn_items SET acceptedQty = ?, receivedQty = ? WHERE id = ?",
+              )
+              .bind(newAccepted, newReceived, ex.id),
+          );
+          if (delta !== 0) {
+            lineDeltas.push({
+              lineIdx: i,
+              delta,
+              unitCostSen,
+              materialCode: ex.materialCode ?? "",
+              materialName: ex.materialName ?? "",
+            });
+            if (ex.poItemIndex != null && ex.poItemIndex >= 0) {
+              poLineDeltas.push({ poItemIndex: ex.poItemIndex, delta });
+            }
+          }
+        }
+
+        // Recompute total from the new accepted qtys.
+        totalAmount = existingItems.reduce((sum, ex, i) => {
+          const newAccepted = Number((rawItems[i] as Record<string, unknown>).acceptedQty) || 0;
+          return sum + newAccepted * (Number(ex.unitPrice) || 0);
+        }, 0);
+
+        // Build the compensating stock movement for every changed line.
+        const adj = await buildPostedGRNStockAdjustment(
+          c.var.DB,
+          id,
+          existing.grnNumber,
+          lineDeltas,
         );
-      }
-      const rawItems: Array<Record<string, unknown>> = body.items;
-      const newItems = rawItems.map((item) => ({
-        poItemIndex: Number(item.poItemIndex) || 0,
-        materialCode: (item.materialCode as string) ?? "",
-        materialName: (item.materialName as string) ?? "",
-        orderedQty: Number(item.orderedQty) || 0,
-        receivedQty: Number(item.receivedQty) || 0,
-        acceptedQty: Number(item.acceptedQty) || 0,
-        rejectedQty: Number(item.rejectedQty) || 0,
-        rejectionReason: (item.rejectionReason as string | null) ?? null,
-        unitPrice: Number(item.unitPrice) || 0,
-      }));
-      totalAmount = newItems.reduce(
-        (sum, i) => sum + i.acceptedQty * i.unitPrice,
-        0,
-      );
-      statements.push(
-        c.var.DB.prepare("DELETE FROM grn_items WHERE grnId = ?").bind(id),
-      );
-      for (const item of newItems) {
+        statements.push(...adj.statements);
+        editAdjustSummary = {
+          lineDeltas: lineDeltas.map((l) => ({ lineIdx: l.lineIdx, delta: l.delta })),
+          unresolved: adj.unresolved,
+        };
+
+        // Cascade the accepted-qty delta to the parent PO's receivedQty so the
+        // PO's per-line consumed counter (and status) tracks the correction.
+        // Deferred to after the main batch (it re-reads PO lines / recomputes
+        // status, like the post cascade). Keyed by poItemIndex → PO line.
+        if (poLineDeltas.length > 0) {
+          poDeltaStatementsAfter.push({
+            run: async () => {
+              await cascadePOReceivedQtyDelta(c.var.DB, id, poLineDeltas);
+            },
+          });
+        }
+      } else {
+        // ── Pre-commit (DRAFT) replace-items — unchanged behaviour ──────────
+        const rawItems: Array<Record<string, unknown>> = body.items;
+        const newItems = rawItems.map((item) => ({
+          poItemIndex: Number(item.poItemIndex) || 0,
+          materialCode: (item.materialCode as string) ?? "",
+          materialName: (item.materialName as string) ?? "",
+          orderedQty: Number(item.orderedQty) || 0,
+          receivedQty: Number(item.receivedQty) || 0,
+          acceptedQty: Number(item.acceptedQty) || 0,
+          rejectedQty: Number(item.rejectedQty) || 0,
+          rejectionReason: (item.rejectionReason as string | null) ?? null,
+          unitPrice: Number(item.unitPrice) || 0,
+        }));
+        totalAmount = newItems.reduce(
+          (sum, i) => sum + i.acceptedQty * i.unitPrice,
+          0,
+        );
         statements.push(
-          c.var.DB.prepare(
-            `INSERT INTO grn_items (grnId, poItemIndex, materialCode, materialName,
-               orderedQty, receivedQty, acceptedQty, rejectedQty,
-               rejectionReason, unitPrice)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          ).bind(
-            id,
-            item.poItemIndex,
-            item.materialCode,
-            item.materialName,
-            item.orderedQty,
-            item.receivedQty,
-            item.acceptedQty,
-            item.rejectedQty,
-            item.rejectionReason,
-            item.unitPrice,
-          ),
+          c.var.DB.prepare("DELETE FROM grn_items WHERE grnId = ?").bind(id),
         );
+        for (const item of newItems) {
+          statements.push(
+            c.var.DB.prepare(
+              `INSERT INTO grn_items (grnId, poItemIndex, materialCode, materialName,
+                 orderedQty, receivedQty, acceptedQty, rejectedQty,
+                 rejectionReason, unitPrice)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ).bind(
+              id,
+              item.poItemIndex,
+              item.materialCode,
+              item.materialName,
+              item.orderedQty,
+              item.receivedQty,
+              item.acceptedQty,
+              item.rejectedQty,
+              item.rejectionReason,
+              item.unitPrice,
+            ),
+          );
+        }
       }
     }
 
@@ -1226,6 +1569,10 @@ app.put("/:id", async (c) => {
     );
 
     await c.var.DB.batch(statements);
+
+    // Run the PO receivedQty delta cascade for a POSTED-GRN qty edit (after the
+    // grn_items rewrite landed, so the recompute reads the new qtys).
+    for (const s of poDeltaStatementsAfter) await s.run();
 
     // Post to stock when we crossed into a committed status
     let postSummary:
@@ -1265,6 +1612,10 @@ app.put("/:id", async (c) => {
       data: updated,
       costing: postSummary,
       restore: restoreSummary,
+      // Compensating-stock summary for a POSTED-GRN qty edit. unresolved lists
+      // any changed line whose material couldn't be resolved — that delta did
+      // NOT move stock (the FE surfaces it like the post path's warning).
+      editAdjust: editAdjustSummary,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

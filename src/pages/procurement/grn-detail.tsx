@@ -33,6 +33,11 @@ import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import {
+  isGrnLineEditable,
+  checkGrnLineQtyEdit,
+  describeGrnStockDelta,
+} from "@/lib/purchase-edit-rules";
 import type { ArrivalState } from "@/types";
 
 // Arrival state pipeline sequences for the stepper
@@ -71,6 +76,7 @@ function advanceLabel(current: ArrivalState): string {
 }
 
 type GRNItem = {
+  id?: number | string;
   poItemIndex: number;
   materialCode: string;
   materialName: string;
@@ -80,6 +86,9 @@ type GRNItem = {
   rejectedQty: number;
   rejectionReason: string | null;
   unitPrice: number; // sen
+  // Convert-chain: qty already pulled into a PI off this line (read-only here;
+  // a POSTED-line edit can't drop accepted below this).
+  invoicedQty?: number;
 };
 
 type GRNDetail = {
@@ -144,6 +153,9 @@ export default function GRNDetailPage() {
     exchange_rate: string;
     currency: string;
   } | null>(null);
+  // Accepted-qty line edit (POSTED GRN) — null = read view, array of RM-string
+  // accepted-qty values per line (parallel to items) = editing.
+  const [qtyEdit, setQtyEdit] = useState<string[] | null>(null);
 
   const { data: resp, loading, error: fetchError, refresh } = useCachedJson<{
     success?: boolean;
@@ -346,6 +358,97 @@ export default function GRNDetailPage() {
       refresh();
     } catch {
       toast.error("Save landed cost failed — network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Save edited accepted quantities (POSTED GRN). Validates each line with the
+  // SHARED rule (same message the backend uses), shows a Confirm dialog
+  // describing the stock delta in plain words, then PUTs the full items[] —
+  // the backend posts the compensating rm_batches/cost_ledger movement.
+  async function saveQtyEdit() {
+    if (!grn || !qtyEdit) return;
+    // Validate + compute per-line deltas with the shared rule.
+    const deltaLines: { ref: string; delta: number }[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const newAccepted = parseFloat(qtyEdit[i]);
+      const guard = checkGrnLineQtyEdit({
+        ref: it.materialName || it.materialCode || `Line ${i + 1}`,
+        oldAcceptedQty: it.acceptedQty,
+        newAcceptedQty: Number.isFinite(newAccepted) ? newAccepted : NaN,
+        invoicedQty: it.invoicedQty ?? 0,
+      });
+      if (!guard.ok) {
+        toast.error(guard.error);
+        return;
+      }
+      deltaLines.push({ ref: it.materialName || it.materialCode || `Line ${i + 1}`, delta: guard.delta });
+    }
+    const stockMsg = describeGrnStockDelta(deltaLines);
+    if (!stockMsg) {
+      toast.error("No quantities changed.");
+      return;
+    }
+    // A POSTED GRN already has stock in — the edit moves it (confirm with the
+    // stock language). A DRAFT/CONFIRMED GRN hasn't posted yet, so the edit only
+    // corrects the document (no stock movement) — a lighter confirm.
+    const ok = await confirm({
+      title: "Adjust received quantities?",
+      message:
+        grn.status === "POSTED"
+          ? `${stockMsg} A matching cost entry is posted so inventory and cost stay in sync. Continue?`
+          : "Update the accepted quantities on this goods receipt?",
+      danger: false,
+    });
+    if (!ok) return;
+
+    setBusy(true);
+    try {
+      // Send the FULL items[] with corrected acceptedQty; other fields carried
+      // through verbatim (the backend only moves accepted/received on a POSTED
+      // GRN and ignores structural changes).
+      const payloadItems = items.map((it, i) => ({
+        poItemIndex: it.poItemIndex,
+        materialCode: it.materialCode,
+        materialName: it.materialName,
+        orderedQty: it.orderedQty,
+        receivedQty: it.receivedQty,
+        acceptedQty: parseFloat(qtyEdit[i]) || 0,
+        rejectedQty: it.rejectedQty,
+        rejectionReason: it.rejectionReason,
+        unitPrice: it.unitPrice,
+      }));
+      const res = await fetch(`/api/grn/${grn.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: payloadItems }),
+      });
+      const j = (await res.json().catch(() => null)) as
+        | { success?: boolean; error?: string; editAdjust?: { unresolved?: unknown[] } }
+        | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || `Save failed (${res.status})`);
+        return;
+      }
+      const unresolved = j.editAdjust?.unresolved?.length ?? 0;
+      if (unresolved > 0) {
+        toast.error(
+          `Saved, but ${unresolved} changed line(s) had no matching raw material — that stock delta did NOT move. Check the item codes.`,
+        );
+      } else {
+        toast.success("Received quantities updated — stock adjusted");
+      }
+      setQtyEdit(null);
+      invalidateCachePrefix("/api/grn");
+      invalidateCachePrefix("/api/raw-materials");
+      invalidateCachePrefix("/api/inventory");
+      invalidateCachePrefix("/api/stock-value");
+      invalidateCachePrefix("/api/purchase-invoices");
+      refresh();
+    } catch {
+      toast.error("Save failed — network error");
     } finally {
       setBusy(false);
     }
@@ -676,9 +779,25 @@ export default function GRNDetailPage() {
         {/* Right: items */}
         <Card className="lg:col-span-2">
           <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <Package className="h-4 w-4 text-[#6B5C32]" /> Received Items ({items.length})
-            </CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Package className="h-4 w-4 text-[#6B5C32]" /> Received Items ({items.length})
+              </CardTitle>
+              {/* Edit accepted quantities. For a POSTED GRN the save posts a
+                  compensating stock movement; for DRAFT/CONFIRMED it just
+                  re-lines (pre-commit). Shown only when the status allows it. */}
+              {qtyEdit === null && items.length > 0 && isGrnLineEditable(grn.status) && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setQtyEdit(items.map((it) => String(it.acceptedQty ?? 0)))}
+                  disabled={busy}
+                >
+                  Edit Quantities
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent>
             {items.length === 0 ? (
@@ -711,14 +830,60 @@ export default function GRNDetailPage() {
                         </td>
                         <td className="h-12 px-3 text-right text-[#4B5563]">{it.orderedQty}</td>
                         <td className="h-12 px-3 text-right text-[#4B5563]">{it.receivedQty}</td>
-                        <td className="h-12 px-3 text-right font-medium text-[#1F1D1B]">{it.acceptedQty}</td>
+                        <td className="h-12 px-3 text-right font-medium text-[#1F1D1B]">
+                          {qtyEdit === null ? (
+                            it.acceptedQty
+                          ) : (
+                            <Input
+                              type="number"
+                              min={it.invoicedQty ?? 0}
+                              step="any"
+                              className="h-8 w-24 text-right inline-block"
+                              value={qtyEdit[idx] ?? ""}
+                              onChange={(e) =>
+                                setQtyEdit((prev) => {
+                                  if (!prev) return prev;
+                                  const next = [...prev];
+                                  next[idx] = e.target.value;
+                                  return next;
+                                })
+                              }
+                            />
+                          )}
+                        </td>
                         <td className={`h-12 px-3 text-right ${it.rejectedQty > 0 ? "text-[#9A3A2D]" : "text-[#9CA3AF]"}`}>{it.rejectedQty}</td>
                         <td className="h-12 px-3 text-right text-[#4B5563]">{formatCurrency(it.unitPrice)}</td>
-                        <td className="h-12 px-3 text-right font-medium text-[#1F1D1B]">{formatCurrency(it.acceptedQty * it.unitPrice)}</td>
+                        <td className="h-12 px-3 text-right font-medium text-[#1F1D1B]">
+                          {formatCurrency(
+                            (qtyEdit === null ? it.acceptedQty : parseFloat(qtyEdit[idx]) || 0) * it.unitPrice,
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {/* Save / Cancel bar for the accepted-qty edit */}
+            {qtyEdit !== null && (
+              <div className="flex items-center justify-end gap-2 pt-3">
+                {grn.status === "POSTED" && (
+                  <span className="text-xs text-[#9A3A2D] mr-auto">
+                    Saving will adjust stock on hand and post a matching cost entry.
+                  </span>
+                )}
+                <Button type="button" variant="outline" size="sm" onClick={() => setQtyEdit(null)} disabled={busy}>
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={saveQtyEdit}
+                  disabled={busy}
+                  className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+                >
+                  Save Quantities
+                </Button>
               </div>
             )}
           </CardContent>

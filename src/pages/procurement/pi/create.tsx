@@ -34,9 +34,9 @@ import {
   type SupplierExtraction,
 } from "@/components/scan-supplier-modal";
 import {
-  FromSourceModal,
-  type SourceSelection,
-} from "@/components/from-source-modal";
+  ConvertToPIModal,
+  type ConvertToPIResult,
+} from "@/components/convert-to-pi-modal";
 
 // ── Source-doc shapes (minimal fields we need for pre-fill) ────────────────
 type POItemShape = {
@@ -53,9 +53,11 @@ type POShape = {
   items: POItemShape[];
 };
 type GRNItemShape = {
+  id: string; // grn_items row id == grnItemId
   materialCode?: string | null;
   materialName: string;
   acceptedQty: number;
+  availableQty?: number;
   unitPrice: number; // sen
 };
 type GRNShape = {
@@ -77,6 +79,10 @@ type PILineDraft = {
   // it as number, parsed at submit via Math.round(unitPriceRM * 100). Kept
   // identical — do NOT convert to MoneyInput / string state.
   unitPriceRM: number;
+  // Convert-chain: set ONLY when this line was picked from a GRN line. Sent in
+  // the POST so the backend increments grn_items.invoiced_qty and runs the
+  // line-level availability guard. null = manual / PO-source line.
+  grnItemId?: string | null;
 };
 
 function emptyPILine(): PILineDraft {
@@ -86,6 +92,7 @@ function emptyPILine(): PILineDraft {
     supplierSku: "",
     qty: 1,
     unitPriceRM: 0,
+    grnItemId: null,
   };
 }
 
@@ -139,13 +146,15 @@ function CreatePurchaseInvoicePage() {
   const [remarks, setRemarks] = useState("");
   const [lines, setLines] = useState<PILineDraft[]>([emptyPILine()]);
   const [scanOpen, setScanOpen] = useState(false);
-  const [fromSourceOpen, setFromSourceOpen] = useState(false);
+  const [convertOpen, setConvertOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // ── Source PO id to include in POST body for lineage ─────────────────────
   const [sourcePurchaseOrderId, setSourcePurchaseOrderId] = useState<
     string | null
   >(null);
+  // ── Source GRN id — POSTed as body.grnId; drives invoiced_qty + line guard ─
+  const [sourceGrnId, setSourceGrnId] = useState<string | null>(null);
 
   // ── Pre-fill from ?poId or ?grnId on first mount ─────────────────────────
   useEffect(() => {
@@ -168,6 +177,7 @@ function CreatePurchaseInvoicePage() {
             supplierSku: it.supplierSKU ?? "",
             qty: it.quantity,
             unitPriceRM: it.unitPriceSen / 100,
+            grnItemId: null,
           }));
           setLines(prefilled.length > 0 ? prefilled : [emptyPILine()]);
         })
@@ -183,15 +193,25 @@ function CreatePurchaseInvoicePage() {
           if (!grn) return;
           setSupplierId(grn.supplierId);
           setRemarks(`From GRN ${grn.grnNumber}`);
+          setSourceGrnId(grn.id);
           if (grn.poId) setSourcePurchaseOrderId(grn.poId);
+          // Deep-link path: take every line that still has something to invoice
+          // (availableQty, falling back to acceptedQty for pre-column rows) and
+          // CARRY grnItemId so the backend increments invoiced_qty + guards.
           const prefilled = grn.items
-            .filter((it) => it.acceptedQty > 0)
+            .map((it) => ({
+              ...it,
+              remaining:
+                it.availableQty != null ? it.availableQty : it.acceptedQty,
+            }))
+            .filter((it) => it.remaining > 0)
             .map((it) => ({
               materialCode: it.materialCode ?? "",
               materialName: it.materialName,
-              supplierSku: "",
-              qty: it.acceptedQty,
+              supplierSku: it.materialCode ?? "",
+              qty: it.remaining,
               unitPriceRM: it.unitPrice / 100,
+              grnItemId: it.id,
             }));
           setLines(prefilled.length > 0 ? prefilled : [emptyPILine()]);
         })
@@ -285,11 +305,31 @@ function CreatePurchaseInvoicePage() {
     });
   };
 
-  // ── From-source picker handler — navigates to same page with new param ──────
-  const handleFromSource = (sel: SourceSelection) => {
-    const param =
-      sel.type === "po" ? `poId=${sel.id}` : `grnId=${sel.id}`;
-    navigate(`/procurement/pi/create?${param}`);
+  // ── Convert picker handler — pre-fills the form in place from picked lines ──
+  // Sets supplier, source ids (grnId for GRN-source so the backend increments
+  // invoiced_qty + guards), and the line table — each GRN line carries its
+  // grnItemId. No navigation: we keep the user on the form with their picks.
+  const handleConvert = (res: ConvertToPIResult) => {
+    setSupplierId(res.supplierId);
+    setSourceGrnId(res.grnId);
+    setSourcePurchaseOrderId(res.purchaseOrderId);
+    setRemarks(
+      res.source === "grn"
+        ? `From GRN ${res.docLabel}`
+        : `Created from PO ${res.docLabel}`,
+    );
+    setLines(
+      res.lines.length > 0
+        ? res.lines.map((l) => ({
+            materialCode: l.materialCode,
+            materialName: l.materialName,
+            supplierSku: l.supplierSku,
+            qty: l.qty,
+            unitPriceRM: l.unitPriceRM,
+            grnItemId: l.grnItemId,
+          }))
+        : [emptyPILine()],
+    );
   };
 
   // ── Derived totals ────────────────────────────────────────────────────────
@@ -326,10 +366,18 @@ function CreatePurchaseInvoicePage() {
           qty: Number(l.qty) || 0,
           unitPriceSen: Math.round((Number(l.unitPriceRM) || 0) * 100),
           lineType: "STOCKED" as const,
+          // Convert-chain: carry the GRN source line so the backend draws down
+          // grn_items.invoiced_qty and enforces the line-level guard.
+          grnItemId: l.grnItemId ?? null,
         })),
       };
       if (sourcePurchaseOrderId) {
         payload.purchaseOrderId = sourcePurchaseOrderId;
+      }
+      // grnId tells the backend to resolve the GRN (→ its PO for the header)
+      // and run the accepted−invoiced availability check per line.
+      if (sourceGrnId) {
+        payload.grnId = sourceGrnId;
       }
       const res = await fetch("/api/purchase-invoices", {
         method: "POST",
@@ -404,10 +452,10 @@ function CreatePurchaseInvoicePage() {
         </div>
         <Button
           variant="outline"
-          onClick={() => setFromSourceOpen(true)}
-          title="Import line items from a Purchase Order or Goods Receipt"
+          onClick={() => setConvertOpen(true)}
+          title="Pick a Goods Receipt (or Purchase Order) and its lines to pre-fill this invoice"
         >
-          <FolderInput className="h-4 w-4" /> From PO / GRN
+          <FolderInput className="h-4 w-4" /> Convert from Goods Receipt
         </Button>
         <Button
           variant="outline"
@@ -709,11 +757,11 @@ function CreatePurchaseInvoicePage() {
         </CardContent>
       </Card>
 
-      {/* From PO / GRN picker */}
-      <FromSourceModal
-        open={fromSourceOpen}
-        onClose={() => setFromSourceOpen(false)}
-        onSelect={handleFromSource}
+      {/* Convert from GRN / PO line-pick picker */}
+      <ConvertToPIModal
+        open={convertOpen}
+        onClose={() => setConvertOpen(false)}
+        onConfirm={handleConvert}
       />
 
       {/* Scan modal — wired to the same applyOcr handler */}

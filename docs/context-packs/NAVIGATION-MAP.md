@@ -98,7 +98,11 @@ Built to cut token usage: open the named file at the named line range instead of
   - Status-transition action button block (SUBMITTED/CONFIRMED/PARTIAL_RECEIVED/RECEIVED) — L525-1287
   - ThreeWayMatchPanel (PO↔GRN↔PI variance) — L1331-1497
 - `src/pages/procurement/grn/create.tsx`
-  - GRN create full-page (single component, no section banners) — L1-1174
+  - GRN create full-page (manual default; "Convert from PO" line-pick, no mode toggle) — single component
+  - Convert-from-PO line-pick modal: `src/components/convert-from-po-modal.tsx`
+- `src/pages/procurement/pi/create.tsx`
+  - PI create full-page ("Convert from Goods Receipt" line-pick; lines carry grnItemId)
+  - Convert-to-PI line-pick modal (GRN + PO tabs): `src/components/convert-to-pi-modal.tsx`
 
 **Gotchas**
 - GRN Post-to-Stock is a cascade: DRAFT/CONFIRMED→POSTED boundary in grn.ts writes stock/WIP movements AND flips parent PO status to RECEIVED (all received) or PARTIAL_RECEIVED (any). Don't write stock outside this boundary; arrival gate guards CONFIRMED/POSTED transitions. COMMITTED_STATUSES = {CONFIRMED,POSTED}.
@@ -112,6 +116,7 @@ Built to cut token usage: open the named file at the named line range instead of
 - OCR scan-supplier.ts is a catalog-snap back-door; SO/CO PUT paths historically unguarded — verify status-snap before trusting OCR-written prices.
 - PENDING task to merge Supplier Pricing (pricing.tsx) into the Supplier module — don't duplicate the comparison surface (a duplicate modal was shipped+reverted before).
 - Convert-chain availability (PO→GRN→PI, mig 0182): per-line CONSUMED tracking. PO line available = `quantity − receivedQty`; GRN line available = `accepted_qty − invoiced_qty` (both exposed as `availableQty` on item reads, dual-keyed). PI POST takes `body.grnId` + per-line `grnItemId`; a LINE-LEVEL 409 guard (`src/lib/convert-chain.ts` `checkConvertAvailability`) replaced the old PO-level double-bill 409 — a 2nd PI is allowed when qty remains, only the over-drawn line is rejected. Increment `grn_items.invoiced_qty` on PI create (same batch as the line insert); RESTORE on PI delete / PI items-replace / PI→CANCELLED, and on GRN un-post/cancel/delete (`restorePOReceivedQtyForGRN` decrements `purchase_order_items.receivedQty`, recomputes PO status). Stock posting (`postGRNToStock`) is NOT reversed by any restore — availability only. GRN DELETE is blocked while a non-CANCELLED PI references it (`purchase_invoices.grn_id`). Tests: `tests/convert-chain.test.mjs` + `tests/purchasing-convert-flow.test.mjs`.
+- Convert UX (2026-06): GRN create = manual default + "Convert from PO" line-pick (`convert-from-po-modal.tsx`); PI create = "Convert from Goods Receipt" line-pick with GRN+PO tabs (`convert-to-pi-modal.tsx`). Pickers show per-line `availableQty`, checkbox + qty (≤ available), skip fully-consumed lines. PI GRN-source lines carry `grnItemId` → POST sends `body.grnId` + per-line `grnItemId`. Both pickers are SINGLE-source (one PO→one GRN; one GRN/PO→one PI) because the GRN backend keys lines to ONE parent PO by `poItemIndex` (grns.poId single column). Multi-source consolidation into one doc is a FOLLOW-UP (needs schema work). The GRN "From PO | Manual" mode toggle was removed; `?poId=` deep-link still locks PO mode.
 
 **Start here:** Open `src/pages/procurement/index.tsx` (PO list + POFormDialog) or `src/pages/procurement/detail.tsx` (PO detail + ThreeWayMatchPanel); for receiving/stock start at `src/api/routes/grn.ts`.
 

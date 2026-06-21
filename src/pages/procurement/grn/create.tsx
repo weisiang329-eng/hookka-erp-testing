@@ -1,23 +1,28 @@
 // ---------------------------------------------------------------------------
 // GRN Create — full-page form.
 //
-// Replaces the cramped GRNFormDialog modal (grn.tsx) for the "Create GRN"
-// toolbar button. Layout matches src/pages/procurement/create.tsx (New PO)
-// so Procurement's three create flows — PO / GRN / PI — all look unified:
-//   • Top header strip (back arrow + title + Cancel/Save buttons)
-//   • 1-2 column grid: GRN Details card (left, lg:col-span-2) +
-//     Summary card (right)
+// Manual entry is the DEFAULT surface. A top-right "Convert from PO" button
+// opens a line-pick modal: pick a PO, select its lines (each with remaining
+// availableQty) + per-line received qty, confirm → the GRN is pre-filled and
+// linked to that PO. There is no "From PO | Manual" mode toggle — the page
+// is in "PO-linked" mode whenever a PO has been picked (or ?poId= deep-links
+// in), and reverts to plain manual entry when the link is cleared.
+//
+// Layout matches src/pages/procurement/create.tsx (New PO):
+//   • Top header strip (back arrow + title + Convert/Cancel/Save buttons)
+//   • 1-2 column grid: GRN Details card (left) + Summary card (right)
 //   • Items card spans full width below
 //
 // The GRNFormDialog modal is KEPT in grn.tsx because detail.tsx (the PO
 // detail page) still uses it via the "Receive Goods" button with lockedPoId.
-// This page is only wired to the GRN list's "Create GRN" / "Scan GRN"
-// toolbar buttons.
 //
 // Query params
-//   ?poId=<id>   — pre-select a PO (mirrors lockedPoId in the modal);
-//                  forces "From Purchase Order" mode and locks the toggle.
+//   ?poId=<id>   — pre-select a PO (PO-linked mode); locks the PO.
 //   ?scan=1      — auto-open the scan modal once a PO is selected
+//
+// Single-PO by design: the GRN backend keys each line to ONE parent PO by
+// poItemIndex (grns.poId is a single column). Converting from multiple POs
+// into one GRN is NOT supported by the schema and is left as a follow-up.
 // ---------------------------------------------------------------------------
 
 import React, { useState, useEffect, useRef, useMemo, Suspense } from "react";
@@ -30,11 +35,15 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { PurchaseOrder, Supplier } from "@/types";
-import { ArrowLeft, Save, ScanLine, Plus, Trash2, ChevronDown, ChevronUp, Ship } from "lucide-react";
+import { ArrowLeft, Save, ScanLine, Plus, Trash2, ChevronDown, ChevronUp, Ship, FolderInput } from "lucide-react";
 import {
   ScanSupplierModal,
   type SupplierExtraction,
 } from "@/components/scan-supplier-modal";
+import {
+  ConvertFromPOModal,
+  type ConvertFromPOResult,
+} from "@/components/convert-from-po-modal";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -58,8 +67,6 @@ type ManualItemEntry = {
   rejectionReason: string;
   unitPriceSen: number; // stored in sen (MoneyInput × 100)
 };
-
-type GRNMode = "po" | "manual";
 
 let nextRowId = 1;
 function newManualRow(): ManualItemEntry {
@@ -101,7 +108,7 @@ function GRNCreatePage() {
   const seedPoId = searchParams.get("poId") ?? "";
   const autoScan = searchParams.get("scan") === "1";
 
-  // If opened with ?poId= the toggle is locked to PO mode
+  // If opened with ?poId= the PO is locked (deep-link from PO detail/list).
   const isLockedPO = Boolean(seedPoId);
 
   // ── Data fetches ─────────────────────────────────────────────────────────
@@ -126,51 +133,40 @@ function GRNCreatePage() {
     [supResp],
   );
 
-  // POs eligible for receiving — same filter as the modal
-  const eligiblePOs = useMemo(
-    () =>
-      purchaseOrders.filter(
-        (p) =>
-          p.status === "CONFIRMED" ||
-          p.status === "PARTIAL_RECEIVED" ||
-          p.status === "SUBMITTED",
-      ),
-    [purchaseOrders],
-  );
-
-  // ── Mode state ────────────────────────────────────────────────────────────
-  const [mode, setMode] = useState<GRNMode>(
-    searchParams.get("manual") === "1" ? "manual" : "po",
-  );
+  // ── PO link state ─────────────────────────────────────────────────────────
+  // The page is "PO-linked" whenever selectedPO is set (deep-link or convert).
+  const [selectedPO, setSelectedPO] = useState(seedPoId);
+  const isPoLinked = Boolean(selectedPO);
+  const po = purchaseOrders.find((p) => p.id === selectedPO);
 
   // ── Shared form state ─────────────────────────────────────────────────────
   const [receivedBy, setReceivedBy] = useState("");
   const [notes, setNotes] = useState("");
   const [scanOpen, setScanOpen] = useState(false);
+  const [convertOpen, setConvertOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // ── Shipment details (PO mode only) ──────────────────────────────────────
-  // When filled, the GRN is created with arrival_state=NOT_ARRIVED + the
-  // shipment fields. Manual mode stays defaulting to ARRIVED (goods in hand).
+  // ── Shipment details (PO-linked only) ─────────────────────────────────────
   const [shipmentOpen, setShipmentOpen] = useState(false);
   const [shipmentMethod, setShipmentMethod] = useState("");
   const [shipmentCarrier, setShipmentCarrier] = useState("");
   const [shipmentExpectedArrival, setShipmentExpectedArrival] = useState("");
 
-  // ── PO-mode state ─────────────────────────────────────────────────────────
-  const [selectedPO, setSelectedPO] = useState(seedPoId);
+  // ── PO-mode entries (built from a picked PO; keyed by poItemIndex) ─────────
   const [poItemEntries, setPoItemEntries] = useState<POItemEntry[]>([]);
+  // Header info from the convert pick (so the form shows supplier/PO before
+  // the PO list cache resolves the full `po` object).
+  const [convertSupplierName, setConvertSupplierName] = useState("");
+  const [convertPoNo, setConvertPoNo] = useState("");
 
-  const po = purchaseOrders.find((p) => p.id === selectedPO);
-
-  // ── Manual-mode state ─────────────────────────────────────────────────────
+  // ── Manual-mode state (default surface when NOT PO-linked) ─────────────────
   const [supplierId, setSupplierId] = useState("");
   const [supplierName, setSupplierName] = useState("");
   const [manualItems, setManualItems] = useState<ManualItemEntry[]>([
     newManualRow(),
   ]);
 
-  // ── Auto-scan gate: mirror modal's logic exactly ──────────────────────────
+  // ── Auto-scan gate ─────────────────────────────────────────────────────────
   const autoScanFired = useRef(false);
   useEffect(() => {
     if (autoScan && po && !autoScanFired.current) {
@@ -179,10 +175,14 @@ function GRNCreatePage() {
     }
   }, [autoScan, po]);
 
-  // ── Seed PO item entries when PO changes ──────────────────────────────────
-  /* eslint-disable react-hooks/set-state-in-effect -- seed from PO */
+  // ── Seed PO item entries when a deep-linked PO resolves ────────────────────
+  // Only runs for the ?poId= deep-link path (locked PO). Convert-from-PO picks
+  // seed entries directly in handleConvert so we honour per-line qty there.
+  const deepLinkSeeded = useRef(false);
+  /* eslint-disable react-hooks/set-state-in-effect -- seed from deep-linked PO */
   useEffect(() => {
-    if (po) {
+    if (isLockedPO && po && !deepLinkSeeded.current) {
+      deepLinkSeeded.current = true;
       setPoItemEntries(
         po.items.map((item, idx) => {
           const remaining = Math.max(0, item.quantity - (item.receivedQty || 0));
@@ -195,11 +195,34 @@ function GRNCreatePage() {
           };
         }),
       );
-    } else {
-      setPoItemEntries([]);
     }
-  }, [selectedPO, po]);
+  }, [isLockedPO, po]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // ── Convert-from-PO handler ────────────────────────────────────────────────
+  const handleConvert = (res: ConvertFromPOResult) => {
+    setSelectedPO(res.poId);
+    setConvertPoNo(res.poNo);
+    setConvertSupplierName(res.supplierName);
+    deepLinkSeeded.current = true; // suppress the deep-link seeder
+    setPoItemEntries(
+      res.lines.map((l) => ({
+        poItemIndex: l.poItemIndex,
+        receivedQty: l.receivedQty,
+        acceptedQty: l.receivedQty,
+        rejectedQty: 0,
+        rejectionReason: "",
+      })),
+    );
+  };
+
+  // ── Clear the PO link → back to manual entry ───────────────────────────────
+  const clearPoLink = () => {
+    setSelectedPO("");
+    setPoItemEntries([]);
+    setConvertPoNo("");
+    setConvertSupplierName("");
+  };
 
   // ── PO item mutator ───────────────────────────────────────────────────────
   const updatePoItem = (idx: number, field: string, value: number | string) => {
@@ -255,8 +278,8 @@ function GRNCreatePage() {
 
   // ── OCR apply ────────────────────────────────────────────────────────────
   const applyOcr = (ex: SupplierExtraction) => {
-    if (mode === "po") {
-      // PO mode — match against PO lines (existing behaviour)
+    if (isPoLinked) {
+      // PO-linked — match against PO lines (existing behaviour)
       if (!po) return;
       const norm = (s: string | null | undefined) =>
         String(s ?? "")
@@ -269,7 +292,7 @@ function GRNCreatePage() {
           if (qty <= 0) continue;
           const codeN = norm(line.supplierCode);
           const descN = norm(line.description);
-          const idx = po.items.findIndex((it) => {
+          const targetPoIdx = po.items.findIndex((it) => {
             const sku = norm(it.supplierSKU);
             const nm = norm(it.materialName);
             const codeHit =
@@ -280,13 +303,23 @@ function GRNCreatePage() {
               !!descN && !!nm && (nm.includes(descN) || descN.includes(nm));
             return codeHit || nameHit;
           });
-          if (idx >= 0 && next[idx]) {
+          if (targetPoIdx < 0) continue;
+          // Find the entry row carrying that poItemIndex.
+          const entryIdx = next.findIndex(
+            (e) => e.poItemIndex === targetPoIdx,
+          );
+          if (entryIdx >= 0) {
             const remaining = Math.max(
               0,
-              po.items[idx].quantity - (po.items[idx].receivedQty || 0),
+              po.items[targetPoIdx].quantity -
+                (po.items[targetPoIdx].receivedQty || 0),
             );
             const recv = remaining > 0 ? Math.min(qty, remaining) : qty;
-            next[idx] = { ...next[idx], receivedQty: recv, acceptedQty: recv };
+            next[entryIdx] = {
+              ...next[entryIdx],
+              receivedQty: recv,
+              acceptedQty: recv,
+            };
           }
         }
         return next;
@@ -319,29 +352,30 @@ function GRNCreatePage() {
   };
 
   // ── Derived summary ───────────────────────────────────────────────────────
-  const activeEntries =
-    mode === "po"
-      ? poItemEntries
-      : manualItems.map((m) => ({
-          receivedQty: m.receivedQty,
-          acceptedQty: m.acceptedQty,
-          rejectedQty: m.rejectedQty,
-        }));
+  const activeEntries = isPoLinked
+    ? poItemEntries
+    : manualItems.map((m) => ({
+        receivedQty: m.receivedQty,
+        acceptedQty: m.acceptedQty,
+        rejectedQty: m.rejectedQty,
+      }));
 
   const totalReceived = activeEntries.reduce((s, e) => s + e.receivedQty, 0);
   const totalAccepted = activeEntries.reduce((s, e) => s + e.acceptedQty, 0);
   const totalRejected = activeEntries.reduce((s, e) => s + e.rejectedQty, 0);
-  const hasItems =
-    mode === "po"
-      ? poItemEntries.some((e) => e.receivedQty > 0)
-      : manualItems.some((e) => e.receivedQty > 0 && e.materialName.trim());
+  const hasItems = isPoLinked
+    ? poItemEntries.some((e) => e.receivedQty > 0)
+    : manualItems.some((e) => e.receivedQty > 0 && e.materialName.trim());
+
+  // PO line lookup for the converted entry table (entries carry poItemIndex).
+  const poItemByIndex = (idx: number) => po?.items[idx];
 
   // ── Submit ────────────────────────────────────────────────────────────────
   const handleSave = async () => {
     if (saving) return;
 
-    if (mode === "po") {
-      if (!po) {
+    if (isPoLinked) {
+      if (!selectedPO) {
         toast.error("Select a purchase order");
         return;
       }
@@ -377,12 +411,11 @@ function GRNCreatePage() {
     try {
       let body: Record<string, unknown>;
 
-      if (mode === "po") {
+      if (isPoLinked) {
         // Include shipment fields if the operator filled them in.
-        // Presence of any shipment field signals "NOT_ARRIVED" default.
         const hasShipment = shipmentMethod || shipmentCarrier || shipmentExpectedArrival;
         body = {
-          poId: po!.id,
+          poId: selectedPO,
           receivedBy: receivedBy.trim(),
           notes: notes.trim(),
           items: poItemEntries.filter((ie) => ie.receivedQty > 0),
@@ -446,21 +479,20 @@ function GRNCreatePage() {
   };
 
   // Summary display values
-  const summaryPO = mode === "po" ? (po ? po.poNo : "—") : "—";
-  const summarySupplier =
-    mode === "po"
-      ? po
-        ? po.supplierName
-        : "—"
-      : supplierName || "—";
+  const summaryPO = isPoLinked ? (po?.poNo || convertPoNo || "—") : "—";
+  const summarySupplier = isPoLinked
+    ? (po?.supplierName || convertSupplierName || "—")
+    : supplierName || "—";
 
   // ── Scan modal context ───────────────────────────────────────────────────
-  const scanSupplierId =
-    mode === "po" ? (po?.supplierId ?? null) : (supplierId || null);
-  const scanSupplierName =
-    mode === "po" ? (po?.supplierName ?? null) : (supplierName || null);
+  const scanSupplierId = isPoLinked
+    ? (po?.supplierId ?? null)
+    : (supplierId || null);
+  const scanSupplierName = isPoLinked
+    ? (po?.supplierName ?? convertSupplierName ?? null)
+    : (supplierName || null);
   const scanPoContext =
-    mode === "po" && po
+    isPoLinked && po
       ? po.items
           .map((it) =>
             `${it.supplierSKU || ""} ${it.materialName || ""}`.trim(),
@@ -489,6 +521,16 @@ function GRNCreatePage() {
             Procurement &rarr; GRN &rarr; New GRN
           </p>
         </div>
+        {/* Convert from PO — hidden when deep-linked to a locked PO */}
+        {!isLockedPO && (
+          <Button
+            variant="outline"
+            onClick={() => setConvertOpen(true)}
+            title="Pick a Purchase Order and its lines to pre-fill this receipt"
+          >
+            <FolderInput className="h-4 w-4" /> Convert from PO
+          </Button>
+        )}
         <Button
           variant="outline"
           onClick={() => navigate("/procurement/grn")}
@@ -500,13 +542,13 @@ function GRNCreatePage() {
           onClick={handleSave}
           disabled={
             saving ||
-            (mode === "po" ? !po || !hasItems : !supplierId || !hasItems)
+            (isPoLinked ? !selectedPO || !hasItems : !supplierId || !hasItems)
           }
           className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
           title={
-            mode === "po"
-              ? !po
-                ? "Select a purchase order first"
+            isPoLinked
+              ? !selectedPO
+                ? "Pick a purchase order first"
                 : !hasItems
                   ? "Enter received quantities for at least one item"
                   : undefined
@@ -529,76 +571,31 @@ function GRNCreatePage() {
             <CardTitle>GRN Details</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {/* Mode toggle — hidden when ?poId= locks us to PO mode */}
-            {!isLockedPO && (
-              <div>
-                <label className="block text-sm font-medium text-[#374151] mb-1.5">
-                  Receipt Type
-                </label>
-                <div className="inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => setMode("po")}
-                    className={`px-4 py-2 text-sm font-medium transition-colors ${
-                      mode === "po"
-                        ? "bg-[#6B5C32] text-white"
-                        : "bg-white text-[#374151] hover:bg-[#FAF9F7]"
-                    }`}
-                  >
-                    From Purchase Order
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMode("manual")}
-                    className={`px-4 py-2 text-sm font-medium border-l border-[#E2DDD8] transition-colors ${
-                      mode === "manual"
-                        ? "bg-[#6B5C32] text-white"
-                        : "bg-white text-[#374151] hover:bg-[#FAF9F7]"
-                    }`}
-                  >
-                    Manual (no PO)
-                  </button>
+            {/* PO-linked banner — shows the linked PO + an Unlink action */}
+            {isPoLinked && (
+              <div className="flex items-center justify-between rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-sm">
+                <div className="text-[#6B5C32]">
+                  Receiving against{" "}
+                  <span className="font-semibold">{summaryPO}</span>
+                  {summarySupplier !== "—" && (
+                    <> — {summarySupplier}</>
+                  )}
                 </div>
+                {!isLockedPO && (
+                  <button
+                    type="button"
+                    className="text-xs font-medium text-[#6B5C32] underline hover:text-[#5a4d2a]"
+                    onClick={clearPoLink}
+                  >
+                    Unlink / manual entry
+                  </button>
+                )}
               </div>
             )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* PO selector (PO mode) or Supplier picker (Manual mode) */}
-              {mode === "po" ? (
-                <div>
-                  <label className="block text-sm font-medium text-[#374151] mb-1.5">
-                    Purchase Order *
-                  </label>
-                  {isLockedPO ? (
-                    <div className="flex h-10 w-full items-center rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm text-[#374151]">
-                      {po ? `${po.poNo} - ${po.supplierName}` : "Loading PO…"}
-                    </div>
-                  ) : eligiblePOs.length === 0 ? (
-                    <div className="rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-xs text-[#6B5C32]">
-                      <span className="font-medium">
-                        No purchase orders are ready to receive.
-                      </span>{" "}
-                      A PO must be <b>Submitted</b> or <b>Confirmed</b> first
-                      — open the PO, submit/confirm it, then come back here to
-                      record the goods.
-                    </div>
-                  ) : (
-                    <select
-                      className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
-                      value={selectedPO}
-                      onChange={(e) => setSelectedPO(e.target.value)}
-                      required
-                    >
-                      <option value="">Select PO…</option>
-                      {eligiblePOs.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.poNo} - {p.supplierName}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-              ) : (
+              {/* Supplier picker — manual mode only (PO mode derives supplier) */}
+              {!isPoLinked && (
                 <div>
                   <label className="block text-sm font-medium text-[#374151] mb-1.5">
                     Supplier *
@@ -642,8 +639,8 @@ function GRNCreatePage() {
               />
             </div>
 
-            {/* Shipment Details — PO mode only; optional collapsible */}
-            {mode === "po" && (
+            {/* Shipment Details — PO-linked only; optional collapsible */}
+            {isPoLinked && (
               <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
                 <button
                   type="button"
@@ -707,7 +704,7 @@ function GRNCreatePage() {
             <CardTitle>Summary</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            {mode === "po" && (
+            {isPoLinked && (
               <div className="flex justify-between text-sm">
                 <span className="text-[#6B7280]">PO</span>
                 <span className="font-medium text-right truncate max-w-[160px]">
@@ -721,22 +718,16 @@ function GRNCreatePage() {
                 {summarySupplier}
               </span>
             </div>
-            {mode === "po" && (
-              <div className="flex justify-between text-sm">
-                <span className="text-[#6B7280]">Line Items</span>
-                <span className="font-medium">{poItemEntries.length}</span>
-              </div>
-            )}
-            {mode === "manual" && (
-              <div className="flex justify-between text-sm">
-                <span className="text-[#6B7280]">Line Items</span>
-                <span className="font-medium">
-                  {manualItems.filter(
-                    (m) => m.materialName.trim() && m.receivedQty > 0,
-                  ).length}
-                </span>
-              </div>
-            )}
+            <div className="flex justify-between text-sm">
+              <span className="text-[#6B7280]">Line Items</span>
+              <span className="font-medium">
+                {isPoLinked
+                  ? poItemEntries.length
+                  : manualItems.filter(
+                      (m) => m.materialName.trim() && m.receivedQty > 0,
+                    ).length}
+              </span>
+            </div>
             <hr className="border-[#E2DDD8]" />
             <div className="flex justify-between text-sm">
               <span className="text-[#6B7280]">Total Received</span>
@@ -764,15 +755,13 @@ function GRNCreatePage() {
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle>
-              {mode === "po"
-                ? po
-                  ? `Items — Enter Received Quantities (${poItemEntries.length})`
-                  : "Items"
+              {isPoLinked
+                ? `Items — Enter Received Quantities (${poItemEntries.length})`
                 : "Items — Enter Lines"}
             </CardTitle>
             <div className="flex items-center gap-2">
-              {/* Scan button: PO mode needs a PO selected; Manual mode available once supplier picked */}
-              {(mode === "po" ? po : supplierId) && (
+              {/* Scan button: PO mode needs a PO; Manual once supplier picked */}
+              {(isPoLinked ? po : supplierId) && (
                 <Button
                   type="button"
                   variant="outline"
@@ -783,7 +772,7 @@ function GRNCreatePage() {
                   <ScanLine className="h-4 w-4" /> Scan supplier document
                 </Button>
               )}
-              {mode === "manual" && (
+              {!isPoLinked && (
                 <Button
                   type="button"
                   variant="outline"
@@ -797,10 +786,12 @@ function GRNCreatePage() {
           </div>
         </CardHeader>
         <CardContent>
-          {mode === "po" ? (
-            !po ? (
+          {isPoLinked ? (
+            poItemEntries.length === 0 ? (
               <div className="rounded-md border border-dashed border-[#E2DDD8] bg-[#FAF9F7] py-10 text-center text-sm text-[#9CA3AF]">
-                Select a purchase order above to load its items.
+                {po
+                  ? "Loading PO items…"
+                  : "No lines picked. Use Convert from PO to pick lines."}
               </div>
             ) : (
               <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
@@ -846,28 +837,30 @@ function GRNCreatePage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {po.items.map((poItem, idx) => {
-                      const entry = poItemEntries[idx];
-                      if (!entry) return null;
-                      const alreadyReceived = poItem.receivedQty || 0;
+                    {poItemEntries.map((entry, idx) => {
+                      const poItem = poItemByIndex(entry.poItemIndex);
+                      const alreadyReceived = poItem?.receivedQty || 0;
+                      const ordered = poItem?.quantity ?? 0;
                       const cumulative = alreadyReceived + entry.receivedQty;
-                      const overReceipt = cumulative > poItem.quantity * 1.1;
+                      const overReceipt =
+                        ordered > 0 && cumulative > ordered * 1.1;
                       return (
                         <tr
-                          key={idx}
+                          key={entry.poItemIndex}
                           className="border-t border-[#E2DDD8] hover:bg-[#FAF9F7]"
                         >
                           <td className="px-3 py-2">
                             <div className="font-medium text-[#1F1D1B]">
-                              {poItem.materialName}
+                              {poItem?.materialName ??
+                                `Line #${entry.poItemIndex + 1}`}
                             </div>
                             <div className="text-xs text-[#9CA3AF]">
-                              {poItem.supplierSKU}
+                              {poItem?.supplierSKU ?? ""}
                             </div>
                           </td>
                           <td className="px-3 py-2 text-right">
                             <div className="text-[#374151]">
-                              {poItem.quantity} {poItem.unit}
+                              {ordered} {poItem?.unit ?? ""}
                             </div>
                             {alreadyReceived > 0 && (
                               <div className="text-[10px] text-[#6B5C32]">
@@ -1161,6 +1154,13 @@ function GRNCreatePage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Convert from PO line-pick modal */}
+      <ConvertFromPOModal
+        open={convertOpen}
+        onClose={() => setConvertOpen(false)}
+        onConfirm={handleConvert}
+      />
 
       {/* Scan supplier document modal */}
       <ScanSupplierModal

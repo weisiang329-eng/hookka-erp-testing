@@ -89,7 +89,7 @@ export function generateGRNPdf(
   ry = lblVal(rightX, ry, "GRN No.", data.grnNo ?? "-", rightMaxW);
   ry = lblVal(rightX, ry, "Date", fmtDate(data.date), rightMaxW);
   ry = lblVal(rightX, ry, "PO Ref", data.poRef ?? "-", rightMaxW);
-  ry = lblVal(rightX, ry, "DO Ref", data.doRef ?? "-", rightMaxW);
+  ry = lblVal(rightX, ry, "Supplier DO No.", data.doRef ?? data.supplierDoNo ?? "-", rightMaxW);
   lblVal(rightX, ry, "Warehouse", data.warehouse ?? "-", rightMaxW);
 
   let y = Math.max(ly, ry) + 2;
@@ -150,7 +150,7 @@ export function generateGRNPdf(
     },
     headStyles: {
       fontStyle: "bold",
-      fontSize: 7.6,
+      fontSize: 8,
       lineWidth: { top: 0, bottom: 0.5, left: 0, right: 0 },
       lineColor: PDF.ink,
       valign: "middle",

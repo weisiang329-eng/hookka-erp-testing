@@ -4,6 +4,7 @@ import {
   fmtCurrency,
   fmtRM,
   fmtDate,
+  amountInWords,
   drawLetterhead,
   drawSectionLabel,
   drawDocFooter,
@@ -47,6 +48,14 @@ export type PurchaseInvoicePdfData = {
   status: string;
   remarks?: string;
   items?: PurchaseInvoicePdfLine[];
+  // Supplier reference numbers (mig 0183). The API returns snake_case;
+  // the FE passes the raw response, so dual-key both spellings.
+  supplierInvoiceNo?: string | null;
+  supplier_invoice_no?: string | null;
+  supplierDoNo?: string | null;
+  supplier_do_no?: string | null;
+  // Computed subtotal when available (sum of line totals). Falls back to amountSen.
+  subtotalSen?: number;
 };
 
 function defaultLetterhead(): LetterheadInfo {
@@ -124,8 +133,16 @@ export function generatePurchaseInvoicePdf(
 
   const rightX = pageW / 2 + 12;
   const rightMaxW = pageW - margin - rightX - labelW;
+  // Dual-key supplier reference numbers (API returns snake_case; toCamel
+  // converts on some paths — accept both spellings, same as the GRN).
+  const supplierInvoiceNo =
+    (pi.supplierInvoiceNo ?? pi.supplier_invoice_no ?? "").trim() || "-";
+  const supplierDoNo =
+    (pi.supplierDoNo ?? pi.supplier_do_no ?? "").trim() || "-";
   let ry = 40;
-  ry = lblVal(rightX, ry, "Invoice No.", pi.piNo || "-", rightMaxW);
+  ry = lblVal(rightX, ry, "PI No.", pi.piNo || "-", rightMaxW);
+  ry = lblVal(rightX, ry, "Supplier Invoice No.", supplierInvoiceNo, rightMaxW);
+  ry = lblVal(rightX, ry, "Supplier DO No.", supplierDoNo, rightMaxW);
   ry = lblVal(rightX, ry, "Linked PO", pi.poRef || (pi.purchaseOrderId ? pi.purchaseOrderId : "-"), rightMaxW);
   ry = lblVal(rightX, ry, "Invoice Date", fmtDate(pi.invoiceDate), rightMaxW);
   ry = lblVal(rightX, ry, "Due Date", fmtDate(pi.dueDate), rightMaxW);
@@ -225,7 +242,8 @@ export function generatePurchaseInvoicePdf(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   y = (doc as any).lastAutoTable.finalY;
 
-  // --- Totals (DO/SI right-aligned label + value pairs) ---
+  // --- Totals (mirrors the Sales Invoice: Subtotal → rule → GRAND TOTAL big
+  //     + amount in words, right-aligned label + value pairs) ---
   y += 8;
   if (y > pageH - 70) {
     doc.addPage();
@@ -243,7 +261,27 @@ export function generatePurchaseInvoicePdf(
     doc.text(value, valX, y, { align: "right" });
     y += big ? 8 : 6;
   };
+  // Derive subtotal from line totals when available; fall back to amountSen.
+  const subtotalSen =
+    pi.subtotalSen ??
+    (pi.items && pi.items.length > 0
+      ? pi.items.reduce((s, i) => s + (Number(i.lineTotalSen) || 0), 0)
+      : pi.amountSen);
+  sumLine("Subtotal", fmtRM(subtotalSen), false);
+  // Rule clears the 11pt GRAND TOTAL cap height (matches the Invoice spacing).
+  y += 3;
+  doc.setDrawColor(...PDF.rule);
+  doc.setLineWidth(0.4);
+  doc.line(lblX - 2, y - 5.5, valX, y - 5.5);
   sumLine("GRAND TOTAL", fmtRM(pi.amountSen), true, true);
+
+  // Amount in words — mirrors the Sales Invoice confirmation line.
+  doc.setFont("helvetica", "italic");
+  doc.setFontSize(7.5);
+  doc.setTextColor(...PDF.muted);
+  const words = doc.splitTextToSize(amountInWords(pi.amountSen), cw);
+  doc.text(words, margin, y);
+  y += words.length * 4 + 6;
 
   // --- Remarks ---
   if (pi.remarks) {
@@ -260,6 +298,27 @@ export function generatePurchaseInvoicePdf(
     doc.text(noteLines, margin, y);
     y += noteLines.length * 3.6 + 6;
   }
+
+  // --- Signature strip (mirrors Sales Invoice: Prepared By / Approved By) ---
+  if (y + 26 > pageH - 18) {
+    doc.addPage();
+    y = 36;
+  }
+  const halfW = (pageW - margin * 2 - 14) / 2;
+  doc.setDrawColor(...PDF.rule);
+  doc.setLineWidth(0.3);
+  doc.line(margin, y + 14, margin + halfW, y + 14);
+  doc.line(pageW - margin - halfW, y + 14, pageW - margin, y + 14);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8);
+  doc.setTextColor(...PDF.ink);
+  doc.text("Prepared By", margin, y + 19);
+  doc.text("Approved By", pageW - margin - halfW, y + 19);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7);
+  doc.setTextColor(...PDF.faint);
+  doc.text(co.name, margin, y + 23.5);
+  doc.text("Name / Date / Stamp", pageW - margin - halfW, y + 23.5);
 
   // --- Footer (all pages — shared DO/SI footer) ---
   // HOOKKA prints via the shared drawDocFooter; sister-company letterheads

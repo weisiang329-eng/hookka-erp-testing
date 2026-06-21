@@ -3,9 +3,6 @@ import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
 import {
   drawLetterhead,
-  drawSectionLabel,
-  drawDocFooter,
-  tableTheme,
   fmtDate,
 } from "@/lib/pdf-utils";
 import type { LetterheadCompany } from "@/lib/pdf-utils";
@@ -97,7 +94,9 @@ export function generateSupplierQuotationPdf(
   const today = new Date().toISOString();
 
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-  const margin = 14; // PDF.margin — matches the shared design system
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 15; // mirrors the customer quotation margin
 
   // =========================================================================
   // 1. HEADER — shared letterhead (single source of truth across all docs).
@@ -113,10 +112,19 @@ export function generateSupplierQuotationPdf(
   doc.setTextColor(31, 29, 27);
 
   // =========================================================================
-  // 2. SUPPLIER block — mirrors the customer quotation "BILL TO" section.
+  // 2. SUPPLIER block — mirrors the customer quotation "BILL TO" section:
+  //    bold label above a horizontal rule, then key–value rows at 8pt.
   // =========================================================================
-  y = drawSectionLabel(doc, "Supplier", y + 2);
+  const boxW = pageW / 2 - 10;
 
+  doc.setFontSize(9);
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(0, 0, 0);
+  doc.text("SUPPLIER", margin + 3, y + 5);
+  doc.setDrawColor(180, 180, 180);
+  doc.line(margin, y + 7, margin + boxW, y + 7);
+
+  let yLeft = y + 10;
   const supplierFields: Array<[string, string]> = [
     ["Supplier", `${supplier.code} - ${supplier.name}`],
     ["Contact", supplier.contactPerson || "-"],
@@ -127,21 +135,57 @@ export function generateSupplierQuotationPdf(
   for (const [label, value] of supplierFields) {
     doc.setFont("helvetica", "normal");
     doc.setTextColor(107, 114, 128);
-    doc.text(label, margin, y);
+    doc.text(label, margin + 3, yLeft);
     doc.setFont("helvetica", "bold");
     doc.setTextColor(31, 29, 27);
-    doc.text(String(value), margin + 28, y);
-    y += 5;
+    const lines2 = doc.splitTextToSize(String(value), boxW - 40);
+    doc.text(lines2, margin + 30, yLeft);
+    yLeft += lines2.length * 4 + 1;
   }
-  y += 4;
+  y = yLeft + 8;
 
   // =========================================================================
-  // 3. QUOTED ITEMS — single section, mirroring the customer quotation tables
-  //    (shared tableTheme: bronze header, hairline grid, striped rows).
+  // 3. QUOTED ITEMS — section header mirrors customer quotation (horizontal
+  //    rule + bold 11pt label above the table), table uses the same
+  //    sharedStyles / sharedHeadStyles / sharedAltRow as the customer
+  //    quotation (white header + black border, striped rows).
   // =========================================================================
-  y = drawSectionLabel(doc, `Quoted Items (${lines.length})`, y);
 
-  const theme = tableTheme();
+  // Shared autoTable styling — mirrors the customer quotation exactly.
+  const sharedStyles = {
+    fontSize: 7.5,
+    cellPadding: 2,
+    textColor: [31, 29, 27] as [number, number, number],
+    lineColor: [226, 221, 216] as [number, number, number],
+    lineWidth: 0.3,
+    overflow: "linebreak" as const,
+  };
+  const sharedHeadStyles = {
+    fillColor: [255, 255, 255] as [number, number, number],
+    textColor: [0, 0, 0] as [number, number, number],
+    fontSize: 8,
+    fontStyle: "bold" as const,
+    lineColor: [0, 0, 0] as [number, number, number],
+    lineWidth: 0.3,
+  };
+  const sharedAltRow = { fillColor: [249, 250, 251] as [number, number, number] };
+
+  // Section header — same look as customer quotation's sectionHeader():
+  // horizontal rule, then bold 11pt title with item count.
+  if (y > pageH - 30) {
+    doc.addPage();
+    y = margin;
+  }
+  doc.setDrawColor(180, 180, 180);
+  doc.setLineWidth(0.4);
+  doc.line(margin, y, pageW - margin, y);
+  y += 6;
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(0, 0, 0);
+  doc.text(`QUOTED ITEMS  (${lines.length})`, margin, y);
+  y += 3;
+
   autoTable(doc, {
     startY: y,
     margin: { left: margin, right: margin },
@@ -167,9 +211,9 @@ export function generateSupplierQuotationPdf(
       fmtMoney(l.unitPriceSen, l.currency),
       l.effectiveFrom ? fmtDate(l.effectiveFrom) : "-",
     ]),
-    styles: theme.styles,
-    headStyles: theme.headStyles,
-    alternateRowStyles: theme.alternateRowStyles,
+    styles: sharedStyles,
+    headStyles: sharedHeadStyles,
+    alternateRowStyles: sharedAltRow,
     columnStyles: {
       0: { cellWidth: 8, halign: "center" },
       1: { cellWidth: 24, fontStyle: "bold" },
@@ -183,7 +227,7 @@ export function generateSupplierQuotationPdf(
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  y = (doc as any).lastAutoTable.finalY + 8;
+  y = (doc as any).lastAutoTable.finalY + 10;
 
   if (lines.length === 0) {
     doc.setFontSize(9);
@@ -194,8 +238,14 @@ export function generateSupplierQuotationPdf(
   }
 
   // =========================================================================
-  // 4. NOTE + FOOTER (shared footer on every page).
+  // 4. FOOTER NOTE + PER-PAGE FOOTER — mirrors customer quotation footer:
+  //    italic note line, then per-page hairline rule + company | Page X of Y
+  //    | Generated date.
   // =========================================================================
+  if (y > pageH - 20) {
+    doc.addPage();
+    y = margin;
+  }
   doc.setFontSize(7.5);
   doc.setFont("helvetica", "italic");
   doc.setTextColor(107, 114, 128);
@@ -205,10 +255,29 @@ export function generateSupplierQuotationPdf(
     y,
   );
 
+  // Per-page footer — same style as the customer quotation (NOT drawDocFooter,
+  // which is the purchase-doc style; the quotation family uses faint rule +
+  // company | page | generated).
   const totalPages = doc.getNumberOfPages();
   for (let p = 1; p <= totalPages; p++) {
     doc.setPage(p);
-    drawDocFooter(doc, co.code);
+    const footerY = pageH - 10;
+    doc.setDrawColor(226, 221, 216);
+    doc.line(margin, footerY - 3, pageW - margin, footerY - 3);
+    doc.setFontSize(7);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(156, 163, 175);
+    doc.text(
+      `${co.info.name}  |  This is a computer-generated document. No signature is required.`,
+      margin,
+      footerY,
+    );
+    doc.text(
+      `Page ${p} of ${totalPages}  |  Generated: ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`,
+      pageW - margin,
+      footerY,
+      { align: "right" },
+    );
   }
 
   if (opts?.returnDoc) return doc;

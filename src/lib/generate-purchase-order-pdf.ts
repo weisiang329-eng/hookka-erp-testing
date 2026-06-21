@@ -293,12 +293,12 @@ export function generatePurchaseOrderPdf(
   };
 
   sumLine("Subtotal", fmtRM(po.subtotalSen), false);
-  // Rule clears the 11pt TOTAL cap height (matches the invoice spacing).
+  // Rule clears the 11pt TOTAL cap height (matches the SO/Invoice spacing).
   y += 3;
   doc.setDrawColor(...PDF.rule);
   doc.setLineWidth(0.4);
   doc.line(lblX - 2, y - 5.5, valX, y - 5.5);
-  sumLine("GRAND TOTAL", fmtRM(po.totalSen), true, true);
+  sumLine("TOTAL", fmtRM(po.totalSen), true, true);
 
   // --- Notes ---
   if (po.notes) {
@@ -348,25 +348,29 @@ export function generatePurchaseOrderPdf(
   }
   y += 6;
 
-  // --- Authorized Signature ---
+  // --- Signature strip (mirrors SO 3-sig layout: Prepared By / Checked By /
+  //     Authorized Signature). Matches generate-order-pdf.ts exactly. ---
   if (y + 26 > pageH - 18) {
     doc.addPage();
     y = 36;
   }
-  const sigW = 60;
+  const cw2 = pageW - margin * 2;
+  const sigW = (cw2 - 8) / 3;
+  const sigPos = [margin, margin + sigW + 4, margin + (sigW + 4) * 2];
+  const sigLabels = ["Prepared By", "Checked By", "Authorized Signature"];
   doc.setDrawColor(...PDF.rule);
   doc.setLineWidth(0.3);
-  doc.line(margin, y + 12, margin + sigW, y + 12);
-  doc.line(pageW - margin - sigW, y + 12, pageW - margin, y + 12);
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(8);
-  doc.setTextColor(...PDF.ink);
-  doc.text("Authorized Signature", margin, y + 17);
-  doc.text("Date", pageW - margin - sigW, y + 17);
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(7);
-  doc.setTextColor(...PDF.faint);
-  doc.text(co.name, margin, y + 21);
+  for (let i = 0; i < 3; i++) {
+    doc.line(sigPos[i], y + 14, sigPos[i] + sigW - 2, y + 14);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    doc.setTextColor(...PDF.ink);
+    doc.text(sigLabels[i], sigPos[i], y + 19);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7);
+    doc.setTextColor(...PDF.faint);
+    doc.text("Name / Date / Stamp", sigPos[i], y + 23.5);
+  }
 
   // --- Footer (all pages — shared DO/SI footer) ---
   // HOOKKA prints via the shared drawDocFooter; sister-company letterheads

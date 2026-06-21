@@ -9,9 +9,11 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { PageSkeleton } from "@/components/ui/skeleton";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, cn } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } from "@/types";
+import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
+import { useSessionState } from "@/lib/use-session-state";
 import {
   Plus, ShoppingBag, Truck, Trash2, X, Package,
   FileText, Download, Filter, AlertTriangle,
@@ -811,16 +813,21 @@ export default function ProcurementPage() {
     setPoFormPrefill(null);
   }, []);
 
-  // Filters
-  const [filterStatus, setFilterStatus] = useState("");
-  const [filterSupplier, setFilterSupplier] = useState("");
-  const [filterDateFrom, setFilterDateFrom] = useState("");
-  const [filterDateTo, setFilterDateTo] = useState("");
-  const [showFilters, setShowFilters] = useState(false);
+  // Filters — URL-synced so refresh / share-link land on the same view
+  const [filterStatus, setFilterStatus] = useUrlState<string>("status", "");
+  const [filterSupplier, setFilterSupplier] = useUrlState<string>("supplier", "");
+  const [filterDateFrom, setFilterDateFrom] = useUrlState<string>("from", "");
+  const [filterDateTo, setFilterDateTo] = useUrlState<string>("to", "");
+  // Show/hide filter panel — sessionStorage so closing the tab forgets,
+  // but a refresh keeps the panel open if user had it open.
+  const [showFilters, setShowFilters] = useSessionState<boolean>("procurement:showFilters", false);
+  // Tab: all POs are Confirmed (no Drafts) — shell mirrors SO list structure
+  const [tab, setTab] = useUrlState<"DRAFT" | "CONFIRMED">("tab", "CONFIRMED");
   // 4.2 — when the aging widget is clicked, only show POs whose
   // expectedDate has passed and that aren't already received / closed /
   // cancelled. Toggles off when the user clicks the widget again.
   const [filterOverdueOnly, setFilterOverdueOnly] = useState(false);
+  const [gridSearch, setGridSearch] = useState("");
 
   const { data: supResp, loading: supLoading, refresh: refreshSuppliers } = useCachedJson<{ success?: boolean; data?: Supplier[] }>("/api/suppliers");
   // Purchase Company letterhead registry — print each PO under its supplier's
@@ -1222,14 +1229,41 @@ export default function ProcurementPage() {
   }, [selectedPOs, bulkGrnRunning, ineligibleReason, toast, refreshPOs]);
 
   // ---- Filters ----
-  const hasActiveFilters = filterStatus || filterSupplier || filterDateFrom || filterDateTo || filterOverdueOnly;
+  const hasActiveFilters = filterStatus || filterSupplier || filterDateFrom || filterDateTo || filterOverdueOnly || gridSearch.trim();
 
   const clearFilters = () => {
-    setFilterStatus("");
-    setFilterSupplier("");
-    setFilterDateFrom("");
-    setFilterDateTo("");
+    setSearchParams(
+      (prev) => {
+        const out = new URLSearchParams(prev);
+        out.delete("status");
+        out.delete("supplier");
+        out.delete("from");
+        out.delete("to");
+        return out;
+      },
+      { replace: true },
+    );
     setFilterOverdueOnly(false);
+  };
+
+  // Quick date presets — atomic batch so both keys land in one navigation
+  const setUrlBatch = useUrlBatch();
+  const applyDatePreset = (preset: "this-month" | "last-month" | "this-year") => {
+    const now = new Date();
+    const fmt = (d: Date) => d.toISOString().split("T")[0];
+    let fromStr = "";
+    let toStr = "";
+    if (preset === "this-month") {
+      fromStr = fmt(new Date(now.getFullYear(), now.getMonth(), 1));
+      toStr = fmt(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+    } else if (preset === "last-month") {
+      fromStr = fmt(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+      toStr = fmt(new Date(now.getFullYear(), now.getMonth(), 0));
+    } else {
+      fromStr = fmt(new Date(now.getFullYear(), 0, 1));
+      toStr = fmt(new Date(now.getFullYear(), 11, 31));
+    }
+    setUrlBatch({ from: fromStr, to: toStr });
   };
 
   // 4.2 — overdue predicate. Reused both by the widget aggregation below
@@ -1256,7 +1290,8 @@ export default function ProcurementPage() {
     [todayStr],
   );
 
-  const filteredOrders = useMemo(() => {
+  // Base filter (status + supplier + date + overdue) — without tab
+  const filteredOrdersByUserFilters = useMemo(() => {
     return purchaseOrders.filter(po => {
       if (filterOverdueOnly && !isOverdue(po)) return false;
       if (filterStatus && po.status !== filterStatus) return false;
@@ -1272,6 +1307,24 @@ export default function ProcurementPage() {
       return true;
     });
   }, [purchaseOrders, filterStatus, filterSupplier, filterDateFrom, filterDateTo, filterOverdueOnly, isOverdue]);
+
+  // Tab filter — DRAFT shows only DRAFT POs, CONFIRMED shows everything else
+  const filteredOrders = useMemo(() => {
+    return filteredOrdersByUserFilters.filter(po => {
+      if (tab === "DRAFT" && po.status !== "DRAFT") return false;
+      if (tab === "CONFIRMED" && po.status === "DRAFT") return false;
+      return true;
+    });
+  }, [filteredOrdersByUserFilters, tab]);
+
+  const draftCount = useMemo(
+    () => purchaseOrders.filter(po => po.status === "DRAFT").length,
+    [purchaseOrders],
+  );
+  const confirmedCount = useMemo(
+    () => purchaseOrders.filter(po => po.status !== "DRAFT").length,
+    [purchaseOrders],
+  );
 
   // 4.2 — aging buckets across overdue POs (count of yellow / orange / red).
   // The widget surfaces an aggregate color = the worst bucket present.
@@ -1544,24 +1597,28 @@ export default function ProcurementPage() {
         </Button>
       </div>
 
-      {/* Summary Cards */}
+      {/* Summary Cards — gold card style: colored icon-box LEFT + text-2xl number */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-[#6B7280]">Total POs</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{purchaseOrders.length}</p>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+              <FileText className="h-5 w-5 text-[#6B5C32]" />
             </div>
-            <FileText className="h-5 w-5 text-[#6B5C32]" />
+            <div>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{purchaseOrders.length}</p>
+              <p className="text-xs text-[#6B7280]">Total POs</p>
+            </div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-[#6B7280]">Pending Delivery</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{pendingDelivery}</p>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#E0EDF0] p-2.5">
+              <Truck className="h-5 w-5 text-[#3E6570]" />
             </div>
-            <Truck className="h-5 w-5 text-[#3E6570]" />
+            <div>
+              <p className="text-2xl font-bold text-[#3E6570]">{pendingDelivery}</p>
+              <p className="text-xs text-[#6B7280]">Pending Delivery</p>
+            </div>
           </CardContent>
         </Card>
         {/* 4.2 — Aging widget. Click toggles the overdue-only filter on the
@@ -1569,7 +1626,11 @@ export default function ProcurementPage() {
             PO in the set (yellow 1-7d / orange 8-30d / red 30d+). The
             inline aging-bar shows the count distribution. */}
         <Card
-          className={`cursor-pointer transition-colors ${overduePoList.length > 0 ? `${overdueWidgetTone.bg} ${overdueWidgetTone.border}` : ""} ${filterOverdueOnly ? "ring-2 ring-[#6B5C32]" : ""}`}
+          className={cn(
+            "cursor-pointer transition-colors",
+            overduePoList.length > 0 ? `${overdueWidgetTone.bg} ${overdueWidgetTone.border}` : "",
+            filterOverdueOnly ? "ring-2 ring-[#6B5C32]" : "",
+          )}
           onClick={() => {
             if (overduePoList.length === 0) return;
             setFilterOverdueOnly((v) => !v);
@@ -1582,30 +1643,35 @@ export default function ProcurementPage() {
                 : "Click to filter the table to overdue POs only"
           }
         >
-          <CardContent className="p-2.5">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs text-[#6B7280]">Overdue POs</p>
-                <p className={`text-xl font-bold ${overduePoList.length > 0 ? overdueWidgetTone.text : "text-[#1F1D1B]"}`}>
-                  {overduePoList.length}
-                </p>
-              </div>
-              <AlertTriangle className={`h-5 w-5 ${overduePoList.length > 0 ? overdueWidgetTone.text : "text-[#E2DDD8]"}`} />
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className={cn(
+              "rounded-lg p-2.5",
+              overduePoList.length > 0 ? `${overdueWidgetTone.bg} border ${overdueWidgetTone.border}` : "bg-[#F0ECE9]",
+            )}>
+              <AlertTriangle className={cn("h-5 w-5", overduePoList.length > 0 ? overdueWidgetTone.text : "text-[#E2DDD8]")} />
             </div>
-            {overduePoList.length > 0 && (
-              <p className={`mt-1 text-[11px] ${overdueWidgetTone.subtle}`}>
-                {agingBuckets.yellow} yellow · {agingBuckets.orange} orange · {agingBuckets.red} red
+            <div>
+              <p className={cn("text-2xl font-bold", overduePoList.length > 0 ? overdueWidgetTone.text : "text-[#1F1D1B]")}>
+                {overduePoList.length}
               </p>
-            )}
+              <p className="text-xs text-[#6B7280]">Overdue POs</p>
+              {overduePoList.length > 0 && (
+                <p className={cn("mt-0.5 text-[11px]", overdueWidgetTone.subtle)}>
+                  {agingBuckets.yellow} yellow · {agingBuckets.orange} orange · {agingBuckets.red} red
+                </p>
+              )}
+            </div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-[#6B7280]">Outstanding Qty</p>
-              <p className={`text-xl font-bold ${totalOutstandingQty > 0 ? "text-[#9C6F1E]" : "text-[#1F1D1B]"}`}>{totalOutstandingQty}</p>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+              <Package className="h-5 w-5 text-[#9C6F1E]" />
             </div>
-            <Package className="h-5 w-5 text-[#9C6F1E]" />
+            <div>
+              <p className={cn("text-2xl font-bold", totalOutstandingQty > 0 ? "text-[#9C6F1E]" : "text-[#1F1D1B]")}>{totalOutstandingQty}</p>
+              <p className="text-xs text-[#6B7280]">Outstanding Qty</p>
+            </div>
           </CardContent>
         </Card>
       </div>
@@ -1779,49 +1845,63 @@ export default function ProcurementPage() {
           </div>
 
           {showFilters && (
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-3 border-t border-[#E2DDD8]">
-              <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">Status</label>
-                <select
-                  value={filterStatus}
-                  onChange={(e) => setFilterStatus(e.target.value)}
-                  className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-                >
-                  {ALL_PO_STATUSES.map(s => (
-                    <option key={s.value} value={s.value}>{s.label}</option>
-                  ))}
-                </select>
+            <>
+              <div className="flex flex-wrap items-center gap-2 pt-3 pb-1 border-t border-[#E2DDD8]">
+                <span className="text-xs text-[#9CA3AF]">Quick:</span>
+                <Button variant="outline" size="sm" onClick={() => applyDatePreset("this-month")}>
+                  This Month
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => applyDatePreset("last-month")}>
+                  Last Month
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => applyDatePreset("this-year")}>
+                  This Year
+                </Button>
               </div>
-              <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">Supplier</label>
-                <select
-                  value={filterSupplier}
-                  onChange={(e) => setFilterSupplier(e.target.value)}
-                  className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-                >
-                  <option value="">All Suppliers</option>
-                  {uniqueSuppliers.map(([id, name]) => (
-                    <option key={id} value={id}>{name}</option>
-                  ))}
-                </select>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-2">
+                <div>
+                  <label className="block text-xs text-[#9CA3AF] mb-1">Status</label>
+                  <select
+                    value={filterStatus}
+                    onChange={(e) => setFilterStatus(e.target.value)}
+                    className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  >
+                    {ALL_PO_STATUSES.map(s => (
+                      <option key={s.value} value={s.value}>{s.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-[#9CA3AF] mb-1">Supplier</label>
+                  <select
+                    value={filterSupplier}
+                    onChange={(e) => setFilterSupplier(e.target.value)}
+                    className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  >
+                    <option value="">All Suppliers</option>
+                    {uniqueSuppliers.map(([id, name]) => (
+                      <option key={id} value={id}>{name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-[#9CA3AF] mb-1">Date From</label>
+                  <Input
+                    type="date"
+                    value={filterDateFrom}
+                    onChange={(e) => setFilterDateFrom(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-[#9CA3AF] mb-1">Date To</label>
+                  <Input
+                    type="date"
+                    value={filterDateTo}
+                    onChange={(e) => setFilterDateTo(e.target.value)}
+                  />
+                </div>
               </div>
-              <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">Date From</label>
-                <Input
-                  type="date"
-                  value={filterDateFrom}
-                  onChange={(e) => setFilterDateFrom(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-[#9CA3AF] mb-1">Date To</label>
-                <Input
-                  type="date"
-                  value={filterDateTo}
-                  onChange={(e) => setFilterDateTo(e.target.value)}
-                />
-              </div>
-            </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -1829,10 +1909,39 @@ export default function ProcurementPage() {
       {/* Purchase Orders */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2">
-            <ShoppingBag className="h-5 w-5 text-[#6B5C32]" />
-            Purchase Orders
-          </CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center gap-2">
+              <ShoppingBag className="h-5 w-5 text-[#6B5C32]" />
+              Purchase Orders
+            </CardTitle>
+            {/* Draft / Confirmed toggle — mirrors SO list shell.
+                POs are all Confirmed (no DRAFT workflow); the Draft tab shows
+                the real count so if any slip through they're visible. */}
+            <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
+              <button
+                onClick={() => { setTab("DRAFT"); setSelectedPOs([]); }}
+                className={cn(
+                  "px-4 py-1.5 text-sm rounded transition-colors",
+                  tab === "DRAFT"
+                    ? "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm"
+                    : "text-[#6B7280] hover:text-[#1F1D1B]"
+                )}
+              >
+                Draft ({draftCount})
+              </button>
+              <button
+                onClick={() => { setTab("CONFIRMED"); setSelectedPOs([]); }}
+                className={cn(
+                  "px-4 py-1.5 text-sm rounded transition-colors",
+                  tab === "CONFIRMED"
+                    ? "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm"
+                    : "text-[#6B7280] hover:text-[#1F1D1B]"
+                )}
+              >
+                Confirmed ({confirmedCount})
+              </button>
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           <DataGrid<PurchaseOrder>
@@ -1847,7 +1956,9 @@ export default function ProcurementPage() {
             onDoubleClick={(row) => navigate(`/procurement/${row.id}`)}
             contextMenuItems={poGridContextMenu}
             maxHeight="calc(100vh - 300px)"
-            emptyMessage="No purchase orders found."
+            emptyMessage={tab === "DRAFT" ? "No draft purchase orders." : "No purchase orders found."}
+            onSearchChange={setGridSearch}
+            gridId="purchase-orders-list"
           />
         </CardContent>
       </Card>

@@ -36,6 +36,8 @@ type GRNListItem = {
   supplierName: string;
   status: string;
   receivedDate: string;
+  /** Per-line invoicing state returned by GET /api/grn (rowToGRN includes items). */
+  items?: { availableQty: number }[];
 };
 
 type Tab = "po" | "grn";
@@ -119,8 +121,13 @@ export function FromSourceModal({ open, onClose, onSelect }: Props) {
   const q = query.toLowerCase().trim();
 
   const filteredPOs = useMemo(() => {
+    // CLOSED and CANCELLED are terminal — nothing more can be converted from
+    // them. DRAFT POs are not yet confirmed. Exclude all three.
     const base = allPOs.filter(
-      (p) => p.status !== "CANCELLED" && p.status !== "DRAFT",
+      (p) =>
+        p.status !== "CANCELLED" &&
+        p.status !== "DRAFT" &&
+        p.status !== "CLOSED",
     );
     if (!q) return base.slice(0, 60); // cap at 60 for render perf
     return base
@@ -133,8 +140,20 @@ export function FromSourceModal({ open, onClose, onSelect }: Props) {
   }, [allPOs, q]);
 
   const filteredGRNs = useMemo(() => {
-    // Prefer POSTED, but show all non-cancelled so operator can still pick CONFIRMED
-    const base = allGRNs.filter((g) => g.status !== "CANCELLED");
+    // Prefer POSTED, but show all non-cancelled so operator can still pick CONFIRMED.
+    // Exclude GRNs where every line's availableQty is 0 — nothing left to invoice.
+    // GET /api/grn returns items[] with availableQty already computed server-side.
+    const base = allGRNs.filter((g) => {
+      if (g.status === "CANCELLED") return false;
+      // If items are present, hide GRNs that are fully invoiced.
+      if (g.items && g.items.length > 0) {
+        const hasInvoiceable = g.items.some(
+          (i) => (Number(i.availableQty) || 0) > 0,
+        );
+        if (!hasInvoiceable) return false;
+      }
+      return true;
+    });
     const sorted = [
       ...base.filter((g) => g.status === "POSTED"),
       ...base.filter((g) => g.status !== "POSTED"),
@@ -237,7 +256,7 @@ export function FromSourceModal({ open, onClose, onSelect }: Props) {
               )}
               {!poLoading && filteredPOs.length === 0 && (
                 <p className="text-xs text-[#9CA3AF] text-center py-8">
-                  No purchase orders found
+                  No purchase orders available to convert. Closed, cancelled, or draft POs are hidden.
                 </p>
               )}
               {filteredPOs.map((po) => (
@@ -285,7 +304,7 @@ export function FromSourceModal({ open, onClose, onSelect }: Props) {
               )}
               {!grnLoading && filteredGRNs.length === 0 && (
                 <p className="text-xs text-[#9CA3AF] text-center py-8">
-                  No goods receipts found
+                  No goods receipts available to invoice. Fully invoiced and cancelled GRNs are hidden.
                 </p>
               )}
               {filteredGRNs.map((g) => (

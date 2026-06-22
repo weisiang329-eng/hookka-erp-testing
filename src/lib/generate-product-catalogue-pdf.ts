@@ -182,13 +182,8 @@ function drawCard(doc: jsPDF, entry: CatalogueModelEntry, x: number, y: number):
   doc.text(catLabel, tx + 1.75, ty);
   ty += 5;
 
-  // Product name (muted)
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(5.8);
-  doc.setTextColor(...PDF.muted);
-  const nameText = (doc.splitTextToSize(entry.name || entry.baseModel, maxTw) as string[])[0] ?? "";
-  doc.text(nameText, tx, ty);
-  ty += 3.5;
+  // Product-name line intentionally omitted (owner: catalogue cards show only
+  // code + category + SKU/size summary, matching the on-screen catalog tiles).
 
   // Variant count + size labels
   doc.setFontSize(5.2);

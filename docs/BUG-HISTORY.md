@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-22-006 — Phantom "559" / "1052-(K)" / "1052-(Q)" models in the Products Catalog (mis-set baseModel field)
+
+🟢 **Fixed** · `pricing-products` / `data-integrity` · caught by owner on prod
+
+**Symptom:** the Catalog showed a "559" SOFA model (1 SKU · 3S) the owner didn't recognise ("we don't have a 559"). The Catalog groups models by the products' stored `baseModel` field.
+
+**Root cause:** product `5539-3S` (SOFA 5539 3S) had `baseModel = "559"` (a typo — should be "5539"), so it split off from the real 16-variant 5539 model into a phantom 1-SKU "559" tile. A full 259-product audit (expected baseModel = code minus the last `-<size>` segment) found 2 more of the same class: `1052-(K)` and `1052-(Q)` had `baseModel` = their full code (incl. the King/Queen size) instead of "1052", so they'd each surface as phantom 1-SKU tiles too. (One false positive — `1030-(HF)(W)(SS)` has an irregular code but a correct `baseModel` — left alone.)
+
+**Fix:** corrected the 3 products' `baseModel` via `PUT /api/products/:id` (5539-3S→"5539", 1052-(K)/(Q)→"1052"). No code change — pure data. `baseModel` is set at import and is **read-only in the SKU Master UI**. The PUT was issued through the app's **authenticated `window.fetch`** from the browser console — the app wraps `fetch` to add the Bearer token, so `window.fetch` carries auth, whereas a raw XHR (cookies only) 403s on mutations.
+
+**Verified live (prod):** re-fetched all 259 products — 0 remaining `baseModel`s equal to "559" or containing a size suffix; the Sofa Catalog dropped 10→9 models and 5539 now shows 17 SKUs (was 16 + the 3S); no orphaned photos (all 3 phantoms were NO-PHOTO, so no `resourceId` orphaning). Lesson: catalog grouping trusts the stored `baseModel`, which is typo-prone at import — consider validating/deriving it on write if this recurs.
+
+---
+
 ## BUG-2026-06-22-005 — Product Catalogue PDF showed "NO PHOTO" for every model even when photos were uploaded
 
 🟢 **Fixed** · `ui-frontend` · caught by owner on prod

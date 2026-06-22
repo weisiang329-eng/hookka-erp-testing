@@ -394,8 +394,11 @@ async function renderStickerLandscape(
   doc.setFont("helvetica", "bold");
   doc.text(`DD: ${fmtDate(jc.dueDate)}`, infoX, y);
 
-  // Dept-specific fields below QR
-  const deptFields = getDeptSpecificFields(order, jc.departmentCode, jc);
+  // Dept-specific fields below QR. Skip fields whose value is empty or "-"
+  // so rows like "Leg: —" don't consume vertical space when the order has no
+  // value (owner request: "empty fields should be removed, not printed").
+  const deptFields = getDeptSpecificFields(order, jc.departmentCode, jc)
+    .filter((f) => f.value && f.value !== "-");
   const fy = qrY + qrSize + 3;
   if (deptFields.length > 0) {
     doc.setDrawColor(220, 220, 220);
@@ -448,10 +451,20 @@ async function renderStickerPortrait(
   doc.setLineWidth(0.5);
   doc.rect(2, 2, pw - 4, ph - 4);
 
-  // Header: parent FG model, centered, big
+  // Header: parent FG model, centered, big.
+  // Auto-fit: start at 18pt and shrink (floor 9pt) until the text fits within
+  // the printable width (pw − 2×4mm side padding) on ONE line — mirrors the
+  // drawLetterhead title auto-fit in pdf-utils.ts so long codes like
+  // "2038(A)(HF)(W)-(Q)" never wrap and push the QR down.
   doc.setTextColor(31, 29, 27);
-  doc.setFontSize(18);
   doc.setFont("helvetica", "bold");
+  const maxModelW = pw - 8; // 4mm padding each side
+  let modelSize = 18;
+  doc.setFontSize(modelSize);
+  while (modelSize > 9 && doc.getTextWidth(order.productCode) > maxModelW) {
+    modelSize -= 0.5;
+    doc.setFontSize(modelSize);
+  }
   doc.text(order.productCode, pw / 2, 14, { align: "center" });
 
   // Divider under header
@@ -480,8 +493,11 @@ async function renderStickerPortrait(
     ["MFD", mfd],
   ];
 
+  // Skip rows whose value is empty or "-" so they don't consume vertical space
+  // (owner: "empty fields should be removed, not printed as blank/—").
+  const visibleRows = infoRows.filter(([, v]) => v && v !== "-");
   doc.setFontSize(9);
-  for (const [label, value] of infoRows) {
+  for (const [label, value] of visibleRows) {
     doc.setFont("helvetica", "normal");
     doc.setTextColor(100, 100, 100);
     doc.text(label, labelX, iy);
@@ -489,7 +505,7 @@ async function renderStickerPortrait(
     doc.setFont("helvetica", "bold");
     doc.setTextColor(31, 29, 27);
     const wrapped = doc.splitTextToSize(value, pw - valueX - 6);
-    doc.text(wrapped[0] || "-", valueX, iy);
+    doc.text(wrapped[0] || value, valueX, iy);
     iy += rowGap;
   }
 

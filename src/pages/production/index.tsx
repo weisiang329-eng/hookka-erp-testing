@@ -8236,8 +8236,8 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Our SO No</span>: {s.salesOrderNo || "—"}</div>
                         <div className="flex items-baseline gap-1">
-                          <span className="inline-block w-[72px] font-semibold text-[#6B7280]">Model</span>
-                          <span className="font-bold" style={{ fontSize: "16px" }}>: {s.productCode || "—"}</span>
+                          <span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">Model</span>
+                          <span className="font-bold whitespace-nowrap" style={{ fontSize: `${Math.max(11, Math.min(16, Math.round(200 / ((s.productCode || "—").length + 2))))}px` }}>: {s.productCode || "—"}</span>
                         </div>
                         {s.boxLabel && (
                           <div className="flex items-baseline gap-1">
@@ -8716,8 +8716,16 @@ export default function ProductionPage({
                       <div><span className="inline-block w-[30mm] font-semibold">Cust SO</span>: {s.customerSO || "—"}</div>
                       <div><span className="inline-block w-[30mm] font-semibold">Our SO No</span>: {s.salesOrderNo || "—"}</div>
                       <div className="flex items-baseline gap-[1mm]">
-                        <span className="inline-block w-[30mm] font-semibold">Model</span>
-                        <span className="font-bold" style={{ fontSize: "20pt" }}>: {s.productCode || "—"}</span>
+                        <span className="inline-block w-[30mm] font-semibold shrink-0">Model</span>
+                        {/* Model MUST stay on ONE line — a wrapped model pushes the
+                            whole card down and shoves the bottom QR off the label
+                            (owner: "QR 又爆了 … model 一定要放进去同一排"). nowrap +
+                            length-based auto-shrink: short codes print big (20pt),
+                            long ones (e.g. 1030(HF)(W)-(Q)) shrink to fit, floor 11pt. */}
+                        <span
+                          className="font-bold whitespace-nowrap"
+                          style={{ fontSize: `${Math.max(11, Math.min(20, Math.round(250 / ((s.productCode || "—").length + 2))))}pt`, lineHeight: 1.1 }}
+                        >: {s.productCode || "—"}</span>
                       </div>
                       {s.boxLabel && (
                         <div className="flex items-baseline gap-[1mm]">

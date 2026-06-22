@@ -34,6 +34,15 @@ import {
   type SalesOrderRow,
   type SalesOrderItemRow,
 } from "./sales-orders";
+import {
+  resolveMaterialCode,
+  bindingKey,
+  normCode,
+  normName,
+  needsFix,
+  type ResolveLookups,
+  type ResolveMethod,
+} from "../lib/material-code-resolve";
 
 const app = new Hono<Env>();
 
@@ -700,6 +709,468 @@ app.post("/rebuild-pos/:soId", async (c) => {
       500,
     );
   }
+});
+
+// ===========================================================================
+// POST /api/admin/backfill-import-data
+//
+// ONE-TIME maintenance endpoint to correct two import-data defects left by the
+// historical-PI importer (routes/import-completion.ts). It is dry-run by
+// default and never writes unless BOTH ?dryRun=false AND { confirm: true }.
+// Before any UPDATE it backs the affected rows up into zz_backfill_import_data_*
+// tables via CREATE TABLE … AS SELECT so the parent can restore. All writes
+// land in ONE db.batch (atomic).
+//
+// Fix #1 — grn_items.invoiced_qty backfill.
+//   The importer inserted GRNs straight as POSTED but never set the
+//   convert-chain counter `invoiced_qty` (grn.ts: available-to-invoice =
+//   accepted_qty − invoiced_qty). For GRN lines under an import GRN that has a
+//   matching PI, the qty is already fully invoiced, so invoiced_qty should
+//   equal acceptedQty. We set invoiced_qty = acceptedQty for import-GRN lines
+//   where invoiced_qty IS NULL OR 0. No stock/cost impact — this only stops the
+//   line re-appearing in the PI-convert picker's GRN tab (can't double-invoice).
+//   Scope: GRNs whose number LIKE 'GRN-IMPORT-PI-%'.
+//   Column note: grn_items uses camelCase `grnId`/`acceptedQty`; the counter is
+//   snake_case `invoiced_qty` (confirmed: grn.ts:65, purchase-invoices.ts:851
+//   both write `invoiced_qty`; reads dual-key invoicedQty ?? invoiced_qty).
+//
+// Fix #2 — material_code backfill on purchase_invoice_items + purchase_order_items.
+//   ~12% of imported lines have a blank/wrong material_code (the importer
+//   sometimes stamped the supplier SKU into it, or left it null). For any line
+//   whose material_code is NULL/empty OR is NOT a valid raw_materials.itemCode,
+//   resolve OUR internal code via material-code-resolve.ts:
+//     (a) PRIMARY  — supplier_material_bindings by (parent doc supplierId +
+//                    line supplierSku) → binding.materialCode
+//     (b) FALLBACK — match the line material_name to a raw_materials row →
+//                    that row's itemCode
+//   Rows where nothing resolves are LEFT UNTOUCHED and listed in the preview.
+//   Column note: purchase_invoice_items is snake_case (pi_id, material_code,
+//   material_name, supplier_sku). purchase_order_items is camelCase
+//   (purchaseOrderId, supplierSKU) EXCEPT material_code (snake, mig 0103) +
+//   materialName (camel). We UPDATE only the snake_case `material_code` on both,
+//   so no column-rename-map.json change is needed.
+// ===========================================================================
+
+const IMPORT_GRN_LIKE = "GRN-IMPORT-PI-%";
+
+// How many sample rows to surface per fix in the preview.
+const SAMPLE_LIMIT = 15;
+
+type Fix2Sample = {
+  table: "purchase_invoice_items" | "purchase_order_items";
+  docNo: string | null;
+  itemId: string;
+  oldCode: string | null;
+  supplierSku: string | null;
+  materialName: string | null;
+  newCode: string;
+  method: ResolveMethod;
+};
+
+type Fix2Unresolved = {
+  table: "purchase_invoice_items" | "purchase_order_items";
+  docNo: string | null;
+  itemId: string;
+  oldCode: string | null;
+  supplierSku: string | null;
+  materialName: string | null;
+};
+
+// Load the shared lookup maps once (raw_materials + supplier_material_bindings).
+async function loadResolveLookups(db: D1Database): Promise<ResolveLookups> {
+  const validCodes = new Set<string>();
+  const codeByName = new Map<string, string>();
+  const rmRes = await db
+    .prepare("SELECT itemCode, description FROM raw_materials")
+    .all<{ itemCode: string; description: string | null }>();
+  // First pass: collect every valid code + detect ambiguous names.
+  const nameHits = new Map<string, string[]>();
+  for (const r of rmRes.results ?? []) {
+    const code = normCode(r.itemCode);
+    if (!code) continue;
+    validCodes.add(code);
+    const nm = normName(r.description);
+    if (!nm) continue;
+    const arr = nameHits.get(nm) ?? [];
+    arr.push(code);
+    nameHits.set(nm, arr);
+  }
+  // Only index UNAMBIGUOUS names (one RM per normalized description) so the
+  // name fallback never silently picks the wrong material when two RMs share
+  // a description.
+  for (const [nm, codes] of nameHits) {
+    if (codes.length === 1) codeByName.set(nm, codes[0]);
+  }
+
+  const bindingByKey = new Map<string, string>();
+  const smbRes = await db
+    .prepare(
+      "SELECT supplierId, supplierSku, materialCode FROM supplier_material_bindings",
+    )
+    .all<{ supplierId: string; supplierSku: string; materialCode: string }>();
+  for (const b of smbRes.results ?? []) {
+    if (!b.supplierId || !b.materialCode) continue;
+    bindingByKey.set(bindingKey(b.supplierId, b.supplierSku), b.materialCode);
+  }
+
+  return { bindingByKey, validCodes, codeByName };
+}
+
+app.post("/backfill-import-data", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
+  const db = c.var.DB;
+
+  const dryRunParam = (c.req.query("dryRun") ?? "true").toLowerCase();
+  let dryRun = dryRunParam !== "false";
+
+  const body = await c.req.json().catch(() => ({}));
+  const bodyDryRun =
+    body && typeof body === "object"
+      ? (body as { dryRun?: unknown }).dryRun
+      : undefined;
+  if (bodyDryRun === false) dryRun = false;
+  const confirm =
+    body && typeof body === "object" &&
+    (body as { confirm?: unknown }).confirm === true;
+
+  // Guardrail (mirrors /archive/run): a real run needs confirm:true in body.
+  if (!dryRun && !confirm) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Refusing to write without confirmation. Pass { confirm: true } in the body together with ?dryRun=false.",
+      },
+      400,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Fix #1 PREVIEW — import-GRN lines with invoiced_qty NULL/0.
+  // -------------------------------------------------------------------------
+  const fix1CountRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM grn_items gi
+        WHERE EXISTS (
+          SELECT 1 FROM grns g
+           WHERE g.id = gi.grnId
+             AND g.grnNumber LIKE ?
+        )
+          AND COALESCE(gi.invoiced_qty, 0) = 0
+          AND COALESCE(gi.acceptedQty, 0) > 0`,
+    )
+    .bind(IMPORT_GRN_LIKE)
+    .first<{ n: number }>();
+  const fix1Count = fix1CountRow?.n ?? 0;
+
+  const fix1SamplesRes = await db
+    .prepare(
+      `SELECT g.grnNumber AS grnNumber,
+              gi.id        AS itemId,
+              gi.materialName AS materialName,
+              gi.acceptedQty  AS acceptedQty,
+              gi.invoiced_qty AS oldInvoicedQty
+         FROM grn_items gi
+         JOIN grns g ON g.id = gi.grnId
+        WHERE g.grnNumber LIKE ?
+          AND COALESCE(gi.invoiced_qty, 0) = 0
+          AND COALESCE(gi.acceptedQty, 0) > 0
+        ORDER BY g.grnNumber, gi.id
+        LIMIT ?`,
+    )
+    .bind(IMPORT_GRN_LIKE, SAMPLE_LIMIT)
+    .all<{
+      grnNumber: string;
+      itemId: string;
+      materialName: string | null;
+      acceptedQty: number;
+      oldInvoicedQty: number | null;
+    }>();
+  const fix1Samples = (fix1SamplesRes.results ?? []).map((r) => ({
+    grnNumber: r.grnNumber,
+    itemId: r.itemId,
+    materialName: r.materialName,
+    oldInvoicedQty: Number(r.oldInvoicedQty ?? 0) || 0,
+    newInvoicedQty: Number(r.acceptedQty) || 0, // = acceptedQty
+  }));
+
+  // -------------------------------------------------------------------------
+  // Fix #2 PREVIEW — material_code backfill on PI + PO items.
+  // -------------------------------------------------------------------------
+  const lookups = await loadResolveLookups(db);
+
+  // PI items joined to their parent PI (supplierId + piNo for context).
+  const piItemsRes = await db
+    .prepare(
+      `SELECT pii.id          AS itemId,
+              pii.material_code AS oldCode,
+              pii.material_name AS materialName,
+              pii.supplier_sku  AS supplierSku,
+              pi.supplierId     AS supplierId,
+              pi.piNo           AS docNo
+         FROM purchase_invoice_items pii
+         JOIN purchase_invoices pi ON pi.id = pii.pi_id`,
+    )
+    .all<{
+      itemId: string;
+      oldCode: string | null;
+      materialName: string | null;
+      supplierSku: string | null;
+      supplierId: string | null;
+      docNo: string | null;
+    }>();
+
+  // PO items joined to their parent PO (supplierId + poNo). NB the line SKU
+  // column on purchase_order_items is camelCase `supplierSKU`.
+  const poItemsRes = await db
+    .prepare(
+      `SELECT poi.id          AS itemId,
+              poi.material_code AS oldCode,
+              poi.materialName  AS materialName,
+              poi.supplierSKU   AS supplierSku,
+              po.supplierId     AS supplierId,
+              po.poNo           AS docNo
+         FROM purchase_order_items poi
+         JOIN purchase_orders po ON po.id = poi.purchaseOrderId`,
+    )
+    .all<{
+      itemId: string;
+      oldCode: string | null;
+      materialName: string | null;
+      supplierSku: string | null;
+      supplierId: string | null;
+      docNo: string | null;
+    }>();
+
+  type Fix2Plan = {
+    itemId: string;
+    newCode: string;
+  };
+  const fix2Samples: Fix2Sample[] = [];
+  const fix2Unresolved: Fix2Unresolved[] = [];
+  let fix2PiToFix = 0;
+  let fix2PoToFix = 0;
+  let fix2PiResolved = 0;
+  let fix2PoResolved = 0;
+  const piPlan: Fix2Plan[] = [];
+  const poPlan: Fix2Plan[] = [];
+
+  function classify(
+    table: "purchase_invoice_items" | "purchase_order_items",
+    rows: Array<{
+      itemId: string;
+      oldCode: string | null;
+      materialName: string | null;
+      supplierSku: string | null;
+      supplierId: string | null;
+      docNo: string | null;
+    }>,
+    plan: Fix2Plan[],
+  ): { toFix: number; resolved: number } {
+    let toFix = 0;
+    let resolved = 0;
+    for (const r of rows) {
+      // Leave valid codes alone.
+      if (!needsFix(r.oldCode, lookups.validCodes)) continue;
+      toFix++;
+      const res = resolveMaterialCode(
+        r.supplierId,
+        r.supplierSku,
+        r.materialName,
+        lookups,
+      );
+      if (!res) {
+        fix2Unresolved.push({
+          table,
+          docNo: r.docNo,
+          itemId: r.itemId,
+          oldCode: r.oldCode,
+          supplierSku: r.supplierSku,
+          materialName: r.materialName,
+        });
+        continue;
+      }
+      resolved++;
+      plan.push({ itemId: r.itemId, newCode: res.code });
+      if (fix2Samples.length < SAMPLE_LIMIT) {
+        fix2Samples.push({
+          table,
+          docNo: r.docNo,
+          itemId: r.itemId,
+          oldCode: r.oldCode,
+          supplierSku: r.supplierSku,
+          materialName: r.materialName,
+          newCode: res.code,
+          method: res.method,
+        });
+      }
+    }
+    return { toFix, resolved };
+  }
+
+  {
+    const pi = classify("purchase_invoice_items", piItemsRes.results ?? [], piPlan);
+    fix2PiToFix = pi.toFix;
+    fix2PiResolved = pi.resolved;
+    const po = classify("purchase_order_items", poItemsRes.results ?? [], poPlan);
+    fix2PoToFix = po.toFix;
+    fix2PoResolved = po.resolved;
+  }
+
+  const preview = {
+    fix1_grn_invoiced_qty: {
+      table: "grn_items",
+      column: "invoiced_qty",
+      scope: `GRNs LIKE '${IMPORT_GRN_LIKE}'`,
+      rule: "set invoiced_qty = acceptedQty where invoiced_qty IS NULL/0 and acceptedQty > 0",
+      wouldUpdate: fix1Count,
+      samples: fix1Samples,
+    },
+    fix2_material_code: {
+      tables: ["purchase_invoice_items", "purchase_order_items"],
+      column: "material_code",
+      purchase_invoice_items: {
+        needFix: fix2PiToFix,
+        resolved: fix2PiResolved,
+        unresolved: fix2PiToFix - fix2PiResolved,
+      },
+      purchase_order_items: {
+        needFix: fix2PoToFix,
+        resolved: fix2PoResolved,
+        unresolved: fix2PoToFix - fix2PoResolved,
+      },
+      wouldUpdate: fix2PiResolved + fix2PoResolved,
+      samples: fix2Samples,
+      unresolvedSamples: fix2Unresolved.slice(0, SAMPLE_LIMIT),
+      unresolvedTotal: fix2Unresolved.length,
+    },
+  };
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      preview,
+      note:
+        "Dry run — nothing written. Pass ?dryRun=false with { confirm: true } in the body to execute. Backups land in zz_backfill_import_data_*.",
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // REAL RUN — back up affected rows, then UPDATE, all in ONE atomic batch.
+  // -------------------------------------------------------------------------
+  const statements: D1PreparedStatement[] = [];
+
+  // Drop any prior backup tables (a re-run after a partial restore) so the
+  // CREATE TABLE … AS SELECT below doesn't error on "already exists".
+  statements.push(
+    db.prepare("DROP TABLE IF EXISTS zz_backfill_import_data_grn_items"),
+  );
+  statements.push(
+    db.prepare(
+      "DROP TABLE IF EXISTS zz_backfill_import_data_purchase_invoice_items",
+    ),
+  );
+  statements.push(
+    db.prepare(
+      "DROP TABLE IF EXISTS zz_backfill_import_data_purchase_order_items",
+    ),
+  );
+
+  // ---- Fix #1 backup + update ----
+  if (fix1Count > 0) {
+    statements.push(
+      db.prepare(
+        `CREATE TABLE zz_backfill_import_data_grn_items AS
+           SELECT gi.* FROM grn_items gi
+            WHERE EXISTS (
+              SELECT 1 FROM grns g
+               WHERE g.id = gi.grnId AND g.grnNumber LIKE ?
+            )
+              AND COALESCE(gi.invoiced_qty, 0) = 0
+              AND COALESCE(gi.acceptedQty, 0) > 0`,
+      ).bind(IMPORT_GRN_LIKE),
+    );
+    statements.push(
+      db.prepare(
+        `UPDATE grn_items
+            SET invoiced_qty = acceptedQty
+          WHERE id IN (
+            SELECT gi.id FROM grn_items gi
+             WHERE EXISTS (
+               SELECT 1 FROM grns g
+                WHERE g.id = gi.grnId AND g.grnNumber LIKE ?
+             )
+               AND COALESCE(gi.invoiced_qty, 0) = 0
+               AND COALESCE(gi.acceptedQty, 0) > 0
+          )`,
+      ).bind(IMPORT_GRN_LIKE),
+    );
+  }
+
+  // ---- Fix #2 backup + per-row update (only resolved rows) ----
+  if (piPlan.length > 0) {
+    const ids = piPlan.map((p) => p.itemId);
+    statements.push(
+      db
+        .prepare(
+          `CREATE TABLE zz_backfill_import_data_purchase_invoice_items AS
+             SELECT * FROM purchase_invoice_items
+              WHERE id IN (${ids.map(() => "?").join(",")})`,
+        )
+        .bind(...ids),
+    );
+    for (const p of piPlan) {
+      statements.push(
+        db
+          .prepare(
+            "UPDATE purchase_invoice_items SET material_code = ? WHERE id = ?",
+          )
+          .bind(p.newCode, p.itemId),
+      );
+    }
+  }
+  if (poPlan.length > 0) {
+    const ids = poPlan.map((p) => p.itemId);
+    statements.push(
+      db
+        .prepare(
+          `CREATE TABLE zz_backfill_import_data_purchase_order_items AS
+             SELECT * FROM purchase_order_items
+              WHERE id IN (${ids.map(() => "?").join(",")})`,
+        )
+        .bind(...ids),
+    );
+    for (const p of poPlan) {
+      statements.push(
+        db
+          .prepare(
+            "UPDATE purchase_order_items SET material_code = ? WHERE id = ?",
+          )
+          .bind(p.newCode, p.itemId),
+      );
+    }
+  }
+
+  await db.batch(statements);
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    applied: {
+      fix1_grn_invoiced_qty: fix1Count,
+      fix2_pi_material_code: piPlan.length,
+      fix2_po_material_code: poPlan.length,
+    },
+    backups: [
+      "zz_backfill_import_data_grn_items",
+      "zz_backfill_import_data_purchase_invoice_items",
+      "zz_backfill_import_data_purchase_order_items",
+    ],
+    preview,
+  });
 });
 
 export default app;

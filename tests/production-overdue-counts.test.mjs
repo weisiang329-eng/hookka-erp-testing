@@ -169,15 +169,16 @@ test("snapshot sourceTables include delivery_orders + delivery_order_items", () 
   }
 });
 
-test("cacheKey is version-bumped (v2) so stale old-semantics snapshots are bypassed", () => {
+test("cacheKey is version-bumped (vN) so stale old-semantics snapshots are bypassed", () => {
   const h = extractOverdueHandler(read(SRC));
   assert.ok(h, "handler missing — see previous test");
   assert.match(
     h,
-    /const cacheKey = `v2&dept=\$\{dept \?\? ""\}&today=\$\{today\}`;/,
-    "cacheKey must carry a version token (v2) — the cached payload's meaning " +
-      "changed (bedframe by piece + ship-exclusion), so pre-existing snapshot " +
-      "rows must not be served.",
+    /const cacheKey = `v\d+&dept=\$\{dept \?\? ""\}&today=\$\{today\}`;/,
+    "cacheKey must carry a version token (vN) — the cached payload's meaning/shape " +
+      "has changed over time (bedframe by piece + ship-exclusion at v2; the overdue " +
+      "PO id arrays at v3), so pre-existing snapshot rows must not be served. Bump " +
+      "the version on any payload SHAPE change.",
   );
 });
 

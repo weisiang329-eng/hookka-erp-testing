@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { LifecycleActions, LifecycleBadge } from "@/components/accounting/lifecycle-actions";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { CreditCard } from "lucide-react";
@@ -356,18 +357,13 @@ export default function SupplierPaymentsPage() {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="md:col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
-              <select
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+              <SearchableSelect
                 value={selectedSupplierId}
-                onChange={(e) => handleSupplierChange(e.target.value)}
-              >
-                <option value="">Select supplier...</option>
-                {suppliers.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.code ? `${s.code} ` : ""}{s.name}
-                  </option>
-                ))}
-              </select>
+                onChange={handleSupplierChange}
+                options={suppliers.map((s) => ({ value: s.id, label: s.code ? `${s.code} ${s.name}` : s.name }))}
+                placeholder="Type supplier code or name..."
+                allowClear
+              />
             </div>
 
             {/* Date — drives the payment number / period; editable. */}

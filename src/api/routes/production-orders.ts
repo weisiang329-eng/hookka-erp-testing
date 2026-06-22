@@ -4641,7 +4641,11 @@ app.get("/overdue-counts", async (c) => {
   // cache_key version sidesteps every pre-existing snapshot row (old
   // bedframe-by-SO counts) cleanly instead of serving stale numbers until they
   // expire — the old rows simply go unread and age out via the nightly wipe.
-  const cacheKey = `v2&dept=${dept ?? ""}&today=${today}`;
+  // v3 bump (2026-06-23): payload now also carries overdueBedframePoIds /
+  // overdueSofaPoIds (the PO-id sets the Overview grid filters on). That is a
+  // SHAPE change, so bump again — without this the new code reads the existing
+  // v2 snapshot rows, which lack the id arrays, and the grid filters to 0.
+  const cacheKey = `v3&dept=${dept ?? ""}&today=${today}`;
   const { withSnapshot } = await import("../lib/snapshot");
   const result = await withSnapshot(
     c.var.DB,

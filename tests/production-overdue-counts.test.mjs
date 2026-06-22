@@ -275,3 +275,40 @@ test("frontend grid filters by the overdue PO-id set (no separate SO-list panel)
       "chip now filters the main grid below instead.",
   );
 });
+
+// ---------------------------------------------------------------------------
+// 7. Stale-SHAPED client cache must not filter the grid to 0 (BUG-2026-06-23).
+//    A browser holding a counts payload cached BEFORE the id arrays existed has
+//    bedframeCount:29 but NO overdueBedframePoIds. The memo must treat ABSENT
+//    ids (undefined) as "not loaded yet" → null (skip the id-filter + refetch),
+//    NOT as an empty Set (which filtered all 1032 rows out → "0 of 1032").
+//    PRESENT-BUT-EMPTY ([]) must still build the Set so a genuine 0 stays 0.
+// ---------------------------------------------------------------------------
+test("absent overdue id array → null (skip filter + self-heal), not an empty Set", () => {
+  const fe = read(FE);
+  // The bug was `new Set(ids ?? [])` — absent ids collapsed to an empty Set,
+  // which the grid predicate then used to exclude every row. That exact
+  // fallback must be gone.
+  assert.doesNotMatch(
+    fe,
+    /return new Set\(ids \?\? \[\]\)/,
+    "The `ids ?? []` fallback collapses an ABSENT id array (stale-shape cache) " +
+      "into an empty Set, filtering the grid to 0. Distinguish absent from empty.",
+  );
+  // Absent (undefined) ids must short-circuit to null so the id-filter is
+  // skipped (overduePoIdSet === null) instead of excluding everything.
+  assert.match(
+    fe,
+    /if \(!ids\) return null;\s*\n\s*return new Set\(ids\);/,
+    "Memo must return null when the id array is ABSENT (skip the id-filter, " +
+      "let the self-heal refetch land) and build the Set only when present.",
+  );
+  // A stale-shape payload (present object, missing array) must force a
+  // cache-bypass refetch so the array-bearing payload arrives without a reload.
+  assert.match(
+    fe,
+    /if \(overdueCountsResp && !ids\) refreshOverdueCounts\(\)/,
+    "When the counts payload is present but the active chip's id array is " +
+      "absent, force a refetch so the stale-shape client cache self-heals.",
+  );
+});

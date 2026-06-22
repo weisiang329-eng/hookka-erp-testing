@@ -977,7 +977,7 @@ export default function ProductionPage({
   const overdueCountsUrl: string | null = datesSeeded
     ? `/api/production-orders/overdue-counts${overdueDept ? `?dept=${encodeURIComponent(overdueDept)}` : ""}`
     : null;
-  const { data: overdueCountsResp } = useCachedJson<{
+  const { data: overdueCountsResp, refresh: refreshOverdueCounts } = useCachedJson<{
     success?: boolean;
     data?: {
       bedframeCount: number;
@@ -986,7 +986,11 @@ export default function ProductionPage({
       // PO-id sets per category — used to filter the main grid to exactly the
       // overdue work the chips count (same server overdue set, ship-exclusion
       // included). Optional so a cached older payload (pre-2026-06-23) still
-      // parses; the grid-filter falls back to an empty set if absent.
+      // parses. When ABSENT (an old-shape cache written before these arrays
+      // existed) the grid-filter treats it as "ids not loaded yet" and skips
+      // the id-filter while forcing a refetch — it must NOT collapse to an
+      // empty set, which would filter the grid to 0 even though the chip
+      // count is right (BUG-2026-06-23: stale-shape cache → "0 of 1032").
       overdueBedframePoIds?: string[];
       overdueSofaPoIds?: string[];
     };
@@ -2589,8 +2593,39 @@ export default function ProductionPage({
       overduePanelMode === "BEDFRAME"
         ? overdueCountsResp?.data?.overdueBedframePoIds
         : overdueCountsResp?.data?.overdueSofaPoIds;
-    return new Set(ids ?? []);
+    // CRITICAL distinction (BUG-2026-06-23):
+    //   • ABSENT (undefined) → the loaded counts payload predates the id
+    //     arrays (a stale-SHAPED localStorage cache written before
+    //     2026-06-23). We do NOT know the overdue ids yet, so return null to
+    //     SKIP the id-filter entirely. Collapsing absent→empty Set was the
+    //     bug: it filtered all 1032 rows out → "No production orders found"
+    //     under a banner promising 29. A refetch is forced in the effect
+    //     below; the real ids replace this within ~50ms and narrow the grid.
+    //   • PRESENT-BUT-EMPTY ([]) → the server genuinely returned 0 overdue
+    //     for this category. Build the empty Set so the grid correctly shows
+    //     0 (the chip would read 0 too; both agree).
+    if (!ids) return null;
+    return new Set(ids);
   }, [overduePanelMode, overdueCountsResp]);
+
+  // Self-heal a stale-SHAPED counts cache (BUG-2026-06-23). When an overdue
+  // chip is active but the loaded counts payload has no id array for it (an
+  // old-shape localStorage entry that predates the arrays), force a
+  // cache-bypass refetch so the array-bearing payload arrives. useCachedJson
+  // already refetches on mount, but this guarantees the heal even if the
+  // mount refetch was deduped/aborted, and re-arms if the chip is switched
+  // before the fresh payload lands. Self-corrects every existing stale browser
+  // with no hard reload. The data dep below is intentionally the whole
+  // response object so this re-evaluates once the fresh ids replace the stale
+  // payload (at which point the absent-id condition is false and we stop).
+  useEffect(() => {
+    if (!overduePanelMode) return;
+    const ids =
+      overduePanelMode === "BEDFRAME"
+        ? overdueCountsResp?.data?.overdueBedframePoIds
+        : overdueCountsResp?.data?.overdueSofaPoIds;
+    if (overdueCountsResp && !ids) refreshOverdueCounts();
+  }, [overduePanelMode, overdueCountsResp, refreshOverdueCounts]);
 
   // Apply the page-level filter panel to `orders` first, then scope further
   // by active tab (Overview = everything; dept tab = only orders that have
@@ -2707,6 +2742,19 @@ export default function ProductionPage({
   // clicking a chip now narrows the grid below instead of popping a list.)
   const bedframeOverdueCount = overdueCountsResp?.data?.bedframeCount ?? 0;
   const sofaOverdueCount = overdueCountsResp?.data?.sofaCount ?? 0;
+
+  // True while an overdue chip is active but the matching id array hasn't
+  // loaded yet — either a stale-SHAPED cache (old payload, no arrays; being
+  // refetched by the self-heal effect above) or the very first cold fetch
+  // still in flight. In this window overduePoIdSet is null (id-filter skipped)
+  // so the banner must say "loading the list" rather than promise N rows the
+  // grid isn't yet narrowed to. PRESENT-BUT-EMPTY ([]) is NOT loading — that's
+  // a genuine 0 and the count shown is correct. (BUG-2026-06-23)
+  const overdueIdsLoading =
+    !!overduePanelMode &&
+    !(overduePanelMode === "BEDFRAME"
+      ? overdueCountsResp?.data?.overdueBedframePoIds
+      : overdueCountsResp?.data?.overdueSofaPoIds);
 
   const visibleOrders = useMemo(() => {
     let rows = filteredOrders;
@@ -6670,11 +6718,21 @@ export default function ProductionPage({
             <span className="font-semibold">
               {overduePanelMode === "BEDFRAME" ? "Bedframe" : "Sofa"} overdue filter on
             </span>{" "}
-            — grid below shows{" "}
-            {overduePanelMode === "BEDFRAME"
-              ? `the ${bedframeOverdueCount} overdue Bedframe piece${bedframeOverdueCount === 1 ? "" : "s"}`
-              : `the overdue Sofa pieces making up ${sofaOverdueCount} set${sofaOverdueCount === 1 ? "" : "s"}`}
-            {" "}(independent of the date range).
+            {overdueIdsLoading ? (
+              // Self-heal window (BUG-2026-06-23): the overdue id list hasn't
+              // loaded yet (stale-shape cache being refetched, or first cold
+              // fetch in flight). Don't promise N filtered rows the grid isn't
+              // narrowed to — say we're loading the list. Refreshes by itself.
+              <>— loading the overdue list…</>
+            ) : (
+              <>
+                — grid below shows{" "}
+                {overduePanelMode === "BEDFRAME"
+                  ? `the ${bedframeOverdueCount} overdue Bedframe piece${bedframeOverdueCount === 1 ? "" : "s"}`
+                  : `the overdue Sofa pieces making up ${sofaOverdueCount} set${sofaOverdueCount === 1 ? "" : "s"}`}
+                {" "}(independent of the date range).
+              </>
+            )}
           </span>
           <button
             type="button"

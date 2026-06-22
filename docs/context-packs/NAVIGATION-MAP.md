@@ -99,6 +99,7 @@ Built to cut token usage: open the named file at the named line range instead of
   - ThreeWayMatchPanel (PO↔GRN↔PI variance) — L1331-1497
 - `src/pages/procurement/grn/create.tsx`
   - GRN create full-page (manual default; "Convert from PO" line-pick, no mode toggle) — single component
+  - Supplier field: read-only display (code + name from linked PO, looked up in `suppliers` list) when PO-linked; editable SearchableSelect in manual mode — both rendered at same grid position
   - Convert-from-PO line-pick modal: `src/components/convert-from-po-modal.tsx`
 - `src/pages/procurement/pi/create.tsx`
   - PI create full-page ("Convert from Goods Receipt" line-pick; lines carry grnItemId)

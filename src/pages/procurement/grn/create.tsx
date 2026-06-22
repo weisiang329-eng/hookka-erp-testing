@@ -652,8 +652,28 @@ function GRNCreatePage() {
             )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Supplier picker — manual mode only (PO mode derives supplier) */}
-              {!isPoLinked && (
+              {/* Supplier — read-only when PO-linked (derived from the PO); editable picker in manual mode */}
+              {isPoLinked ? (
+                <div>
+                  <label className="block text-sm font-medium text-[#374151] mb-1.5">
+                    Supplier
+                  </label>
+                  {(() => {
+                    const linkedSupplierId = po?.supplierId ?? "";
+                    const linkedSupplierCode =
+                      suppliers.find((s) => s.id === linkedSupplierId)?.code ?? "";
+                    const linkedSupplierName =
+                      po?.supplierName || convertSupplierName || "—";
+                    return (
+                      <div className="flex items-center h-10 px-3 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] text-sm text-[#374151] select-none">
+                        {linkedSupplierCode
+                          ? <><span className="font-mono text-xs text-[#6B7280] mr-2">{linkedSupplierCode}</span>{linkedSupplierName}</>
+                          : linkedSupplierName}
+                      </div>
+                    );
+                  })()}
+                </div>
+              ) : (
                 <div>
                   <label className="block text-sm font-medium text-[#374151] mb-1.5">
                     Supplier *

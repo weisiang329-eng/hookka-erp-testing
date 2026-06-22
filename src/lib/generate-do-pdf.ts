@@ -907,7 +907,36 @@ function renderPackingSummary(
     pageW - 2 * m,
   );
   doc.text(namesLine, m, y);
-  y += namesLine.length * 3.8 + 4;
+  y += namesLine.length * 3.8 + 3;
+
+  // --- Transport line: Driver / Lorry / Plate for the run. These are stored on
+  // each DO at dispatch (delivery_orders.driverName, lorryName, vehicleNo —
+  // vehicleNo = the picked three_pl_vehicles plate / the provider's vehicleNo)
+  // and returned by GET /api/packing-lists/:id. A run normally shares one truck;
+  // if DOs carry different values we show all distinct ones so the loader/driver
+  // can still see them. driverPhone / vehicleType aren't on the typed Delivery
+  // order but the backend returns them, so read them via a narrow cast.
+  const driverNames = uniq(
+    list.map((o) => {
+      const phone = (o as { driverPhone?: string }).driverPhone?.trim();
+      const name = (o.driverName || "").trim();
+      return name ? (phone ? `${name} (${phone})` : name) : "";
+    }),
+  );
+  const lorries = uniq(list.map((o) => o.lorryName));
+  const plates = uniq(
+    list.map((o) => {
+      const plate = (o.vehicleNo || "").trim();
+      const vtype = (o as { vehicleType?: string }).vehicleType?.trim();
+      return plate ? (vtype ? `${plate} (${vtype})` : plate) : "";
+    }),
+  );
+  const transportLine = doc.splitTextToSize(
+    `Driver: ${driverNames.join(", ") || "-"}      Lorry: ${lorries.join(", ") || "-"}      Plate: ${plates.join(", ") || "-"}`,
+    pageW - 2 * m,
+  );
+  doc.text(transportLine, m, y);
+  y += transportLine.length * 3.8 + 4;
 
   // --- Container component total: how many Headboards / Divans / Sofas are in
   // the WHOLE truck (summed from each item's BOM pieces), so the loader can
@@ -1015,7 +1044,7 @@ function renderPackingSummary(
       // line is drawn by hand: didParseCell reserves the extra height,
       // didDrawCell draws it bottom-anchored under the pieces text.
       const QTY_WRAP_W = 34 - 3.6; // Quantity col width minus L/R padding
-      const LH_MAIN = 3.05; // 7.5pt × 1.15 line height, in mm
+      const LH_MAIN = 3.65; // 9pt × 1.15 line height, in mm (matches body 9pt)
       const LH_RACK = 2.55; // 6.2pt × 1.15 line height, in mm
       const rowExtras = items.map((it) => {
         const ex = exDo?.items?.[it.id];
@@ -1027,7 +1056,7 @@ function renderPackingSummary(
         const fp = fmtPieces(ex?.pieces);
         const qtyTxt = fp.text || String(it.quantity ?? 0);
         const piecesLines = (
-          doc.splitTextToSize(qtyTxt, QTY_WRAP_W, { fontSize: 7.5 }) as string[]
+          doc.splitTextToSize(qtyTxt, QTY_WRAP_W, { fontSize: 9 }) as string[]
         ).length;
         return {
           rackLines,
@@ -1080,24 +1109,30 @@ function renderPackingSummary(
         }) as RowInput[],
         theme: "plain",
         styles: {
+          // Body bumped 7.5pt → 9pt so warehouse staff can read the line
+          // Description easily (owner request). Description (col 2) is the
+          // flexible "auto" column with ~77mm to wrap into, so the larger font
+          // wraps to a 2nd line rather than overflowing. The narrow structured
+          // columns (Order / Packed) keep their own smaller per-column sizes
+          // below so they don't blow their fixed widths.
           font: "helvetica",
-          fontSize: 7.5,
+          fontSize: 9,
           cellPadding: { top: 1.2, bottom: 1.2, left: 1.8, right: 1.8 },
           textColor: INK,
           valign: "top",
         },
         headStyles: {
           fontStyle: "bold",
-          fontSize: 7,
+          fontSize: 7.5,
           lineWidth: { top: 0, bottom: 0.4, left: 0, right: 0 },
           lineColor: RULE,
         },
         columnStyles: {
           0: { cellWidth: 9, halign: "center" },
-          1: { cellWidth: 30, fontSize: 6.5 },
+          1: { cellWidth: 30, fontSize: 7 },
           2: { cellWidth: "auto" },
           3: { cellWidth: 34 },
-          4: { cellWidth: 18, fontSize: 6.5, halign: "center" },
+          4: { cellWidth: 18, fontSize: 7, halign: "center" },
           5: { cellWidth: 14, halign: "right" },
         },
         rowPageBreak: "avoid",

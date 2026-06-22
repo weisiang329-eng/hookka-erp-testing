@@ -479,6 +479,24 @@ app.post("/", async (c) => {
         400,
       );
     }
+    // Bedframe packing pieces are derived from sizeCode (K/Q → Headboard + 2
+    // Divan; S/SS → Headboard + 1 Divan). A blank sizeCode silently falls back
+    // to a single Headboard piece — the 1052 "packing sticker missing Divan"
+    // bug (BUG-2026-06-22-008). Require it so it can't happen again (owner:
+    // 必须填写). Validated identically on the frontend save handler.
+    if (
+      String(category).toUpperCase() === "BEDFRAME" &&
+      !String(body.sizeCode ?? "").trim()
+    ) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "Size code (e.g. K / Q / S / SS) is required for bedframe products — it drives the Headboard + Divan piece count.",
+        },
+        400,
+      );
+    }
 
     // Duplicate code check
     const dup = await c.var.DB.prepare(
@@ -673,6 +691,23 @@ app.put("/:id", async (c) => {
             ? JSON.stringify(body.defaultVariants)
             : null,
     };
+
+    // Bedframe pieces are derived from sizeCode — never let an edit blank it
+    // out (the 1052 "missing Divan" class, BUG-2026-06-22-008). Same rule as
+    // the POST + the frontend save handler.
+    if (
+      String(merged.category).toUpperCase() === "BEDFRAME" &&
+      !String(merged.sizeCode ?? "").trim()
+    ) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "Size code (e.g. K / Q / S / SS) is required for bedframe products — it drives the Headboard + Divan piece count.",
+        },
+        400,
+      );
+    }
 
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(

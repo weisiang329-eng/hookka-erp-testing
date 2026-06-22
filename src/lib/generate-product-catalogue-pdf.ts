@@ -60,8 +60,8 @@ const BODY_W = PAGE_W - MARGIN * 2; // 182mm
 const COLS = 3;
 const COL_GAP = 4; // mm gap between cards
 const CARD_W = (BODY_W - COL_GAP * (COLS - 1)) / COLS; // ≈ 58mm
-const PHOTO_H = CARD_W * 0.72; // slightly less than 4:3
-const TEXT_AREA_H = 27; // mm below photo
+const PHOTO_H = CARD_W; // square — matches the 1:1 catalog tile + locked square crop
+const TEXT_AREA_H = 22; // mm below photo (code + category chip + SKU/size line)
 const CARD_H = PHOTO_H + TEXT_AREA_H;
 const ROW_H = CARD_H + COL_GAP;
 const HEADER_H = 42; // space below letterhead (page 1)
@@ -142,7 +142,20 @@ function drawCard(doc: jsPDF, entry: CatalogueModelEntry, x: number, y: number):
     try {
       const fmt = imgFmt(entry.photoMimeType);
       const dataUrl = bytesToDataUrl(entry.photoBytes, entry.photoMimeType);
-      doc.addImage(dataUrl, fmt, x, photoY, CARD_W, PHOTO_H, undefined, "FAST");
+      // Fit inside the square box preserving aspect (no stretch): square photos
+      // fill it; any odd-aspect legacy photo letterboxes against the box bg
+      // instead of squashing.
+      let dw = CARD_W, dh = PHOTO_H, dx = x, dy = photoY;
+      try {
+        const props = doc.getImageProperties(dataUrl);
+        const ir = (props.width as number) / (props.height as number);
+        const boxR = CARD_W / PHOTO_H;
+        if (ir > boxR) { dw = CARD_W; dh = CARD_W / ir; }
+        else { dh = PHOTO_H; dw = PHOTO_H * ir; }
+        dx = x + (CARD_W - dw) / 2;
+        dy = photoY + (PHOTO_H - dh) / 2;
+      } catch { /* fall back to filling the box */ }
+      doc.addImage(dataUrl, fmt, dx, dy, dw, dh, undefined, "FAST");
       // Re-draw card border on top so it shows through any bleed
       doc.setDrawColor(...PDF.rule);
       doc.setLineWidth(0.2);

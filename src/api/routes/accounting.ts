@@ -50,6 +50,14 @@ import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
 import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
+import {
+  computeMaterialPeriod,
+  rollupByGroup,
+  valueIssues,
+  type MaterialInput,
+  type FifoEvent,
+  type IssueCost,
+} from "../../lib/material-cost-fifo";
 
 const app = new Hono<Env>();
 
@@ -4347,17 +4355,403 @@ async function glWindowSigned(
   return { net, coa };
 }
 
+// ---------------------------------------------------------------------------
+// loadMaterialCost (F6 T4b) — read-only FIFO material cost for a P&L window.
+//
+// MONEY-CRITICAL. Replaces the cost_ledger perpetual figures (which stopped
+// being fed after 2026-03) with a from-source FIFO replay, for the three
+// inventory layers the manufacturing P&L needs:
+//   · RM  — opening + GRN purchases − closing, per item_group (FIFO consumption)
+//   · WIP — per in-progress production_order: FIFO material issued + labour
+//   · FG  — per completed-not-delivered fg_batch: undelivered qty × FIFO unit cost
+//
+// The pure FIFO maths live in src/lib/material-cost-fifo.ts; here we only
+// assemble the events from the operational tables and feed the engine. The
+// engine guarantees  Σ valueIssues(m).fifoCostSen in [a,b] === consumedSen
+// for the same window, so WIP/FG (which sum per-issue costs) and RM (which use
+// consumed) stay coherent to the sen.
+//
+// As-of-date reconstruction (the hard part — owner accepts pre-cutover /
+// transitional imperfection, but the CURRENT period, whose closing date is
+// "now", must be exact):
+//   · closing (wipClose/fgClose) is as of endIso (period end).
+//   · opening (wipOpen/fgOpen)  is as of the instant BEFORE startIso, i.e. the
+//     day before the period start (prevDayIso) — last close of the prior period.
+//   · "in progress as of D"     = start_date <= D AND (completed_date IS NULL OR
+//                                 completed_date > D)   — rebuilt from dates, not
+//                                 the current `status`, so any historical window
+//                                 is answerable.
+//   · "undelivered as of D"     = original_qty − COUNT(fg_units delivered_at<=D).
+// ---------------------------------------------------------------------------
+type LoadMaterialCostResult = {
+  rmGroups: { itemGroup: string; openingSen: number; purchaseSen: number; closingSen: number; consumedSen: number }[];
+  wipOpenSen: number;
+  wipCloseSen: number;
+  fgOpenSen: number;
+  fgCloseSen: number;
+  warnings: {
+    negatives: { rmId: string; itemCode: string; units: number }[];
+    unresolved: { source: string; code: string }[];
+  };
+};
+
+// Last calendar day of a YYYY-MM month, as YYYY-MM-DD (UTC-safe via day 0 of
+// next month). Used to turn the inclusive period-end month into an ISO date.
+function monthEndIso(ym: string): string {
+  const [y, m] = ym.split("-").map((n) => parseInt(n, 10));
+  const d = new Date(Date.UTC(y, m, 0)); // day 0 of month m+1 = last day of month m
+  return d.toISOString().slice(0, 10);
+}
+
+// The day immediately before an ISO date (YYYY-MM-DD). Opening balances are
+// snapshot "the instant before the window starts", which is this date as a
+// <= cutoff for the as-of reconstruction.
+function prevDayIso(iso: string): string {
+  const [y, m, d] = iso.split("-").map((n) => parseInt(n, 10));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() - 1);
+  return dt.toISOString().slice(0, 10);
+}
+
+async function loadMaterialCost(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  startIso: string,
+  endIso: string,
+): Promise<LoadMaterialCostResult> {
+  // 0. Ensure the opening-stock table exists (deploys don't run migrations).
+  await ensureMaterialOpeningStock(db);
+
+  // 0a. Cutover day: global kv `material_opening_date`, else the earliest
+  //     as_of_date on file. Only GRN/issue movements strictly AFTER the cutover
+  //     are replayed — everything up to cutover is captured by the opening seed
+  //     layer (so we never double-count the day the books were switched).
+  const [openRes, kvRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT rmId AS rmId, qty AS qty, unitCostSen AS unitCostSen, asOfDate AS asOfDate
+           FROM material_opening_stock WHERE orgId = ?`,
+      )
+      .bind(orgId)
+      .all<{ rmId: string; qty: number | null; unitCostSen: number | null; asOfDate: string | null }>(),
+    db
+      .prepare("SELECT value FROM kv_config WHERE key = 'material_opening_date'")
+      .first<{ value: string | null }>()
+      .catch(() => null),
+  ]);
+  const openingRows = openRes.results ?? [];
+  let cutoverIso = (kvRes?.value ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(cutoverIso)) {
+    // Fall back to the earliest opening as_of_date; if there are none either,
+    // use a sentinel far in the past so every movement is replayed.
+    cutoverIso = "";
+    for (const r of openingRows) {
+      const d = (r.asOfDate ?? "").trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d) && (cutoverIso === "" || d < cutoverIso)) cutoverIso = d;
+    }
+    if (cutoverIso === "") cutoverIso = "0000-01-01";
+  }
+
+  // 1. Reference maps: rmId → itemGroup, material_code → rmId, rmId → itemCode.
+  const rmRes = await db
+    .prepare("SELECT id, itemCode, itemGroup FROM raw_materials WHERE orgId = ?")
+    .bind(orgId)
+    .all<{ id: string; itemCode: string | null; itemGroup: string | null }>();
+  const groupOf = new Map<string, string>();
+  const codeOf = new Map<string, string>();
+  const rmIdByCode = new Map<string, string>();
+  for (const r of rmRes.results ?? []) {
+    groupOf.set(r.id, (r.itemGroup || "OTHER").trim() || "OTHER");
+    codeOf.set(r.id, r.itemCode ?? r.id);
+    if (r.itemCode) rmIdByCode.set(r.itemCode, r.id);
+  }
+  const unresolved: { source: string; code: string }[] = [];
+  const seenUnresolved = new Set<string>();
+  const flagUnresolved = (source: string, code: string) => {
+    const key = `${source}\u0000${code}`;
+    if (seenUnresolved.has(key)) return;
+    seenUnresolved.add(key);
+    unresolved.push({ source, code });
+  };
+
+  // 2-4. Source movements: GRN receipts, approved PI lines (for layer cost),
+  //      and the cost_ledger RM_ISSUE / ADJUSTMENT rows. Loaded in parallel.
+  //      (cost_ledger is read whole — same pattern as stockSummaryRange — and
+  //      filtered in JS; LABOR / FG rows are reused for WIP / FG below.)
+  const [grnRes, piRes, clRes, poRes, fgbRes, fguRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT g.poId AS poId, g.receiveDate AS receiveDate, g.status AS status,
+                gi.materialCode AS materialCode, gi.acceptedQty AS acceptedQty, gi.unitPrice AS unitPrice,
+                po.status AS poStatus
+           FROM grn_items gi
+           JOIN grns g ON g.id = gi.grnId
+           LEFT JOIN purchase_orders po ON po.id = g.poId
+          WHERE g.orgId = ? AND g.status IN ('CONFIRMED','POSTED')`,
+      )
+      .bind(orgId)
+      .all<{ poId: string | null; receiveDate: string | null; status: string; materialCode: string | null; acceptedQty: number | null; unitPrice: number | null; poStatus: string | null }>(),
+    db
+      .prepare(
+        `SELECT pi.purchaseOrderId AS poId, pii.materialCode AS materialCode,
+                pii.qty AS qty, pii.lineTotalSen AS lineTotalSen
+           FROM purchase_invoice_items pii
+           JOIN purchase_invoices pi ON pi.id = pii.piId
+          WHERE pi.orgId = ? AND pi.status = 'APPROVED' AND pii.lineType = 'STOCKED'
+            AND pii.materialCode IS NOT NULL AND pi.purchaseOrderId IS NOT NULL`,
+      )
+      .bind(orgId)
+      .all<{ poId: string | null; materialCode: string | null; qty: number | null; lineTotalSen: number | null }>(),
+    db
+      .prepare(
+        `SELECT type, itemId, direction, qty, unitCostSen, totalCostSen, refId, date
+           FROM cost_ledger WHERE orgId = ?`,
+      )
+      .bind(orgId)
+      .all<{ type: string; itemId: string; direction: string; qty: number | null; unitCostSen: number | null; totalCostSen: number | null; refId: string | null; date: string | null }>(),
+    db
+      .prepare("SELECT id, startDate, completedDate, status FROM production_orders WHERE orgId = ?")
+      .bind(orgId)
+      .all<{ id: string; startDate: string | null; completedDate: string | null; status: string | null }>(),
+    db
+      .prepare("SELECT id, productionOrderId, completedDate, originalQty FROM fg_batches WHERE orgId = ?")
+      .bind(orgId)
+      .all<{ id: string; productionOrderId: string | null; completedDate: string | null; originalQty: number | null }>(),
+    db
+      .prepare("SELECT batchId, deliveredAt FROM fg_units WHERE orgId = ? AND deliveredAt IS NOT NULL")
+      .bind(orgId)
+      .all<{ batchId: string | null; deliveredAt: string | null }>(),
+  ]);
+
+  // 3. PI-weighted-average layer cost, batched into one map keyed PO+material.
+  //    round(Σ line_total_sen / Σ qty) over all APPROVED-PI STOCKED lines for
+  //    that (purchase_order_id, material_code). Used as the GRN receipt's unit
+  //    cost when present; otherwise the GRN line's own unit_price (already sen).
+  const piAgg = new Map<string, { totalSen: number; qty: number }>();
+  for (const r of piRes.results ?? []) {
+    if (!r.poId || !r.materialCode) continue;
+    const key = `${r.poId}\u0000${r.materialCode}`;
+    const a = piAgg.get(key) ?? { totalSen: 0, qty: 0 };
+    a.totalSen += Number(r.lineTotalSen) || 0;
+    a.qty += Number(r.qty) || 0;
+    piAgg.set(key, a);
+  }
+  const piUnitCostSen = new Map<string, number>();
+  for (const [key, a] of piAgg) {
+    if (a.qty > 0) piUnitCostSen.set(key, Math.round(a.totalSen / a.qty));
+  }
+
+  // 5. Assemble one MaterialInput per raw material: opening seed + receipt
+  //    events (GRN, post-cutover) + issue/adjustment events (cost_ledger,
+  //    post-cutover, up to endIso). Same-day ordering: receipts BEFORE issues
+  //    (T4 contract) so an issue can draw from goods received the same day.
+  const eventsByRm = new Map<string, FifoEvent[]>();
+  const pushEvent = (rmId: string, ev: FifoEvent) => {
+    let arr = eventsByRm.get(rmId);
+    if (!arr) { arr = []; eventsByRm.set(rmId, arr); }
+    arr.push(ev);
+  };
+
+  // 5a. GRN receipts (exclude lines whose PO is CANCELLED).
+  for (const r of grnRes.results ?? []) {
+    const date = (r.receiveDate ?? "").slice(0, 10);
+    if (!date || date <= cutoverIso) continue;
+    if (r.poStatus === "CANCELLED") continue;
+    const code = r.materialCode ?? "";
+    const rmId = code ? rmIdByCode.get(code) : undefined;
+    if (!rmId) { if (code) flagUnresolved("grn_items", code); continue; }
+    const qty = Number(r.acceptedQty) || 0;
+    if (qty <= 0) continue;
+    const key = r.poId ? `${r.poId}\u0000${code}` : "";
+    const unitCostSen = (key && piUnitCostSen.has(key)) ? (piUnitCostSen.get(key) as number) : (Number(r.unitPrice) || 0);
+    pushEvent(rmId, { kind: "receipt", date, qty, unitCostSen });
+  }
+
+  // 5b. cost_ledger RM movements (RM_ISSUE / ADJUSTMENT), post-cutover.
+  for (const l of clRes.results ?? []) {
+    if (l.type !== "RM_ISSUE" && l.type !== "ADJUSTMENT") continue;
+    const date = (l.date ?? "").slice(0, 10);
+    if (!date || date <= cutoverIso || date > endIso) continue;
+    const rmId = l.itemId;
+    if (!groupOf.has(rmId)) { flagUnresolved("cost_ledger", rmId); continue; }
+    const qty = Number(l.qty) || 0;
+    if (l.type === "RM_ISSUE") {
+      pushEvent(rmId, { kind: "issue", date, qty, ref: l.refId ?? undefined });
+    } else {
+      // ADJUSTMENT: IN → receipt (valued at its unit_cost_sen), OUT → issue.
+      if (l.direction === "IN") pushEvent(rmId, { kind: "receipt", date, qty, unitCostSen: Number(l.unitCostSen) || 0 });
+      else pushEvent(rmId, { kind: "issue", date, qty, ref: l.refId ?? undefined });
+    }
+  }
+
+  // 6. Run the engine per material. Stable-sort events (date asc; same date:
+  //    receipt before issue) before handing to the engine, which keeps given
+  //    order for equal dates. Collect period results + per-issue costs.
+  const rank = (e: FifoEvent) => (e.kind === "receipt" ? 0 : 1);
+  const periodResults = [];
+  const issuesByRef = new Map<string, IssueCost[]>(); // ref(PO) → its issues
+  const negatives: { rmId: string; itemCode: string; units: number }[] = [];
+  const openByRm = new Map<string, { rmId: string; qty: number | null; unitCostSen: number | null; asOfDate: string | null }>();
+  for (const r of openingRows) openByRm.set(r.rmId, r);
+  const allRmIds = new Set<string>([...eventsByRm.keys()]);
+  for (const r of openingRows) if (groupOf.has(r.rmId)) allRmIds.add(r.rmId);
+
+  for (const rmId of allRmIds) {
+    const itemGroup = groupOf.get(rmId) ?? "OTHER";
+    const open = openByRm.get(rmId);
+    const events = (eventsByRm.get(rmId) ?? [])
+      .slice()
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : rank(a) - rank(b)));
+    const m: MaterialInput = {
+      rmId,
+      itemGroup,
+      opening: open && (Number(open.qty) || 0) !== 0
+        ? { qty: Number(open.qty) || 0, unitCostSen: Number(open.unitCostSen) || 0 }
+        : null,
+      // One GLOBAL cutover day for every material: the seed layer is dated at
+      // cutoverIso and every replayed event is filtered date > cutoverIso, so
+      // the seed and the events never overlap regardless of a row's own
+      // as_of_date (which only feeds the global-cutover derivation above).
+      openingDate: cutoverIso,
+      events,
+    };
+    periodResults.push(computeMaterialPeriod(m, startIso, endIso));
+    // Per-issue costs (full timeline) — grouped by production order for WIP/FG.
+    for (const ic of valueIssues(m)) {
+      if (!ic.ref) continue;
+      let arr = issuesByRef.get(ic.ref);
+      if (!arr) { arr = []; issuesByRef.set(ic.ref, arr); }
+      arr.push(ic);
+    }
+  }
+
+  const rolled = rollupByGroup(periodResults);
+  const rmGroups = rolled.groups.map((g) => ({
+    itemGroup: g.itemGroup,
+    openingSen: g.openingSen,
+    purchaseSen: g.purchaseSen,
+    closingSen: g.closingSen,
+    consumedSen: g.consumedSen,
+  }));
+  for (const n of rolled.negatives) negatives.push({ rmId: n.rmId, itemCode: codeOf.get(n.rmId) ?? n.rmId, units: n.negativeUnits });
+
+  // 6a. Per-PO FIFO material cost as of a date D = Σ issue.fifoCostSen for that
+  //     PO with date <= D. Computed on demand from the grouped issues.
+  const fifoMaterialAsOf = (poId: string, dIso: string): number => {
+    const arr = issuesByRef.get(poId);
+    if (!arr) return 0;
+    let s = 0;
+    for (const ic of arr) if (ic.date <= dIso) s += ic.fifoCostSen;
+    return s;
+  };
+
+  // 6b. Per-PO labour cost as of a date D = Σ LABOR_POSTED.total_cost_sen for
+  //     that PO (cost_ledger.ref_id = PO) with date <= D.
+  const laborByPo = new Map<string, { date: string; sen: number }[]>();
+  for (const l of clRes.results ?? []) {
+    if (l.type !== "LABOR_POSTED") continue;
+    const ref = l.refId;
+    if (!ref) continue;
+    const date = (l.date ?? "").slice(0, 10);
+    if (!date) continue;
+    let arr = laborByPo.get(ref);
+    if (!arr) { arr = []; laborByPo.set(ref, arr); }
+    arr.push({ date, sen: Number(l.totalCostSen) || 0 });
+  }
+  const laborAsOf = (poId: string, dIso: string): number => {
+    const arr = laborByPo.get(poId);
+    if (!arr) return 0;
+    let s = 0;
+    for (const e of arr) if (e.date <= dIso) s += e.sen;
+    return s;
+  };
+
+  // 7. WIP as of D = Σ over production_orders in progress at D of
+  //    (FIFO material issued so far + labour posted so far).
+  const pos = poRes.results ?? [];
+  const wipAsOf = (dIso: string): number => {
+    let s = 0;
+    for (const p of pos) {
+      const start = (p.startDate ?? "").slice(0, 10);
+      const completed = (p.completedDate ?? "").slice(0, 10);
+      if (!start || start > dIso) continue;            // not started yet
+      if (completed && completed <= dIso) continue;    // already completed by D
+      s += fifoMaterialAsOf(p.id, dIso) + laborAsOf(p.id, dIso);
+    }
+    return s;
+  };
+
+  // 8. FG as of D = Σ over batches completed by D, of undelivered qty × FIFO
+  //    unit cost. Unit cost = (PO FIFO material@completion + PO labour@completion)
+  //    / original_qty — re-valued from the engine, NOT fg_batches.unit_cost_sen.
+  //    Undelivered qty = original_qty − COUNT(fg_units of this batch delivered<=D).
+  const deliveredByBatch = new Map<string, { date: string }[]>();
+  for (const u of fguRes.results ?? []) {
+    if (!u.batchId) continue;
+    const date = (u.deliveredAt ?? "").slice(0, 10);
+    if (!date) continue;
+    let arr = deliveredByBatch.get(u.batchId);
+    if (!arr) { arr = []; deliveredByBatch.set(u.batchId, arr); }
+    arr.push({ date });
+  }
+  const deliveredAsOf = (batchId: string, dIso: string): number => {
+    const arr = deliveredByBatch.get(batchId);
+    if (!arr) return 0;
+    let n = 0;
+    for (const e of arr) if (e.date <= dIso) n += 1;
+    return n;
+  };
+  const batches = fgbRes.results ?? [];
+  const fgAsOf = (dIso: string): number => {
+    let s = 0;
+    for (const b of batches) {
+      const completed = (b.completedDate ?? "").slice(0, 10);
+      if (!completed || completed > dIso) continue;        // not completed by D
+      const origQty = Number(b.originalQty) || 0;
+      if (origQty <= 0) continue;
+      const undelivered = origQty - deliveredAsOf(b.id, dIso);
+      if (undelivered <= 0) continue;                       // fully shipped by D
+      const poId = b.productionOrderId;
+      if (!poId) continue;
+      // FIFO unit cost at completion (material + labour) / original_qty.
+      const unitCostSen = (fifoMaterialAsOf(poId, completed) + laborAsOf(poId, completed)) / origQty;
+      s += Math.round(undelivered * unitCostSen);
+    }
+    return s;
+  };
+
+  const openAsOf = prevDayIso(startIso); // "the instant before" the period start
+  return {
+    rmGroups,
+    wipOpenSen: wipAsOf(openAsOf),
+    wipCloseSen: wipAsOf(endIso),
+    fgOpenSen: fgAsOf(openAsOf),
+    fgCloseSen: fgAsOf(endIso),
+    warnings: { negatives, unresolved },
+  };
+}
+
 type PnlWindow = Awaited<ReturnType<typeof computePnlWindow>>;
 
 async function computePnlWindow(
   db: Env["Variables"]["DB"],
+  orgId: string,
   startYm: string | null,
   endYm: string | null,
   line: "all" | "sofa" | "bedframe",
   override: Record<string, string> = {},
 ) {
-  const [stock, gl, ratio] = await Promise.all([
-    stockSummaryRange(db, startYm, endYm),
+  // RM / WIP / FG now come from the FIFO engine (loadMaterialCost), replacing
+  // the cost_ledger perpetual figures that stockSummaryRange returns (the
+  // ledger stopped being fed after 2026-03). All OTHER P&L lines (labour /
+  // overhead / carriage / SST / revenue / other income / expenses) still come
+  // from the GL window untouched. The window's month bounds are turned into ISO
+  // dates: start = first day of startYm (far past if null = "since beginning"),
+  // end = last day of endYm (far future if null).
+  const matStartIso = startYm ? `${startYm}-01` : "0000-01-01";
+  const matEndIso = endYm ? monthEndIso(endYm) : "9999-12-31";
+  const [mat, gl, ratio] = await Promise.all([
+    loadMaterialCost(db, orgId, matStartIso, matEndIso),
     glWindowSigned(db, startYm, endYm),
     costByLineWindow(db, startYm, endYm),
   ]);
@@ -4391,11 +4785,16 @@ async function computePnlWindow(
   const netSalesSen = isAll ? grossSalesSen : Math.round(grossSalesSen * R);
 
   // --- Raw materials (per group, opening+purchase−closing = consumed) ---
-  const rmGroups = stock.rows.map((r) => ({
-    group: r.group,
-    description: GROUP_DESCRIPTIONS[r.group] ?? r.group,
+  // From the FIFO engine (loadMaterialCost). The engine guarantees
+  // opening + purchase − closing === consumed per group, so rmConsumedSen
+  // (still derived as opening+purchases−closing for the downstream row tree)
+  // ties out to the engine's consumed exactly. Line-share scaling (R) is
+  // applied the same way the old cost-ledger figures were.
+  const rmGroups = mat.rmGroups.map((r) => ({
+    group: r.itemGroup,
+    description: GROUP_DESCRIPTIONS[r.itemGroup] ?? r.itemGroup,
     openingSen: isAll ? r.openingSen : Math.round(r.openingSen * R),
-    purchasesSen: isAll ? r.purchasesSen : Math.round(r.purchasesSen * R),
+    purchasesSen: isAll ? r.purchaseSen : Math.round(r.purchaseSen * R),
     closingSen: isAll ? r.closingSen : Math.round(r.closingSen * R),
   }));
   const rmConsumedSen = rmGroups.reduce((s, g) => s + g.openingSen + g.purchasesSen - g.closingSen, 0);
@@ -4424,11 +4823,11 @@ async function computePnlWindow(
   }
   const overheadSen = overheadLines.reduce((s, l) => s + l.amountSen, 0);
 
-  // --- WIP / FG movements ---
-  const wipOpen = isAll ? stock.wip.openingSen : Math.round(stock.wip.openingSen * R);
-  const wipClose = isAll ? stock.wip.closingSen : Math.round(stock.wip.closingSen * R);
-  const fgOpen = isAll ? stock.fg.openingSen : Math.round(stock.fg.openingSen * R);
-  const fgClose = isAll ? stock.fg.closingSen : Math.round(stock.fg.closingSen * R);
+  // --- WIP / FG movements (from the FIFO engine, as-of-date reconstructed) ---
+  const wipOpen = isAll ? mat.wipOpenSen : Math.round(mat.wipOpenSen * R);
+  const wipClose = isAll ? mat.wipCloseSen : Math.round(mat.wipCloseSen * R);
+  const fgOpen = isAll ? mat.fgOpenSen : Math.round(mat.fgOpenSen * R);
+  const fgClose = isAll ? mat.fgCloseSen : Math.round(mat.fgCloseSen * R);
 
   const manufacturingSen = rmConsumedSen + carriageSen + sstSen + labourSen + overheadSen + (wipOpen - wipClose);
   const cogsSen = fgOpen + manufacturingSen - fgClose;
@@ -4467,6 +4866,11 @@ async function computePnlWindow(
     expenseLines,
     expenseSen,
     netProfitSen,
+    // Material-wide data-quality warnings from the FIFO engine (negative stock
+    // / unresolved item codes). These are NOT period-specific — they reflect
+    // the whole replayed timeline — so the caller can take them from any one
+    // window (the broadest/accumulated call is the natural choice).
+    materialWarnings: mat.warnings,
   };
 }
 
@@ -4750,7 +5154,7 @@ app.get("/pl-trend", async (c) => {
     let m = am - i;
     while (m <= 0) { m += 12; y -= 1; }
     const ym = `${y}-${String(m).padStart(2, "0")}`;
-    const p = await computePnlWindow(c.var.DB, ym, ym, line);
+    const p = await computePnlWindow(c.var.DB, getOrgId(c), ym, ym, line);
     cols.push({
       ym,
       netSalesSen: p.netSalesSen,
@@ -4779,10 +5183,24 @@ app.get("/pl-statement", async (c) => {
   const endForFy = new Date(`${endYm ?? new Date().toISOString().slice(0, 7)}-15T00:00:00Z`);
   const fyWin = fyWindowFor(endForFy, fyeMonth);
   const fyStartYm = fyWin.startIso.slice(0, 7);
+  const orgId = getOrgId(c);
   const [p, y] = await Promise.all([
-    computePnlWindow(c.var.DB, startYm, endYm, line, pnlOverride),
-    computePnlWindow(c.var.DB, fyStartYm, endYm, line, pnlOverride),
+    computePnlWindow(c.var.DB, orgId, startYm, endYm, line, pnlOverride),
+    computePnlWindow(c.var.DB, orgId, fyStartYm, endYm, line, pnlOverride),
   ]);
+  // Material warnings are material-wide (whole-timeline), not period-specific —
+  // merge both windows' lists and de-dupe so the same material can't appear
+  // twice (by rmId for negatives, by source+code for unresolved).
+  const negMap = new Map<string, { itemCode: string; units: number }>();
+  const unresMap = new Map<string, { source: string; code: string }>();
+  for (const w of [p.materialWarnings, y.materialWarnings]) {
+    for (const n of w.negatives) negMap.set(n.rmId, { itemCode: n.itemCode, units: n.units });
+    for (const u of w.unresolved) unresMap.set(`${u.source} ${u.code}`, u);
+  }
+  const materialWarnings = {
+    negatives: [...negMap.entries()].map(([rmId, v]) => ({ rmId, itemCode: v.itemCode, units: v.units })),
+    unresolved: [...unresMap.values()],
+  };
   return c.json({
     success: true,
     data: {
@@ -4792,6 +5210,7 @@ app.get("/pl-statement", async (c) => {
       fyLabel: fyWin.label,
       netSalesSen: p.netSalesSen,
       rows: buildPnlRows(p, y, editable),
+      materialWarnings,
     },
   });
 });
@@ -4820,11 +5239,12 @@ app.get("/pl-monthly", async (c) => {
   const override = await getPnlSectionMap(c.var.DB);
   const monthLabel = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleString("en", { month: "short", year: "numeric", timeZone: "UTC" });
 
+  const orgId = getOrgId(c);
   const cols: PnlMatrixCol[] = [];
-  cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, fyStartYm, lastYm, line, override) });
+  cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, orgId, fyStartYm, lastYm, line, override) });
   // Months newest-first (after Accumulated) per owner layout (F4 #7).
   for (const ym of [...months].reverse()) {
-    cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, ym, ym, line, override) });
+    cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, orgId, ym, ym, line, override) });
   }
 
   const matrix = buildPnlMatrix(cols);
@@ -8138,6 +8558,230 @@ app.post("/opening-balance/post", async (c) => {
     return c.json({
       success: true,
       data: { openingDate, lines: cleaned.length, totalSen: totalDr },
+    });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// MATERIAL OPENING STOCK (F6 — material-cost FIFO engine)
+//
+// The FIFO cost engine (src/lib/material-cost-fifo.ts) needs a per-material
+// "seed layer" at cutover: the quantity + unit cost on hand the day the old
+// perpetual stock ledger stopped (2026-03). The owner fills this once in
+// Maintenance → Opening Stock; thereafter each month's opening = last month's
+// closing and the engine rolls it forward automatically. Read-only on the
+// finance side — does NOT touch the operations rm_batches.
+//
+// ⚠️ Runtime self-apply (load-bearing): deploys do NOT run migration files, so
+// the table reaches prod ONLY via ensureMaterialOpeningStock — an idempotent
+// CREATE TABLE IF NOT EXISTS awaited at the top of every handler before the
+// first read/write. Mirrors migrations-postgres/0185_material_opening_stock.sql
+// (which is an inert double-track record). Pattern copied from
+// ensureThreePlStateRatesSchema in src/api/routes/three-pl-state-rates.ts:
+// module-level promise = one flight per isolate; per-statement try/catch so a
+// benign "already exists" never poisons the cached promise.
+// ---------------------------------------------------------------------------
+let pendingMosMigrations: Promise<void> | null = null;
+function ensureMaterialOpeningStock(db: D1Database): Promise<void> {
+  if (pendingMosMigrations) return pendingMosMigrations;
+  pendingMosMigrations = (async () => {
+    const stmts = [
+      `CREATE TABLE IF NOT EXISTS material_opening_stock (
+         id            TEXT PRIMARY KEY,
+         rm_id         TEXT NOT NULL,
+         qty           DOUBLE PRECISION NOT NULL DEFAULT 0,
+         unit_cost_sen INTEGER NOT NULL DEFAULT 0,
+         as_of_date    TEXT NOT NULL,
+         org_id        TEXT NOT NULL DEFAULT 'hookka',
+         created_at    TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
+         updated_at    TEXT
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_mos_key ON material_opening_stock (org_id, rm_id)`,
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[accounting.material-opening-stock] DDL skipped", {
+          sql: sql.split("\n")[0],
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return pendingMosMigrations;
+}
+
+type MaterialOpeningStockRow = {
+  rmId: string;
+  qty: number | null;
+  unitCostSen: number | null;
+  asOfDate: string | null;
+};
+
+// GET /api/accounting/material-opening-stock
+// Lists every ACTIVE raw material LEFT JOINed to its opening-stock row, so the
+// Maintenance grid always shows the full catalogue (qty/unitCostSen/asOfDate
+// null for materials not yet filled).
+app.get("/material-opening-stock", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  await ensureMaterialOpeningStock(c.var.DB);
+  const res = await c.var.DB.prepare(
+    `SELECT rm.id            AS id,
+            rm.itemCode      AS itemCode,
+            rm.description   AS description,
+            rm.itemGroup     AS itemGroup,
+            rm.baseUOM       AS baseUOM,
+            mos.qty          AS qty,
+            mos.unitCostSen  AS unitCostSen,
+            mos.asOfDate     AS asOfDate
+       FROM raw_materials rm
+       LEFT JOIN material_opening_stock mos
+         ON mos.rmId = rm.id AND mos.orgId = ?
+      WHERE rm.orgId = ? AND rm.status = 'ACTIVE'
+      ORDER BY rm.itemCode`,
+  )
+    .bind(orgId, orgId)
+    .all<{
+      id: string;
+      itemCode: string | null;
+      description: string | null;
+      itemGroup: string | null;
+      baseUOM: string | null;
+      qty: number | null;
+      unitCostSen: number | null;
+      asOfDate: string | null;
+    }>();
+  const data = (res.results ?? []).map((r) => ({
+    id: r.id,
+    itemCode: r.itemCode ?? "",
+    description: r.description ?? "",
+    itemGroup: r.itemGroup ?? "",
+    baseUOM: r.baseUOM ?? "",
+    qty: r.qty ?? null,
+    unitCostSen: r.unitCostSen ?? null,
+    asOfDate: r.asOfDate ?? null,
+  }));
+  return c.json({ success: true, data, total: data.length });
+});
+
+// PUT /api/accounting/material-opening-stock
+// Body: { rows: [{ rmId, qty, unitCostSen, asOfDate }] }
+// Upserts the whole batch (ON CONFLICT (org_id, rm_id)). Amounts are integer
+// sen; qty is a plain (possibly fractional) quantity. Validates everything up
+// front, then writes in one transaction.
+app.put("/material-opening-stock", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  try {
+    const body = (await c.req.json()) as {
+      rows?: {
+        rmId?: unknown;
+        qty?: unknown;
+        unitCostSen?: unknown;
+        asOfDate?: unknown;
+      }[];
+    };
+    if (!Array.isArray(body.rows)) {
+      return c.json({ success: false, error: "rows[] is required" }, 400);
+    }
+    await ensureMaterialOpeningStock(c.var.DB);
+
+    type CleanRow = {
+      rmId: string;
+      qty: number;
+      unitCostSen: number;
+      asOfDate: string;
+    };
+    const seen = new Set<string>();
+    const cleaned: CleanRow[] = [];
+    for (const raw of body.rows) {
+      const entry = (raw ?? {}) as Record<string, unknown>;
+      const rmId = typeof entry.rmId === "string" ? entry.rmId.trim() : "";
+      if (!rmId) {
+        return c.json({ success: false, error: "Each row needs an rmId" }, 400);
+      }
+      if (seen.has(rmId)) {
+        return c.json(
+          { success: false, error: `Duplicate rmId in rows: ${rmId}` },
+          400,
+        );
+      }
+      seen.add(rmId);
+      const qty = typeof entry.qty === "number" ? entry.qty : Number(entry.qty);
+      const unitCostSen =
+        typeof entry.unitCostSen === "number"
+          ? entry.unitCostSen
+          : Number(entry.unitCostSen);
+      if (!Number.isFinite(qty) || qty < 0) {
+        return c.json(
+          { success: false, error: `Invalid qty for ${rmId}: must be a non-negative number` },
+          400,
+        );
+      }
+      if (!Number.isInteger(unitCostSen) || unitCostSen < 0) {
+        return c.json(
+          {
+            success: false,
+            error: `Invalid unitCostSen for ${rmId}: must be a non-negative integer (sen)`,
+          },
+          400,
+        );
+      }
+      const asOfDate =
+        typeof entry.asOfDate === "string" ? entry.asOfDate.trim() : "";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+        return c.json(
+          { success: false, error: `Invalid asOfDate for ${rmId}: expected YYYY-MM-DD` },
+          400,
+        );
+      }
+      cleaned.push({ rmId, qty, unitCostSen, asOfDate });
+    }
+
+    if (cleaned.length > 0) {
+      const now = new Date().toISOString();
+      await c.var.DB.batch(
+        cleaned.map((r) =>
+          c.var.DB.prepare(
+            `INSERT INTO material_opening_stock
+               (id, rmId, qty, unitCostSen, asOfDate, orgId, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (orgId, rmId) DO UPDATE SET
+               qty = EXCLUDED.qty,
+               unitCostSen = EXCLUDED.unitCostSen,
+               asOfDate = EXCLUDED.asOfDate,
+               updated_at = EXCLUDED.updated_at`,
+          ).bind(
+            `mos-${crypto.randomUUID().slice(0, 12)}`,
+            r.rmId,
+            r.qty,
+            r.unitCostSen,
+            r.asOfDate,
+            orgId,
+            now,
+            now,
+          ),
+        ),
+      );
+    }
+
+    const res = await c.var.DB.prepare(
+      `SELECT rmId AS rmId, qty AS qty, unitCostSen AS unitCostSen, asOfDate AS asOfDate
+         FROM material_opening_stock
+        WHERE orgId = ?`,
+    )
+      .bind(orgId)
+      .all<MaterialOpeningStockRow>();
+    return c.json({
+      success: true,
+      data: { saved: cleaned.length },
+      total: (res.results ?? []).length,
     });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

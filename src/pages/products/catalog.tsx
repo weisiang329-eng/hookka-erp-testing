@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Box, Images, Upload, Trash2, Loader2, X, FileText } from "lucide-react";
+import { Box, Images, Upload, Trash2, Loader2, X, FileText, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
@@ -42,7 +42,19 @@ type FileAsset = {
   contentType: string;
   sizeBytes: number;
   uploadedAt: string;
+  /** Cover ordering: lowest first (0 = cover). Add-on column, may be null. */
+  sortOrder?: number | null;
 };
+
+// Cover-first ordering: the file with the lowest sort_order is the cover;
+// ties / unset fall back to newest-uploaded first. Shared by the tile grid
+// and the catalogue PDF so both agree on which photo is the cover.
+function comparePhotos(a: FileAsset, b: FileAsset): number {
+  const ao = a.sortOrder ?? 1e9;
+  const bo = b.sortOrder ?? 1e9;
+  if (ao !== bo) return ao - bo;
+  return (b.uploadedAt || "").localeCompare(a.uploadedAt || "");
+}
 
 type ModelGroup = {
   baseModel: string;
@@ -110,6 +122,7 @@ export function ProductCatalog({ products }: { products: CatalogProduct[] }) {
           if (arr) arr.push(f);
           else map[f.resourceId] = [f];
         }
+        for (const k of Object.keys(map)) map[k].sort(comparePhotos);
         setPhotos(map);
       }
     } catch {
@@ -345,6 +358,21 @@ function ModelDetailDialog({
     }
   }
 
+  async function setCover(f: FileAsset) {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/files/${f.id}/cover`, { method: "PATCH" });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !j?.success) { toast.error(j?.error || "Could not set cover"); return; }
+      toast.success("Cover updated");
+      onChanged();
+    } catch {
+      toast.error("Could not set cover — network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const readFileAsDataUrl = (file: File): Promise<string> =>
     new Promise((resolve, reject) => {
       const r = new FileReader();
@@ -436,7 +464,7 @@ function ModelDetailDialog({
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                {photos.map((f) => (
+                {photos.map((f, idx) => (
                   <div key={f.id} className="relative group rounded-md overflow-hidden border border-[#E2DDD8] bg-[#FAF9F7]">
                     <a href={`/api/files/${f.id}/download`} target="_blank" rel="noreferrer" title={f.filename}>
                       <img
@@ -446,6 +474,21 @@ function ModelDetailDialog({
                         className="aspect-square w-full object-cover"
                       />
                     </a>
+                    {idx === 0 ? (
+                      <span className="absolute top-1 left-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#6B5C32] text-white shadow-sm">
+                        <Star className="h-2.5 w-2.5 fill-current" /> Cover
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setCover(f)}
+                        disabled={busy}
+                        title="Set as cover"
+                        className="absolute top-1 left-1 p-1 rounded-md bg-black/55 text-white opacity-0 group-hover:opacity-100 hover:bg-[#6B5C32] transition-opacity"
+                      >
+                        <Star className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => remove(f)}

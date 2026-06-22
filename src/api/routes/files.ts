@@ -361,6 +361,35 @@ app.get("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// PATCH /api/files/:id/cover — mark this file as the cover photo for its
+// resource. Used by the Products Catalog "Set as cover" action. The cover is
+// the file with the lowest sort_order (clients sort by sort_order then date);
+// we reset the resource's covers then stamp this one to 0 so there is exactly
+// one. `sort_order` is an add-on snake_case column self-applied at runtime
+// (migrations don't auto-run on deploy).
+// ---------------------------------------------------------------------------
+app.patch("/:id/cover", async (c) => {
+  const id = c.req.param("id");
+  const orgId = getOrgId(c);
+  await c.var.DB.prepare(
+    "ALTER TABLE file_assets ADD COLUMN IF NOT EXISTS sort_order INTEGER",
+  ).run();
+  const row = await c.var.DB.prepare(
+    "SELECT * FROM file_assets WHERE id = ? AND orgId = ?",
+  )
+    .bind(id, orgId)
+    .first<FileAssetRow>();
+  if (!row) return c.json({ success: false, error: "Not found" }, 404);
+  await c.var.DB.batch([
+    c.var.DB.prepare(
+      "UPDATE file_assets SET sort_order = NULL WHERE orgId = ? AND resourceType = ? AND resourceId = ?",
+    ).bind(orgId, row.resourceType, row.resourceId),
+    c.var.DB.prepare("UPDATE file_assets SET sort_order = 0 WHERE id = ?").bind(id),
+  ]);
+  return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/files/:id — metadata
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {

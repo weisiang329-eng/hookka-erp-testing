@@ -2566,12 +2566,20 @@ export default function ProductsPage() {
       const res = await fetch("/api/files?resourceType=modular");
       const j = (await res.json().catch(() => null)) as {
         success?: boolean;
-        data?: Array<{ id: string; resourceId: string }>;
+        data?: Array<{ id: string; resourceId: string; sortOrder?: number | null; uploadedAt?: string }>;
       } | null;
       if (res.ok && j?.success && Array.isArray(j.data)) {
+        // Sort cover-first (lowest sort_order, then newest) so the cover photo
+        // chosen in the Catalog is the exact one embedded in the PDF.
+        const sorted = j.data.slice().sort((a, b) => {
+          const ao = a.sortOrder ?? 1e9;
+          const bo = b.sortOrder ?? 1e9;
+          if (ao !== bo) return ao - bo;
+          return (b.uploadedAt || "").localeCompare(a.uploadedAt || "");
+        });
         const map: Record<string, string> = {};
-        for (const f of j.data) {
-          // Only store the first photo per baseModel (cover photo)
+        for (const f of sorted) {
+          // First per baseModel after the cover-first sort = the cover photo.
           if (!map[f.resourceId]) map[f.resourceId] = f.id;
         }
         return map;

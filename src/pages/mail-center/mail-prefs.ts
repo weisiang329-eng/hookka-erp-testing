@@ -35,7 +35,10 @@ const KEY = "hookka-mail-prefs:v1";
 
 const DEFAULTS: MailViewPrefs = {
   density: "compact",
-  readingPane: "split",
+  // Default to full-width reading (no split): the split right-pane is too narrow
+  // to read an email comfortably (owner: "左右screen太小…我要fullscreen"). Users
+  // can still switch to Split in the View menu.
+  readingPane: "full",
   categoryTabs: true,
 };
 
@@ -47,7 +50,7 @@ function load(): MailViewPrefs {
     const parsed = JSON.parse(raw) as Partial<MailViewPrefs>;
     return {
       density: parsed.density === "comfortable" ? "comfortable" : "compact",
-      readingPane: parsed.readingPane === "full" ? "full" : "split",
+      readingPane: parsed.readingPane === "split" ? "split" : "full",
       // Default ON unless explicitly stored false.
       categoryTabs: parsed.categoryTabs === false ? false : true,
     };

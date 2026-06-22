@@ -466,6 +466,112 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
   };
 
   const [exportingQuotation, setExportingQuotation] = useState(false);
+  const [exportingCatalogue, setExportingCatalogue] = useState(false);
+
+  // Customer catalogue export — generates a photo-first lookbook PDF for this
+  // customer's assigned SKUs only, by reusing the customer-quotation endpoint to
+  // resolve product list then the generate-product-catalogue-pdf generator.
+  const handleExportCataloguePdf = async () => {
+    if (rows.length === 0) return;
+    setExportingCatalogue(true);
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const res = await fetch(
+        `/api/customer-quotation?customerId=${encodeURIComponent(customerId)}&asOf=${today}`,
+      );
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        toast.error((j as { error?: string }).error || `Failed to fetch products (HTTP ${res.status})`);
+        return;
+      }
+      const json = (await res.json()) as
+        | { success: true; data: { products?: Array<{ code: string; name: string; category: string; sizeLabel: string | null }> } }
+        | { success: false; error?: string };
+      if (!json.success || !json.data?.products) {
+        toast.error((json as { error?: string }).error || "No products found.");
+        return;
+      }
+
+      // Derive baseModels and group products (mirrors catalog.tsx buildModelGroups)
+      const groupMap = new Map<string, {
+        category: string; name: string; sizeLabels: string[];
+      }>();
+      for (const p of json.data.products) {
+        const key = (p.code || "").split(/\s|-\(/)[0].trim() || p.code;
+        const sl = p.sizeLabel ?? "";
+        const existing = groupMap.get(key);
+        if (existing) {
+          if (sl && !existing.sizeLabels.includes(sl)) existing.sizeLabels.push(sl);
+        } else {
+          groupMap.set(key, {
+            category: p.category || "",
+            name: p.name || "",
+            sizeLabels: sl ? [sl] : [],
+          });
+        }
+      }
+      if (groupMap.size === 0) {
+        toast.error("No models to export.");
+        return;
+      }
+
+      // Fetch photo file IDs for modular assets
+      const photoMap: Record<string, string> = {};
+      try {
+        const pr = await fetch("/api/files?resourceType=modular");
+        const pj = (await pr.json().catch(() => null)) as {
+          success?: boolean;
+          data?: Array<{ id: string; resourceId: string }>;
+        } | null;
+        if (pr.ok && pj?.success && Array.isArray(pj.data)) {
+          for (const f of pj.data) {
+            if (!photoMap[f.resourceId]) photoMap[f.resourceId] = f.id;
+          }
+        }
+      } catch { /* no photos — placeholders will be used */ }
+
+      const { fetchModelPhotoBytes, default: generateProductCataloguePdf } = await import(
+        "@/lib/generate-product-catalogue-pdf"
+      );
+
+      const entries = await Promise.all(
+        Array.from(groupMap.entries()).map(async ([baseModel, g]) => {
+          const fileId = photoMap[baseModel];
+          let photoBytes: Uint8Array | null = null;
+          let photoMimeType = "image/jpeg";
+          if (fileId) {
+            const result = await fetchModelPhotoBytes(fileId);
+            if (result) { photoBytes = result.bytes; photoMimeType = result.mimeType; }
+          }
+          return {
+            baseModel,
+            category: g.category,
+            name: g.name,
+            variantCount: json.data.products!.filter(
+              (p) => ((p.code || "").split(/\s|-\(/)[0].trim() || p.code) === baseModel,
+            ).length,
+            sizeLabels: g.sizeLabels.sort(),
+            photoBytes,
+            photoMimeType,
+          };
+        }),
+      );
+      entries.sort((a, b) =>
+        a.category !== b.category
+          ? a.category.localeCompare(b.category)
+          : a.baseModel.localeCompare(b.baseModel),
+      );
+
+      const doc = generateProductCataloguePdf(entries, { customerName });
+      const safeCode = (customerId || customerName).replace(/[^a-zA-Z0-9_-]+/g, "_");
+      doc.save(`Product-Catalogue-${safeCode}-${today}.pdf`);
+    } catch (err) {
+      console.error("[Customer Catalogue PDF]", err);
+      toast.error("Failed to generate catalogue PDF.");
+    } finally {
+      setExportingCatalogue(false);
+    }
+  };
 
   // Date-aware export. Fetches the combined envelope (products + sofa combos
   // + maintenance config + letterhead-resolved customer block) and hands it
@@ -602,6 +708,20 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
                 <FileDown className="h-4 w-4 mr-1" />
               )}
               Export Quotation PDF
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={rows.length === 0 || exportingCatalogue}
+              onClick={handleExportCataloguePdf}
+              title="Export a photo-first product lookbook for this customer's assigned SKUs"
+            >
+              {exportingCatalogue ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <FileDown className="h-4 w-4 mr-1" />
+              )}
+              Export Catalogue PDF
             </Button>
             <Button
               variant="outline"

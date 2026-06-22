@@ -6,7 +6,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { MoneyInput } from "@/components/ui/money-input";
 import { Link } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
-import { Plus, Trash2, Check, Calendar, History, Pencil } from "lucide-react";
+import { Plus, Trash2, Check, Calendar, History, Pencil, FileDown, Loader2, BookOpen, X as XIcon } from "lucide-react";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { ProductSchema } from "@/lib/schemas/product";
@@ -1784,6 +1784,17 @@ export default function ProductsPage() {
   const [price1Input, setPrice1Input] = useState("");
   const [importing, setImporting] = useState(false);
 
+  // ── Catalogue PDF export state ──────────────────────────────────────────
+  const [exportingCatalogue, setExportingCatalogue] = useState(false);
+  // Customer picker: null = closed, open = picker is showing
+  const [showCatCustomerPicker, setShowCatCustomerPicker] = useState(false);
+  const [catCustomerQuery, setCatCustomerQuery] = useState("");
+  // Customer list loaded lazily when the picker opens
+  const [catalogueCustomers, setCatalogueCustomers] = useState<
+    Array<{ id: string; code: string; name: string }>
+  >([]);
+  const [loadingCatalogueCustomers, setLoadingCatalogueCustomers] = useState(false);
+
   // Sofa seat-size pricing editor
   const [editingSeatPrices, setEditingSeatPrices] = useState<string | null>(null);
   const [seatPriceInputs, setSeatPriceInputs] = useState<Record<string, string>>({});
@@ -2489,6 +2500,195 @@ export default function ProductsPage() {
     "sizeCode", "sizeLabel", "fabricUsage", "unitM3", "status",
     "costPriceSen", "basePriceSen", "productionTimeMinutes",
   ] as const;
+
+  // ── Catalogue PDF helpers ──────────────────────────────────────────────
+
+  // Build CatalogueModelEntry[] from current products + pre-fetched photos map.
+  // photoMap: resourceId (baseModel) → first FileAsset id.
+  // customerAssignedBaseModels: when provided, only include models in this set.
+  async function buildCatalogueModels(
+    photoMap: Record<string, string>,
+    customerAssignedBaseModels?: Set<string>,
+  ) {
+    // Group products by baseModel (mirrors catalog.tsx buildModelGroups logic)
+    const groups = new Map<string, Product[]>();
+    for (const p of products) {
+      const key = p.baseModel || p.code;
+      if (customerAssignedBaseModels && !customerAssignedBaseModels.has(key)) continue;
+      const arr = groups.get(key);
+      if (arr) arr.push(p);
+      else groups.set(key, [p]);
+    }
+    const modelGroups = Array.from(groups.entries()).map(([baseModel, ps]) => ({
+      baseModel,
+      category: ps[0].category,
+      name: ps[0].name,
+      variantCount: ps.length,
+      sizeLabels: Array.from(new Set(ps.map((p) => p.sizeLabel).filter(Boolean))).sort(),
+    }));
+    // Sort: category first, then baseModel
+    modelGroups.sort((a, b) =>
+      a.category !== b.category
+        ? a.category.localeCompare(b.category)
+        : a.baseModel.localeCompare(b.baseModel),
+    );
+
+    const { fetchModelPhotoBytes } = await import("@/lib/generate-product-catalogue-pdf");
+
+    const entries = await Promise.all(
+      modelGroups.map(async (g) => {
+        const fileId = photoMap[g.baseModel];
+        let photoBytes: Uint8Array | null = null;
+        let photoMimeType = "image/jpeg";
+        if (fileId) {
+          const result = await fetchModelPhotoBytes(fileId);
+          if (result) {
+            photoBytes = result.bytes;
+            photoMimeType = result.mimeType;
+          }
+        }
+        return {
+          baseModel: g.baseModel,
+          category: g.category,
+          name: g.name,
+          variantCount: g.variantCount,
+          sizeLabels: g.sizeLabels,
+          photoBytes,
+          photoMimeType,
+        };
+      }),
+    );
+    return entries;
+  }
+
+  async function fetchPhotoMap(): Promise<Record<string, string>> {
+    try {
+      const res = await fetch("/api/files?resourceType=modular");
+      const j = (await res.json().catch(() => null)) as {
+        success?: boolean;
+        data?: Array<{ id: string; resourceId: string }>;
+      } | null;
+      if (res.ok && j?.success && Array.isArray(j.data)) {
+        const map: Record<string, string> = {};
+        for (const f of j.data) {
+          // Only store the first photo per baseModel (cover photo)
+          if (!map[f.resourceId]) map[f.resourceId] = f.id;
+        }
+        return map;
+      }
+    } catch {
+      // fall through
+    }
+    return {};
+  }
+
+  // Full catalogue export (respects the active category filter in catalog view)
+  async function handleExportCatalogue(catFilter?: string) {
+    setExportingCatalogue(true);
+    try {
+      const photoMap = await fetchPhotoMap();
+      const entries = await buildCatalogueModels(photoMap);
+      const { default: generateProductCataloguePdf } = await import(
+        "@/lib/generate-product-catalogue-pdf"
+      );
+      const doc = generateProductCataloguePdf(entries, {
+        categoryFilter: catFilter,
+      });
+      const ts = new Date().toISOString().slice(0, 10);
+      doc.save(`Product-Catalogue-${ts}.pdf`);
+    } catch (err) {
+      console.error("[Catalogue PDF]", err);
+      toast.error("Failed to generate catalogue PDF.");
+    } finally {
+      setExportingCatalogue(false);
+    }
+  }
+
+  // Load customers for the picker
+  async function openCatalogueCustomerPicker() {
+    setShowCatCustomerPicker(true);
+    if (catalogueCustomers.length > 0) return; // already loaded
+    setLoadingCatalogueCustomers(true);
+    try {
+      const res = await fetch("/api/customers");
+      const j = (await res.json().catch(() => null)) as {
+        success?: boolean;
+        data?: Array<{ id: string; code: string; name: string }>;
+      } | null;
+      if (res.ok && j?.success && Array.isArray(j.data)) {
+        setCatalogueCustomers(j.data);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingCatalogueCustomers(false);
+    }
+  }
+
+  // Per-customer catalogue export
+  async function handleExportCustomerCatalogue(customer: {
+    id: string;
+    code: string;
+    name: string;
+  }) {
+    setShowCatCustomerPicker(false);
+    setCatCustomerQuery("");
+    setExportingCatalogue(true);
+    try {
+      // 1. Fetch the customer's assigned products (reuse the customer-quotation
+      //    API which already resolves customer_products joined to products).
+      const today = new Date().toISOString().slice(0, 10);
+      const res = await fetch(
+        `/api/customer-quotation?customerId=${encodeURIComponent(customer.id)}&asOf=${today}`,
+      );
+      if (!res.ok) {
+        toast.error("Could not fetch customer assigned products.");
+        return;
+      }
+      const j = (await res.json()) as {
+        success: boolean;
+        data?: { products?: Array<{ code: string }> };
+        error?: string;
+      };
+      if (!j.success || !j.data?.products) {
+        toast.error(j.error || "No assigned products found for this customer.");
+        return;
+      }
+      // Derive the set of baseModels the customer has at least one SKU in
+      const assignedBaseModels = new Set<string>(
+        j.data.products.map((p) => {
+          // Derive baseModel from code (mirrors catalog.tsx buildModelGroups logic)
+          return (p.code || "").split(/\s|-\(/)[0].trim() || p.code;
+        }),
+      );
+      if (assignedBaseModels.size === 0) {
+        toast.error(`${customer.name} has no assigned SKUs.`);
+        return;
+      }
+
+      const photoMap = await fetchPhotoMap();
+      const entries = await buildCatalogueModels(photoMap, assignedBaseModels);
+      if (entries.length === 0) {
+        toast.error("No matching models found in the product catalogue.");
+        return;
+      }
+
+      const { default: generateProductCataloguePdf } = await import(
+        "@/lib/generate-product-catalogue-pdf"
+      );
+      const doc = generateProductCataloguePdf(entries, {
+        customerName: customer.name,
+      });
+      const safeCode = (customer.code || customer.name).replace(/[^a-zA-Z0-9_-]+/g, "_");
+      const ts = new Date().toISOString().slice(0, 10);
+      doc.save(`Product-Catalogue-${safeCode}-${ts}.pdf`);
+    } catch (err) {
+      console.error("[Customer Catalogue PDF]", err);
+      toast.error("Failed to generate customer catalogue PDF.");
+    } finally {
+      setExportingCatalogue(false);
+    }
+  }
 
   function handleExportCsv() {
     const header = EXPORT_COLUMNS.join(",");
@@ -3392,6 +3592,102 @@ export default function ProductsPage() {
         <p className="text-sm text-[#6B7280] -mt-4">
           {filtered.length} product{filtered.length !== 1 ? "s" : ""} &middot; Production configs from SKU sheet
         </p>
+      )}
+
+      {/* Catalog view — export toolbar */}
+      {viewMode === "catalog" && (
+        <div className="flex items-center gap-2 justify-end -mt-1 mb-2 flex-wrap">
+          <button
+            onClick={() => handleExportCatalogue()}
+            disabled={exportingCatalogue || products.length === 0}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-[#E5E7EB] bg-white text-[#6B7280] hover:bg-[#F3F4F6] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {exportingCatalogue ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <FileDown className="w-3.5 h-3.5" />
+            )}
+            Export Catalogue PDF
+          </button>
+          <button
+            onClick={openCatalogueCustomerPicker}
+            disabled={exportingCatalogue || products.length === 0}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-[#D9CEB3] bg-[#F4F0E8] text-[#6B5C32] hover:bg-[#EDE8D8] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            Export for Customer…
+          </button>
+        </div>
+      )}
+
+      {/* Customer picker modal for per-customer catalogue export */}
+      {showCatCustomerPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => { setShowCatCustomerPicker(false); setCatCustomerQuery(""); }}
+          />
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-[#E2DDD8]">
+              <h2 className="text-base font-semibold text-[#1F1D1B]">Export Catalogue for Customer</h2>
+              <button
+                onClick={() => { setShowCatCustomerPicker(false); setCatCustomerQuery(""); }}
+                className="text-[#9CA3AF] hover:text-[#1F1D1B] transition-colors"
+              >
+                <XIcon className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="px-5 py-3 border-b border-[#F3F4F6]">
+              <input
+                type="text"
+                value={catCustomerQuery}
+                onChange={(e) => setCatCustomerQuery(e.target.value)}
+                placeholder="Search customers…"
+                autoFocus
+                className="w-full px-3 py-2 rounded-md text-sm border border-[#E2DDD8] bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30"
+              />
+            </div>
+            <div className="max-h-80 overflow-y-auto">
+              {loadingCatalogueCustomers ? (
+                <div className="flex items-center justify-center py-10">
+                  <Loader2 className="h-5 w-5 animate-spin text-[#6B5C32]" />
+                </div>
+              ) : (() => {
+                const q = catCustomerQuery.trim().toLowerCase();
+                const visible = q
+                  ? catalogueCustomers.filter(
+                      (c) =>
+                        c.name.toLowerCase().includes(q) ||
+                        c.code.toLowerCase().includes(q),
+                    )
+                  : catalogueCustomers;
+                if (visible.length === 0) {
+                  return (
+                    <p className="text-sm text-[#9CA3AF] text-center py-8">No customers found.</p>
+                  );
+                }
+                return visible.map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => handleExportCustomerCatalogue(c)}
+                    className="w-full text-left px-5 py-3 hover:bg-[#F9FAFB] transition-colors flex items-center gap-3 border-b border-[#F3F4F6] last:border-0"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-[#1F1D1B] truncate">{c.name}</p>
+                      <p className="text-xs text-[#9CA3AF]">{c.code}</p>
+                    </div>
+                    <FileDown className="h-4 w-4 text-[#6B5C32] flex-shrink-0" />
+                  </button>
+                ));
+              })()}
+            </div>
+            <div className="px-5 py-3 border-t border-[#F3F4F6] bg-[#FAFAF9]">
+              <p className="text-xs text-[#9CA3AF]">
+                Generates a catalogue showing only this customer's assigned SKU models.
+              </p>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Catalog (Modular) View — one photo-first tile per Model. */}

@@ -34,6 +34,18 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-22-003 — P&L 500 ("column pii.piid does not exist") — F6 material-cost SQL used camelCase columns missing from the rename map
+
+🟢 **Fixed** · `data-migration`
+
+**Symptom:** The Accounting P&L (Overall / trend / matrix) stuck on "Loading…" forever after the F6 material-cost feature shipped. Read as a perf hang; the Network tab showed `/pl-statement` returning **500** in ~2s: `{"success":false,"error":"column pii.piid does not exist"}`. Present since the original F6 (v1) — it never actually worked; the identical "Loading…" symptom masked a 500 as a slow load.
+
+**Root cause:** `loadMaterialCostData`'s SQL (and v1's `loadMaterialCost`) in `src/api/routes/accounting.ts` referenced camelCase identifiers `pii.piId` (+ `lineType`, and the `po.status AS poStatus` alias) that were NOT in `src/api/lib/column-rename-map.json`. The d1-compat rewriter (`supabase-compat.ts`, bare-identifier branch `out += renameMap[word] ?? word`) only snake-cases identifiers present in the map; an unmapped one passes through and Postgres lowercases it (`piId` → `piid`) → column-not-found → 500. `sql-write-column-coverage` only checks INSERT/UPDATE columns, so JOIN/WHERE/alias identifiers slipped through.
+
+**Fix (`bab1f44a`):** added `piId`→`pi_id`, `lineType`→`line_type`, `poStatus`→`po_status` to the rename map; verified every identifier in all F6 queries is now mapped. (Same branch also rebuilt the engine single-pass — `loadMaterialCostData` loads + replays ONCE per request via monthly checkpoints instead of per-window N× — a real perf win that was mistaken for the cause, but NOT the 500.)
+
+**Verified live (prod):** P&L Overall 2026-06 opens, all sections render (chunk `accounting-BoemKanp.js`). Regression test `tests/material-cost-column-map.test.mjs` auto-extracts every camelCase identifier from `loadMaterialCostData`'s SQL and asserts each is in the rename map — catches the whole class, not just these three. (The "54 negative-stock / 3 unresolved" P&L banner is expected until the owner fills Opening Stock when they start using the feature.)
+
 ## BUG-2026-06-22-002 — Supplier binding/price edit silently un-saveable ("Save 不到") — `required` on a value-swapping search input blocked submit
 
 🟢 **Fixed** · `ui-frontend`

@@ -15,7 +15,7 @@
 // export is also provided so a lazy import never explodes, but no route mounts
 // it — Compose is always a modal over the inbox.
 // ---------------------------------------------------------------------------
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,31 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { csrfHeaders } from "@/lib/csrf";
 import { saveDraft, deleteDraft, type MailDraft } from "./mail-local";
-import { Mail, Send, Loader2, X, Save } from "lucide-react";
+import {
+  validateMailAttachments,
+  decodedBase64Bytes,
+  isAllowedMailAttachment,
+  MAIL_ATTACH_MAX_COUNT,
+  MAIL_ATTACH_MAX_TOTAL_BYTES,
+} from "@/api/lib/mail-attachments";
+import { Mail, Send, Loader2, X, Save, Paperclip } from "lucide-react";
+
+// One picked file held in memory for the compose POST. contentBase64 is the
+// RAW base64 (the `data:...;base64,` prefix is stripped on read) so it maps
+// 1:1 onto the backend EmailAttachment shape.
+type ComposeAttachment = {
+  name: string;
+  type: string;
+  size: number; // decoded byte count (for the chip label + total cap)
+  contentBase64: string;
+};
+
+// Human-readable file size for the chip label.
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 type MailAddress = {
   id: string;
@@ -83,6 +107,11 @@ export function ComposeDialog({
   const [body, setBody] = useState("");
   const [touchedTo, setTouchedTo] = useState(false);
   const [sending, setSending] = useState(false);
+  // Picked attachments (held in memory only — NOT persisted to a local draft).
+  const [files, setFiles] = useState<ComposeAttachment[]>([]);
+  // Inline attachment error (count / size / type), mirrors the backend reject.
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Id of the local draft being edited, if this dialog was opened by resuming a
   // draft (so Send / re-save can clear or update the right one).
   const [draftId, setDraftId] = useState<string | null>(null);
@@ -99,6 +128,10 @@ export function ComposeDialog({
       setDraftId(initialDraft?.id ?? null);
       setTouchedTo(false);
       setSending(false);
+      // Attachments are never persisted in a draft (see mail-local.ts note),
+      // so a freshly-opened dialog — even one resuming a draft — starts empty.
+      setFiles([]);
+      setAttachError(null);
     }
     wasOpen.current = open;
   }, [open, initialDraft]);
@@ -156,6 +189,93 @@ export function ComposeDialog({
     onClose();
   }
 
+  // Read one file → raw base64 (strip the `data:<mime>;base64,` prefix). The
+  // FileReader result is a data URL; everything after the first comma is the
+  // base64 payload the backend expects in EmailAttachment.contentBase64.
+  function readFileAsBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = typeof reader.result === "string" ? reader.result : "";
+        const comma = result.indexOf(",");
+        resolve(comma >= 0 ? result.slice(comma + 1) : result);
+      };
+      reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handlePickFiles(e: ChangeEvent<HTMLInputElement>) {
+    const picked = Array.from(e.target.files ?? []);
+    // Allow re-picking the same file later (clear the input value).
+    e.target.value = "";
+    if (picked.length === 0) return;
+    setAttachError(null);
+
+    // Per-file type gate (mirrors isAllowedMailAttachment on the backend) — do
+    // it before the read so an obviously-wrong file never gets decoded.
+    const rejected = picked.filter((f) => !isAllowedMailAttachment(f.name));
+    if (rejected.length > 0) {
+      setAttachError(
+        `"${rejected[0].name}" is not an allowed type. Only images and PDF files can be attached.`,
+      );
+      return;
+    }
+
+    // Pre-check RAW file sizes (File.size, synchronous, zero read cost) BEFORE
+    // decoding, so an oversized file never gets fully read into memory first —
+    // FileReader.readAsDataURL on a huge phone photo / video can hang or crash a
+    // low-RAM tab. f.size is the raw byte count ≈ the decoded bytes the cap is
+    // enforced on, so this is the same 5 MB ceiling, just applied earlier.
+    const existingBytes = files.reduce((sum, f) => sum + f.size, 0);
+    const pickedRawBytes = picked.reduce((sum, f) => sum + f.size, 0);
+    if (existingBytes + pickedRawBytes > MAIL_ATTACH_MAX_TOTAL_BYTES) {
+      setAttachError(
+        `Attachments exceed the ${humanSize(MAIL_ATTACH_MAX_TOTAL_BYTES)} limit.`,
+      );
+      return;
+    }
+
+    let read: ComposeAttachment[];
+    try {
+      read = await Promise.all(
+        picked.map(async (f) => {
+          const contentBase64 = await readFileAsBase64(f);
+          return {
+            name: f.name,
+            type: f.type,
+            // Trust the decoded base64 length, not f.size — that's the number
+            // the cap is enforced on (server-side too).
+            size: decodedBase64Bytes(contentBase64),
+            contentBase64,
+          };
+        }),
+      );
+    } catch {
+      setAttachError("Could not read one of the files. Please try again.");
+      return;
+    }
+
+    const next = [...files, ...read];
+    // Validate the COMBINED batch with the SAME helper the backend uses, so the
+    // operator is rejected here with the identical 5 MB / 10-file / type rule.
+    const check = validateMailAttachments(
+      next.map((f) => ({ filename: f.name, contentBase64: f.contentBase64 })),
+    );
+    if (!check.ok) {
+      setAttachError(check.error ?? "Invalid attachments.");
+      return; // keep the previous selection; don't apply the over-cap batch
+    }
+    setFiles(next);
+  }
+
+  function removeFile(index: number) {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+    setAttachError(null);
+  }
+
+  const totalAttachBytes = files.reduce((sum, f) => sum + f.size, 0);
+
   async function handleSend() {
     if (!canSend) return;
     setSending(true);
@@ -169,6 +289,14 @@ export function ComposeDialog({
           to: to.trim(),
           subject: subject.trim(),
           text: body,
+          ...(files.length > 0
+            ? {
+                attachments: files.map((f) => ({
+                  filename: f.name,
+                  contentBase64: f.contentBase64,
+                })),
+              }
+            : {}),
         }),
       });
       let payload: ComposeResponse = {};
@@ -311,6 +439,44 @@ export function ComposeDialog({
                   className="w-full resize-y rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm leading-relaxed focus:border-[#6B5C32] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 disabled:cursor-not-allowed disabled:opacity-60"
                 />
               </div>
+
+              {/* Attachments — removable chips. Images + PDF only, ≤10 files,
+                  ≤5 MB total (mirrors the backend cap in mail-attachments.ts). */}
+              {files.length > 0 && (
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-[#6B7280]">
+                    Attachments ({files.length}/{MAIL_ATTACH_MAX_COUNT} ·{" "}
+                    {humanSize(totalAttachBytes)} of{" "}
+                    {humanSize(MAIL_ATTACH_MAX_TOTAL_BYTES)})
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {files.map((f, i) => (
+                      <span
+                        key={`${f.name}-${i}`}
+                        className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] py-1 pl-2 pr-1 text-xs text-[#1F1D1B]"
+                      >
+                        <Paperclip className="h-3 w-3 shrink-0 text-[#6B7280]" />
+                        <span className="truncate">{f.name}</span>
+                        <span className="shrink-0 text-[#6B7280]">
+                          {humanSize(f.size)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeFile(i)}
+                          disabled={sending}
+                          aria-label={`Remove ${f.name}`}
+                          className="shrink-0 rounded p-0.5 text-[#6B7280] transition hover:bg-[#F0ECE9] hover:text-[#1F1D1B] disabled:opacity-50"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {attachError && (
+                <p className="text-[11px] text-red-600">{attachError}</p>
+              )}
             </>
           )}
         </div>
@@ -334,17 +500,40 @@ export function ComposeDialog({
               Cancel
             </Button>
             {!noMailbox && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5"
-                disabled={!canSaveDraft}
-                onClick={handleSaveDraft}
-                title="Save this email as a local draft"
-              >
-                <Save className="h-4 w-4" />
-                Save draft
-              </Button>
+              <>
+                {/* Hidden picker driven by the Attach button. Images + PDF only;
+                    `multiple` so several can be added in one go. */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*,application/pdf"
+                  multiple
+                  className="hidden"
+                  onChange={handlePickFiles}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  disabled={sending}
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Attach images or PDF files (max 10 files, 5 MB total)"
+                >
+                  <Paperclip className="h-4 w-4" />
+                  Attach
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  disabled={!canSaveDraft}
+                  onClick={handleSaveDraft}
+                  title="Save this email as a local draft"
+                >
+                  <Save className="h-4 w-4" />
+                  Save draft
+                </Button>
+              </>
             )}
             <Button
               variant="primary"

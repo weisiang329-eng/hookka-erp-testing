@@ -25,6 +25,7 @@ import type { Env } from "../worker";
 import { requireSuperAdmin } from "../lib/rbac";
 import { getOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 import { sendMail } from "../lib/email";
+import { validateMailAttachments } from "../lib/mail-attachments";
 import {
   DEFAULT_BUCKET,
   putFile,
@@ -1882,6 +1883,9 @@ app.post("/compose", async (c) => {
     to?: string;
     subject?: string;
     text?: string;
+    // Inline outbound attachments (images + PDF), base64 (no data: prefix).
+    // Transient — not persisted to /api/files; just forwarded to sendMail.
+    attachments?: Array<{ filename: string; contentBase64: string }>;
   };
   const body: ComposeBody = await c.req
     .json<ComposeBody>()
@@ -1891,6 +1895,7 @@ app.post("/compose", async (c) => {
   const to = (body.to ?? "").trim();
   const subject = (body.subject ?? "").trim();
   const text = (body.text ?? "").trim();
+  const attachments = body.attachments ?? [];
 
   if (!fromAddress) {
     return c.json({ error: "fromAddress is required" }, 400);
@@ -1903,6 +1908,15 @@ app.post("/compose", async (c) => {
   }
   if (!text) {
     return c.json({ error: "message body is required" }, 400);
+  }
+
+  // This route sends SYNCHRONOUSLY via sendMail and BYPASSES the outbox, so the
+  // outbox's MAX_ATTACHMENT_TOTAL_BYTES guard does NOT protect it — own the cap
+  // here (same 5 MB decoded / 10-file / images+PDF rule the frontend mirrors).
+  // Interactive path → reject clearly, never silently drop the attachment.
+  const attachCheck = validateMailAttachments(attachments);
+  if (!attachCheck.ok) {
+    return c.json({ error: attachCheck.error || "Invalid attachments." }, 400);
   }
 
   // Authorize the From: non-admins may only send from a mailbox they own or
@@ -1937,6 +1951,10 @@ app.post("/compose", async (c) => {
     subject,
     text,
     html: htmlBody,
+    // Forward the validated attachments (already capped at 5 MB / 10 files /
+    // images+PDF above). Omitted when empty so the payload is byte-identical to
+    // the pre-attachment behaviour. Not persisted — transient outbound only.
+    ...(attachments.length > 0 ? { attachments } : {}),
   });
   if (!result.ok) {
     // Surface the REAL provider error instead of a blank "send failed" — the

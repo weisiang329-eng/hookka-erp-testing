@@ -372,7 +372,12 @@ export async function fetchModelPhotoBytes(
   fileId: string,
 ): Promise<{ bytes: Uint8Array; mimeType: string } | null> {
   try {
-    const res = await fetch(`/api/files/${fileId}/download`);
+    // Use the same-origin /stream proxy, NOT /download. /download 302-redirects
+    // to a cross-origin Supabase signed URL — fine for <img>, but fetch() can't
+    // read the cross-origin response (CORS), so it always failed → silent "NO
+    // PHOTO" in the PDF even when a photo exists. /stream returns the bytes
+    // directly from our own origin. (BUG-2026-06-22: catalogue PDF photos.)
+    const res = await fetch(`/api/files/${fileId}/stream`);
     if (!res.ok) return null;
     const ct = res.headers.get("content-type") ?? "image/jpeg";
     const mime = ct.split(";")[0].trim() || "image/jpeg";

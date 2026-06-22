@@ -34,6 +34,43 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-22-008 — 1052 bedframe packing sticker prints only the Headboard, no Divan (DATA — only 1 fg_unit piece generated)
+
+🔴 **Identified** (DATA, not code — no code change) · `production-orders` / `data-integrity` · caught by owner on prod
+
+**Symptom:** the 1052 bedframe's packing sticker prints only ONE Headboard (HB) piece — there is no Divan sticker. A full bedframe set is HB + 2 Divan (King/Queen), so the Divan should produce 2 stickers. Working bedframes (1013 / 1003 / 2008 etc.) print HB + 2 Divan correctly.
+
+**Root cause (DATA, not code):** the packing/FG sticker count is driven entirely by the `fg_units` rows the backend generates per production order. Both render paths — the on-screen Foam/Packing preview (`fetchFgStickersForOrders` → `POST /api/fg-units/generate/:poId`) and the bedframe sticker render loop (`src/pages/production/index.tsx` ~L4652-4673: `pieceNo===1` → HB, rest → Divan) — faithfully draw one sticker per `fg_unit`. There is **no code branch that drops the Divan** for any 1052 condition. So a single HB sticker means the backend produced exactly ONE `fg_unit` (count 1) for that PO. Piece count comes from `parsePieces()` (`src/api/routes/fg-units.ts:244`), in priority order:
+  1. `specialOrder` contains "Headboard Only" → short-circuits to `{count:1, names:["Headboard"]}` (`fg-units.ts:257-267`);
+  2. `products.pieces` JSON non-empty → used verbatim (a `{count:1,...}` or legacy value forces 1 piece) (`fg-units.ts:271-282`);
+  3. else the BEDFRAME size-default — K/Q → `{count:3, names:["Headboard","Divan","Divan"]}`, S/SS → `{count:2}` (`bedframeSizeDefault`, `fg-units.ts:225-242`).
+A "Headboard"-labelled single sticker means the 1052 PO hit branch (1) or (2). Same class as the prior `2008(A)-(K)` "HB shows 1/1 instead of 1/3" investigation (`scripts/inspect-2008-bedframe.mjs`) and the legacy-pieces cleanup (`scripts/clear-bedframe-legacy-pieces.mjs`). NOTE: 1052 is confirmed to exist as `1052-(K)` / `1052-(Q)` (King/Queen) — see BUG-2026-06-22-006 — so the correct size-default is HB + 2 Divan.
+
+**Could not query prod directly** to pin which branch fired: the embedded credentials in the `scripts/inspect-*.mjs` tools now 401 (rotated). The owner must run the `inspect-2008-bedframe.mjs` pattern with fresh creds against the 1052 PO to read: (a) `products.pieces` for `1052-(K)`/`1052-(Q)`, (b) the 1052 SO line's `specialOrder`, (c) the existing `fg_units` rows for that PO.
+
+**Proposed DATA fix (no code change):**
+  - If `products.pieces` for `1052-(K)`/`1052-(Q)` is a count-1 / legacy value → clear it: `PUT /api/products/:id { "pieces": null }` so the size-default (HB + 2 Divan) takes over (this is exactly what `scripts/clear-bedframe-legacy-pieces.mjs` does).
+  - If the 1052 SO line's `specialOrder` wrongly contains "Headboard Only" → correct the SO line (the customer ordered a full bedframe).
+  - **Then regenerate the frozen units:** `POST /api/fg-units/generate/:poId` is **idempotent** (returns existing rows untouched), so fixing the config alone will NOT change an already-generated PO. Use the one-shot `POST /api/import/regen-fg-units` with `{ "soIds": ["<1052 SO>"], "dryRun": true }` first (preview), then `dryRun:false` — it deletes the in-stock (`PACKED`/pre-load) `fg_units` and re-runs `generateFGUnitsForPO`, safely skipping any LOADED/DELIVERED/RETURNED unit (`src/api/routes/import-completion.ts:13971`).
+
+**Latent gap surfaced:** `/api/fg-units/generate/:poId` has no `force` mode; the only way to re-derive after a config fix is the one-shot `regen-fg-units`. If this piece-count class keeps recurring, validating bedframe `pieces` on write (or auto-clearing legacy bedframe configs) would prevent it.
+
+---
+
+## BUG-2026-06-22-007 — Foam tab "Show / Print Packing Stickers (ticked rows)" → "Could not match the ticked rows to any production orders" (regression of BUG-2026-06-08)
+
+🟢 **Fixed** · `production-orders` / `ui-frontend` · caught by owner on prod
+
+**Symptom:** on the Production page, the owner ticked 19 FOAM-bonding component rows (e.g. `PC151-01 Foam`, `IB 22" PC151-10 Foam`) spanning 13 SOs, then clicked "Show / Print Packing Stickers". The preview header correctly read "Packing stickers for the 13 SOs in your 19 ticked rows", but the body warned "Could not match the ticked rows to any production orders" and produced 0 stickers.
+
+**Root cause (CODE — a regression):** the Foam packing flow is a two-sided contract. The matcher `loadFoamPackingStickers` (`src/pages/production/index.tsx` ~L5016-5022) builds `selSoIds` from `selectedDeptRows[].soId` and matches it against the **human doc fields** `o.poNo || o.companySOId || o.companyCOId`. BUG-2026-06-08 had already fixed this so ticked rows carry the human number (SOFA → `companySOId`, BF/ACC → line-suffixed `poNo`). But the DataGrid `onSelectionChange` handler (~L6829) was later changed to populate `selectedDeptRows` with `soId: r.salesOrderId || r.consignmentOrderId` — the **internal primary-key UUIDs**, not the human number. A UUID never equals `o.poNo`/`o.companySOId`/`o.companyCOId`, so `scoped` was always empty → the "Could not match" warning. The header still counted "13 SOs" because distinct UUIDs are still distinct SOs (`selSoIds.size`), which is why the count looked right while the match failed — exactly the reported symptom. (This is type (b), a real matching bug — matching foam/WIP component rows up to their parent SO's FG units is the *intended* design of this pre-print feature; `fetchFgStickersForOrders` re-fetches all of the SO's POs incl. the Divan PO that has no FOAM job card.)
+
+**Fix:** `src/pages/production/index.tsx` ~L6829 — restore `soId: r.salesOrderId || r.consignmentOrderId || ""` → **`soId: r.soId || ""`** (`DeptRow.soId` is already the human doc number the matcher expects). One-line change; added an explanatory comment block. The only two consumers of `selectedDeptRows[].soId` are the Foam Show + Print packing-sticker paths (both feed `selSoIds`), so nothing else is affected.
+
+**Verified:** `npx tsc -p tsconfig.app.json --noEmit` clean (only the 3 known jsbarcode/@zxing sandbox errors). New regression test `tests/production-foam-packing-ticked-rows.test.mjs` pins BOTH sides of the contract (selection writer must use `r.soId` and must NOT use `r.salesOrderId`/`r.consignmentOrderId`; matcher must compare against the human doc fields) — confirmed it FAILS against the buggy line and passes against the fix. Live prod verify (tick foam component rows → Show Packing Stickers → stickers render) still owed on next deploy.
+
+---
+
 ## BUG-2026-06-22-006 — Phantom "559" / "1052-(K)" / "1052-(Q)" models in the Products Catalog (mis-set baseModel field)
 
 🟢 **Fixed** · `pricing-products` / `data-integrity` · caught by owner on prod

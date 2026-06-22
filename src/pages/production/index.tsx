@@ -6826,7 +6826,17 @@ export default function ProductionPage({
                   prodTime: Number(r.prodTime) || 0,
                   // SO this row belongs to — lets the Foam packing-sticker
                   // buttons scope to the ticked rows (Wei Siang 2026-06-02).
-                  soId: r.salesOrderId || r.consignmentOrderId || "",
+                  // MUST be the HUMAN doc number (DeptRow.soId = companySOId
+                  // for SOFA, line-suffixed poNo for BF/ACC), NOT the internal
+                  // salesOrderId/consignmentOrderId primary key: the Foam
+                  // packing matcher in loadFoamPackingStickers compares this
+                  // set against o.poNo / o.companySOId / o.companyCOId (all
+                  // human numbers). Storing the UUID primary key here made
+                  // every comparison miss → "Could not match the ticked rows
+                  // to any production orders" even though the header counted
+                  // the SOs correctly (UUIDs are still distinct per SO).
+                  // Regression of the BUG-2026-06-08 fix; re-fixed 2026-06-22.
+                  soId: r.soId || "",
                 })),
               )
             }

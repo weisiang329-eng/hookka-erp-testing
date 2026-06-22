@@ -16,7 +16,7 @@
 // PIFormDialog. The backend endpoint is unchanged.
 // ---------------------------------------------------------------------------
 
-import React, { useState, useEffect, useMemo, Suspense } from "react";
+import React, { useState, useEffect, useMemo, useCallback, Suspense } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -248,14 +248,19 @@ function CreatePurchaseInvoicePage() {
 
   const supplier = suppliers.find((s) => s.id === supplierId);
 
-  // ── Supplier-filtered material picker options ─────────────────────────────
+  // ── Material picker options ───────────────────────────────────────────────
   // When a supplier is selected, narrow the catalog to materials bound to that
-  // supplier via supplier_material_bindings. The picker still allows free-text
-  // for off-catalog items — this only changes the suggestions list.
-  // When no supplier is selected, materialOptions is empty and the picker shows
-  // a "Pick a supplier first" hint instead of catalog entries.
+  // supplier via supplier_material_bindings so the most relevant items appear
+  // first. When no supplier is selected yet, show the FULL active catalog so
+  // the operator can pick item first (supplier auto-fills from the binding).
   const materialOptions: MaterialOption[] = useMemo(() => {
-    if (!supplierId) return [];
+    if (!supplierId) {
+      // No supplier yet — show all active materials so item-first entry works.
+      return allRawMaterials.map((rm) => ({
+        itemCode: rm.itemCode,
+        description: rm.description,
+      }));
+    }
     const boundCodes = new Set(
       supplierMaterialBindings
         .filter((b) => b.supplierId === supplierId)
@@ -273,6 +278,22 @@ function CreatePurchaseInvoicePage() {
       .filter((rm) => boundCodes.has(rm.itemCode.trim().toUpperCase()))
       .map((rm) => ({ itemCode: rm.itemCode, description: rm.description }));
   }, [supplierId, supplierMaterialBindings, allRawMaterials]);
+
+  // ── Reverse-lookup: material → main supplier ──────────────────────────────
+  // Used when the operator picks a material before selecting a supplier.
+  // Finds the main-supplier binding (isMainSupplier flag); falls back to any
+  // binding for that material. Returns null if no binding exists.
+  const findMainBindingForMaterial = useCallback(
+    (materialCode: string): SupplierMaterialBinding | null => {
+      const key = materialCode.trim().toUpperCase();
+      const matches = supplierMaterialBindings.filter(
+        (b) => b.materialCode.trim().toUpperCase() === key,
+      );
+      if (matches.length === 0) return null;
+      return matches.find((b) => b.isMainSupplier) ?? matches[0];
+    },
+    [supplierMaterialBindings],
+  );
 
   // ── Line mutators — verbatim from PIFormDialog ────────────────────────────
   const updateLine = (
@@ -712,37 +733,38 @@ function CreatePurchaseInvoicePage() {
                       key={idx}
                       className="border-t border-[#E2DDD8] hover:bg-[#FAF9F7]"
                     >
-                      {/* Description — catalog picker, filtered by supplier; free-text OK */}
+                      {/* Description — catalog picker; works item-first (no supplier required).
+                          On pick: fills code + name + supplier SKU; if no supplier is
+                          selected yet, auto-fills the supplier from the main binding. */}
                       <td className="px-2 py-1.5">
-                        {!supplierId ? (
-                          <input
-                            disabled
-                            className="h-8 w-full rounded border border-[#E2DDD8] bg-[#F9F8F6] px-2 text-xs text-[#9CA3AF] cursor-not-allowed"
-                            placeholder="Pick a supplier first"
-                          />
-                        ) : (
-                          <MaterialPicker
-                            className="h-8"
-                            inputClassName="h-8"
-                            placeholder="Search code or name..."
-                            value={line.materialName}
-                            options={materialOptions}
-                            onPick={(o) =>
-                              setLines((prev) => {
-                                const next = [...prev];
-                                next[idx] = {
-                                  ...next[idx],
-                                  materialCode: o.itemCode,
-                                  materialName: o.description,
-                                };
-                                return next;
-                              })
+                        <MaterialPicker
+                          className="h-8"
+                          inputClassName="h-8"
+                          placeholder="Search code or name..."
+                          value={line.materialName}
+                          options={materialOptions}
+                          onPick={(o) => {
+                            const binding = findMainBindingForMaterial(o.itemCode);
+                            setLines((prev) => {
+                              const next = [...prev];
+                              next[idx] = {
+                                ...next[idx],
+                                materialCode: o.itemCode,
+                                materialName: o.description,
+                                // Fill Supplier SKU from binding when available.
+                                supplierSku: binding?.supplierSku ?? next[idx].supplierSku,
+                              };
+                              return next;
+                            });
+                            // Reverse-fill supplier if none selected yet.
+                            if (!supplierId && binding) {
+                              setSupplierId(binding.supplierId);
                             }
-                            onTyped={(text) =>
-                              updateLine(idx, "materialName", text)
-                            }
-                          />
-                        )}
+                          }}
+                          onTyped={(text) =>
+                            updateLine(idx, "materialName", text)
+                          }
+                        />
                       </td>
                       {/* Supplier SKU */}
                       <td className="px-2 py-1.5">

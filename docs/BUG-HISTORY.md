@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-22-005 — Product Catalogue PDF showed "NO PHOTO" for every model even when photos were uploaded
+
+🟢 **Fixed** · `ui-frontend` · caught by owner on prod
+
+**Symptom:** owner uploaded a model photo (e.g. SOFA 5543), saw it on the on-screen Catalog tile, but the exported Product Catalogue PDF still rendered the cross-hatched "NO PHOTO" placeholder for every card — photos never embedded.
+
+**Root cause:** `src/lib/generate-product-catalogue-pdf.ts` `fetchModelPhotoBytes()` fetched the image via `GET /api/files/:id/download`. That route 302-redirects to a **cross-origin Supabase signed URL** (`files.ts` `signedDownloadUrl` → `c.redirect(named, 302)`). An `<img src>` follows the redirect fine (no CORS needed → tile works), but `fetch()` reading the cross-origin response is blocked by CORS → throws → the catch returned `null` → `photoBytes` null → generator drew the placeholder. So the photo fetch *always* failed silently in the PDF path. Confirmed live via XHR: `/download` → "Failed to fetch", `/api/files/:id/stream` → 200 `image/jpeg` 23913 bytes magic `ff d8 ff e0`.
+
+**Fix:** fetch the bytes from the same-origin **`/api/files/:id/stream`** proxy (which streams the object body directly from our own worker, no redirect) instead of `/download`. One-line change; covers both the full and per-customer exports (both call `fetchModelPhotoBytes`). The on-screen tiles keep using `/download` (the redirect is fine + cheaper for `<img>`). Commit 4dc1d75e.
+
+**Verified live (prod):** re-exported the full catalogue via the single Export button → All Customers; the generated PDF now contains 1 embedded JPEG (`DCTDecode` count 1, was 0) — the SOFA 5543 photo. Lesson: a signed-URL redirect that works for `<img>` will silently break any `fetch()`/`arrayBuffer()` reader — use the same-origin stream proxy for byte reads.
+
+---
+
 ## BUG-2026-06-22-004 — POSTED-GRN qty reduction 500'd on prod: `function max(integer, double precision) does not exist`
 
 🟢 **Fixed** · `infrastructure` · caught by live-verify

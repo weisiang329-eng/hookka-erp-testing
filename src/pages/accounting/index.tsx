@@ -5619,7 +5619,13 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
   const startEdit = async (r: PvRow) => {
     if (!(await confirm({ title: "Edit voucher?", message: `Edit ${r.pvNo}? It will be VOIDED and a new prefilled payment opened to repost.`, danger: true }))) return;
-    const res = await fetch(`/api/accounting/payment-vouchers/${r.id}/void`, { method: "POST" });
+    // Void via the lifecycle endpoint (hides the original + reversal from the GL),
+    // NOT the legacy /void (which left both legs visible — the ledger void leak).
+    const res = await fetch(`/api/accounting/payment-vouchers/${r.id}/lifecycle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "void" }),
+    });
     const j = asMutationResponse(await res.json());
     if (!j?.success) { toast.error(j?.error || "Could not void the original"); return; }
     setForm({ date: r.date, payee: r.payee ?? "", description: r.description ?? "", accrued: r.accrued === 1, payFrom: r.payFrom ?? "", accrualAccount: r.accrualAccount ?? "", productLine: r.productLine ?? "" });

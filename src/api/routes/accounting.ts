@@ -6090,54 +6090,6 @@ app.post("/payment-vouchers/:id/settle", async (c) => {
   }
 });
 
-app.post("/payment-vouchers/:id/void", async (c) => {
-  const denied = await requirePermission(c, "accounting", "update");
-  if (denied) return denied;
-  const id = c.req.param("id");
-  const pv = await c.var.DB.prepare(
-    "SELECT id, pvNo, status FROM payment_vouchers WHERE id = ?",
-  )
-    .bind(id)
-    .first<{ id: string; pvNo: string; status: string }>();
-  if (!pv) return c.json({ success: false, error: "Voucher not found" }, 404);
-  if (pv.status !== "POSTED") {
-    return c.json({ success: false, error: "Already void" }, 400);
-  }
-  const orgId = getOrgId(c);
-  const actorUserId =
-    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
-  const prior = await c.var.DB.prepare(
-    `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
-      WHERE sourceType IN ('payment_voucher','payment_voucher_settle') AND sourceId = ? AND orgId = ?`,
-  )
-    .bind(id, orgId)
-    .all<{ accountCode: string; debitSen: number; creditSen: number }>();
-  const legs: LedgerEntryInput[] = (prior.results ?? []).map((l, idx) => ({
-    id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-    sourceType: "payment_voucher_void",
-    sourceId: id,
-    legNo: idx + 1,
-    accountCode: l.accountCode,
-    debitSen: Number(l.creditSen) || 0,
-    creditSen: Number(l.debitSen) || 0,
-    description: `VOID · ${pv.pvNo}`,
-    actorUserId,
-    orgId,
-  }));
-  const { statements: ledgerStmts } = await buildJournalEntryStatements(
-    c.var.DB,
-    orgId,
-    legs,
-  );
-  await c.var.DB.batch([
-    c.var.DB.prepare(
-      "UPDATE payment_vouchers SET status = 'VOID', updated_at = ? WHERE id = ?",
-    ).bind(new Date().toISOString(), id),
-    ...ledgerStmts,
-  ]);
-  return c.json({ success: true });
-});
-
 app.post("/payment-vouchers/:id/lifecycle", async (c) => {
   const denied = await requirePermission(c, "accounting", "update");
   if (denied) return denied;
@@ -6287,54 +6239,6 @@ app.post("/official-receipts", async (c) => {
       400,
     );
   }
-});
-
-app.post("/official-receipts/:id/void", async (c) => {
-  const denied = await requirePermission(c, "accounting", "update");
-  if (denied) return denied;
-  const id = c.req.param("id");
-  const orRow = await c.var.DB.prepare(
-    "SELECT id, orNo, status FROM official_receipts WHERE id = ?",
-  )
-    .bind(id)
-    .first<{ id: string; orNo: string; status: string }>();
-  if (!orRow) return c.json({ success: false, error: "Receipt not found" }, 404);
-  if (orRow.status !== "POSTED") {
-    return c.json({ success: false, error: "Already void" }, 400);
-  }
-  const orgId = getOrgId(c);
-  const actorUserId =
-    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
-  const prior = await c.var.DB.prepare(
-    `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
-      WHERE sourceType = 'official_receipt' AND sourceId = ? AND orgId = ?`,
-  )
-    .bind(id, orgId)
-    .all<{ accountCode: string; debitSen: number; creditSen: number }>();
-  const legs: LedgerEntryInput[] = (prior.results ?? []).map((l, idx) => ({
-    id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-    sourceType: "official_receipt_void",
-    sourceId: id,
-    legNo: idx + 1,
-    accountCode: l.accountCode,
-    debitSen: Number(l.creditSen) || 0,
-    creditSen: Number(l.debitSen) || 0,
-    description: `VOID · ${orRow.orNo}`,
-    actorUserId,
-    orgId,
-  }));
-  const { statements: ledgerStmts } = await buildJournalEntryStatements(
-    c.var.DB,
-    orgId,
-    legs,
-  );
-  await c.var.DB.batch([
-    c.var.DB.prepare(
-      "UPDATE official_receipts SET status = 'VOID', updated_at = ? WHERE id = ?",
-    ).bind(new Date().toISOString(), id),
-    ...ledgerStmts,
-  ]);
-  return c.json({ success: true });
 });
 
 app.post("/official-receipts/:id/lifecycle", async (c) => {
@@ -6549,48 +6453,6 @@ app.get("/fund-transfers", async (c) => {
   out.sort((a, b) => (a.no < b.no ? 1 : a.no > b.no ? -1 : 0));
 
   return c.json({ success: true, data: out });
-});
-
-app.post("/fund-transfers/:no/void", async (c) => {
-  const denied = await requirePermission(c, "accounting", "update");
-  if (denied) return denied;
-  const no = c.req.param("no");
-  const orgId = getOrgId(c);
-  const actorUserId =
-    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
-
-  if (await ledgerHasSource(c.var.DB, orgId, "fund_transfer_void", no)) {
-    return c.json({ success: true, alreadyVoided: true });
-  }
-
-  const prior = await c.var.DB.prepare(
-    `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
-      WHERE sourceType = 'fund_transfer' AND sourceId = ? AND orgId = ?`,
-  )
-    .bind(no, orgId)
-    .all<{ accountCode: string; debitSen: number; creditSen: number }>();
-
-  if (!prior.results || prior.results.length === 0) {
-    return c.json({ success: false, error: "Transfer not found" }, 404);
-  }
-
-  const legs: LedgerEntryInput[] = (prior.results).map((l, idx) => ({
-    id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-    sourceType: "fund_transfer_void",
-    sourceId: no,
-    legNo: idx + 1,
-    accountCode: l.accountCode,
-    debitSen: Number(l.creditSen) || 0,
-    creditSen: Number(l.debitSen) || 0,
-    description: `Void transfer ${no}`,
-    actorUserId,
-    orgId,
-  }));
-
-  const { statements } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
-  await c.var.DB.batch(statements);
-
-  return c.json({ success: true });
 });
 
 app.post("/fund-transfers/:no/lifecycle", async (c) => {

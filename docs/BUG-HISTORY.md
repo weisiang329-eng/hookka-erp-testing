@@ -34,6 +34,18 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-22-004 — POSTED-GRN qty reduction 500'd on prod: `function max(integer, double precision) does not exist`
+
+🟢 **Fixed** · `infrastructure` · caught by live-verify
+
+**Symptom:** with the new editable-POSTED-GRN feature (Phase D) live on prod, REDUCING a posted GRN line's accepted qty (e.g. 96→95) failed with a toast `function max(integer, double precision) does not exist`; the increase (95→96) had worked. The decrement rolled back (no data corruption — atomic batch), but the edit couldn't complete.
+
+**Root cause:** `src/api/routes/grn.ts` (the compensating-movement path for a POSTED-GRN qty change) clamped the batch qty with `UPDATE rm_batches SET originalQty = MAX(0, COALESCE(originalQty,0)+?), remainingQty = MAX(0, …)`. `MAX(a, b)` is a valid 2-arg SCALAR in SQLite but Postgres has no 2-arg scalar MAX (that's `GREATEST`), and the D1-compat `translateSql` layer does NOT convert it. The 585-line cascade test passed because it runs against SQLite — classic SQLite-test-vs-Postgres-prod dialect gap.
+
+**Fix:** the batch row is already SELECTed just above, so compute the clamped `Math.max(0, …)` values in JS and write literals (`UPDATE rm_batches SET originalQty = ?, remainingQty = ? …`) — no SQL MAX, works on both dialects. Commit 6bfa1dd4.
+
+**Verified live (prod):** edited GRN-IMPORT-PI-2606-002's FG66151-10 qty 95→96 (stock 847.6→848.6) then 96→95 (stock back to 847.6) — clean reversible no-op, no error. PI-side AP/GL cascade separately verified: APPROVED PI qty 95→94→95, payable 2,221.46→2,206.40→2,221.46 + matching GL correction, all restored. Lesson: SQLite tests can't catch Postgres-only SQL — live-verify the write path on prod.
+
 ## BUG-2026-06-22-003 — P&L 500 ("column pii.piid does not exist") — F6 material-cost SQL used camelCase columns missing from the rename map
 
 🟢 **Fixed** · `data-migration`

@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-23-002 — /production overdue chip filtered the grid to 0 on browsers holding a stale-SHAPED counts cache (chip read 29, grid showed "No production orders found")
+
+🟢 **Fixed** · `production-orders` / `ui-frontend` / `caching` · caught by owner on prod (hours after -001)
+
+**Symptom:** clicking "Bedframe ⚠ 29" turned the filter on (banner promised "29 overdue Bedframe pieces") but the grid showed "No production orders found / 0 of 1032". The chip COUNT was right (29); only the filtered grid was empty. Reproduced ONLY on a browser that had loaded /production before the id-arrays shipped — a fresh browser worked, which is why -001's verify-live passed.
+
+**Root cause:** `useCachedJson` (`src/lib/cached-fetch.ts`) caches the /overdue-counts response in localStorage keyed `hookka-cache:${__BUILD_ID__}:<url>`. The namespace is per-BUILD (orphaned across deploys) but has **no payload-SHAPE version within a build**, so an entry written just before the v3 shape change (-001) held `bedframeCount:29` but NO `overdueBedframePoIds`/`overdueSofaPoIds`. The grid filter built its Set with `new Set(ids ?? [])` — collapsing ABSENT ids into an EMPTY Set — and `if (overduePoIdSet && !overduePoIdSet.has(o.id)) return false` then excluded all 1032 rows. The chip count (from `bedframeCount`) stayed correct, masking it. The SERVER v3 cache was already right — the un-versioned layer was the CLIENT cache.
+
+**Fix (`src/pages/production/index.tsx`):** distinguish ABSENT from PRESENT-BUT-EMPTY. The `overduePoIdSet` memo now does `if (!ids) return null; return new Set(ids)` — absent → null (id-filter SKIPPED → grid shows orders, not 0); present-but-empty `[]` → empty Set (genuine 0 stays 0). A self-heal `useEffect` forces a cache-bypass refetch (`refreshOverdueCounts()`) whenever a chip is active but its id array is absent; an `overdueIdsLoading` flag makes the banner read "loading the overdue list…" in that window. Since `useCachedJson` always-refetches on mount, the fresh v3 payload lands in ~50ms and the grid narrows to 29 — **self-heals every stale browser, no hard reload**. Regression test added (`production-overdue-counts.test.mjs`: "absent id array → null, not empty Set" — locks out `new Set(ids ?? [])`). build:strict clean, 13/13.
+
+**Lesson:** a client-side cache (`useCachedJson`) is ANOTHER layer that can serve a stale PAYLOAD SHAPE — versioning the server snapshot (v3) wasn't enough. A consumer must treat "field absent" as "not loaded → refetch", never as an empty default that silently changes the result.
+
+---
+
 ## BUG-2026-06-23-001 — Production Overview "overdue chip → grid filter" shipped broken twice (stale snapshot cache + cold-Overview lazy gate) — both caught in verify-live before the owner saw them
 
 🟢 **Fixed** · `production-orders` / `ui-frontend` / `caching` · feature change, two latent bugs caught live

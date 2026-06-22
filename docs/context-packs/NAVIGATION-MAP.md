@@ -472,13 +472,14 @@ Built to cut token usage: open the named file at the named line range instead of
   - Org tab (departments + positions) — L2198-2608
   - Mailbox tab (mailbox scope, canManageUsers gated) — L2609-3235
   - Th/Td table cell helpers — L3236-3263
-- `src/pages/mail-center/index.tsx`
-  - Dept/mailbox constants (canonical dept mailboxes, panes) — L165-246
-  - ThreadList + row icon helpers — L247-578
-  - DraftsList — L579-640
-  - MailCenterPage default export (main shell, folders, bulk, fetch) — L641-1482
-  - Sidebar items (FolderItem/MailboxItem/DeptGroup/PersonItem) — L1483-1989
-  - LabelManagerDialog + rows + color swatches — L1990-2274
+- `src/pages/mail-center/index.tsx` (~2470 lines after the Gmail-view redesign)
+  - Dept/mailbox constants (canonical dept mailboxes, panes) + useMailPrefs hook — L180-280
+  - ThreadList (density router) + CompactRow / ComfortableRow / RowLead / RowActions — L255-590
+  - DraftsList — after the rows
+  - MailCenterPage default export (main shell, folders, bulk, fetch, prefs/category state) — ~L850-1770
+  - CategoryTabs (All/Primary/Notifications) + ViewSettingsMenu (density/pane/tabs gear) + SegButton — after the main export
+  - Sidebar items (FolderItem/MailboxItem/DeptGroup/PersonItem) + LabelManagerDialog + colour swatches
+- `src/pages/mail-center/mail-prefs.ts` — localStorage view toggles (density / reading-pane / category-tabs) external store + `classifyCategory` sender heuristic (Primary vs Notifications). All client-side; no backend, no API change.
 
 **Gotchas**
 - customer-maintenance.ts is a SNAPSHOT mirror: copies EVERY master maintenance_config_history snapshot per customer and REFUSES to write if the master config is corrupt — don't bypass that guard or write per-customer config directly.
@@ -490,6 +491,7 @@ Built to cut token usage: open the named file at the named line range instead of
 - Customer hubs feed the DO/Service hub chain (delivery_hubs, customer_hubs); hub-cascade-completeness + service-hub-chain tests guard the cascade — editing hub routes can break downstream delivery/consignment integrity.
 - /api/files (files.ts) serves customer, product-doc and modular uploads with attachment disposition but `<img src=.../download>` still renders — shared endpoint, don't special-case per resourceType.
 - kv_config is a shared generic store (e.g. public_holidays consumed by payroll) — changing its shape can affect unrelated modules.
+- Mail Center is GMAIL-STYLE with 3 localStorage view toggles (mail-prefs.ts, surfaced via the header "View" gear): density (compact single-line default ↔ comfortable old multi-line cards), reading-pane (split 3-pane default ↔ full-width list that opens /mail-center/:id), category-tabs (All/Primary/Notifications strip, default on). These ARE the owner's "可以开关" — we did NOT fork two full layouts. The category split is a CLIENT-SIDE heuristic (`classifyCategory` over counterpartyEmail: no-reply/system/alert/eservices/statement local-parts + known bank/payment domains → Notifications, else Primary) — NO backend columns, the threads API is unchanged (still GET /threads, 300-row cap). Both row densities share RowLead+RowActions so star/select/hover-actions can't drift. Don't re-add the old single-layout ThreadList; don't move the category heuristic server-side.
 
 **Start here:** For a customer-facing task open `src/pages/customers.tsx`; for users/RBAC/org/mailbox-scope open `src/pages/settings/Users.tsx`; for internal email open `src/pages/mail-center/index.tsx`.
 

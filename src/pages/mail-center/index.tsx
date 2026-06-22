@@ -29,6 +29,23 @@
 //
 // Mobile / under-lg: tapping a row navigates to the standalone
 // /mail-center/:id page (deep links unchanged). The reading pane is lg-only.
+//
+// GMAIL-STYLE VIEW TOGGLES (mail-prefs.ts, localStorage-persisted, surfaced via
+// the header "View" gear — these ARE the owner's "可以开关"; we did NOT fork two
+// full layouts, we made ONE layout configurable to keep the risk low):
+//   • DENSITY      — "compact" (Gmail single-line rows, the default) vs
+//                    "comfortable" (the original taller multi-line cards). The
+//                    ThreadList renders CompactRow vs ComfortableRow; both share
+//                    RowLead (checkbox+star) + RowActions (hover cluster).
+//   • READING PANE — "split" (list + right reading pane, the 3-pane default) vs
+//                    "full" (full-width list; a row opens /mail-center/:id). The
+//                    grid drops its 3rd column and openThread navigates in full.
+//   • CATEGORY TABS— All / Primary / Notifications strip above the list. A
+//                    CLIENT-SIDE sender heuristic (classifyCategory in
+//                    mail-prefs.ts) over the already-fetched rows — no backend
+//                    columns. Toggle hides the strip (and clears its filter).
+// Everything else (reply/forward/star/unread/archive/trash, labels, Assign,
+// mailbox+dept scoping, unread counts, search, pagination) is unchanged.
 // ---------------------------------------------------------------------------
 import {
   useEffect,
@@ -78,6 +95,18 @@ import {
   chipStyle,
 } from "./mail-labels";
 import {
+  type MailViewPrefs,
+  type MailDensity,
+  type MailReadingPane,
+  type MailCategory,
+  classifyCategory,
+  subscribePrefs,
+  getPrefsSnapshot,
+  setDensity,
+  setReadingPane,
+  setCategoryTabs,
+} from "./mail-prefs";
+import {
   Mail,
   Search,
   RefreshCw,
@@ -103,6 +132,12 @@ import {
   Plus,
   Building2,
   Settings2,
+  SlidersHorizontal,
+  Bell,
+  Rows3,
+  Rows4,
+  PanelRight,
+  Square,
 } from "lucide-react";
 
 type MailThread = {
@@ -239,16 +274,40 @@ function useLocalMail() {
   return useSyncExternalStore(subscribeLocal, getLocalSnapshot, getLocalSnapshot);
 }
 
+// Subscribe to the persisted view preferences (density / reading-pane /
+// category-tabs). Cross-tab synced via the storage event in mail-prefs.ts.
+function useMailPrefs(): MailViewPrefs {
+  return useSyncExternalStore(subscribePrefs, getPrefsSnapshot, getPrefsSnapshot);
+}
+
+// Strip HTML + entities out of a snippet so the preview reads as clean text,
+// not raw source like "<!DOCTYPE H…" (owner 2026-06-18). Shared by both
+// densities.
+function cleanSnippet(s: string): string {
+  return (
+    s
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&(?:nbsp|amp|lt|gt|quot|#\d+);/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim() || "(no preview)"
+  );
+}
+
 // ---------------------------------------------------------------------------
-// ThreadList — the thread rows. Each row has a leading checkbox (bulk select),
-// the unread/star column, the sender + subject + snippet, label chips, and a
-// hover action cluster (star / read-unread / archive-or-inbox / trash).
+// ThreadList — the thread rows. Two densities:
+//   • compact     — a Gmail-style SINGLE-LINE row: [checkbox][star][unread dot]
+//                   Sender (bold when unread) · Subject — snippet (muted,
+//                   truncated) ……… date (right), with hover row actions.
+//   • comfortable — the original taller multi-line card (sender + subject +
+//                   snippet + label chips stacked), preserved verbatim.
+// Both share the same checkbox / star / hover-action behaviour.
 // ---------------------------------------------------------------------------
 function ThreadList({
   threads,
   loading,
   activeId,
   folder,
+  density,
   selectedIds,
   colorMap,
   onToggleSelect,
@@ -260,6 +319,7 @@ function ThreadList({
   loading: boolean;
   activeId: string | null;
   folder: Folder;
+  density: MailDensity;
   selectedIds: Set<string>;
   colorMap: Map<string, string>;
   onToggleSelect: (id: string) => void;
@@ -294,207 +354,379 @@ function ThreadList({
     );
   }
 
+  const compact = density === "compact";
   return (
     <ul className="divide-y divide-border">
-      {threads.map((t) => {
-        const active = activeId === t.id;
-        const starred = t.starred;
-        const unread = t.unread;
-        const chips = t.labels;
-        const selected = selectedIds.has(t.id);
-        return (
-          <li
+      {threads.map((t) =>
+        compact ? (
+          <CompactRow
             key={t.id}
-            className={cn(
-              "group relative flex items-stretch border-l-2 transition",
-              active
-                ? "border-amber-500 bg-amber-50/70"
-                : selected
-                  ? "border-amber-400 bg-amber-50/40"
-                  : unread
-                    ? "border-amber-400 bg-amber-50/30"
-                    : "border-transparent hover:bg-muted/50",
-            )}
-          >
-            {/* Select checkbox — its own click target, never opens the row. */}
-            <label
-              className="flex cursor-pointer items-center pl-3 pr-1"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <input
-                type="checkbox"
-                checked={selected}
-                onChange={() => onToggleSelect(t.id)}
-                aria-label={`Select conversation with ${senderLabel(t)}`}
-                className="h-3.5 w-3.5 cursor-pointer rounded border-[#C9C2BA] text-[#6B5C32] focus:ring-[#6B5C32]/30"
-              />
-            </label>
-
-            {/* Star toggle — DB-backed (PATCH starred). */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onRowAction(starred ? "unstar" : "star", t);
-              }}
-              aria-label={starred ? "Unstar" : "Star"}
-              title={starred ? "Unstar" : "Star"}
-              className="flex items-center px-1 text-muted-foreground/40 hover:text-amber-500"
-            >
-              <Star
-                className={cn(
-                  "h-4 w-4",
-                  starred && "fill-amber-400 text-amber-500",
-                )}
-              />
-            </button>
-
-            <button
-              onClick={() => onOpen(t.id)}
-              className="flex min-w-0 flex-1 items-start gap-2 py-3 pr-2 text-left"
-            >
-              {/* Unread dot / direction arrow column. */}
-              <div className="mt-1.5 flex h-4 w-4 shrink-0 items-center justify-center">
-                {unread ? (
-                  <span className="h-2.5 w-2.5 rounded-full bg-amber-500" />
-                ) : t.lastDirection === "outbound" ? (
-                  <ArrowUpRight className="h-3.5 w-3.5 text-muted-foreground/50" />
-                ) : (
-                  <ArrowDownLeft className="h-3.5 w-3.5 text-muted-foreground/50" />
-                )}
-              </div>
-
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center justify-between gap-2">
-                  <span
-                    className={cn(
-                      "truncate text-sm",
-                      unread
-                        ? "font-semibold text-foreground"
-                        : "font-medium text-foreground/90",
-                    )}
-                  >
-                    {senderLabel(t)}
-                  </span>
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    {fmtTime(t.lastMessageAt)}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span
-                    className={cn(
-                      "truncate text-sm",
-                      unread ? "text-foreground" : "text-muted-foreground",
-                    )}
-                  >
-                    {t.subject}
-                  </span>
-                  {t.messageCount > 1 && (
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      ({t.messageCount})
-                    </span>
-                  )}
-                </div>
-                {t.lastSnippet && (
-                  <p className="truncate text-xs text-muted-foreground/80">
-                    {/* Strip any HTML so the preview reads clean text, not raw
-                        source like "<!DOCTYPE H…" (owner 2026-06-18). */}
-                    {t.lastSnippet
-                      .replace(/<[^>]+>/g, " ")
-                      .replace(/&(?:nbsp|amp|lt|gt|quot|#\d+);/gi, " ")
-                      .replace(/\s+/g, " ")
-                      .trim() || "(no preview)"}
-                  </p>
-                )}
-                {chips.length > 0 && (
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {chips.map((l) => {
-                      const color = colorForLabel(l, colorMap);
-                      return (
-                        <span
-                          key={l}
-                          style={chipStyle(color)}
-                          className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ring-black/5"
-                        >
-                          <span
-                            className="h-1.5 w-1.5 rounded-full"
-                            style={{ backgroundColor: color }}
-                            aria-hidden="true"
-                          />
-                          {l}
-                        </span>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Mailbox + status. Status VALUE stays 'closed'; the chip reads
-                  "Archived" to match the folder name. */}
-              <div className="ml-1 flex shrink-0 flex-col items-end gap-1">
-                {t.mailboxAddress && (
-                  <Badge className="max-w-[150px] truncate text-[10px]">
-                    {t.mailboxAddress}
-                  </Badge>
-                )}
-                {t.status === "closed" && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
-                    <Check className="h-3 w-3" />
-                    Archived
-                  </span>
-                )}
-              </div>
-            </button>
-
-            {/* Hover action cluster — appears on row hover (always visible on
-                touch via focus-within). */}
-            <div className="flex shrink-0 items-center gap-0.5 pr-2 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
-              <RowIconButton
-                title={unread ? "Mark as read" : "Mark as unread"}
-                onClick={() => onRowAction(unread ? "read" : "unread", t)}
-              >
-                {unread ? (
-                  <MailOpen className="h-4 w-4" />
-                ) : (
-                  <MailWarning className="h-4 w-4" />
-                )}
-              </RowIconButton>
-              {folder !== "trash" &&
-                (t.status === "closed" ? (
-                  <RowIconButton
-                    title="Move to Inbox"
-                    onClick={() => onRowAction("inbox", t)}
-                  >
-                    <Inbox className="h-4 w-4" />
-                  </RowIconButton>
-                ) : (
-                  <RowIconButton
-                    title="Archive (mark done)"
-                    onClick={() => onRowAction("archive", t)}
-                  >
-                    <Archive className="h-4 w-4" />
-                  </RowIconButton>
-                ))}
-              {folder === "trash" ? (
-                <RowIconButton
-                  title="Restore from Trash"
-                  onClick={() => onRowAction("restore", t)}
-                >
-                  <RotateIcon />
-                </RowIconButton>
-              ) : (
-                <RowIconButton
-                  title="Move to Trash"
-                  onClick={() => onRowAction("trash", t)}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </RowIconButton>
-              )}
-            </div>
-          </li>
-        );
-      })}
+            t={t}
+            active={activeId === t.id}
+            folder={folder}
+            selected={selectedIds.has(t.id)}
+            colorMap={colorMap}
+            onToggleSelect={onToggleSelect}
+            onOpen={onOpen}
+            onRowAction={onRowAction}
+          />
+        ) : (
+          <ComfortableRow
+            key={t.id}
+            t={t}
+            active={activeId === t.id}
+            folder={folder}
+            selected={selectedIds.has(t.id)}
+            colorMap={colorMap}
+            onToggleSelect={onToggleSelect}
+            onOpen={onOpen}
+            onRowAction={onRowAction}
+          />
+        ),
+      )}
     </ul>
+  );
+}
+
+type RowProps = {
+  t: MailThread;
+  active: boolean;
+  folder: Folder;
+  selected: boolean;
+  colorMap: Map<string, string>;
+  onToggleSelect: (id: string) => void;
+  onOpen: (id: string) => void;
+  onRowAction: (action: RowAction, t: MailThread) => void;
+};
+
+// Shared leading controls (select checkbox + star) — identical in both
+// densities, so the two row layouts can't drift on the bulk-select / star
+// behaviour.
+function RowLead({
+  t,
+  selected,
+  onToggleSelect,
+  onRowAction,
+}: Pick<RowProps, "t" | "selected" | "onToggleSelect" | "onRowAction">) {
+  const starred = t.starred;
+  return (
+    <>
+      {/* Select checkbox — its own click target, never opens the row. */}
+      <label
+        className="flex cursor-pointer items-center pl-3 pr-1"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={() => onToggleSelect(t.id)}
+          aria-label={`Select conversation with ${senderLabel(t)}`}
+          className="h-3.5 w-3.5 cursor-pointer rounded border-[#C9C2BA] text-[#6B5C32] focus:ring-[#6B5C32]/30"
+        />
+      </label>
+      {/* Star toggle — DB-backed (PATCH starred). */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRowAction(starred ? "unstar" : "star", t);
+        }}
+        aria-label={starred ? "Unstar" : "Star"}
+        title={starred ? "Unstar" : "Star"}
+        className="flex items-center px-1 text-muted-foreground/40 hover:text-amber-500"
+      >
+        <Star
+          className={cn("h-4 w-4", starred && "fill-amber-400 text-amber-500")}
+        />
+      </button>
+    </>
+  );
+}
+
+// Shared hover action cluster (read/unread · archive/inbox · trash/restore).
+function RowActions({
+  t,
+  folder,
+  onRowAction,
+}: Pick<RowProps, "t" | "folder" | "onRowAction">) {
+  const unread = t.unread;
+  return (
+    <div className="flex shrink-0 items-center gap-0.5 pr-2 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+      <RowIconButton
+        title={unread ? "Mark as read" : "Mark as unread"}
+        onClick={() => onRowAction(unread ? "read" : "unread", t)}
+      >
+        {unread ? (
+          <MailOpen className="h-4 w-4" />
+        ) : (
+          <MailWarning className="h-4 w-4" />
+        )}
+      </RowIconButton>
+      {folder !== "trash" &&
+        (t.status === "closed" ? (
+          <RowIconButton
+            title="Move to Inbox"
+            onClick={() => onRowAction("inbox", t)}
+          >
+            <Inbox className="h-4 w-4" />
+          </RowIconButton>
+        ) : (
+          <RowIconButton
+            title="Archive (mark done)"
+            onClick={() => onRowAction("archive", t)}
+          >
+            <Archive className="h-4 w-4" />
+          </RowIconButton>
+        ))}
+      {folder === "trash" ? (
+        <RowIconButton
+          title="Restore from Trash"
+          onClick={() => onRowAction("restore", t)}
+        >
+          <RotateIcon />
+        </RowIconButton>
+      ) : (
+        <RowIconButton
+          title="Move to Trash"
+          onClick={() => onRowAction("trash", t)}
+        >
+          <Trash2 className="h-4 w-4" />
+        </RowIconButton>
+      )}
+    </div>
+  );
+}
+
+// ── Compact (Gmail single-line) row ─────────────────────────────────────────
+// One tight line: sender (bold when unread) · subject — snippet (muted) … date.
+// Labels render as small dots inline; the mailbox/Archived chip is dropped to
+// keep the line clean (still shown in comfortable + the reading pane). The date
+// is replaced by the hover action cluster on hover (Gmail behaviour).
+function CompactRow({
+  t,
+  active,
+  folder,
+  selected,
+  colorMap,
+  onToggleSelect,
+  onOpen,
+  onRowAction,
+}: RowProps) {
+  const unread = t.unread;
+  const chips = t.labels;
+  return (
+    <li
+      className={cn(
+        "group relative flex items-center border-l-2 transition",
+        active
+          ? "border-amber-500 bg-amber-50/70"
+          : selected
+            ? "border-amber-400 bg-amber-50/40"
+            : unread
+              ? "border-amber-400 bg-amber-50/40"
+              : "border-transparent hover:bg-muted/50",
+      )}
+    >
+      <RowLead
+        t={t}
+        selected={selected}
+        onToggleSelect={onToggleSelect}
+        onRowAction={onRowAction}
+      />
+      {/* Unread dot column (kept tiny). */}
+      <span className="flex w-3 shrink-0 items-center justify-center">
+        {unread && (
+          <span
+            className="h-2 w-2 rounded-full bg-amber-500"
+            aria-hidden="true"
+          />
+        )}
+      </span>
+      <button
+        onClick={() => onOpen(t.id)}
+        className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-1.5 pr-2 text-left"
+      >
+        {/* Sender — fixed-ish width, bold when unread. */}
+        <span
+          className={cn(
+            "w-32 shrink-0 truncate text-sm sm:w-40",
+            unread
+              ? "font-semibold text-foreground"
+              : "font-medium text-foreground/80",
+          )}
+        >
+          {senderLabel(t)}
+        </span>
+        {/* Label dots (compact) — just the coloured dots inline before the
+            subject, so categories stay visible without eating the line. */}
+        {chips.length > 0 && (
+          <span className="flex shrink-0 items-center gap-0.5">
+            {chips.slice(0, 3).map((l) => (
+              <span
+                key={l}
+                title={l}
+                className="h-2 w-2 rounded-full ring-1 ring-inset ring-black/10"
+                style={{ backgroundColor: colorForLabel(l, colorMap) }}
+                aria-hidden="true"
+              />
+            ))}
+          </span>
+        )}
+        {/* Subject — snippet on one line. */}
+        <span className="min-w-0 flex-1 truncate text-sm">
+          <span className={cn(unread ? "text-foreground" : "text-foreground/70")}>
+            {t.subject || "(no subject)"}
+          </span>
+          {t.messageCount > 1 && (
+            <span className="text-muted-foreground"> ({t.messageCount})</span>
+          )}
+          {t.lastSnippet && (
+            <span className="text-muted-foreground/70">
+              {" — "}
+              {cleanSnippet(t.lastSnippet)}
+            </span>
+          )}
+        </span>
+      </button>
+      {/* Date — hidden on hover so the action cluster takes its place. */}
+      <span className="shrink-0 px-2 text-xs text-muted-foreground group-hover:hidden group-focus-within:hidden">
+        {fmtTime(t.lastMessageAt)}
+      </span>
+      <div className="hidden group-hover:flex group-focus-within:flex">
+        <RowActions t={t} folder={folder} onRowAction={onRowAction} />
+      </div>
+    </li>
+  );
+}
+
+// ── Comfortable (original multi-line card) row ──────────────────────────────
+// Preserved verbatim from the previous layout so "comfortable" density gives
+// the owner back the old look exactly.
+function ComfortableRow({
+  t,
+  active,
+  folder,
+  selected,
+  colorMap,
+  onToggleSelect,
+  onOpen,
+  onRowAction,
+}: RowProps) {
+  const unread = t.unread;
+  const chips = t.labels;
+  return (
+    <li
+      className={cn(
+        "group relative flex items-stretch border-l-2 transition",
+        active
+          ? "border-amber-500 bg-amber-50/70"
+          : selected
+            ? "border-amber-400 bg-amber-50/40"
+            : unread
+              ? "border-amber-400 bg-amber-50/30"
+              : "border-transparent hover:bg-muted/50",
+      )}
+    >
+      <RowLead
+        t={t}
+        selected={selected}
+        onToggleSelect={onToggleSelect}
+        onRowAction={onRowAction}
+      />
+
+      <button
+        onClick={() => onOpen(t.id)}
+        className="flex min-w-0 flex-1 items-start gap-2 py-3 pr-2 text-left"
+      >
+        {/* Unread dot / direction arrow column. */}
+        <div className="mt-1.5 flex h-4 w-4 shrink-0 items-center justify-center">
+          {unread ? (
+            <span className="h-2.5 w-2.5 rounded-full bg-amber-500" />
+          ) : t.lastDirection === "outbound" ? (
+            <ArrowUpRight className="h-3.5 w-3.5 text-muted-foreground/50" />
+          ) : (
+            <ArrowDownLeft className="h-3.5 w-3.5 text-muted-foreground/50" />
+          )}
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <span
+              className={cn(
+                "truncate text-sm",
+                unread
+                  ? "font-semibold text-foreground"
+                  : "font-medium text-foreground/90",
+              )}
+            >
+              {senderLabel(t)}
+            </span>
+            <span className="shrink-0 text-xs text-muted-foreground">
+              {fmtTime(t.lastMessageAt)}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className={cn(
+                "truncate text-sm",
+                unread ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              {t.subject}
+            </span>
+            {t.messageCount > 1 && (
+              <span className="shrink-0 text-xs text-muted-foreground">
+                ({t.messageCount})
+              </span>
+            )}
+          </div>
+          {t.lastSnippet && (
+            <p className="truncate text-xs text-muted-foreground/80">
+              {cleanSnippet(t.lastSnippet)}
+            </p>
+          )}
+          {chips.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {chips.map((l) => {
+                const color = colorForLabel(l, colorMap);
+                return (
+                  <span
+                    key={l}
+                    style={chipStyle(color)}
+                    className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ring-black/5"
+                  >
+                    <span
+                      className="h-1.5 w-1.5 rounded-full"
+                      style={{ backgroundColor: color }}
+                      aria-hidden="true"
+                    />
+                    {l}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Mailbox + status. Status VALUE stays 'closed'; the chip reads
+            "Archived" to match the folder name. */}
+        <div className="ml-1 flex shrink-0 flex-col items-end gap-1">
+          {t.mailboxAddress && (
+            <Badge className="max-w-[150px] truncate text-[10px]">
+              {t.mailboxAddress}
+            </Badge>
+          )}
+          {t.status === "closed" && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
+              <Check className="h-3 w-3" />
+              Archived
+            </span>
+          )}
+        </div>
+      </button>
+
+      <RowActions t={t} folder={folder} onRowAction={onRowAction} />
+    </li>
   );
 }
 
@@ -644,6 +876,13 @@ export default function MailCenterPage() {
   const { toast } = useToast();
   const { confirm, confirmDialog } = useConfirm();
   const local = useLocalMail();
+  const prefs = useMailPrefs();
+  // Split = list + reading pane (the 3-pane behaviour); Full = full-width list,
+  // a row opens the standalone detail route. On a narrow screen the reading
+  // pane can't fit, so we always behave as "full" there regardless of the pref.
+  const splitView = prefs.readingPane === "split";
+  // Gmail category tab over the already-fetched rows (client-side only).
+  const [category, setCategory] = useState<MailCategory>("all");
   // SUPER_ADMIN sees every mailbox (the backend scope returns all) AND gets the
   // one-click "Set up" for a missing canonical department mailbox.
   const isSuperAdmin =
@@ -798,7 +1037,9 @@ export default function MailCenterPage() {
   //   2. Department filter — when a whole dept is selected.
   //   3. Label filter — when a sidebar label is active (DB labels).
   //   4. Text search over subject / sender name / sender email / snippet.
-  const visible = useMemo(() => {
+  // The Gmail CATEGORY tab (Primary/Notifications) is applied separately on top
+  // of this (see `visible` below) so each tab can show its own count.
+  const categoryBase = useMemo(() => {
     let list = threads ?? [];
 
     // Folder-specific client narrowing.
@@ -837,6 +1078,29 @@ export default function MailCenterPage() {
 
     return list;
   }, [threads, q, folder, filter, addressesByDept, labelFilter]);
+
+  // Category-tab counts (Primary / Notifications) — computed over the
+  // folder/dept/label/search-narrowed set BEFORE the category filter, so each
+  // tab shows its own total. Client-side heuristic over the counterparty email;
+  // never touches the backend.
+  const categoryCounts = useMemo(() => {
+    let primary = 0;
+    let notifications = 0;
+    for (const t of categoryBase) {
+      if (classifyCategory(t.counterpartyEmail) === "notifications") notifications++;
+      else primary++;
+    }
+    return { all: categoryBase.length, primary, notifications };
+  }, [categoryBase]);
+
+  // The list actually shown: the category-narrowed set when the tabs are on and
+  // a specific tab (not "All") is active; otherwise the full narrowed set.
+  const visible = useMemo(() => {
+    if (!prefs.categoryTabs || category === "all") return categoryBase;
+    return categoryBase.filter(
+      (t) => classifyCategory(t.counterpartyEmail) === category,
+    );
+  }, [categoryBase, category, prefs.categoryTabs]);
 
   // Counts for the folder list. inbox-unread / starred are computed off the
   // FETCHED set (so they reflect the current mailbox scope), filtered to the
@@ -943,7 +1207,11 @@ export default function MailCenterPage() {
     // Opening a thread marks it read server-side (GET /threads/:id clears the
     // unread flag); the detail view invalidates the list cache so the row
     // reflects that on the next read.
-    if (isDesktop) {
+    //
+    // Reading pane on (split) + a desktop-wide screen → open in the right pane.
+    // Otherwise (full-width-list pref, or a narrow screen where the pane can't
+    // fit) → navigate to the standalone /mail-center/:id detail route.
+    if (isDesktop && splitView) {
       setSelectedId(id);
     } else {
       navigate(`/mail-center/${id}`);
@@ -1121,10 +1389,18 @@ export default function MailCenterPage() {
             </p>
           </div>
         </div>
-        <Button variant="outline" size="sm" onClick={refresh} className="gap-1.5">
-          <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <ViewSettingsMenu prefs={prefs} />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={refresh}
+            className="gap-1.5"
+          >
+            <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -1133,10 +1409,18 @@ export default function MailCenterPage() {
         </div>
       )}
 
-      {/* 3-pane shell: rail / list / reading-pane (Gmail/Outlook proportions —
-          folders rail, a fixed-ish list column ~360-400px, then a flex-1
-          reading pane). Single column under md. */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-[210px_minmax(0,1fr)] lg:grid-cols-[230px_minmax(360px,400px)_minmax(0,1fr)]">
+      {/* Shell: rail / list / (optional) reading-pane. In SPLIT mode (default)
+          the lg grid is 3 columns — folders rail, a fixed-ish list column
+          ~360-400px, then a flex-1 reading pane (Gmail/Outlook proportions). In
+          FULL mode the reading pane is dropped and the list spans the rest of
+          the width (rail + list only). Single column under md either way. */}
+      <div
+        className={cn(
+          "grid grid-cols-1 gap-4 md:grid-cols-[210px_minmax(0,1fr)]",
+          splitView &&
+            "lg:grid-cols-[230px_minmax(360px,400px)_minmax(0,1fr)]",
+        )}
+      >
         {/* LEFT RAIL */}
         <aside className="space-y-3">
           <Button
@@ -1369,6 +1653,18 @@ export default function MailCenterPage() {
         {/* MIDDLE — thread list (or drafts list) */}
         <Card className="overflow-hidden">
           <CardContent className="p-0">
+            {/* Gmail-style category tabs (All / Primary / Notifications) —
+                client-side split of the inbox by sender. Shown only when the
+                "category tabs" view toggle is on and we're not in Drafts (which
+                are local compose drafts, not inbound mail to categorise). */}
+            {prefs.categoryTabs && folder !== "drafts" && (
+              <CategoryTabs
+                active={category}
+                counts={categoryCounts}
+                onSelect={setCategory}
+              />
+            )}
+
             {/* List toolbar: select-all + bulk action bar. Hidden for Drafts. */}
             {folder !== "drafts" && visible.length > 0 && (
               <div className="flex items-center justify-between gap-2 border-b border-border bg-muted/30 px-3 py-1.5">
@@ -1418,8 +1714,9 @@ export default function MailCenterPage() {
               <ThreadList
                 threads={visible}
                 loading={loading}
-                activeId={isDesktop ? selectedId : null}
+                activeId={isDesktop && splitView ? selectedId : null}
                 folder={folder}
+                density={prefs.density}
                 selectedIds={selectedVisibleIds}
                 colorMap={colorMap}
                 onToggleSelect={toggleSelect}
@@ -1431,27 +1728,34 @@ export default function MailCenterPage() {
           </CardContent>
         </Card>
 
-        {/* RIGHT — reading pane (lg+ only). When a thread is selected it shows
-            the conversation in a card; when nothing is selected it's a simple
-            borderless, centered placeholder (no card, no compose button — the
-            sidebar "New email" is the single compose entry, Gmail/Outlook
-            style). */}
-        <div className="hidden min-w-0 lg:block">
-          {selectedId ? (
-            <Card className="min-w-0">
-              <CardContent className="p-4">
-                <MailCenterDetailPage key={selectedId} id={selectedId} embedded />
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="flex h-full min-h-[360px] flex-col items-center justify-center gap-2 px-6 text-center">
-              <Mail className="h-8 w-8 text-muted-foreground/30" />
-              <p className="text-sm text-muted-foreground">
-                Select a conversation to read it here
-              </p>
-            </div>
-          )}
-        </div>
+        {/* RIGHT — reading pane (lg+ only, SPLIT mode only). When a thread is
+            selected it shows the conversation in a card; when nothing is
+            selected it's a simple borderless, centered placeholder (no card, no
+            compose button — the sidebar "New email" is the single compose
+            entry, Gmail/Outlook style). In FULL mode this column is dropped and
+            a row opens the standalone detail route instead. */}
+        {splitView && (
+          <div className="hidden min-w-0 lg:block">
+            {selectedId ? (
+              <Card className="min-w-0">
+                <CardContent className="p-4">
+                  <MailCenterDetailPage
+                    key={selectedId}
+                    id={selectedId}
+                    embedded
+                  />
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="flex h-full min-h-[360px] flex-col items-center justify-center gap-2 px-6 text-center">
+                <Mail className="h-8 w-8 text-muted-foreground/30" />
+                <p className="text-sm text-muted-foreground">
+                  Select a conversation to read it here
+                </p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Label manager — create / rename / recolour / delete catalogue labels. */}
@@ -1470,12 +1774,229 @@ export default function MailCenterPage() {
           setResumeDraft(null);
         }}
         onSent={(threadId) => {
-          if (isDesktop) setSelectedId(threadId);
+          // Show the just-sent thread in the reading pane (split mode only;
+          // there's no pane in full mode).
+          if (isDesktop && splitView) setSelectedId(threadId);
         }}
       />
 
       {confirmDialog}
     </div>
+  );
+}
+
+// ── Category tabs (Gmail Primary / Notifications) ────────────────────────────
+// A client-side split of the inbox by sender (see classifyCategory). "All"
+// clears the filter. Each tab carries its own count. Rendered as an underlined
+// tab strip above the list — Gmail's category-row idiom, restyled to the app's
+// warm palette.
+function CategoryTabs({
+  active,
+  counts,
+  onSelect,
+}: {
+  active: MailCategory;
+  counts: { all: number; primary: number; notifications: number };
+  onSelect: (c: MailCategory) => void;
+}) {
+  const tabs: {
+    id: MailCategory;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    count: number;
+  }[] = [
+    { id: "all", label: "All", icon: Inbox, count: counts.all },
+    { id: "primary", label: "Primary", icon: UserIcon, count: counts.primary },
+    {
+      id: "notifications",
+      label: "Notifications",
+      icon: Bell,
+      count: counts.notifications,
+    },
+  ];
+  return (
+    <div className="flex items-stretch gap-0.5 border-b border-border bg-muted/20 px-1">
+      {tabs.map((t) => {
+        const on = active === t.id;
+        return (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => onSelect(t.id)}
+            className={cn(
+              "flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition",
+              on
+                ? "border-amber-600 text-amber-800"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <t.icon className="h-3.5 w-3.5" />
+            <span>{t.label}</span>
+            {t.count > 0 && (
+              <span
+                className={cn(
+                  "rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+                  on ? "bg-amber-100 text-amber-800" : "bg-muted text-muted-foreground",
+                )}
+              >
+                {t.count}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── View settings menu (the Gmail "settings" gear) ───────────────────────────
+// One dropdown holding the three persisted view toggles — density,
+// reading-pane and category-tabs. Each writes straight through to mail-prefs
+// (localStorage); the page re-renders via the prefs external store. Closes on
+// outside click / Escape.
+function ViewSettingsMenu({ prefs }: { prefs: MailViewPrefs }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="relative" ref={ref}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="gap-1.5"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="View settings"
+      >
+        <SlidersHorizontal className="h-4 w-4" />
+        View
+      </Button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full z-30 mt-1 w-64 rounded-md border border-[#E2DDD8] bg-white p-3 text-left shadow-lg"
+        >
+          {/* Density */}
+          <p className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+            Density
+          </p>
+          <div className="mb-3 grid grid-cols-2 gap-1">
+            <SegButton
+              icon={Rows4}
+              label="Compact"
+              active={prefs.density === "compact"}
+              onClick={() => setDensity("compact" satisfies MailDensity)}
+            />
+            <SegButton
+              icon={Rows3}
+              label="Comfortable"
+              active={prefs.density === "comfortable"}
+              onClick={() => setDensity("comfortable" satisfies MailDensity)}
+            />
+          </div>
+
+          {/* Reading pane */}
+          <p className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+            Reading pane
+          </p>
+          <div className="mb-3 grid grid-cols-2 gap-1">
+            <SegButton
+              icon={PanelRight}
+              label="Split"
+              active={prefs.readingPane === "split"}
+              onClick={() => setReadingPane("split" satisfies MailReadingPane)}
+            />
+            <SegButton
+              icon={Square}
+              label="No split"
+              active={prefs.readingPane === "full"}
+              onClick={() => setReadingPane("full" satisfies MailReadingPane)}
+            />
+          </div>
+
+          {/* Category tabs */}
+          <p className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+            Category tabs
+          </p>
+          <button
+            type="button"
+            role="menuitemcheckbox"
+            aria-checked={prefs.categoryTabs}
+            onClick={() => setCategoryTabs(!prefs.categoryTabs)}
+            className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm text-foreground/80 transition hover:bg-muted"
+          >
+            <span className="flex items-center gap-2">
+              <Bell className="h-4 w-4 text-muted-foreground/60" />
+              Show Primary / Notifications
+            </span>
+            <span
+              className={cn(
+                "flex h-4 w-7 items-center rounded-full px-0.5 transition",
+                prefs.categoryTabs ? "bg-amber-500" : "bg-muted-foreground/30",
+              )}
+            >
+              <span
+                className={cn(
+                  "h-3 w-3 rounded-full bg-white transition-transform",
+                  prefs.categoryTabs && "translate-x-3",
+                )}
+              />
+            </span>
+          </button>
+          <p className="mt-2 px-1 text-[10px] leading-snug text-muted-foreground/70">
+            These choices are saved on this browser.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A segmented-control button used inside the View settings menu.
+function SegButton({
+  icon: Icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={active}
+      onClick={onClick}
+      className={cn(
+        "flex items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium transition",
+        active
+          ? "border-amber-300 bg-amber-50 text-amber-800"
+          : "border-[#E2DDD8] bg-white text-foreground/70 hover:bg-muted",
+      )}
+    >
+      <Icon className="h-3.5 w-3.5" />
+      {label}
+    </button>
   );
 }
 

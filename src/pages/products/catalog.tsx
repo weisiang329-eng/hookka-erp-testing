@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { PhotoCropDialog } from "@/components/ui/PhotoCropDialog";
 
 const RT_MODULAR = "modular";
 
@@ -289,6 +290,11 @@ function ModelDetailDialog({
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const { confirm } = useConfirm();
+  // Crop-on-upload queue (mirrors R&D's PhotoCropDialog flow): each picked
+  // file is cropped (square by default) before it's uploaded, so stored
+  // photos are already square and fit the tile + catalogue PDF cleanly.
+  const [cropQueue, setCropQueue] = useState<File[]>([]);
+  const [cropUrl, setCropUrl] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !busy) onClose(); };
@@ -339,7 +345,60 @@ function ModelDetailDialog({
     }
   }
 
+  const readFileAsDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result));
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+
+  // Open the crop dialog for the first file in the queue (or finish + reset).
+  async function advanceCrop(queue: File[]) {
+    if (queue.length === 0) {
+      setCropUrl(null);
+      if (inputRef.current) inputRef.current.value = "";
+      return;
+    }
+    try {
+      setCropUrl(await readFileAsDataUrl(queue[0]));
+    } catch {
+      toast.error("Could not read the image file.");
+      setCropUrl(null);
+    }
+  }
+
+  function startCropQueue(files: File[]) {
+    if (files.length === 0) return;
+    setCropQueue(files);
+    void advanceCrop(files);
+  }
+
+  async function onCropConfirm(croppedDataUrl: string) {
+    const current = cropQueue[0];
+    setCropUrl(null);
+    try {
+      const blob = await (await fetch(croppedDataUrl)).blob();
+      const base = (current?.name || "photo").replace(/\.[^.]+$/, "");
+      const file = new File([blob], `${base}.jpg`, { type: "image/jpeg" });
+      await uploadFiles([file]);
+    } catch {
+      toast.error("Could not process the cropped image.");
+    }
+    const rest = cropQueue.slice(1);
+    setCropQueue(rest);
+    void advanceCrop(rest);
+  }
+
+  function onCropCancel() {
+    const rest = cropQueue.slice(1);
+    setCropUrl(null);
+    setCropQueue(rest);
+    void advanceCrop(rest);
+  }
+
   return (
+    <>
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/40" onClick={() => !busy && onClose()} />
       <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
@@ -365,7 +424,7 @@ function ModelDetailDialog({
                 accept="image/png,image/jpeg,image/webp,image/gif,image/heic"
                 multiple
                 className="hidden"
-                onChange={(e) => { const fs = Array.from(e.target.files ?? []); if (fs.length) uploadFiles(fs); }}
+                onChange={(e) => { const fs = Array.from(e.target.files ?? []); if (fs.length) startCropQueue(fs); }}
               />
               <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => inputRef.current?.click()}>
                 {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />} Upload Photos
@@ -430,6 +489,16 @@ function ModelDetailDialog({
         </div>
       </div>
     </div>
+    {cropUrl && (
+      <PhotoCropDialog
+        open
+        imageDataUrl={cropUrl}
+        aspectRatio={1}
+        onConfirm={onCropConfirm}
+        onCancel={onCropCancel}
+      />
+    )}
+    </>
   );
 }
 

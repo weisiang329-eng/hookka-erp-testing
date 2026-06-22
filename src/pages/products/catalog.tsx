@@ -267,7 +267,6 @@ function ModelTile({
           </span>
           <Badge variant="status" status={group.category} />
         </div>
-        <p className="text-[11px] text-[#6B7280] truncate" title={group.name}>{group.name}</p>
         <p className="text-[11px] text-[#9CA3AF]">
           {group.variantCount} SKU{group.variantCount === 1 ? "" : "s"}
           {group.sizeLabels.length > 0 ? ` · ${group.sizeLabels.slice(0, 4).join(", ")}${group.sizeLabels.length > 4 ? "…" : ""}` : ""}

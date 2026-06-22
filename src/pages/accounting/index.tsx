@@ -5475,6 +5475,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const { confirm } = useConfirm();
   const [rows, setRows] = useState<PvRow[] | null>(null);
   const [migrationMissing, setMigrationMissing] = useState(false);
+  const [expandedPv, setExpandedPv] = useState<Record<string, boolean>>({});
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
@@ -5771,8 +5772,14 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
               </thead>
               <tbody>
                 {visibleRows.map((r) => (
-                  <tr key={r.id} className={`border-b border-[#F0ECE9] ${r.status === "VOID" ? "opacity-50" : ""}`}>
-                    <td className="px-3 py-1.5 tabular-nums text-xs">{r.pvNo}</td>
+                  <React.Fragment key={r.id}>
+                  <tr
+                    className={`border-b border-[#F0ECE9] cursor-pointer hover:bg-[#FAF8F5] ${r.status === "VOID" ? "opacity-50" : ""}`}
+                    onClick={() => setExpandedPv((m) => ({ ...m, [r.id]: !m[r.id] }))}
+                  >
+                    <td className="px-3 py-1.5 tabular-nums text-xs whitespace-nowrap">
+                      <span className="inline-block w-3 text-[#9CA3AF]">{expandedPv[r.id] ? "▾" : "▸"}</span> {r.pvNo}
+                    </td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.date}</td>
                     <td className="px-3 py-1.5">{[r.payee, r.description].filter(Boolean).join(" · ")}</td>
                     <td className="px-3 py-1.5 text-xs">
@@ -5785,7 +5792,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     <td className="px-3 py-1.5 text-xs">
                       {r.status === "VOID" ? "VOID" : r.accrued === 1 && !r.settledAt ? "UNPAID (accrued)" : "PAID"}
                     </td>
-                    <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                    <td className="px-3 py-1.5 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                       {r.status === "POSTED" && (
                         <button onClick={() => startEdit(r)} className="text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3">edit</button>
                       )}
@@ -5800,6 +5807,38 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                       />
                     </td>
                   </tr>
+                  {expandedPv[r.id] && (
+                    <tr className="bg-[#FAF8F5] border-b border-[#F0ECE9]">
+                      <td colSpan={8} className="px-8 py-2">
+                        {r.lines.length === 0 ? (
+                          <div className="text-xs text-[#9CA3AF]">No line detail.</div>
+                        ) : (
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="text-[#9CA3AF] text-left">
+                                <th className="py-1 pr-4 font-medium">Account</th>
+                                <th className="py-1 pr-4 font-medium">Description</th>
+                                <th className="py-1 font-medium text-right">Amount</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {r.lines.map((l, i) => {
+                                const nm = accounts.find((a) => a.code === l.accountCode)?.name;
+                                return (
+                                  <tr key={i} className="border-t border-[#F0ECE9]">
+                                    <td className="py-1 pr-4 whitespace-nowrap">{l.accountCode}{nm ? ` · ${nm}` : ""}</td>
+                                    <td className="py-1 pr-4">{l.description ?? ""}</td>
+                                    <td className="py-1 text-right tabular-nums">{formatCurrency(l.amountSen)}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
                 ))}
                 {visibleRows.length === 0 && (
                   <tr><td colSpan={8} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No payments match</td></tr>

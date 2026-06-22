@@ -1957,6 +1957,16 @@ app.put("/:id", async (c) => {
                   ...postLegs,
                 ]);
               statements.push(...jeStmts);
+              // Collapse the restate in the GL: hide the original invoice legs,
+              // the reversal just posted, and any prior restate legs — leave ONLY
+              // this newest restate_post visible (the current amount). The net is
+              // unchanged and the full history stays in the audit log. Runs after
+              // the rev/post INSERTs in the batch.
+              statements.push(
+                c.var.DB.prepare(
+                  "UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'invoice%' AND sourceType <> ?",
+                ).bind(id, orgId, `invoice_restate_post:${stamp}`),
+              );
               const auditStmt = await buildAuditStatement(c, {
                 resource: "invoices",
                 resourceId: id,

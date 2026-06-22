@@ -34,9 +34,24 @@ Entries themselves stay newest-first.
 
 ---
 
-## BUG-2026-06-22-008 — 1052 bedframe packing sticker prints only the Headboard, no Divan (DATA — only 1 fg_unit piece generated)
+## BUG-2026-06-22-008 — Bedframe packing sticker prints only the Headboard, no Divan (blank / unrecognised sizeCode → single "Full Product" piece)
 
-🔴 **Identified** (DATA, not code — no code change) · `production-orders` / `data-integrity` · caught by owner on prod
+🟢 **Fixed** · `production-orders` / `data-integrity` / `pricing-products` · caught by owner on prod
+
+**ACTUAL root cause (confirmed by live prod query — the agent diagnosis below GUESSED `specialOrder`/`products.pieces`; both were ruled out):** the bedframe piece count comes from `parsePieces` → `bedframeSizeDefault(sizeCode)`. **`1052-(K)`/`(Q)` had an EMPTY `sizeCode` (`""`)** while every other bedframe has "K"/"Q" — so `bedframeSizeDefault` returned null and `parsePieces` fell through to the global `{count:1, names:["Full Product"]}` fallback (`fg-units.ts:292`) → ONE unit, no HB/Divan split. The 1052 orders' `specialOrder` was NOT "Headboard Only" (some even said "Divan Full Cover") and `products.pieces` was null, so branches (1)+(2) below were both ruled out.
+
+**Swept same class (owner ruling 2026-06-22):** 18 MORE bedframe SKUs had non-K/Q/S/SS sizeCodes the default didn't recognise (SK ×7, dimension 152/153/183/200×200 ×6, SP ×5), all `pieces=null` → each also produced a single "Full Product".
+
+**FIX (shipped + verified live):**
+  1. Data — `1052-(K)`→`sizeCode:"K"`, `1052-(Q)`→`"Q"` (authed `PUT /api/products/:id`).
+  2. Code — `bedframeSizeDefault` now also maps **SK → HB+2Divan** and **dimension codes by WIDTH** (≥150cm → HB+2Divan, narrower → HB+1Divan) (`fg-units.ts`, commit e5ea5388).
+  3. Data — explicit `pieces` on the 5 SP SKUs (4 wide → HB+2Divan; `1041-(SP)` 107cm → HB+1Divan).
+  4. Regenerated affected non-shipped orders via `POST /api/import/regen-fg-units` (1052: 8 POs → HB+2Divan, 2 shipped skipped; SK/SP/dimension: active POs fixed, shipped skipped, 0 errors). Verified SO-2606-224-01 = Headboard 1/3 + Divan 2/3 + Divan 3/3.
+  5. Prevention — **bedframe `sizeCode` now REQUIRED** on POST+PUT (blank → 400, commit 73cf5004; verified: `PUT 1013-(Q) {sizeCode:""}` → 400). Note the `regen-fg-units` re-derive is the only force path; `/generate/:poId` stays idempotent.
+
+---
+
+_Original agent diagnosis (kept for context — the proposed pieces/specialOrder causes turned out NOT to be it; the size-default-fallback was):_
 
 **Symptom:** the 1052 bedframe's packing sticker prints only ONE Headboard (HB) piece — there is no Divan sticker. A full bedframe set is HB + 2 Divan (King/Queen), so the Divan should produce 2 stickers. Working bedframes (1013 / 1003 / 2008 etc.) print HB + 2 Divan correctly.
 

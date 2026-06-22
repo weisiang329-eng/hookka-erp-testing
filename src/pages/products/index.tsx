@@ -1789,6 +1789,9 @@ export default function ProductsPage() {
   // Customer picker: null = closed, open = picker is showing
   const [showCatCustomerPicker, setShowCatCustomerPicker] = useState(false);
   const [catCustomerQuery, setCatCustomerQuery] = useState("");
+  // Catalogue-export category filter: "ALL" or a product category (applies to
+  // both the All-Customers and per-customer exports).
+  const [catExportCategory, setCatExportCategory] = useState<string>("ALL");
   // Customer list loaded lazily when the picker opens
   const [catalogueCustomers, setCatalogueCustomers] = useState<
     Array<{ id: string; code: string; name: string }>
@@ -2603,7 +2606,8 @@ export default function ProductsPage() {
         categoryFilter: catFilter,
       });
       const ts = new Date().toISOString().slice(0, 10);
-      doc.save(`Product-Catalogue-${ts}.pdf`);
+      const catTag = catFilter ? `-${catFilter}` : "";
+      doc.save(`Product-Catalogue${catTag}-${ts}.pdf`);
     } catch (err) {
       console.error("[Catalogue PDF]", err);
       toast.error("Failed to generate catalogue PDF.");
@@ -2634,11 +2638,10 @@ export default function ProductsPage() {
   }
 
   // Per-customer catalogue export
-  async function handleExportCustomerCatalogue(customer: {
-    id: string;
-    code: string;
-    name: string;
-  }) {
+  async function handleExportCustomerCatalogue(
+    customer: { id: string; code: string; name: string },
+    catFilter?: string,
+  ) {
     setShowCatCustomerPicker(false);
     setCatCustomerQuery("");
     setExportingCatalogue(true);
@@ -2686,10 +2689,12 @@ export default function ProductsPage() {
       );
       const doc = generateProductCataloguePdf(entries, {
         customerName: customer.name,
+        categoryFilter: catFilter,
       });
       const safeCode = (customer.code || customer.name).replace(/[^a-zA-Z0-9_-]+/g, "_");
       const ts = new Date().toISOString().slice(0, 10);
-      doc.save(`Product-Catalogue-${safeCode}-${ts}.pdf`);
+      const catTag = catFilter ? `-${catFilter}` : "";
+      doc.save(`Product-Catalogue-${safeCode}${catTag}-${ts}.pdf`);
     } catch (err) {
       console.error("[Customer Catalogue PDF]", err);
       toast.error("Failed to generate customer catalogue PDF.");
@@ -3647,19 +3652,37 @@ export default function ProductsPage() {
                 className="w-full px-3 py-2 rounded-md text-sm border border-[#E2DDD8] bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30"
               />
             </div>
+            <div className="px-5 py-2.5 border-b border-[#F3F4F6] flex flex-wrap items-center gap-1.5">
+              <span className="text-xs text-[#9CA3AF] mr-1">Category</span>
+              {["ALL", "BEDFRAME", "SOFA", "ACCESSORY"].map((cat) => (
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => setCatExportCategory(cat)}
+                  className={
+                    "px-2.5 py-1 rounded-md text-xs font-medium transition-colors border " +
+                    (catExportCategory === cat
+                      ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                      : "bg-white text-[#1F1D1B] border-[#E2DDD8] hover:bg-[#F0ECE9]")
+                  }
+                >
+                  {cat === "ALL" ? "All" : cat.charAt(0) + cat.slice(1).toLowerCase()}
+                </button>
+              ))}
+            </div>
             <div className="max-h-80 overflow-y-auto">
               {!catCustomerQuery.trim() && (
                 <button
                   onClick={() => {
                     setShowCatCustomerPicker(false);
                     setCatCustomerQuery("");
-                    handleExportCatalogue();
+                    handleExportCatalogue(catExportCategory === "ALL" ? undefined : catExportCategory);
                   }}
                   className="w-full text-left px-5 py-3 hover:bg-[#F9FAFB] transition-colors flex items-center gap-3 border-b border-[#F3F4F6]"
                 >
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-[#1F1D1B]">All Customers</p>
-                    <p className="text-xs text-[#9CA3AF]">Full catalogue — every model</p>
+                    <p className="text-xs text-[#9CA3AF]">{catExportCategory === "ALL" ? "Full catalogue — every model" : `Every ${catExportCategory.toLowerCase()} model`}</p>
                   </div>
                   <FileDown className="h-4 w-4 text-[#6B5C32] flex-shrink-0" />
                 </button>
@@ -3685,7 +3708,7 @@ export default function ProductsPage() {
                 return visible.map((c) => (
                   <button
                     key={c.id}
-                    onClick={() => handleExportCustomerCatalogue(c)}
+                    onClick={() => handleExportCustomerCatalogue(c, catExportCategory === "ALL" ? undefined : catExportCategory)}
                     className="w-full text-left px-5 py-3 hover:bg-[#F9FAFB] transition-colors flex items-center gap-3 border-b border-[#F3F4F6] last:border-0"
                   >
                     <div className="flex-1 min-w-0">

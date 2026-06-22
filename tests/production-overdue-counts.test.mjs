@@ -223,3 +223,54 @@ test("frontend chip tooltips state the correct units (Bedframe = piece, Sofa = s
     "The Sofa chip tooltip must say it counts sets.",
   );
 });
+
+// ---------------------------------------------------------------------------
+// 6. Chip-click FILTERS THE GRID (owner request 2026-06-23) — not a separate
+//    SO-list panel. The endpoint exposes per-category overdue PO-id sets, and
+//    the FE narrows the main grid by them via `overduePoIdSet`. Lock both ends
+//    so a future "cleanup" can't silently revert to the old drill-down panel.
+// ---------------------------------------------------------------------------
+test("endpoint returns per-category overdue PO-id sets (overdueBedframePoIds / overdueSofaPoIds)", () => {
+  const h = extractOverdueHandler(read(SRC));
+  assert.ok(h, "handler missing — see previous test");
+  assert.match(
+    h,
+    /const overdueBedframePoIds = rows\s*\.filter\(/,
+    "Handler must derive overdueBedframePoIds from the overdue bedframe rows.",
+  );
+  assert.match(
+    h,
+    /const overdueSofaPoIds = rows\s*\.filter\(/,
+    "Handler must derive overdueSofaPoIds from the overdue sofa rows.",
+  );
+  assert.match(
+    h,
+    /overdueBedframePoIds,\s*\n\s*overdueSofaPoIds,/,
+    "Both id sets must be returned in the response payload so the grid can " +
+      "filter to exactly the overdue work the chips count.",
+  );
+});
+
+test("frontend grid filters by the overdue PO-id set (no separate SO-list panel)", () => {
+  const fe = read(FE);
+  // The grid-filter set built from the active chip + the endpoint's id arrays.
+  assert.match(
+    fe,
+    /const overduePoIdSet = useMemo<Set<string> \| null>/,
+    "FE must build `overduePoIdSet` from the active chip's overdue PO ids.",
+  );
+  // The main grid predicate must drop rows outside the active overdue set.
+  assert.match(
+    fe,
+    /if \(overduePoIdSet && !overduePoIdSet\.has\(o\.id\)\) return false;/,
+    "filteredOrders must exclude POs not in the active overdue id set.",
+  );
+  // Regression guard: the old drill-down panel (its own <table> titled
+  // "<label> Overdue — N SOs") must be gone.
+  assert.doesNotMatch(
+    fe,
+    /Overdue — \{filteredRows\.length\} SO/,
+    "The separate overdue-SO drill-down panel must be removed — clicking a " +
+      "chip now filters the main grid below instead.",
+  );
+});

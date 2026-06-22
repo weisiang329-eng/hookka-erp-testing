@@ -974,6 +974,12 @@ export default function ProductionPage({
       bedframeCount: number;
       sofaCount: number;
       breakdown: OverdueSORow[];
+      // PO-id sets per category — used to filter the main grid to exactly the
+      // overdue work the chips count (same server overdue set, ship-exclusion
+      // included). Optional so a cached older payload (pre-2026-06-23) still
+      // parses; the grid-filter falls back to an empty set if absent.
+      overdueBedframePoIds?: string[];
+      overdueSofaPoIds?: string[];
     };
   }>(overdueCountsUrl);
   // (Lifecycle dropdown removed 2026-04-27 — replaced by the Status
@@ -1031,15 +1037,41 @@ export default function ProductionPage({
       // ignore quota / private-mode failures
     }
   }, [incompleteOnly]);
-  // Overdue drill-down panel mode. Two cards in the filter bar
-  // ("Bedframe Overdue: N" + "Sofa Overdue: N") each toggle the panel
-  // scoped to that itemCategory. null = panel closed. Click the active
-  // card again to close, or click the other card to switch categories.
-  // Date-filter-independent — counts come from
+  // Overdue chip filter mode. The two red chips in the filter bar
+  // ("Bedframe ⚠ N" / "Sofa ⚠ N") each toggle a grid filter scoped to that
+  // itemCategory's overdue set (owner request 2026-06-23: filter the main grid
+  // below INSTEAD of popping a separate SO list). null = no overdue filter.
+  // Click the active chip again to clear, or click the other chip to switch.
+  // Date-filter-independent — the id-set comes from
   // /api/production-orders/overdue-counts which scans the whole PO set.
   const [overduePanelMode, setOverduePanelMode] = useState<
     "BEDFRAME" | "SOFA" | null
   >(null);
+  // Anchor for scrolling the grid into view when an overdue chip is clicked
+  // (the grid sits below the filter bar; on a tall page it can be off-screen).
+  const gridSectionRef = useRef<HTMLDivElement | null>(null);
+  // Toggle an overdue chip: click to filter the grid to that category's
+  // overdue set, click the same chip again to clear, click the other to
+  // switch. On activate, scroll the grid into view so the filtered rows are
+  // visible without a manual scroll.
+  const selectOverdueChip = useCallback(
+    (cat: "BEDFRAME" | "SOFA") => {
+      setOverduePanelMode((m) => {
+        const next = m === cat ? null : cat;
+        if (next) {
+          // Defer so the scroll target exists / the grid has re-filtered.
+          requestAnimationFrame(() => {
+            gridSectionRef.current?.scrollIntoView({
+              behavior: "smooth",
+              block: "start",
+            });
+          });
+        }
+        return next;
+      });
+    },
+    [],
+  );
   // Atomic multi-key URL writer for "Clear all". Sequential useUrlState
   // setters race under React 18 batching — see useUrlBatch jsdoc.
   const setUrlBatch = useUrlBatch();
@@ -1277,7 +1309,10 @@ export default function ProductionPage({
     !!fltCustomer ||
     !!fltDueFrom ||
     !!fltDueTo ||
-    !!fltCategory;
+    !!fltCategory ||
+    // An active overdue chip filters the grid too — arm the fetch so clicking
+    // a chip on a cold (un-fetched) Overview loads the rows it selects.
+    !!overduePanelMode;
   /* eslint-disable react-hooks/set-state-in-effect -- gate fetch on first filter activation */
   useEffect(() => {
     if (anyFilterActive && !shouldFetch) setShouldFetch(true);
@@ -2532,12 +2567,35 @@ export default function ProductionPage({
   // visible for the whole "click filter → grid refreshed" window.
   const updatingHint = filtersPending || baserowsPending;
 
+  // Set of production-order ids the active overdue chip selects (null when no
+  // chip is active). Reuses the SAME server-computed overdue set the chip
+  // counts come from — including the per-piece ship-exclusion the FE
+  // isOverduePO lacks — so the filtered grid can never drift from 29 / 25.
+  // Clicking "Bedframe ⚠ 29" → the 29 overdue bedframe pieces; "Sofa ⚠ 25" →
+  // every overdue sofa piece (PO) making up those 25 sets. Declared before
+  // `filteredOrders` because that memo reads it.
+  const overduePoIdSet = useMemo<Set<string> | null>(() => {
+    if (!overduePanelMode) return null;
+    const ids =
+      overduePanelMode === "BEDFRAME"
+        ? overdueCountsResp?.data?.overdueBedframePoIds
+        : overdueCountsResp?.data?.overdueSofaPoIds;
+    return new Set(ids ?? []);
+  }, [overduePanelMode, overdueCountsResp]);
+
   // Apply the page-level filter panel to `orders` first, then scope further
   // by active tab (Overview = everything; dept tab = only orders that have
   // a non-empty cell in that dept).
   const filteredOrders = useMemo(() => {
     const q = deferredFltSearch.trim().toLowerCase();
     return orders.filter((o) => {
+      // Overdue chip filter (date-INDEPENDENT, like the chips). When a chip is
+      // active, keep ONLY the POs in that category's server overdue set and
+      // SKIP the date-range narrowing below — the operator clicked "show me
+      // the overdue ones", not "the overdue ones that also fall in my date
+      // window". Other filters (search / customer / state / category) still
+      // layer on top so the operator can narrow further within the overdue set.
+      if (overduePoIdSet && !overduePoIdSet.has(o.id)) return false;
       if (q) {
         const hay = haystackByPo.get(o.id) || "";
         if (!hay.includes(q)) return false;
@@ -2571,8 +2629,13 @@ export default function ProductionPage({
         const jc = (o.jobCards ?? []).find((j) => j.departmentCode === activeTab);
         axisVal = jc?.dueDate || "";
       }
-      if (deferredFltDueFrom && axisVal && axisVal < deferredFltDueFrom) return false;
-      if (deferredFltDueTo && axisVal && axisVal > deferredFltDueTo) return false;
+      // Skip the date window while an overdue chip is active — the overdue set
+      // is date-independent (matches the chip), so a stale date filter must not
+      // hide overdue rows from the chip's own selection.
+      if (!overduePoIdSet) {
+        if (deferredFltDueFrom && axisVal && axisVal < deferredFltDueFrom) return false;
+        if (deferredFltDueTo && axisVal && axisVal > deferredFltDueTo) return false;
+      }
       // "Filter Incomplete" toggle — dept-aware:
       //   Overview ("ALL")  → keep POs whose UPHOLSTERY JC isn't done.
       //                       UPH gates ship-readiness, so this answers
@@ -2617,6 +2680,8 @@ export default function ProductionPage({
     deferredFltSearch, deferredFltState, deferredFltCustomer,
     deferredFltDueFrom, deferredFltDueTo, fltDateAxis,
     deferredFltCategory,
+    // Overdue chip filter — recompute when the active chip / its id-set changes.
+    overduePoIdSet,
     showCancelled,
     deferredIncompleteOnly,
     // activeTab drives the dueDate axis branch added 2026-05-07 (overview
@@ -2625,16 +2690,12 @@ export default function ProductionPage({
     activeTab,
   ]);
 
-  // Overdue breakdown + per-category counts. Pre-aggregated server-side
-  // (see /api/production-orders/overdue-counts above) so this is a thin
-  // pass-through. The endpoint already applies the same isOverduePO /
-  // earliestOverdueDateOnPO rules per `overdueDept`, so the rows match
-  // what the matrix's red cells show. An SO with both BEDFRAME + SOFA
-  // overdue POs counts in BOTH cards (no dedup) — same as before.
-  const overdueBreakdown: OverdueSORow[] = useMemo(
-    () => overdueCountsResp?.data?.breakdown ?? [],
-    [overdueCountsResp],
-  );
+  // Per-category overdue counts. Pre-aggregated server-side (see
+  // /api/production-orders/overdue-counts above). The endpoint applies the same
+  // isOverduePO / earliestOverdueDateOnPO rules per `overdueDept`, so the counts
+  // match the matrix's red cells. (The old SO-grouped `breakdown` drill-down
+  // panel was replaced 2026-06-23 by the grid-filter `overduePoIdSet` above —
+  // clicking a chip now narrows the grid below instead of popping a list.)
   const bedframeOverdueCount = overdueCountsResp?.data?.bedframeCount ?? 0;
   const sofaOverdueCount = overdueCountsResp?.data?.sofaCount ?? 0;
 
@@ -6448,14 +6509,15 @@ export default function ProductionPage({
             since one set's -01/-02/-03 pieces share an SO). Both exclude any
             piece already on a dispatched/delivered DO. Counts come from
             /api/production-orders/overdue-counts (server-side), not the
-            date-windowed `filteredOrders`. Click either to drill the panel
-            below into that category (rows are SO-grouped either way); click
-            again to close. Greyed out at zero so "all clear" reads explicit. */}
+            date-windowed `filteredOrders`. Owner request 2026-06-23: clicking
+            a chip FILTERS THE GRID BELOW to exactly that category's overdue
+            set (reusing the same server overdue ids the count comes from),
+            INSTEAD of popping a separate SO list. Click again to clear; click
+            the other chip to switch. Greyed out at zero so "all clear" reads
+            explicit. */}
         <button
           type="button"
-          onClick={() =>
-            setOverduePanelMode((m) => (m === "BEDFRAME" ? null : "BEDFRAME"))
-          }
+          onClick={() => selectOverdueChip("BEDFRAME")}
           className={`text-xs px-2 py-1.5 rounded border transition font-semibold ${
             bedframeOverdueCount > 0
               ? overduePanelMode === "BEDFRAME"
@@ -6464,9 +6526,12 @@ export default function ProductionPage({
               : "bg-white text-[#9CA3AF] border-[#E6E0D9] cursor-default"
           }`}
           disabled={bedframeOverdueCount === 0}
+          aria-pressed={overduePanelMode === "BEDFRAME"}
           title={
             bedframeOverdueCount > 0
-              ? `${bedframeOverdueCount} overdue Bedframe piece${bedframeOverdueCount === 1 ? "" : "s"} (counted by piece; independent of date filter). Click to view the affected SOs.`
+              ? overduePanelMode === "BEDFRAME"
+                ? "Showing the overdue Bedframe pieces in the grid below. Click to clear this filter."
+                : `${bedframeOverdueCount} overdue Bedframe piece${bedframeOverdueCount === 1 ? "" : "s"} (counted by piece; independent of date filter). Click to filter the grid below to these.`
               : "No overdue Bedframe pieces system-wide"
           }
         >
@@ -6474,9 +6539,7 @@ export default function ProductionPage({
         </button>
         <button
           type="button"
-          onClick={() =>
-            setOverduePanelMode((m) => (m === "SOFA" ? null : "SOFA"))
-          }
+          onClick={() => selectOverdueChip("SOFA")}
           className={`text-xs px-2 py-1.5 rounded border transition font-semibold ${
             sofaOverdueCount > 0
               ? overduePanelMode === "SOFA"
@@ -6485,9 +6548,12 @@ export default function ProductionPage({
               : "bg-white text-[#9CA3AF] border-[#E6E0D9] cursor-default"
           }`}
           disabled={sofaOverdueCount === 0}
+          aria-pressed={overduePanelMode === "SOFA"}
           title={
             sofaOverdueCount > 0
-              ? `${sofaOverdueCount} overdue Sofa set${sofaOverdueCount === 1 ? "" : "s"} (counted by set = SO; independent of date filter). Click to view them.`
+              ? overduePanelMode === "SOFA"
+                ? "Showing the overdue Sofa pieces in the grid below. Click to clear this filter."
+                : `${sofaOverdueCount} overdue Sofa set${sofaOverdueCount === 1 ? "" : "s"} (counted by set = SO; independent of date filter). Click to filter the grid below to the overdue sofa pieces.`
               : "No overdue Sofa sets system-wide"
           }
         >
@@ -6584,105 +6650,32 @@ export default function ProductionPage({
         </span>
       </div>
 
-      {/* Overdue SO drill-down panel — toggled by the chips above. Filter
-          mode comes from `overduePanelMode` (BEDFRAME / SOFA): only rows
-          whose overdue PO set contains that itemCategory render. An SO
-          with both BF + sofa overdue POs appears in either panel.
-          Date-filter-independent: rows come from the
-          /api/production-orders/overdue-counts breakdown payload. Click
-          an SO row → navigate to /sales/<id> when we have a salesOrderId,
-          otherwise the row stays read-only (CO-only orders don't have an
-          SO detail page). */}
-      {overduePanelMode && (() => {
-        const filteredRows = overdueBreakdown.filter((r) =>
-          r.overdueCategories.includes(overduePanelMode),
-        );
-        if (filteredRows.length === 0) return null;
-        const label = overduePanelMode === "BEDFRAME" ? "Bedframe" : "Sofa";
-        return (
-        <div className="rounded-lg border border-[#F1B5B0] bg-[#FFF7F6] overflow-hidden">
-          <div className="flex items-center justify-between px-3 py-2 border-b border-[#F1B5B0] bg-[#FDECEA]">
-            <div className="flex items-baseline gap-2">
-              <span className="text-sm font-semibold text-[#A12C28]">
-                {label} Overdue — {filteredRows.length} SO
-                {filteredRows.length === 1 ? "" : "s"}
-              </span>
-              <span className="text-[10px] text-[#A12C28]/70">
-                {/* The chip counts pieces (Bedframe) / sets (Sofa); this list is
-                    SO-grouped, so its count is the affected SOs, not the chip
-                    number. */}
-                {overduePanelMode === "BEDFRAME"
-                  ? "Affected SOs (chip counts pieces) — independent of the date filter"
-                  : "Each row = one set — independent of the date filter"}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setOverduePanelMode(null)}
-              className="text-[11px] text-[#A12C28] hover:underline"
-            >
-              Close
-            </button>
-          </div>
-          <div className="max-h-[320px] overflow-y-auto overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead className="bg-[#FFF7F6] border-b border-[#F1B5B0] sticky top-0">
-                <tr className="text-left text-[10px] uppercase tracking-wider text-[#A12C28]/80">
-                  <th className="px-3 py-1.5 font-semibold">SO</th>
-                  <th className="px-3 py-1.5 font-semibold">Customer</th>
-                  <th className="px-3 py-1.5 font-semibold text-center">Overdue / Total</th>
-                  <th className="px-3 py-1.5 font-semibold">Earliest Overdue</th>
-                  <th className="px-3 py-1.5 font-semibold">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredRows.map((row) => {
-                  const clickable = !!row.salesOrderId;
-                  return (
-                    <tr
-                      key={row.soId}
-                      onClick={() => {
-                        if (clickable) navigate(`/sales/${row.salesOrderId}`);
-                      }}
-                      className={`border-b border-[#F1B5B0]/40 last:border-b-0 ${
-                        clickable
-                          ? "cursor-pointer hover:bg-[#FDECEA]"
-                          : "cursor-default"
-                      }`}
-                      title={
-                        clickable
-                          ? `Open ${row.displaySoId}`
-                          : "No linked SO detail page"
-                      }
-                    >
-                      <td className="px-3 py-1.5 text-[11px] text-[#1F1D1B]">
-                        {row.displaySoId}
-                        {clickable && (
-                          <ExternalLink className="inline-block ml-1 h-3 w-3 text-[#9CA3AF]" />
-                        )}
-                      </td>
-                      <td className="px-3 py-1.5 text-[#1F1D1B]">{row.customer || "—"}</td>
-                      <td className="px-3 py-1.5 text-center">
-                        <span className="font-semibold text-[#A12C28]">
-                          {row.overduePos}
-                        </span>
-                        <span className="text-[#9CA3AF]"> / {row.totalPos} POs</span>
-                      </td>
-                      <td className="px-3 py-1.5 text-[#A12C28] font-medium">
-                        {fmtShortDate(row.earliest) || "—"}
-                      </td>
-                      <td className="px-3 py-1.5 text-[10px] text-[#6B7280]">
-                        {row.poStatus}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+      {/* Active overdue-filter banner. Owner request 2026-06-23: clicking an
+          overdue chip now FILTERS THE GRID BELOW (instead of popping a separate
+          SO list). This thin banner just confirms the active filter + restates
+          the chip's metric, and offers a one-click clear. The actual rows are
+          the grid below, narrowed via `overduePoIdSet` in `filteredOrders`. */}
+      {overduePanelMode && shouldFetch && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-[#F1B5B0] bg-[#FFF7F6] px-3 py-2">
+          <span className="text-xs text-[#A12C28]">
+            <span className="font-semibold">
+              {overduePanelMode === "BEDFRAME" ? "Bedframe" : "Sofa"} overdue filter on
+            </span>{" "}
+            — grid below shows{" "}
+            {overduePanelMode === "BEDFRAME"
+              ? `the ${bedframeOverdueCount} overdue Bedframe piece${bedframeOverdueCount === 1 ? "" : "s"}`
+              : `the overdue Sofa pieces making up ${sofaOverdueCount} set${sofaOverdueCount === 1 ? "" : "s"}`}
+            {" "}(independent of the date range).
+          </span>
+          <button
+            type="button"
+            onClick={() => setOverduePanelMode(null)}
+            className="shrink-0 text-[11px] font-medium text-[#A12C28] hover:underline"
+          >
+            Clear overdue filter
+          </button>
         </div>
-        );
-      })()}
+      )}
 
       {/* Lazy-load placeholder: before any filter is set we don't fetch
           the payload at all — the user sees the filter bar above plus this
@@ -6706,7 +6699,7 @@ export default function ProductionPage({
           (/production vs /production/<code>) navigate via the sidebar
           instead, so the in-page tab bar would be redundant. */}
       {mode === "full" && (
-      <div className="rounded-lg border border-[#E6E0D9] bg-[#FAF8F4] p-1 overflow-x-auto">
+      <div ref={gridSectionRef} className="rounded-lg border border-[#E6E0D9] bg-[#FAF8F4] p-1 overflow-x-auto scroll-mt-4">
         <div className="grid grid-cols-9 gap-1">
           <button
             onClick={() => setActiveTab("ALL")}

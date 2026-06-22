@@ -4831,7 +4831,40 @@ app.get("/overdue-counts", async (c) => {
     r.overdueCategories.includes("SOFA"),
   ).length;
 
-      return { data: { bedframeCount, sofaCount, breakdown } };
+  // PO-id sets per category — lets the Production Overview grid filter to
+  // EXACTLY the overdue work the chips count, reusing this endpoint's overdue
+  // set (same isOverduePO rule + per-piece ship-exclusion) so the filtered
+  // rows can never drift from the chip numbers. BEDFRAME ids = the overdue
+  // bedframe pieces (1 PO = 1 piece, so this matches bedframeCount exactly).
+  // SOFA ids = every overdue sofa PIECE (PO) that makes up the overdue sets;
+  // the chip counts SETS (distinct SOs) but the per-PO grid renders the
+  // constituent overdue pieces, which is the actual work to action.
+  const overdueBedframePoIds = rows
+    .filter(
+      (r) =>
+        r.poStatus !== "CANCELLED" &&
+        r.itemCategory === "BEDFRAME" &&
+        !!r.earliestOverdue,
+    )
+    .map((r) => r.id);
+  const overdueSofaPoIds = rows
+    .filter(
+      (r) =>
+        r.poStatus !== "CANCELLED" &&
+        r.itemCategory === "SOFA" &&
+        !!r.earliestOverdue,
+    )
+    .map((r) => r.id);
+
+      return {
+        data: {
+          bedframeCount,
+          sofaCount,
+          breakdown,
+          overdueBedframePoIds,
+          overdueSofaPoIds,
+        },
+      };
     },
     cacheKey,
   );

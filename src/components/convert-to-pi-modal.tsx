@@ -191,8 +191,14 @@ export function ConvertToPIModal({ open, onClose, onConfirm }: Props) {
   const q = query.toLowerCase().trim();
 
   const filteredPOs = useMemo(() => {
+    // CLOSED is terminal — a fully-received/invoiced PO has nothing left to
+    // convert into a PI, so it must not appear in the picker (matches
+    // from-source-modal). CANCELLED / DRAFT were already excluded.
     const base = allPOs.filter(
-      (p) => p.status !== "CANCELLED" && p.status !== "DRAFT",
+      (p) =>
+        p.status !== "CANCELLED" &&
+        p.status !== "DRAFT" &&
+        p.status !== "CLOSED",
     );
     if (!q) return base.slice(0, 60);
     return base

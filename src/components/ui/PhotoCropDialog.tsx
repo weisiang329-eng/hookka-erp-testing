@@ -61,6 +61,13 @@ type Props = {
    * the photo as-is without cropping. Number defaults to 1 (1:1).
    */
   aspectRatio?: number | null;
+  /**
+   * When true, hide the aspect-ratio toggle and lock the crop to
+   * `aspectRatio` (the user can still pan / zoom / rotate, but cannot change
+   * the shape). Used by the product Catalog so cover photos are always 1:1.
+   * Default false → R&D and other callers keep the switchable toggle.
+   */
+  lockAspect?: boolean;
   onCancel: () => void;
   onConfirm: (croppedDataUrl: string) => void;
 };
@@ -119,6 +126,7 @@ export function PhotoCropDialog({
   open,
   imageDataUrl,
   aspectRatio = 1,
+  lockAspect = false,
   onCancel,
   onConfirm,
 }: Props) {
@@ -752,22 +760,28 @@ export function PhotoCropDialog({
 
           {/* Aspect ratio toggle row */}
           <div className="flex flex-wrap items-center gap-1.5">
-            {ASPECT_OPTIONS.map((opt) => (
-              <button
-                key={opt.key}
-                type="button"
-                onClick={() => handleAspectClick(opt.key)}
-                className={
-                  "px-2.5 py-1 rounded-md text-xs font-medium transition-colors border " +
-                  (aspectKey === opt.key
-                    ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-                    : "bg-white text-[#1F1D1B] border-[#E2DDD8] hover:bg-[#F0ECE9]")
-                }
-                aria-pressed={aspectKey === opt.key}
-              >
-                {opt.label}
-              </button>
-            ))}
+            {lockAspect ? (
+              <span className="px-2.5 py-1 rounded-md text-xs font-semibold text-white bg-[#6B5C32] border border-[#6B5C32]">
+                Square (1:1)
+              </span>
+            ) : (
+              ASPECT_OPTIONS.map((opt) => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => handleAspectClick(opt.key)}
+                  className={
+                    "px-2.5 py-1 rounded-md text-xs font-medium transition-colors border " +
+                    (aspectKey === opt.key
+                      ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                      : "bg-white text-[#1F1D1B] border-[#E2DDD8] hover:bg-[#F0ECE9]")
+                  }
+                  aria-pressed={aspectKey === opt.key}
+                >
+                  {opt.label}
+                </button>
+              ))
+            )}
             <div className="ml-auto flex items-center gap-1.5">
               <button
                 type="button"

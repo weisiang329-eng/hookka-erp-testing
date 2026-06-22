@@ -537,6 +537,7 @@ function ModelDetailDialog({
         open
         imageDataUrl={cropUrl}
         aspectRatio={1}
+        lockAspect
         onConfirm={onCropConfirm}
         onCancel={onCropCancel}
       />

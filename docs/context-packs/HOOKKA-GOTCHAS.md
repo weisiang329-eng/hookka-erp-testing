@@ -27,6 +27,10 @@ generic context packs.
   `tests/sql-write-column-coverage.test.mjs`. (A 400 on a well-formed body is
   usually a DB write throwing inside a try/catch — suspect this first.)
 
+## Production — bedframe packing pieces (sizeCode-driven)
+
+- **A bedframe's Headboard + Divan sticker count is derived from its `sizeCode`**, via `bedframeSizeDefault` in `src/api/routes/fg-units.ts` (`parsePieces` priority: specialOrder "Headboard Only" → 1 HB; `products.pieces` JSON → verbatim; else the size-default). It knows **K/Q → HB+2Divan, S/SS → HB+1Divan, SK → HB+2Divan, dimension codes** ("152X200") by width (≥150cm → 2 Divan). **Anything else — a BLANK sizeCode, "SP", or an unknown code — falls through to the global `{count:1, names:["Full Product"]}` fallback → ONE unit, NO Divan sticker** (BUG-2026-06-22-008: 1052 had a blank sizeCode; 18 SK/SP/dimension SKUs had unrecognised codes — each silently shipped 1 "Full Product"). Bedframe `sizeCode` is now **REQUIRED** on products POST/PUT (blank → 400). To fix already-generated orders you must set the product's sizeCode/pieces **and then** `POST /api/import/regen-fg-units {soIds, dryRun}` — `/generate/:poId` is idempotent and will NOT re-derive existing units. The sticker render loop (`production/index.tsx`) faithfully draws one sticker per fg_unit and is never the bug; the bug is always the fg_unit COUNT.
+
 ## Build / ship
 
 - **build:strict before every push** = `npx tsc -p tsconfig.app.json --noEmit`.

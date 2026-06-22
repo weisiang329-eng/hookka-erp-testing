@@ -65,7 +65,10 @@ export default function PaymentsPage() {
           .filter((a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH")
           .map((a) => ({ code: a.code, name: a.name }));
         setBankOptions(opts);
-        setBankAccount((prev) => prev || opts[0]?.code || "");
+        // Default the deposit account to Hong Leong Bank (owner preference);
+        // fall back to the first bank/cash account if HLB isn't in the COA.
+        const hlb = opts.find((o) => /hong\s*leong/i.test(o.name));
+        setBankAccount((prev) => prev || hlb?.code || opts[0]?.code || "");
       })
       .catch(() => {});
   }, []);

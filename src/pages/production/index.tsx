@@ -964,10 +964,19 @@ export default function ProductionPage({
   // dept tabs use that dept's JC.dueDate rule (mirrors isOverduePO in
   // src/pages/production/utils.ts).
   const overdueDept: string | null = activeTab === "ALL" ? null : activeTab;
-  const overdueCountsUrl: string | null =
-    shouldFetch && datesSeeded
-      ? `/api/production-orders/overdue-counts${overdueDept ? `?dept=${encodeURIComponent(overdueDept)}` : ""}`
-      : null;
+  // NOT gated on `shouldFetch` (2026-06-23). The overdue chips are the
+  // Overview's primary KPI and now ALSO drive the grid filter (clicking
+  // "Bedframe ⚠ N" filters the grid to those N), so they must populate on a
+  // cold landing — otherwise the chips read 0, look wrong, and clicking them
+  // filters to nothing (the bug verify-live caught: cold Overview never flips
+  // shouldFetch, so the counts never loaded). This endpoint is a cheap
+  // ~5 KB / ~50 ms aggregate, snapshot-cached server-side (withSnapshot) and
+  // client-side (useCachedJson), so firing it on every Overview mount is fine;
+  // the heavy orders grid below stays lazy (still gated on shouldFetch), and a
+  // chip click arms that fetch via anyFilterActive.
+  const overdueCountsUrl: string | null = datesSeeded
+    ? `/api/production-orders/overdue-counts${overdueDept ? `?dept=${encodeURIComponent(overdueDept)}` : ""}`
+    : null;
   const { data: overdueCountsResp } = useCachedJson<{
     success?: boolean;
     data?: {

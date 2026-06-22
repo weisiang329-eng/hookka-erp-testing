@@ -34,6 +34,28 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-22-002 — Supplier binding/price edit silently un-saveable ("Save 不到") — `required` on a value-swapping search input blocked submit
+
+🟢 **Fixed** · `ui-frontend`
+
+**Symptom:** On `/suppliers/:id` → Pricing & SKUs, opening a binding's Edit dialog, changing the price and clicking Update did nothing — the form silently refused to submit. (Owner: "Save 不到".)
+
+**Root cause:** in `src/pages/procurement/sku-form-dialog.tsx` the Internal Code (~line 209) and Internal Description (~248) inputs use `value={showRmDropdown ? rmSearch : internalRMCode}` AND carry the native HTML `required` attribute. Focusing either field flips its dropdown open → the displayed value becomes the (empty) search term → native `required` validation fails → the browser blocks submit even though the committed `internalRMCode`/`materialName` are set. NOTE: the "infinite-render freeze" seen during diagnosis was a corrupted-tab artifact (repeated DOM-poking on one tab) — could NOT be reproduced on a clean prod build; do not chase a phantom loop.
+
+**Fix:** removed `required` from the two search-driven inputs; added a `handleSubmit` guard validating the COMMITTED `internalRMCode`/`materialName` (+ supplier + price) with an inline `role="alert"` message. Also memoised `skuColumns` in `suppliers/detail.tsx` (was a fresh array every render → DataGrid re-filter/sort churn). Merge 957dd123.
+
+**Verified live (prod):** opened Edit, focused Internal Code (blanks — expected), changed price, Update → `form.checkValidity()` stayed `true`, dialog closed, `saved: true`. Regression test `tests/supplier-sku-edit-save.test.mjs`.
+
+## BUG-2026-06-22-001 — PI-create "Convert from PO" picker still offered already-CLOSED import POs
+
+🟢 **Fixed** · `purchasing`
+
+**Symptom:** The PI-create "Convert from PO / Goods Receipt" picker listed CLOSED import POs (e.g. `PO-IMPORT-PI-2606-002`) that cannot be re-invoiced.
+
+**Root cause:** the convert-picker fix was applied to `from-source-modal.tsx` (the PI-LIST "Import from PO or GRN" picker), but the PI-CREATE page renders a DIFFERENT component `convert-to-pi-modal.tsx`, whose `filteredPOs` excluded CANCELLED + DRAFT but NOT CLOSED. Caught during verify-live — the agent fixed the wrong modal.
+
+**Fix:** added `p.status !== "CLOSED"` to `convert-to-pi-modal.tsx` `filteredPOs`. Verified live: both modals' PO tabs now show only CONFIRMED (0 CLOSED / 0 import). Also a one-time `/api/admin/backfill-import-data` tool (built → run → reverted) marked 45 import-GRN lines fully-invoiced (invoiced_qty = acceptedQty) so they stop reappearing in the GRN tab + can't be double-invoiced, and backfilled 69 blank/wrong `material_code` values on PI/PO lines via supplier-binding → internal-code lookup (48 freight/ambiguous lines left untouched; backups in `zz_backfill_import_data_*`).
+
 ## BUG-2026-06-21-006 — Audit history printed a base64 image as text → 423px mobile overflow on SO/CO detail
 
 🟢 **Fixed** · `ui-frontend`

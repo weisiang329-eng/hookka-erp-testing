@@ -2071,6 +2071,13 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
             "UPDATE invoices SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
           ).bind(now, oldInv.id),
         );
+        // Hide the superseded invoice's GL legs (original + reversal) so the
+        // void doesn't linger in the GL.
+        b1.push(
+          c.var.DB.prepare(
+            "UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceType IN ('invoice','invoice_void') AND sourceId = ? AND orgId = ?",
+          ).bind(oldInv.id, orgId),
+        );
       }
       b1.push(
         c.var.DB.prepare(

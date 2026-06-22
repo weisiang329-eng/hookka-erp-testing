@@ -1184,6 +1184,13 @@ app.put("/journals/:id", async (c) => {
              ON CONFLICT (orgId, sourceType, sourceId) DO UPDATE SET state='VOID', actionAt=?, actorUserId=?`,
           ).bind(`dl-${crypto.randomUUID().slice(0, 10)}`, "manual", id, now, actorUserId, orgId, now, actorUserId),
         );
+        // Hide the reversed JV's legs (original + reversal) from the GL — the
+        // legacy reverse stamps VOID but, before this, left both legs visible.
+        statements.push(
+          c.var.DB.prepare(
+            "UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceType IN ('manual','manual_reversal') AND sourceId = ? AND orgId = ?",
+          ).bind(id, orgId),
+        );
       } catch (e) {
         console.error(
           `[ledger] JV ${id} reversal GL build failed — aborting:`,

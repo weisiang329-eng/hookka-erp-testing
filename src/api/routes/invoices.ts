@@ -2234,6 +2234,16 @@ app.put("/:id", async (c) => {
           ).bind(unpaidSen, existing.customerId),
         );
       }
+
+      // Hide the cancelled invoice's GL legs (original + reversal) so the void
+      // doesn't show in the GL — the same effect applyLifecycle gives the
+      // lifecycle-managed doc types. Pushed AFTER the reversal INSERTs, so the
+      // batch sets hidden=1 on both the original `invoice` and `invoice_void` legs.
+      statements.push(
+        c.var.DB.prepare(
+          "UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceType IN ('invoice','invoice_void') AND sourceId = ? AND orgId = ?",
+        ).bind(id, getOrgId(c)),
+      );
     }
 
     await c.var.DB.batch(statements);

@@ -237,7 +237,7 @@ function ModelTile({
       onClick={onOpen}
       className="group text-left rounded-lg border border-[#E5E7EB] bg-white overflow-hidden hover:shadow-md hover:border-[#D8CFC0] transition-all"
     >
-      <div className="relative aspect-[4/3] bg-[#FAF9F7] flex items-center justify-center overflow-hidden">
+      <div className="relative aspect-square bg-[#FAF9F7] flex items-center justify-center overflow-hidden">
         {cover && !imgFailed ? (
           <img
             src={`/api/files/${cover.id}/download`}

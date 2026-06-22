@@ -51,12 +51,13 @@ import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import {
-  computeMaterialPeriod,
-  rollupByGroup,
   valueIssues,
+  computeMaterialCheckpoints,
+  windowFromCheckpoints,
   type MaterialInput,
   type FifoEvent,
   type IssueCost,
+  type CheckpointCum,
 } from "../../lib/material-cost-fifo";
 
 const app = new Hono<Env>();
@@ -4376,7 +4377,7 @@ async function glWindowSigned(
 // "now", must be exact):
 //   · closing (wipClose/fgClose) is as of endIso (period end).
 //   · opening (wipOpen/fgOpen)  is as of the instant BEFORE startIso, i.e. the
-//     day before the period start (prevDayIso) — last close of the prior period.
+//     day before the period start (= end of the prior month) — last close of it.
 //   · "in progress as of D"     = start_date <= D AND (completed_date IS NULL OR
 //                                 completed_date > D)   — rebuilt from dates, not
 //                                 the current `status`, so any historical window
@@ -4403,22 +4404,55 @@ function monthEndIso(ym: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-// The day immediately before an ISO date (YYYY-MM-DD). Opening balances are
-// snapshot "the instant before the window starts", which is this date as a
-// <= cutoff for the as-of reconstruction.
-function prevDayIso(iso: string): string {
-  const [y, m, d] = iso.split("-").map((n) => parseInt(n, 10));
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  dt.setUTCDate(dt.getUTCDate() - 1);
-  return dt.toISOString().slice(0, 10);
+// The YYYY-MM month immediately before `ym`.
+function prevMonthYm(ym: string): string {
+  let [y, m] = ym.split("-").map((n) => parseInt(n, 10));
+  m -= 1; if (m === 0) { m = 12; y -= 1; }
+  return `${y}-${String(m).padStart(2, "0")}`;
 }
 
-async function loadMaterialCost(
+// Inclusive list of YYYY-MM from startYm to endYm. Empty when startYm > endYm.
+// Guarded at 1200 months (100y) so a bad cutover can never spin forever.
+function monthsBetweenYm(startYm: string, endYm: string): string[] {
+  const out: string[] = [];
+  let [y, m] = startYm.split("-").map((n) => parseInt(n, 10));
+  const [ey, em] = endYm.split("-").map((n) => parseInt(n, 10));
+  let guard = 0;
+  while ((y < ey || (y === ey && m <= em)) && guard++ < 1200) {
+    out.push(`${y}-${String(m).padStart(2, "0")}`);
+    m += 1; if (m === 13) { m = 1; y += 1; }
+  }
+  return out;
+}
+
+// Precomputed material-cost data for a whole request: built ONCE by
+// loadMaterialCostData (one replay per item), then any P&L window is derived
+// synchronously by materialWindow via checkpoint subtraction. groupCum holds,
+// per item-group, a cumulative checkpoint at every month-end in
+// [globalFirstYm..lastYm]; wipByYm/fgByYm hold the WIP/FG stock value as of each
+// month-end. Lookups for a ym outside the range fall back to zero.
+type MaterialCostData = {
+  globalFirstYm: string;
+  lastYm: string;
+  groups: string[];
+  groupCum: Map<string, Map<string, CheckpointCum>>;
+  wipByYm: Map<string, number>;
+  fgByYm: Map<string, number>;
+  warnings: {
+    negatives: { rmId: string; itemCode: string; units: number }[];
+    unresolved: { source: string; code: string }[];
+  };
+};
+
+async function loadMaterialCostData(
   db: Env["Variables"]["DB"],
   orgId: string,
-  startIso: string,
-  endIso: string,
-): Promise<LoadMaterialCostResult> {
+  lastYm: string,
+): Promise<MaterialCostData> {
+  // Replay every movement ONCE up to the last month any window needs, sampling
+  // monthly checkpoints. matEndIso = end of lastYm; events after it can't affect
+  // any window ending <= lastYm, so they're dropped while assembling.
+  const matEndIso = monthEndIso(lastYm);
   // 0. Ensure the opening-stock table exists (deploys don't run migrations).
   await ensureMaterialOpeningStock(db);
 
@@ -4504,8 +4538,11 @@ async function loadMaterialCost(
       .all<{ poId: string | null; materialCode: string | null; qty: number | null; lineTotalSen: number | null }>(),
     db
       .prepare(
+        // Only the movement types the engine reads (RM in/out + labour for WIP).
+        // Cuts the scan from the whole ledger to the few thousand rows we use.
         `SELECT type, itemId, direction, qty, unitCostSen, totalCostSen, refId, date
-           FROM cost_ledger WHERE orgId = ?`,
+           FROM cost_ledger
+          WHERE orgId = ? AND type IN ('RM_ISSUE','ADJUSTMENT','LABOR_POSTED')`,
       )
       .bind(orgId)
       .all<{ type: string; itemId: string; direction: string; qty: number | null; unitCostSen: number | null; totalCostSen: number | null; refId: string | null; date: string | null }>(),
@@ -4555,7 +4592,7 @@ async function loadMaterialCost(
   // 5a. GRN receipts (exclude lines whose PO is CANCELLED).
   for (const r of grnRes.results ?? []) {
     const date = (r.receiveDate ?? "").slice(0, 10);
-    if (!date || date <= cutoverIso) continue;
+    if (!date || date <= cutoverIso || date > matEndIso) continue;
     if (r.poStatus === "CANCELLED") continue;
     const code = r.materialCode ?? "";
     const rmId = code ? rmIdByCode.get(code) : undefined;
@@ -4571,7 +4608,7 @@ async function loadMaterialCost(
   for (const l of clRes.results ?? []) {
     if (l.type !== "RM_ISSUE" && l.type !== "ADJUSTMENT") continue;
     const date = (l.date ?? "").slice(0, 10);
-    if (!date || date <= cutoverIso || date > endIso) continue;
+    if (!date || date <= cutoverIso || date > matEndIso) continue;
     const rmId = l.itemId;
     if (!groupOf.has(rmId)) { flagUnresolved("cost_ledger", rmId); continue; }
     const qty = Number(l.qty) || 0;
@@ -4584,11 +4621,22 @@ async function loadMaterialCost(
     }
   }
 
-  // 6. Run the engine per material. Stable-sort events (date asc; same date:
-  //    receipt before issue) before handing to the engine, which keeps given
-  //    order for equal dates. Collect period results + per-issue costs.
+  // 6. Earliest month to checkpoint from: the first real movement (or the
+  //    cutover seed if it has a real date). Bounded below at year 2000 so a
+  //    "0000-01-01" sentinel (opening with no as-of date) can't explode the range.
+  let minIso = matEndIso;
+  for (const arr of eventsByRm.values()) for (const e of arr) if (e.date && e.date < minIso) minIso = e.date;
+  if (cutoverIso >= "2000-01-01" && cutoverIso < minIso) minIso = cutoverIso;
+  const globalFirstYm = minIso.slice(0, 7);
+  const monthsYm = monthsBetweenYm(globalFirstYm, lastYm); // [] when first > last
+  const monthEnds = monthsYm.map(monthEndIso);
+
+  // Replay each item ONCE; sum its monthly checkpoints into its item-group, and
+  // collect per-PO issue costs (for WIP/FG) from the same pass. No per-window
+  // re-replay — that repetition was the prod P&L hang.
   const rank = (e: FifoEvent) => (e.kind === "receipt" ? 0 : 1);
-  const periodResults = [];
+  const groupCum = new Map<string, Map<string, CheckpointCum>>(); // group → ym → cumulative
+  const allGroups = new Set<string>();
   const issuesByRef = new Map<string, IssueCost[]>(); // ref(PO) → its issues
   const negatives: { rmId: string; itemCode: string; units: number }[] = [];
   const openByRm = new Map<string, { rmId: string; qty: number | null; unitCostSen: number | null; asOfDate: string | null }>();
@@ -4598,6 +4646,7 @@ async function loadMaterialCost(
 
   for (const rmId of allRmIds) {
     const itemGroup = groupOf.get(rmId) ?? "OTHER";
+    allGroups.add(itemGroup);
     const open = openByRm.get(rmId);
     const events = (eventsByRm.get(rmId) ?? [])
       .slice()
@@ -4615,25 +4664,32 @@ async function loadMaterialCost(
       openingDate: cutoverIso,
       events,
     };
-    periodResults.push(computeMaterialPeriod(m, startIso, endIso));
-    // Per-issue costs (full timeline) — grouped by production order for WIP/FG.
+    // Monthly cumulative checkpoints, summed into this item's group (additive).
+    const cps = computeMaterialCheckpoints(m, monthEnds);
+    let gm = groupCum.get(itemGroup);
+    if (!gm) { gm = new Map(); groupCum.set(itemGroup, gm); }
+    for (let i = 0; i < cps.length; i++) {
+      const cp = cps[i];
+      const ym = monthsYm[i];
+      let acc = gm.get(ym);
+      if (!acc) { acc = { closingSen: 0, cumPurchaseSen: 0, cumConsumedSen: 0, cumNegativeUnits: 0 }; gm.set(ym, acc); }
+      acc.closingSen += cp.closingSen;
+      acc.cumPurchaseSen += cp.cumPurchaseSen;
+      acc.cumConsumedSen += cp.cumConsumedSen;
+      acc.cumNegativeUnits += cp.cumNegativeUnits;
+    }
+    // Per-issue FIFO costs (full timeline ≤ matEndIso) — grouped by PO for WIP/FG.
     for (const ic of valueIssues(m)) {
       if (!ic.ref) continue;
       let arr = issuesByRef.get(ic.ref);
       if (!arr) { arr = []; issuesByRef.set(ic.ref, arr); }
       arr.push(ic);
     }
+    // Whole-range negative-stock flag (fractional qty → rounded; diagnostic only).
+    const lastCp = cps.length ? cps[cps.length - 1] : null;
+    const negUnits = lastCp ? lastCp.cumNegativeUnits : 0;
+    if (negUnits > 1e-9) negatives.push({ rmId, itemCode: codeOf.get(rmId) ?? rmId, units: Math.round(negUnits * 1000) / 1000 });
   }
-
-  const rolled = rollupByGroup(periodResults);
-  const rmGroups = rolled.groups.map((g) => ({
-    itemGroup: g.itemGroup,
-    openingSen: g.openingSen,
-    purchaseSen: g.purchaseSen,
-    closingSen: g.closingSen,
-    consumedSen: g.consumedSen,
-  }));
-  for (const n of rolled.negatives) negatives.push({ rmId: n.rmId, itemCode: codeOf.get(n.rmId) ?? n.rmId, units: n.negativeUnits });
 
   // 6a. Per-PO FIFO material cost as of a date D = Σ issue.fifoCostSen for that
   //     PO with date <= D. Computed on demand from the grouped issues.
@@ -4720,15 +4776,47 @@ async function loadMaterialCost(
     return s;
   };
 
-  const openAsOf = prevDayIso(startIso); // "the instant before" the period start
+  // Precompute WIP/FG stock value as of EACH month-end so a window's open/close
+  // are O(1) lookups (open of a window = value at the end of the prior month).
+  const wipByYm = new Map<string, number>();
+  const fgByYm = new Map<string, number>();
+  for (let i = 0; i < monthsYm.length; i++) {
+    wipByYm.set(monthsYm[i], wipAsOf(monthEnds[i]));
+    fgByYm.set(monthsYm[i], fgAsOf(monthEnds[i]));
+  }
+
   return {
-    rmGroups,
-    wipOpenSen: wipAsOf(openAsOf),
-    wipCloseSen: wipAsOf(endIso),
-    fgOpenSen: fgAsOf(openAsOf),
-    fgCloseSen: fgAsOf(endIso),
+    globalFirstYm,
+    lastYm,
+    groups: [...allGroups],
+    groupCum,
+    wipByYm,
+    fgByYm,
     warnings: { negatives, unresolved },
   };
+}
+
+// Derive one P&L window (the old per-window loadMaterialCost shape) from the
+// precomputed data — pure arithmetic, no replay. opening = closing at the end of
+// the month BEFORE startYm; purchase/consumed = cumulative(end) − cumulative(prev);
+// closing = closing at endYm. WIP/FG open/close are month-end snapshots. A null
+// startYm means "since the beginning" → opening 0.
+function materialWindow(data: MaterialCostData, startYm: string | null, endYm: string | null): LoadMaterialCostResult {
+  const ZERO: CheckpointCum = { closingSen: 0, cumPurchaseSen: 0, cumConsumedSen: 0, cumNegativeUnits: 0 };
+  const endKey = endYm ?? data.lastYm;
+  const prevKey = startYm ? prevMonthYm(startYm) : null;
+  const rmGroups = data.groups.map((g) => {
+    const gm = data.groupCum.get(g);
+    const end = gm?.get(endKey) ?? ZERO;
+    const prev = prevKey ? (gm?.get(prevKey) ?? ZERO) : null;
+    const w = windowFromCheckpoints(end, prev);
+    return { itemGroup: g, openingSen: w.openingSen, purchaseSen: w.purchaseSen, closingSen: w.closingSen, consumedSen: w.consumedSen };
+  });
+  const wipCloseSen = data.wipByYm.get(endKey) ?? 0;
+  const wipOpenSen = prevKey ? (data.wipByYm.get(prevKey) ?? 0) : 0;
+  const fgCloseSen = data.fgByYm.get(endKey) ?? 0;
+  const fgOpenSen = prevKey ? (data.fgByYm.get(prevKey) ?? 0) : 0;
+  return { rmGroups, wipOpenSen, wipCloseSen, fgOpenSen, fgCloseSen, warnings: data.warnings };
 }
 
 type PnlWindow = Awaited<ReturnType<typeof computePnlWindow>>;
@@ -4739,22 +4827,20 @@ async function computePnlWindow(
   startYm: string | null,
   endYm: string | null,
   line: "all" | "sofa" | "bedframe",
+  matData: MaterialCostData,
   override: Record<string, string> = {},
 ) {
-  // RM / WIP / FG now come from the FIFO engine (loadMaterialCost), replacing
-  // the cost_ledger perpetual figures that stockSummaryRange returns (the
-  // ledger stopped being fed after 2026-03). All OTHER P&L lines (labour /
-  // overhead / carriage / SST / revenue / other income / expenses) still come
-  // from the GL window untouched. The window's month bounds are turned into ISO
-  // dates: start = first day of startYm (far past if null = "since beginning"),
-  // end = last day of endYm (far future if null).
-  const matStartIso = startYm ? `${startYm}-01` : "0000-01-01";
-  const matEndIso = endYm ? monthEndIso(endYm) : "9999-12-31";
-  const [mat, gl, ratio] = await Promise.all([
-    loadMaterialCost(db, orgId, matStartIso, matEndIso),
+  // RM / WIP / FG come from the FIFO engine via the precomputed per-request
+  // checkpoints (materialWindow), replacing the cost_ledger perpetual figures
+  // that stockSummaryRange returns (that ledger stopped being fed after 2026-03).
+  // All OTHER P&L lines (labour / overhead / carriage / SST / revenue / other
+  // income / expenses) still come from the GL window untouched.
+  const [gl, ratio] = await Promise.all([
     glWindowSigned(db, startYm, endYm),
     costByLineWindow(db, startYm, endYm),
   ]);
+  // Material window derived synchronously from the single-replay checkpoints.
+  const mat = materialWindow(matData, startYm, endYm);
   const isAll = line === "all";
   const R = isAll ? 1 : line === "sofa" ? ratio.salesRatio.sofa : ratio.salesRatio.bedframe;
   // Helpers to read GL sums for an account band/predicate.
@@ -5147,6 +5233,10 @@ app.get("/pl-trend", async (c) => {
   const months = Math.min(24, Math.max(3, parseInt(c.req.query("months") || "6", 10) || 6));
   const anchor = c.req.query("anchor") || new Date().toISOString().slice(0, 7);
   const [ay, am] = anchor.split("-").map((n) => parseInt(n, 10));
+  const orgId = getOrgId(c);
+  // Build the FIFO checkpoints ONCE (anchor is the latest month in the trend);
+  // every month-window below is then a synchronous lookup, not a fresh replay.
+  const matData = await loadMaterialCostData(c.var.DB, orgId, anchor);
   const cols: { ym: string; netSalesSen: number; cogsSen: number; grossProfitSen: number; otherIncomeSen: number; expenseSen: number; netProfitSen: number }[] = [];
   for (let i = 0; i < months; i++) {
     // newest first: anchor, anchor-1, …
@@ -5154,7 +5244,7 @@ app.get("/pl-trend", async (c) => {
     let m = am - i;
     while (m <= 0) { m += 12; y -= 1; }
     const ym = `${y}-${String(m).padStart(2, "0")}`;
-    const p = await computePnlWindow(c.var.DB, getOrgId(c), ym, ym, line);
+    const p = await computePnlWindow(c.var.DB, orgId, ym, ym, line, matData);
     cols.push({
       ym,
       netSalesSen: p.netSalesSen,
@@ -5184,9 +5274,11 @@ app.get("/pl-statement", async (c) => {
   const fyWin = fyWindowFor(endForFy, fyeMonth);
   const fyStartYm = fyWin.startIso.slice(0, 7);
   const orgId = getOrgId(c);
+  // FIFO checkpoints once — period end is the latest month either window needs.
+  const matData = await loadMaterialCostData(c.var.DB, orgId, endYm ?? new Date().toISOString().slice(0, 7));
   const [p, y] = await Promise.all([
-    computePnlWindow(c.var.DB, orgId, startYm, endYm, line, pnlOverride),
-    computePnlWindow(c.var.DB, orgId, fyStartYm, endYm, line, pnlOverride),
+    computePnlWindow(c.var.DB, orgId, startYm, endYm, line, matData, pnlOverride),
+    computePnlWindow(c.var.DB, orgId, fyStartYm, endYm, line, matData, pnlOverride),
   ]);
   // Material warnings are material-wide (whole-timeline), not period-specific —
   // merge both windows' lists and de-dupe so the same material can't appear
@@ -5240,11 +5332,13 @@ app.get("/pl-monthly", async (c) => {
   const monthLabel = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleString("en", { month: "short", year: "numeric", timeZone: "UTC" });
 
   const orgId = getOrgId(c);
+  // FIFO checkpoints once for the whole FY matrix (lastYm is the latest column).
+  const matData = await loadMaterialCostData(c.var.DB, orgId, lastYm);
   const cols: PnlMatrixCol[] = [];
-  cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, orgId, fyStartYm, lastYm, line, override) });
+  cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, orgId, fyStartYm, lastYm, line, matData, override) });
   // Months newest-first (after Accumulated) per owner layout (F4 #7).
   for (const ym of [...months].reverse()) {
-    cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, orgId, ym, ym, line, override) });
+    cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, orgId, ym, ym, line, matData, override) });
   }
 
   const matrix = buildPnlMatrix(cols);

@@ -261,12 +261,12 @@ export default function CreditNotesPage() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card>
           <CardContent className="pt-6">
-            <div className="flex items-center justify-between">
-              <div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
                 <p className="text-sm text-gray-500">Total CN Value</p>
-                <p className="text-2xl font-bold text-[#9A3A2D]">-{formatCurrency(totalCNValue)}</p>
+                <p className="text-xl font-bold text-[#9A3A2D] truncate">-{formatCurrency(totalCNValue)}</p>
               </div>
-              <FileX className="h-8 w-8 text-[#9A3A2D]" />
+              <FileX className="h-8 w-8 text-[#9A3A2D] shrink-0" />
             </div>
           </CardContent>
         </Card>

@@ -267,12 +267,12 @@ export default function PaymentsPage() {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card>
           <CardContent className="pt-6">
-            <div className="flex items-center justify-between">
-              <div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
                 <p className="text-sm text-gray-500">Total Received</p>
-                <p className="text-2xl font-bold text-[#4F7C3A]">{formatCurrency(totalReceived)}</p>
+                <p className="text-xl font-bold text-[#4F7C3A] truncate">{formatCurrency(totalReceived)}</p>
               </div>
-              <CreditCard className="h-8 w-8 text-[#4F7C3A]" />
+              <CreditCard className="h-8 w-8 text-[#4F7C3A] shrink-0" />
             </div>
           </CardContent>
         </Card>

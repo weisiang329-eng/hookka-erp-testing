@@ -746,80 +746,81 @@ function CreatePurchaseOrderPage() {
             </label>
 
             {/* Compact filter row: one category dropdown (grouped Bedframe /
-                Sofa / Common) + a search box, replacing the old wall of ~22
-                category chips. Same filter state (selectedCategory + rmSearch)
-                drives the list below — only the picker UI got tidier. */}
-            <div className="flex flex-col sm:flex-row gap-2">
-              <select
-                value={selectedCategory}
-                onChange={(e) => setSelectedCategory(e.target.value)}
-                className="h-9 w-full sm:w-60 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-                aria-label="Filter materials by category"
-              >
-                <option value="ALL">All categories ({pickerRMs.length})</option>
-                {groupedCategories.bedframe.length > 0 && (
-                  <optgroup label="Bedframe">
-                    {groupedCategories.bedframe.map((cat) => (
-                      <option key={cat} value={cat}>{cat} ({categoryCounts[cat] ?? 0})</option>
-                    ))}
-                  </optgroup>
-                )}
-                {groupedCategories.sofa.length > 0 && (
-                  <optgroup label="Sofa">
-                    {groupedCategories.sofa.map((cat) => (
-                      <option key={cat} value={cat}>{cat} ({categoryCounts[cat] ?? 0})</option>
-                    ))}
-                  </optgroup>
-                )}
-                {groupedCategories.common.length > 0 && (
-                  <optgroup label="Common">
-                    {groupedCategories.common.map((cat) => (
-                      <option key={cat} value={cat}>{cat} ({categoryCounts[cat] ?? 0})</option>
-                    ))}
-                  </optgroup>
-                )}
-              </select>
-              <Input
-                className="h-9 text-sm flex-1"
-                value={rmSearch}
-                onChange={(e) => setRmSearch(e.target.value)}
-                placeholder="Search by RM code or description..."
-              />
-            </div>
-
-            {/* List only appears once the operator has typed a search or
-                picked a specific category — keeps the panel tidy when nothing
-                is being searched. "ALL" with no search = hidden. */}
-            {(rmSearch.trim() !== "" || selectedCategory !== "ALL") && (
-              <div className="max-h-64 overflow-y-auto bg-white border border-[#E2DDD8] rounded-md">
-                {filteredRMs.length === 0 ? (
-                  <div className="px-3 py-4 text-sm text-[#9CA3AF] text-center">
-                    No materials match this filter
-                  </div>
-                ) : (
-                  <>
-                    {filteredRMs.slice(0, 100).map((rm) => (
-                      <button
-                        key={rm.id}
-                        type="button"
-                        className="w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7] border-b border-[#E2DDD8] last:border-b-0 flex items-center gap-2"
-                        onClick={() => addItemFromRM(rm.itemCode)}
-                      >
-                        <Plus className="h-3 w-3 text-[#6B5C32] flex-shrink-0" />
-                        <span className="font-medium text-[#1F1D1B] flex-shrink-0">{rm.itemCode}</span>
-                        <span className="text-[#6B7280] truncate">{rm.description}</span>
-                        <span className="text-[#9CA3AF] ml-auto flex-shrink-0">({rm.baseUOM})</span>
-                      </button>
-                    ))}
-                    {filteredRMs.length > 100 && (
-                      <div className="px-3 py-2 text-xs text-[#9CA3AF] bg-[#FAF9F7]">
-                        Showing 100 of {filteredRMs.length}. Refine your search to narrow further.
-                      </div>
-                    )}
-                  </>
-                )}
+                Sofa / Common) + a search box. The results list is absolutely
+                positioned as a dropdown overlay so it does not push the line
+                item table down when it appears. */}
+            <div className="relative">
+              <div className="flex flex-col sm:flex-row gap-2">
+                <select
+                  value={selectedCategory}
+                  onChange={(e) => setSelectedCategory(e.target.value)}
+                  className="h-9 w-full sm:w-60 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  aria-label="Filter materials by category"
+                >
+                  <option value="ALL">All categories ({pickerRMs.length})</option>
+                  {groupedCategories.bedframe.length > 0 && (
+                    <optgroup label="Bedframe">
+                      {groupedCategories.bedframe.map((cat) => (
+                        <option key={cat} value={cat}>{cat} ({categoryCounts[cat] ?? 0})</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {groupedCategories.sofa.length > 0 && (
+                    <optgroup label="Sofa">
+                      {groupedCategories.sofa.map((cat) => (
+                        <option key={cat} value={cat}>{cat} ({categoryCounts[cat] ?? 0})</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {groupedCategories.common.length > 0 && (
+                    <optgroup label="Common">
+                      {groupedCategories.common.map((cat) => (
+                        <option key={cat} value={cat}>{cat} ({categoryCounts[cat] ?? 0})</option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+                <Input
+                  className="h-9 text-sm flex-1"
+                  value={rmSearch}
+                  onChange={(e) => setRmSearch(e.target.value)}
+                  placeholder="Search by RM code or description..."
+                />
               </div>
-            )}
+
+              {/* Results dropdown — absolutely positioned under the search row so it
+                  overlays the line-item table below rather than reflowing the page. */}
+              {(rmSearch.trim() !== "" || selectedCategory !== "ALL") && (
+                <div className="absolute left-0 right-0 top-full mt-1 z-20 max-h-64 overflow-y-auto bg-white border border-[#E2DDD8] rounded-md shadow-lg">
+                  {filteredRMs.length === 0 ? (
+                    <div className="px-3 py-4 text-sm text-[#9CA3AF] text-center">
+                      No materials match this filter
+                    </div>
+                  ) : (
+                    <>
+                      {filteredRMs.slice(0, 100).map((rm) => (
+                        <button
+                          key={rm.id}
+                          type="button"
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7] border-b border-[#E2DDD8] last:border-b-0 flex items-center gap-2"
+                          onClick={() => addItemFromRM(rm.itemCode)}
+                        >
+                          <Plus className="h-3 w-3 text-[#6B5C32] flex-shrink-0" />
+                          <span className="font-medium text-[#1F1D1B] flex-shrink-0">{rm.itemCode}</span>
+                          <span className="text-[#6B7280] truncate">{rm.description}</span>
+                          <span className="text-[#9CA3AF] ml-auto flex-shrink-0">({rm.baseUOM})</span>
+                        </button>
+                      ))}
+                      {filteredRMs.length > 100 && (
+                        <div className="px-3 py-2 text-xs text-[#9CA3AF] bg-[#FAF9F7]">
+                          Showing 100 of {filteredRMs.length}. Refine your search to narrow further.
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Line item table — full-width, generous columns. The wrapper is

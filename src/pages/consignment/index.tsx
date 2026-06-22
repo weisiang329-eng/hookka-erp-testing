@@ -587,7 +587,7 @@ export default function SalesPage() {
               {hasActiveFilters ? "Revenue (filtered)" : "Revenue"}
             </p>
             <p className={cn(
-              "text-xl font-bold",
+              "text-xl font-bold truncate",
               hasActiveFilters && "text-[#6B5C32]"
             )}>
               {formatCurrency(hasActiveFilters ? filteredRevenue : totalRevenue)}

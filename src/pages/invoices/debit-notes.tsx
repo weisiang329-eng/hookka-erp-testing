@@ -210,12 +210,12 @@ export default function DebitNotesPage() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card>
           <CardContent className="pt-6">
-            <div className="flex items-center justify-between">
-              <div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
                 <p className="text-sm text-gray-500">Total DN Value</p>
-                <p className="text-2xl font-bold text-[#3E6570]">+{formatCurrency(totalDNValue)}</p>
+                <p className="text-xl font-bold text-[#3E6570] truncate">+{formatCurrency(totalDNValue)}</p>
               </div>
-              <FileText className="h-8 w-8 text-[#3E6570]" />
+              <FileText className="h-8 w-8 text-[#3E6570] shrink-0" />
             </div>
           </CardContent>
         </Card>

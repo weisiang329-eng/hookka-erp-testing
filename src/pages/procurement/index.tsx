@@ -1601,10 +1601,10 @@ export default function ProcurementPage() {
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5 shrink-0">
               <FileText className="h-5 w-5 text-[#6B5C32]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-bold text-[#1F1D1B]">{purchaseOrders.length}</p>
               <p className="text-xs text-[#6B7280]">Total POs</p>
             </div>
@@ -1612,10 +1612,10 @@ export default function ProcurementPage() {
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#E0EDF0] p-2.5">
+            <div className="rounded-lg bg-[#E0EDF0] p-2.5 shrink-0">
               <Truck className="h-5 w-5 text-[#3E6570]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-bold text-[#3E6570]">{pendingDelivery}</p>
               <p className="text-xs text-[#6B7280]">Pending Delivery</p>
             </div>
@@ -1645,12 +1645,12 @@ export default function ProcurementPage() {
         >
           <CardContent className="p-4 flex items-center gap-3">
             <div className={cn(
-              "rounded-lg p-2.5",
+              "rounded-lg p-2.5 shrink-0",
               overduePoList.length > 0 ? `${overdueWidgetTone.bg} border ${overdueWidgetTone.border}` : "bg-[#F0ECE9]",
             )}>
               <AlertTriangle className={cn("h-5 w-5", overduePoList.length > 0 ? overdueWidgetTone.text : "text-[#E2DDD8]")} />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className={cn("text-2xl font-bold", overduePoList.length > 0 ? overdueWidgetTone.text : "text-[#1F1D1B]")}>
                 {overduePoList.length}
               </p>
@@ -1665,10 +1665,10 @@ export default function ProcurementPage() {
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5 shrink-0">
               <Package className="h-5 w-5 text-[#9C6F1E]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className={cn("text-2xl font-bold", totalOutstandingQty > 0 ? "text-[#9C6F1E]" : "text-[#1F1D1B]")}>{totalOutstandingQty}</p>
               <p className="text-xs text-[#6B7280]">Outstanding Qty</p>
             </div>

@@ -340,10 +340,10 @@ export default function PurchaseInvoicesPage() {
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5 shrink-0">
               <FileText className="h-5 w-5 text-[#6B5C32]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-bold text-[#1F1D1B]">{totalPIs}</p>
               <p className="text-xs text-[#6B7280]">Total PIs</p>
             </div>
@@ -351,10 +351,10 @@ export default function PurchaseInvoicesPage() {
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5 shrink-0">
               <Clock className="h-5 w-5 text-[#9C6F1E]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-bold text-[#9C6F1E]">{pendingPayment}</p>
               <p className="text-xs text-[#6B7280]">Pending Payment</p>
             </div>
@@ -362,10 +362,10 @@ export default function PurchaseInvoicesPage() {
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#FDECEA] p-2.5">
+            <div className="rounded-lg bg-[#FDECEA] p-2.5 shrink-0">
               <AlertTriangle className="h-5 w-5 text-[#9A3A2D]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-bold text-[#9A3A2D]">{overdue}</p>
               <p className="text-xs text-[#6B7280]">Overdue</p>
             </div>
@@ -373,11 +373,11 @@ export default function PurchaseInvoicesPage() {
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
+            <div className="rounded-lg bg-[#F0ECE9] p-2.5 shrink-0">
               <DollarSign className="h-5 w-5 text-[#6B5C32]" />
             </div>
-            <div>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{formatCurrency(totalValueSen)}</p>
+            <div className="min-w-0">
+              <p className="text-xl font-bold text-[#1F1D1B] truncate">{formatCurrency(totalValueSen)}</p>
               <p className="text-xs text-[#6B7280]">Total Value</p>
             </div>
           </CardContent>

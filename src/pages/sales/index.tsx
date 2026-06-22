@@ -927,32 +927,32 @@ export default function SalesPage() {
           <>
             <Card>
               <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-lg bg-[#F0ECE9] p-2.5"><ClipboardList className="h-5 w-5 text-[#6B5C32]" /></div>
-                <div><p className="text-2xl font-bold text-[#1F1D1B]">{statsTotal}</p><p className="text-xs text-[#6B7280]">Total Service Orders</p></div>
+                <div className="rounded-lg bg-[#F0ECE9] p-2.5 shrink-0"><ClipboardList className="h-5 w-5 text-[#6B5C32]" /></div>
+                <div className="min-w-0"><p className="text-2xl font-bold text-[#1F1D1B]">{statsTotal}</p><p className="text-xs text-[#6B7280]">Total Service Orders</p></div>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-lg bg-[#FAEFCB] p-2.5"><DollarSign className="h-5 w-5 text-[#9C6F1E]" /></div>
-                <div><p className="text-2xl font-bold text-[#9C6F1E]">{outstandingCount}</p><p className="text-xs text-[#6B7280]">Outstanding</p></div>
+                <div className="rounded-lg bg-[#FAEFCB] p-2.5 shrink-0"><DollarSign className="h-5 w-5 text-[#9C6F1E]" /></div>
+                <div className="min-w-0"><p className="text-2xl font-bold text-[#9C6F1E]">{outstandingCount}</p><p className="text-xs text-[#6B7280]">Outstanding</p></div>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-lg bg-[#F0ECE9] p-2.5"><Package className="h-5 w-5 text-[#6B5C32]" /></div>
-                <div><p className="text-2xl font-bold text-[#6B5C32]">{inProductionCount}</p><p className="text-xs text-[#6B7280]">In Production</p></div>
+                <div className="rounded-lg bg-[#F0ECE9] p-2.5 shrink-0"><Package className="h-5 w-5 text-[#6B5C32]" /></div>
+                <div className="min-w-0"><p className="text-2xl font-bold text-[#6B5C32]">{inProductionCount}</p><p className="text-xs text-[#6B7280]">In Production</p></div>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-lg bg-[#E6F0F3] p-2.5"><Truck className="h-5 w-5 text-[#3E6570]" /></div>
-                <div><p className="text-2xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p><p className="text-xs text-[#6B7280]">Pending Delivery</p></div>
+                <div className="rounded-lg bg-[#E6F0F3] p-2.5 shrink-0"><Truck className="h-5 w-5 text-[#3E6570]" /></div>
+                <div className="min-w-0"><p className="text-2xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p><p className="text-xs text-[#6B7280]">Pending Delivery</p></div>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-lg bg-[#EEF3E4] p-2.5"><CheckCircle className="h-5 w-5 text-[#4F7C3A]" /></div>
-                <div><p className="text-2xl font-bold text-[#4F7C3A]">{deliveredCount + completedCount}</p><p className="text-xs text-[#6B7280]">Delivered</p></div>
+                <div className="rounded-lg bg-[#EEF3E4] p-2.5 shrink-0"><CheckCircle className="h-5 w-5 text-[#4F7C3A]" /></div>
+                <div className="min-w-0"><p className="text-2xl font-bold text-[#4F7C3A]">{deliveredCount + completedCount}</p><p className="text-xs text-[#6B7280]">Delivered</p></div>
               </CardContent>
             </Card>
           </>
@@ -960,15 +960,15 @@ export default function SalesPage() {
           <>
             <Card>
               <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-lg bg-[#F0ECE9] p-2.5"><ShoppingCart className="h-5 w-5 text-[#6B5C32]" /></div>
-                <div><p className="text-2xl font-bold text-[#1F1D1B]">{statsTotal}</p><p className="text-xs text-[#6B7280]">Total Orders</p></div>
+                <div className="rounded-lg bg-[#F0ECE9] p-2.5 shrink-0"><ShoppingCart className="h-5 w-5 text-[#6B5C32]" /></div>
+                <div className="min-w-0"><p className="text-2xl font-bold text-[#1F1D1B]">{statsTotal}</p><p className="text-xs text-[#6B7280]">Total Orders</p></div>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-lg bg-[#F0ECE9] p-2.5"><DollarSign className="h-5 w-5 text-[#6B5C32]" /></div>
-                <div>
-                  <p className={cn("text-2xl font-bold", hasActiveFilters ? "text-[#6B5C32]" : "text-[#1F1D1B]")}>
+                <div className="rounded-lg bg-[#F0ECE9] p-2.5 shrink-0"><DollarSign className="h-5 w-5 text-[#6B5C32]" /></div>
+                <div className="min-w-0">
+                  <p className={cn("text-xl font-bold truncate", hasActiveFilters ? "text-[#6B5C32]" : "text-[#1F1D1B]")}>
                     {formatCurrency(displayRevenue)}
                   </p>
                   <p
@@ -982,20 +982,20 @@ export default function SalesPage() {
             </Card>
             <Card>
               <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-lg bg-[#FAEFCB] p-2.5"><DollarSign className="h-5 w-5 text-[#9C6F1E]" /></div>
-                <div><p className="text-2xl font-bold text-[#9C6F1E]">{outstandingCount}</p><p className="text-xs text-[#6B7280]">Outstanding</p></div>
+                <div className="rounded-lg bg-[#FAEFCB] p-2.5 shrink-0"><DollarSign className="h-5 w-5 text-[#9C6F1E]" /></div>
+                <div className="min-w-0"><p className="text-2xl font-bold text-[#9C6F1E]">{outstandingCount}</p><p className="text-xs text-[#6B7280]">Outstanding</p></div>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-lg bg-[#E6F0F3] p-2.5"><Truck className="h-5 w-5 text-[#3E6570]" /></div>
-                <div><p className="text-2xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p><p className="text-xs text-[#6B7280]">Pending Delivery</p></div>
+                <div className="rounded-lg bg-[#E6F0F3] p-2.5 shrink-0"><Truck className="h-5 w-5 text-[#3E6570]" /></div>
+                <div className="min-w-0"><p className="text-2xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p><p className="text-xs text-[#6B7280]">Pending Delivery</p></div>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-lg bg-[#EEF3E4] p-2.5"><CheckCircle className="h-5 w-5 text-[#4F7C3A]" /></div>
-                <div><p className="text-2xl font-bold text-[#4F7C3A]">{completedCount}</p><p className="text-xs text-[#6B7280]">Completed</p></div>
+                <div className="rounded-lg bg-[#EEF3E4] p-2.5 shrink-0"><CheckCircle className="h-5 w-5 text-[#4F7C3A]" /></div>
+                <div className="min-w-0"><p className="text-2xl font-bold text-[#4F7C3A]">{completedCount}</p><p className="text-xs text-[#6B7280]">Completed</p></div>
               </CardContent>
             </Card>
           </>

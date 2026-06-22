@@ -4204,10 +4204,10 @@ export default function DeliveryPage() {
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5 shrink-0">
               <Package className="h-5 w-5 text-[#9C6F1E]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-bold text-[#9C6F1E]">{loading ? "-" : pendingDispatchCount}</p>
               <p className="text-xs text-[#6B7280]">Pending Dispatch</p>
             </div>
@@ -4215,10 +4215,10 @@ export default function DeliveryPage() {
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#E0EDF0] p-2.5">
+            <div className="rounded-lg bg-[#E0EDF0] p-2.5 shrink-0">
               <Send className="h-5 w-5 text-[#3E6570]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-bold text-[#3E6570]">{loading ? "-" : dispatchedCount}</p>
               <p className="text-xs text-[#6B7280]">Dispatched</p>
             </div>
@@ -4226,10 +4226,10 @@ export default function DeliveryPage() {
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#F1E6F0] p-2.5">
+            <div className="rounded-lg bg-[#F1E6F0] p-2.5 shrink-0">
               <Truck className="h-5 w-5 text-[#6B4A6D]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-bold text-[#6B4A6D]">{loading ? "-" : inTransitCount}</p>
               <p className="text-xs text-[#6B7280]">In Transit</p>
             </div>
@@ -4237,10 +4237,10 @@ export default function DeliveryPage() {
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#EEF3E4] p-2.5">
+            <div className="rounded-lg bg-[#EEF3E4] p-2.5 shrink-0">
               <CheckCircle2 className="h-5 w-5 text-[#4F7C3A]" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-bold text-[#4F7C3A]">{loading ? "-" : deliveredMTD}</p>
               <p className="text-xs text-[#6B7280]">Delivered (MTD)</p>
             </div>

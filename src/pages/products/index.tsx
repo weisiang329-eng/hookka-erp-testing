@@ -6,7 +6,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { MoneyInput } from "@/components/ui/money-input";
 import { Link } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
-import { Plus, Trash2, Check, Calendar, History, Pencil, FileDown, Loader2, BookOpen, X as XIcon } from "lucide-react";
+import { Plus, Trash2, Check, Calendar, History, Pencil, FileDown, Loader2, X as XIcon } from "lucide-react";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { ProductSchema } from "@/lib/schemas/product";
@@ -3598,9 +3598,9 @@ export default function ProductsPage() {
       {viewMode === "catalog" && (
         <div className="flex items-center gap-2 justify-end -mt-1 mb-2 flex-wrap">
           <button
-            onClick={() => handleExportCatalogue()}
+            onClick={openCatalogueCustomerPicker}
             disabled={exportingCatalogue || products.length === 0}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-[#E5E7EB] bg-white text-[#6B7280] hover:bg-[#F3F4F6] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-[#D9CEB3] bg-[#F4F0E8] text-[#6B5C32] hover:bg-[#EDE8D8] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {exportingCatalogue ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -3608,14 +3608,6 @@ export default function ProductsPage() {
               <FileDown className="w-3.5 h-3.5" />
             )}
             Export Catalogue PDF
-          </button>
-          <button
-            onClick={openCatalogueCustomerPicker}
-            disabled={exportingCatalogue || products.length === 0}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-[#D9CEB3] bg-[#F4F0E8] text-[#6B5C32] hover:bg-[#EDE8D8] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <BookOpen className="w-3.5 h-3.5" />
-            Export for Customer…
           </button>
         </div>
       )}
@@ -3629,7 +3621,7 @@ export default function ProductsPage() {
           />
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-[#E2DDD8]">
-              <h2 className="text-base font-semibold text-[#1F1D1B]">Export Catalogue for Customer</h2>
+              <h2 className="text-base font-semibold text-[#1F1D1B]">Export Catalogue PDF</h2>
               <button
                 onClick={() => { setShowCatCustomerPicker(false); setCatCustomerQuery(""); }}
                 className="text-[#9CA3AF] hover:text-[#1F1D1B] transition-colors"
@@ -3648,6 +3640,22 @@ export default function ProductsPage() {
               />
             </div>
             <div className="max-h-80 overflow-y-auto">
+              {!catCustomerQuery.trim() && (
+                <button
+                  onClick={() => {
+                    setShowCatCustomerPicker(false);
+                    setCatCustomerQuery("");
+                    handleExportCatalogue();
+                  }}
+                  className="w-full text-left px-5 py-3 hover:bg-[#F9FAFB] transition-colors flex items-center gap-3 border-b border-[#F3F4F6]"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-[#1F1D1B]">All Customers</p>
+                    <p className="text-xs text-[#9CA3AF]">Full catalogue — every model</p>
+                  </div>
+                  <FileDown className="h-4 w-4 text-[#6B5C32] flex-shrink-0" />
+                </button>
+              )}
               {loadingCatalogueCustomers ? (
                 <div className="flex items-center justify-center py-10">
                   <Loader2 className="h-5 w-5 animate-spin text-[#6B5C32]" />
@@ -3683,7 +3691,7 @@ export default function ProductsPage() {
             </div>
             <div className="px-5 py-3 border-t border-[#F3F4F6] bg-[#FAFAF9]">
               <p className="text-xs text-[#9CA3AF]">
-                Generates a catalogue showing only this customer's assigned SKU models.
+                Pick a customer for their assigned-SKU catalogue, or "All Customers" for every model.
               </p>
             </div>
           </div>

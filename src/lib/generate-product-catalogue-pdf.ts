@@ -242,10 +242,17 @@ function calcTotalPages(allCards: Array<{ firstInCat: boolean }>): number {
     return simY + neededH > FOOTER_Y - SAFE_BOTTOM;
   }
 
+  let seenFirstCat = false;
   for (const { firstInCat } of allCards) {
     if (firstInCat) {
-      if (col > 0) { simY += ROW_H; col = 0; }
-      if (wouldOverflow(SECTION_H + CARD_H)) { simPage++; simY = MARGIN + 4; }
+      if (seenFirstCat) {
+        // each subsequent category starts on a fresh page
+        simPage++; simY = MARGIN + 4; col = 0;
+      } else {
+        seenFirstCat = true;
+        if (col > 0) { simY += ROW_H; col = 0; }
+        if (wouldOverflow(SECTION_H + CARD_H)) { simPage++; simY = MARGIN + 4; }
+      }
       simY += SECTION_H;
     } else {
       if (col === 0 && wouldOverflow(CARD_H)) { simPage++; simY = MARGIN + 4; }
@@ -333,8 +340,14 @@ export default function generateProductCataloguePdf(
   for (const { entry, cat, firstInCat } of allCards) {
     // Section header when category changes
     if (firstInCat || cat !== currentCat) {
-      if (col > 0) { y += ROW_H; col = 0; }
-      if (wouldOverflow(SECTION_H + CARD_H)) newPage();
+      if (currentCat === "") {
+        // first category stays on page 1 (right under the letterhead)
+        if (col > 0) { y += ROW_H; col = 0; }
+        if (wouldOverflow(SECTION_H + CARD_H)) newPage();
+      } else {
+        // each subsequent category (SOFA, ACCESSORY, …) starts on a fresh page
+        newPage();
+      }
       y = drawSectionLabel(doc, categoryLabel(cat), y);
       currentCat = cat;
     } else {

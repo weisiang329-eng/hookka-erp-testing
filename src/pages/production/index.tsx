@@ -8456,8 +8456,13 @@ export default function ProductionPage({
                       >: {s.customerName || "—"}</span>
                     </div>
                     <div className="flex items-baseline gap-[1mm]">
-                      <span className="inline-block w-[35mm] font-semibold">Model</span>
-                      <span className="font-bold" style={{ fontSize: "15pt" }}>: {s.model || "—"}</span>
+                      <span className="inline-block w-[35mm] font-semibold shrink-0">Model</span>
+                      {/* one line — nowrap + length-based shrink so a long model
+                          (e.g. 1030(HF)(W)-(Q)) never wraps and pushes the QR. */}
+                      <span
+                        className="font-bold whitespace-nowrap"
+                        style={{ fontSize: `${Math.max(10, Math.min(15, Math.round(230 / ((s.model || "—").length + 2))))}pt` }}
+                      >: {s.model || "—"}</span>
                     </div>
                     {s.wipName && (
                       <div className="flex items-baseline gap-[1mm]">
@@ -8525,13 +8530,33 @@ export default function ProductionPage({
                             <span className="flex-1 border-b border-black h-[10mm]" />
                           </div>
                         </div>
-                        <div className="flex items-baseline justify-between mt-[2mm]" style={{ fontSize: "13pt" }}>
+                        <div className="flex items-end justify-between mt-[2mm]" style={{ fontSize: "13pt" }}>
                           <span className="font-bold">Qty {s.qty}</span>
-                          {s.totalPieces > 1 && (
-                            <span className="font-semibold" style={{ fontSize: "9pt" }}>
-                              Piece {s.pieceNo} of {s.totalPieces}
-                            </span>
-                          )}
+                          {/* Bottom-right piece-type tag so a sewer knows at a glance
+                              what this piece is (owner request). Bedframe → HEADBOARD
+                              / DIVAN (from the WIP line); sofa → the modular component
+                              from the model suffix (e.g. 5535-1A(LHF) → 1A(LHF)). */}
+                          <div className="text-right leading-tight">
+                            {(() => {
+                              const wn = s.wipName || "";
+                              let tag = "";
+                              if (/divan/i.test(wn)) tag = "DIVAN";
+                              else if (/HB/i.test(wn)) tag = "HEADBOARD";
+                              else {
+                                const m = s.model || "";
+                                const i = m.indexOf("-");
+                                tag = i >= 0 && i < m.length - 1 ? m.slice(i + 1) : (s.wipType || "");
+                              }
+                              return tag ? (
+                                <div className="font-bold uppercase" style={{ fontSize: "16pt", lineHeight: 1.05 }}>{tag}</div>
+                              ) : null;
+                            })()}
+                            {s.totalPieces > 1 && (
+                              <span className="font-semibold" style={{ fontSize: "9pt" }}>
+                                Piece {s.pieceNo} of {s.totalPieces}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>

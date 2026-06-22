@@ -230,13 +230,25 @@ function bedframeSizeDefault(
   const norm = sizeCode.trim().toUpperCase();
   // Strip storage / option suffixes (e.g. "K-S", "Q (HF)") — first word wins
   const base = norm.split(/[\s\-_(]/)[0];
-  if (base === "K" || base === "Q") {
-    if (isDivanOnly) return { count: 2, names: ["Divan", "Divan"] };
-    return { count: 3, names: ["Headboard", "Divan", "Divan"] };
-  }
-  if (base === "S" || base === "SS") {
-    if (isDivanOnly) return { count: 1, names: ["Divan"] };
-    return { count: 2, names: ["Headboard", "Divan"] };
+  const twoDivan = isDivanOnly
+    ? { count: 2, names: ["Divan", "Divan"] }
+    : { count: 3, names: ["Headboard", "Divan", "Divan"] };
+  const oneDivan = isDivanOnly
+    ? { count: 1, names: ["Divan"] }
+    : { count: 2, names: ["Headboard", "Divan"] };
+  // King / Queen / Super-King → 2 divan bases.
+  if (base === "K" || base === "Q" || base === "SK") return twoDivan;
+  // Single / Super-single → 1 divan base.
+  if (base === "S" || base === "SS") return oneDivan;
+  // Dimension-coded sizes (e.g. "152X200", "200X200") that aren't K/Q/S/SS:
+  // decide by WIDTH (the first number) — >=150cm → 2 divan bases, narrower → 1.
+  // Owner ruling 2026-06-22; stops the 1007/2008/2009 dimension SKUs falling
+  // through to a single "Full Product" piece (BUG-2026-06-22-008).
+  const dim = norm.match(/^(\d+)\s*X/);
+  if (dim) {
+    const width = parseInt(dim[1], 10);
+    if (width >= 150) return twoDivan;
+    if (width > 0) return oneDivan;
   }
   return null;
 }

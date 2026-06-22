@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-23-001 — Production Overview "overdue chip → grid filter" shipped broken twice (stale snapshot cache + cold-Overview lazy gate) — both caught in verify-live before the owner saw them
+
+🟢 **Fixed** · `production-orders` / `ui-frontend` / `caching` · feature change, two latent bugs caught live
+
+**Feature:** the red overdue chips ("Bedframe ⚠ 29" / "Sofa ⚠ 25") on `/production` now FILTER the main grid to exactly those overdue orders (clicking arms the lazy grid, scrolls to it, banner explains the scope, toggle/Clear-all clears) instead of popping a separate SO-list panel. Endpoint `/api/production-orders/overdue-counts` gained `overdueBedframePoIds` / `overdueSofaPoIds`; the FE filters `filteredOrders` by that id set.
+
+**Bug 1 — stale snapshot cache served the old payload shape (grid filtered to 0).** The endpoint is wrapped in `withSnapshot` (Postgres `production_overdue_snapshot`, key `v2&dept=…&today=…`). Adding the id arrays is a payload **SHAPE** change, but the cache key version wasn't bumped — so the freshly-deployed code read the pre-existing `v2` snapshot rows (which lack the id arrays) and the FE filtered to an empty set. `cache:'no-store'` didn't help (server-side cache, not HTTP). **Fix:** bump `v2`→`v3` (`production-orders.ts` ~L4644) exactly as the in-code comment prescribes for shape changes; updated the test that hard-coded `v2` to match `v\d+`.
+
+**Bug 2 — cold Overview never loaded the chip counts (deadlock).** The Overview is lazy by design: `shouldFetch` starts `false` (only `mode==="dept"` is eager) and the first-mount date seed only fires for dept tabs, so on a cold Overview nothing flips `shouldFetch` and the counts query (gated on it) never ran → chips read **0**. The new filter then dead-locked: a 0 chip shows nothing to click, and clicking can't load the data that would make it non-zero. (The owner had only ever seen 29/25 via sticky in-session state.) **Fix:** ungate the counts query from `shouldFetch` (`production-orders/index.tsx` ~L967) — the chips are the Overview's primary KPI + now drive the filter, and the endpoint is a cheap ~5 KB / ~50 ms snapshot-cached aggregate, so it loads on every Overview mount; the heavy orders grid stays lazy.
+
+**Verified live (prod):** cold `/production` now shows Bedframe ⚠ 29 / Sofa ⚠ 25 immediately; clicking Bedframe filters the grid to "29 of 1032" (matches the chip exactly); Sofa filters to 40 work-order pieces with a banner reading "…the overdue Sofa pieces making up 25 sets…"; clicking again clears; the old SO-list panel is gone. **Lesson:** any change to a `withSnapshot` payload's SHAPE must bump the cache-key version; and a feature that depends on a lazily-fetched value must guarantee that value loads (don't assume sticky session state).
+
+---
+
 ## BUG-2026-06-22-008 — Bedframe packing sticker prints only the Headboard, no Divan (blank / unrecognised sizeCode → single "Full Product" piece)
 
 🟢 **Fixed** · `production-orders` / `data-integrity` / `pricing-products` · caught by owner on prod

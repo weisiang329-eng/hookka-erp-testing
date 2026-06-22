@@ -251,14 +251,14 @@ function ModelTile({
       onClick={onOpen}
       className="group text-left rounded-lg border border-[#E5E7EB] bg-white overflow-hidden hover:shadow-md hover:border-[#D8CFC0] transition-all"
     >
-      <div className="relative aspect-square bg-[#FAF9F7] flex items-center justify-center overflow-hidden">
+      <div className="relative aspect-[4/3] bg-[#FAF9F7] flex items-center justify-center overflow-hidden">
         {cover && !imgFailed ? (
           <img
             src={`/api/files/${cover.id}/download`}
             alt={group.baseModel}
             loading="lazy"
             onError={() => setImgFailed(true)}
-            className="h-full w-full object-cover group-hover:scale-[1.02] transition-transform"
+            className="h-full w-full object-contain group-hover:scale-[1.02] transition-transform"
           />
         ) : (
           <div className="flex flex-col items-center gap-1 text-[#C4BCAF]">
@@ -471,7 +471,7 @@ function ModelDetailDialog({
                         src={`/api/files/${f.id}/download`}
                         alt={f.filename}
                         loading="lazy"
-                        className="aspect-square w-full object-cover"
+                        className="aspect-square w-full object-contain"
                       />
                     </a>
                     {idx === 0 ? (
@@ -536,8 +536,7 @@ function ModelDetailDialog({
       <PhotoCropDialog
         open
         imageDataUrl={cropUrl}
-        aspectRatio={1}
-        lockAspect
+        aspectRatio={null}
         onConfirm={onCropConfirm}
         onCancel={onCropCancel}
       />

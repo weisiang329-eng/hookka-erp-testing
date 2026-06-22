@@ -60,7 +60,8 @@ const BODY_W = PAGE_W - MARGIN * 2; // 182mm
 const COLS = 3;
 const COL_GAP = 4; // mm gap between cards
 const CARD_W = (BODY_W - COL_GAP * (COLS - 1)) / COLS; // ≈ 58mm
-const PHOTO_H = CARD_W; // square — matches the 1:1 catalog tile + locked square crop
+const PHOTO_H = CARD_W * 0.75; // 4:3 landscape box — matches the catalog tile; the
+// image is fitted preserving aspect (drawCard) so any photo shape shows whole.
 const TEXT_AREA_H = 22; // mm below photo (code + category chip + SKU/size line)
 const CARD_H = PHOTO_H + TEXT_AREA_H;
 const ROW_H = CARD_H + COL_GAP;

@@ -600,15 +600,19 @@ async function buildPostedGRNStockAdjustment(
       .bind(batchId)
       .first<{ id: string; originalQty?: number | null; remainingQty?: number | null }>();
     if (batch) {
+      // Clamp in JS, NOT SQL: Postgres has no 2-arg scalar MAX (that is
+      // GREATEST), and translateSql does not convert SQLite's `MAX(a, b)` — a
+      // negative delta hit "function max(integer, double precision) does not
+      // exist" on prod. The batch is already loaded above, so compute the
+      // clamped (≥ 0) values here and write literals (works on both dialects).
+      const newOriginal = Math.max(0, (Number(batch.originalQty) || 0) + delta);
+      const newRemaining = Math.max(0, (Number(batch.remainingQty) || 0) + delta);
       statements.push(
         db
           .prepare(
-            `UPDATE rm_batches
-                SET originalQty = MAX(0, COALESCE(originalQty, 0) + ?),
-                    remainingQty = MAX(0, COALESCE(remainingQty, 0) + ?)
-              WHERE id = ?`,
+            `UPDATE rm_batches SET originalQty = ?, remainingQty = ? WHERE id = ?`,
           )
-          .bind(delta, delta, batchId),
+          .bind(newOriginal, newRemaining, batchId),
       );
     } else if (delta > 0) {
       statements.push(

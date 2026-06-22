@@ -6,6 +6,7 @@ import { humanizeError } from "@/lib/humanize-error";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { LifecycleActions, LifecycleBadge } from "@/components/accounting/lifecycle-actions";
+import { defaultBankCode } from "@/lib/default-bank";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -4679,7 +4680,7 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
   const banks = accounts.filter((a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH");
   const [partyId, setPartyId] = useState("");
   const [bankAccountSel, setBankAccountSel] = useState("");
-  const bankAccount = bankAccountSel || banks[0]?.code || "";
+  const bankAccount = bankAccountSel || defaultBankCode(banks);
   const [date, setDate] = useState(today);
   const [reference, setReference] = useState("");
   const [openBills, setOpenBills] = useState<OpenBill[]>([]);
@@ -5550,7 +5551,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
       payee: form.payee,
       description: form.description,
       accrued: form.accrued,
-      payFrom: form.accrued ? undefined : form.payFrom,
+      payFrom: form.accrued ? undefined : (form.payFrom || defaultBankCode(bankCash)),
       accrualAccount: form.accrued ? form.accrualAccount : undefined,
       productLine: form.productLine || undefined,
       lines: lines
@@ -5695,7 +5696,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
               ) : (
                 <div>
                   <label className="text-xs font-medium text-[#6B7280] mb-1 block">Pay From (CR bank/cash)</label>
-                  <select value={form.payFrom} onChange={(e) => setForm({ ...form, payFrom: e.target.value })} className={`${selCls} w-72`}>
+                  <select value={form.payFrom || defaultBankCode(bankCash)} onChange={(e) => setForm({ ...form, payFrom: e.target.value })} className={`${selCls} w-72`}>
                     <option value="">— pick bank/cash —</option>
                     {bankCash.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
                   </select>
@@ -5727,7 +5728,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
             </div>
             <div className="flex items-center gap-4">
               <span className="text-sm text-[#6B7280]">Total <span className="font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
-              <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || (form.accrued ? !form.accrualAccount : !form.payFrom)} onClick={handleSave}>
+              <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || (form.accrued ? !form.accrualAccount : !(form.payFrom || defaultBankCode(bankCash)))} onClick={handleSave}>
                 {saving ? "Posting…" : form.accrued ? "Post (accrued)" : "Post payment"}
               </Button>
               <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
@@ -5876,7 +5877,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
       date: form.date,
       receivedFrom: form.receivedFrom,
       description: form.description,
-      payTo: form.payTo,
+      payTo: form.payTo || defaultBankCode(bankCash),
       lines: lines
         .filter((l) => l.accountCode && toSen(l.amount) > 0)
         .map((l) => ({ accountCode: l.accountCode, description: l.description, amountSen: toSen(l.amount) })),
@@ -5957,7 +5958,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
               </div>
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Deposit To (DR bank/cash)</label>
-                <select value={form.payTo} onChange={(e) => setForm({ ...form, payTo: e.target.value })} className={`${selCls} w-72`}>
+                <select value={form.payTo || defaultBankCode(bankCash)} onChange={(e) => setForm({ ...form, payTo: e.target.value })} className={`${selCls} w-72`}>
                   <option value="">— pick bank/cash —</option>
                   {bankCash.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
                 </select>
@@ -5988,7 +5989,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
             </div>
             <div className="flex items-center gap-4">
               <span className="text-sm text-[#6B7280]">Total <span className="font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
-              <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || !form.payTo} onClick={handleSave}>
+              <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || !(form.payTo || defaultBankCode(bankCash))} onClick={handleSave}>
                 {saving ? "Posting…" : "Post receipt"}
               </Button>
               <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>

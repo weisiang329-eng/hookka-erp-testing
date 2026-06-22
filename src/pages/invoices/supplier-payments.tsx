@@ -5,6 +5,7 @@ import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { LifecycleActions, LifecycleBadge } from "@/components/accounting/lifecycle-actions";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { defaultBankCode } from "@/lib/default-bank";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { CreditCard } from "lucide-react";
@@ -114,7 +115,7 @@ export default function SupplierPaymentsPage() {
           .filter((a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH")
           .map((a) => ({ code: a.code, name: a.name }));
         setBankOptions(opts);
-        setPayFrom((prev) => prev || opts[0]?.code || "");
+        setPayFrom((prev) => prev || defaultBankCode(opts));
       })
       .catch(() => {});
   }, []);

@@ -29,6 +29,10 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { DEFAULT_ORG_ID, tryGetOrgId } from "../lib/tenant";
 import { resolveWorkerToken } from "./worker-auth";
+import {
+  translateAnnouncement,
+  type AnnouncementTranslations,
+} from "../lib/translate-announcement";
 
 // ---- runtime schema self-apply (idempotent, once per isolate) ----
 let _announcementsMig: Promise<void> | null = null;
@@ -56,6 +60,27 @@ function ensureAnnouncementsTable(db: D1Database): Promise<void> {
            ON announcements (org_id, is_active, created_at DESC)`,
       )
       .run();
+    // Auto-translation column (added 2026-06-23). Stores ONE JSON blob with the
+    // worker-portal translations: { en:{title,body}, ms:{…}, zh:{…}, my:{…} }.
+    // A single JSONB column (not per-lang columns) keeps the schema stable if a
+    // 5th language is ever added. The migration FILE is inert on prod — this
+    // runtime ALTER is the only way the column reaches prod, awaited before the
+    // first read/write. Wrapped in try/catch like ocr-distill.ensureDistillColumns
+    // so a transient DDL reject can't strand the whole ensure.
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS translations JSONB",
+        )
+        .run();
+    } catch {
+      // best-effort; column may already exist or DDL transiently rejected.
+      // Clear the memo so a transient DDL reject SELF-HEALS on the next call,
+      // instead of caching a "success" that strands every write (the INSERT
+      // would bind a non-existent `translations` column → 500) for the life of
+      // the isolate.
+      _announcementsMig = null;
+    }
   })();
   return _announcementsMig;
 }
@@ -81,6 +106,12 @@ type AnnouncementRow = {
   createdAt?: string | null;
   updated_at?: string | null;
   updatedAt?: string | null;
+  // Auto-translation blob. The PG driver may hand it back as a parsed object
+  // OR as a JSON string depending on the column type/path, and the toCamel
+  // folder leaves the all-lowercase `translations` key as-is — but we still
+  // read it dual-keyed defensively (translations / translations_json).
+  translations?: AnnouncementTranslations | string | null;
+  translations_json?: AnnouncementTranslations | string | null;
 };
 
 function isActiveFlag(v: boolean | number | null): boolean {
@@ -96,6 +127,24 @@ function notExpired(expiresAt: string | null): boolean {
   return t > Date.now();
 }
 
+// Normalize the stored translations value to a parsed object (or null). The PG
+// driver may return JSONB as a real object OR as a JSON string; tolerate both.
+function readTranslations(
+  r: AnnouncementRow,
+): AnnouncementTranslations | null {
+  const raw = r.translations ?? r.translations_json ?? null;
+  if (raw == null) return null;
+  if (typeof raw === "string") {
+    if (!raw.trim()) return null;
+    try {
+      return JSON.parse(raw) as AnnouncementTranslations;
+    } catch {
+      return null;
+    }
+  }
+  return raw;
+}
+
 // Public (worker-facing) shape — camelCase for the frontend. Same shape the
 // admin list uses so one TS type covers both pages.
 function toPublic(r: AnnouncementRow) {
@@ -107,6 +156,9 @@ function toPublic(r: AnnouncementRow) {
     expiresAt: r.expiresAt ?? r.expires_at ?? null,
     createdAt: r.createdAt ?? r.created_at ?? null,
     createdBy: r.createdBy ?? r.created_by ?? null,
+    // All four translations (or null). The worker FE picks the one matching
+    // the worker's chosen portal language, falling back to title/body above.
+    translations: readTranslations(r),
   };
 }
 
@@ -170,12 +222,30 @@ admin.post("/", async (c) => {
     ) ?? null;
   const id = genId();
   const nowIso = new Date().toISOString();
+  // Translate the notice into all four worker-portal languages ONCE on POST,
+  // best-effort: a Claude failure / missing key returns null and we still
+  // INSERT (workers then see the original text). Await before INSERT so the
+  // row lands fully translated; the call is short + rare so blocking is fine.
+  const translations = await translateAnnouncement({
+    title,
+    body: text,
+    apiKey: c.env.ANTHROPIC_API_KEY,
+  });
   await c.var.DB.prepare(
     `INSERT INTO announcements
-       (id, org_id, title, body, is_active, expires_at, created_by, created_at)
-     VALUES (?, ?, ?, ?, TRUE, ?, ?, ?)`,
+       (id, org_id, title, body, is_active, expires_at, created_by, created_at, translations)
+     VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, ?)`,
   )
-    .bind(id, orgId, title, text, expiresAt, userId, nowIso)
+    .bind(
+      id,
+      orgId,
+      title,
+      text,
+      expiresAt,
+      userId,
+      nowIso,
+      translations ? JSON.stringify(translations) : null,
+    )
     .run();
   const row = await c.var.DB.prepare(
     "SELECT * FROM announcements WHERE id = ?",
@@ -204,6 +274,12 @@ admin.patch("/:id", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const sets: string[] = [];
   const binds: unknown[] = [];
+  // Track whether title/body changed so we re-translate; if either changes we
+  // re-run the whole pair (translation always needs both). Seed from the
+  // existing row so a title-only edit still re-translates against the old body.
+  let textChanged = false;
+  let nextTitle = existing.title;
+  let nextText = existing.body ?? "";
   if ("isActive" in (body as object)) {
     sets.push("is_active = ?");
     binds.push((body as { isActive?: unknown }).isActive ? true : false);
@@ -215,10 +291,15 @@ admin.patch("/:id", async (c) => {
     }
     sets.push("title = ?");
     binds.push(title);
+    nextTitle = title;
+    textChanged = true;
   }
   if (typeof (body as { body?: unknown }).body === "string") {
+    const text = String((body as { body: string }).body).trim();
     sets.push("body = ?");
-    binds.push(String((body as { body: string }).body).trim());
+    binds.push(text);
+    nextText = text;
+    textChanged = true;
   }
   if ("expiresAt" in (body as object)) {
     const raw = (body as { expiresAt?: unknown }).expiresAt;
@@ -236,6 +317,18 @@ admin.patch("/:id", async (c) => {
   }
   if (sets.length === 0) {
     return c.json({ success: true, data: toPublic(existing) });
+  }
+  // Re-translate when the title or body changed (the only fields that affect
+  // translations). Best-effort, same posture as POST: a failure stores null
+  // and the worker FE falls back to the freshly-edited original text.
+  if (textChanged) {
+    const retranslated = await translateAnnouncement({
+      title: nextTitle,
+      body: nextText,
+      apiKey: c.env.ANTHROPIC_API_KEY,
+    });
+    sets.push("translations = ?");
+    binds.push(retranslated ? JSON.stringify(retranslated) : null);
   }
   sets.push("updated_at = ?");
   binds.push(new Date().toISOString());

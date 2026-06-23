@@ -46,6 +46,22 @@ Entries themselves stay newest-first.
 
 **No regression test:** pure CSS/layout; the test suite is logic/pure-function only (no render/DOM harness), same as the prior overflow-clip fixes. Verified visually on prod after deploy.
 
+## FEAT-2026-06-23-001 — Announcement auto-translation (office posts one language → every worker reads their own)
+
+🟢 **Fixed** · `ui-frontend` · enhancement (worker portal i18n)
+
+**Symptom / gap:** the office types an announcement in ONE language (free-text title + body) on `src/pages/announcements.tsx`; the worker portal supports four languages (en/ms/zh/my, chosen per-device in localStorage). Workers on a different language saw the notice in the office's language only — title/body were stored verbatim and rendered raw at both worker render sites.
+
+**Fix:** translate-once-on-write, store all four versions, serve them all, FE picks by worker language.
+- **Schema (load-bearing):** `ensureAnnouncementsTable` (`src/api/routes/announcements.ts` ~L60) now also runs `ALTER TABLE announcements ADD COLUMN IF NOT EXISTS translations JSONB` in a try/catch — the runtime self-apply is the only way the column reaches prod (the migration file `0186_announcements.sql` is inert). One JSONB column holds `{ en:{title,body}, ms, zh, my }` (schema-stable if a 5th language is ever added). `translations` is all-lowercase so it needs no `column-rename-map.json` entry and passes the SQL write-column coverage guard.
+- **Translate on write:** new helper `src/api/lib/translate-announcement.ts` (`translateAnnouncement`) makes ONE Claude call (same bare-fetch pattern as `ocr-distill.ts` — model `claude-sonnet-4-6`, temperature 0, `x-api-key` + `anthropic-version` headers, `ANTHROPIC_API_KEY`). Called + awaited before INSERT in POST (`announcements.ts` ~L224) and re-run in PATCH when title/body change (~L308). Best-effort by contract: a missing key / Claude error / unparseable response → returns null, the row stores null, and the worker FE falls back to the original text. Translation can NEVER block posting an announcement.
+- **Serve:** `toPublic` (`announcements.ts` ~L120) now returns `translations` (dual-keyed `translations` / `translations_json`, parsed if the driver hands back a JSON string). Both admin and worker GET use `toPublic`.
+- **Worker FE:** `src/pages/worker/index.tsx` — `Announcement` type gains `translations`, a `localizeAnnouncement(a, lang)` picker (worker-lang translation → original per-field fallback) feeds BOTH the must-ack popup and the home banner. Worker language via `useWorkerLang()`. Office compose page UNCHANGED.
+
+**Regression test:** `tests/announcement-translate.test.mjs` (12 cases) — `parseTranslationsText` (clean JSON, fences, prose-wrapped, missing-lang→null, wrong-type→null, empty-body OK, garbage→null) + the FE picker fallback chain (translated shown, null→original, missing field→original, blank field→per-field fallback). build:strict clean (only the 3 known jsbarcode/@zxing sandbox errors).
+
+**Verify live (post-deploy, write+read):** post a notice in zh on the office page → open the worker portal set to ms / my / en and confirm each device shows its own language; confirm a notice with no translations (or posted during a Claude outage) shows the original; edit a notice's title/body and confirm it re-translates.
+
 ## BUG-2026-06-23-005 — Customer DO/Invoice emails NEVER fired for delivered orders (FE-only trigger bypassed by the real delivery paths) — the main customer's 128 delivered DOs emailed nothing, including same-day
 
 🟢 **Fixed** · `delivery` / `customer-notify` / `email` · caught by owner on prod (customers report no invoice)

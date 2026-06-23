@@ -32,3 +32,13 @@ CREATE TABLE IF NOT EXISTS announcements (
 -- "is_active filter, newest first" scan cheap.
 CREATE INDEX IF NOT EXISTS idx_announcements_org_active_created
   ON announcements (org_id, is_active, created_at DESC);
+
+-- Auto-translation (added 2026-06-23). ONE JSON blob holds the four
+-- worker-portal language versions: { en:{title,body}, ms:{…}, zh:{…}, my:{…} }.
+-- Filled best-effort on POST/PATCH via Claude; null when translation is
+-- unavailable (worker FE then shows the original posted text). A single JSONB
+-- column (not per-lang columns) keeps the schema stable if a 5th language is
+-- ever added. INERT here — the load-bearing copy is the runtime
+-- `ALTER TABLE … ADD COLUMN IF NOT EXISTS translations JSONB` in
+-- ensureAnnouncementsTable (src/api/routes/announcements.ts).
+ALTER TABLE announcements ADD COLUMN IF NOT EXISTS translations JSONB;

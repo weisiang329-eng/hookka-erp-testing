@@ -25,7 +25,7 @@ import {
   Megaphone,
   MapPin,
 } from "lucide-react";
-import { useT } from "@/lib/worker-i18n";
+import { useT, useWorkerLang } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
 import { deriveWipName } from "@/lib/wip-name";
 import { compressImage } from "@/lib/image-compress";
@@ -108,14 +108,34 @@ type AttendanceRow = {
   lateMinutes?: number;
   status: string;
 };
-// Office → worker announcement. The body comes from the office (any language
-// they type); only the heading/"New" badge are localised.
+// Office → worker announcement. The office types ONE language; the backend
+// auto-translates title+body into all four worker-portal languages on POST and
+// returns them here. Each worker sees the version matching their chosen portal
+// language, falling back to the original posted title/body.
 type Announcement = {
   id: string;
   title: string;
   body: string;
   createdAt: string | null;
+  translations?: Record<
+    "en" | "ms" | "zh" | "my",
+    { title: string; body: string }
+  > | null;
 };
+
+// Pick the worker-language version of a notice, falling back to the original
+// posted text whenever the translation is missing/empty (Claude outage, or a
+// row posted before auto-translation shipped).
+function localizeAnnouncement(
+  a: Announcement,
+  lang: "en" | "ms" | "zh" | "my",
+): { title: string; body: string } {
+  const t = a.translations?.[lang];
+  return {
+    title: t?.title?.trim() ? t.title : a.title,
+    body: t?.body?.trim() ? t.body : a.body,
+  };
+}
 type HistoryData = {
   range: { from: string; to: string };
   daily: DailyRow[];
@@ -336,6 +356,9 @@ function capturePunchPhoto(): Promise<string | null> {
 // ============================================================
 export default function WorkerHomePage() {
   const t = useT();
+  // Worker's chosen portal language — drives which translation of each
+  // announcement we show (localizeAnnouncement falls back to the original).
+  const lang = useWorkerLang();
   const [data, setData] = useState<TodayData | null>(null);
   const [loading, setLoading] = useState(true);
   const [clocking, setClocking] = useState(false);
@@ -608,23 +631,26 @@ export default function WorkerHomePage() {
               </span>
             </div>
             <div className="max-h-[60vh] divide-y divide-[#F0ECE9] overflow-y-auto px-4 py-1">
-              {popupAnnouncements.map((a) => (
-                <div key={a.id} className="py-3">
-                  <p className="text-base font-bold text-[#1F1D1B] break-words">
-                    {a.title}
-                  </p>
-                  {a.body && (
-                    <p className="mt-1 whitespace-pre-wrap break-words text-sm text-[#5A5550]">
-                      {a.body}
+              {popupAnnouncements.map((a) => {
+                const { title, body } = localizeAnnouncement(a, lang);
+                return (
+                  <div key={a.id} className="py-3">
+                    <p className="text-base font-bold text-[#1F1D1B] break-words">
+                      {title}
                     </p>
-                  )}
-                  {a.createdAt && (
-                    <p className="mt-1.5 text-[11px] text-[#9CA3AF]">
-                      {fmtDay(a.createdAt)}
-                    </p>
-                  )}
-                </div>
-              ))}
+                    {body && (
+                      <p className="mt-1 whitespace-pre-wrap break-words text-sm text-[#5A5550]">
+                        {body}
+                      </p>
+                    )}
+                    {a.createdAt && (
+                      <p className="mt-1.5 text-[11px] text-[#9CA3AF]">
+                        {fmtDay(a.createdAt)}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
             </div>
             <div className="px-4 pb-4 pt-2">
               <button
@@ -667,6 +693,7 @@ export default function WorkerHomePage() {
           >
             {announcements.map((a) => {
               const unread = !seenAnn.has(a.id);
+              const { title, body } = localizeAnnouncement(a, lang);
               return (
                 <li key={a.id} className="px-4 py-3">
                   <div className="flex items-start gap-2">
@@ -678,16 +705,16 @@ export default function WorkerHomePage() {
                     )}
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-semibold text-[#1F1D1B] break-words">
-                        {a.title}
+                        {title}
                         {unread && (
                           <span className="ml-1.5 align-middle text-[10px] font-bold uppercase tracking-wide text-[#9A3A2D]">
                             {t("home.newBadge")}
                           </span>
                         )}
                       </p>
-                      {a.body && (
+                      {body && (
                         <p className="mt-0.5 whitespace-pre-wrap break-words text-xs text-[#5A5550]">
-                          {a.body}
+                          {body}
                         </p>
                       )}
                       {a.createdAt && (

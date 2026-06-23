@@ -401,6 +401,7 @@ Built to cut token usage: open the named file at the named line range instead of
 | | `src/api/routes/department-performance.ts` — read-only aggregate (571) | | |
 | | `src/api/routes/leaves.ts` — leave CRUD | | |
 | | `src/api/routes/payslips.ts` — payslip read/persist (OT buckets) | | |
+| `src/pages/announcements.tsx` — office compose (one language, UNCHANGED) | `src/api/routes/announcements.ts` — admin + worker sub-apps; auto-translate on POST/PATCH via `src/api/lib/translate-announcement.ts` (Claude, ANTHROPIC_API_KEY) | `announcements` (snake_case; `translations` JSONB, runtime ALTER) | `tests/announcement-translate.test.mjs` |
 
 **Big-file section index**
 - `src/pages/employees.tsx`

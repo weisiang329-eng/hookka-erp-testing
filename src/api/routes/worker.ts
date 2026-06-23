@@ -27,6 +27,7 @@ import { jcMinutesTotal } from "../../lib/job-card-minutes";
 import { deriveBarcodeToken, deptOfBarcodeToken, isBarcodeToken } from "../../lib/job-card-id";
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
 import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
+import { applyPackingRack } from "../lib/packing-rack-write";
 import {
   recordDeptScan,
   autofillWorkingHoursFromPunch,
@@ -572,61 +573,18 @@ app.post("/packing-rack", async (c) => {
     jobCardId?: string;
     rackingNumber?: string;
   };
-  if (!jobCardId || rackingNumber == null) {
-    return c.json(
-      { success: false, error: "jobCardId and rackingNumber are required" },
-      400,
-    );
+  // The validation + writes live in the SHARED helper so this worker path and
+  // the PUBLIC packing-sticker scan (routes/public-rack-write.ts) can't drift
+  // (same contract as the office dashboard rack dropdown).
+  const res = await applyPackingRack(c.var.DB, jobCardId, rackingNumber);
+  if (!res.ok) {
+    const status = res.code === "NOT_FOUND" ? 404 : 400;
+    return c.json({ success: false, error: res.error }, status);
   }
-  const jc = await c.var.DB.prepare(
-    "SELECT id, productionOrderId, departmentCode FROM job_cards WHERE id = ?",
-  )
-    .bind(jobCardId)
-    .first<{
-      id: string;
-      productionOrderId: string;
-      departmentCode: string | null;
-    }>();
-  if (!jc) {
-    return c.json({ success: false, error: "Job card not found" }, 404);
-  }
-  if ((jc.departmentCode || "").toUpperCase() !== "PACKING") {
-    return c.json(
-      { success: false, error: "Rack number applies to Packing cards only." },
-      400,
-    );
-  }
-  const rack = String(rackingNumber).trim();
-  // Reject anything not in the warehouse rack catalog (the dashboard dropdown
-  // constrains this; the endpoint must too).
-  if (rack) {
-    const slot = await c.var.DB.prepare(
-      "SELECT rack FROM rack_locations WHERE rack = ? LIMIT 1",
-    )
-      .bind(rack)
-      .first<{ rack: string }>();
-    if (!slot) {
-      return c.json(
-        {
-          success: false,
-          error: `Rack "${rack}" is not a known warehouse location.`,
-        },
-        400,
-      );
-    }
-  }
-  const nowIso = new Date().toISOString();
-  await c.var.DB.prepare(
-    "UPDATE job_cards SET rackingNumber = ? WHERE id = ?",
-  )
-    .bind(rack || null, jobCardId)
-    .run();
-  await c.var.DB.prepare(
-    "UPDATE production_orders SET rackingNumber = ?, updated_at = ? WHERE id = ?",
-  )
-    .bind(rack || null, nowIso, jc.productionOrderId)
-    .run();
-  return c.json({ success: true, data: { jobCardId, rackingNumber: rack } });
+  return c.json({
+    success: true,
+    data: { jobCardId: res.jobCardId, rackingNumber: res.rackingNumber },
+  });
 });
 
 // ============================================================

@@ -61,6 +61,21 @@ const OVERRIDES: Array<{ prefix: string; limits: RateLimitConfig; reason: string
   // one mobile-carrier NAT stays far below this. Tightened vs DEFAULT
   // because the endpoint is reachable without login.
   { prefix: "/api/public/do-qr", limits: { perMinute: 30, perHour: 300 }, reason: "public QR scan surface" },
+
+  // Public packing-sticker → RACK assignment (no session — limiter keys by IP).
+  // A storekeeper scans one sticker and taps one rack; even a whole warehouse
+  // crew behind one NAT stays far below this. Same tightened public ceiling as
+  // the DO-QR surface. NOTE: this MUST come before the broader rack-qr entry
+  // below so the more-specific "/api/public/rack-write" prefix wins the
+  // starts-with match (rack-write is not a prefix of rack-qr, but keep them
+  // adjacent + ordered for clarity).
+  { prefix: "/api/public/rack-write", limits: { perMinute: 30, perHour: 300 }, reason: "public rack-write scan surface" },
+
+  // Public rack STOCK-IN scan flow (no session — limiter keys by IP). Was
+  // previously missing from OVERRIDES (fell back to DEFAULT 600/min); brought
+  // under the same tightened public ceiling as the other two public scan
+  // surfaces. A warehouse crew scanning items into a rack stays far below this.
+  { prefix: "/api/public/rack-qr", limits: { perMinute: 30, perHour: 300 }, reason: "public rack stock-in scan surface" },
 ];
 
 /**

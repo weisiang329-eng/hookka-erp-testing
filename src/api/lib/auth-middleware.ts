@@ -89,6 +89,16 @@ const PUBLIC_PREFIXES = [
   // GET exposes only the rack label + item count; POST /stock-in writes via the
   // SAME helper the worker route uses. See routes/public-rack-qr.ts.
   "/api/public/rack-qr/",
+  // 2026-06-24 — public packing-sticker → RACK assignment (the ITEM→RACK
+  // direction). A storekeeper scans the QR on a Packing (FG) sticker with a
+  // normal phone camera — no session — and lands on /p/<token> to set the rack
+  // for THAT piece. The gate is the unguessable 64-hex job_card qr_token
+  // (migration 0187), minted lazily only by the AUTHED sticker-print endpoint.
+  // GET returns a minimal no-price summary; POST /rack performs ONLY set/clear
+  // of the rackingNumber on the one token-resolved PACKING card, via the SAME
+  // applyPackingRack helper the worker /packing-rack path uses. See
+  // routes/public-rack-write.ts.
+  "/api/public/rack-write/",
 ];
 
 // Customer QR tracking lookup: only the single-unit GET is public. The list

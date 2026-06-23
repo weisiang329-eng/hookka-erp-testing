@@ -20,6 +20,13 @@ const DoScan = lazy(() => import('./pages/do-scan'))
 // /api/public/rack-qr only performs the forward stock-in. See routes/public-rack-qr.ts)
 const RackScan = lazy(() => import('./pages/rack-scan'))
 
+// Public packing-sticker → rack assignment page (standalone, no auth — the
+// unguessable 64-hex token in /p/:token is the credential; a storekeeper scans
+// the Packing sticker QR and sets the rack for THAT piece. Backend
+// /api/public/rack-write only sets/clears that one card's rack. See
+// routes/public-rack-write.ts)
+const StickerRack = lazy(() => import('./pages/sticker-rack'))
+
 // Auth
 const Login = lazy(() => import('./pages/login'))
 const InviteAccept = lazy(() => import('./pages/InviteAccept'))
@@ -87,6 +94,11 @@ export const router = createBrowserRouter([
   // Public rack stock-in page (standalone, no auth, mobile-friendly — staff
   // scan a physical rack's QR to open /r/:rackId, then scan items into it)
   { path: '/r/:rackId', element: <S><RackScan /></S> },
+
+  // Public packing-sticker rack-assignment page (standalone, no auth,
+  // mobile-friendly — a storekeeper scans a Packing sticker's QR to open
+  // /p/:token and set the rack for THAT piece; the token is the credential)
+  { path: '/p/:token', element: <S><StickerRack /></S> },
 
   // Dashboard layout — gated behind RequireAuth. All dashboard routes share
   // the one `TabbedOutlet` inside DashboardLayout, which renders its own

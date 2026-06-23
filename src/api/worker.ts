@@ -705,6 +705,12 @@ import publicDoQr from "./routes/public-do-qr";
 // auth bypass via PUBLIC_PREFIXES "/api/public/rack-qr/" in lib/auth-middleware.ts).
 // Writes via the SAME buildRackStockInStatements helper the worker route uses.
 import publicRackQr from "./routes/public-rack-qr";
+// Public packing-sticker → RACK assignment (no login — the unguessable 64-hex
+// job_card qr_token IS the credential; auth bypass via PUBLIC_PREFIXES
+// "/api/public/rack-write/"). The ONLY write is set/clear the rack on the one
+// token-resolved PACKING card, via the SAME applyPackingRack helper the worker
+// /packing-rack path uses. See routes/public-rack-write.ts.
+import publicRackWrite from "./routes/public-rack-write";
 import cncTemplates from "./routes/cnc-templates";
 import invoices from "./routes/invoices";
 import payments from "./routes/payments";
@@ -875,6 +881,11 @@ app.route("/api/public/do-qr", publicDoQr);
 // the request still flows through tenant + rate-limit middleware (the limiter
 // keys by client IP when there is no session).
 app.route("/api/public/rack-qr", publicRackQr);
+// Public packing-sticker → RACK assignment. Mounted AFTER /api/public/rack-qr
+// so the more-specific "/api/public/rack-write" prefix is unambiguous. Auth
+// bypass via PUBLIC_PREFIXES "/api/public/rack-write/"; rate-limit override is
+// the tightened public ceiling (30/min, 300/hr) in api-rate-limit-config.ts.
+app.route("/api/public/rack-write", publicRackWrite);
 app.route("/api/cnc-templates", cncTemplates);
 app.route("/api/invoices", invoices);
 app.route("/api/payments", payments);

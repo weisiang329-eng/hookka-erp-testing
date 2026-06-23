@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Plus,
   FileX,
@@ -32,6 +33,17 @@ export default function CreditNotesPage() {
     [invResp]
   );
   const [selectedInvoiceId, setSelectedInvoiceId] = useState("");
+  const [selectedCustomerId, setSelectedCustomerId] = useState("");
+  // #5: pick the customer first, then list only their not-yet-settled invoices.
+  const cnCustomers = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const inv of invoices) if (inv.customerId) m.set(inv.customerId, inv.customerName);
+    return [...m].map(([id, name]) => ({ value: id, label: name })).sort((a, b) => a.label.localeCompare(b.label));
+  }, [invoices]);
+  const cnInvoices = useMemo(
+    () => invoices.filter((inv) => inv.customerId === selectedCustomerId && inv.status !== "PAID" && inv.status !== "CANCELLED"),
+    [invoices, selectedCustomerId],
+  );
   const [reason, setReason] = useState<CreditNote["reason"]>("RETURN");
   const [reasonDetail, setReasonDetail] = useState("");
   // Editor rows carry a client-only `_uid` so React keys stay stable across
@@ -351,18 +363,33 @@ export default function CreditNotesPage() {
               </button>
             </div>
             <div className="p-6 space-y-4">
-              {/* Invoice Selection */}
+              {/* #5: Customer first → only their not-yet-settled invoices. */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Invoice</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Customer</label>
+                <SearchableSelect
+                  value={selectedCustomerId}
+                  onChange={(v) => { setSelectedCustomerId(v); setSelectedInvoiceId(""); }}
+                  options={cnCustomers}
+                  placeholder="Type customer name..."
+                  allowClear
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Invoice <span className="font-normal text-gray-400">(unsettled only)</span>
+                </label>
                 <select
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm disabled:bg-gray-100"
                   value={selectedInvoiceId}
                   onChange={(e) => setSelectedInvoiceId(e.target.value)}
+                  disabled={!selectedCustomerId}
                 >
-                  <option value="">Select invoice...</option>
-                  {invoices.map((inv) => (
+                  <option value="">
+                    {selectedCustomerId ? (cnInvoices.length ? "Select invoice..." : "No unsettled invoices") : "Select a customer first"}
+                  </option>
+                  {cnInvoices.map((inv) => (
                     <option key={inv.id} value={inv.id}>
-                      {inv.invoiceNo} - {inv.customerName} ({formatCurrency(inv.totalSen)})
+                      {inv.invoiceNo} ({formatCurrency(inv.totalSen)})
                     </option>
                   ))}
                 </select>

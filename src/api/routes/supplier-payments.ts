@@ -432,6 +432,18 @@ async function buildSupplierPaymentLifecycle(
 
   const deactivated = lc.prevState === "ACTIVE" && lc.newState !== "ACTIVE";
   const reactivated = lc.prevState !== "ACTIVE" && lc.newState === "ACTIVE";
+  // An edited (restated) payment's live legs are supplier_payment_restate_post:* —
+  // the applyLifecycle exact-match on "supplier_payment" misses them, so hide the
+  // whole family on void/delete to keep the GL net at zero.
+  if (deactivated) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'supplier_payment%'`,
+        )
+        .bind(paymentNo, orgId),
+    );
+  }
   if (deactivated || reactivated) {
     for (const row of rows) {
       const piId = row.purchaseInvoiceId;
@@ -474,6 +486,151 @@ async function buildSupplierPaymentLifecycle(
     }
   }
   return { statements, newState: lc.newState };
+}
+
+// buildSupplierPaymentRestate — in-place EDIT (same voucher number). Rolls the
+// old PI paid amounts back, drops the old sub-ledger rows, re-runs the per-PI FX
+// allocation (same logic as POST) for the new data, and on the GL reverses the
+// live legs + posts the corrected ones (supplier_payment_restate_rev/post:<stamp>),
+// then collapses to the newest post. Throws "PAYMENT_NOT_FOUND" / a validation msg.
+async function buildSupplierPaymentRestate(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  paymentNo: string,
+  body: { supplierId?: string; payFrom?: string; date?: string; reference?: string; allocations?: CreateAllocation[] },
+  actorUserId: string | null,
+  stamp: number,
+): Promise<D1PreparedStatement[]> {
+  const oldRows =
+    (
+      await db
+        .prepare("SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ?")
+        .bind(paymentNo)
+        .all<{ purchaseInvoiceId: string | null; booked_sen: number | null }>()
+    ).results ?? [];
+  if (oldRows.length === 0) throw new Error("PAYMENT_NOT_FOUND");
+
+  const payFrom = String(body.payFrom ?? "");
+  const date = String(body.date ?? "");
+  const reference: string | undefined = body.reference;
+  const supplierId = String(body.supplierId ?? "");
+  const allocations: CreateAllocation[] = Array.isArray(body.allocations) ? body.allocations : [];
+  const statements: D1PreparedStatement[] = [];
+
+  // 1. Roll the OLD PI paid amounts back.
+  for (const r of oldRows) {
+    if (!r.purchaseInvoiceId) continue;
+    const b = Number(r.booked_sen) || 0;
+    statements.push(
+      db
+        .prepare(
+          `UPDATE purchase_invoices SET paid_amount_sen = GREATEST(0, paid_amount_sen - ?),
+             status = CASE WHEN paid_amount_sen - ? <= 0 THEN 'APPROVED' WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID' ELSE 'PAID' END
+           WHERE id = ?`,
+        )
+        .bind(b, b, b, r.purchaseInvoiceId),
+    );
+  }
+  // 2. Drop the old sub-ledger rows.
+  statements.push(
+    db.prepare("DELETE FROM supplier_payments WHERE payment_no = ?").bind(paymentNo),
+  );
+
+  // 3. Re-run the per-PI FX allocation for the NEW data (mirrors the POST loop).
+  let totalBooked = 0, totalBank = 0, totalFx = 0;
+  for (const a of allocations) {
+    const piId = String(a.piId ?? "");
+    if (!piId) continue;
+    const pi = await db
+      .prepare(
+        `SELECT id, pi_no, amount_sen, paid_amount_sen, status, currency, fx_rate, supplier_id, supplier_name FROM purchase_invoices WHERE id = ?`,
+      )
+      .bind(piId)
+      .first<PiRow>();
+    if (!pi || (pi.status !== "APPROVED" && pi.status !== "PARTIAL_PAID")) {
+      throw new Error(`PI ${piId} not found or not in a payable status (APPROVED / PARTIAL_PAID)`);
+    }
+    const outstandingBookedSen = (Number(pi.amount_sen) || 0) - (Number(pi.paid_amount_sen) || 0);
+    const currency = pi.currency ? String(pi.currency) : "MYR";
+    const isForeign = !!pi.currency && currency.toUpperCase() !== "MYR";
+    const fxRate = Number(pi.fx_rate) || 1;
+    const r = computeAlloc({
+      outstandingBookedSen, isForeign, fxRate,
+      payMyrSen: a.payMyrSen, foreignSen: a.foreignSen, payRate: a.payRate, full: !!a.full,
+    });
+    if (!r.ok) throw new Error(r.error);
+    if (r.bookedSen <= 0) continue;
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO supplier_payments (
+             id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
+             date, amountSen, bookedSen, foreignSen, payFxRate, method, reference, notes, orgId
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          `sp-${crypto.randomUUID().slice(0, 8)}`, paymentNo, pi.supplier_id ?? supplierId, pi.supplier_name ?? "",
+          piId, date, r.bankSen, r.bookedSen, isForeign ? (Number(a.foreignSen) || 0) : null,
+          isForeign ? (Number(a.payRate) || 0) : null, "BANK_TRANSFER", reference ?? "", `Payment ${paymentNo}`, orgId,
+        ),
+    );
+    statements.push(
+      db
+        .prepare(
+          `UPDATE purchase_invoices SET paid_amount_sen = paid_amount_sen + ?,
+             status = CASE WHEN paid_amount_sen + ? >= amount_sen THEN 'PAID' WHEN paid_amount_sen + ? > 0 THEN 'PARTIAL_PAID' ELSE status END
+           WHERE id = ?`,
+        )
+        .bind(r.bookedSen, r.bookedSen, r.bookedSen, piId),
+    );
+    totalBooked += r.bookedSen;
+    totalBank += r.bankSen;
+    totalFx += r.fxDiffSen;
+  }
+  if (totalBooked <= 0) throw new Error("no allocations");
+
+  // 4. GL: reverse the live legs + post the corrected legs in ONE call, collapse.
+  const cur =
+    (
+      await db
+        .prepare(
+          `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+            WHERE sourceId = ? AND orgId = ? AND hidden = 0 AND sourceType LIKE 'supplier_payment%'`,
+        )
+        .bind(paymentNo, orgId)
+        .all<{ accountCode: string; debitSen: number; creditSen: number }>()
+    ).results ?? [];
+  const revLegs = cur.map((l, i) => ({
+    id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+    sourceType: `supplier_payment_restate_rev:${stamp}`,
+    sourceId: paymentNo,
+    legNo: i + 1,
+    accountCode: l.accountCode,
+    debitSen: l.creditSen,
+    creditSen: l.debitSen,
+    description: `Restate rev · ${paymentNo}`,
+    actorUserId,
+    orgId,
+  }));
+  const postSource = `supplier_payment_restate_post:${stamp}`;
+  const newLegs: Parameters<typeof buildJournalEntryStatements>[2] = [
+    { id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: postSource, sourceId: paymentNo, legNo: 1, accountCode: AP_CONTROL, debitSen: totalBooked, creditSen: 0, description: `Supplier payment ${paymentNo} (edited)`, actorUserId, orgId },
+    { id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: postSource, sourceId: paymentNo, legNo: 2, accountCode: payFrom, debitSen: 0, creditSen: totalBank, description: `Supplier payment ${paymentNo} (edited)`, actorUserId, orgId },
+  ];
+  if (totalFx !== 0) {
+    newLegs.push({ id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: postSource, sourceId: paymentNo, legNo: 3, accountCode: FX_GAIN_ACCT, debitSen: totalFx < 0 ? -totalFx : 0, creditSen: totalFx > 0 ? totalFx : 0, description: `Realised FX · ${paymentNo}`, actorUserId, orgId });
+  }
+  const { statements: jeStmts } = await buildJournalEntryStatements(db, orgId, [...revLegs, ...newLegs]);
+  statements.push(...jeStmts);
+  statements.push(
+    db
+      .prepare(
+        `UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'supplier_payment%' AND sourceType <> ?`,
+      )
+      .bind(paymentNo, orgId, postSource),
+  );
+
+  return statements;
 }
 
 // ---------------------------------------------------------------------------
@@ -562,6 +719,71 @@ app.post("/:paymentNo/lifecycle", async (c) => {
     );
     await c.var.DB.batch(statements);
     return c.json({ success: true, data: { state: newState } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "PAYMENT_NOT_FOUND") {
+      return c.json(
+        { success: false, error: `No supplier payment found for ${paymentNo}` },
+        404,
+      );
+    }
+    return c.json({ success: false, error: msg }, 400);
+  }
+});
+
+// Edit a supplier payment IN PLACE — same voucher number; GL reversed +
+// re-posted (see buildSupplierPaymentRestate). Body mirrors the POST:
+// { supplierId, payFrom, date, reference, allocations }.
+app.post("/:paymentNo/restate", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const paymentNo = c.req.param("paymentNo");
+  let body: {
+    supplierId?: string;
+    payFrom?: string;
+    date?: string;
+    reference?: string;
+    allocations?: CreateAllocation[];
+  };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: "Invalid body" }, 400);
+  }
+  if (!body.payFrom || !body.date) {
+    return c.json({ success: false, error: "payFrom and date are required" }, 400);
+  }
+  if (!Array.isArray(body.allocations) || body.allocations.length === 0) {
+    return c.json({ success: false, error: "at least one allocation is required" }, 400);
+  }
+  const acct = await c.var.DB.prepare(
+    "SELECT specialAccountType FROM chart_of_accounts WHERE code = ?",
+  )
+    .bind(String(body.payFrom))
+    .first<{ specialAccountType: string | null }>();
+  if (!acct || (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH")) {
+    return c.json(
+      { success: false, error: "payFrom must be a bank (SBK) or cash (SCH) account" },
+      400,
+    );
+  }
+  try {
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get(
+        "userId",
+      ) ?? null;
+    const stamp = Date.now();
+    const statements = await buildSupplierPaymentRestate(
+      c.var.DB,
+      orgId,
+      paymentNo,
+      body,
+      actorUserId,
+      stamp,
+    );
+    await c.var.DB.batch(statements);
+    return c.json({ success: true, data: { paymentNo } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "PAYMENT_NOT_FOUND") {

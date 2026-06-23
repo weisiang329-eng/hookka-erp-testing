@@ -126,27 +126,39 @@ export default function SupplierPaymentsPage() {
   // Keyed by PI id.
   const [rows, setRows] = useState<Record<string, RowState>>({});
   const [posting, setPosting] = useState(false);
+  // Edit mode: when set, the form is editing this payment in place (same number).
+  const [editingNo, setEditingNo] = useState<string | null>(null);
 
-  const loadOpenPIs = (supplierId: string, prefill?: Record<string, number>) => {
+  const loadOpenPIs = (
+    supplierId: string,
+    editLines?: { purchaseInvoiceId: string; bookedSen: number }[],
+  ) => {
     if (!supplierId) {
       setOpenPIs([]);
       return;
     }
     setLoadingPIs(true);
-    fetch(`/api/purchase-invoices?supplierId=${encodeURIComponent(supplierId)}&status=APPROVED,PARTIAL_PAID`)
+    // In edit mode include PAID PIs so the ones this payment settled still show;
+    // their paid amount is rolled back for display so they're re-allocatable.
+    const status = editLines ? "APPROVED,PARTIAL_PAID,PAID" : "APPROVED,PARTIAL_PAID";
+    fetch(`/api/purchase-invoices?supplierId=${encodeURIComponent(supplierId)}&status=${status}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: OpenPI[] } | OpenPI[]>)
       .then((j) => {
         const raw = Array.isArray(j) ? j : j?.success ? j.data ?? [] : [];
-        // Drop fully-settled rows — outstanding must be > 0 to be payable.
-        const open = raw.filter((pi) => pi.amountSen - pi.paidAmountSen > 0);
+        const back = new Map((editLines ?? []).map((l) => [l.purchaseInvoiceId, l.bookedSen]));
+        const adj = raw.map((pi) =>
+          back.has(pi.id)
+            ? { ...pi, paidAmountSen: Math.max(0, pi.paidAmountSen - (back.get(pi.id) ?? 0)) }
+            : pi,
+        );
+        const open = adj.filter((pi) => pi.amountSen - pi.paidAmountSen > 0);
         setOpenPIs(open);
-        // Edit flow: re-seed each PI's amount from the just-voided payment
-        // (MYR booked amount; foreign PIs need their rate re-entered).
-        if (prefill) {
+        // Edit flow: seed each PI's MYR amount from the payment being edited.
+        // Foreign PIs need their rate re-entered (the line only carries booked MYR).
+        if (editLines) {
           const seeded: Record<string, RowState> = {};
-          for (const pi of open) {
-            const amt = prefill[pi.id];
-            if (amt && amt > 0) seeded[pi.id] = { ...emptyRow(), amountStr: (amt / 100).toFixed(2) };
+          for (const l of editLines) {
+            if (l.bookedSen > 0) seeded[l.purchaseInvoiceId] = { ...emptyRow(), amountStr: (l.bookedSen / 100).toFixed(2) };
           }
           setRows(seeded);
         }
@@ -271,7 +283,9 @@ export default function SupplierPaymentsPage() {
 
     setPosting(true);
     try {
-      const res = await fetch("/api/supplier-payments", {
+      const res = await fetch(
+        editingNo ? `/api/supplier-payments/${encodeURIComponent(editingNo)}/restate` : "/api/supplier-payments",
+        {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -290,13 +304,14 @@ export default function SupplierPaymentsPage() {
       });
       const j = (await res.json()) as { success?: boolean; error?: string; data?: { paymentNo?: string; totalBankSen?: number } };
       if (res.ok && j.success) {
-        toast.success(j.data?.paymentNo ? `Payment ${j.data.paymentNo} recorded` : "Payment recorded");
+        toast.success(editingNo ? "Payment updated" : j.data?.paymentNo ? `Payment ${j.data.paymentNo} recorded` : "Payment recorded");
+        setEditingNo(null);
         resetForm();
         invalidateCachePrefix("/api/supplier-payments");
         invalidateCachePrefix("/api/purchase-invoices");
         refreshHistory();
       } else {
-        toast.error(j.error || "Failed to record payment");
+        toast.error(j.error || `Failed to ${editingNo ? "update" : "record"} payment`);
       }
     } catch {
       toast.error("Failed to record payment");
@@ -336,38 +351,34 @@ export default function SupplierPaymentsPage() {
   // Edit = void the original (GL reversed, PIs reopened) then reload the form
   // prefilled, so the operator corrects and re-posts. Mirrors the expense-PV
   // edit pattern; the immutable ledger is never mutated in place.
-  const editPayment = async (p: PaymentGroup) => {
-    if (!(await confirm({ title: "Edit payment?", message: `Editing ${p.paymentNo} voids the original and reopens it so you can correct and re-post it. Continue?`, danger: true }))) return;
-    try {
-      const res = await fetch(`/api/supplier-payments/${encodeURIComponent(p.paymentNo)}/lifecycle`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "void" }),
-      });
-      const j = (await res.json()) as { success?: boolean; error?: string };
-      if (!(res.ok && j.success)) { toast.error(j.error || "Failed to reopen payment"); return; }
-      invalidateCachePrefix("/api/supplier-payments");
-      invalidateCachePrefix("/api/purchase-invoices");
-      refreshHistory();
-      setDetail(null);
-      const sup = suppliers.find((s) => s.name === p.supplierName);
-      const prefill: Record<string, number> = {};
-      for (const l of p.lines) if (l.purchaseInvoiceId) prefill[l.purchaseInvoiceId] = l.amountSen;
-      setDate(p.date || today);
-      if (sup) {
-        setSelectedSupplierId(sup.id);
-        setRows({});
-        loadOpenPIs(sup.id, prefill);
-      } else {
-        setSelectedSupplierId("");
-        setRows({});
-        setOpenPIs([]);
-      }
-      toast.success(`${p.paymentNo} voided — adjust and post the corrected payment`);
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    } catch {
-      toast.error("Failed to reopen payment");
+  // In-place edit: load the payment into the form (no void). Save re-states it
+  // under the same voucher number; the original is untouched until then.
+  const editPayment = (p: PaymentGroup) => {
+    setDetail(null);
+    setEditingNo(p.paymentNo);
+    setDate(p.date || today);
+    const sup = suppliers.find((s) => s.name === p.supplierName);
+    if (sup) {
+      setSelectedSupplierId(sup.id);
+      setRows({});
+      loadOpenPIs(
+        sup.id,
+        p.lines.map((l) => ({ purchaseInvoiceId: l.purchaseInvoiceId, bookedSen: l.bookedSen })),
+      );
+    } else {
+      setSelectedSupplierId("");
+      setRows({});
+      setOpenPIs([]);
     }
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const cancelEdit = () => {
+    setEditingNo(null);
+    setSelectedSupplierId("");
+    setRows({});
+    setOpenPIs([]);
+    setReference("");
   };
 
   const canPost = !!selectedSupplierId && !!payFrom && totalBankSen > 0 && !posting;
@@ -453,10 +464,13 @@ export default function SupplierPaymentsPage() {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
-            <CardTitle>Record Payment</CardTitle>
-            <Button onClick={handlePost} disabled={!canPost} size="sm">
-              {posting ? "Posting..." : "Post Payment"}
-            </Button>
+            <CardTitle>{editingNo ? "Edit Payment" : "Record Payment"}</CardTitle>
+            <div className="flex items-center gap-2">
+              {editingNo && <Button variant="outline" size="sm" onClick={cancelEdit}>Cancel</Button>}
+              <Button onClick={handlePost} disabled={!canPost} size="sm">
+                {posting ? (editingNo ? "Updating..." : "Posting...") : editingNo ? "Update Payment" : "Post Payment"}
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">

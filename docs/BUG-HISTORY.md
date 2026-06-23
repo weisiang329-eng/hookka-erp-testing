@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-24-002 — Customer DO/Invoice emails could not be RE-SENT, and a no-email customer's invoice was skipped with ZERO operator signal (remediation for BUG-2026-06-23-005's 128-DO backlog)
+
+🟢 **Fixed** · `delivery-orders` / `ui-frontend` · follow-up to BUG-2026-06-23-005 (backend choke-point trigger)
+
+**Symptom:** two gaps left by the BUG-2026-06-23-005 fix. (1) Many DOs were delivered/invoiced BEFORE the backend choke-point trigger shipped, so their `deliveredEmailAt`/`dispatchEmailAt` stamps are null and the customer was never emailed (Houzs Century alone = 128) — and there was NO way to re-send, because the notice is one-shot by design (atomic claim on the stamp). (2) Delivering/invoicing a DO whose customer has no "PIC Email" on file sends nothing and `queueDoCustomerNotice` returns `{skipped, reason:'no recipient'}` silently — the operator had zero signal the invoice never emailed.
+
+**Root cause:** the notice path is deliberately idempotent — `queueDoCustomerNotice` claims the stamp with `UPDATE … WHERE col IS NULL`, so once a stamp is set (or the operator simply wants to re-send) the claim matches zero rows and no-ops. There was no operator-facing way to release the stamp, and the silent-skip (correct behaviour: don't email a blank address) surfaced nothing.
+
+**Fix:**
+- **Resend (Feature A):** new `POST /api/delivery-orders/:id/resend-notice` (`src/api/routes/delivery-orders.ts` — right after `notify-customer`, ~L4738), admin-gated via the same `requirePermission(c, "delivery-orders", "update")` gate every DO mutation uses. Body `{kind:'DELIVERED'|'DISPATCHED'}`. It FORCE re-fires: clears the relevant stamp (`deliveredEmailAt`/`dispatchEmailAt`) to NULL so the atomic claim can win again, THEN calls the existing `queueDoCustomerNotice(c, id, {kind})` — recipient chain + server-rendered PDF fallback + no-recipient silent skip + atomic re-claim ALL reused (no second send path). Returns `{sent:true,to}` / `{sent:false,skipped:true,reason}` / `{error}` so the FE can toast correctly. Deliberately PER-DO only — no auto-blast-all (128 emails at once = spam).
+  - FE: "Resend invoice email" button on the DO detail footer for DELIVERED/INVOICED DOs (disabled + "No email on file" when the customer has no email) AND a row context-menu entry. `useConfirm` dialog ("Re-send the invoice email for DO-X to <email>?") before sending; success toast carries the recipient; no-email warns. `src/pages/delivery/index.tsx` — `resendCustomerNotice` (~L2790), footer button (~L6330), row menu (~L4232).
+- **No-email warning (Feature B):** `warnIfNoCustomerEmail` (`src/pages/delivery/index.tsx` ~L2760) raises a non-blocking warning toast ("⚠ DO-X not emailed — <customer> has no email on file. Add it on the customer, then Resend.") at the moment of Mark-Dispatched (row + detail modal), Mark-Delivered (POD submit) and Generate-Invoice. The delivery/invoice still proceeds — the warning is signal only. The customer email is read from the loaded customers list via a ref (`customersDataRef`) so the lookup is correct even from the memoized row-menu closure.
+
+**Regression test:** extended `tests/customer-notify.test.mjs` — asserts the resend endpoint is admin-gated + validates kind, clears the stamp to NULL BEFORE re-firing `queueDoCustomerNotice` (no duplicate send path), reports sent/skipped-no-email/error, has NO bulk auto-blast route, and that the FE wires the Resend button (footer + row menu) and the no-email warning into all transition points. 45 pass / 0 fail. build:strict clean (only the 3 known jsbarcode/@zxing sandbox errors).
+
+**Verify live:** open a DELIVERED/INVOICED DO whose customer has an email → detail footer shows "Resend invoice email"; click → Confirm → toast "Invoice email re-sent to <email>"; check the outbox (`/api/internal/process-email-outbox` cron) for the queued mail. Open one whose customer has NO email → button reads "No email on file" + is disabled; Mark-Delivered/Generate-Invoice such a DO → warning toast fires, delivery still proceeds. For the Houzs 128 backlog: add the PIC Email on the customer, then Resend per-DO the ones that need it.
+
 ## BUG-2026-06-24-001 — Searching a COMPLETED order's customer PO on the DEFAULT /production view ("X of 1608") matched it in the count but did NOT render the rows (the Overview half of BUG-2026-06-23-004)
 
 🟢 **Fixed** · `production-orders` / `ui-frontend` · follow-up to BUG-2026-06-23-004 (v3 only fixed the dept grid)

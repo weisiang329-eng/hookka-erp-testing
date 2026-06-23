@@ -881,3 +881,137 @@ test("backend choke-point: double-send is prevented by the SAME idempotency clai
   assert.match(pageSrc, /\/notify-customer`,/);
   assert.match(doRouteSrc, /fireCustomerNoticeBestEffort\(c, id, /);
 });
+
+// ---------------------------------------------------------------------------
+// FEATURE A — per-DO Resend notice (2026-06-24). Many DOs were
+// delivered/invoiced BEFORE the backend choke-point trigger shipped, so their
+// deliveredEmailAt/dispatchEmailAt stamps are null AND the customer was never
+// emailed. The normal notice is one-shot (atomic claim on the stamp), so a
+// force re-send must FIRST clear the stamp, THEN call the SAME
+// queueDoCustomerNotice (no duplicate send path). These pins assert the
+// endpoint clears the stamp + re-fires the shared helper, is admin-gated,
+// reuses the recipient chain + no-recipient skip, and reports what happened.
+// ---------------------------------------------------------------------------
+
+test("resend-notice endpoint: admin-gated, validates kind", () => {
+  // Same delivery-orders:update gate every DO mutation uses.
+  assert.match(
+    doRouteSrc,
+    /app\.post\("\/:id\/resend-notice", async \(c\) => \{[\s\S]*?const denied = await requirePermission\(c, "delivery-orders", "update"\);/,
+    "resend-notice must gate on delivery-orders:update",
+  );
+  // kind is validated to the two fixed literals (anything else → 400).
+  assert.match(
+    doRouteSrc,
+    /body\.kind === "DISPATCHED" \|\| body\.kind === "DELIVERED"\s*\?\s*body\.kind\s*:\s*null/,
+  );
+  assert.match(
+    doRouteSrc,
+    /kind must be "DISPATCHED" or "DELIVERED"/,
+  );
+});
+
+test("resend-notice endpoint: clears the stamp THEN re-fires queueDoCustomerNotice (no duplicate send)", () => {
+  // stampCol is the same two fixed literals as the auto-notice path.
+  assert.match(
+    doRouteSrc,
+    /const stampCol =\s*\n\s*kind === "DISPATCHED" \? "dispatchEmailAt" : "deliveredEmailAt";\s*\n\s*await c\.var\.DB\.prepare\(\s*\n\s*`UPDATE delivery_orders SET \$\{stampCol\} = NULL WHERE id = \?`,\s*\n\s*\)/,
+    "resend must clear the relevant stamp to NULL so the atomic claim can re-fire",
+  );
+  // The re-fire goes through the SAME helper (recipient chain + server PDF
+  // fallback + no-recipient skip + the atomic re-claim) — no second send path.
+  assert.match(
+    doRouteSrc,
+    /const res = await queueDoCustomerNotice\(c, id, \{ kind \}\);/,
+  );
+  // The clear must come BEFORE the queueDoCustomerNotice call (order matters:
+  // queue's claim only fires when the column it just cleared is NULL).
+  const resendIdx = doRouteSrc.indexOf('app.post("/:id/resend-notice"');
+  assert.ok(resendIdx > 0, "resend-notice route must exist");
+  const resendBody = doRouteSrc.slice(resendIdx, resendIdx + 3500);
+  const clearIdx = resendBody.indexOf(
+    "UPDATE delivery_orders SET ${stampCol} = NULL WHERE id = ?",
+  );
+  const fireIdx = resendBody.indexOf(
+    "await queueDoCustomerNotice(c, id, { kind });",
+  );
+  assert.ok(
+    clearIdx > 0 && fireIdx > clearIdx,
+    "the stamp clear must precede the queueDoCustomerNotice re-fire",
+  );
+});
+
+test("resend-notice endpoint: reports sent / skipped-no-email / error", () => {
+  const resendIdx = doRouteSrc.indexOf('app.post("/:id/resend-notice"');
+  const resendBody = doRouteSrc.slice(resendIdx, resendIdx + 3500);
+  // Success → { success:true, sent:true, to }.
+  assert.match(resendBody, /return c\.json\(\{ success: true, sent: true, to: j\?\.to \}\);/);
+  // queueDoCustomerNotice's skip (no recipient / no invoice) → sent:false +
+  // the reason, so the FE can warn "<customer> has no email on file".
+  assert.match(
+    resendBody,
+    /sent: false,\s*\n\s*skipped: true,\s*\n\s*reason: j\?\.reason/,
+  );
+  // Hard failures surface the helper's error.
+  assert.match(resendBody, /success: false, error: j\?\.error \|\| "Failed to re-send notice"/);
+  // 404 when the DO does not exist.
+  assert.match(resendBody, /"Delivery order not found"/);
+  // Columns are guaranteed to exist before clearing one (pre-feature DOs).
+  assert.match(resendBody, /await ensureNotifyEmailColumns\(c\.var\.DB\);/);
+});
+
+test("resend-notice: deliberately PER-DO — no auto-blast-all endpoint", () => {
+  // The spec forbids a bulk auto-blast of the backlog (e.g. Houzs's 128 DOs at
+  // once = spam). There must be no "resend-all" / bulk-resend route.
+  assert.doesNotMatch(doRouteSrc, /resend-all|resend-notices|bulk-resend/i);
+});
+
+test("frontend: Feature A Resend wiring (detail footer + row menu) + Feature B no-email warning", () => {
+  // The resend handler force-re-fires via the resend-notice endpoint with the
+  // kind in the body, and toasts the outcome.
+  assert.match(pageSrc, /\/resend-notice`,/);
+  assert.match(
+    pageSrc,
+    /const resendCustomerNotice = async \(/,
+  );
+  // Confirm dialog before sending ("Re-send the <noun> email for <doNo> to
+  // <email>?"), reusing useConfirm (not window.confirm).
+  assert.match(pageSrc, /Re-send the \$\{noun\} email for \$\{row\.doNo\} to \$\{email\}\?/);
+  // Success toast carries the recipient; no-email path warns instead.
+  assert.match(pageSrc, /email re-sent to \$\{j\.to \|\| email\}/);
+  // The customer email is read from the loaded customers list via the ref
+  // (correct even from the memoized row-menu closure).
+  assert.match(
+    pageSrc,
+    /customersDataRef\.current\.find\(\(cu\) => cu\.id === row\.customerId\)\?\.email/,
+  );
+  // Detail footer: Resend button for DELIVERED/INVOICED, disabled when no
+  // email (with the "No email on file" label/hint).
+  assert.match(
+    pageSrc,
+    /detailDO\.status === "DELIVERED" \|\|\s*\n\s*detailDO\.status === "INVOICED"/,
+  );
+  assert.match(pageSrc, /No email on file/);
+  assert.match(pageSrc, /resendCustomerNotice\(detailDO, "DELIVERED"\)/);
+  // Row context menu: "Resend invoice email" entry, gated to delivered/invoiced.
+  assert.match(pageSrc, /label: "Resend invoice email"/);
+  assert.match(pageSrc, /resendCustomerNotice\(row, "DELIVERED"\)/);
+
+  // Feature B — no-email warning fires at the moment of each customer-notice
+  // transition (dispatch, mark delivered, generate invoice) so the operator
+  // learns the email didn't send, without blocking the flow.
+  assert.match(
+    pageSrc,
+    /const warnIfNoCustomerEmail = \(/,
+  );
+  assert.match(pageSrc, /not emailed —/);
+  // Wired into the three success points (POD delivered, generate-invoice,
+  // both dispatch paths). At least: delivered + dispatch + invoice.
+  assert.match(pageSrc, /warnIfNoCustomerEmail\(podDialog, "DELIVERED"\)/);
+  assert.match(pageSrc, /warnIfNoCustomerEmail\(invoiceDialog, "DELIVERED"\)/);
+  assert.equal(
+    count(pageSrc, /warnIfNoCustomerEmail\([^,]+, "DISPATCHED"\)/g),
+    2,
+    "both dispatch paths (row action + detail modal) must warn on no-email",
+  );
+});

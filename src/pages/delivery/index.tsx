@@ -30,6 +30,7 @@ import {
   Users,
   Save,
   QrCode,
+  Mail,
 } from "lucide-react";
 import type { DeliveryOrder, ProofOfDelivery, ThreePLProvider, Customer } from "@/types";
 import PODDialog from "@/components/delivery/POD-dialog";
@@ -879,6 +880,9 @@ export default function DeliveryPage() {
   const [invoiceDialog, setInvoiceDialog] = useState<DeliveryOrderRow | null>(null);
   const [podDialog, setPodDialog] = useState<DeliveryOrderRow | null>(null);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
+  // DO id whose customer invoice email is currently being re-sent (Feature A:
+  // per-DO Resend). Drives the spinner + disables the Resend button.
+  const [resendingId, setResendingId] = useState<string | null>(null);
   const [selectedReadyPOs, setSelectedReadyPOs] = useState<Set<string>>(new Set());
   const [creatingDOFromPO, setCreatingDOFromPO] = useState(false);
   const [dragDropIdx, setDragDropIdx] = useState<number | null>(null);
@@ -1002,6 +1006,13 @@ export default function DeliveryPage() {
 
   // ----- Customer hub lookup -----
   const [customersData, setCustomersData] = useState<Customer[]>([]);
+  // Mirror of customersData kept in a ref so the email lookup is correct even
+  // from a memoized closure (the row context menu is built via
+  // useCallback([fetchData]) and would otherwise capture a stale/empty list).
+  const customersDataRef = useRef<Customer[]>([]);
+  useEffect(() => {
+    customersDataRef.current = customersData;
+  }, [customersData]);
 
   // ----- Inline Expected DD editing -----
   // Per-cell draft + edit state now lives inside EditableExpectedDD (no naked
@@ -2696,6 +2707,100 @@ export default function DeliveryPage() {
     }
   };
 
+  // The customer's "PIC Email" (customers.email) for a DO row — looked up from
+  // the already-loaded customers list (via the ref, so it's correct even from
+  // a memoized closure). Empty string when the customer has no email on file
+  // (the silent-skip case the warning + Resend surface).
+  const customerEmailFor = (row: { customerId: string }): string =>
+    (
+      customersDataRef.current.find((cu) => cu.id === row.customerId)?.email ??
+      ""
+    ).trim();
+
+  // Feature B — no-email warning. The backend silently SKIPS the customer
+  // notice when the customer has no email on file (returns {skipped, reason:
+  // 'no recipient'}), so delivering/invoicing such a DO sends nothing with no
+  // signal. After a transition we check the customer's email and, when blank,
+  // raise a clear non-blocking warning toast so the operator knows the invoice
+  // didn't email (and can add the email + Resend). NEVER blocks the flow — the
+  // transition is already committed by the time this runs.
+  const warnIfNoCustomerEmail = (
+    row: { customerId: string; customerName: string; doNo: string },
+    kind: "DISPATCHED" | "DELIVERED",
+  ) => {
+    if (customerEmailFor(row)) return;
+    toast.warning(
+      kind === "DELIVERED"
+        ? `⚠ ${row.doNo} not emailed — ${row.customerName} has no email on file. Add it on the customer, then Resend.`
+        : `⚠ ${row.doNo} dispatch notice not emailed — ${row.customerName} has no email on file. Add it on the customer, then Resend.`,
+    );
+  };
+
+  // Feature A — per-DO FORCE re-send of the customer invoice/dispatch email.
+  // Clears the email-sent stamp on the backend so the same notice helper can
+  // re-fire (recipient chain + server PDF fallback + no-recipient skip all
+  // reused), then toasts what actually happened. Confirmed first; when the
+  // customer has no email on file the caller disables the button, but we still
+  // guard here and surface the warning if it slips through.
+  const resendCustomerNotice = async (
+    row: { id: string; customerId: string; customerName: string; doNo: string },
+    kind: "DISPATCHED" | "DELIVERED" = "DELIVERED",
+  ) => {
+    if (resendingId) return;
+    const email = customerEmailFor(row);
+    const noun = kind === "DELIVERED" ? "invoice" : "dispatch";
+    if (!email) {
+      toast.warning(
+        `${row.customerName} has no email on file — add the PIC Email on the customer, then Resend.`,
+      );
+      return;
+    }
+    if (
+      !(await confirm({
+        title: `Re-send ${noun} email`,
+        message: `Re-send the ${noun} email for ${row.doNo} to ${email}?`,
+        danger: false,
+      }))
+    )
+      return;
+    setResendingId(row.id);
+    try {
+      const r = await fetch(
+        `/api/delivery-orders/${encodeURIComponent(row.id)}/resend-notice`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind }),
+        },
+      );
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean;
+        sent?: boolean;
+        skipped?: boolean;
+        reason?: string;
+        to?: string;
+        error?: string;
+      };
+      if (r.ok && j?.sent) {
+        toast.success(
+          `${kind === "DELIVERED" ? "Invoice" : "Dispatch"} email re-sent to ${j.to || email}`,
+        );
+      } else if (r.ok && j?.skipped) {
+        toast.warning(
+          j.reason === "no recipient"
+            ? `${row.customerName} has no email on file — nothing sent.`
+            : `Nothing sent (${j.reason || "skipped"}).`,
+        );
+      } else {
+        toast.error(j?.error || `Failed to re-send (HTTP ${r.status})`);
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error — email not re-sent");
+    } finally {
+      setResendingId(null);
+    }
+  };
+
   // Queue the customer notices for the DOs that JUST transitioned —
   // kicked off (not awaited) so the page stays snappy; inside, the POSTs
   // run sequentially after the transitions finished. One summary toast
@@ -2886,6 +2991,10 @@ export default function DeliveryPage() {
         // Invoice notice (fire-and-forget) — the DELIVERED cascade just
         // auto-created the invoice; email it with the invoice PDF attached.
         notifyCustomersAfterTransition([podDialog], "DELIVERED");
+        // Feature B — surface the silent skip: if the customer has no email
+        // on file, nothing was emailed. Warn (non-blocking) so the operator
+        // knows to add the email + Resend.
+        warnIfNoCustomerEmail(podDialog, "DELIVERED");
         setPodDialog(null);
         fetchData();
       } else if (result.reason === "mismatch") {
@@ -2971,6 +3080,10 @@ export default function DeliveryPage() {
       setDetailDO({ ...invoiceDialog, status: "INVOICED" });
     }
     toast.success("Invoice generated");
+    // Feature B — the DELIVERED→INVOICED flip fires the customer invoice notice
+    // on the backend choke-point; if the customer has no email on file nothing
+    // was emailed, so warn the operator (non-blocking).
+    warnIfNoCustomerEmail(invoiceDialog, "DELIVERED");
     setInvoiceDialog(null);
   };
 
@@ -4032,6 +4145,8 @@ export default function DeliveryPage() {
           } else {
             // Dispatch notice (fire-and-forget) with the branded DO PDF.
             notifyCustomersAfterTransition([row], "DISPATCHED");
+            // Feature B — warn (non-blocking) when the customer has no email.
+            warnIfNoCustomerEmail(row, "DISPATCHED");
           }
           fetchData();
         },
@@ -4124,6 +4239,17 @@ export default function DeliveryPage() {
         icon: <ReceiptText className="h-3.5 w-3.5" />,
         action: () => handleGenerateInvoice(row),
         disabled: row.status !== "DELIVERED",
+      },
+      {
+        // Feature A — per-DO Resend (row menu). Re-fires the customer invoice
+        // email for a delivered/invoiced DO (force: clears the email-sent stamp
+        // then re-queues the SAME notice helper). resendCustomerNotice confirms
+        // first and surfaces the no-email case via a warning toast.
+        label: "Resend invoice email",
+        icon: <Mail className="h-3.5 w-3.5" />,
+        action: () => resendCustomerNotice(row, "DELIVERED"),
+        disabled:
+          row.status !== "DELIVERED" && row.status !== "INVOICED",
       },
       { label: "", separator: true, action: () => {} },
       {
@@ -6147,6 +6273,8 @@ export default function DeliveryPage() {
                             // Dispatch notice (fire-and-forget) with the
                             // branded DO PDF attached.
                             notifyCustomersAfterTransition([detailDO], "DISPATCHED");
+                            // Feature B — warn (non-blocking) when no email.
+                            warnIfNoCustomerEmail(detailDO, "DISPATCHED");
                             setDetailDO({ ...detailDO, status: "LOADED", dispatchDate: new Date().toISOString() });
                             fetchData();
                           } else if (result.reason === "mismatch") {
@@ -6183,6 +6311,44 @@ export default function DeliveryPage() {
                       <ReceiptText className="h-4 w-4" /> Transfer to Invoice
                     </Button>
                   )}
+                  {/* Feature A — per-DO Resend invoice email. Shown once the DO
+                      is delivered/invoiced (the states the invoice notice
+                      fires for). Disabled when the customer has no email on
+                      file (with a "no email on file" hint), since there is
+                      nowhere to send it. */}
+                  {(detailDO.status === "DELIVERED" ||
+                    detailDO.status === "INVOICED") &&
+                    (() => {
+                      const email = customerEmailFor(detailDO);
+                      return (
+                        <Button
+                          variant="outline"
+                          disabled={!email || resendingId === detailDO.id}
+                          title={
+                            email
+                              ? `Re-send the invoice email to ${email}`
+                              : "No email on file — add the PIC Email on the customer"
+                          }
+                          onClick={() =>
+                            resendCustomerNotice(detailDO, "DELIVERED")
+                          }
+                        >
+                          {resendingId === detailDO.id ? (
+                            <>
+                              <RefreshCw className="h-4 w-4 animate-spin" />{" "}
+                              Sending...
+                            </>
+                          ) : (
+                            <>
+                              <Mail className="h-4 w-4" />{" "}
+                              {email
+                                ? "Resend invoice email"
+                                : "No email on file"}
+                            </>
+                          )}
+                        </Button>
+                      );
+                    })()}
                   <Button variant="outline" onClick={() => setDetailDO(null)}>
                     Close
                   </Button>

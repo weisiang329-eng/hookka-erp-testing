@@ -488,6 +488,36 @@ function pickRelevantUphCards(po: ProductionOrder): JobCard[] {
   return uph.filter((j) => (j.wipType || "").toUpperCase() !== "DIVAN");
 }
 
+// Component-type badge label for a job-card sticker (HB / Divan / Base /
+// Armrest / Cushion / Leg), or null when the piece doesn't map to one of the
+// six (whole/full product, HEADREST, untyped/accessory). Derived from the
+// SAME normalized wipType the grid already produced (baserows-core.ts), with a
+// case-insensitive wipName fallback for legs / un-typed bedframe rows. Shared
+// by BOTH the printed 100×150mm Fab Cut/Sew sticker AND the on-screen QR
+// Stickers preview tile so the two never drift — see the print badge call site
+// in the large-sticker branch and renderLargeStickerTile.
+function componentBadgeLabel(s: { wipType?: string; wipName?: string }): string | null {
+  const wt = (s.wipType || "").toUpperCase();
+  const wn = (s.wipName || "").toUpperCase();
+  // Primary: the normalized wipType the grid already derived.
+  if (wt === "HB" || wt === "HEADBOARD") return "HB";
+  if (wt === "DIVAN") return "Divan";
+  if (wt === "BASE" || wt === "SOFA_BASE") return "Base";
+  if (wt === "ARMREST" || wt === "SOFA_ARMREST") return "Armrest";
+  if (wt === "CUSHION" || wt === "SOFA_CUSHION") return "Cushion";
+  if (wt === "LEG") return "Leg";
+  // Fallback: match the WIP description text (case-insensitive) for rows where
+  // wipType is blank or a leg piece.
+  if (/\bDIVAN\b/.test(wn)) return "Divan";
+  if (/HEADBOARD|\bHB\b/.test(wn)) return "HB";
+  if (/ARM\s?REST|ARMREST|\b(LEFT|RIGHT)\s+ARM\b/.test(wn)) return "Armrest";
+  if (/CUSHION/.test(wn)) return "Cushion";
+  if (/\bLEG\b/.test(wn)) return "Leg";
+  if (/\bBASE\b/.test(wn)) return "Base";
+  // No confident match → omit the badge.
+  return null;
+}
+
 // ----- main page -----
 
 // Rendering mode — injected by the per-route wrappers in overview.tsx / dept.tsx.
@@ -4575,13 +4605,36 @@ export default function ProductionPage({
                 <span className="flex-1 border-b border-black h-[22px]" />
               </div>
             </div>
-            <div className="flex items-baseline justify-between mt-1">
+            <div className="flex items-end justify-between mt-1">
               <span className="font-bold" style={{ fontSize: "13px" }}>Qty {s.qty}</span>
-              {s.totalPieces > 1 && (
-                <span className="font-semibold text-[#6B7280]" style={{ fontSize: "10px" }}>
-                  {s.pieceNo} of {s.totalPieces}
-                </span>
-              )}
+              {/* Bottom-right component-type badge — same label + omit rule as
+                  the 100×150mm printout (componentBadgeLabel), scaled down for
+                  the on-screen card so the operator's preview matches the
+                  printed sticker. */}
+              <div className="text-right leading-tight flex flex-col items-end gap-[2px]">
+                {(() => {
+                  const label = componentBadgeLabel(s);
+                  if (!label) return null;
+                  return (
+                    <div
+                      className="font-bold uppercase border-2 border-black text-center"
+                      style={{
+                        fontSize: "11px",
+                        lineHeight: 1.05,
+                        padding: "0px 4px",
+                        borderRadius: "3px",
+                      }}
+                    >
+                      {label}
+                    </div>
+                  );
+                })()}
+                {s.totalPieces > 1 && (
+                  <span className="font-semibold text-[#6B7280]" style={{ fontSize: "10px" }}>
+                    {s.pieceNo} of {s.totalPieces}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -8738,24 +8791,10 @@ export default function ProductionPage({
                               a wrong label. Boxed + large so it reads on a B/W print. */}
                           <div className="text-right leading-tight flex flex-col items-end gap-[1mm]">
                             {(() => {
-                              const wt = (s.wipType || "").toUpperCase();
-                              const wn = (s.wipName || "").toUpperCase();
-                              let label = "";
-                              // Primary: the normalized wipType the grid already derived.
-                              if (wt === "HB" || wt === "HEADBOARD") label = "HB";
-                              else if (wt === "DIVAN") label = "Divan";
-                              else if (wt === "BASE" || wt === "SOFA_BASE") label = "Base";
-                              else if (wt === "ARMREST" || wt === "SOFA_ARMREST") label = "Armrest";
-                              else if (wt === "CUSHION" || wt === "SOFA_CUSHION") label = "Cushion";
-                              else if (wt === "LEG") label = "Leg";
-                              // Fallback: match the WIP description text (case-insensitive)
-                              // for rows where wipType is blank or a leg piece.
-                              else if (/\bDIVAN\b/.test(wn)) label = "Divan";
-                              else if (/HEADBOARD|\bHB\b/.test(wn)) label = "HB";
-                              else if (/ARM\s?REST|ARMREST|\b(LEFT|RIGHT)\s+ARM\b/.test(wn)) label = "Armrest";
-                              else if (/CUSHION/.test(wn)) label = "Cushion";
-                              else if (/\bLEG\b/.test(wn)) label = "Leg";
-                              else if (/\bBASE\b/.test(wn)) label = "Base";
+                              // Shared with the on-screen QR Stickers preview tile
+                              // (renderLargeStickerTile) via componentBadgeLabel so
+                              // the printout and the preview never drift.
+                              const label = componentBadgeLabel(s);
                               // No confident match → omit the badge.
                               if (!label) return null;
                               return (

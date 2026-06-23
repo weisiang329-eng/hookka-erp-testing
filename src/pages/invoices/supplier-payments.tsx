@@ -357,7 +357,7 @@ export default function SupplierPaymentsPage() {
           {/* Supplier + header fields */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
+              <label className="block text-sm font-medium text-[#6B7280] mb-1">Supplier</label>
               <SearchableSelect
                 value={selectedSupplierId}
                 onChange={handleSupplierChange}
@@ -369,10 +369,10 @@ export default function SupplierPaymentsPage() {
 
             {/* Date — drives the payment number / period; editable. */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+              <label className="block text-sm font-medium text-[#6B7280] mb-1">Date</label>
               <input
                 type="date"
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                className="w-full border border-[#E2DDD8] rounded-md px-3 py-2 text-sm"
                 value={date}
                 onChange={(e) => setDate(e.target.value)}
               />
@@ -380,9 +380,9 @@ export default function SupplierPaymentsPage() {
 
             {/* Pay From — the SBK/SCH bank/cash account the money leaves. */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Pay From</label>
+              <label className="block text-sm font-medium text-[#6B7280] mb-1">Pay From</label>
               <select
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                className="w-full border border-[#E2DDD8] rounded-md px-3 py-2 text-sm"
                 value={payFrom}
                 onChange={(e) => setPayFrom(e.target.value)}
               >
@@ -396,10 +396,10 @@ export default function SupplierPaymentsPage() {
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Reference</label>
+              <label className="block text-sm font-medium text-[#6B7280] mb-1">Reference</label>
               <input
                 type="text"
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                className="w-full border border-[#E2DDD8] rounded-md px-3 py-2 text-sm"
                 value={reference}
                 onChange={(e) => setReference(e.target.value)}
                 placeholder="Cheque #, Transfer ref... (optional)"
@@ -410,7 +410,7 @@ export default function SupplierPaymentsPage() {
           {/* Open-PI allocation table */}
           {selectedSupplierId && (
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Open Purchase Invoices</label>
+              <label className="block text-sm font-medium text-[#6B7280] mb-2">Open Purchase Invoices</label>
               {loadingPIs ? (
                 <p className="text-sm text-gray-400 italic">Loading invoices...</p>
               ) : openPIs.length === 0 ? (
@@ -459,7 +459,7 @@ export default function SupplierPaymentsPage() {
                                     inputMode="decimal"
                                     onFocus={(e) => e.currentTarget.select()}
                                     disabled={row.full}
-                                    className="w-28 border border-gray-300 rounded px-2 py-1 text-sm text-right tabular-nums disabled:bg-gray-100"
+                                    className="w-28 border border-[#E2DDD8] rounded px-2 py-1 text-sm text-right tabular-nums disabled:bg-gray-100"
                                     value={row.amountStr}
                                     onChange={(e) => setRow(pi.id, { amountStr: e.target.value })}
                                     placeholder="0.00"
@@ -474,7 +474,7 @@ export default function SupplierPaymentsPage() {
                                       inputMode="decimal"
                                       onFocus={(e) => e.currentTarget.select()}
                                       disabled={row.full}
-                                      className="w-24 border border-gray-300 rounded px-2 py-1 text-sm text-right tabular-nums disabled:bg-gray-100"
+                                      className="w-24 border border-[#E2DDD8] rounded px-2 py-1 text-sm text-right tabular-nums disabled:bg-gray-100"
                                       value={row.foreignStr}
                                       onChange={(e) => setRow(pi.id, { foreignStr: e.target.value })}
                                       placeholder="0.00"
@@ -486,7 +486,7 @@ export default function SupplierPaymentsPage() {
                                       type="text"
                                       inputMode="decimal"
                                       onFocus={(e) => e.currentTarget.select()}
-                                      className="w-24 border border-gray-300 rounded px-2 py-1 text-sm text-right tabular-nums"
+                                      className="w-24 border border-[#E2DDD8] rounded px-2 py-1 text-sm text-right tabular-nums"
                                       value={row.rateStr}
                                       onChange={(e) => setRow(pi.id, { rateStr: e.target.value })}
                                       placeholder={pi.fxRate ? String(pi.fxRate) : "0.0000"}
@@ -499,7 +499,7 @@ export default function SupplierPaymentsPage() {
                             <td className="px-3 py-2 text-center">
                               <input
                                 type="checkbox"
-                                className="rounded border-gray-300"
+                                className="rounded border-[#E2DDD8]"
                                 checked={row.full}
                                 onChange={() => (myr ? toggleMyrFull(pi) : toggleForeignFull(pi))}
                               />

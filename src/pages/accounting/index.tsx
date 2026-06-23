@@ -10,6 +10,7 @@ import { defaultBankCode } from "@/lib/default-bank";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { MoneyInput } from "@/components/ui/money-input";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
@@ -4759,10 +4760,13 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label className="text-xs font-medium text-[#6B7280] mb-1 block">{side === "CREDITOR" ? "Creditor" : "Debtor"}</label>
-            <select value={partyId} onChange={(e) => loadOpenBills(e.target.value)} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm">
-              <option value="">Select…</option>
-              {sideParties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
+            <SearchableSelect
+              value={partyId}
+              onChange={(v) => loadOpenBills(v)}
+              options={sideParties.map((p) => ({ value: p.id, label: p.name }))}
+              placeholder={`Type ${side === "CREDITOR" ? "creditor" : "debtor"} name…`}
+              allowClear
+            />
           </div>
           <div>
             <label className="text-xs font-medium text-[#6B7280] mb-1 block">{side === "CREDITOR" ? "Pay from" : "Deposit to"} (bank / cash)</label>

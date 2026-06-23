@@ -1,5 +1,5 @@
 ﻿import * as React from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
@@ -93,6 +93,8 @@ function AccountPicker({
 }) {
   const [text, setText] = useState("");
   const [open, setOpen] = useState(false);
+  const [hi, setHi] = useState(0);
+  const listRef = useRef<HTMLDivElement>(null);
   const selected = accounts.find((a) => a.code === value);
   const shown = open
     ? text
@@ -111,6 +113,22 @@ function AccountPicker({
         a.name.toLowerCase().includes(kw),
     )
     .slice(0, 50);
+
+  const pick = (code: string) => {
+    onChange(code);
+    setText("");
+    setOpen(false);
+    setHi(0);
+  };
+
+  // Keep the highlighted row scrolled into view while arrowing through matches.
+  useEffect(() => {
+    if (!open) return;
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-idx="${hi}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [hi, open]);
+
   return (
     <div className="relative">
       <input
@@ -120,42 +138,63 @@ function AccountPicker({
         onFocus={() => {
           setOpen(true);
           setText("");
+          setHi(0);
         }}
         // eslint-disable-next-line no-restricted-syntax -- event-handler-only delay so the option's onMouseDown fires before the dropdown closes; not a React render timer
         onBlur={() => setTimeout(() => setOpen(false), 150)}
         onChange={(e) => {
           setText(e.target.value);
           setOpen(true);
+          setHi(0);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            if (!open) {
+              setOpen(true);
+              return;
+            }
+            setHi((h) => Math.min(h + 1, matches.length - 1));
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setHi((h) => Math.max(h - 1, 0));
+          } else if (e.key === "Enter") {
+            const sel = matches[hi];
+            if (open && sel) {
+              e.preventDefault();
+              pick(sel.code);
+            }
+          } else if (e.key === "Escape") {
+            setOpen(false);
+          }
         }}
         className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
       />
       {open && (
-        <div className="absolute z-20 mt-1 max-h-64 w-full min-w-72 overflow-y-auto rounded-md border border-[#E2DDD8] bg-white shadow-lg">
+        <div ref={listRef} className="absolute z-20 mt-1 max-h-64 w-full min-w-72 overflow-y-auto rounded-md border border-[#E2DDD8] bg-white shadow-lg">
           {allowAll && (
             <button
               type="button"
               onMouseDown={(e) => {
                 e.preventDefault();
-                onChange("");
-                setText("");
-                setOpen(false);
+                pick("");
               }}
               className="block w-full px-3 py-1.5 text-left text-sm text-[#6B7280] hover:bg-[#F0ECE9] cursor-pointer"
             >
               (All accounts)
             </button>
           )}
-          {matches.map((a) => (
+          {matches.map((a, idx) => (
             <button
               key={a.code}
               type="button"
+              data-idx={idx}
+              onMouseEnter={() => setHi(idx)}
               onMouseDown={(e) => {
                 e.preventDefault();
-                onChange(a.code);
-                setText("");
-                setOpen(false);
+                pick(a.code);
               }}
-              className="block w-full px-3 py-1.5 text-left text-sm hover:bg-[#F0ECE9] cursor-pointer"
+              className={`block w-full px-3 py-1.5 text-left text-sm cursor-pointer ${idx === hi ? "bg-[#F0ECE9]" : "hover:bg-[#F0ECE9]"}`}
             >
               <span className="tabular-nums text-xs text-[#6B7280] mr-2">{a.code}</span>
               {a.name}
@@ -5705,7 +5744,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
             <div>
               <label className="text-xs font-medium text-[#6B7280] mb-1 block">Expense lines (DR)</label>
-              <div className="border border-[#E2DDD8] rounded-md overflow-hidden">
+              <div className="border border-[#E2DDD8] rounded-md">
                 <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1.4fr)_7rem_2rem] bg-[#FAF8F5] text-[11px] font-medium text-[#9CA3AF]">
                   <div className="px-2.5 py-1.5">Account</div>
                   <div className="px-2.5 py-1.5">Description</div>
@@ -6019,7 +6058,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
             <div>
               <label className="text-xs font-medium text-[#6B7280] mb-1 block">Receipt lines (CR — income account or 305-0000 recovery)</label>
-              <div className="border border-[#E2DDD8] rounded-md overflow-hidden">
+              <div className="border border-[#E2DDD8] rounded-md">
                 <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1.4fr)_7rem_2rem] bg-[#FAF8F5] text-[11px] font-medium text-[#9CA3AF]">
                   <div className="px-2.5 py-1.5">Account</div>
                   <div className="px-2.5 py-1.5">Description</div>

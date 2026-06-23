@@ -230,3 +230,79 @@ test("no Chinese characters in the force-show wiring (FE handler region)", () =>
   assert.ok(h, "handler missing — see previous test");
   assert.doesNotMatch(h, /[一-鿿]/, "Code/comments must be English-only.");
 });
+
+// ---------------------------------------------------------------------------
+// 6. OVERVIEW search-exemption (BUG-2026-06-24-001 — the Overview half of the
+//    same class). The DEFAULT /production view is the hand-rolled Overview
+//    matrix (activeTab === "ALL"), NOT the dept <DataGrid>. v1/v2/v3 (the
+//    forceShowKeys work above) only fixed the dept grid; the Overview hides
+//    COMPLETED via its OWN per-dept column value-filter (`f.deptStatuses`,
+//    persisted in localStorage) and date-filter (`f.deptDates`) inside the
+//    `visibleOrders` memo — these have NO search exemption, so a searched
+//    COMPLETED order matched only 2-of-6 ("6 of 1608" counted, 2 rendered).
+//
+//    Fix: while a top-bar search is active, BYPASS those two dept-column-filter
+//    loops in the visibleOrders memo (mirroring the dept grid's forceShowKeys
+//    exemption + the filteredOrders `!q` date-window skip). With NO search
+//    active the loops run exactly as before (byte-identical). Pin it so a
+//    future refactor of the visibleOrders memo can't silently un-gate it.
+// ---------------------------------------------------------------------------
+
+// Isolate the visibleOrders memo (from its declaration to the closing
+// `useMemo` dep array) so assertions inspect only that memo.
+function extractVisibleOrdersMemo(src) {
+  const start = src.indexOf("const visibleOrders = useMemo(");
+  if (start < 0) return null;
+  // The memo ends at its dependency array, which includes deferredOverviewFilters.
+  const after = src.slice(start);
+  const end = after.indexOf("deferredOverviewFilters, deferredFltSearch]);");
+  return end < 0 ? after : after.slice(0, end + "deferredOverviewFilters, deferredFltSearch]);".length);
+}
+
+test("Overview visibleOrders bypasses the dept-column filters while searching", () => {
+  const memo = extractVisibleOrdersMemo(read(FE));
+  assert.ok(memo, "Could not isolate the visibleOrders memo.");
+  // A deferred-derived search flag (NOT the urgent `searchActive`) so the
+  // bypass flips in lockstep with filteredOrders (which reads deferredFltSearch).
+  assert.match(
+    memo,
+    /const searchActiveOverview = deferredFltSearch\.trim\(\)\.length > 0;/,
+    "visibleOrders must derive a search flag from the DEFERRED search " +
+      "(deferredFltSearch) so the dept-column-filter bypass tracks filteredOrders.",
+  );
+  // Both dept-column filter loops must sit INSIDE `if (!searchActiveOverview)`.
+  assert.match(
+    memo,
+    /if \(!searchActiveOverview\) \{[\s\S]*Object\.keys\(f\.deptStatuses\)[\s\S]*Object\.keys\(f\.deptDates\)[\s\S]*\}\s*return true;/,
+    "The f.deptStatuses AND f.deptDates filter loops must both be gated behind " +
+      "`if (!searchActiveOverview)` so a searched COMPLETED/TRANSFERRED order is " +
+      "not dropped by a persisted dept-status/date filter on the Overview.",
+  );
+});
+
+test("Overview dept-column filters STILL apply when no search is active (byte-identical)", () => {
+  const memo = extractVisibleOrdersMemo(read(FE));
+  assert.ok(memo, "memo missing — see previous test");
+  // The deptStatuses loop body must be unchanged (the hide still works with no
+  // search): wanted-state membership check + empty-cell drop remain present.
+  assert.match(
+    memo,
+    /const wanted = f\.deptStatuses\[deptCode\] \|\| \[\];/,
+    "The dept-status filter body must be preserved (so the hide still applies " +
+      "with no search active).",
+  );
+  assert.match(
+    memo,
+    /if \(!wanted\.includes\(c\.state as "pending" \| "overdue" \| "done"\)\) return false;/,
+    "The dept-status membership check must remain — non-search behaviour is " +
+      "byte-identical.",
+  );
+  // visibleOrders memo must depend on deferredFltSearch so the bypass recomputes
+  // when the search changes.
+  assert.match(
+    memo,
+    /\}, \[filteredOrders, activeTab, deferredOverviewSort, deferredOverviewFilters, deferredFltSearch\]\);/,
+    "The visibleOrders useMemo must list deferredFltSearch in its deps so the " +
+      "search-bypass re-runs when the query changes.",
+  );
+});

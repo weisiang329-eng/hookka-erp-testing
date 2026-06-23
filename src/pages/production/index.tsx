@@ -2865,6 +2865,13 @@ export default function ProductionPage({
       // F5: use deferred overviewFilters here so Clear / per-column filter
       // edits don't block the click on the heavy recompute.
       const f = deferredOverviewFilters;
+      // Search-active flag derived from the DEFERRED search (not the urgent
+      // `searchActive`) so it flips in lockstep with `filteredOrders` (which
+      // also reads deferredFltSearch). Gating the dept-column-filter bypass
+      // below on the urgent flag would, for one render, bypass the dept
+      // filters before filteredOrders had narrowed to the search match —
+      // flashing every completed order. Deferred keeps the two in sync.
+      const searchActiveOverview = deferredFltSearch.trim().length > 0;
       // Cell-state cache so dept-status filter + dept-sort don't recompute
       // cellFor() N×M times.
       const cellCache = new Map<string, ReturnType<typeof cellFor>>();
@@ -2896,29 +2903,49 @@ export default function ProductionPage({
         const ourDD = o.hookkaExpectedDD || "";
         if (f.ourExpectedDDFrom && ourDD && ourDD < f.ourExpectedDDFrom) return false;
         if (f.ourExpectedDDTo && ourDD && ourDD > f.ourExpectedDDTo) return false;
-        // Dept status filters — only check depts the user actually picked.
-        for (const deptCode of Object.keys(f.deptStatuses)) {
-          const wanted = f.deptStatuses[deptCode] || [];
-          if (wanted.length === 0) continue;
-          const c = cellAt(o, deptCode);
-          if (c.state === "empty") return false;
-          if (!wanted.includes(c.state as "pending" | "overdue" | "done")) return false;
-        }
-        // Dept date-range filters — applied to the displayed cell date
-        // (done → latestCompleted; else → earliestDue). Empty cells fall
-        // out of any non-empty filter.
-        for (const deptCode of Object.keys(f.deptDates)) {
-          const range = f.deptDates[deptCode];
-          if (!range || (!range.from && !range.to)) continue;
-          const c = cellAt(o, deptCode);
-          if (c.state === "empty") return false;
-          const cellDate =
-            c.state === "done"
-              ? (c.latestCompleted || c.earliestDue)
-              : c.earliestDue;
-          if (!cellDate) return false;
-          if (range.from && cellDate < range.from) return false;
-          if (range.to && cellDate > range.to) return false;
+        // Per-dept column filters (status + date). These are the Overview's
+        // equivalent of the dept grid's seeded hide-COMPLETED value filter:
+        // an operator who once set a dept column to show only Pending/Overdue
+        // (excluding Done) keeps that filter forever via localStorage
+        // (OVERVIEW_TABLE_LS_KEY), so a fully-completed ("done") order is
+        // dropped here. While a top-bar search is active, BYPASS these
+        // dept-column filters so a searched COMPLETED / TRANSFERRED order
+        // surfaces on the Overview — exactly mirroring the dept grid's
+        // forceShowKeys search-exemption (deptForceShowKeys ~L3297) and the
+        // `filteredOrders` date-window `!q` skip (~L2774). The page-level
+        // search/customer/state/category/date predicates already ran (in
+        // filteredOrders), so a search that matches NOTHING leaves these rows
+        // empty and reveals no completed orders; a search that matches a
+        // completed order now renders it. With NO search active this is
+        // byte-identical (the loops run exactly as before). The count line
+        // (~L6849, reads filteredOrders) and the body (visibleOrders) now
+        // agree for searched completed rows — no count-line change needed.
+        // BUG-2026-06-24-001 (Overview half of BUG-2026-06-23-004). 2026-06-24.
+        if (!searchActiveOverview) {
+          // Dept status filters — only check depts the user actually picked.
+          for (const deptCode of Object.keys(f.deptStatuses)) {
+            const wanted = f.deptStatuses[deptCode] || [];
+            if (wanted.length === 0) continue;
+            const c = cellAt(o, deptCode);
+            if (c.state === "empty") return false;
+            if (!wanted.includes(c.state as "pending" | "overdue" | "done")) return false;
+          }
+          // Dept date-range filters — applied to the displayed cell date
+          // (done → latestCompleted; else → earliestDue). Empty cells fall
+          // out of any non-empty filter.
+          for (const deptCode of Object.keys(f.deptDates)) {
+            const range = f.deptDates[deptCode];
+            if (!range || (!range.from && !range.to)) continue;
+            const c = cellAt(o, deptCode);
+            if (c.state === "empty") return false;
+            const cellDate =
+              c.state === "done"
+                ? (c.latestCompleted || c.earliestDue)
+                : c.earliestDue;
+            if (!cellDate) return false;
+            if (range.from && cellDate < range.from) return false;
+            if (range.to && cellDate > range.to) return false;
+          }
         }
         return true;
       });
@@ -2953,7 +2980,9 @@ export default function ProductionPage({
       }
     }
     return rows;
-  }, [filteredOrders, activeTab, deferredOverviewSort, deferredOverviewFilters]);
+    // deferredFltSearch: the Overview dept-column-filter bypass while searching
+    // (see searchActiveOverview above) must recompute when the search changes.
+  }, [filteredOrders, activeTab, deferredOverviewSort, deferredOverviewFilters, deferredFltSearch]);
 
   // ── Overview multi-select (batch set due date) ──
   // The selected orders, intersected with the live `visibleOrders` so a row

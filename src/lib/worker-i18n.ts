@@ -889,6 +889,46 @@ const dict: Dict = {
     zh: '出错了',
     my: 'အမှား ဖြစ်နေပါသည်',
   },
+
+  // ---- Announcements (office → worker) ----
+  'home.announcements': {
+    en: 'Announcements',
+    ms: 'Pengumuman',
+    zh: '公告',
+    my: 'ကြေညာချက်များ',
+  },
+  'home.newBadge': {
+    en: 'New',
+    ms: 'Baru',
+    zh: '新',
+    my: 'အသစ်',
+  },
+
+  // ---- Location prompt (Feature B — cut "No GPS" punches) ----
+  'home.locationNeededTitle': {
+    en: 'Turn on location',
+    ms: 'Hidupkan lokasi',
+    zh: '请开启定位',
+    my: 'တည်နေရာ ဖွင့်ပါ',
+  },
+  'home.locationNeededBody': {
+    en: 'Please allow location so your clock-in records you At factory.',
+    ms: 'Sila benarkan lokasi supaya daftar masuk anda direkod Di kilang.',
+    zh: '请允许定位，这样您的打卡才能记录为「在工厂」。',
+    my: 'အလုပ်ဝင်ချိန် "စက်ရုံတွင်" မှတ်တမ်းတင်နိုင်ရန် တည်နေရာကို ခွင့်ပြုပါ။',
+  },
+  'home.locationHowTo': {
+    en: 'Tap the lock icon in your browser address bar → Location → Allow.',
+    ms: 'Ketik ikon kunci di bar alamat pelayar → Lokasi → Benarkan.',
+    zh: '点击浏览器地址栏的锁形图标 → 位置 → 允许。',
+    my: 'ဘရောက်ဇာ လိပ်စာဘားရှိ သော့ပုံကို နှိပ်ပါ → တည်နေရာ → ခွင့်ပြုပါ။',
+  },
+  'home.locationRetry': {
+    en: 'Try again',
+    ms: 'Cuba lagi',
+    zh: '重试',
+    my: 'ထပ်စမ်းပါ',
+  },
 };
 
 // Translate helper: t("home.hello") → lookup in chosen language with

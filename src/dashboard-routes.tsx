@@ -134,6 +134,10 @@ const RDMaintenance = lazy(() => import('./pages/rd/maintenance'))
 const Reports = lazy(() => import('./pages/reports'))
 const DailyReport = lazy(() => import('./pages/daily-report'))
 const Notifications = lazy(() => import('./pages/notifications'))
+// Announcements — office posts that every worker sees on their phone home
+// screen (worker portal). Admin-gated by the API (requirePermission); the
+// sidebar link is permission-filtered too.
+const Announcements = lazy(() => import('./pages/announcements'))
 const MailCenter = lazy(() => import('./pages/mail-center'))
 const MailCenterDetail = lazy(() => import('./pages/mail-center/detail'))
 const Maintenance = lazy(() => import('./pages/maintenance'))
@@ -427,6 +431,8 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // Daily Report — process / SOP exceptions ("what needs attention today").
   { path: '/daily-report', element: <S><DailyReport /></S> },
   { path: '/notifications', element: <S><Notifications /></S> },
+  // Announcements — post a notice that shows on every worker's phone.
+  { path: '/announcements', element: <S><Announcements /></S> },
   { path: '/mail-center', element: <S><MailCenter /></S> },
   { path: '/mail-center/:id', element: <S><MailCenterDetail /></S> },
   { path: '/maintenance', element: <S><Maintenance /></S> },
@@ -498,6 +504,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/dashboard': () => import('./pages/dashboard-b'),
   '/daily-report': () => import('./pages/daily-report'),
   '/notifications': () => import('./pages/notifications'),
+  '/announcements': () => import('./pages/announcements'),
   '/mail-center': () => import('./pages/mail-center'),
   '/analytics/forecast': () => import('./pages/analytics/forecast'),
   '/sales': () => import('./pages/sales'),

@@ -829,6 +829,7 @@ import departmentPerformance from "./routes/department-performance";
 // see how long each WIP typically takes.
 import wipTimes from "./routes/wip-times";
 import mailCenter from "./routes/mail-center";
+import { announcementsAdmin, announcementsWorker } from "./routes/announcements";
 
 app.route("/api/customers", customers);
 app.route("/api/mail-center", mailCenter);
@@ -837,6 +838,13 @@ app.route("/api/products", products);
 app.route("/api/product-configs", productConfigs);
 app.route("/api/workers", workers);
 app.route("/api/worker-auth", workerAuth);
+// In-app announcements. The ADMIN surface is a normal auth-gated route; the
+// WORKER read endpoint lives under /api/worker/announcements (worker-token
+// authed — the /api/worker/ prefix bypasses the dashboard auth gate). The
+// worker mount MUST come BEFORE /api/worker below so the more-specific prefix
+// wins matching (same reasoning as the /api/worker-auth ordering note).
+app.route("/api/announcements", announcementsAdmin);
+app.route("/api/worker/announcements", announcementsWorker);
 // Worker portal (mobile /worker pages). MUST mount AFTER /api/worker-auth so
 // the more-specific prefix wins matching — `/api/worker-auth/login` would
 // otherwise be a prefix-match for `/api/worker` if order flipped.

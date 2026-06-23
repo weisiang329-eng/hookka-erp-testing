@@ -16,7 +16,15 @@
 // ============================================================
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ScanLine, AlertTriangle, Clock, CheckCircle2, Camera } from "lucide-react";
+import {
+  ScanLine,
+  AlertTriangle,
+  Clock,
+  CheckCircle2,
+  Camera,
+  Megaphone,
+  MapPin,
+} from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
 import { deriveWipName } from "@/lib/wip-name";
@@ -29,6 +37,7 @@ const TodayEnvelope = z
   .object({ success: z.boolean().optional(), data: z.unknown().optional(), error: z.string().optional() })
   .passthrough();
 const HistoryEnvelope = TodayEnvelope;
+const AnnouncementsEnvelope = TodayEnvelope;
 
 // ---------- types ----------
 type TodayData = {
@@ -99,6 +108,14 @@ type AttendanceRow = {
   lateMinutes?: number;
   status: string;
 };
+// Office → worker announcement. The body comes from the office (any language
+// they type); only the heading/"New" badge are localised.
+type Announcement = {
+  id: string;
+  title: string;
+  body: string;
+  createdAt: string | null;
+};
 type HistoryData = {
   range: { from: string; to: string };
   daily: DailyRow[];
@@ -158,6 +175,64 @@ function getPunchLocation(): Promise<{ lat: number; lng: number } | null> {
     navigator.geolocation.getCurrentPosition(
       (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
       () => resolve(null),
+      { enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 },
+    );
+  });
+}
+
+// ---------- announcements "seen" tracking (localStorage, v1) ----------
+// We don't keep a per-worker read table server-side; the unread dot is purely
+// a phone-local memory of which announcement ids this device has opened.
+const SEEN_ANN_KEY = "hookka.worker.seenAnnouncements";
+function readSeenAnnouncements(): Set<string> {
+  try {
+    const raw = localStorage.getItem(SEEN_ANN_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return new Set(arr.filter((x) => typeof x === "string"));
+    }
+  } catch {
+    /* ignore */
+  }
+  return new Set();
+}
+function writeSeenAnnouncements(ids: Set<string>): void {
+  try {
+    // Cap the stored set so it can't grow unbounded over months of posts.
+    const arr = Array.from(ids).slice(-200);
+    localStorage.setItem(SEEN_ANN_KEY, JSON.stringify(arr));
+  } catch {
+    /* ignore */
+  }
+}
+
+// ---------- proactive location permission (Feature B) ----------
+// On app open we PROACTIVELY ask for location. This pops the browser
+// permission prompt for a worker who hasn't decided yet (so their next punch
+// stamps "At factory" instead of "No GPS"). Browsers REMEMBER a hard deny and
+// won't re-prompt, so the realistic UX is: request on open + a persistent nudge
+// banner when not granted. We NEVER block clock-in — the punch still works
+// unstamped (the existing getPunchLocation handles that).
+type LocationState = "unknown" | "granted" | "denied" | "unavailable";
+
+// Request a position once. Resolves the resulting permission state. A success
+// means the worker granted (or had already granted) location; a failure with
+// PERMISSION_DENIED means denied; anything else (no geolocation API, timeout,
+// position unavailable) is "unavailable" — both surface the same nudge.
+function requestLocationPermission(): Promise<LocationState> {
+  return new Promise((resolve) => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      resolve("unavailable");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      () => resolve("granted"),
+      (err) => {
+        // 1 === PERMISSION_DENIED across browsers.
+        resolve(err && err.code === 1 ? "denied" : "unavailable");
+      },
+      // Same low-accuracy/indoor-friendly settings the punch uses, so a grant
+      // here matches what the punch will actually get on the factory floor.
       { enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 },
     );
   });
@@ -246,6 +321,16 @@ export default function WorkerHomePage() {
   // Tap-to-expand share roster on Completed Products.
   const [openShare, setOpenShare] = useState<string | null>(null);
 
+  // ---- Announcements (Feature A) ----
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  // Which announcement ids this device has already opened (drives the dot).
+  const [seenAnn, setSeenAnn] = useState<Set<string>>(() =>
+    readSeenAnnouncements(),
+  );
+
+  // ---- Location permission (Feature B) ----
+  const [locState, setLocState] = useState<LocationState>("unknown");
+
   // ---- fetches ----
   const refreshToday = useCallback(async () => {
     try {
@@ -274,9 +359,41 @@ export default function WorkerHomePage() {
     }
   }, []);
 
+  // Active announcements — best-effort; a failure just leaves the banner empty
+  // and never strands the page (same posture as /history).
+  const refreshAnnouncements = useCallback(async () => {
+    try {
+      const res = await workerFetch("/api/worker/announcements");
+      const raw = await res.json();
+      const j = AnnouncementsEnvelope.parse(raw);
+      if (j.success && Array.isArray(j.data)) {
+        setAnnouncements(j.data as Announcement[]);
+      }
+    } catch {
+      /* leave announcements as-is */
+    }
+  }, []);
+
   useEffect(() => {
     refreshToday();
-  }, [refreshToday]);
+    refreshAnnouncements();
+  }, [refreshToday, refreshAnnouncements]);
+
+  // Feature B — proactively request location ONCE on app open. This prompts a
+  // worker who hasn't decided yet (so their punch stamps "At factory"); a
+  // worker who already granted resolves "granted" silently (no banner); a hard
+  // deny resolves "denied" and surfaces the nudge. Never blocks anything.
+  /* eslint-disable react-hooks/set-state-in-effect -- async permission probe; setState lives inside the resolved promise */
+  useEffect(() => {
+    let alive = true;
+    requestLocationPermission().then((s) => {
+      if (alive) setLocState(s);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /* eslint-disable react-hooks/set-state-in-effect -- refresh history when date range changes; setState lives inside the async callback */
   useEffect(() => {
@@ -313,6 +430,25 @@ export default function WorkerHomePage() {
     } finally {
       setClocking(false);
     }
+  }
+
+  // Mark all currently-shown announcements as seen (clears the unread dots).
+  // Called when the worker expands/taps the Announcements card.
+  function markAnnouncementsSeen() {
+    setSeenAnn((prev) => {
+      const next = new Set(prev);
+      for (const a of announcements) next.add(a.id);
+      writeSeenAnnouncements(next);
+      return next;
+    });
+  }
+
+  // Re-request location after a worker has (hopefully) flipped the browser
+  // setting. If they're still denied the browser resolves immediately without
+  // a prompt, so this is safe to tap repeatedly.
+  async function retryLocation() {
+    const s = await requestLocationPermission();
+    setLocState(s);
   }
 
   // Quick preset chips for the range picker
@@ -377,6 +513,13 @@ export default function WorkerHomePage() {
   // stat grid and report-issue stay hidden until their own rollout.
   const SHOW_SCAN = true;
 
+  // Announcements the worker hasn't opened on this device yet → unread dot.
+  const unreadAnnouncements = announcements.filter((a) => !seenAnn.has(a.id)).length;
+  // Show the location nudge whenever we did NOT end up granted (denied OR the
+  // device couldn't get a fix). Never shown while "unknown" (the probe is still
+  // running / the worker hasn't answered the prompt yet) so it can't flash.
+  const showLocNudge = locState === "denied" || locState === "unavailable";
+
   return (
     <div className="space-y-4 pt-2">
       {/* Greeting */}
@@ -387,6 +530,90 @@ export default function WorkerHomePage() {
           {data.worker.empNo} · {data.worker.departmentCode}
         </p>
       </div>
+
+      {/* Announcements (Feature A) — office posts, newest first. Tapping the
+          card marks everything seen (clears the unread dots). */}
+      {announcements.length > 0 && (
+        <div className="bg-white rounded-xl border border-[#D8D2CC] shadow-sm overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-[#6B5C32] text-white">
+            <Megaphone className="h-4 w-4" />
+            <span className="text-sm font-semibold">{t("home.announcements")}</span>
+            {unreadAnnouncements > 0 && (
+              <span className="ml-auto inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-[#9A3A2D] px-1.5 text-[11px] font-bold">
+                {unreadAnnouncements}
+              </span>
+            )}
+          </div>
+          <ul
+            onClick={markAnnouncementsSeen}
+            className="divide-y divide-[#F0ECE9]"
+          >
+            {announcements.map((a) => {
+              const unread = !seenAnn.has(a.id);
+              return (
+                <li key={a.id} className="px-4 py-3">
+                  <div className="flex items-start gap-2">
+                    {unread && (
+                      <span
+                        aria-hidden
+                        className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-[#9A3A2D]"
+                      />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-[#1F1D1B] break-words">
+                        {a.title}
+                        {unread && (
+                          <span className="ml-1.5 align-middle text-[10px] font-bold uppercase tracking-wide text-[#9A3A2D]">
+                            {t("home.newBadge")}
+                          </span>
+                        )}
+                      </p>
+                      {a.body && (
+                        <p className="mt-0.5 whitespace-pre-wrap break-words text-xs text-[#5A5550]">
+                          {a.body}
+                        </p>
+                      )}
+                      {a.createdAt && (
+                        <p className="mt-1 text-[10px] text-[#9CA3AF]">
+                          {fmtDay(a.createdAt)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
+      {/* Location nudge (Feature B) — shown when location is denied/unavailable
+          so the worker's punch can stamp "At factory". Never blocks clock-in. */}
+      {showLocNudge && (
+        <div className="bg-[#FFF6E9] border border-[#E5C98A] rounded-xl p-3.5">
+          <div className="flex items-start gap-2.5">
+            <MapPin className="h-5 w-5 shrink-0 text-[#9C6F1E]" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-[#7A5512]">
+                {t("home.locationNeededTitle")}
+              </p>
+              <p className="mt-0.5 text-xs text-[#7A5512]">
+                {t("home.locationNeededBody")}
+              </p>
+              <p className="mt-1 text-[11px] text-[#9C6F1E]">
+                {t("home.locationHowTo")}
+              </p>
+              <button
+                type="button"
+                onClick={retryLocation}
+                className="mt-2 h-9 rounded-lg bg-[#9C6F1E] px-4 text-sm font-semibold text-white hover:bg-[#86601a] transition-colors"
+              >
+                {t("home.locationRetry")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Clock card */}
       {SHOW_CLOCK && (

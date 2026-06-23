@@ -7,6 +7,9 @@ import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { defaultBankCode } from "@/lib/default-bank";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { LifecycleBadge } from "@/components/accounting/lifecycle-actions";
 import { CreditCard } from "lucide-react";
 import type { PaymentRecord, Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
@@ -48,6 +51,8 @@ export default function PaymentsPage() {
   const [allocations, setAllocations] = useState<{ invoiceId: string; amount: number }[]>([]);
   const [creating, setCreating] = useState(false);
   const [detail, setDetail] = useState<PaymentRecord | null>(null);
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
 
   useEffect(() => {
     fetch("/api/accounting/coa")
@@ -121,6 +126,65 @@ export default function PaymentsPage() {
       // ignore
     }
     setCreating(false);
+  };
+
+  const handleLifecycle = async (id: string, action: "void" | "delete" | "unvoid") => {
+    const verb = action === "unvoid" ? "Restore" : action === "delete" ? "Delete" : "Void";
+    const extra = action === "delete"
+      ? " It will be hidden from the GL (still visible in the audit log)."
+      : action === "void"
+        ? " This reverses the receipt (nothing is deleted)."
+        : "";
+    if (!(await confirm({ title: `${verb} receipt?`, message: `${verb} this receipt?${extra}`, danger: true }))) return;
+    try {
+      const res = await fetch(`/api/payments/${encodeURIComponent(id)}/lifecycle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (res.ok && j.success) {
+        toast.success(`Receipt ${action === "unvoid" ? "restored" : action === "delete" ? "deleted" : "voided"}`);
+        invalidateCachePrefix("/api/payments");
+        invalidateCachePrefix("/api/invoices");
+        refreshPayments();
+        refreshInvoices();
+        setDetail(null);
+      } else {
+        toast.error(j.error || `Failed to ${verb.toLowerCase()} receipt`);
+      }
+    } catch {
+      toast.error(`Failed to ${verb.toLowerCase()} receipt`);
+    }
+  };
+
+  // Edit = void the original (GL reversed, invoices reopened, customer A/R
+  // restored) then reload the inline form prefilled, so the operator corrects
+  // and re-posts. The immutable ledger is never mutated in place.
+  const editPayment = async (p: PaymentRecord) => {
+    if (!(await confirm({ title: "Edit receipt?", message: `Editing ${p.receiptNumber} voids the original and reopens it so you can correct and re-post it. Continue?`, danger: true }))) return;
+    try {
+      const res = await fetch(`/api/payments/${encodeURIComponent(p.id)}/lifecycle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "void" }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (!(res.ok && j.success)) { toast.error(j.error || "Failed to reopen receipt"); return; }
+      invalidateCachePrefix("/api/payments");
+      invalidateCachePrefix("/api/invoices");
+      refreshPayments();
+      refreshInvoices();
+      setDetail(null);
+      setSelectedCustomerId(p.customerId);
+      setAllocations(p.allocations.map((a) => ({ invoiceId: a.invoiceId, amount: a.amount })));
+      setMethod(p.method);
+      setReference(p.reference ?? "");
+      toast.success(`${p.receiptNumber} voided — adjust and post the corrected receipt`);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch {
+      toast.error("Failed to reopen receipt");
+    }
   };
 
   const columns: Column<PaymentRecord>[] = [
@@ -209,10 +273,11 @@ export default function PaymentsPage() {
   ];
 
   // Summary stats
-  const totalReceived = payments.reduce((s, p) => s + p.amount, 0);
-  const clearedCount = payments.filter((p) => p.status === "CLEARED").length;
-  const pendingCount = payments.filter((p) => p.status === "RECEIVED").length;
-  const bouncedCount = payments.filter((p) => p.status === "BOUNCED").length;
+  const active = payments.filter((p) => (p.lifecycleState ?? "ACTIVE") === "ACTIVE");
+  const totalReceived = active.reduce((s, p) => s + p.amount, 0);
+  const clearedCount = active.filter((p) => p.status === "CLEARED").length;
+  const pendingCount = active.filter((p) => p.status === "RECEIVED").length;
+  const bouncedCount = active.filter((p) => p.status === "BOUNCED").length;
 
   if (loading) {
     return (
@@ -435,6 +500,7 @@ export default function PaymentsPage() {
             gridId="payments"
             contextMenuItems={contextMenuItems}
             onRowClick={(row) => setDetail(row)}
+            rowClassName={(row) => ((row.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? "opacity-50" : "")}
           />
         </CardContent>
       </Card>
@@ -444,7 +510,10 @@ export default function PaymentsPage() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDetail(null)}>
           <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b">
-              <h2 className="text-lg font-semibold">Receipt {detail.receiptNumber}</h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-semibold">Receipt {detail.receiptNumber}</h2>
+                {(detail.lifecycleState ?? "ACTIVE") !== "ACTIVE" && <LifecycleBadge state={detail.lifecycleState} />}
+              </div>
               <button onClick={() => setDetail(null)} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
             </div>
             <div className="p-5 space-y-4 text-sm">
@@ -473,6 +542,17 @@ export default function PaymentsPage() {
                       </tbody>
                     </table>
                   </div>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t">
+                {(detail.lifecycleState ?? "ACTIVE") === "ACTIVE" ? (
+                  <>
+                    <Button variant="outline" size="sm" onClick={() => editPayment(detail)}>Edit</Button>
+                    <Button variant="outline" size="sm" onClick={() => handleLifecycle(detail.id, "void")}>Void</Button>
+                    <Button variant="outline" size="sm" onClick={() => handleLifecycle(detail.id, "delete")}>Delete</Button>
+                  </>
+                ) : (
+                  <Button variant="outline" size="sm" onClick={() => handleLifecycle(detail.id, "unvoid")}>Restore</Button>
                 )}
               </div>
             </div>

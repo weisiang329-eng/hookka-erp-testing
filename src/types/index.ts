@@ -1605,6 +1605,8 @@ export type PaymentRecord = {
   reference: string;
   allocations: { invoiceId: string; invoiceNumber: string; amount: number }[];
   status: "RECEIVED" | "CLEARED" | "BOUNCED";
+  // Document lifecycle (void/delete). Absent or "ACTIVE" = live receipt.
+  lifecycleState?: string;
 };
 
 // --- Payslip Details ---

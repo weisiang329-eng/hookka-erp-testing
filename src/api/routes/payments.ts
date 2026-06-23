@@ -22,6 +22,8 @@ import {
   buildJournalEntryStatements,
   ledgerHasSource,
 } from "../lib/journal-hash";
+import { applyLifecycle } from "../lib/document-lifecycle";
+import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import { parseDebtorCode } from "../../lib/debtor";
 import { issueDocNumber } from "../lib/doc-number-service";
 
@@ -54,6 +56,93 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   CLEARED: [],
   BOUNCED: [],
 };
+
+// buildCustomerPaymentLifecycle — void/delete/unvoid core (mirrors the supplier
+// one). applyLifecycle reverses the GL legs + sets hidden + records the
+// document_lifecycle state; on leaving/returning to ACTIVE we also roll the
+// paid invoices' paidAmount/status back/forward and adjust the customer's
+// outstanding A/R. Per the owner's scope decision, the linked sales-order
+// status is intentionally NOT touched — a void only reverses the receipt's own
+// effects. The payment_records / invoice_payments rows are kept so unvoid can
+// re-read them. Throws "PAYMENT_NOT_FOUND".
+async function buildCustomerPaymentLifecycle(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  id: string,
+  action: LifecycleAction,
+  actorUserId: string | null,
+): Promise<{ statements: D1PreparedStatement[]; newState: DocState }> {
+  const existing = await db
+    .prepare("SELECT * FROM payment_records WHERE id = ?")
+    .bind(id)
+    .first<PaymentRow>();
+  if (!existing) throw new Error("PAYMENT_NOT_FOUND");
+  const allocs = parseAllocations(existing.allocations);
+
+  const lc = await applyLifecycle(db, {
+    orgId,
+    baseSourceTypes: ["payment"],
+    voidSourceType: "payment_void",
+    sourceId: id,
+    action,
+    actorUserId,
+    descriptionTag: `${action.toUpperCase()} · ${existing.receiptNumber ?? id}`,
+  });
+  const statements: D1PreparedStatement[] = [...lc.statements];
+
+  const deactivated = lc.prevState === "ACTIVE" && lc.newState !== "ACTIVE";
+  const reactivated = lc.prevState !== "ACTIVE" && lc.newState === "ACTIVE";
+  if (deactivated || reactivated) {
+    let totalAllocSen = 0;
+    for (const a of allocs) {
+      if (!a.invoiceId || !a.amount) continue;
+      totalAllocSen += a.amount;
+      if (deactivated) {
+        statements.push(
+          db
+            .prepare(
+              `UPDATE invoices
+                 SET paidAmount = GREATEST(0, paidAmount - ?),
+                     status = CASE
+                       WHEN paidAmount - ? <= 0 THEN 'SENT'
+                       WHEN paidAmount - ? < totalSen THEN 'PARTIAL_PAID'
+                       ELSE 'PAID'
+                     END
+               WHERE id = ?`,
+            )
+            .bind(a.amount, a.amount, a.amount, a.invoiceId),
+        );
+      } else {
+        statements.push(
+          db
+            .prepare(
+              `UPDATE invoices
+                 SET paidAmount = paidAmount + ?,
+                     status = CASE
+                       WHEN paidAmount + ? >= totalSen THEN 'PAID'
+                       WHEN paidAmount + ? > 0 THEN 'PARTIAL_PAID'
+                       ELSE status
+                     END
+               WHERE id = ?`,
+            )
+            .bind(a.amount, a.amount, a.amount, a.invoiceId),
+        );
+      }
+    }
+    if (totalAllocSen > 0 && existing.customerId) {
+      statements.push(
+        db
+          .prepare(
+            deactivated
+              ? `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`
+              : `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
+          )
+          .bind(totalAllocSen, existing.customerId),
+      );
+    }
+  }
+  return { statements, newState: lc.newState };
+}
 
 function parseAllocations(raw: string | null): Allocation[] {
   if (!raw) return [];
@@ -128,7 +217,23 @@ app.get("/", async (c) => {
     .bind(...params)
     .all<PaymentRow>();
 
-  const data = (res.results ?? []).map(rowToPayment);
+  const rows = res.results ?? [];
+  // Attach lifecycle state (ACTIVE unless void/deleted) so the list can dim
+  // voided receipts and drop them from the active totals.
+  const lcMap = new Map<string, string>();
+  if (rows.length > 0) {
+    const ph = rows.map(() => "?").join(",");
+    const lcRes = await c.var.DB.prepare(
+      `SELECT sourceId, state FROM document_lifecycle WHERE sourceType = 'payment' AND orgId = ? AND sourceId IN (${ph})`,
+    )
+      .bind(orgId, ...rows.map((r) => r.id))
+      .all<{ sourceId: string; state: string }>();
+    for (const r of lcRes.results ?? []) lcMap.set(r.sourceId, r.state);
+  }
+  const data = rows.map((r) => ({
+    ...rowToPayment(r),
+    lifecycleState: lcMap.get(r.id) ?? "ACTIVE",
+  }));
   return c.json({ success: true, data, total: data.length });
 });
 
@@ -794,6 +899,49 @@ app.put("/:id", async (c) => {
       return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
     }
     return c.json({ success: false, error: msg || "Internal error updating payment" }, 500);
+  }
+});
+
+// Void / delete / unvoid a receipt — reverses the GL, reopens the paid
+// invoices, and restores the customer's outstanding A/R (see
+// buildCustomerPaymentLifecycle). The payment row is kept so it can be unvoided.
+app.post("/:id/lifecycle", async (c) => {
+  const denied = await requirePermission(c, "payments", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  let action: LifecycleAction;
+  try {
+    action = ((await c.req.json()) as { action: string }).action as LifecycleAction;
+  } catch {
+    return c.json({ success: false, error: "Invalid body" }, 400);
+  }
+  if (!["void", "delete", "unvoid"].includes(action)) {
+    return c.json(
+      { success: false, error: "action must be void|delete|unvoid" },
+      400,
+    );
+  }
+  try {
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get(
+        "userId",
+      ) ?? null;
+    const { statements, newState } = await buildCustomerPaymentLifecycle(
+      c.var.DB,
+      orgId,
+      id,
+      action,
+      actorUserId,
+    );
+    await c.var.DB.batch(statements);
+    return c.json({ success: true, data: { state: newState } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "PAYMENT_NOT_FOUND") {
+      return c.json({ success: false, error: `No payment found for ${id}` }, 404);
+    }
+    return c.json({ success: false, error: msg }, 400);
   }
 });
 

@@ -34,6 +34,56 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-23-005 — Customer DO/Invoice emails NEVER fired for delivered orders (FE-only trigger bypassed by the real delivery paths) — the main customer's 128 delivered DOs emailed nothing, including same-day
+
+🟢 **Fixed** · `delivery` / `customer-notify` / `email` · caught by owner on prod (customers report no invoice)
+
+**Symptom:** customers (incl. Houzs Century, which HAS a valid email `operation@houzscentury.com` on file) report never receiving invoice emails. Confirmed on prod: Houzs has **128 DELIVERED/INVOICED DOs and ZERO have `deliveredEmailAt` OR `dispatchEmailAt` stamped** — including DOs delivered TODAY (2026-06-23) and 2026-06-19, well after the customer-notify feature shipped 2026-06-11. So: not spam, not a missing email, not historical — the notify TRIGGER never ran on these DOs' path.
+
+**Root cause:** the customer-notify was **front-end-scattered** — `notifyCustomersAfterTransition` (`src/pages/delivery/index.tsx:2704`) fired only from a few React buttons. The single BACKEND transition handler `applyDeliveryOrderUpdate` (`delivery-orders.ts:5282`, which BOTH the office PUT and the driver-QR scan funnel through) ran every cascade but NEVER called `queueDoCustomerNotice`. The dominant Houzs path — the **"Generate Invoice" button** (`confirmGenerateInvoice` → POST /api/invoices → flips DO to INVOICED at `invoices.ts:1173`) — had NO notify on FE or BE; the driver-sticker QR dispatch + stale-list bulk also bypass the FE notify. The idempotency stamp lives INSIDE `queueDoCustomerNotice`, so a path that never reaches it leaves the row permanently blank.
+
+**Fix:** moved the trigger to the BACKEND choke-point so EVERY path emails the customer. New `fireCustomerNoticeBestEffort(c, doId, kind)` (delivery-orders.ts) calls the existing `queueDoCustomerNotice` via `executionCtx.waitUntil` (fire-and-forget — never blocks/rolls back the transition). Wired into (1) `applyDeliveryOrderUpdate` (DISPATCHED on →LOADED, DELIVERED on →DELIVERED/INVOICED) — covers office PUT, driver QR, PL-first/bulk; and (2) `invoices.ts` after the status='INVOICED' UPDATE — covers the Generate-Invoice button. **No double-send:** the atomic claim `UPDATE … SET deliveredEmailAt=now WHERE id=? AND col IS NULL` is the sole gate — whichever caller (BE choke-point, the kept FE branded-PDF trigger, or the QR in-loop call) wins, the rest no-op → exactly one email. The no-recipient case still skips silently. **The 128 historical null-stamped DOs are NOT mass-emailed** by this change (they only send on a future transition; a deliberate backfill needs owner sign-off). +4 regression tests (94/94 incl. delivery/QR suites). build:strict clean.
+
+**Lesson:** a customer-facing side-effect (email) must fire from the BACKEND transition choke-point, never from FE buttons only — FE triggers are path-dependent and silently bypassed by every other route to the same state.
+
+---
+
+## BUG-2026-06-23-004 — Batch "Apply Completion" on the dept Production Sheet made the just-completed rows VANISH (they were saved, but the default hide-COMPLETED filter dropped them — looked like the completion didn't stick)
+
+🟢 **Fixed** · `production-orders` / `ui-frontend` · caught by owner on prod
+
+**Symptom:** on a dept Production Sheet (`src/pages/production/index.tsx`), the operator ticks several rows, clicks **Apply Completion**, and the rows DISAPPEAR. It looks like the batch completion didn't take — yet a **single-cell** completion edit on one row leaves that row visible, and the **Folder** (`production/folder-detail.tsx`) shows the completed rows fine. "Single works, multi-select doesn't."
+
+**Root cause (NOT a save failure — a display filter):** the batch handler flips the selected job cards' status → COMPLETED via the optimistic `setOrders` (~L7055). The sheet **default-hides COMPLETED rows** via the DataGrid Status value-filter (`defaultExcludedValues={status:["COMPLETED","TRANSFERRED"]}`, applied on the dept `<DataGrid>`). So the moment a row flips to COMPLETED it filters ITSELF out of the on-screen grid. The completion was saved (DB + Folder confirm it); it just left the active list. A single-cell completion edit only **stamps the date** through the same `patchJobCard` path but the operator is still looking at the row they clicked, so the disappearance is less jarring — and the Folder has no hide-filter, so it always shows them. (The list fetch also carries `&excludeCompleted=true`, but that filters at the **PO** level and keeps any PO completed within 35 days, so it is NOT what hides a freshly-completed dept JC — the client-side Status value-filter is.)
+
+**Prior attempt (NOT merged — it broke the selection):** an earlier fix re-revealed the rows by bumping `gridResetNonce` (part of the DataGrid `key`) to force the grid to re-read its filter state. That **remounted** the grid → wiped the uncontrolled checkbox selection (`selectedKeys` useState inside DataGrid) → cleared `selectedDeptRows` → the `BatchActionToolbar` self-hid → **broke the owner's explicitly-designed chaining workflow** (Apply Completion → Apply PIC → Save to Folder on the SAME selection; see the "Wei Siang 2026-05-13" comment). Reverted before merge.
+
+**Fix (option A — no-remount force-show allowlist):**
+  1. **DataGrid** (`src/components/ui/data-grid.tsx`): new `forceShowKeys?: ReadonlySet<string>` prop. In `filteredData`, a row whose `keyField` value is in the set is EXEMPT from the per-column TEXT and VALUE filters (so the hide-COMPLETED Status filter can't drop it) — global SEARCH is intentionally still honoured (typing a query is an explicit operator narrowing). Defaults to a shared stable empty Set (`EMPTY_FORCE_SHOW`) so omitting it doesn't bust the memo.
+  2. **Production sheet** (`src/pages/production/index.tsx`): new component state `forceShowCompletedIds: ReadonlySet<string>` of the just-completed `DeptRow` ids (`${po.id}:${jc.id}`), passed as `forceShowKeys={forceShowCompletedIds}` on the dept `<DataGrid>`. **Apply Completion** adds the completed rows' ids to it (and removes any rows whose date was cleared back to WAITING). It lives in component state only (NOT sessionStorage), so the rows stay visible for the session and hide again on a full page reload (the active list stays clean long-term); it also resets on a dept-tab switch.
+  3. **CRITICAL — no remount:** `forceShowCompletedIds` is NOT part of the grid `key` (`dept-grid-${activeDept.code}-${gridResetNonce}` is unchanged), and Apply Completion does NOT clear `selectedDeptRows` or bump `gridResetNonce`. So the checkbox selection + BatchActionToolbar + Apply-Completion→Apply-PIC→Save-to-Folder chaining all SURVIVE. The existing `mergeFreshPOs`/`recentlyPatchedRef` read-back is unchanged and does an in-place PO replace (the fresh JC is COMPLETED with today's `completedDate`), so it never reverts the reveal.
+  4. **Scope:** only **Apply Completion** populates the allowlist. **Apply Due Date** / **Apply PIC** don't change status → don't hide → left untouched. The success toast now reads "Marked N job cards Completed — saved & kept visible (they hide on next reload; also in the Folder)."
+
+**Regression test:** `tests/production-batch-completion-reveal.test.mjs` (source-structural, mirrors `production-overdue-counts.test.mjs`) locks: the `forceShowKeys` prop + its text/value-filter exemption + search-NOT-exempted; the dept grid wiring; that the grid `key` does NOT include `forceShowCompletedIds` (no remount); that Apply Completion does NOT clear the selection or bump `gridResetNonce` and never reintroduces a `revealCompletedRows`/remount path; and the tab-change reset. Added to `npm test`. build:strict clean (only the 3 known jsbarcode/@zxing sandbox errors).
+
+**Verify live:** open a dept Production Sheet, tick 2-3 live rows, click **Apply Completion** with today's date. The rows STAY on screen showing status COMPLETED (cyan) with the date stamped — and the checkboxes are STILL ticked + the blue batch toolbar still shows the same count. Immediately click **Apply PIC** (or **Save to Folder**) and confirm it acts on the same rows (chaining works). Hard-refresh the page → the completed rows are gone from the active list (clean), and they appear in the Folder. **Lesson:** to re-reveal filtered-out rows, exempt them from the grid's filter via a parent-owned allowlist — never via the grid `key`, which remounts and silently wipes uncontrolled in-grid state (selection).
+
+---
+
+## BUG-2026-06-23-003 — Department Performance "Print Report" ignored the on-screen filters (printed a single-day, all-department dump instead of the filtered view)
+
+🟢 **Fixed** · `ui-frontend` / `hr-labor` · caught by owner on prod
+
+**Symptom:** on the Employees → **Department Performance** tab, the operator filters to e.g. Framing / SOFA / 15–18 Jun, clicks **Print Report**, and gets the WRONG report — only the "To" day (18 Jun), ALL departments, ALL categories. The date RANGE, Department, and Category selections are ignored.
+
+**Root cause:** `src/pages/employees.tsx`, `DepartmentPerformanceTab` — the "Print Report" button did `window.open(\`/api/reports/efficiency?date=${dateTo||today}\`)`, which is the generic **Daily Efficiency Report** (single date, all depts, all cats — the same view the noon cron mails out). It was never wired to print the tab's own filtered data. EVERY other tab in this file prints the on-screen filtered view via `printReport()` from `@/lib/print-report`; this one was the odd one out.
+
+**Fix:** rewired "Print Report" to a `handlePrint` that calls `printReport({ title: "Department Performance", filterSummary: \`${dateRangeLabel(dateFrom,dateTo)} · ${deptLabel} · ${catLabel}\`, cards, sections })` over the component's already-filtered `totals` + `daily` state (the tab fetches `/api/department-performance?from&to&departmentCode&category`). Cards = the 4 on-screen KPIs (Workers / Total Working Hrs / Total Production Hrs / Avg Efficiency); columns = the on-screen table (Date / Working Hrs / Production Hrs / Efficiency %). The old single-day report was KEPT as a separate secondary button **"Daily Efficiency (A4)"** (the `/api/reports/efficiency` endpoint is untouched — the cron still uses it). Mirrors the "Department Labor" tab's print pattern.
+
+**Verified live (prod):** clicking Print Report now opens a report titled "Department Performance" (with the Workers/Efficiency cards), NOT the old "Daily Efficiency Report" dump. build:strict clean. **Lesson:** when a page has N tabs each with a "Print Report", they must all print the on-screen FILTERED view — one tab silently opening a different (unfiltered) report is an easy, invisible drift.
+
+---
+
 ## BUG-2026-06-23-002 — /production overdue chip filtered the grid to 0 on browsers holding a stale-SHAPED counts cache (chip read 29, grid showed "No production orders found")
 
 🟢 **Fixed** · `production-orders` / `ui-frontend` / `caching` · caught by owner on prod (hours after -001)

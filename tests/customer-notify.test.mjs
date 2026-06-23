@@ -771,3 +771,113 @@ test("migration 0163 exists and is additive (folded-lowercase column)", () => {
   // statement itself (the header comment may reference the dual-key read).
   assert.match(sql, /dispatchemailat TEXT;/);
 });
+
+// ---------------------------------------------------------------------------
+// BACKEND choke-point trigger (BUG-2026-06-23). The customer notice used to
+// fire ONLY from a handful of React buttons, so any transition driven through
+// a path the FE didn't cover (driver-sticker QR scan, bulk/list action with a
+// stale row set, the "Generate Invoice" button) sent nothing AND stamped
+// nothing — the signature of Houzs's 128 INVOICED DOs with null dispatch/
+// delivered stamps. The fix wires queueDoCustomerNotice into the single
+// backend transition choke-point (applyDeliveryOrderUpdate) PLUS the manual
+// invoice-create path, so every way a DO becomes DISPATCHED/DELIVERED emails
+// the customer regardless of which UI/driver path drove it. These pins assert
+// the wiring can't be silently dropped by a refactor.
+// ---------------------------------------------------------------------------
+
+const invRouteSrc = readFileSync(
+  new URL("../src/api/routes/invoices.ts", import.meta.url),
+  "utf8",
+);
+
+test("backend choke-point: fire-and-forget notice helper is non-blocking + idempotent + error-swallowing", () => {
+  // The helper exists and is exported (invoices.ts imports it).
+  assert.match(
+    doRouteSrc,
+    /export function fireCustomerNoticeBestEffort\(\s*c: Context<Env>,\s*deliveryOrderId: string,\s*kind: "DISPATCHED" \| "DELIVERED",\s*\): void \{/,
+    "fireCustomerNoticeBestEffort must be exported with the DISPATCHED|DELIVERED kind",
+  );
+  // It calls the SAME queueDoCustomerNotice the FE endpoint uses — so the
+  // recipient chain, no-recipient skip, server PDF fallback and the atomic
+  // idempotency claim are all reused (no second, divergent send path).
+  assert.match(
+    doRouteSrc,
+    /const res = await queueDoCustomerNotice\(c, deliveryOrderId, \{ kind \}\);/,
+  );
+  // Non-blocking: queued via executionCtx.waitUntil so it never holds, fails,
+  // or rolls back the already-committed transition.
+  assert.match(doRouteSrc, /if \(ctx\?\.waitUntil\) \{\s*\n\s*ctx\.waitUntil\(run\);/);
+  // Error-swallowing: a notice hiccup must never escape onto the transition's
+  // response path (it warns, the FE trigger / cron stay as backups).
+  assert.match(
+    doRouteSrc,
+    /backend \$\{kind\} customer notice failed/,
+  );
+});
+
+test("backend choke-point: applyDeliveryOrderUpdate fires DISPATCHED on →LOADED and DELIVERED on →DELIVERED/INVOICED", () => {
+  // DISPATCH boundary — any transition that lands the DO in LOADED (covers the
+  // driver QR scan and bulk dispatch, not just the DRAFT→LOADED office click).
+  assert.match(
+    doRouteSrc,
+    /if \(existing\.status !== "LOADED" && nextStatus === "LOADED"\) \{\s*\n\s*fireCustomerNoticeBestEffort\(c, id, "DISPATCHED"\);/,
+  );
+  // DELIVERED boundary — the move into DELIVERED (invoice notice via the
+  // auto-created invoice) AND a direct DELIVERED→INVOICED bare flip
+  // ("Convert to Invoice"), so that path also notifies.
+  assert.match(
+    doRouteSrc,
+    /if \(\s*\n\s*existing\.status !== "DELIVERED" &&\s*\n\s*existing\.status !== "INVOICED" &&\s*\n\s*\(nextStatus === "DELIVERED" \|\| nextStatus === "INVOICED"\)\s*\n\s*\) \{\s*\n\s*fireCustomerNoticeBestEffort\(c, id, "DELIVERED"\);/,
+  );
+  // The firing happens AFTER the batch commits (the transition is durable
+  // before any email work) and inside applyDeliveryOrderUpdate, the single
+  // choke-point the office PUT and the public QR scan both funnel through.
+  const batchIdx = doRouteSrc.indexOf("await c.var.DB.batch(statements);");
+  const dispatchFireIdx = doRouteSrc.indexOf(
+    'fireCustomerNoticeBestEffort(c, id, "DISPATCHED");',
+  );
+  assert.ok(batchIdx > 0 && dispatchFireIdx > batchIdx);
+});
+
+test("backend choke-point: manual 'Generate Invoice' (invoices.ts POST) also fires the DELIVERED notice", () => {
+  // The DELIVERED→INVOICED manual path does NOT pass through
+  // applyDeliveryOrderUpdate, so it imports + calls the same helper itself.
+  assert.match(
+    invRouteSrc,
+    /const \{ ensureDeliveryIncompleteColumn, fireCustomerNoticeBestEffort \} =\s*\n\s*await import\("\.\/delivery-orders"\);/,
+    "invoices.ts must pull fireCustomerNoticeBestEffort via the call-time import (cycle-safe)",
+  );
+  assert.match(
+    invRouteSrc,
+    /fireCustomerNoticeBestEffort\(c, doRow\.id, "DELIVERED"\);/,
+  );
+  // Fired AFTER the batch commits (DO is now INVOICED + the invoice row exists,
+  // so queueDoCustomerNotice can resolve it) and BEFORE the success return.
+  const invBatchIdx = invRouteSrc.indexOf("await c.var.DB.batch(statements);");
+  const invFireIdx = invRouteSrc.indexOf(
+    'fireCustomerNoticeBestEffort(c, doRow.id, "DELIVERED");',
+  );
+  const invReturnIdx = invRouteSrc.indexOf(
+    "return c.json({ success: true, data: created }, 201);",
+  );
+  assert.ok(invBatchIdx > 0 && invFireIdx > invBatchIdx && invReturnIdx > invFireIdx);
+});
+
+test("backend choke-point: double-send is prevented by the SAME idempotency claim the FE trigger uses", () => {
+  // There is exactly ONE atomic claim UPDATE in the route — both the backend
+  // choke-point call and the surviving FE notify endpoint go through
+  // queueDoCustomerNotice, so whichever wins the claim sends once and the
+  // loser's claim matches zero rows and no-ops.
+  assert.equal(
+    count(
+      doRouteSrc,
+      /UPDATE delivery_orders SET \$\{stampCol\} = \? WHERE id = \? AND \$\{stampCol\} IS NULL/g,
+    ),
+    1,
+    "exactly one atomic claim — the single guard both triggers share",
+  );
+  // The FE trigger is NOT removed (it delivers the nicer branded PDF when it
+  // wins the race); the backend call is the catch-all. Both still present.
+  assert.match(pageSrc, /\/notify-customer`,/);
+  assert.match(doRouteSrc, /fireCustomerNoticeBestEffort\(c, id, /);
+});

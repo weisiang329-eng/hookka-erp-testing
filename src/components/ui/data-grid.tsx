@@ -181,6 +181,19 @@ export type DataGridProps<T> = {
   // Columns menu. Idempotent: once applied (tracked per user), the user's
   // later choice to hide it is respected and never re-forced.
   ensureColumns?: string[];
+  // Force-show allowlist (keyField values). Rows whose keyField is in this
+  // set are EXEMPT from the per-column text filters AND the per-column value
+  // filters (the "(All)" checkbox dropdowns, incl. defaultExcludedValues) —
+  // so they stay visible even when their value would normally be hidden. Used
+  // by the Production Sheet so a row the operator just batch-flipped to
+  // COMPLETED stays on screen (showing the completion) for the rest of the
+  // session, instead of silently filtering itself out under the default
+  // "hide COMPLETED" Status filter. Global SEARCH is intentionally still
+  // honoured (typing a query is an explicit narrowing the operator owns), as
+  // is sorting. The set lives in PARENT state and changing it does NOT remount
+  // the grid, so the (uncontrolled) checkbox selection / batch toolbar survive.
+  // Omit / empty set = no exemption (current behaviour).
+  forceShowKeys?: ReadonlySet<string>;
   // Render-only row cap. When set, the grid renders at most this many rows
   // (post-filter, post-sort) on first paint, and shows a "Showing X of Y · Show
   // all Y" footer button to lift the cap. Filter / sort / search / select-all
@@ -1473,6 +1486,9 @@ function DefaultCellRenderer<T>({
 // module scope so the destructure default keeps the same array reference every
 // render (a fresh `[]` literal would bust the filteredData useMemo each time).
 const EMPTY_SEARCH_KEYS: string[] = [];
+// Shared empty Set so an omitted `forceShowKeys` keeps a stable reference
+// across renders (a fresh `new Set()` would bust the filteredData useMemo).
+const EMPTY_FORCE_SHOW: ReadonlySet<string> = new Set();
 
 export function DataGrid<T extends Record<string, any>>({
   columns,
@@ -1502,6 +1518,7 @@ export function DataGrid<T extends Record<string, any>>({
   defaultExcludedValues,
   valueFilterKey,
   ensureColumns,
+  forceShowKeys = EMPTY_FORCE_SHOW,
   defaultRowCap,
 }: DataGridProps<T>) {
   // ── Column visibility & order ──
@@ -2191,10 +2208,20 @@ export function DataGrid<T extends Record<string, any>>({
       });
     }
 
+    // forceShowKeys exemption (see prop doc): a row whose keyField is in the
+    // allowlist bypasses the per-column TEXT and VALUE filters below, so it
+    // stays visible even when its value (e.g. status COMPLETED) would normally
+    // be hidden by the default-hide filter. Global search above is intentionally
+    // NOT exempted — that's an explicit operator narrowing. No-op when empty.
+    const hasForceShow = forceShowKeys.size > 0;
+    const isForceShown = (row: T) =>
+      hasForceShow && forceShowKeys.has(String(getNestedValue(row, keyField)));
+
     // Per-column text filters
     const activeFilters = Object.entries(columnFilters).filter(([, v]) => v);
     if (activeFilters.length > 0) {
       result = result.filter(row =>
+        isForceShown(row) ||
         activeFilters.every(([key, val]) => matchesFilter(getNestedValue(row, key), val))
       );
     }
@@ -2205,6 +2232,7 @@ export function DataGrid<T extends Record<string, any>>({
     const activeValueFilters = Object.entries(columnValueFilters);
     if (activeValueFilters.length > 0) {
       result = result.filter(row =>
+        isForceShown(row) ||
         activeValueFilters.every(([key, allowedValues]) => {
           const col = columns.find((c) => c.key === key);
           const v = col?.filterAccessor
@@ -2216,7 +2244,7 @@ export function DataGrid<T extends Record<string, any>>({
     }
 
     return result;
-  }, [data, deferredSearch, columnFilters, columnValueFilters, visibleColumns, alwaysSearchKeys]);
+  }, [data, deferredSearch, columnFilters, columnValueFilters, visibleColumns, alwaysSearchKeys, forceShowKeys, keyField, columns]);
 
   // All unique group values (for group filter dropdown)
   const allGroupValues = useMemo(() => {

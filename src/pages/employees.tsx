@@ -5833,6 +5833,114 @@ function DepartmentPerformanceTab({
     });
   }, []);
 
+  // Print Report — prints EXACTLY this tab's on-screen filtered view (date
+  // range + department + category), NOT the generic single-day all-departments
+  // Daily Efficiency Report the old button opened. Mirrors every other report
+  // tab on this page (Department Labor / Employee Performance / Efficiency
+  // Overview): the four KPI cards from `totals` + the Daily Breakdown table.
+  const handlePrint = useCallback(() => {
+    const deptLabel =
+      orderedDepts.find((d) => d.code === departmentCode)?.name ??
+      (departmentCode || "All departments");
+    const catLabel = category
+      ? category[0] + category.slice(1).toLowerCase()
+      : "All categories";
+    const cards: PrintCard[] = [
+      { label: "Workers", value: String(totals?.workerCount ?? 0) },
+      {
+        label: "Total Working Hrs",
+        value: totals && totals.workingMinutes > 0 ? formatHours(totals.workingMinutes) : "—",
+      },
+      {
+        label: "Total Production Hrs",
+        value: totals && totals.productionMinutes > 0 ? formatHours(totals.productionMinutes) : "—",
+      },
+      {
+        label: "Avg Efficiency",
+        value: avgEff !== null ? `${avgEff}%` : "—",
+        color:
+          avgEff !== null
+            ? Number(avgEff) >= 80
+              ? "#4F7C3A"
+              : Number(avgEff) >= 60
+                ? "#9C6F1E"
+                : "#9A3A2D"
+            : undefined,
+      },
+    ];
+    // Flatten each day + its per-worker drill-down into one printable table,
+    // mirroring the on-screen Daily Breakdown where every day expands to show
+    // its workers. Day rows print bold; worker rows are indented beneath them.
+    type DeptPerfPrintRow = {
+      isWorker: boolean;
+      label: string;
+      workingMinutes: number;
+      productionMinutes: number;
+      efficiencyPct: number;
+    };
+    const printRows: DeptPerfPrintRow[] = [];
+    for (const d of daily) {
+      printRows.push({
+        isWorker: false,
+        label: formatDateDMY(d.date),
+        workingMinutes: d.workingMinutes,
+        productionMinutes: d.productionMinutes,
+        efficiencyPct: d.efficiencyPct,
+      });
+      for (const w of d.workers ?? []) {
+        printRows.push({
+          isWorker: true,
+          label: w.workerName,
+          workingMinutes: w.workingMinutes,
+          productionMinutes: w.productionMinutes,
+          efficiencyPct: w.efficiencyPct,
+        });
+      }
+    }
+    const hrsCell = (mins: number, bold: boolean) =>
+      mins > 0 ? { text: formatHours(mins), bold } : { text: "—", bold };
+    const columns: PrintColumn[] = [
+      {
+        header: "Date / Worker",
+        value: (r) => {
+          const row = r as DeptPerfPrintRow;
+          return row.isWorker
+            ? { text: `    ↳ ${row.label}` }
+            : { text: row.label, bold: true };
+        },
+      },
+      {
+        header: "Working Hrs",
+        align: "right",
+        value: (r) => hrsCell((r as DeptPerfPrintRow).workingMinutes, !(r as DeptPerfPrintRow).isWorker),
+      },
+      {
+        header: "Production Hrs",
+        align: "right",
+        value: (r) => hrsCell((r as DeptPerfPrintRow).productionMinutes, !(r as DeptPerfPrintRow).isWorker),
+      },
+      {
+        header: "Efficiency %",
+        align: "right",
+        value: (r) => {
+          const row = r as DeptPerfPrintRow;
+          const bold = !row.isWorker;
+          if (row.workingMinutes <= 0) return { text: "—", bold };
+          const pct = row.efficiencyPct;
+          const color = pct >= 80 ? "#4F7C3A" : pct >= 60 ? "#9C6F1E" : "#9A3A2D";
+          return { text: `${pct.toFixed(1)}%`, color, align: "right", bold };
+        },
+      },
+    ];
+    printReport({
+      title: "Department Performance",
+      filterSummary: `${dateRangeLabel(dateFrom, dateTo)} · ${deptLabel} · ${catLabel}`,
+      orientation: "portrait",
+      cards,
+      sections: [{ columns, rows: printRows }],
+    });
+  }, [orderedDepts, departmentCode, category, totals, avgEff, dateFrom, dateTo, daily]);
+
   return (
     <div className="space-y-4">
       {/* Filters */}
@@ -5885,11 +5993,24 @@ function DepartmentPerformanceTab({
               />
             </div>
             <div className="ml-auto flex items-center gap-2">
-              {/* Daily Efficiency Report — A4 print layout. Opens in a new
-                  tab where the operator can hit Cmd-P / Print to save as
-                  PDF or send to paper. Defaults to yesterday because the
-                  cron mails out yesterday's report at 12pm SGT and the
-                  button gives operator the same view on demand. */}
+              {/* Primary Print Report — prints EXACTLY this tab's filtered
+                  view (date range + department + category): the 4 KPI cards +
+                  the Daily Breakdown table, consistent with every other report
+                  tab. Was wrongly wired to /api/reports/efficiency, which only
+                  shows ONE day, ALL departments, ALL categories. */}
+              <Button
+                variant="default"
+                size="sm"
+                onClick={handlePrint}
+                title="Print this tab's filtered Department Performance view (date range + department + category)"
+              >
+                <Printer className="h-4 w-4 mr-1" />
+                Print Report
+              </Button>
+              {/* Secondary — the generic single-day, all-departments Daily
+                  Efficiency Report (the same A4 view the noon cron mails out).
+                  Kept as a separate link because it ignores this tab's filters
+                  by design; uses the "To" date. */}
               <Button
                 variant="outline"
                 size="sm"
@@ -5901,10 +6022,10 @@ function DepartmentPerformanceTab({
                     "noopener",
                   );
                 }}
-                title="Open A4-printable efficiency report in a new tab"
+                title="Open the generic single-day, all-departments Daily Efficiency Report (A4) in a new tab"
               >
                 <Printer className="h-4 w-4 mr-1" />
-                Print Report
+                Daily Efficiency (A4)
               </Button>
             </div>
           </div>
@@ -10877,15 +10998,15 @@ export default function EmployeesPage() {
           the 8 multi-word labels stay on ONE line. Was text-sm + px-5 py-3
           which wrapped "Working Hours" / "Labor Cost" / "Efficiency
           Overview" etc. into two lines on a 1366-px viewport. Now
-          text-xs + px-3.5 py-2.5 fits everything single-line. Smaller
-          icons (h-3.5 w-3.5) match the new font scale. */}
+          text-[11px] + px-2.5 py-2 + gap-1 fits all 9 tabs single-line
+          with room to spare (owner 2026-06-23: no scroll, smaller font). */}
       <div className="border-b border-[#E2DDD8] overflow-x-auto">
         <nav className="flex gap-0 -mb-px">
           {TABS.map((tab) => (
             <button
               key={tab.key}
               onClick={() => setActiveTab(tab.key)}
-              className={`flex items-center gap-1.5 px-3.5 py-2.5 text-xs font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+              className={`flex items-center gap-1 px-2.5 py-2 text-[11px] font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
                 activeTab === tab.key
                   ? "border-[#6B5C32] text-[#6B5C32]"
                   : "border-transparent text-[#6B7280] hover:text-[#1F1D1B] hover:border-[#E2DDD8]"

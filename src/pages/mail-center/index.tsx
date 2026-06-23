@@ -898,10 +898,6 @@ export default function MailCenterPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   // Label manager dialog (create / rename / recolour / delete catalogue labels).
   const [labelManagerOpen, setLabelManagerOpen] = useState(false);
-  // "Sync now" — disabled + spinning while an on-demand inbound pull is in
-  // flight / cooling down (~60s), so repeated clicks can't queue a burst of
-  // GitHub Actions runs.
-  const [syncing, setSyncing] = useState(false);
 
   // Map folder → the server status param. Inbox/Archive/Trash filter
   // server-side; Starred/Sent/All fetch the full (non-trashed) set and narrow
@@ -1356,47 +1352,6 @@ export default function MailCenterPage() {
     refresh();
   }
 
-  // Trigger an immediate inbound-mail pull instead of waiting for the 10-minute
-  // timer. The backend fires the mail-sync GitHub Actions workflow; new mail
-  // lands in the inbox ~30–60s later, so we spin + disable for 60s and re-fetch
-  // the thread list once the run has had time to complete.
-  async function syncNow() {
-    if (syncing) return;
-    setSyncing(true);
-    try {
-      const res = await fetch("/api/mail-center/sync-now", {
-        method: "POST",
-        headers: csrfHeaders(),
-        credentials: "include",
-      });
-      if (res.ok) {
-        toast.success("Syncing… new mail usually arrives in ~30–60s");
-        // Re-read the inbox once the run has had time to land new mail.
-        window.setTimeout(() => refresh(), 60000);
-      } else {
-        // Cool down anyway so a failed click can't immediately re-spam.
-        const data = (await res.json().catch(() => ({}))) as {
-          error?: string;
-          code?: string;
-        };
-        if (data.code === "TOKEN_READONLY") {
-          toast.error(
-            "Sync-now needs the GitHub token upgraded to Actions: write — ask your developer.",
-          );
-        } else if (res.status === 429 || data.code === "RATE_LIMITED") {
-          toast.info("Just synced — give it a moment.");
-        } else {
-          toast.error(data.error || "Couldn't start a sync. Please try again.");
-        }
-      }
-    } catch {
-      toast.error("Couldn't start a sync. Please try again.");
-    }
-    // Keep the button disabled + spinning for ~60s regardless of outcome so it
-    // can't be hammered (the backend also holds a 45s lock).
-    window.setTimeout(() => setSyncing(false), 60000);
-  }
-
   // SUPER_ADMIN: provision a missing canonical department mailbox (support@/
   // finance@/hr@) as a SHARED address (assignedDept set, no user). Confirmed
   // first ("no naked edits"), then created via the existing POST /addresses.
@@ -1436,17 +1391,6 @@ export default function MailCenterPage() {
         </div>
         <div className="flex items-center gap-2">
           <ViewSettingsMenu prefs={prefs} />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={syncNow}
-            disabled={syncing}
-            className="gap-1.5"
-            title="Pull new mail now instead of waiting for the timer."
-          >
-            <RefreshCw className={cn("h-4 w-4", syncing && "animate-spin")} />
-            Sync now
-          </Button>
           <Button
             variant="outline"
             size="sm"

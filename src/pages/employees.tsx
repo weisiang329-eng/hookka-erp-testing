@@ -5833,6 +5833,80 @@ function DepartmentPerformanceTab({
     });
   }, []);
 
+  // Print Report — prints EXACTLY this tab's on-screen filtered view (date
+  // range + department + category), NOT the generic single-day all-departments
+  // Daily Efficiency Report the old button opened. Mirrors every other report
+  // tab on this page (Department Labor / Employee Performance / Efficiency
+  // Overview): the four KPI cards from `totals` + the Daily Breakdown table.
+  const handlePrint = useCallback(() => {
+    const deptLabel =
+      orderedDepts.find((d) => d.code === departmentCode)?.name ??
+      (departmentCode || "All departments");
+    const catLabel = category
+      ? category[0] + category.slice(1).toLowerCase()
+      : "All categories";
+    const cards: PrintCard[] = [
+      { label: "Workers", value: String(totals?.workerCount ?? 0) },
+      {
+        label: "Total Working Hrs",
+        value: totals && totals.workingMinutes > 0 ? formatHours(totals.workingMinutes) : "—",
+      },
+      {
+        label: "Total Production Hrs",
+        value: totals && totals.productionMinutes > 0 ? formatHours(totals.productionMinutes) : "—",
+      },
+      {
+        label: "Avg Efficiency",
+        value: avgEff !== null ? `${avgEff}%` : "—",
+        color:
+          avgEff !== null
+            ? Number(avgEff) >= 80
+              ? "#4F7C3A"
+              : Number(avgEff) >= 60
+                ? "#9C6F1E"
+                : "#9A3A2D"
+            : undefined,
+      },
+    ];
+    const columns: PrintColumn[] = [
+      { header: "Date", value: (r) => formatDateDMY((r as DeptPerfDailyRow).date) },
+      {
+        header: "Working Hrs",
+        align: "right",
+        value: (r) => {
+          const row = r as DeptPerfDailyRow;
+          return row.workingMinutes > 0 ? formatHours(row.workingMinutes) : "—";
+        },
+      },
+      {
+        header: "Production Hrs",
+        align: "right",
+        value: (r) => {
+          const row = r as DeptPerfDailyRow;
+          return row.productionMinutes > 0 ? formatHours(row.productionMinutes) : "—";
+        },
+      },
+      {
+        header: "Efficiency %",
+        align: "right",
+        value: (r) => {
+          const row = r as DeptPerfDailyRow;
+          if (row.workingMinutes <= 0) return "—";
+          const pct = row.efficiencyPct;
+          const color = pct >= 80 ? "#4F7C3A" : pct >= 60 ? "#9C6F1E" : "#9A3A2D";
+          return { text: `${pct.toFixed(1)}%`, color, align: "right" };
+        },
+      },
+    ];
+    printReport({
+      title: "Department Performance",
+      filterSummary: `${dateRangeLabel(dateFrom, dateTo)} · ${deptLabel} · ${catLabel}`,
+      orientation: "portrait",
+      cards,
+      sections: [{ columns, rows: daily }],
+    });
+  }, [orderedDepts, departmentCode, category, totals, avgEff, dateFrom, dateTo, daily]);
+
   return (
     <div className="space-y-4">
       {/* Filters */}
@@ -5885,11 +5959,24 @@ function DepartmentPerformanceTab({
               />
             </div>
             <div className="ml-auto flex items-center gap-2">
-              {/* Daily Efficiency Report — A4 print layout. Opens in a new
-                  tab where the operator can hit Cmd-P / Print to save as
-                  PDF or send to paper. Defaults to yesterday because the
-                  cron mails out yesterday's report at 12pm SGT and the
-                  button gives operator the same view on demand. */}
+              {/* Primary Print Report — prints EXACTLY this tab's filtered
+                  view (date range + department + category): the 4 KPI cards +
+                  the Daily Breakdown table, consistent with every other report
+                  tab. Was wrongly wired to /api/reports/efficiency, which only
+                  shows ONE day, ALL departments, ALL categories. */}
+              <Button
+                variant="default"
+                size="sm"
+                onClick={handlePrint}
+                title="Print this tab's filtered Department Performance view (date range + department + category)"
+              >
+                <Printer className="h-4 w-4 mr-1" />
+                Print Report
+              </Button>
+              {/* Secondary — the generic single-day, all-departments Daily
+                  Efficiency Report (the same A4 view the noon cron mails out).
+                  Kept as a separate link because it ignores this tab's filters
+                  by design; uses the "To" date. */}
               <Button
                 variant="outline"
                 size="sm"
@@ -5901,10 +5988,10 @@ function DepartmentPerformanceTab({
                     "noopener",
                   );
                 }}
-                title="Open A4-printable efficiency report in a new tab"
+                title="Open the generic single-day, all-departments Daily Efficiency Report (A4) in a new tab"
               >
                 <Printer className="h-4 w-4 mr-1" />
-                Print Report
+                Daily Efficiency (A4)
               </Button>
             </div>
           </div>

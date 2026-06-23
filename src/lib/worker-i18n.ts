@@ -903,6 +903,19 @@ const dict: Dict = {
     zh: '新',
     my: 'အသစ်',
   },
+  // Popup that demands the worker tap to acknowledge a new announcement.
+  'home.announcementPopupTitle': {
+    en: 'New Announcement',
+    ms: 'Pengumuman Baru',
+    zh: '新公告',
+    my: 'ကြေညာချက် အသစ်',
+  },
+  'home.announcementGotIt': {
+    en: 'Got it',
+    ms: 'Faham',
+    zh: '知道了',
+    my: 'သဘောပေါက်ပါပြီ',
+  },
 
   // ---- Location prompt (Feature B — cut "No GPS" punches) ----
   'home.locationNeededTitle': {

@@ -206,6 +206,38 @@ function writeSeenAnnouncements(ids: Set<string>): void {
   }
 }
 
+// ---------- announcements "acknowledged" tracking (localStorage) ----------
+// A passive banner is too easy to miss, so on app-open we POP any active
+// announcement this device has NOT yet acknowledged as a modal the worker must
+// tap to dismiss. We track acknowledgement separately from the "seen" dot above
+// so the two never interfere: tapping the banner clears the dot but should NOT
+// silently suppress the must-acknowledge popup, and vice-versa. Per-device only
+// (no server table) — a NEW announcement id is absent from this set, so it pops
+// the next time the worker opens the app; an expired one is already filtered out
+// by the GET, so it never reaches the popup.
+const ACK_ANN_KEY = "hookka.worker.ackAnnouncements";
+function readAckAnnouncements(): Set<string> {
+  try {
+    const raw = localStorage.getItem(ACK_ANN_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return new Set(arr.filter((x) => typeof x === "string"));
+    }
+  } catch {
+    /* ignore */
+  }
+  return new Set();
+}
+function writeAckAnnouncements(ids: Set<string>): void {
+  try {
+    // Cap the stored set so it can't grow unbounded over months of posts.
+    const arr = Array.from(ids).slice(-200);
+    localStorage.setItem(ACK_ANN_KEY, JSON.stringify(arr));
+  } catch {
+    /* ignore */
+  }
+}
+
 // ---------- proactive location permission (Feature B) ----------
 // On app open we PROACTIVELY ask for location. This pops the browser
 // permission prompt for a worker who hasn't decided yet (so their next punch
@@ -327,6 +359,11 @@ export default function WorkerHomePage() {
   const [seenAnn, setSeenAnn] = useState<Set<string>>(() =>
     readSeenAnnouncements(),
   );
+  // Which announcement ids this device has tapped "Got it" on (suppresses the
+  // must-acknowledge popup; the re-readable banner below stays regardless).
+  const [ackAnn, setAckAnn] = useState<Set<string>>(() =>
+    readAckAnnouncements(),
+  );
 
   // ---- Location permission (Feature B) ----
   const [locState, setLocState] = useState<LocationState>("unknown");
@@ -443,6 +480,26 @@ export default function WorkerHomePage() {
     });
   }
 
+  // Tap "Got it" on the popup → acknowledge exactly the announcements that were
+  // shown, so the popup never re-pops for them on this device. We also mark them
+  // seen (clears the unread dot) since the worker has now actually read them.
+  // The re-readable banner stays in place for later reference.
+  function acknowledgeAnnouncements(shown: Announcement[]) {
+    const shownIds = shown.map((a) => a.id);
+    setAckAnn((prev) => {
+      const next = new Set(prev);
+      for (const id of shownIds) next.add(id);
+      writeAckAnnouncements(next);
+      return next;
+    });
+    setSeenAnn((prev) => {
+      const next = new Set(prev);
+      for (const id of shownIds) next.add(id);
+      writeSeenAnnouncements(next);
+      return next;
+    });
+  }
+
   // Re-request location after a worker has (hopefully) flipped the browser
   // setting. If they're still denied the browser resolves immediately without
   // a prompt, so this is safe to tap repeatedly.
@@ -515,6 +572,13 @@ export default function WorkerHomePage() {
 
   // Announcements the worker hasn't opened on this device yet → unread dot.
   const unreadAnnouncements = announcements.filter((a) => !seenAnn.has(a.id)).length;
+  // Must-acknowledge popup: every ACTIVE announcement this device hasn't tapped
+  // "Got it" on yet. `announcements` already only contains active (non-expired)
+  // posts — the GET applies the auto-hide/expiry filter — so an expired one
+  // never reaches here. Most recent first (mirrors the banner order). If there
+  // are several, we show them together in one popup and acknowledge them all on
+  // dismiss (kept deliberately simple — no per-item queue).
+  const popupAnnouncements = announcements.filter((a) => !ackAnn.has(a.id));
   // Show the location nudge whenever we did NOT end up granted (denied OR the
   // device couldn't get a fix). Never shown while "unknown" (the probe is still
   // running / the worker hasn't answered the prompt yet) so it can't flash.
@@ -522,6 +586,59 @@ export default function WorkerHomePage() {
 
   return (
     <div className="space-y-4 pt-2">
+      {/* Must-acknowledge announcement popup. A passive banner is too easy to
+          miss, so any ACTIVE announcement this device hasn't tapped "Got it" on
+          pops as a centered modal the moment the worker lands on the home screen
+          (past PIN login). It is fully dismissable — tapping "Got it" records the
+          shown ids in localStorage so it never re-pops here, while the banner
+          below stays for re-reading. It only renders once `data` has loaded, so
+          it can never overlay the login / clock-in flow. A NEW post (new id) is
+          absent from the ack set, so it pops on the next open. */}
+      {popupAnnouncements.length > 0 && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-sm overflow-hidden rounded-2xl bg-white shadow-xl">
+            <div className="flex items-center gap-2 bg-[#6B5C32] px-4 py-3 text-white">
+              <Megaphone className="h-5 w-5 shrink-0" />
+              <span className="text-base font-bold">
+                {t("home.announcementPopupTitle")}
+              </span>
+            </div>
+            <div className="max-h-[60vh] divide-y divide-[#F0ECE9] overflow-y-auto px-4 py-1">
+              {popupAnnouncements.map((a) => (
+                <div key={a.id} className="py-3">
+                  <p className="text-base font-bold text-[#1F1D1B] break-words">
+                    {a.title}
+                  </p>
+                  {a.body && (
+                    <p className="mt-1 whitespace-pre-wrap break-words text-sm text-[#5A5550]">
+                      {a.body}
+                    </p>
+                  )}
+                  {a.createdAt && (
+                    <p className="mt-1.5 text-[11px] text-[#9CA3AF]">
+                      {fmtDay(a.createdAt)}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="px-4 pb-4 pt-2">
+              <button
+                type="button"
+                onClick={() => acknowledgeAnnouncements(popupAnnouncements)}
+                className="h-12 w-full rounded-xl bg-[#6B5C32] text-base font-bold text-white transition-colors hover:bg-[#5a4d2a] active:translate-y-[1px]"
+              >
+                {t("home.announcementGotIt")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Greeting */}
       <div>
         <p className="text-sm text-[#5A5550]">{t("home.hello")},</p>

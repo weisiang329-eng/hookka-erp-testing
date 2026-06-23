@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-23-005 — Customer DO/Invoice emails NEVER fired for delivered orders (FE-only trigger bypassed by the real delivery paths) — the main customer's 128 delivered DOs emailed nothing, including same-day
+
+🟢 **Fixed** · `delivery` / `customer-notify` / `email` · caught by owner on prod (customers report no invoice)
+
+**Symptom:** customers (incl. Houzs Century, which HAS a valid email `operation@houzscentury.com` on file) report never receiving invoice emails. Confirmed on prod: Houzs has **128 DELIVERED/INVOICED DOs and ZERO have `deliveredEmailAt` OR `dispatchEmailAt` stamped** — including DOs delivered TODAY (2026-06-23) and 2026-06-19, well after the customer-notify feature shipped 2026-06-11. So: not spam, not a missing email, not historical — the notify TRIGGER never ran on these DOs' path.
+
+**Root cause:** the customer-notify was **front-end-scattered** — `notifyCustomersAfterTransition` (`src/pages/delivery/index.tsx:2704`) fired only from a few React buttons. The single BACKEND transition handler `applyDeliveryOrderUpdate` (`delivery-orders.ts:5282`, which BOTH the office PUT and the driver-QR scan funnel through) ran every cascade but NEVER called `queueDoCustomerNotice`. The dominant Houzs path — the **"Generate Invoice" button** (`confirmGenerateInvoice` → POST /api/invoices → flips DO to INVOICED at `invoices.ts:1173`) — had NO notify on FE or BE; the driver-sticker QR dispatch + stale-list bulk also bypass the FE notify. The idempotency stamp lives INSIDE `queueDoCustomerNotice`, so a path that never reaches it leaves the row permanently blank.
+
+**Fix:** moved the trigger to the BACKEND choke-point so EVERY path emails the customer. New `fireCustomerNoticeBestEffort(c, doId, kind)` (delivery-orders.ts) calls the existing `queueDoCustomerNotice` via `executionCtx.waitUntil` (fire-and-forget — never blocks/rolls back the transition). Wired into (1) `applyDeliveryOrderUpdate` (DISPATCHED on →LOADED, DELIVERED on →DELIVERED/INVOICED) — covers office PUT, driver QR, PL-first/bulk; and (2) `invoices.ts` after the status='INVOICED' UPDATE — covers the Generate-Invoice button. **No double-send:** the atomic claim `UPDATE … SET deliveredEmailAt=now WHERE id=? AND col IS NULL` is the sole gate — whichever caller (BE choke-point, the kept FE branded-PDF trigger, or the QR in-loop call) wins, the rest no-op → exactly one email. The no-recipient case still skips silently. **The 128 historical null-stamped DOs are NOT mass-emailed** by this change (they only send on a future transition; a deliberate backfill needs owner sign-off). +4 regression tests (94/94 incl. delivery/QR suites). build:strict clean.
+
+**Lesson:** a customer-facing side-effect (email) must fire from the BACKEND transition choke-point, never from FE buttons only — FE triggers are path-dependent and silently bypassed by every other route to the same state.
+
+---
+
 ## BUG-2026-06-23-004 — Batch "Apply Completion" on the dept Production Sheet made the just-completed rows VANISH (they were saved, but the default hide-COMPLETED filter dropped them — looked like the completion didn't stick)
 
 🟢 **Fixed** · `production-orders` / `ui-frontend` · caught by owner on prod

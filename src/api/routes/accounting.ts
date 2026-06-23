@@ -2178,7 +2178,7 @@ app.get("/debtor-ledger", async (c) => {
   const [custRes, invRes, payRes, cnRes, dnRes] = await Promise.all([
     c.var.DB.prepare("SELECT id, name, code FROM customers").all<{ id: string; name: string; code: string }>(),
     c.var.DB.prepare(`SELECT customerId, invoiceNo, invoiceDate, totalSen FROM invoices WHERE status NOT IN ('DRAFT','CANCELLED')`).all<{ customerId: string; invoiceNo: string; invoiceDate: string; totalSen: number }>(),
-    c.var.DB.prepare(`SELECT customerId, receiptNumber, date, amount, status FROM payment_records`).all<{ customerId: string; receiptNumber: string; date: string; amount: number; status: string }>(),
+    c.var.DB.prepare(`SELECT customerId, receiptNumber, date, amount, status FROM payment_records WHERE id NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'payment' AND state IN ('VOID','DELETED'))`).all<{ customerId: string; receiptNumber: string; date: string; amount: number; status: string }>(),
     c.var.DB.prepare(`SELECT customerId, noteNumber, date, totalAmount FROM credit_notes WHERE status IN ('APPROVED','POSTED')`).all<{ customerId: string; noteNumber: string; date: string; totalAmount: number }>(),
     c.var.DB.prepare(`SELECT customerId, noteNumber, date, totalAmount FROM debit_notes WHERE status = 'POSTED'`).all<{ customerId: string; noteNumber: string; date: string; totalAmount: number }>(),
   ]);
@@ -2221,7 +2221,7 @@ app.get("/creditor-ledger", async (c) => {
   const [supRes, piRes, payRes, pcnRes] = await Promise.all([
     c.var.DB.prepare("SELECT id, name, code FROM suppliers").all<{ id: string; name: string; code: string | null }>(),
     c.var.DB.prepare(`SELECT supplierId, piNo, invoiceDate, amountSen FROM purchase_invoices WHERE status IN ('APPROVED','PARTIAL_PAID','PAID')`).all<{ supplierId: string; piNo: string; invoiceDate: string; amountSen: number }>(),
-    c.var.DB.prepare(`SELECT supplierId, paymentNo, date, amountSen FROM supplier_payments`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
+    c.var.DB.prepare(`SELECT supplierId, paymentNo, date, amountSen FROM supplier_payments WHERE paymentNo NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'supplier_payment' AND state IN ('VOID','DELETED'))`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
     c.var.DB.prepare(`SELECT supplierId, noteNumber, date, totalAmount FROM purchase_credit_notes WHERE status = 'POSTED'`).all<{ supplierId: string; noteNumber: string; date: string; totalAmount: number }>(),
   ]);
   const byParty = new Map<string, LedgerLine[]>();

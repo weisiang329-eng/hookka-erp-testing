@@ -325,6 +325,7 @@ export default function SupplierPaymentsPage() {
 
   const canPost = !!selectedSupplierId && !!payFrom && totalBankSen > 0 && !posting;
   const [histQ, setHistQ] = useState("");
+  const [detail, setDetail] = useState<PaymentGroup | null>(null);
 
   // Summary across active (non-void) payments — mirrors the customer page cards.
   const activePayments = history.filter((p) => (p.lifecycleState ?? "ACTIVE") === "ACTIVE");
@@ -615,13 +616,13 @@ export default function SupplierPaymentsPage() {
                 </thead>
                 <tbody>
                   {filteredHistory.map((p) => (
-                    <tr key={p.paymentNo} className={`border-t hover:bg-gray-50 ${(p.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? "opacity-50" : ""}`}>
+                    <tr key={p.paymentNo} onClick={() => setDetail(p)} className={`border-t hover:bg-gray-50 cursor-pointer ${(p.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? "opacity-50" : ""}`}>
                       <td className="px-3 py-2 font-mono font-medium">{p.paymentNo}</td>
                       <td className="px-3 py-2">{p.supplierName}</td>
                       <td className="px-3 py-2 text-gray-600">{formatDateDMY(p.date)}</td>
                       <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{formatRM(p.totalBankSen)}</td>
                       <td className="px-3 py-2 text-right text-gray-600">{p.lines?.length ?? 0}</td>
-                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                      <td className="px-3 py-2 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                         <span className="mr-2"><LifecycleBadge state={p.lifecycleState} /></span>
                         <LifecycleActions
                           state={p.lifecycleState}
@@ -638,6 +639,42 @@ export default function SupplierPaymentsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Payment detail — click any row to see which invoices it paid */}
+      {detail && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDetail(null)}>
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b">
+              <h2 className="text-lg font-semibold">Payment {detail.paymentNo}</h2>
+              <button onClick={() => setDetail(null)} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
+            </div>
+            <div className="p-5 space-y-4 text-sm">
+              <div className="grid grid-cols-2 gap-3">
+                <div><p className="text-gray-500">Supplier</p><p className="font-medium">{detail.supplierName}</p></div>
+                <div><p className="text-gray-500">Date</p><p className="font-medium">{formatDateDMY(detail.date)}</p></div>
+                <div><p className="text-gray-500">Total paid</p><p className="font-bold text-[#4F7C3A]">{formatRM(detail.totalBankSen)}</p></div>
+                <div><p className="text-gray-500">Status</p><p><LifecycleBadge state={detail.lifecycleState} /></p></div>
+              </div>
+              <div>
+                <p className="text-gray-500 mb-1">Invoices paid</p>
+                <div className="border rounded-md overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50"><tr><th className="text-left px-3 py-1.5 font-medium text-gray-600">PI No</th><th className="text-right px-3 py-1.5 font-medium text-gray-600">Amount (RM)</th></tr></thead>
+                    <tbody>
+                      {detail.lines.map((l) => (
+                        <tr key={l.purchaseInvoiceId} className="border-t">
+                          <td className="px-3 py-1.5 font-mono">{l.piNo}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums">{formatRM(l.amountSen)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Empty-state hint icon (matches payments.tsx visual vocabulary) */}
       {!selectedSupplierId && history.length === 0 && (

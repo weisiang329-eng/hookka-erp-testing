@@ -4726,6 +4726,7 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
   const [openBills, setOpenBills] = useState<OpenBill[]>([]);
   const [rows, setRows] = useState<Record<string, { amountStr: string; full: boolean }>>({});
   const [history, setHistory] = useState<PaymentGroup[] | null>(null);
+  const [detail, setDetail] = useState<PaymentGroup | null>(null);
   const [posting, setPosting] = useState(false);
 
   const sideParties = parties.filter((p) => p.type === side && p.isActive);
@@ -4883,13 +4884,13 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
             </tr></thead>
             <tbody>
               {history.map((g) => (
-                <tr key={g.paymentNo} className="border-b border-[#F0ECE9]">
+                <tr key={g.paymentNo} onClick={() => setDetail(g)} className="border-b border-[#F0ECE9] cursor-pointer hover:bg-[#FAF8F5]">
                   <td className="px-4 py-1.5 font-mono text-xs">{g.paymentNo}</td>
                   <td className="px-4 py-1.5">{g.partyName}</td>
                   <td className="px-4 py-1.5">{g.date}</td>
                   <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(g.totalSen)}</td>
                   <td className="px-4 py-1.5 text-center">{g.lines.length}</td>
-                  <td className="px-4 py-1.5 text-right whitespace-nowrap">
+                  <td className="px-4 py-1.5 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                     <span className="mr-2"><LifecycleBadge state={g.lifecycleState} /></span>
                     <LifecycleActions
                       state={g.lifecycleState}
@@ -4904,6 +4905,41 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
           </table>
         )}
       </CardContent></Card>
+
+      {detail && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDetail(null)}>
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-[#E2DDD8]">
+              <h2 className="text-base font-semibold">{verb} {detail.paymentNo}</h2>
+              <button onClick={() => setDetail(null)} className="text-[#9CA3AF] hover:text-[#6B7280] text-lg leading-none">✕</button>
+            </div>
+            <div className="p-5 space-y-4 text-sm">
+              <div className="grid grid-cols-2 gap-3">
+                <div><p className="text-[#9CA3AF]">{side === "CREDITOR" ? "Creditor" : "Debtor"}</p><p className="font-medium">{detail.partyName}</p></div>
+                <div><p className="text-[#9CA3AF]">Date</p><p className="font-medium">{detail.date}</p></div>
+                <div><p className="text-[#9CA3AF]">Total</p><p className="font-bold text-[#3E6570]">{formatCurrency(detail.totalSen)}</p></div>
+                <div><p className="text-[#9CA3AF]">Status</p><p><LifecycleBadge state={detail.lifecycleState} /></p></div>
+              </div>
+              <div>
+                <p className="text-[#9CA3AF] mb-1">Bills {side === "CREDITOR" ? "paid" : "received against"}</p>
+                <div className="border border-[#E2DDD8] rounded-md overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[#FAF8F5]"><tr><th className="text-left px-3 py-1.5 font-medium text-[#6B7280]">Bill No</th><th className="text-right px-3 py-1.5 font-medium text-[#6B7280]">Amount (RM)</th></tr></thead>
+                    <tbody>
+                      {detail.lines.map((l) => (
+                        <tr key={l.billId} className="border-t border-[#F0ECE9]">
+                          <td className="px-3 py-1.5 font-mono">{l.billNo}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(l.amountSen)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

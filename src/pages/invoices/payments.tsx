@@ -47,6 +47,7 @@ export default function PaymentsPage() {
   const [bankOptions, setBankOptions] = useState<{ code: string; name: string }[]>([]);
   const [allocations, setAllocations] = useState<{ invoiceId: string; amount: number }[]>([]);
   const [creating, setCreating] = useState(false);
+  const [detail, setDetail] = useState<PaymentRecord | null>(null);
 
   useEffect(() => {
     fetch("/api/accounting/coa")
@@ -433,9 +434,51 @@ export default function PaymentsPage() {
             virtualize
             gridId="payments"
             contextMenuItems={contextMenuItems}
+            onRowClick={(row) => setDetail(row)}
           />
         </CardContent>
       </Card>
+
+      {/* Payment detail — click any row to see which invoices it cleared */}
+      {detail && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDetail(null)}>
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b">
+              <h2 className="text-lg font-semibold">Receipt {detail.receiptNumber}</h2>
+              <button onClick={() => setDetail(null)} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
+            </div>
+            <div className="p-5 space-y-4 text-sm">
+              <div className="grid grid-cols-2 gap-3">
+                <div><p className="text-gray-500">Customer</p><p className="font-medium">{detail.customerName}</p></div>
+                <div><p className="text-gray-500">Date</p><p className="font-medium">{formatDateDMY(detail.date)}</p></div>
+                <div><p className="text-gray-500">Amount</p><p className="font-bold text-[#4F7C3A]">{formatRM(detail.amount)}</p></div>
+                <div><p className="text-gray-500">Method</p><p className="font-medium">{detail.method.replace(/_/g, " ")}</p></div>
+                {detail.reference && <div className="col-span-2"><p className="text-gray-500">Reference</p><p className="font-medium font-mono">{detail.reference}</p></div>}
+              </div>
+              <div>
+                <p className="text-gray-500 mb-1">Invoices allocated</p>
+                {detail.allocations.length === 0 ? (
+                  <p className="text-gray-400 italic">Unallocated (on account)</p>
+                ) : (
+                  <div className="border rounded-md overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50"><tr><th className="text-left px-3 py-1.5 font-medium text-gray-600">Invoice #</th><th className="text-right px-3 py-1.5 font-medium text-gray-600">Amount (RM)</th></tr></thead>
+                      <tbody>
+                        {detail.allocations.map((a) => (
+                          <tr key={a.invoiceId} className="border-t">
+                            <td className="px-3 py-1.5 font-mono">{a.invoiceNumber}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums">{formatRM(a.amount)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -50,7 +50,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "opening" | "audit" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "debtorledger" | "creditorledger" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "opening" | "audit" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -236,6 +236,8 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   // Debtor / Creditor
   { key: "ar", label: "Debtor Aging", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "ap", label: "Creditor Aging", icon: <Building2 className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "debtorledger", label: "Debtor Ledger", icon: <BookOpen className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "creditorledger", label: "Creditor Ledger", icon: <BookOpen className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "odebtor", label: "Other Debtor", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "odebtorbills", label: "Other Debtor Bills", icon: <BookOpen className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "odebtorpay", label: "Other Debtor Receipts", icon: <Wallet className="h-4 w-4" />, group: "Debtor / Creditor" },
@@ -424,6 +426,8 @@ export default function AccountingPage() {
           )}
           {tab === "tb" && <TrialBalanceTab />}
           {tab === "gl" && <GeneralLedgerTab accounts={accounts} />}
+          {tab === "debtorledger" && <PartyLedgerTab side="DEBTOR" />}
+          {tab === "creditorledger" && <PartyLedgerTab side="CREDITOR" />}
           {tab === "ar" && <ARTab arData={arData} onRefresh={fetchAll} />}
           {tab === "ap" && (
             <div className="space-y-4">
@@ -5181,6 +5185,127 @@ type GlAllRow = {
   debitSen: number;
   creditSen: number;
 };
+
+// Debtor / Creditor Ledger — the subsidiary ledger as one report: every party
+// as its own section (Balance b/f → dated transactions → running balance →
+// Balance c/f). Data from /debtor-ledger | /creditor-ledger.
+type PartyLedgerData = {
+  from: string | null;
+  to: string | null;
+  parties: {
+    party: { id: string; name: string; code: string };
+    openingSen: number;
+    closingSen: number;
+    rows: { date: string; ref: string; type: string; debitSen: number; creditSen: number; runningSen: number }[];
+  }[];
+};
+
+function PartyLedgerTab({ side }: { side: "DEBTOR" | "CREDITOR" }) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [data, setData] = useState<PartyLedgerData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const endpoint = side === "DEBTOR" ? "debtor-ledger" : "creditor-ledger";
+  const title = side === "DEBTOR" ? "Debtor Ledger" : "Creditor Ledger";
+
+  const load = useCallback(() => {
+    setLoading(true);
+    const p = new URLSearchParams();
+    if (from) p.set("from", from);
+    if (to) p.set("to", to);
+    fetch(`/api/accounting/${endpoint}?${p.toString()}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: PartyLedgerData }>)
+      .then((j) => setData(j?.success ? j.data ?? null : null))
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  }, [endpoint, from, to]);
+  useEffect(() => { load(); }, [load]);
+
+  const fmtType = (t: string) => t.replace(/_/g, " ").toLowerCase();
+
+  const printLedger = () => {
+    if (!data) return;
+    const w = window.open("", "_blank");
+    if (!w) return;
+    const sections = data.parties
+      .map(
+        (pl) =>
+          `<h3 style="margin:16px 0 4px;font-size:13px">${pl.party.code ? pl.party.code + " · " : ""}${pl.party.name}</h3>` +
+          `<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="border-bottom:1px solid #000;text-align:left"><th>Date</th><th>Ref</th><th>Type</th><th style="text-align:right">Debit</th><th style="text-align:right">Credit</th><th style="text-align:right">Balance</th></tr></thead><tbody>` +
+          `<tr><td colspan="5"><i>Balance b/f</i></td><td style="text-align:right">${formatCurrency(pl.openingSen)}</td></tr>` +
+          pl.rows
+            .map(
+              (r) =>
+                `<tr><td>${r.date}</td><td>${r.ref}</td><td>${fmtType(r.type)}</td><td style="text-align:right">${r.debitSen ? formatCurrency(r.debitSen) : ""}</td><td style="text-align:right">${r.creditSen ? formatCurrency(r.creditSen) : ""}</td><td style="text-align:right">${formatCurrency(r.runningSen)}</td></tr>`,
+            )
+            .join("") +
+          `<tr style="border-top:1px solid #000;font-weight:bold"><td colspan="5">Balance c/f</td><td style="text-align:right">${formatCurrency(pl.closingSen)}</td></tr></tbody></table>`,
+      )
+      .join("");
+    w.document.write(
+      `<html><head><title>${title}</title></head><body><h2>HOOKKA MANUFACTURING SDN BHD</h2><p>${title}${data.from || data.to ? ` · ${data.from || "…"} → ${data.to || "…"}` : ""}</p>${sections}</body></html>`,
+    );
+    w.document.close();
+    w.print();
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">{title}</h2>
+        <div className="flex items-center gap-2">
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+          <span className="text-xs text-[#9CA3AF]">→</span>
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+          <Button variant="outline" size="sm" onClick={load}>Refresh</Button>
+          <Button variant="outline" size="sm" onClick={printLedger} disabled={!data || data.parties.length === 0}>Print</Button>
+        </div>
+      </div>
+      <p className="text-xs text-[#6B7280]">每个{side === "DEBTOR" ? "客户" : "供应商"}各一段:Balance b/f → 交易 → 累计余额 → Balance c/f。空白起止日 = 全部。</p>
+      {loading ? (
+        <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+      ) : !data || data.parties.length === 0 ? (
+        <div className="py-12 text-center text-[#6B7280] text-sm">No activity.</div>
+      ) : (
+        <div className="space-y-4">
+          {data.parties.map((pl) => (
+            <Card key={pl.party.id}>
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold text-[#3E6570]">{pl.party.code ? `${pl.party.code} · ` : ""}{pl.party.name}</h3>
+                  <span className="text-sm text-[#6B7280]">Balance <span className="font-bold text-[#1F1D1B] tabular-nums">{formatCurrency(pl.closingSen)}</span></span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-xs text-[#6B7280] text-left border-b border-[#E2DDD8]">
+                        <th className="py-1 px-2">Date</th><th className="py-1 px-2">Ref</th><th className="py-1 px-2">Type</th>
+                        <th className="py-1 px-2 text-right">Debit</th><th className="py-1 px-2 text-right">Credit</th><th className="py-1 px-2 text-right">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className="text-[#9CA3AF] italic"><td className="py-1 px-2" colSpan={5}>Balance b/f</td><td className="py-1 px-2 text-right tabular-nums">{formatCurrency(pl.openingSen)}</td></tr>
+                      {pl.rows.map((r, i) => (
+                        <tr key={i} className="border-t border-[#F0ECE9]">
+                          <td className="py-1 px-2 whitespace-nowrap">{r.date}</td>
+                          <td className="py-1 px-2 font-mono text-xs">{r.ref}</td>
+                          <td className="py-1 px-2 text-xs">{fmtType(r.type)}</td>
+                          <td className="py-1 px-2 text-right tabular-nums">{r.debitSen ? formatCurrency(r.debitSen) : ""}</td>
+                          <td className="py-1 px-2 text-right tabular-nums">{r.creditSen ? formatCurrency(r.creditSen) : ""}</td>
+                          <td className="py-1 px-2 text-right tabular-nums font-medium">{formatCurrency(r.runningSen)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
   // Multi-account review (owner): 0 picked = full ledger; 1 picked =

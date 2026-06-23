@@ -2163,6 +2163,95 @@ app.get("/supplier-statement", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// DEBTOR / CREDITOR LEDGER (owner 2026-06-23) — the subsidiary ledger as ONE
+// report: every debtor (or creditor) as its own ledger section (opening →
+// dated transactions → running balance → closing). Same line model as the
+// per-party statement, looped over all parties in a single pass.
+// ---------------------------------------------------------------------------
+type LedgerLine = { date: string; ref: string; type: string; debitSen: number; creditSen: number };
+
+app.get("/debtor-ledger", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const from = c.req.query("from") || "";
+  const to = c.req.query("to") || "9999-12-31";
+  const [custRes, invRes, payRes, cnRes, dnRes] = await Promise.all([
+    c.var.DB.prepare("SELECT id, name, code FROM customers").all<{ id: string; name: string; code: string }>(),
+    c.var.DB.prepare(`SELECT customerId, invoiceNo, invoiceDate, totalSen FROM invoices WHERE status NOT IN ('DRAFT','CANCELLED')`).all<{ customerId: string; invoiceNo: string; invoiceDate: string; totalSen: number }>(),
+    c.var.DB.prepare(`SELECT customerId, receiptNumber, date, amount, status FROM payment_records`).all<{ customerId: string; receiptNumber: string; date: string; amount: number; status: string }>(),
+    c.var.DB.prepare(`SELECT customerId, noteNumber, date, totalAmount FROM credit_notes WHERE status IN ('APPROVED','POSTED')`).all<{ customerId: string; noteNumber: string; date: string; totalAmount: number }>(),
+    c.var.DB.prepare(`SELECT customerId, noteNumber, date, totalAmount FROM debit_notes WHERE status = 'POSTED'`).all<{ customerId: string; noteNumber: string; date: string; totalAmount: number }>(),
+  ]);
+  const byParty = new Map<string, LedgerLine[]>();
+  const push = (id: string, l: LedgerLine) => { if (!id) return; const arr = byParty.get(id) ?? []; arr.push(l); byParty.set(id, arr); };
+  for (const i of invRes.results ?? []) push(i.customerId, { date: i.invoiceDate ?? "", ref: i.invoiceNo, type: "INVOICE", debitSen: Number(i.totalSen) || 0, creditSen: 0 });
+  for (const p of payRes.results ?? []) {
+    push(p.customerId, { date: p.date ?? "", ref: p.receiptNumber, type: "RECEIPT", debitSen: 0, creditSen: Number(p.amount) || 0 });
+    if (p.status === "BOUNCED") push(p.customerId, { date: p.date ?? "", ref: p.receiptNumber, type: "BOUNCED", debitSen: Number(p.amount) || 0, creditSen: 0 });
+  }
+  for (const n of cnRes.results ?? []) push(n.customerId, { date: n.date ?? "", ref: n.noteNumber, type: "CREDIT_NOTE", debitSen: 0, creditSen: Number(n.totalAmount) || 0 });
+  for (const n of dnRes.results ?? []) push(n.customerId, { date: n.date ?? "", ref: n.noteNumber, type: "DEBIT_NOTE", debitSen: Number(n.totalAmount) || 0, creditSen: 0 });
+
+  const parties: unknown[] = [];
+  for (const cust of custRes.results ?? []) {
+    const lines = byParty.get(cust.id) ?? [];
+    if (lines.length === 0) continue;
+    lines.sort((a, b) => (a.date === b.date ? a.ref.localeCompare(b.ref) : a.date.localeCompare(b.date)));
+    let openingSen = 0;
+    const rows: (LedgerLine & { runningSen: number })[] = [];
+    let running = 0;
+    for (const l of lines) {
+      const delta = l.debitSen - l.creditSen; // debit-normal (AR)
+      if (l.date < from) { openingSen += delta; continue; }
+      if (l.date > to) continue;
+      running = (rows.length === 0 ? openingSen : running) + delta;
+      rows.push({ ...l, runningSen: running });
+    }
+    if (openingSen === 0 && rows.length === 0) continue;
+    parties.push({ party: { id: cust.id, name: cust.name, code: cust.code }, openingSen, closingSen: rows.length ? rows[rows.length - 1].runningSen : openingSen, rows });
+  }
+  return c.json({ success: true, data: { from: from || null, to: to === "9999-12-31" ? null : to, parties } });
+});
+
+app.get("/creditor-ledger", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const from = c.req.query("from") || "";
+  const to = c.req.query("to") || "9999-12-31";
+  const [supRes, piRes, payRes, pcnRes] = await Promise.all([
+    c.var.DB.prepare("SELECT id, name, code FROM suppliers").all<{ id: string; name: string; code: string | null }>(),
+    c.var.DB.prepare(`SELECT supplierId, piNo, invoiceDate, amountSen FROM purchase_invoices WHERE status IN ('APPROVED','PARTIAL_PAID','PAID')`).all<{ supplierId: string; piNo: string; invoiceDate: string; amountSen: number }>(),
+    c.var.DB.prepare(`SELECT supplierId, paymentNo, date, amountSen FROM supplier_payments`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
+    c.var.DB.prepare(`SELECT supplierId, noteNumber, date, totalAmount FROM purchase_credit_notes WHERE status = 'POSTED'`).all<{ supplierId: string; noteNumber: string; date: string; totalAmount: number }>(),
+  ]);
+  const byParty = new Map<string, LedgerLine[]>();
+  const push = (id: string, l: LedgerLine) => { if (!id) return; const arr = byParty.get(id) ?? []; arr.push(l); byParty.set(id, arr); };
+  for (const pi of piRes.results ?? []) push(pi.supplierId, { date: pi.invoiceDate ?? "", ref: pi.piNo, type: "PURCHASE_INVOICE", debitSen: 0, creditSen: Number(pi.amountSen) || 0 });
+  for (const p of payRes.results ?? []) push(p.supplierId, { date: p.date ?? "", ref: p.paymentNo, type: "PAYMENT", debitSen: Number(p.amountSen) || 0, creditSen: 0 });
+  for (const n of pcnRes.results ?? []) push(n.supplierId, { date: n.date ?? "", ref: n.noteNumber, type: "PURCHASE_CN", debitSen: Number(n.totalAmount) || 0, creditSen: 0 });
+
+  const parties: unknown[] = [];
+  for (const sup of supRes.results ?? []) {
+    const lines = byParty.get(sup.id) ?? [];
+    if (lines.length === 0) continue;
+    lines.sort((a, b) => (a.date === b.date ? a.ref.localeCompare(b.ref) : a.date.localeCompare(b.date)));
+    let openingSen = 0;
+    const rows: (LedgerLine & { runningSen: number })[] = [];
+    let running = 0;
+    for (const l of lines) {
+      const delta = l.creditSen - l.debitSen; // credit-normal (AP)
+      if (l.date < from) { openingSen += delta; continue; }
+      if (l.date > to) continue;
+      running = (rows.length === 0 ? openingSen : running) + delta;
+      rows.push({ ...l, runningSen: running });
+    }
+    if (openingSen === 0 && rows.length === 0) continue;
+    parties.push({ party: { id: sup.id, name: sup.name, code: sup.code ?? "" }, openingSen, closingSen: rows.length ? rows[rows.length - 1].runningSen : openingSen, rows });
+  }
+  return c.json({ success: true, data: { from: from || null, to: to === "9999-12-31" ? null : to, parties } });
+});
+
+// ---------------------------------------------------------------------------
 // OTHER DEBTOR / OTHER CREDITOR REGISTRY (Phase 1, 2026-06)
 //
 // Non-trade counterparties (transporters, deposit holders, staff advances,

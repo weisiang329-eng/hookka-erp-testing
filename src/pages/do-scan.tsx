@@ -223,7 +223,19 @@ function ItemRow({
   onToggle: () => void;
   addable?: boolean;
 }) {
-  const sub = [it.sizeLabel, it.fabricCode, it.poNo].filter(Boolean).join(" · ");
+  // The owner reads the PRODUCT CODE (our SKU, e.g. 1013-(K)) and the
+  // colour/fabric (e.g. PC151-01) to identify the item — make these the
+  // prominent line. Above it, the source context: Customer PO · our SO.
+  // Internal product name + size + PO no. drop to a quiet secondary line.
+  const customerPO = (it.customerPOId || "").trim();
+  const soNo = (it.salesOrderNo || "").trim();
+  const productCode = (it.productCode || "").trim();
+  const fabric = (it.fabricCode || "").trim();
+  const context = [customerPO, soNo].filter(Boolean).join(" · ");
+  const detail = [it.sizeLabel, it.productName, it.poNo]
+    .map((v) => (v || "").trim())
+    .filter(Boolean)
+    .join(" · ");
   return (
     <label
       className={`flex items-center gap-2.5 rounded-lg border p-2.5 cursor-pointer ${
@@ -241,10 +253,19 @@ function ItemRow({
         className="h-4 w-4 accent-[#6B5C32]"
       />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-[#1F1D1B]">
-          {it.productName || it.productCode || it.poNo || "Item"}
+        {context && (
+          <p className="truncate text-[11px] text-gray-500">{context}</p>
+        )}
+        <p className="truncate text-sm font-bold text-[#1F1D1B]">
+          {productCode || it.productName || it.poNo || "Item"}
+          {fabric && (
+            <span className="font-medium text-[#6B5C32]">
+              {"  ·  Fabrics: "}
+              {fabric}
+            </span>
+          )}
         </p>
-        {sub && <p className="truncate text-xs text-gray-500">{sub}</p>}
+        {detail && <p className="truncate text-xs text-gray-400">{detail}</p>}
       </div>
       <div className="shrink-0 text-right">
         <p className="text-xs font-semibold text-[#1F1D1B]">×{it.quantity}</p>
@@ -686,16 +707,40 @@ export default function DoScanPage() {
 
                 {editableDos.map((d) => {
                   const doChecked = checkedByDo[d.doId] ?? new Set<string>();
+                  // Customer PO for this DO — the office reads this to match the
+                  // truck against the order. Derive it from the DO's lines
+                  // (every line carries the same customer PO; first non-blank
+                  // wins). Falls back to the bare DO no. when none is present.
+                  const doCustomerPO =
+                    d.items
+                      .map((it) => (it.customerPOId || "").trim())
+                      .find(Boolean) || "";
                   return (
                     <div
                       key={d.doId}
                       className="rounded-xl bg-white shadow-sm border border-[#E6E0D9] p-4 space-y-3"
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-bold text-[#1F1D1B]">
-                          {d.doNo}
-                        </p>
-                        <span className="truncate text-xs text-gray-500">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          {doCustomerPO ? (
+                            <>
+                              <p className="text-[10px] uppercase tracking-wide text-gray-400">
+                                Customer PO
+                              </p>
+                              <p className="text-base font-bold text-[#1F1D1B] leading-tight">
+                                {doCustomerPO}
+                              </p>
+                              <p className="text-xs text-gray-500 mt-0.5">
+                                {d.doNo}
+                              </p>
+                            </>
+                          ) : (
+                            <p className="text-sm font-bold text-[#1F1D1B]">
+                              {d.doNo}
+                            </p>
+                          )}
+                        </div>
+                        <span className="truncate text-xs text-gray-500 text-right shrink-0">
                           {d.customerName}
                           {d.area ? ` · ${d.area}` : ""}
                         </span>

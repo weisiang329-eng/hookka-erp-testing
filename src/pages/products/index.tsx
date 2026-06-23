@@ -12,6 +12,7 @@ import { mutationWithData } from "@/lib/schemas/common";
 import { ProductSchema } from "@/lib/schemas/product";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { useNavGuard } from "@/lib/use-nav-guard";
+import { familyOf } from "@/lib/product-family";
 import { MasterPriceHistoryDialog } from "./MasterPriceHistoryDialog";
 import {
   EffectiveDateConfirmModal,
@@ -2507,40 +2508,41 @@ export default function ProductsPage() {
   // ── Catalogue PDF helpers ──────────────────────────────────────────────
 
   // Build CatalogueModelEntry[] from current products + pre-fetched photos map.
-  // photoMap: resourceId (baseModel) → first FileAsset id.
-  // customerAssignedBaseModels: when provided, only include models in this set.
+  // photoMap: resourceId (familyKey) → first FileAsset id.
+  // customerAssignedFamilies: when provided, only include families in this set.
   async function buildCatalogueModels(
     photoMap: Record<string, string>,
-    customerAssignedBaseModels?: Set<string>,
+    customerAssignedFamilies?: Set<string>,
   ) {
-    // Group products by baseModel (mirrors catalog.tsx buildModelGroups logic)
+    // Group products by FAMILY (mirrors catalog.tsx buildModelGroups logic, one
+    // tile per family) so the PDF agrees with the Catalog grid + family photos.
     const groups = new Map<string, Product[]>();
     for (const p of products) {
-      const key = p.baseModel || p.code;
-      if (customerAssignedBaseModels && !customerAssignedBaseModels.has(key)) continue;
+      const key = familyOf(p.code) || p.code;
+      if (customerAssignedFamilies && !customerAssignedFamilies.has(key)) continue;
       const arr = groups.get(key);
       if (arr) arr.push(p);
       else groups.set(key, [p]);
     }
-    const modelGroups = Array.from(groups.entries()).map(([baseModel, ps]) => ({
-      baseModel,
+    const modelGroups = Array.from(groups.entries()).map(([familyKey, ps]) => ({
+      familyKey,
       category: ps[0].category,
       name: ps[0].name,
       variantCount: ps.length,
       sizeLabels: Array.from(new Set(ps.map((p) => p.sizeLabel).filter(Boolean))).sort(),
     }));
-    // Sort: category first, then baseModel
+    // Sort: category first, then family
     modelGroups.sort((a, b) =>
       a.category !== b.category
         ? a.category.localeCompare(b.category)
-        : a.baseModel.localeCompare(b.baseModel),
+        : a.familyKey.localeCompare(b.familyKey),
     );
 
     const { fetchModelPhotoBytes } = await import("@/lib/generate-product-catalogue-pdf");
 
     const entries = await Promise.all(
       modelGroups.map(async (g) => {
-        const fileId = photoMap[g.baseModel];
+        const fileId = photoMap[g.familyKey];
         let photoBytes: Uint8Array | null = null;
         let photoMimeType = "image/jpeg";
         if (fileId) {
@@ -2551,7 +2553,9 @@ export default function ProductsPage() {
           }
         }
         return {
-          baseModel: g.baseModel,
+          // The PDF's CatalogueModelEntry calls its heading field "baseModel";
+          // feed it the family key so the PDF heading matches the Catalog tile.
+          baseModel: g.familyKey,
           category: g.category,
           name: g.name,
           variantCount: g.variantCount,
@@ -2582,7 +2586,7 @@ export default function ProductsPage() {
         });
         const map: Record<string, string> = {};
         for (const f of sorted) {
-          // First per baseModel after the cover-first sort = the cover photo.
+          // First per familyKey (resourceId) after the cover-first sort = the cover photo.
           if (!map[f.resourceId]) map[f.resourceId] = f.id;
         }
         return map;
@@ -2665,20 +2669,18 @@ export default function ProductsPage() {
         toast.error(j.error || "No assigned products found for this customer.");
         return;
       }
-      // Derive the set of baseModels the customer has at least one SKU in
-      const assignedBaseModels = new Set<string>(
-        j.data.products.map((p) => {
-          // Derive baseModel from code (mirrors catalog.tsx buildModelGroups logic)
-          return (p.code || "").split(/\s|-\(/)[0].trim() || p.code;
-        }),
+      // Derive the set of FAMILIES the customer has at least one SKU in
+      // (same familyOf rule as the Catalog grid, so the filter matches).
+      const assignedFamilies = new Set<string>(
+        j.data.products.map((p) => familyOf(p.code) || p.code),
       );
-      if (assignedBaseModels.size === 0) {
+      if (assignedFamilies.size === 0) {
         toast.error(`${customer.name} has no assigned SKUs.`);
         return;
       }
 
       const photoMap = await fetchPhotoMap();
-      const entries = await buildCatalogueModels(photoMap, assignedBaseModels);
+      const entries = await buildCatalogueModels(photoMap, assignedFamilies);
       if (entries.length === 0) {
         toast.error("No matching models found in the product catalogue.");
         return;

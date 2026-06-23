@@ -1,11 +1,16 @@
 // ---------------------------------------------------------------------------
-// Product Catalog ("Modular") — a Model-based, photo-first view of Products.
+// Product Catalog ("Modular") — a FAMILY-based, photo-first view of Products.
 //
-// Auto-derived: every baseModel that exists in Products becomes one Modular
-// tile (one tile per Model, mirroring the CNC "one Model = one File" logic),
-// so nothing is forgotten — add a product, its model shows up here. Photos are
-// uploaded per Model and stored via the existing file system
-// (resourceType="modular", resourceId=baseModel) — no backend / schema change.
+// Auto-derived: every product FAMILY that exists in Products becomes one tile
+// (one tile per family, mirroring the CNC "one Model = one File" logic), so
+// nothing is forgotten — add a product, its family shows up here. A family is
+// the leading base of the SKU code (see familyOf), one level coarser than the
+// stored baseModel: 1003 / 1003(A) / 1003(A)(HF)(W) all collapse into ONE
+// "1003" tile, and every size SKU under them. Photos are uploaded per family
+// and stored via the existing file system (resourceType="modular",
+// resourceId=familyKey) — no backend / schema change. Clicking a tile drills
+// in to the family's variants (grouped by their stored baseModel) and their
+// size SKUs, each keeping its Production Docs link.
 //
 // Rendered as a third view mode on the Products page (SKU Master · Catalog ·
 // Maintenance). Click a tile to manage its photos and see the SKUs under it.
@@ -18,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { PhotoCropDialog } from "@/components/ui/PhotoCropDialog";
+import { familyOf } from "@/lib/product-family";
 
 const RT_MODULAR = "modular";
 
@@ -56,43 +62,70 @@ function comparePhotos(a: FileAsset, b: FileAsset): number {
   return (b.uploadedAt || "").localeCompare(a.uploadedAt || "");
 }
 
-type ModelGroup = {
+// A config variant inside a family: the stored baseModel (e.g. "1003(A)") and
+// its size SKUs underneath. Used to make the drill-down readable.
+type ModelVariant = {
   baseModel: string;
+  products: CatalogProduct[];
+};
+
+type ModelGroup = {
+  familyKey: string;
   category: string;
   name: string;
   variantCount: number;
   sizeLabels: string[];
   products: CatalogProduct[];
+  /** baseModel sub-groups for the drill-down (e.g. 1003 / 1003(A) / 1003(A)(HF)(W)). */
+  variants: ModelVariant[];
 };
 
-// One Modular per baseModel. Falls back to the product code when a product has
-// no baseModel so a stray SKU still surfaces (never silently dropped).
+// One tile per FAMILY (familyOf the code, e.g. 1003 covers 1003 / 1003(A) /
+// 1003(A)(HF)(W) and all their sizes). familyOf falls back to the trimmed,
+// uppercased code when a code is blank so a stray SKU still surfaces (never
+// silently dropped). Inside each family the products are sub-grouped by their
+// stored baseModel for a readable drill-down.
 function buildModelGroups(products: CatalogProduct[]): ModelGroup[] {
   const map = new Map<string, CatalogProduct[]>();
   for (const p of products) {
-    const key = p.baseModel || p.code;
+    const key = familyOf(p.code) || p.code;
     const arr = map.get(key);
     if (arr) arr.push(p);
     else map.set(key, [p]);
   }
   const groups: ModelGroup[] = [];
-  for (const [baseModel, ps] of map) {
+  for (const [familyKey, ps] of map) {
     const sizeLabels = Array.from(
       new Set(ps.map((p) => p.sizeLabel).filter((s): s is string => !!s)),
     ).sort();
+    // Sub-group by stored baseModel (the config variant) for the drill-down.
+    const variantMap = new Map<string, CatalogProduct[]>();
+    for (const p of ps) {
+      const vKey = p.baseModel || p.code;
+      const arr = variantMap.get(vKey);
+      if (arr) arr.push(p);
+      else variantMap.set(vKey, [p]);
+    }
+    const variants: ModelVariant[] = Array.from(variantMap.entries())
+      .map(([baseModel, vps]) => ({
+        baseModel,
+        products: vps.slice().sort((a, b) => a.code.localeCompare(b.code)),
+      }))
+      .sort((a, b) => a.baseModel.localeCompare(b.baseModel));
     groups.push({
-      baseModel,
+      familyKey,
       category: ps[0].category,
       name: ps[0].name,
       variantCount: ps.length,
       sizeLabels,
       products: ps.slice().sort((a, b) => a.code.localeCompare(b.code)),
+      variants,
     });
   }
   groups.sort((a, b) =>
     a.category !== b.category
       ? a.category.localeCompare(b.category)
-      : a.baseModel.localeCompare(b.baseModel),
+      : a.familyKey.localeCompare(b.familyKey),
   );
   return groups;
 }
@@ -110,7 +143,7 @@ export function ProductCatalog({ products }: { products: CatalogProduct[] }) {
   const [openModel, setOpenModel] = useState<ModelGroup | null>(null);
 
   // ONE request returns every modular photo for the org; group by resourceId
-  // (= baseModel) client-side so we don't fire a request per tile.
+  // (= familyKey) client-side so we don't fire a request per tile.
   const reloadPhotos = useCallback(async () => {
     try {
       const res = await fetch(`/api/files?resourceType=${RT_MODULAR}`);
@@ -148,12 +181,12 @@ export function ProductCatalog({ products }: { products: CatalogProduct[] }) {
     const q = search.trim().toLowerCase();
     return groups.filter((g) => {
       if (categoryFilter !== "ALL" && g.category !== categoryFilter) return false;
-      if (q && !`${g.baseModel} ${g.name}`.toLowerCase().includes(q)) return false;
+      if (q && !`${g.familyKey} ${g.name}`.toLowerCase().includes(q)) return false;
       return true;
     });
   }, [groups, categoryFilter, search]);
 
-  const withPhotos = filtered.filter((g) => (photos[g.baseModel] ?? []).length > 0).length;
+  const withPhotos = filtered.filter((g) => (photos[g.familyKey] ?? []).length > 0).length;
 
   return (
     <div className="space-y-4">
@@ -212,9 +245,9 @@ export function ProductCatalog({ products }: { products: CatalogProduct[] }) {
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
           {filtered.map((g) => (
             <ModelTile
-              key={`${g.category}:${g.baseModel}`}
+              key={`${g.category}:${g.familyKey}`}
               group={g}
-              photos={photos[g.baseModel] ?? []}
+              photos={photos[g.familyKey] ?? []}
               onOpen={() => setOpenModel(g)}
             />
           ))}
@@ -224,7 +257,7 @@ export function ProductCatalog({ products }: { products: CatalogProduct[] }) {
       {openModel && (
         <ModelDetailDialog
           group={openModel}
-          photos={photos[openModel.baseModel] ?? []}
+          photos={photos[openModel.familyKey] ?? []}
           onClose={() => setOpenModel(null)}
           onChanged={reloadPhotos}
           toast={toast}
@@ -255,7 +288,7 @@ function ModelTile({
         {cover && !imgFailed ? (
           <img
             src={`/api/files/${cover.id}/download`}
-            alt={group.baseModel}
+            alt={group.familyKey}
             loading="lazy"
             onError={() => setImgFailed(true)}
             className="h-full w-full object-contain group-hover:scale-[1.02] transition-transform"
@@ -276,12 +309,13 @@ function ModelTile({
       </div>
       <div className="p-2.5 space-y-1">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-sm font-semibold text-[#1F1D1B] truncate" title={group.baseModel}>
-            {group.baseModel}
+          <span className="text-sm font-semibold text-[#1F1D1B] truncate" title={group.familyKey}>
+            {group.familyKey}
           </span>
           <Badge variant="status" status={group.category} />
         </div>
         <p className="text-[11px] text-[#9CA3AF]">
+          {group.variants.length > 1 ? `${group.variants.length} variants · ` : ""}
           {group.variantCount} SKU{group.variantCount === 1 ? "" : "s"}
           {group.sizeLabels.length > 0 ? ` · ${group.sizeLabels.slice(0, 4).join(", ")}${group.sizeLabels.length > 4 ? "…" : ""}` : ""}
         </p>
@@ -325,7 +359,9 @@ function ModelDetailDialog({
         const fd = new FormData();
         fd.append("file", file);
         fd.append("resourceType", RT_MODULAR);
-        fd.append("resourceId", group.baseModel);
+        // Key the photo by the FAMILY base (e.g. "1003"), not the per-variant
+        // baseModel — so ONE photo covers the whole family + all its variants.
+        fd.append("resourceId", group.familyKey);
         const res = await fetch("/api/files", { method: "POST", body: fd });
         const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
         if (res.ok && j?.success) ok++;
@@ -432,7 +468,7 @@ function ModelDetailDialog({
       <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
         <div className="sticky top-0 bg-white z-10 flex items-center justify-between p-5 border-b border-[#E2DDD8]">
           <div className="flex items-center gap-3">
-            <h2 className="text-lg font-semibold text-[#1F1D1B]">{group.baseModel}</h2>
+            <h2 className="text-lg font-semibold text-[#1F1D1B]">{group.familyKey}</h2>
             <Badge variant="status" status={group.category} />
             <span className="text-xs text-[#9CA3AF]">{group.name}</span>
           </div>
@@ -460,7 +496,7 @@ function ModelDetailDialog({
             </div>
             {photos.length === 0 ? (
               <div className="rounded-md border border-dashed border-[#D8CFC0] bg-[#FAF9F7] p-8 text-center text-sm text-[#9CA3AF]">
-                No photos yet. Upload product photos so anyone can recognise this model at a glance.
+                No photos yet. Upload product photos so anyone can recognise this family at a glance — one photo here covers every variant and size under it.
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
@@ -504,27 +540,48 @@ function ModelDetailDialog({
             )}
           </div>
 
-          {/* SKUs under this model */}
+          {/* Variants + SKUs under this family. Each stored baseModel (config
+              variant, e.g. 1003 / 1003(A) / 1003(A)(HF)(W)) is a sub-group,
+              with its size SKUs listed under it — so the drill-down reads
+              top-down: family → variant → size, each keeping its Docs link. */}
           <div>
             <h3 className="text-sm font-semibold text-[#374151] mb-2">
-              SKUs in this model ({group.products.length})
+              {group.variants.length > 1
+                ? `Variants in this family (${group.variants.length}) · ${group.products.length} SKU${group.products.length === 1 ? "" : "s"}`
+                : `SKUs in this family (${group.products.length})`}
             </h3>
-            <div className="rounded-md border border-[#E2DDD8] divide-y divide-[#F0ECE9]">
-              {group.products.map((p) => (
-                <div key={p.id} className="flex items-center justify-between gap-2 px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium text-[#1F1D1B] truncate">{p.code}</div>
-                    <div className="text-[11px] text-[#6B7280] truncate">
-                      {p.sizeLabel || "—"}{p.name ? ` · ${p.name}` : ""}
+            <div className="space-y-3">
+              {group.variants.map((v) => (
+                <div key={v.baseModel} className="rounded-md border border-[#E2DDD8] overflow-hidden">
+                  {group.variants.length > 1 && (
+                    <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-[#FAF9F7] border-b border-[#F0ECE9]">
+                      <span className="text-xs font-semibold text-[#6B5C32]" title={v.baseModel}>
+                        {v.baseModel}
+                      </span>
+                      <span className="text-[10px] text-[#9CA3AF]">
+                        {v.products.length} SKU{v.products.length === 1 ? "" : "s"}
+                      </span>
                     </div>
+                  )}
+                  <div className="divide-y divide-[#F0ECE9]">
+                    {v.products.map((p) => (
+                      <div key={p.id} className="flex items-center justify-between gap-2 px-3 py-2">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-[#1F1D1B] truncate">{p.code}</div>
+                          <div className="text-[11px] text-[#6B7280] truncate">
+                            {p.sizeLabel || "—"}{p.name ? ` · ${p.name}` : ""}
+                          </div>
+                        </div>
+                        <Link
+                          to={`/products/${p.id}/documents`}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-[#6B5C32] bg-[#F0ECE9] border border-[#D8CFC0] hover:bg-[#E8E2D9] transition-colors shrink-0"
+                          onClick={onClose}
+                        >
+                          <FileText className="h-3 w-3" /> Docs
+                        </Link>
+                      </div>
+                    ))}
                   </div>
-                  <Link
-                    to={`/products/${p.id}/documents`}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-[#6B5C32] bg-[#F0ECE9] border border-[#D8CFC0] hover:bg-[#E8E2D9] transition-colors shrink-0"
-                    onClick={onClose}
-                  >
-                    <FileText className="h-3 w-3" /> Docs
-                  </Link>
                 </div>
               ))}
             </div>

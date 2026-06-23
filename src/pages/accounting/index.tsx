@@ -2489,8 +2489,9 @@ function JournalEntryForm({
             </div>
           </div>
 
-          {/* Lines Table */}
-          <div className="overflow-x-auto">
+          {/* Lines Table — no overflow wrapper: it would clip the AccountPicker
+              dropdown vertically (overflow-x:auto forces overflow-y:auto). */}
+          <div>
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#E2DDD8] text-left">
@@ -5215,6 +5216,7 @@ function PartyLedgerTab({ side }: { side: "DEBTOR" | "CREDITOR" }) {
       .catch(() => setData(null))
       .finally(() => setLoading(false));
   }, [endpoint, from, to]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- standard data-fetch effect; `load` (a useCallback also wired to the Refresh button) sets loading/data when endpoint/from/to change, not a cascading-render bug
   useEffect(() => { load(); }, [load]);
 
   const fmtType = (t: string) => t.replace(/_/g, " ").toLowerCase();

@@ -18,7 +18,7 @@ Each entry below jumps to the first BUG with that category tag.
 Entries themselves stay newest-first.
 
 - `inventory-display` (23) — [BUG-2026-04-27-032](#bug-2026-04-27-032-wip-page-inflated-displayed-qty-by-summing-uph-jc-capacity-instead-of-trusting-wip_itemsstockqty)
-- `ui-frontend` (24) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
+- `ui-frontend` (25) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
 - `production-orders` (20) — [BUG-2026-04-29-001](#bug-2026-04-29-001--production-sheet-so-id-column-blank-for-sofa-rows-of-co-origin-pos)
 - `bom` (18) — [BUG-2026-04-29-008](#bug-2026-04-29-008--dept-pivot-editor-shows-stale-minutes-same-cat-different-times-on-different-rows)
 - `infrastructure` (15) — [BUG-2026-04-27-029](#bug-2026-04-27-029-fixdb-hyperdrive-needs-preparefalse-supavisor-6543-rejects-prepared-statements)
@@ -33,6 +33,18 @@ Entries themselves stay newest-first.
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
 
 ---
+
+## BUG-2026-06-23-006 — Journal Entry account picker dropdown clipped to ~3 rows (last `overflow-x-auto`-wrapped line-item table)
+
+🟢 **Fixed** · `ui-frontend` · caught by owner on prod (screenshot: JV "Type code or name…" list cut off after CAPITAL / RETAINED EARNING / RESERVES)
+
+**Symptom:** On the New Journal Entry form, opening a line's Account picker showed only ~3 accounts then was cut off by the card edge — same class as the PV/OR and OD/OC-bill pickers fixed earlier in the forms batch.
+
+**Root cause:** the JV lines `<table>` was wrapped in `<div className="overflow-x-auto">`. Per CSS, `overflow-x: auto` forces `overflow-y` to `auto` (it cannot stay `visible`), so the wrapper became a scroll container that clipped the shared `AccountPicker`'s `absolute z-20 max-h-64` dropdown (index.tsx L173-207) vertically. `position:absolute` escapes normal flow but NOT an ancestor scroll container.
+
+**Fix:** dropped the `overflow-x-auto` wrapper around the JV lines table (`src/pages/accounting/index.tsx` ~L2493), matching the already-fixed siblings — OD/OC bill (bare `w-full` table), PV/OR (`w-80`), labour (CSS grid). Swept the other 8 AccountPicker call sites on the page: all sit in fixed-width (`w-56` / `w-72` / `w-80`) or grid / bare-table containers — none clipped. JV was the last `overflow-x-auto`-wrapped line-item picker.
+
+**No regression test:** pure CSS/layout; the test suite is logic/pure-function only (no render/DOM harness), same as the prior overflow-clip fixes. Verified visually on prod after deploy.
 
 ## BUG-2026-06-23-005 — Customer DO/Invoice emails NEVER fired for delivered orders (FE-only trigger bypassed by the real delivery paths) — the main customer's 128 delivered DOs emailed nothing, including same-day
 

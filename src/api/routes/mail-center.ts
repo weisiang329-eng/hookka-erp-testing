@@ -1884,7 +1884,16 @@ app.post("/threads/:id/reply", async (c) => {
   const id = c.req.param("id");
   const scope = await getMailScope(c, orgId);
 
-  type ReplyBody = { text?: string; html?: string };
+  type ReplyBody = {
+    text?: string;
+    html?: string;
+    // Optional From override — the address the operator picked in the reply
+    // box. Absent ⇒ reply from the thread's mailbox (the original behaviour).
+    fromAddress?: string;
+    // Inline outbound attachments (images + PDF), base64 (no data: prefix).
+    // Transient — not persisted to /api/files; just forwarded to sendMail.
+    attachments?: Array<{ filename: string; contentBase64: string }>;
+  };
   const body: ReplyBody = await c.req
     .json<ReplyBody>()
     .catch(() => ({} as ReplyBody));
@@ -1893,6 +1902,16 @@ app.post("/threads/:id/reply", async (c) => {
   const html = body.html?.trim() || "";
   if (!text && !html) {
     return c.json({ error: "reply body is empty" }, 400);
+  }
+
+  const attachments = body.attachments ?? [];
+  // This route, like /compose, sends SYNCHRONOUSLY via sendMail and BYPASSES
+  // the outbox, so the outbox's MAX_ATTACHMENT_TOTAL_BYTES guard does NOT
+  // protect it — own the cap here (same 5 MB decoded / 10-file / images+PDF
+  // rule the frontend mirrors). Interactive path → reject clearly.
+  const attachCheck = validateMailAttachments(attachments);
+  if (!attachCheck.ok) {
+    return c.json({ error: attachCheck.error || "Invalid attachments." }, 400);
   }
 
   const thread = await c.var.DB.prepare(
@@ -1920,7 +1939,43 @@ app.post("/threads/:id/reply", async (c) => {
   }
 
   const mailbox = (thread.mailboxAddress ?? thread.mailbox_address ?? "").trim();
-  const from = mailbox || DEFAULT_REPLY_FROM;
+
+  // Resolve the From: the operator may pick a mailbox in the reply box (default
+  // is their own — see the FE). An explicit fromAddress is honoured only when
+  // the caller is allowed to send from it: SUPER_ADMIN may send from any, a
+  // non-admin only from a mailbox in their scope (same gate as /compose). An
+  // absent / unauthorised override falls back to the thread's mailbox, which the
+  // caller already passed the ownership check on above — so the reply never
+  // silently goes out from an address the user can't use.
+  const requestedFrom = (body.fromAddress ?? "").trim();
+  let fromAddress = mailbox;
+  if (
+    requestedFrom &&
+    (scope.isAdmin || scope.addresses.includes(requestedFrom.toLowerCase()))
+  ) {
+    fromAddress = requestedFrom;
+  }
+
+  // The send-from header: "<label> <addr>" when the address record carries a
+  // label (mirrors /compose), else the bare address; DEFAULT_REPLY_FROM only
+  // when the thread truly has no mailbox on file. A label lookup failure must
+  // never block the send.
+  let from = fromAddress || DEFAULT_REPLY_FROM;
+  if (fromAddress) {
+    try {
+      const addrRow = await c.var.DB.prepare(
+        `SELECT label FROM email_addresses
+           WHERE org_id = ? AND address = ? LIMIT 1`,
+      )
+        .bind(orgId, fromAddress)
+        .first<{ label: string | null }>();
+      const label = addrRow?.label?.trim();
+      if (label) from = `${label} <${fromAddress}>`;
+    } catch {
+      // Keep the bare address — a display-name lookup isn't worth failing over.
+    }
+  }
+
   const baseSubject = thread.subject ?? "(no subject)";
   const subject = /^re:/i.test(baseSubject) ? baseSubject : `Re: ${baseSubject}`;
 
@@ -1935,6 +1990,10 @@ app.post("/threads/:id/reply", async (c) => {
     subject,
     text: text || undefined,
     html: htmlBody,
+    // Forward the validated attachments (already capped at 5 MB / 10 files /
+    // images+PDF above). Omitted when empty so the payload is byte-identical to
+    // the pre-attachment behaviour. Not persisted — transient outbound only.
+    ...(attachments.length > 0 ? { attachments } : {}),
   });
   if (!result.ok) {
     return c.json({ error: result.error || "failed to send reply" }, 502);
@@ -1959,7 +2018,10 @@ app.post("/threads/:id/reply", async (c) => {
       messageId,
       orgId,
       id,
-      from,
+      // Store the BARE chosen address (not the "label <addr>" header form) so
+      // the message row's from_address stays a plain address — matches /compose
+      // and how the thread's mailbox is recorded.
+      fromAddress || DEFAULT_REPLY_FROM,
       fromName || null,
       JSON.stringify([to]),
       subject,

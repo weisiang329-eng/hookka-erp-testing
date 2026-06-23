@@ -15,7 +15,7 @@
 // Pass an optional `id` prop; it falls back to useParams when absent, so the
 // standalone route keeps working unchanged.
 // ---------------------------------------------------------------------------
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState, type ChangeEvent } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
 import { Card, CardContent } from "@/components/ui/card";
@@ -25,6 +25,14 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { csrfHeaders } from "@/lib/csrf";
+import { pickDefaultFromAddress } from "./mail-from-default";
+import {
+  validateMailAttachments,
+  decodedBase64Bytes,
+  isAllowedMailAttachment,
+  MAIL_ATTACH_MAX_COUNT,
+  MAIL_ATTACH_MAX_TOTAL_BYTES,
+} from "@/api/lib/mail-attachments";
 import { cn } from "@/lib/utils";
 import {
   patchThreadStarred,
@@ -158,6 +166,57 @@ function htmlToText(html: string): string {
     .trim();
 }
 
+// One picked file held in memory for the reply POST. contentBase64 is the RAW
+// base64 (the `data:...;base64,` prefix is stripped on read) so it maps 1:1 onto
+// the backend EmailAttachment shape. Mirrors compose.tsx's ComposeAttachment.
+type OutboundAttachment = {
+  name: string;
+  type: string;
+  size: number; // decoded byte count (for the chip label + total cap)
+  contentBase64: string;
+};
+
+// One of OUR @hookka.com mailboxes (GET /api/mail-center/addresses). Only the
+// fields the reply From picker needs. assignedUserId drives the default-to-self.
+type MailAddress = {
+  id: string;
+  address: string;
+  label: string;
+  active: boolean;
+  assignedUserId?: string | null;
+};
+
+// Minimal shape of GET /api/auth/me — the current user's id + email, all that
+// pickDefaultFromAddress needs to default the From to this user's own mailbox.
+type MeResponse = {
+  success?: boolean;
+  data?: { user?: { id?: string; email?: string } };
+};
+
+// Human-readable file size for the attachment chip label (e.g. "12 KB").
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Read one file → raw base64 (strip the `data:<mime>;base64,` prefix). The
+// FileReader result is a data URL; everything after the first comma is the
+// base64 payload the backend expects in EmailAttachment.contentBase64.
+// Mirrors compose.tsx's readFileAsBase64.
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export type MailCenterDetailProps = {
   // When embedded in the desktop reading pane, the parent passes the route id
   // as a prop. On the standalone /mail-center/:id route this is omitted and we
@@ -190,6 +249,18 @@ export default function MailCenterDetailPage({
   );
   const colorMap = labelColorMap(labelCatalog ?? []);
 
+  // Our @hookka.com mailboxes (for the reply From picker) + the current user
+  // (so the From defaults to THEIR own mailbox). Both shared-cached.
+  const { data: addresses } = useCachedJson<MailAddress[]>(
+    "/api/mail-center/addresses",
+    300,
+  );
+  const { data: me } = useCachedJson<MeResponse>("/api/auth/me", 300);
+  const activeAddresses = useMemo(
+    () => (addresses ?? []).filter((a) => a.active),
+    [addresses],
+  );
+
   const thread = data?.thread;
   const messages = data?.messages ?? [];
 
@@ -203,6 +274,37 @@ export default function MailCenterDetailPage({
   // the always-visible reply composer at the bottom of the conversation.
   const [forwardOpen, setForwardOpen] = useState(false);
   const replyRef = useRef<HTMLTextAreaElement>(null);
+  // Reply From override the operator picked (empty = follow the default). The
+  // effective From is DERIVED below, so no effect is needed to seed it.
+  const [fromOverride, setFromOverride] = useState("");
+  // Picked reply attachments (held in memory only).
+  const [files, setFiles] = useState<OutboundAttachment[]>([]);
+  // Inline attachment error (count / size / type), mirrors the backend reject.
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // The mailbox that belongs to the logged-in user (assigned-to / address ==
+  // login email / local-part), if any active one maps to them. "" when none.
+  const userDefaultFrom = useMemo(
+    () => pickDefaultFromAddress(activeAddresses, me?.data?.user),
+    [activeAddresses, me],
+  );
+  // Effective reply From, derived: the operator's explicit pick wins; otherwise
+  // the logged-in user's OWN mailbox; then the thread's mailbox (the original
+  // recipient address — the existing default); then the first active mailbox.
+  // Each candidate must still be a valid active address to be honoured, except
+  // the thread mailbox which is always a legitimate reply-from even if it isn't
+  // in the caller's listed set (admins reply from any).
+  const threadMailbox = thread?.mailboxAddress ?? "";
+  const replyFrom =
+    (fromOverride &&
+      (activeAddresses.some((a) => a.address === fromOverride) ||
+        fromOverride === threadMailbox) &&
+      fromOverride) ||
+    userDefaultFrom ||
+    threadMailbox ||
+    activeAddresses[0]?.address ||
+    "";
 
   // Star / labels / trashed are DB-backed and arrive on the thread itself.
   const starred = thread?.starred ?? false;
@@ -319,6 +421,79 @@ export default function MailCenterDetailPage({
     }
   }
 
+  // Pick reply attachments — type gate → raw-size pre-check → read to base64 →
+  // validate the COMBINED batch with the SAME helper the backend uses, so the
+  // operator is rejected here with the identical 5 MB / 10-file / type rule.
+  // Mirrors compose.tsx's handlePickFiles exactly.
+  async function handlePickFiles(e: ChangeEvent<HTMLInputElement>) {
+    const picked = Array.from(e.target.files ?? []);
+    // Allow re-picking the same file later (clear the input value).
+    e.target.value = "";
+    if (picked.length === 0) return;
+    setAttachError(null);
+
+    // Per-file type gate (mirrors isAllowedMailAttachment on the backend) — do
+    // it before the read so an obviously-wrong file never gets decoded.
+    const rejected = picked.filter((f) => !isAllowedMailAttachment(f.name));
+    if (rejected.length > 0) {
+      setAttachError(
+        `"${rejected[0].name}" is not an allowed type. Only images and PDF files can be attached.`,
+      );
+      return;
+    }
+
+    // Pre-check RAW file sizes (File.size, synchronous, zero read cost) BEFORE
+    // decoding, so an oversized file never gets fully read into memory first —
+    // FileReader.readAsDataURL on a huge phone photo can hang/crash a low-RAM
+    // tab. f.size ≈ decoded bytes the cap is enforced on, so this is the same
+    // 5 MB ceiling applied earlier.
+    const existingBytes = files.reduce((sum, f) => sum + f.size, 0);
+    const pickedRawBytes = picked.reduce((sum, f) => sum + f.size, 0);
+    if (existingBytes + pickedRawBytes > MAIL_ATTACH_MAX_TOTAL_BYTES) {
+      setAttachError(
+        `Attachments exceed the ${humanSize(MAIL_ATTACH_MAX_TOTAL_BYTES)} limit.`,
+      );
+      return;
+    }
+
+    let read: OutboundAttachment[];
+    try {
+      read = await Promise.all(
+        picked.map(async (f) => {
+          const contentBase64 = await readFileAsBase64(f);
+          return {
+            name: f.name,
+            type: f.type,
+            // Trust the decoded base64 length, not f.size — that's the number
+            // the cap is enforced on (server-side too).
+            size: decodedBase64Bytes(contentBase64),
+            contentBase64,
+          };
+        }),
+      );
+    } catch {
+      setAttachError("Could not read one of the files. Please try again.");
+      return;
+    }
+
+    const next = [...files, ...read];
+    const check = validateMailAttachments(
+      next.map((f) => ({ filename: f.name, contentBase64: f.contentBase64 })),
+    );
+    if (!check.ok) {
+      setAttachError(check.error ?? "Invalid attachments.");
+      return; // keep the previous selection; don't apply the over-cap batch
+    }
+    setFiles(next);
+  }
+
+  function removeFile(index: number) {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+    setAttachError(null);
+  }
+
+  const totalAttachBytes = files.reduce((sum, f) => sum + f.size, 0);
+
   // Send the composed reply, then invalidate this thread's cache so the new
   // outbound message + updated status flag refetch immediately (the hook
   // subscribes to its own URL's invalidations — see lib/cached-fetch.ts).
@@ -332,7 +507,22 @@ export default function MailCenterDetailPage({
         method: "POST",
         headers: csrfHeaders(),
         credentials: "include",
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({
+          text,
+          // Send the chosen From so the reply goes out from the logged-in
+          // user's mailbox (or whatever they picked). The backend authorizes
+          // it against their mailbox scope and falls back to the thread mailbox
+          // when absent — so omitting it stays byte-identical to before.
+          ...(replyFrom ? { fromAddress: replyFrom } : {}),
+          ...(files.length > 0
+            ? {
+                attachments: files.map((f) => ({
+                  filename: f.name,
+                  contentBase64: f.contentBase64,
+                })),
+              }
+            : {}),
+        }),
       });
       if (!res.ok) {
         let msg = "Failed to send reply. Please try again.";
@@ -346,6 +536,8 @@ export default function MailCenterDetailPage({
         return;
       }
       setReplyText("");
+      setFiles([]);
+      setAttachError(null);
       toast.success("Reply sent.");
       invalidateCache(url);
     } catch {
@@ -878,8 +1070,43 @@ export default function MailCenterDetailPage({
                   {thread.counterpartyName ||
                     thread.counterpartyEmail ||
                     "(unknown sender)"}
-                  {thread.mailboxAddress ? ` · from ${thread.mailboxAddress}` : ""}
                 </span>
+              </div>
+              {/* From picker — defaults to the logged-in user's own mailbox
+                  (replyFrom), but stays switchable when the user has 2+ active
+                  mailboxes. With 0/1 mailbox in scope there's nothing to pick,
+                  so we show the effective From as static text. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-xs font-medium text-muted-foreground">
+                  From
+                </label>
+                {activeAddresses.length > 1 ? (
+                  <select
+                    value={replyFrom}
+                    onChange={(e) => setFromOverride(e.target.value)}
+                    disabled={sending}
+                    className="h-8 max-w-full rounded-md border border-[#E2DDD8] bg-white px-2 text-xs text-[#1F1D1B] focus:border-[#6B5C32] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {/* When the thread's own mailbox isn't one of the listed
+                        active addresses, keep it selectable so the reply can
+                        still go out from the address the customer wrote to. */}
+                    {threadMailbox &&
+                      !activeAddresses.some(
+                        (a) => a.address === threadMailbox,
+                      ) && (
+                        <option value={threadMailbox}>{threadMailbox}</option>
+                      )}
+                    {activeAddresses.map((a) => (
+                      <option key={a.id} value={a.address}>
+                        {a.label ? `${a.label} · ${a.address}` : a.address}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="text-xs text-foreground/90">
+                    {replyFrom || "Hookka"}
+                  </span>
+                )}
               </div>
               <textarea
                 ref={replyRef}
@@ -890,23 +1117,85 @@ export default function MailCenterDetailPage({
                 disabled={sending}
                 className="w-full resize-y rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32] disabled:cursor-not-allowed disabled:opacity-60"
               />
+
+              {/* Attachments — removable chips. Images + PDF only, ≤10 files,
+                  ≤5 MB total (mirrors the backend cap in mail-attachments.ts). */}
+              {files.length > 0 && (
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground">
+                    Attachments ({files.length}/{MAIL_ATTACH_MAX_COUNT} ·{" "}
+                    {humanSize(totalAttachBytes)} of{" "}
+                    {humanSize(MAIL_ATTACH_MAX_TOTAL_BYTES)})
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {files.map((f, i) => (
+                      <span
+                        key={`${f.name}-${i}`}
+                        className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] py-1 pl-2 pr-1 text-xs text-[#1F1D1B]"
+                      >
+                        <Paperclip className="h-3 w-3 shrink-0 text-[#6B7280]" />
+                        <span className="truncate">{f.name}</span>
+                        <span className="shrink-0 text-[#6B7280]">
+                          {humanSize(f.size)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeFile(i)}
+                          disabled={sending}
+                          aria-label={`Remove ${f.name}`}
+                          className="shrink-0 rounded p-0.5 text-[#6B7280] transition hover:bg-[#F0ECE9] hover:text-[#1F1D1B] disabled:opacity-50"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {attachError && (
+                <p className="text-[11px] text-red-600">{attachError}</p>
+              )}
+
               <div className="flex items-center justify-between gap-2">
                 <p className="text-[11px] text-muted-foreground">
-                  Sent via Brevo from {thread.mailboxAddress || "Hookka"}.
+                  Sent via Brevo from {replyFrom || "Hookka"}.
                 </p>
-                <Button
-                  size="sm"
-                  className="gap-1.5 bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-                  disabled={sending || !replyText.trim()}
-                  onClick={handleSend}
-                >
-                  {sending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Send className="h-4 w-4" />
-                  )}
-                  Send reply
-                </Button>
+                <div className="flex items-center gap-2">
+                  {/* Hidden picker driven by the Attach button. Images + PDF
+                      only; `multiple` so several can be added in one go. */}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*,application/pdf"
+                    multiple
+                    className="hidden"
+                    onChange={handlePickFiles}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                    disabled={sending}
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Attach images or PDF files (max 10 files, 5 MB total)"
+                  >
+                    <Paperclip className="h-4 w-4" />
+                    Attach
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="gap-1.5 bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+                    disabled={sending || !replyText.trim()}
+                    onClick={handleSend}
+                  >
+                    {sending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Send className="h-4 w-4" />
+                    )}
+                    Send reply
+                  </Button>
+                </div>
               </div>
             </CardContent>
           </Card>

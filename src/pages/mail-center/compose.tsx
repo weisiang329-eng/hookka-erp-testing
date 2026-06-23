@@ -23,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { csrfHeaders } from "@/lib/csrf";
 import { saveDraft, deleteDraft, type MailDraft } from "./mail-local";
+import { pickDefaultFromAddress } from "./mail-from-default";
 import {
   validateMailAttachments,
   decodedBase64Bytes,
@@ -54,6 +55,17 @@ type MailAddress = {
   address: string;
   label: string;
   active: boolean;
+  // Served by GET /api/mail-center/addresses (rowToAddress) — the user this
+  // mailbox is assigned to. Used to default the From to the logged-in user's
+  // own mailbox (see pickDefaultFromAddress).
+  assignedUserId?: string | null;
+};
+
+// Minimal shape of GET /api/auth/me — only the current user's id + email, which
+// is all pickDefaultFromAddress needs to choose this user's own mailbox.
+type MeResponse = {
+  success?: boolean;
+  data?: { user?: { id?: string; email?: string } };
 };
 
 // Conservative single-@ shape check — mirrors the backend's EMAIL_RE so the
@@ -92,10 +104,21 @@ export function ComposeDialog({
     "/api/mail-center/addresses",
     300,
   );
+  // Current logged-in user — so the From defaults to THEIR own mailbox.
+  const { data: me } = useCachedJson<MeResponse>("/api/auth/me", 300);
 
   const activeAddresses = useMemo(
     () => (addresses ?? []).filter((a) => a.active),
     [addresses],
+  );
+
+  // The mailbox that belongs to the logged-in user, if any of the active ones
+  // map to them (assigned-to / address == login email / local-part). "" when
+  // the user owns no listed mailbox → we fall back to the first active address
+  // below, exactly as before (safe fallback, never blank).
+  const userDefaultFrom = useMemo(
+    () => pickDefaultFromAddress(activeAddresses, me?.data?.user),
+    [activeAddresses, me],
   );
 
   // Explicit From override the operator picked (empty = follow the default).
@@ -142,8 +165,8 @@ export function ComposeDialog({
   const onlyOneMailbox = activeAddresses.length === 1;
   // Effective From, derived (no state sync needed): the operator's explicit
   // pick wins; otherwise, when resuming a draft, the draft's saved sender; then
-  // the first active mailbox. Each candidate must still be a valid active
-  // address to be honoured.
+  // the logged-in user's OWN mailbox; then the first active mailbox. Each
+  // candidate must still be a valid active address to be honoured.
   const draftFrom =
     draftId && initialDraft?.id === draftId ? initialDraft.fromAddress : "";
   const fromAddress =
@@ -153,6 +176,7 @@ export function ComposeDialog({
     (draftFrom &&
       activeAddresses.some((a) => a.address === draftFrom) &&
       draftFrom) ||
+    userDefaultFrom ||
     activeAddresses[0]?.address ||
     "";
   const toValid = EMAIL_RE.test(to.trim());

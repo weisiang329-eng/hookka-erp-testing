@@ -5863,6 +5863,8 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     return true;
   });
 
+  const [editingId, setEditingId] = useState<string | null>(null);
+
   const handleSave = async () => {
     const body = {
       date: form.date,
@@ -5882,19 +5884,19 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     }
     setSaving(true);
     try {
-      const res = await fetch("/api/accounting/payment-vouchers", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      const res = await fetch(
+        editingId ? `/api/accounting/payment-vouchers/${editingId}/restate` : "/api/accounting/payment-vouchers",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+      );
       const j = asMutationResponse(await res.json());
       if (j?.success) {
-        toast.success("Payment posted");
+        toast.success(editingId ? "Payment updated" : "Payment posted");
         setShowForm(false);
+        setEditingId(null);
         setForm({ date: new Date().toISOString().slice(0, 10), payee: "", description: "", accrued: false, payFrom: "", accrualAccount: "", productLine: "" });
         setLines([{ accountCode: "", description: "", amount: "" }]);
         load();
-      } else toast.error(j?.error || "Save failed");
+      } else toast.error(j?.error || (editingId ? "Update failed" : "Save failed"));
     } finally {
       setSaving(false);
     }
@@ -5936,22 +5938,13 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     } else toast.error(j?.error || `${verb} failed`);
   };
 
-  const startEdit = async (r: PvRow) => {
-    if (!(await confirm({ title: "Edit voucher?", message: `Edit ${r.pvNo}? It will be VOIDED and a new prefilled payment opened to repost.`, danger: true }))) return;
-    // Void via the lifecycle endpoint (hides the original + reversal from the GL),
-    // NOT the legacy /void (which left both legs visible — the ledger void leak).
-    const res = await fetch(`/api/accounting/payment-vouchers/${r.id}/lifecycle`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "void" }),
-    });
-    const j = asMutationResponse(await res.json());
-    if (!j?.success) { toast.error(j?.error || "Could not void the original"); return; }
+  // In-place edit: load the voucher into the form (no void). Save re-states it
+  // under the same PV number; the original is untouched until then.
+  const startEdit = (r: PvRow) => {
+    setEditingId(r.id);
     setForm({ date: r.date, payee: r.payee ?? "", description: r.description ?? "", accrued: r.accrued === 1, payFrom: r.payFrom ?? "", accrualAccount: r.accrualAccount ?? "", productLine: r.productLine ?? "" });
     setLines(r.lines.length ? r.lines.map((l) => ({ accountCode: l.accountCode, description: l.description ?? "", amount: (l.amountSen / 100).toFixed(2) })) : [{ accountCode: "", description: "", amount: "" }]);
     setShowForm(true);
-    toast.success(`${r.pvNo} voided — edit and Save to repost`);
-    load();
   };
 
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
@@ -5960,7 +5953,15 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Payment / Expense</h2>
-        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+        <Button variant="primary" size="sm" onClick={() => {
+          if (showForm) { setShowForm(false); setEditingId(null); }
+          else {
+            setEditingId(null);
+            setForm({ date: new Date().toISOString().slice(0, 10), payee: "", description: "", accrued: false, payFrom: "", accrualAccount: "", productLine: "" });
+            setLines([{ accountCode: "", description: "", amount: "" }]);
+            setShowForm(true);
+          }
+        }}>
           <Plus className="h-4 w-4" /> New Payment
         </Button>
       </div>
@@ -6053,9 +6054,9 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
             <div className="flex gap-2 pt-3 border-t border-[#F0ECE9]">
               <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || (form.accrued ? !form.accrualAccount : !(form.payFrom || defaultBankCode(bankCash)))} onClick={handleSave}>
-                {saving ? "Posting…" : form.accrued ? "Post (accrued)" : "Post payment"}
+                {saving ? (editingId ? "Updating…" : "Posting…") : editingId ? "Update payment" : form.accrued ? "Post (accrued)" : "Post payment"}
               </Button>
-              <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
+              <Button variant="outline" size="sm" onClick={() => { setShowForm(false); setEditingId(null); }}>Cancel</Button>
             </div>
           </CardContent>
         </Card>

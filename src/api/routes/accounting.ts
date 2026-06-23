@@ -6411,8 +6411,78 @@ app.post("/payment-vouchers/:id/lifecycle", async (c) => {
     ...lc.statements,
     c.var.DB.prepare("UPDATE payment_vouchers SET status = ? WHERE id = ?").bind(docStatus, id),
   ];
+  // Cover restate legs (payment_voucher_restate_post:*) on void/delete so an
+  // edited-then-voided voucher still nets to zero in the GL.
+  if (lc.newState !== "ACTIVE") {
+    statements.push(
+      c.var.DB.prepare(`UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'payment_voucher%'`).bind(id, orgId),
+    );
+  }
   await c.var.DB.batch(statements);
   return c.json({ success: true, data: { state: lc.newState } });
+});
+
+// Edit a payment voucher IN PLACE — same PV number; reverses the live legs and
+// re-posts the corrected ones (payment_voucher_restate_rev/post:<stamp>), then
+// collapses to the newest post. Mirrors the customer-receipt restate. A settled
+// accrual is un-settled (its settle legs are reversed), so re-settle if needed.
+app.post("/payment-vouchers/:id/restate", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+  try {
+    const pv = await c.var.DB.prepare("SELECT id, pvNo FROM payment_vouchers WHERE id = ?").bind(id).first<{ id: string; pvNo: string }>();
+    if (!pv) return c.json({ success: false, error: "Voucher not found" }, 404);
+    const body = await c.req.json();
+    const date = String(body.date || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ success: false, error: "date must be YYYY-MM-DD" }, 400);
+    const accrued = body.accrued === true || body.accrued === 1;
+    const productLine = body.productLine === "SOFA" || body.productLine === "BEDFRAME" ? body.productLine : null;
+    const coaRes = await c.var.DB.prepare("SELECT code, type, specialAccountType, isPostable FROM chart_of_accounts").all<{ code: string; type: CoaRow["type"]; specialAccountType: string | null; isPostable: number | null }>();
+    const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
+    const v = validateDocLines(coa, body.lines);
+    if (!v.ok) return c.json({ success: false, error: v.error }, 400);
+    let payFrom: string | null = null;
+    let accrualAccount: string | null = null;
+    if (accrued) {
+      accrualAccount = String(body.accrualAccount || "");
+      if (accrualAccount.startsWith("405")) return c.json({ success: false, error: "Expense accrual must use a 410-x accrued-expense account, not 405 Other Creditors." }, 400);
+      const acct = coa.get(accrualAccount);
+      if (!acct || acct.type !== "LIABILITY" || (acct.isPostable ?? 1) !== 1) return c.json({ success: false, error: "Pick a postable LIABILITY accrual account (410-x)" }, 400);
+    } else {
+      payFrom = String(body.payFrom || "");
+      const acct = coa.get(payFrom);
+      if (!acct || (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH")) return c.json({ success: false, error: "Pay From must be a bank (SBK) or cash (SCH) account" }, 400);
+    }
+    const now = new Date().toISOString();
+    const actorUserId = (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const stamp = Date.now();
+    const creditAccount = accrued ? accrualAccount! : payFrom!;
+
+    const statements: D1PreparedStatement[] = [];
+    // 1. Reverse the live voucher legs (incl. any settle legs).
+    const cur = (await c.var.DB.prepare(`SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE sourceId = ? AND orgId = ? AND hidden = 0 AND sourceType LIKE 'payment_voucher%'`).bind(id, orgId).all<{ accountCode: string; debitSen: number; creditSen: number }>()).results ?? [];
+    const revLegs = cur.map((l, i) => ({ id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: `payment_voucher_restate_rev:${stamp}`, sourceId: id, legNo: i + 1, accountCode: l.accountCode, debitSen: l.creditSen, creditSen: l.debitSen, description: `Restate rev · ${pv.pvNo}`, actorUserId, orgId }));
+    // 2. Corrected legs (DR expense lines, CR pay-from / accrual).
+    const postSource = `payment_voucher_restate_post:${stamp}`;
+    const newLegs: LedgerEntryInput[] = v.lines.map((l, idx) => ({ id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: postSource, sourceId: id, legNo: idx + 1, accountCode: l.accountCode, debitSen: l.amountSen, creditSen: 0, description: `${pv.pvNo} · ${l.description || body.description || "Payment"}${accrued ? " (accrued)" : ""}`, actorUserId, orgId }));
+    newLegs.push({ id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: postSource, sourceId: id, legNo: newLegs.length + 1, accountCode: creditAccount, debitSen: 0, creditSen: v.totalSen, description: `${pv.pvNo} · ${body.payee ? `to ${body.payee}` : "Payment"}${accrued ? " (accrued)" : ""}`, actorUserId, orgId });
+    const { statements: jeStmts } = await buildJournalEntryStatements(c.var.DB, orgId, [...revLegs, ...newLegs]);
+    statements.push(...jeStmts);
+    statements.push(c.var.DB.prepare(`UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'payment_voucher%' AND sourceType <> ?`).bind(id, orgId, postSource));
+    // 3. Update the voucher row + replace its lines (same id + pvNo); un-settle.
+    statements.push(c.var.DB.prepare(`UPDATE payment_vouchers SET date = ?, payee = ?, description = ?, payFrom = ?, accrued = ?, accrualAccount = ?, settledAt = NULL, productLine = ?, totalSen = ?, status = 'POSTED', updated_at = ? WHERE id = ?`).bind(date, String(body.payee ?? ""), String(body.description ?? ""), payFrom, accrued ? 1 : 0, accrualAccount, productLine, v.totalSen, now, id));
+    statements.push(c.var.DB.prepare("DELETE FROM payment_voucher_lines WHERE voucherId = ?").bind(id));
+    v.lines.forEach((l, idx) => {
+      statements.push(c.var.DB.prepare(`INSERT INTO payment_voucher_lines (id, voucherId, accountCode, description, amountSen, lineOrder) VALUES (?, ?, ?, ?, ?, ?)`).bind(`pvl-${crypto.randomUUID().slice(0, 8)}`, id, l.accountCode, l.description, l.amountSen, idx));
+    });
+    await c.var.DB.batch(statements);
+    return c.json({ success: true, data: { id, pvNo: pv.pvNo } });
+  } catch (e) {
+    console.error("[pv] restate failed:", e);
+    return c.json({ success: false, error: "Failed to update the payment voucher" }, 400);
+  }
 });
 
 app.get("/official-receipts", async (c) => {

@@ -1420,6 +1420,24 @@ export default function ProductionPage({
   // "Apply Completion" populates it; Apply Due Date / Apply PIC don't change
   // status (no hide) so they leave it alone.
   const [forceShowCompletedIds, setForceShowCompletedIds] = useState<ReadonlySet<string>>(() => new Set());
+  // Single-row completion (the per-row completion cell + the Status-cell flip)
+  // feeds the SAME force-show allowlist the batch "Apply Completion" uses, so a
+  // row completed one-at-a-time ALSO stays visible until reload instead of
+  // vanishing on the next ~20s poll — keeps single, batch and folder behaviour
+  // consistent (BUG-2026-06-23-004 follow-up). Updating the Set never remounts
+  // the grid, so it's cheap.
+  const markRowCompletedVisible = useCallback(
+    (rowId: string, completed: boolean) => {
+      setForceShowCompletedIds((prev) => {
+        if (completed ? prev.has(rowId) : !prev.has(rowId)) return prev;
+        const next = new Set(prev);
+        if (completed) next.add(rowId);
+        else next.delete(rowId);
+        return next;
+      });
+    },
+    [],
+  );
   // Reset selection + close batch dialogs when the dept tab changes.
   /* eslint-disable react-hooks/set-state-in-effect -- reset on tab change */
   useEffect(() => {
@@ -3374,6 +3392,13 @@ export default function ProductionPage({
             // Single-JC patch — FAB_CUT no longer merges rows, so every
             // dept (including FC) updates exactly the row's own jobCardId.
             patchJobCard(row.poId, row.jobCardId, patch);
+            // Keep the row visible (until reload) when it flips to a hidden
+            // status (COMPLETED/TRANSFERRED) — same allowlist as batch; drop it
+            // when it leaves DONE. Matches the completion-cell + batch paths.
+            markRowCompletedVisible(
+              row.id,
+              next === "COMPLETED" || next === "TRANSFERRED",
+            );
           }}
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
@@ -3445,6 +3470,8 @@ export default function ProductionPage({
                 status: v ? "COMPLETED" : "WAITING",
               };
               patchJobCard(row.poId, row.jobCardId, patch);
+              // Keep a just-completed row visible (until reload), same as batch.
+              markRowCompletedVisible(row.id, !!v);
             },
             e.currentTarget,
           );

@@ -236,8 +236,6 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   // Debtor / Creditor
   { key: "ar", label: "Debtor Aging", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "ap", label: "Creditor Aging", icon: <Building2 className="h-4 w-4" />, group: "Debtor / Creditor" },
-  { key: "debtorledger", label: "Debtor Ledger", icon: <BookOpen className="h-4 w-4" />, group: "Debtor / Creditor" },
-  { key: "creditorledger", label: "Creditor Ledger", icon: <BookOpen className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "odebtor", label: "Other Debtor", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "odebtorbills", label: "Other Debtor Bills", icon: <BookOpen className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "odebtorpay", label: "Other Debtor Receipts", icon: <Wallet className="h-4 w-4" />, group: "Debtor / Creditor" },
@@ -426,8 +424,6 @@ export default function AccountingPage() {
           )}
           {tab === "tb" && <TrialBalanceTab />}
           {tab === "gl" && <GeneralLedgerTab accounts={accounts} />}
-          {tab === "debtorledger" && <PartyLedgerTab side="DEBTOR" />}
-          {tab === "creditorledger" && <PartyLedgerTab side="CREDITOR" />}
           {tab === "ar" && <ARTab arData={arData} onRefresh={fetchAll} />}
           {tab === "ap" && (
             <div className="space-y-4">
@@ -5407,6 +5403,33 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
     setPicked(picked.filter((c) => c !== code));
     reset();
   };
+
+  // Sales / Purchase Ledger scope shows the per-customer / per-supplier ledger
+  // (one section each) — the "subsidiary" ledger — instead of the flat
+  // control-account listing. (Owner: a debtor/creditor ledger should be per party.)
+  if (ledger === "sales" || ledger === "purchase") {
+    return (
+      <div className="space-y-4">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">General Ledger</h2>
+        <Card>
+          <CardContent className="p-4 bg-[#F7F4EF] rounded-lg">
+            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Ledger</label>
+            <select
+              value={ledger}
+              onChange={(e) => { setLedger(e.target.value as typeof ledger); setPicked([]); reset(); }}
+              className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm"
+            >
+              <option value="all">All Ledgers</option>
+              <option value="general">General Ledger</option>
+              <option value="sales">Sales Ledger (Debtors)</option>
+              <option value="purchase">Purchase Ledger (Creditors)</option>
+            </select>
+          </CardContent>
+        </Card>
+        <PartyLedgerTab side={ledger === "sales" ? "DEBTOR" : "CREDITOR"} />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

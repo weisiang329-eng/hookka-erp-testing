@@ -92,6 +92,19 @@ async function buildCustomerPaymentLifecycle(
 
   const deactivated = lc.prevState === "ACTIVE" && lc.newState !== "ACTIVE";
   const reactivated = lc.prevState !== "ACTIVE" && lc.newState === "ACTIVE";
+  // If the receipt was edited (restated), its live legs are
+  // payment_restate_post:* — which the applyLifecycle exact-match on "payment"
+  // doesn't cover. Hide the whole payment family on void/delete so the GL nets
+  // to zero regardless of how many times it was edited.
+  if (deactivated) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'payment%'`,
+        )
+        .bind(id, orgId),
+    );
+  }
   if (deactivated || reactivated) {
     let totalAllocSen = 0;
     for (const a of allocs) {
@@ -142,6 +155,183 @@ async function buildCustomerPaymentLifecycle(
     }
   }
   return { statements, newState: lc.newState };
+}
+
+// buildCustomerPaymentRestate — in-place EDIT. Keeps the same receipt row and
+// number; reverses the currently-posted GL legs and re-posts the corrected ones
+// (timestamped restate_rev/restate_post sourceTypes, then collapse so only the
+// newest post stays visible — the invoice-restate pattern). Rolls the old
+// allocations off the invoices / customer A/R and applies the new ones.
+// Throws "PAYMENT_NOT_FOUND".
+async function buildCustomerPaymentRestate(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  id: string,
+  body: {
+    method?: string | null;
+    reference?: string | null;
+    bankAccount?: string;
+    allocations?: Allocation[];
+  },
+  actorUserId: string | null,
+  stamp: number,
+): Promise<D1PreparedStatement[]> {
+  const existing = await db
+    .prepare("SELECT * FROM payment_records WHERE id = ?")
+    .bind(id)
+    .first<PaymentRow>();
+  if (!existing) throw new Error("PAYMENT_NOT_FOUND");
+  const oldAllocs = parseAllocations(existing.allocations);
+  const newAllocs = (body.allocations ?? []).filter(
+    (a) => a.invoiceId && a.amount > 0,
+  );
+  const statements: D1PreparedStatement[] = [];
+
+  // 1. Roll the OLD allocations off their invoices.
+  let oldTotal = 0;
+  for (const a of oldAllocs) {
+    if (!a.invoiceId || !a.amount) continue;
+    oldTotal += a.amount;
+    statements.push(
+      db
+        .prepare(
+          `UPDATE invoices SET paidAmount = GREATEST(0, paidAmount - ?),
+             status = CASE
+               WHEN paidAmount - ? <= 0 THEN 'SENT'
+               WHEN paidAmount - ? < totalSen THEN 'PARTIAL_PAID'
+               ELSE 'PAID'
+             END
+           WHERE id = ?`,
+        )
+        .bind(a.amount, a.amount, a.amount, a.invoiceId),
+    );
+  }
+  // 2. Apply the NEW allocations.
+  let newTotal = 0;
+  for (const a of newAllocs) {
+    newTotal += a.amount;
+    statements.push(
+      db
+        .prepare(
+          `UPDATE invoices SET paidAmount = paidAmount + ?,
+             status = CASE
+               WHEN paidAmount + ? >= totalSen THEN 'PAID'
+               WHEN paidAmount + ? > 0 THEN 'PARTIAL_PAID'
+               ELSE 'SENT'
+             END
+           WHERE id = ?`,
+        )
+        .bind(a.amount, a.amount, a.amount, a.invoiceId),
+    );
+  }
+  // 3. Net the customer A/R (reverse old, apply new).
+  if (existing.customerId && oldTotal !== newTotal) {
+    const delta = oldTotal - newTotal;
+    statements.push(
+      delta > 0
+        ? db
+            .prepare(
+              `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
+            )
+            .bind(delta, existing.customerId)
+        : db
+            .prepare(
+              `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
+            )
+            .bind(-delta, existing.customerId),
+    );
+  }
+
+  // 4. GL: reverse the currently-visible payment legs + post the corrected
+  //    legs in ONE buildJournalEntryStatements call (so rev + post chain off the
+  //    same head), then collapse so only this restate_post stays visible.
+  const cur =
+    (
+      await db
+        .prepare(
+          `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+            WHERE sourceId = ? AND orgId = ? AND hidden = 0 AND sourceType LIKE 'payment%'`,
+        )
+        .bind(id, orgId)
+        .all<{ accountCode: string; debitSen: number; creditSen: number }>()
+    ).results ?? [];
+  const revLegs = cur.map((l, i) => ({
+    id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+    sourceType: `payment_restate_rev:${stamp}`,
+    sourceId: id,
+    legNo: i + 1,
+    accountCode: l.accountCode,
+    debitSen: l.creditSen,
+    creditSen: l.debitSen,
+    description: `Restate rev · ${existing.receiptNumber}`,
+    actorUserId,
+    orgId,
+  }));
+  const customer = await db
+    .prepare("SELECT code FROM customers WHERE id = ?")
+    .bind(existing.customerId)
+    .first<{ code: string | null }>();
+  const ctl = parseDebtorCode(customer?.code ?? null);
+  const controlCode = ctl.ok ? ctl.controlCode : "300-0000";
+  const depositAcct = body.bankAccount || bankAcct(body.method);
+  const postLegs =
+    newTotal > 0
+      ? [
+          {
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: `payment_restate_post:${stamp}`,
+            sourceId: id,
+            legNo: 1,
+            accountCode: depositAcct,
+            debitSen: newTotal,
+            creditSen: 0,
+            description: `Receipt ${existing.receiptNumber} (edited)`,
+            actorUserId,
+            orgId,
+          },
+          {
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: `payment_restate_post:${stamp}`,
+            sourceId: id,
+            legNo: 2,
+            accountCode: controlCode,
+            debitSen: 0,
+            creditSen: newTotal,
+            description: `Receipt ${existing.receiptNumber} (edited)`,
+            actorUserId,
+            orgId,
+          },
+        ]
+      : [];
+  const { statements: jeStmts } = await buildJournalEntryStatements(db, orgId, [
+    ...revLegs,
+    ...postLegs,
+  ]);
+  statements.push(...jeStmts);
+  statements.push(
+    db
+      .prepare(
+        `UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'payment%' AND sourceType <> ?`,
+      )
+      .bind(id, orgId, `payment_restate_post:${stamp}`),
+  );
+
+  // 5. Update the receipt row in place (same id + receiptNumber).
+  statements.push(
+    db
+      .prepare(
+        `UPDATE payment_records SET amount = ?, method = ?, reference = ?, allocations = ? WHERE id = ?`,
+      )
+      .bind(
+        newTotal,
+        body.method ?? existing.method,
+        body.reference ?? existing.reference,
+        JSON.stringify(newAllocs),
+        id,
+      ),
+  );
+
+  return statements;
 }
 
 function parseAllocations(raw: string | null): Allocation[] {
@@ -936,6 +1126,59 @@ app.post("/:id/lifecycle", async (c) => {
     );
     await c.var.DB.batch(statements);
     return c.json({ success: true, data: { state: newState } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "PAYMENT_NOT_FOUND") {
+      return c.json({ success: false, error: `No payment found for ${id}` }, 404);
+    }
+    return c.json({ success: false, error: msg }, 400);
+  }
+});
+
+// Edit a receipt IN PLACE — keeps the same number; reverses the posted GL legs
+// and re-posts the corrected ones (see buildCustomerPaymentRestate). Body is the
+// corrected receipt: { method, reference, bankAccount, allocations }.
+app.post("/:id/restate", async (c) => {
+  const denied = await requirePermission(c, "payments", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  let body: {
+    method?: string | null;
+    reference?: string | null;
+    bankAccount?: string;
+    allocations?: Allocation[];
+  };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: "Invalid body" }, 400);
+  }
+  const allocs = (body.allocations ?? []).filter(
+    (a) => a.invoiceId && a.amount > 0,
+  );
+  if (allocs.length === 0) {
+    return c.json(
+      { success: false, error: "A receipt must allocate to at least one invoice" },
+      400,
+    );
+  }
+  try {
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get(
+        "userId",
+      ) ?? null;
+    const stamp = Date.now();
+    const statements = await buildCustomerPaymentRestate(
+      c.var.DB,
+      orgId,
+      id,
+      body,
+      actorUserId,
+      stamp,
+    );
+    await c.var.DB.batch(statements);
+    return c.json({ success: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "PAYMENT_NOT_FOUND") {

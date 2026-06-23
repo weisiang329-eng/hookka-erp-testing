@@ -53,6 +53,11 @@ export default function PaymentsPage() {
   const [detail, setDetail] = useState<PaymentRecord | null>(null);
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  // Edit mode: when set, the inline form is editing an existing receipt in place
+  // (same number). editBaseline = that receipt's original per-invoice amounts,
+  // added back to each invoice's outstanding so they stay re-allocatable.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editBaseline, setEditBaseline] = useState<Record<string, number>>({});
 
   useEffect(() => {
     fetch("/api/accounting/coa")
@@ -74,8 +79,10 @@ export default function PaymentsPage() {
   const customerInvoices = invoices.filter(
     (inv) =>
       inv.customerId === selectedCustomerId &&
-      inv.status !== "PAID" &&
-      inv.status !== "CANCELLED"
+      inv.status !== "CANCELLED" &&
+      // Open invoices, plus any the receipt-being-edited paid (so they can be
+      // re-allocated even though they're currently marked PAID).
+      (inv.status !== "PAID" || editBaseline[inv.id] !== undefined)
   );
 
   const handleCustomerChange = (custId: string) => {
@@ -161,30 +168,54 @@ export default function PaymentsPage() {
   // Edit = void the original (GL reversed, invoices reopened, customer A/R
   // restored) then reload the inline form prefilled, so the operator corrects
   // and re-posts. The immutable ledger is never mutated in place.
-  const editPayment = async (p: PaymentRecord) => {
-    if (!(await confirm({ title: "Edit receipt?", message: `Editing ${p.receiptNumber} voids the original and reopens it so you can correct and re-post it. Continue?`, danger: true }))) return;
+  // In-place edit: load the receipt into the inline form (no void). The original
+  // stays untouched until Save, which re-states it under the SAME number.
+  const editPayment = (p: PaymentRecord) => {
+    setDetail(null);
+    setEditingId(p.id);
+    setEditBaseline(Object.fromEntries(p.allocations.map((a) => [a.invoiceId, a.amount])));
+    setSelectedCustomerId(p.customerId);
+    setAllocations(p.allocations.map((a) => ({ invoiceId: a.invoiceId, amount: a.amount })));
+    setMethod(p.method);
+    setReference(p.reference ?? "");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditBaseline({});
+    setSelectedCustomerId("");
+    setAllocations([]);
+    setReference("");
+  };
+
+  // Save: create a new receipt, or — in edit mode — re-state the existing one in
+  // place (same number; the GL is reversed + re-posted server-side).
+  const handleSave = async () => {
+    if (!editingId) { handleCreate(); return; }
+    if (!selectedCustomerId || totalAllocated <= 0) return;
+    setCreating(true);
     try {
-      const res = await fetch(`/api/payments/${encodeURIComponent(p.id)}/lifecycle`, {
+      const res = await fetch(`/api/payments/${encodeURIComponent(editingId)}/restate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "void" }),
+        body: JSON.stringify({ method, reference, bankAccount, allocations }),
       });
       const j = (await res.json()) as { success?: boolean; error?: string };
-      if (!(res.ok && j.success)) { toast.error(j.error || "Failed to reopen receipt"); return; }
-      invalidateCachePrefix("/api/payments");
-      invalidateCachePrefix("/api/invoices");
-      refreshPayments();
-      refreshInvoices();
-      setDetail(null);
-      setSelectedCustomerId(p.customerId);
-      setAllocations(p.allocations.map((a) => ({ invoiceId: a.invoiceId, amount: a.amount })));
-      setMethod(p.method);
-      setReference(p.reference ?? "");
-      toast.success(`${p.receiptNumber} voided — adjust and post the corrected receipt`);
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      if (res.ok && j.success) {
+        toast.success("Receipt updated");
+        invalidateCachePrefix("/api/payments");
+        invalidateCachePrefix("/api/invoices");
+        refreshPayments();
+        refreshInvoices();
+        cancelEdit();
+      } else {
+        toast.error(j.error || "Failed to update receipt");
+      }
     } catch {
-      toast.error("Failed to reopen receipt");
+      toast.error("Failed to update receipt");
     }
+    setCreating(false);
   };
 
   const columns: Column<PaymentRecord>[] = [
@@ -345,10 +376,15 @@ export default function PaymentsPage() {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
-            <CardTitle>Record Payment</CardTitle>
-            <Button onClick={handleCreate} disabled={creating || !selectedCustomerId || totalAllocated <= 0} size="sm">
-              {creating ? "Recording..." : "Record Payment"}
-            </Button>
+            <CardTitle>{editingId ? "Edit Receipt" : "Record Payment"}</CardTitle>
+            <div className="flex items-center gap-2">
+              {editingId && (
+                <Button variant="outline" size="sm" onClick={cancelEdit}>Cancel</Button>
+              )}
+              <Button onClick={handleSave} disabled={creating || !selectedCustomerId || totalAllocated <= 0} size="sm">
+                {creating ? (editingId ? "Updating..." : "Recording...") : editingId ? "Update receipt" : "Record Payment"}
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -442,7 +478,7 @@ export default function PaymentsPage() {
                         <tbody>
                           {customerInvoices.map((inv) => {
                             const alloc = allocations.find((a) => a.invoiceId === inv.id);
-                            const outstanding = inv.totalSen - inv.paidAmount;
+                            const outstanding = inv.totalSen - inv.paidAmount + (editBaseline[inv.id] ?? 0);
                             const isFull = !!alloc && alloc.amount === outstanding;
                             return (
                               <tr key={inv.id} className="border-t hover:bg-gray-50">

@@ -7,11 +7,7 @@ import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { defaultBankCode } from "@/lib/default-bank";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import {
-  Plus,
-  CreditCard,
-  X,
-} from "lucide-react";
+import { CreditCard } from "lucide-react";
 import type { PaymentRecord, Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
@@ -30,9 +26,8 @@ export default function PaymentsPage() {
     () => (payResp?.success ? payResp.data ?? [] : Array.isArray(payResp) ? payResp : []),
     [payResp]
   );
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const { data: custResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: { id: string; name: string }[] }>(showCreateModal ? "/api/customers" : null);
-  const { data: invResp, refresh: refreshInvoices } = useCachedJson<{ success?: boolean; data?: Invoice[] }>(showCreateModal ? "/api/invoices" : null);
+  const { data: custResp } = useCachedJson<{ success?: boolean; data?: { id: string; name: string }[] }>("/api/customers");
+  const { data: invResp, refresh: refreshInvoices } = useCachedJson<{ success?: boolean; data?: Invoice[] }>("/api/invoices");
   const customers: CustomerOption[] = useMemo(() => {
     const raw = custResp?.success ? custResp.data ?? [] : Array.isArray(custResp) ? (custResp as { id: string; name: string }[]) : [];
     return raw.map((c) => ({ id: c.id, name: c.name }));
@@ -68,12 +63,6 @@ export default function PaymentsPage() {
       })
       .catch(() => {});
   }, []);
-
-  const openCreate = () => {
-    refreshCustomers();
-    refreshInvoices();
-    setShowCreateModal(true);
-  };
 
   // Outstanding invoices for the selected customer
   const customerInvoices = invoices.filter(
@@ -118,7 +107,6 @@ export default function PaymentsPage() {
         },
       });
       if (data.success) {
-        setShowCreateModal(false);
         setSelectedCustomerId("");
         setMethod("BANK_TRANSFER");
         setReference("");
@@ -126,6 +114,7 @@ export default function PaymentsPage() {
         invalidateCachePrefix("/api/payments");
         invalidateCachePrefix("/api/invoices");
         refreshPayments();
+        refreshInvoices();
       }
     } catch {
       // ignore
@@ -245,9 +234,6 @@ export default function PaymentsPage() {
             Record and track customer payments with invoice allocation
           </p>
         </div>
-        <Button onClick={openCreate}>
-          <Plus className="h-4 w-4 mr-2" /> Record Payment
-        </Button>
       </div>
 
       {/* Summary Cards */}
@@ -289,34 +275,17 @@ export default function PaymentsPage() {
         </Card>
       </div>
 
-      {/* Data Grid */}
+      {/* Record Payment — inline (unified with Supplier Payment) */}
       <Card>
         <CardHeader>
-          <CardTitle>All Payments</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle>Record Payment</CardTitle>
+            <Button onClick={handleCreate} disabled={creating || !selectedCustomerId || totalAllocated <= 0} size="sm">
+              {creating ? "Recording..." : "Record Payment"}
+            </Button>
+          </div>
         </CardHeader>
-        <CardContent>
-          <DataGrid
-            columns={columns}
-            data={payments}
-            keyField="id"
-            virtualize
-            gridId="payments"
-            contextMenuItems={contextMenuItems}
-          />
-        </CardContent>
-      </Card>
-
-      {/* Create Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between p-6 border-b">
-              <h2 className="text-lg font-semibold">Record Payment</h2>
-              <button onClick={() => setShowCreateModal(false)}>
-                <X className="h-5 w-5 text-gray-400" />
-              </button>
-            </div>
-            <div className="p-6 space-y-4">
+        <CardContent className="space-y-4">
               {/* Customer Selection */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Customer</label>
@@ -448,19 +417,25 @@ export default function PaymentsPage() {
                   )}
                 </div>
               )}
-            </div>
-            <div className="flex justify-end gap-2 p-6 border-t">
-              <Button variant="ghost" onClick={() => setShowCreateModal(false)}>Cancel</Button>
-              <Button
-                onClick={handleCreate}
-                disabled={creating || !selectedCustomerId || totalAllocated <= 0}
-              >
-                {creating ? "Recording..." : "Record Payment"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+        </CardContent>
+      </Card>
+
+      {/* All Payments */}
+      <Card>
+        <CardHeader>
+          <CardTitle>All Payments</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <DataGrid
+            columns={columns}
+            data={payments}
+            keyField="id"
+            virtualize
+            gridId="payments"
+            contextMenuItems={contextMenuItems}
+          />
+        </CardContent>
+      </Card>
     </div>
   );
 }

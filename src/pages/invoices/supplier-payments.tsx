@@ -324,6 +324,20 @@ export default function SupplierPaymentsPage() {
   };
 
   const canPost = !!selectedSupplierId && !!payFrom && totalBankSen > 0 && !posting;
+  const [histQ, setHistQ] = useState("");
+
+  // Summary across active (non-void) payments — mirrors the customer page cards.
+  const activePayments = history.filter((p) => (p.lifecycleState ?? "ACTIVE") === "ACTIVE");
+  const totalPaidSen = activePayments.reduce((s, p) => s + (p.totalBankSen || 0), 0);
+  const ymNow = new Date().toISOString().slice(0, 7);
+  const thisMonthSen = activePayments
+    .filter((p) => String(p.date).slice(0, 7) === ymNow)
+    .reduce((s, p) => s + (p.totalBankSen || 0), 0);
+  const supplierCount = new Set(activePayments.map((p) => p.supplierName)).size;
+  const histLc = histQ.trim().toLowerCase();
+  const filteredHistory = history.filter(
+    (p) => !histLc || p.paymentNo.toLowerCase().includes(histLc) || (p.supplierName ?? "").toLowerCase().includes(histLc),
+  );
 
   if (loading) {
     return (
@@ -346,6 +360,45 @@ export default function SupplierPaymentsPage() {
             Pay supplier purchase invoices — partial, multi-PI, and foreign-currency with FX
           </p>
         </div>
+      </div>
+
+      {/* Summary Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-sm text-gray-500">Total Paid</p>
+                <p className="text-xl font-bold text-[#4F7C3A] truncate">{formatCurrency(totalPaidSen)}</p>
+              </div>
+              <CreditCard className="h-8 w-8 text-[#4F7C3A] shrink-0" />
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-6">
+            <div>
+              <p className="text-sm text-gray-500">Payments</p>
+              <p className="text-2xl font-bold">{activePayments.length}</p>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-6">
+            <div>
+              <p className="text-sm text-gray-500">This Month</p>
+              <p className="text-xl font-bold text-[#3E6570] truncate">{formatCurrency(thisMonthSen)}</p>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-6">
+            <div>
+              <p className="text-sm text-gray-500">Suppliers</p>
+              <p className="text-2xl font-bold">{supplierCount}</p>
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       {/* Create / Pay card */}
@@ -533,7 +586,16 @@ export default function SupplierPaymentsPage() {
       {/* History */}
       <Card>
         <CardHeader>
-          <CardTitle>Payment History</CardTitle>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle>All Payments</CardTitle>
+            <input
+              type="text"
+              value={histQ}
+              onChange={(e) => setHistQ(e.target.value)}
+              placeholder="Search payment # / supplier..."
+              className="w-64 max-w-full border border-[#E2DDD8] rounded-md px-3 py-1.5 text-sm"
+            />
+          </div>
         </CardHeader>
         <CardContent>
           {history.length === 0 ? (
@@ -552,7 +614,7 @@ export default function SupplierPaymentsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {history.map((p) => (
+                  {filteredHistory.map((p) => (
                     <tr key={p.paymentNo} className={`border-t hover:bg-gray-50 ${(p.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? "opacity-50" : ""}`}>
                       <td className="px-3 py-2 font-mono font-medium">{p.paymentNo}</td>
                       <td className="px-3 py-2">{p.supplierName}</td>

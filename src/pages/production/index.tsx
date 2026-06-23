@@ -8644,24 +8644,53 @@ export default function ProductionPage({
                         </div>
                         <div className="flex items-end justify-between mt-[2mm]" style={{ fontSize: "13pt" }}>
                           <span className="font-bold">Qty {s.qty}</span>
-                          {/* Bottom-right piece-type tag so a sewer knows at a glance
-                              what this piece is (owner request). Bedframe → HEADBOARD
-                              / DIVAN (from the WIP line); sofa → the modular component
-                              from the model suffix (e.g. 5535-1A(LHF) → 1A(LHF)). */}
-                          <div className="text-right leading-tight">
+                          {/* Bottom-right component-type label so a worker knows at
+                              a glance what this piece is (owner request). Derived
+                              from the SAME normalized piece field the grid uses —
+                              s.wipType, produced by the wipType helper in
+                              baserows-core.ts (HB / DIVAN / BASE / CUSHION / ARMREST
+                              / HEADREST). We do NOT re-derive the piece here; we only
+                              MAP that label (plus a case-insensitive wipName fallback
+                              for legs / un-typed bedframe rows) to one of the six
+                              human labels: HB / Divan / Base / Armrest / Cushion /
+                              Leg. A piece that maps to none of the six (whole/full
+                              product, HEADREST, accessory) shows NO badge rather than
+                              a wrong label. Boxed + large so it reads on a B/W print. */}
+                          <div className="text-right leading-tight flex flex-col items-end gap-[1mm]">
                             {(() => {
-                              const wn = s.wipName || "";
-                              let tag = "";
-                              if (/divan/i.test(wn)) tag = "DIVAN";
-                              else if (/HB/i.test(wn)) tag = "HEADBOARD";
-                              else {
-                                const m = s.model || "";
-                                const i = m.indexOf("-");
-                                tag = i >= 0 && i < m.length - 1 ? m.slice(i + 1) : (s.wipType || "");
-                              }
-                              return tag ? (
-                                <div className="font-bold uppercase" style={{ fontSize: "16pt", lineHeight: 1.05 }}>{tag}</div>
-                              ) : null;
+                              const wt = (s.wipType || "").toUpperCase();
+                              const wn = (s.wipName || "").toUpperCase();
+                              let label = "";
+                              // Primary: the normalized wipType the grid already derived.
+                              if (wt === "HB" || wt === "HEADBOARD") label = "HB";
+                              else if (wt === "DIVAN") label = "Divan";
+                              else if (wt === "BASE" || wt === "SOFA_BASE") label = "Base";
+                              else if (wt === "ARMREST" || wt === "SOFA_ARMREST") label = "Armrest";
+                              else if (wt === "CUSHION" || wt === "SOFA_CUSHION") label = "Cushion";
+                              else if (wt === "LEG") label = "Leg";
+                              // Fallback: match the WIP description text (case-insensitive)
+                              // for rows where wipType is blank or a leg piece.
+                              else if (/\bDIVAN\b/.test(wn)) label = "Divan";
+                              else if (/HEADBOARD|\bHB\b/.test(wn)) label = "HB";
+                              else if (/ARM\s?REST|ARMREST|\b(LEFT|RIGHT)\s+ARM\b/.test(wn)) label = "Armrest";
+                              else if (/CUSHION/.test(wn)) label = "Cushion";
+                              else if (/\bLEG\b/.test(wn)) label = "Leg";
+                              else if (/\bBASE\b/.test(wn)) label = "Base";
+                              // No confident match → omit the badge.
+                              if (!label) return null;
+                              return (
+                                <div
+                                  className="font-bold uppercase border-2 border-black text-center"
+                                  style={{
+                                    fontSize: "18pt",
+                                    lineHeight: 1.05,
+                                    padding: "0.5mm 2mm",
+                                    borderRadius: "1mm",
+                                  }}
+                                >
+                                  {label}
+                                </div>
+                              );
                             })()}
                             {s.totalPieces > 1 && (
                               <span className="font-semibold" style={{ fontSize: "9pt" }}>

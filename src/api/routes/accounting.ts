@@ -2952,6 +2952,18 @@ async function buildOtherPartyPaymentLifecycle(
 
   const deactivated = lc.prevState === "ACTIVE" && lc.newState !== "ACTIVE";
   const reactivated = lc.prevState !== "ACTIVE" && lc.newState === "ACTIVE";
+  // An edited (restated) payment's live legs are other_party_payment_restate_post:* —
+  // the applyLifecycle exact-match on "other_party_payment" misses them, so hide
+  // the whole family on void/delete to keep the GL net at zero.
+  if (deactivated) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'other_party_payment%'`,
+        )
+        .bind(paymentNo, orgId),
+    );
+  }
   if (deactivated || reactivated) {
     const now = new Date().toISOString();
     for (const r of rows) {
@@ -2971,6 +2983,148 @@ async function buildOtherPartyPaymentLifecycle(
     }
   }
   return { statements, newState: lc.newState };
+}
+
+// buildOtherPartyPaymentRestate — in-place EDIT (same payment number). Rolls the
+// old bill allocations back, drops the old rows, writes the new rows + bill
+// paid, and on the GL reverses the live legs + posts the corrected ones
+// (restate_rev/post:<stamp>), then collapses so only the newest post is visible.
+// Mirrors the customer-receipt restate. Throws "PAYMENT_NOT_FOUND".
+async function buildOtherPartyPaymentRestate(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  paymentNo: string,
+  body: {
+    bankAccount?: string;
+    date?: string;
+    reference?: string;
+    allocations?: { billId?: string; amountSen?: number }[];
+  },
+  actorUserId: string | null,
+  stamp: number,
+): Promise<D1PreparedStatement[]> {
+  const rows =
+    (
+      await db
+        .prepare("SELECT * FROM other_party_payments WHERE paymentNo = ? AND orgId = ?")
+        .bind(paymentNo, orgId)
+        .all<OtherPartyPaymentRow>()
+    ).results ?? [];
+  const first = rows[0];
+  if (!first) throw new Error("PAYMENT_NOT_FOUND");
+  const now = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+
+  // 1. Reverse the OLD bill paid amounts.
+  const revExpr =
+    "CASE WHEN paidAmountSen - ? < 0 THEN 0 ELSE paidAmountSen - ? END";
+  for (const r of rows) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE other_party_bills SET paidAmountSen = ${revExpr},
+             status = CASE WHEN (${revExpr}) >= totalSen THEN 'PAID' WHEN (${revExpr}) > 0 THEN 'PARTIAL_PAID' ELSE 'OPEN' END,
+             updatedAt = ? WHERE id = ? AND orgId = ?`,
+        )
+        .bind(r.amountSen, r.amountSen, r.amountSen, r.amountSen, r.amountSen, r.amountSen, now, r.billId, orgId),
+    );
+  }
+  // 2. Drop the old payment rows.
+  statements.push(
+    db
+      .prepare("DELETE FROM other_party_payments WHERE paymentNo = ? AND orgId = ?")
+      .bind(paymentNo, orgId),
+  );
+  // 3. Insert the NEW rows + apply bill paid.
+  const bankAccount = String(body.bankAccount ?? first.bankAccount);
+  const date = String(body.date ?? first.date).slice(0, 10);
+  const newAllocs = (body.allocations ?? [])
+    .map((a) => ({ billId: String(a.billId ?? ""), amountSen: Math.round(Number(a.amountSen ?? 0)) }))
+    .filter((a) => a.billId && a.amountSen > 0);
+  let newTotal = 0;
+  for (const a of newAllocs) {
+    newTotal += a.amountSen;
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO other_party_payments
+             (id, paymentNo, partyId, partyType, partyName, billId, date, amountSen, bankAccount, reference, orgId, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          `opp-${crypto.randomUUID().slice(0, 10)}`, paymentNo, first.partyId, first.partyType, first.partyName,
+          a.billId, date, a.amountSen, bankAccount, body.reference ?? null, orgId, now,
+        ),
+    );
+    statements.push(
+      db
+        .prepare(
+          `UPDATE other_party_bills SET paidAmountSen = paidAmountSen + ?,
+             status = CASE WHEN paidAmountSen + ? >= totalSen THEN 'PAID' WHEN paidAmountSen + ? > 0 THEN 'PARTIAL_PAID' ELSE status END,
+             updatedAt = ? WHERE id = ? AND orgId = ?`,
+        )
+        .bind(a.amountSen, a.amountSen, a.amountSen, now, a.billId, orgId),
+    );
+  }
+
+  // 4. GL: reverse the live legs + post the corrected legs in ONE call, collapse.
+  const cur =
+    (
+      await db
+        .prepare(
+          `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+            WHERE sourceId = ? AND orgId = ? AND hidden = 0 AND sourceType LIKE 'other_party_payment%'`,
+        )
+        .bind(paymentNo, orgId)
+        .all<{ accountCode: string; debitSen: number; creditSen: number }>()
+    ).results ?? [];
+  const revLegs = cur.map((l, i) => ({
+    id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+    sourceType: `other_party_payment_restate_rev:${stamp}`,
+    sourceId: paymentNo,
+    legNo: i + 1,
+    accountCode: l.accountCode,
+    debitSen: l.creditSen,
+    creditSen: l.debitSen,
+    description: `Restate rev · ${paymentNo}`,
+    actorUserId,
+    orgId,
+  }));
+  const postLegs =
+    newTotal > 0
+      ? buildPaymentLegs({
+          partyType: first.partyType as PartyType,
+          paymentNo,
+          partyName: first.partyName,
+          bankAccount,
+          totalSen: newTotal,
+        }).map((l) => ({
+          id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+          sourceType: `other_party_payment_restate_post:${stamp}`,
+          sourceId: paymentNo,
+          legNo: l.legNo,
+          accountCode: l.accountCode,
+          debitSen: l.debitSen,
+          creditSen: l.creditSen,
+          description: l.description,
+          actorUserId,
+          orgId,
+        }))
+      : [];
+  const { statements: jeStmts } = await buildJournalEntryStatements(db, orgId, [
+    ...revLegs,
+    ...postLegs,
+  ]);
+  statements.push(...jeStmts);
+  statements.push(
+    db
+      .prepare(
+        `UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'other_party_payment%' AND sourceType <> ?`,
+      )
+      .bind(paymentNo, orgId, `other_party_payment_restate_post:${stamp}`),
+  );
+
+  return statements;
 }
 
 app.post("/other-party-payments/:paymentNo/void", async (c) => {
@@ -3010,6 +3164,52 @@ app.post("/other-party-payments/:paymentNo/lifecycle", async (c) => {
     return c.json({ success: true, data: { state: newState } });
   } catch (e) {
     if ((e as Error).message === "PAYMENT_NOT_FOUND") return c.json({ success: false, error: "Payment not found" }, 404);
+    return c.json({ success: false, error: (e as Error).message }, 400);
+  }
+});
+
+// Edit a payment/receipt IN PLACE — same number; GL reversed + re-posted (see
+// buildOtherPartyPaymentRestate). Body: { bankAccount, date, reference, allocations }.
+app.post("/other-party-payments/:paymentNo/restate", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const paymentNo = c.req.param("paymentNo");
+  let body: {
+    bankAccount?: string;
+    date?: string;
+    reference?: string;
+    allocations?: { billId?: string; amountSen?: number }[];
+  };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid body" }, 400);
+  }
+  const allocs = (body.allocations ?? []).filter(
+    (a) => a.billId && Number(a.amountSen) > 0,
+  );
+  if (allocs.length === 0)
+    return c.json({ success: false, error: "Select at least one bill" }, 400);
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get(
+      "userId",
+    ) ?? null;
+  try {
+    const stamp = Date.now();
+    const statements = await buildOtherPartyPaymentRestate(
+      c.var.DB,
+      orgId,
+      paymentNo,
+      body,
+      actorUserId,
+      stamp,
+    );
+    await c.var.DB.batch(statements);
+    return c.json({ success: true });
+  } catch (e) {
+    if ((e as Error).message === "PAYMENT_NOT_FOUND")
+      return c.json({ success: false, error: "Payment not found" }, 404);
     return c.json({ success: false, error: (e as Error).message }, 400);
   }
 });

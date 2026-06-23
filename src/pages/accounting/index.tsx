@@ -4728,6 +4728,8 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
   const [history, setHistory] = useState<PaymentGroup[] | null>(null);
   const [detail, setDetail] = useState<PaymentGroup | null>(null);
   const [posting, setPosting] = useState(false);
+  // Edit mode: when set, the form is editing this payment in place (same number).
+  const [editingNo, setEditingNo] = useState<string | null>(null);
 
   const sideParties = parties.filter((p) => p.type === side && p.isActive);
   const verb = side === "CREDITOR" ? "Payment" : "Receipt";
@@ -4740,21 +4742,34 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
   };
   useEffect(loadHistory, [side]);
 
-  const loadOpenBills = (pid: string, prefill?: Record<string, number>) => {
+  const loadOpenBills = (
+    pid: string,
+    editLines?: { billId: string; billNo: string; amountSen: number }[],
+  ) => {
     setPartyId(pid); setRows({});
     if (!pid) { setOpenBills([]); return; }
     fetch(`/api/accounting/other-party-bills?type=${side}&partyId=${pid}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; billNo: string; outstandingSen: number }[] }>)
       .then((j) => {
         if (!j?.success) return;
-        const open = (j.data ?? []).filter((b) => b.outstandingSen > 0).map((b) => ({ id: b.id, billNo: b.billNo, outstandingSen: b.outstandingSen }));
+        // Edit flow: add the receipt-being-edited's amount back to each bill's
+        // outstanding (it'll be reversed on save), and surface any bills it fully
+        // paid so they stay re-allocatable.
+        const back = new Map((editLines ?? []).map((l) => [l.billId, l.amountSen]));
+        let open = (j.data ?? [])
+          .filter((b) => b.outstandingSen > 0)
+          .map((b) => ({ id: b.id, billNo: b.billNo, outstandingSen: b.outstandingSen + (back.get(b.id) ?? 0) }));
+        const have = new Set(open.map((b) => b.id));
+        for (const l of editLines ?? []) {
+          if (!have.has(l.billId) && l.amountSen > 0) {
+            open = [...open, { id: l.billId, billNo: l.billNo, outstandingSen: l.amountSen }];
+          }
+        }
         setOpenBills(open);
-        // Edit flow: re-seed each bill's amount from the just-voided payment.
-        if (prefill) {
+        if (editLines) {
           const seeded: Record<string, { amountStr: string; full: boolean }> = {};
-          for (const b of open) {
-            const amt = prefill[b.id];
-            if (amt && amt > 0) seeded[b.id] = { amountStr: (amt / 100).toFixed(2), full: false };
+          for (const l of editLines) {
+            if (l.amountSen > 0) seeded[l.billId] = { amountStr: (l.amountSen / 100).toFixed(2), full: false };
           }
           setRows(seeded);
         }
@@ -4769,7 +4784,7 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
   const allocSen = (b: OpenBill) => { const row = getRow(b.id); return row.full ? b.outstandingSen : toSen(row.amountStr); };
   const totalSen = openBills.reduce((s, b) => s + allocSen(b), 0);
 
-  const post = async () => {
+  const handleSave = async () => {
     if (!partyId) { toast.error("Select a party"); return; }
     if (!bankAccount) { toast.error("Select a bank/cash account"); return; }
     const allocations = openBills
@@ -4777,15 +4792,32 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
       .filter((a) => a.amountSen > 0);
     if (allocations.length === 0) { toast.error("Enter at least one amount"); return; }
     setPosting(true);
-    const res = await fetch("/api/accounting/other-party-payments", {
+    const url = editingNo
+      ? `/api/accounting/other-party-payments/${encodeURIComponent(editingNo)}/restate`
+      : "/api/accounting/other-party-payments";
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify({ partyId, bankAccount, date, reference: reference || undefined, allocations }),
     });
     setPosting(false);
     const j = asMutationResponse(await res.json());
-    if (j?.success) { setReference(""); loadOpenBills(partyId); loadHistory(); toast.success(`${verb} posted`); }
-    else toast.error(j?.error || `Failed to post ${verb.toLowerCase()}`);
+    if (!j?.success) {
+      toast.error(j?.error || `Failed to ${editingNo ? "update" : "post"} ${verb.toLowerCase()}`);
+      return;
+    }
+    if (editingNo) {
+      setEditingNo(null); setReference(""); setPartyId(""); setOpenBills([]); setRows({});
+      loadHistory();
+      toast.success(`${verb} updated`);
+    } else {
+      setReference(""); loadOpenBills(partyId); loadHistory();
+      toast.success(`${verb} posted`);
+    }
+  };
+
+  const cancelEdit = () => {
+    setEditingNo(null); setPartyId(""); setOpenBills([]); setRows({}); setReference("");
   };
 
   const handleLifecycle = async (paymentNo: string, action: "void" | "delete" | "unvoid") => {
@@ -4806,34 +4838,27 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
     else toast.error(j?.error || `${lcVerb} failed`);
   };
 
-  // Edit = void the original (GL reversed, bills reopened) then reopen the form
-  // prefilled, so the operator corrects and re-posts.
-  const editPayment = async (g: PaymentGroup) => {
-    if (!(await confirm({ title: `Edit ${verb.toLowerCase()}?`, message: `Editing ${g.paymentNo} voids the original and reopens it so you can correct and re-post it. Continue?`, danger: true }))) return;
-    const res = await fetch(`/api/accounting/other-party-payments/${encodeURIComponent(g.paymentNo)}/lifecycle`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "void" }),
-    });
-    const j = asMutationResponse(await res.json());
-    if (!j?.success) { toast.error(j?.error || "Failed to reopen"); return; }
-    loadHistory();
+  // Edit in place: load the payment into the form (no void). Save re-states it
+  // under the same number; the original is untouched until then.
+  const editPayment = (g: PaymentGroup) => {
     setDetail(null);
-    setDate(g.date || today);
+    setEditingNo(g.paymentNo);
     if (g.bankAccount) setBankAccountSel(g.bankAccount);
-    const prefill: Record<string, number> = {};
-    for (const l of g.lines) prefill[l.billId] = l.amountSen;
-    loadOpenBills(g.partyId, prefill);
-    toast.success(`${g.paymentNo} voided — adjust and post the corrected ${verb.toLowerCase()}`);
+    setDate(g.date || today);
+    setReference("");
+    loadOpenBills(g.partyId, g.lines);
   };
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-[#3E6570]">{side === "CREDITOR" ? "Payments" : "Receipts"}</h3>
-        <Button variant="primary" size="sm" disabled={posting || !partyId || !bankAccount || totalSen <= 0} onClick={post}>
-          Post {verb.toLowerCase()}
-        </Button>
+        <h3 className="text-sm font-semibold text-[#3E6570]">{editingNo ? `Edit ${verb.toLowerCase()}` : side === "CREDITOR" ? "Payments" : "Receipts"}</h3>
+        <div className="flex items-center gap-2">
+          {editingNo && <Button variant="outline" size="sm" onClick={cancelEdit}>Cancel</Button>}
+          <Button variant="primary" size="sm" disabled={posting || !partyId || !bankAccount || totalSen <= 0} onClick={handleSave}>
+            {editingNo ? `Update ${verb.toLowerCase()}` : `Post ${verb.toLowerCase()}`}
+          </Button>
+        </div>
       </div>
       <Card><CardContent className="p-4 space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

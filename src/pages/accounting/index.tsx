@@ -2503,7 +2503,16 @@ function JournalEntryForm({
               </thead>
               <tbody>
                 {lines.map((line, idx) => (
-                  <tr key={line._uid} className="border-b border-[#F0ECE9]">
+                  <tr
+                    key={line._uid}
+                    className="border-b border-[#F0ECE9]"
+                    onKeyDown={(e) => {
+                      if (e.key === "Insert") {
+                        e.preventDefault();
+                        setLines([...lines.slice(0, idx + 1), newRow(), ...lines.slice(idx + 1)]);
+                      }
+                    }}
+                  >
                     <td className="py-1.5 px-2">
                       <AccountPicker
                         accounts={leafAccounts}
@@ -2575,9 +2584,12 @@ function JournalEntryForm({
           </div>
 
           <div className="flex justify-between">
-            <Button variant="outline" size="sm" onClick={addLine}>
-              <Plus className="h-3.5 w-3.5" /> Add Line
-            </Button>
+            <div className="flex items-center gap-3">
+              <Button variant="outline" size="sm" onClick={addLine}>
+                <Plus className="h-3.5 w-3.5" /> Add Line
+              </Button>
+              <span className="text-[11px] text-[#B4B2A9]">press <span className="font-medium text-[#6B7280]">Insert</span> to add a line below</span>
+            </div>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" onClick={onCancel}>
                 Cancel
@@ -4587,7 +4599,15 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
             </tr></thead>
             <tbody>
               {form.lines.map((l, idx) => (
-                <tr key={idx}>
+                <tr
+                  key={idx}
+                  onKeyDown={(e) => {
+                    if (e.key === "Insert") {
+                      e.preventDefault();
+                      setForm((f) => ({ ...f, lines: [...f.lines.slice(0, idx + 1), blankLine(), ...f.lines.slice(idx + 1)] }));
+                    }
+                  }}
+                >
                   <td className="py-1 pr-2 w-1/3">
                     <AccountPicker accounts={accounts} value={l.counterAccount} onChange={(code) => updateLine(idx, "counterAccount", code)} placeholder="counter account" />
                   </td>
@@ -4607,7 +4627,10 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
             </tbody>
           </table>
           </div>
-          <Button variant="outline" size="sm" onClick={addLine}>+ Add Line</Button>
+          <div className="flex items-center gap-3">
+            <Button variant="outline" size="sm" onClick={addLine}>+ Add Line</Button>
+            <span className="text-[11px] text-[#B4B2A9]">press <span className="font-medium text-[#6B7280]">Insert</span> to add a line below</span>
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end pt-2 border-t border-[#F0ECE9]">
             <div>

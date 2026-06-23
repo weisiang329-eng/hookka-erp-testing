@@ -351,7 +351,12 @@ export default function SupplierPaymentsPage() {
       {/* Create / Pay card */}
       <Card>
         <CardHeader>
-          <CardTitle>Record Payment</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle>Record Payment</CardTitle>
+            <Button onClick={handlePost} disabled={!canPost} size="sm">
+              {posting ? "Posting..." : "Post Payment"}
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
           {/* Supplier + header fields */}
@@ -522,12 +527,6 @@ export default function SupplierPaymentsPage() {
               )}
             </div>
           )}
-
-          <div className="flex justify-end gap-2 pt-2">
-            <Button onClick={handlePost} disabled={!canPost}>
-              {posting ? "Posting..." : "Post Payment"}
-            </Button>
-          </div>
         </CardContent>
       </Card>
 

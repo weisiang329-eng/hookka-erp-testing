@@ -4794,7 +4794,12 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
 
   return (
     <div className="space-y-3">
-      <h3 className="text-sm font-semibold text-[#3E6570]">{side === "CREDITOR" ? "Payments" : "Receipts"}</h3>
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-[#3E6570]">{side === "CREDITOR" ? "Payments" : "Receipts"}</h3>
+        <Button variant="primary" size="sm" disabled={posting || !partyId || !bankAccount || totalSen <= 0} onClick={post}>
+          Post {verb.toLowerCase()}
+        </Button>
+      </div>
       <Card><CardContent className="p-4 space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
@@ -4863,11 +4868,6 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
           </div>
         ))}
 
-        <div className="flex items-center justify-end gap-4 pt-2 border-t border-[#F0ECE9]">
-          <Button variant="primary" size="sm" disabled={posting || !partyId || !bankAccount || totalSen <= 0} onClick={post}>
-            Post {verb.toLowerCase()}
-          </Button>
-        </div>
       </CardContent></Card>
 
       <Card><CardContent className="p-0 overflow-x-auto">

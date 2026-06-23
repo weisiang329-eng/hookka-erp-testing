@@ -1380,6 +1380,128 @@ app.post("/test-inject", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/mail-center/sync-now — pull new inbound mail on demand instead of
+// waiting for the 10-minute cron.
+//
+// How it works: inbound mail is fetched from Hostinger IMAP by the GitHub
+// Actions workflow `.github/workflows/mail-sync.yml` (cron every 10 min, plus
+// `workflow_dispatch`). This route fires that workflow's dispatch trigger so a
+// run starts immediately; the worker itself does NOT touch IMAP.
+//
+// Auth: behind authMiddleware (route registered after it in worker.ts). We also
+// require the caller to actually have a mailbox in scope (admin OR an assigned
+// address) — same gate the inbox list uses — so a random authed user with no
+// mail access can't spam GitHub Actions.
+//
+// Token: reuses the same GITHUB_TOKEN / GITHUB_REPO resolution as
+// routes/admin-health.ts GET /github-runs. NOTE the existing PAT is documented
+// as READ-ONLY (Actions: read); the dispatch endpoint needs Actions: WRITE, so
+// a 403 is handled explicitly with an actionable message (code TOKEN_READONLY)
+// instead of a generic failure.
+//
+// Debounce: a 45s lock in SESSION_CACHE (KV) stops repeated clicks (or multiple
+// users) from queuing a burst of runs. The workflow also has a concurrency
+// guard, so this is belt-and-suspenders, not the only protection.
+// ---------------------------------------------------------------------------
+app.post("/sync-now", async (c) => {
+  await ensureMailSchema(c.var.DB);
+  const orgId = getOrgId(c);
+  const scope = await getMailScope(c, orgId);
+  // Must have a mailbox to pull mail for (admins always pass).
+  if (!scope.isAdmin && scope.addresses.length === 0) {
+    return c.json({ error: "You don't have a mailbox to sync." }, 403);
+  }
+
+  const env = c.env as {
+    GITHUB_TOKEN?: string;
+    GITHUB_REPO?: string;
+    SESSION_CACHE?: KVNamespace;
+  };
+  if (!env.GITHUB_TOKEN) {
+    return c.json(
+      { error: "Sync-now is not configured (GITHUB_TOKEN missing)." },
+      500,
+    );
+  }
+
+  // Debounce — reject if a sync was triggered in the last ~45s. KV failures
+  // never block the user (we just skip the lock).
+  const LOCK_KEY = "mail-sync-now:lock";
+  if (env.SESSION_CACHE) {
+    try {
+      const held = await env.SESSION_CACHE.get(LOCK_KEY);
+      if (held) {
+        return c.json(
+          {
+            error: "A sync was just triggered — please wait a moment.",
+            code: "RATE_LIMITED",
+          },
+          429,
+        );
+      }
+    } catch {
+      /* KV blip — fall through and let the dispatch happen. */
+    }
+  }
+
+  const repo = (env.GITHUB_REPO || "weisiang329-eng/hookka-erp-testing").trim();
+  const url = `https://api.github.com/repos/${repo}/actions/workflows/mail-sync.yml/dispatches`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "hookka-erp",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ref: "main" }),
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (e) {
+    console.error("[mail-center] sync-now dispatch failed:", e);
+    return c.json({ error: "Couldn't reach GitHub to trigger a sync." }, 502);
+  }
+
+  // GitHub returns 204 No Content on a successful dispatch.
+  if (res.status === 204) {
+    // Set the debounce lock only on success so a failed attempt can be retried.
+    if (env.SESSION_CACHE) {
+      try {
+        await env.SESSION_CACHE.put(LOCK_KEY, new Date().toISOString(), {
+          expirationTtl: 45,
+        });
+      } catch {
+        /* non-fatal — the lock is an optimisation, not a correctness gate. */
+      }
+    }
+    return c.json({ ok: true });
+  }
+
+  // 403 = the fine-grained PAT lacks Actions: write. Surface a specific,
+  // actionable message so the owner knows the token needs upgrading.
+  if (res.status === 403) {
+    return c.json(
+      {
+        error:
+          "The GitHub token is read-only — it needs Actions: Read and write to trigger a sync. Upgrade the fine-grained PAT's permission.",
+        code: "TOKEN_READONLY",
+      },
+      502,
+    );
+  }
+
+  // Any other non-204: surface the GitHub status + a snippet of the body.
+  const bodyText = await res.text().catch(() => "");
+  return c.json(
+    { error: `GitHub ${res.status}: ${bodyText.slice(0, 200)}` },
+    502,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Address admin endpoints — creating / managing someone's @hookka.com alias
 // is an ACCOUNT-level action, so these are fenced with requireSuperAdmin (the
 // same hard gate that protects user-account management in routes/users.ts),

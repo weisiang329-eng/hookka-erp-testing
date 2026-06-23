@@ -44,22 +44,15 @@ import {
   clearLoginRateLimit,
 } from "../lib/rate-limit";
 import { emitAudit } from "../lib/audit";
-import { SESSION_COOKIE, CSRF_COOKIE } from "../lib/auth-middleware";
+import {
+  sessionCookieHeader,
+  csrfCookieHeader,
+} from "../lib/session-cookie";
 
 const app = new Hono<Env>();
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const SESSION_TTL_S = SESSION_TTL_MS / 1000;
 const TOTP_ISSUER = "Hookka Manufacturing ERP";
-
-// Mirrors helpers in routes/auth.ts — small duplication is fine; both paths
-// land at the same cookie shape.
-function sessionCookieHeader(token: string): string {
-  return `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
-}
-function csrfCookieHeader(csrfToken: string): string {
-  return `${CSRF_COOKIE}=${csrfToken}; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
-}
 
 type UserRow = {
   id: string;
@@ -191,8 +184,12 @@ app.post("/login-verify", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     userId?: string;
     code?: string;
+    rememberMe?: boolean;
   };
-  const { userId, code } = body;
+  const { userId, code, rememberMe } = body;
+  // Carry "Remember me" through the 2FA step so an enrolled user gets the
+  // same persist-or-session cookie choice a password-only user gets.
+  const persistSession = rememberMe === true;
   if (!userId || !code) {
     return c.json(
       { success: false, error: "userId and code required" },
@@ -288,8 +285,8 @@ app.post("/login-verify", async (c) => {
   });
 
   // Sprint 7: set the two auth cookies; body keeps user + csrfToken only.
-  c.header("Set-Cookie", sessionCookieHeader(sessionToken), { append: true });
-  c.header("Set-Cookie", csrfCookieHeader(csrfToken), { append: true });
+  c.header("Set-Cookie", sessionCookieHeader(sessionToken, persistSession), { append: true });
+  c.header("Set-Cookie", csrfCookieHeader(csrfToken, persistSession), { append: true });
   return c.json({
     success: true,
     data: {

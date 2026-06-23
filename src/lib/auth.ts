@@ -31,10 +31,20 @@ type AuthBlob = {
 
 const STORAGE_KEY = "hookka_auth";
 
+// "Remember me" decides WHERE the public user blob lives, mirroring where the
+// HttpOnly session cookie lives:
+//   • checked   → localStorage   (persists across browser restart, just like
+//                 the persistent on-disk session cookie). Owner stays signed in.
+//   • unchecked → sessionStorage (wiped when the browser closes, just like the
+//                 session-only cookie). Next launch = blob gone + cookie gone
+//                 = a clean signed-out state with no flash of authed UI.
+// readBlob() checks sessionStorage first (a same-session login wins over any
+// stale persistent blob) then falls back to localStorage.
 function readBlob(): AuthBlob | null {
+  const raw =
+    safeGet(sessionStorage, STORAGE_KEY) ?? safeGet(localStorage, STORAGE_KEY);
+  if (!raw) return null;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<AuthBlob & { token: unknown }>;
     if (!parsed || !parsed.user || typeof parsed.user !== "object") return null;
     // Old blobs from before Sprint 7 had a `token` field; tolerate them by
@@ -43,6 +53,16 @@ function readBlob(): AuthBlob | null {
     // api-client redirects to /login, prompting a fresh sign-in that lands
     // a Sprint-7 cookie pair.
     return { user: parsed.user as AuthUser };
+  } catch {
+    return null;
+  }
+}
+
+// localStorage / sessionStorage can throw (private-mode quota, disabled
+// storage). Keep every access infallible so auth never hard-crashes the app.
+function safeGet(store: Storage, key: string): string | null {
+  try {
+    return store.getItem(key);
   } catch {
     return null;
   }
@@ -63,23 +83,48 @@ export function getCurrentUser(): AuthUser | null {
   return blob ? blob.user : null;
 }
 
-export function setAuth(data: { user: AuthUser }): void {
+export function setAuth(data: { user: AuthUser; rememberMe?: boolean }): void {
   // If an OTHER user's session is lingering, snapshot+wipe it first so we
   // never mix state across accounts. Then restore the incoming user's own
   // snapshot (if they've signed in on this browser before).
   const blob: AuthBlob = { user: data.user };
+  const serialized = JSON.stringify(blob);
+  // Where the blob lives must match the cookie's persistence (see readBlob):
+  // Remember-me → localStorage; otherwise → sessionStorage. Default false so
+  // an absent flag is treated as session-only (the safer choice).
+  const persist = data.rememberMe === true;
   try {
     const current = getCurrentUser();
     if (current?.id && current.id !== data.user.id) {
       snapshotFor(current.id);
       wipeLiveUserKeys();
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(blob));
+    writeBlob(serialized, persist);
     restoreFor(data.user.id);
   } catch {
     // Even if state juggling fails, make sure the user blob lands so the
     // sidebar/topbar can render correctly.
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(blob));
+    writeBlob(serialized, persist);
+  }
+}
+
+// Write the blob to the chosen store and clear the OTHER store, so the blob
+// only ever lives in one place — otherwise a stale localStorage blob from a
+// prior "Remember me" login would survive a later session-only login and keep
+// the user "signed in" across restart. Each access is wrapped so a throwing
+// store never aborts login.
+function writeBlob(serialized: string, persist: boolean): void {
+  const primary = persist ? localStorage : sessionStorage;
+  const secondary = persist ? sessionStorage : localStorage;
+  try {
+    primary.setItem(STORAGE_KEY, serialized);
+  } catch {
+    /* best-effort */
+  }
+  try {
+    secondary.removeItem(STORAGE_KEY);
+  } catch {
+    /* best-effort */
   }
 }
 
@@ -151,7 +196,14 @@ export function clearAuth(): void {
     const current = getCurrentUser();
     if (current?.id) snapshotFor(current.id);
     wipeLiveUserKeys();
+    // Clear the blob from BOTH stores — we don't know (or care) which one a
+    // given login used; logout must leave neither behind.
     localStorage.removeItem(STORAGE_KEY);
+    try {
+      sessionStorage.removeItem(STORAGE_KEY);
+    } catch {
+      /* best-effort */
+    }
   } catch {
     // localStorage can throw in private-mode quotas; best-effort is fine.
   }

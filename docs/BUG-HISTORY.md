@@ -34,6 +34,27 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-24-002 — Dashboard login "Remember me" checkbox did NOTHING; the owner was kept logged in across browser restarts whether or not it was ticked (no way to get a session that ends on browser close)
+
+🟢 **Fixed** · `auth-rbac` · owner reported the checkbox felt inert
+
+**Symptom:** On the dashboard login page ("Welcome back · Sign in to your manufacturing intelligence platform") the "Remember me" checkbox had no effect. Ticking it or leaving it unticked produced the exact same result — the session always persisted across a full browser restart. There was no way to sign in for "this browser session only."
+
+**Root cause (the checkbox state never reached the thing that decides persistence):** Since Sprint 7 the dashboard credential is the HttpOnly `hookka_session` cookie set by the server, NOT a Bearer token in localStorage (`getAuthToken()` is a null shim). The server's `sessionCookieHeader()` in `src/api/routes/auth.ts` ALWAYS emitted the cookie with `Max-Age=7d`, so the browser always wrote it to disk and it always survived a restart. The login page (`src/pages/login.tsx`) captured the checkbox into React state (`rememberMe`) but never sent it in the `/api/auth/login` body, and the backend never read it — so cookie persistence was identical in both cases. The checkbox was wired to nothing.
+
+**Fix (`file:line`):** the checkbox now drives WHERE the credential is stored, via a `persistent` flag threaded from FE → login body → server cookie builder.
+- New shared builder `src/api/lib/session-cookie.ts` (`sessionCookieHeader` / `csrfCookieHeader`): `persistent === true` → emit `Max-Age` (on-disk, survives restart); `persistent === false` → omit `Max-Age`/`Expires` → a SESSION cookie the browser drops on close. Single source of truth, imported by both login paths so they can't drift.
+- `src/api/routes/auth.ts` (`POST /login`, ~L153/L285): read `rememberMe` from the body → `persistSession = rememberMe === true` → `issueSessionCookies(c, token, csrfToken, persistSession)`. Local cookie helpers removed in favour of the shared module.
+- `src/api/routes/auth-totp.ts` (`POST /login-verify`, ~L191/L288): same `rememberMe` passthrough for 2FA users; local cookie helpers removed.
+- `src/pages/login.tsx` (~L86): send `rememberMe` in the login body; (~L105) `setAuth({ user, rememberMe })`.
+- `src/lib/auth.ts`: the public user blob now follows the cookie — checked → `localStorage` (persistent), unchecked → `sessionStorage` (cleared on browser close). `readBlob()` checks sessionStorage first then localStorage; `setAuth()` writes one store and clears the other; `clearAuth()` wipes both. Prevents a stale persistent blob from showing a flash of authed UI after a session-only restart. Token is never logged or exposed (still HttpOnly cookie).
+- `src/pages/InviteAccept.tsx` (~L113): `rememberMe: true` to match accept-invite's persistent cookie.
+- DB session row keeps its 7-day sliding window regardless — only cookie persistence changed, so the server-side security boundary is unchanged.
+
+**Regression test:** new `tests/session-cookie-remember-me.test.mjs` (registered in `package.json` test list) — asserts persistent mode carries `Max-Age=604800` + all security attributes, session-only mode has NO `Max-Age`/`Expires` but stays HttpOnly/Secure/SameSite=Strict, CSRF cookie persistence tracks the session cookie, and the two modes produce DIFFERENT headers (the explicit guard against re-hardcoding Max-Age). Full suite: 1096 pass / 1 skip / 0 fail. build:strict clean (only the 3 known jsbarcode/@zxing sandbox errors).
+
+**Verify live:** sign in with "Remember me" CHECKED → fully quit and reopen the browser → still logged in on the dashboard. Sign out, sign in with "Remember me" UNCHECKED → fully quit and reopen the browser → bounced to /login (session cookie was dropped on close). DevTools → Application → Cookies: checked shows `hookka_session` with an Expires/Max-Age value; unchecked shows it as "Session". **Lesson:** when the credential is a server-set cookie, a "Remember me" checkbox must travel to the server and toggle the cookie's `Max-Age` — client-side React state alone can't change cookie persistence.
+
 ## BUG-2026-06-24-001 — Searching a COMPLETED order's customer PO on the DEFAULT /production view ("X of 1608") matched it in the count but did NOT render the rows (the Overview half of BUG-2026-06-23-004)
 
 🟢 **Fixed** · `production-orders` / `ui-frontend` · follow-up to BUG-2026-06-23-004 (v3 only fixed the dept grid)

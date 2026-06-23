@@ -935,10 +935,12 @@ export default function ProductionPage({
   // drop the flag so the refetch ships completed rows too.
   // When the operator is searching (top-bar search active) OR has hit "Clear
   // all", drop the server-side excludeCompleted flag so a COMPLETED / old
-  // order can come back in the payload and be found client-side. The Overview
-  // search is purely client-side over haystackByPo, so the matching order MUST
-  // be in the fetched payload first (gate 1 of 3 — see also dueFrag + the grid
-  // value-filter bypass below). 2026-06-23.
+  // order can come back in the payload and be found client-side. The search is
+  // purely client-side over haystackByPo, so the matching order MUST be in the
+  // fetched payload first (gate 1 of 3 — see also dueFrag for gate 2, and on
+  // the per-dept grid the deptForceShowKeys search exemption for gate 3, which
+  // re-surfaces a matched COMPLETED row past the grid's seeded Status hide).
+  // 2026-06-23.
   const searchActive = fltSearch.trim().length > 0;
   const excludeCompletedFrag =
     clearAllActive || searchActive ? "" : "&excludeCompleted=true";
@@ -1430,14 +1432,25 @@ export default function ProductionPage({
     () => ({ status: ["COMPLETED", "TRANSFERRED"] }),
     [],
   );
-  // When "Clear all" is active OR a top-bar search is active, do NOT apply the
-  // hide-COMPLETED/TRANSFERRED Status value-filter (gate 3 of 3). data-grid.tsx
-  // documents that global search is intentionally NOT exempt from value
-  // filters, so without this the grid re-hides a COMPLETED row even when it is
-  // in the data and matches the search. Bypassing the value-filter is simpler
-  // than threading the matching ids through forceShowKeys. 2026-06-23.
-  const deptDefaultExcluded =
-    clearAllActive || searchActive ? undefined : DEPT_STATUS_EXCLUDE;
+  // "Clear all" → drop the hide-COMPLETED/TRANSFERRED Status value-filter.
+  // This ONLY works for Clear All because that path ALSO bumps gridResetNonce
+  // (see the Clear-all button + the grid `key`), remounting the grid so its
+  // value-filter state re-seeds from the now-empty sessionStorage with this
+  // prop = undefined → the seed effect early-returns and no Status filter is
+  // applied.
+  //
+  // Search does NOT use this `undefined` flip (and must not): a top-bar search
+  // does NOT remount the grid (that would wipe the multi-select), so the
+  // Status value-filter the seed effect already applied on cold mount stays in
+  // place. data-grid.tsx's seed effect early-returns on a falsy
+  // defaultExcludedValues — it never CLEARS an already-applied default — so
+  // flipping this to undefined on search was a no-op: the COMPLETED row that
+  // matched the search stayed hidden (the v2 gate-3 attempt; corrected
+  // 2026-06-23). Search instead reveals the matching rows via forceShowKeys —
+  // which IS exempt from value filters (data-grid.tsx:2211-2218) — see
+  // deptForceShowKeys below. So keep the default-hide ON during search; the
+  // force-show allowlist surfaces exactly the searched rows.
+  const deptDefaultExcluded = clearAllActive ? undefined : DEPT_STATUS_EXCLUDE;
   // BUG-2026-06-23-004 force-show allowlist. Holds the DeptRow `id`
   // (`${po.id}:${jc.id}`) of every row the operator just batch-flipped to
   // COMPLETED via "Apply Completion". Passed to <DataGrid forceShowKeys> so
@@ -3231,6 +3244,32 @@ export default function ProductionPage({
     // other dept — one row per matching JobCard, no merge.
     return rows;
   }, [baseRows, activeTab]);
+
+  // Force-show allowlist passed to the dept <DataGrid>. Two sources unioned:
+  //   1. forceShowCompletedIds — rows the operator just flipped to COMPLETED
+  //      this session (BUG-2026-06-23-004), kept visible despite the hide.
+  //   2. While a top-bar search is active — EVERY current deptRows id. This is
+  //      the dept-tab search fix (2026-06-23): the page already narrows the
+  //      grid to the search match upstream (filteredOrders filters `orders` by
+  //      haystackByPo at the SO/PO level, then buildBaseRows → baseRows →
+  //      deptRows carries only those orders' rows — deptRows is PRE-SEARCH-
+  //      FILTERED, it never holds a non-matching order). But the grid's seeded
+  //      hide-COMPLETED Status value-filter still drops a matched COMPLETED /
+  //      TRANSFERRED row, and the seed effect won't clear that filter without a
+  //      remount (which would wipe the multi-select). forceShowKeys IS exempt
+  //      from value filters (data-grid.tsx:2211-2218), so exempting the current
+  //      deptRows ids reveals exactly the searched rows — including the
+  //      completed/transferred ones — while a search that matches NOTHING
+  //      leaves deptRows empty (nothing to reveal). Only built while searching,
+  //      so with no search active this is just forceShowCompletedIds and the
+  //      grid is byte-identical. Does NOT feed the grid `key`, so it never
+  //      remounts the grid (selection + batch toolbar survive).
+  const deptForceShowKeys = useMemo<ReadonlySet<string>>(() => {
+    if (!searchActive) return forceShowCompletedIds;
+    const next = new Set<string>(forceShowCompletedIds);
+    for (const r of deptRows) next.add(r.id);
+    return next;
+  }, [searchActive, forceShowCompletedIds, deptRows]);
 
   // Per-dept pill renderer. Click anywhere on the pill to fill the
   // completion date for that department's underlying JobCard. Filling
@@ -6963,7 +7002,13 @@ export default function ProductionPage({
             // COMPLETED stay visible (exempt from the hide-COMPLETED Status
             // filter) for the session. Changing this Set does NOT remount the
             // grid, so the checkbox selection + batch toolbar + chaining survive.
-            forceShowKeys={forceShowCompletedIds}
+            // deptForceShowKeys also folds in EVERY current deptRows id while a
+            // top-bar search is active (2026-06-23 dept-tab search fix) — those
+            // rows are already the search matches (deptRows is pre-search-
+            // filtered upstream), so this surfaces a searched COMPLETED /
+            // TRANSFERRED order that the seeded hide would otherwise drop, while
+            // a non-matching search reveals nothing (empty deptRows).
+            forceShowKeys={deptForceShowKeys}
             // Re-enabled 2026-05-10 after measuring a 5.4s React-render
             // block on Fab Sew (~1.4k rows × 25 cols) immediately after
             // clearing the From-date filter — operator's "卡着 needs refresh"

@@ -70,6 +70,64 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   DELIVERED: ["INVOICED"],
 };
 
+// ---------------------------------------------------------------------------
+// fireCustomerNoticeBestEffort — the BACKEND safety-net trigger for the
+// customer DO/Invoice emails (BUG-2026-06-23: ZERO of 128 Houzs DOs ever
+// emailed because the notice was FRONT-END-scattered — fired by a handful of
+// React buttons that the dominant delivery paths (driver-sticker QR scan,
+// bulk list actions, the "Generate Invoice" button, any stale FE row list)
+// never reach).
+//
+// queueDoCustomerNotice already owns the recipient chain, the no-recipient
+// silent skip, the server-rendered PDF fallback, AND the atomic idempotency
+// claim (UPDATE ... WHERE dispatchEmailAt/deliveredEmailAt IS NULL). Calling
+// it from the backend transition choke-point guarantees a send regardless of
+// which UI/driver path drove the transition, while the same idempotency stamp
+// means it never double-sends with the surviving (branded-PDF) FE trigger —
+// whichever caller wins the claim sends exactly one email; the loser no-ops.
+//
+// Fire-and-forget: queued via executionCtx.waitUntil so a notice never blocks
+// or fails (or rolls back) the already-committed transition. queueDoCustomerNotice
+// swallows its own errors (returns an error Response rather than throwing), but
+// we still guard with try/catch + .catch() so nothing can escape onto the
+// transition's response path. Outside a Worker isolate (unit tests / local
+// node) executionCtx throws on access — we fall back to letting the promise
+// run detached.
+// ---------------------------------------------------------------------------
+export function fireCustomerNoticeBestEffort(
+  c: Context<Env>,
+  deliveryOrderId: string,
+  kind: "DISPATCHED" | "DELIVERED",
+): void {
+  const run = (async () => {
+    try {
+      const res = await queueDoCustomerNotice(c, deliveryOrderId, { kind });
+      // Consume the body so the Response object never leaks.
+      await res.json().catch(() => undefined);
+    } catch (err) {
+      console.warn(
+        `[delivery-orders] ${deliveryOrderId}: backend ${kind} customer notice failed (FE trigger / cron may still cover it):`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  })();
+  try {
+    const ctx = (c as unknown as {
+      executionCtx?: { waitUntil(p: Promise<unknown>): void };
+    }).executionCtx;
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(run);
+      return;
+    }
+  } catch {
+    // executionCtx getter throws outside a Worker isolate — fine, the promise
+    // above is already running detached; we just don't hold the request open.
+  }
+  // No executionCtx — make sure a rejection can't surface as an unhandled
+  // promise; the work still runs (and the 5-min outbox cron is the backstop).
+  void run.catch(() => undefined);
+}
+
 type DeliveryOrderRow = {
   id: string;
   doNo: string;
@@ -6137,6 +6195,34 @@ export async function applyDeliveryOrderUpdate(
         before: { status: existing.status },
         after: { status: nextStatus },
       });
+    }
+
+    // -------------------------------------------------------------------
+    // BACKEND customer-notice trigger (the safety net — BUG-2026-06-23).
+    // This is the SINGLE choke-point every DO status transition funnels
+    // through (office PUT /:id AND the public driver-sticker QR scan), so
+    // firing here guarantees the dispatch/invoice email goes out no matter
+    // which UI/driver path drove the transition — including the bulk-list
+    // actions and PL-first dispatches whose FE notify call was skipped or
+    // ran against a stale row set. Fire-and-forget + idempotency-stamped, so
+    // it neither blocks the transition nor double-sends with the FE trigger.
+    //
+    //   * DISPATCHED → on any transition that lands the DO in LOADED (the
+    //     dispatch boundary; public-do-qr maps its DISPATCH step to to:LOADED).
+    //   * DELIVERED  → on the move into DELIVERED (sends the invoice notice,
+    //     using the DO's auto-created invoice) AND on a direct DELIVERED →
+    //     INVOICED bare flip ("Convert to Invoice" button) so that path also
+    //     notifies. queueDoCustomerNotice no-ops if no invoice row exists yet.
+    // -------------------------------------------------------------------
+    if (existing.status !== "LOADED" && nextStatus === "LOADED") {
+      fireCustomerNoticeBestEffort(c, id, "DISPATCHED");
+    }
+    if (
+      existing.status !== "DELIVERED" &&
+      existing.status !== "INVOICED" &&
+      (nextStatus === "DELIVERED" || nextStatus === "INVOICED")
+    ) {
+      fireCustomerNoticeBestEffort(c, id, "DELIVERED");
     }
 
     return c.json({ success: true, data: updated });

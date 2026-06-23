@@ -1013,7 +1013,8 @@ app.post("/", async (c) => {
     // Guarantee the delivered-with-issues column exists before we read it
     // (call-time import — same cycle-avoidance the line-pricing import below
     // uses; delivery-orders already imports nextInvoiceNo from here).
-    const { ensureDeliveryIncompleteColumn } = await import("./delivery-orders");
+    const { ensureDeliveryIncompleteColumn, fireCustomerNoticeBestEffort } =
+      await import("./delivery-orders");
     await ensureDeliveryIncompleteColumn(c.var.DB);
     const doRow = await c.var.DB.prepare(
       `SELECT id, doNo, salesOrderId, companySOId, customerId, customerName,
@@ -1184,6 +1185,16 @@ app.post("/", async (c) => {
     ];
 
     await c.var.DB.batch(statements);
+
+    // BACKEND customer-notice trigger (BUG-2026-06-23 safety net). The manual
+    // "Generate Invoice" button (DELIVERED → INVOICED via this POST) does NOT
+    // pass through applyDeliveryOrderUpdate, so its choke-point notice never
+    // fires here — wire the same fire-and-forget invoice notice so this path
+    // also emails the customer. Idempotency-stamped (deliveredEmailAt), so if
+    // the DELIVERED-time notice already went out this no-ops; if it never did
+    // (the Houzs signature), this is the catch-all that finally sends it. The
+    // invoice row is now committed, so queueDoCustomerNotice resolves it.
+    fireCustomerNoticeBestEffort(c, doRow.id, "DELIVERED");
 
     const created = await fetchInvoiceWithChildren(c.var.DB, id);
     if (!created) {

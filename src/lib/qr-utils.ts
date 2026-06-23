@@ -44,39 +44,39 @@ export async function getQRCodeDataURL(
 }
 
 // ============================================================
-// Code 128 barcodes — the linear-scan twin of the square QR.
+// Schedule WIP code — the scannable twin of the per-WIP sticker QR.
 //
 // Some departments (Woodcutting / Framing / Webbing) can't keep a QR sticker
-// WITH the WIP, so a Code 128 is printed on the Production Schedule listing
-// instead. Scanning it marks the same WIP complete as the QR would. The
-// barcode encodes the job_card id (compact — a full URL becomes too wide to
-// scan reliably on a printed row), guarded by a short sentinel prefix so a
-// stray courier / GTIN barcode in the camera view is never mistaken for ours.
+// WITH the WIP, so a scannable code is printed on the Production Schedule
+// listing instead. Scanning it marks the same WIP complete as the sticker QR
+// would. It encodes the SHORT 10-digit token (deriveBarcodeToken) — guarded by
+// the strict shape below so a stray courier / GTIN barcode in the camera view
+// is never mistaken for ours.
+//
+// 2026-06-24: the schedule print now renders this token as a QR (was a 1D Code
+// 128). The ENCODED VALUE is unchanged, so this parser, the scanner, and the
+// dept-scoped re-derivation in worker.ts / public-rack-qr.ts are untouched —
+// and every Code 128 printed before the switch still scans (same token).
 // ============================================================
 
-/** Sentinel prefix on every WIP Code 128 — `HKJC:` + job_card.id. */
+/** Legacy sentinel prefix — `HKJC:` + job_card.id. Still ACCEPTED on scan (old
+ * printed Code 128s carry it), but the schedule no longer EMITS this form. */
 export const JC_BARCODE_PREFIX = "HKJC:";
 
-// Code 128 IMAGE generation lives at its single consumer — the Production
-// Schedule print in src/pages/production/index.tsx — which statically imports
-// `jsbarcode` and renders SYNCHRONOUSLY inside the print click gesture (an
-// async generator would force an `await` before window.open and trip the
-// browser pop-up blocker). Keeping jsbarcode out of qr-utils also keeps it out
-// of the scanner / PDF chunks that import this module only to DECODE or for QR.
-
-/** The string to ENCODE in a WIP's Code 128 (prefix + job card id). */
+/** Legacy: the string a WIP's Code 128 used to ENCODE (prefix + job card id).
+ * Retained only so the scanner-side parser stays backward compatible. */
 export function jobCardBarcodeValue(jobCardId: string): string {
   return `${JC_BARCODE_PREFIX}${jobCardId}`;
 }
 
 /**
- * Parse a scanned Code 128 back to a WIP barcode token, or null when it isn't
- * one of ours. The schedule barcode is now the SHORT `b<deptNN><7hash>` form
- * 2026-06-17: the token is now ALL-NUMERIC `<deptNN><8 digits>` = 10 digits so
- * Code 128 uses Set C (fat, scannable bars — see deriveBarcodeToken). The
- * leading 2 digits are the dept (01–08), which keeps a stray courier barcode
- * (EAN-8 = 8 digits, EAN-13 = 13) AND our own QR URLs from matching. The legacy
- * `HKJC:jc-…` form is still accepted.
+ * Parse a scanned schedule code back to a WIP barcode token, or null when it
+ * isn't one of ours. The schedule token is ALL-NUMERIC `<deptNN><8 digits>` =
+ * 10 digits (see deriveBarcodeToken); the leading 2 digits are the dept (01–08),
+ * which keeps a stray courier barcode (EAN-8 = 8 digits, EAN-13 = 13) AND our
+ * own QR URLs from matching. The legacy `HKJC:jc-…` Code-128 form (printed
+ * before the 2026-06-24 switch to QR) is still accepted. Symbology-agnostic —
+ * the same token resolves whether it was scanned off a QR or an old 1D barcode.
  */
 export function parseJobCardBarcode(value: string): string | null {
   if (!value) return null;

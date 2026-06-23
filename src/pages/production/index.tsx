@@ -933,11 +933,24 @@ export default function ProductionPage({
   // fab-sew: 7.6 MB decompressed → ~3 MB after this slim). When operator
   // hits "Clear all" (clearAllActive=true) they explicitly want history →
   // drop the flag so the refetch ships completed rows too.
-  const excludeCompletedFrag = clearAllActive ? "" : "&excludeCompleted=true";
+  // When the operator is searching (top-bar search active) OR has hit "Clear
+  // all", drop the server-side excludeCompleted flag so a COMPLETED / old
+  // order can come back in the payload and be found client-side. The Overview
+  // search is purely client-side over haystackByPo, so the matching order MUST
+  // be in the fetched payload first (gate 1 of 3 — see also dueFrag + the grid
+  // value-filter bypass below). 2026-06-23.
+  const searchActive = fltSearch.trim().length > 0;
+  const excludeCompletedFrag =
+    clearAllActive || searchActive ? "" : "&excludeCompleted=true";
+  // Same reasoning for the date window: on standalone dept routes the cold
+  // start seeds from=to=today, which would drop a non-today order the operator
+  // is searching for. Send NO date window while a search is active so the
+  // match survives the server's dueFrom/dueTo filter (gate 2 of 3).
+  const dueFrag = searchActive ? "" : dueQueryFrag;
   const baseUrl =
     mode === "dept" && deptCode
-      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${excludeCompletedFrag}${dueQueryFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`
-      : `/api/production-orders?fields=minimal${excludeCompletedFrag}${dueQueryFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`;
+      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${excludeCompletedFrag}${dueFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`
+      : `/api/production-orders?fields=minimal${excludeCompletedFrag}${dueFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`;
   const ordersUrl: string | null = shouldFetch && datesSeeded ? baseUrl : null;
   // Phase 5 was reverted on 2026-05-24: the worker-parse path added
   // structured-clone overhead that ate the JSON.parse savings on desktop
@@ -1063,28 +1076,9 @@ export default function ProductionPage({
   // Anchor for scrolling the grid into view when an overdue chip is clicked
   // (the grid sits below the filter bar; on a tall page it can be off-screen).
   const gridSectionRef = useRef<HTMLDivElement | null>(null);
-  // Toggle an overdue chip: click to filter the grid to that category's
-  // overdue set, click the same chip again to clear, click the other to
-  // switch. On activate, scroll the grid into view so the filtered rows are
-  // visible without a manual scroll.
-  const selectOverdueChip = useCallback(
-    (cat: "BEDFRAME" | "SOFA") => {
-      setOverduePanelMode((m) => {
-        const next = m === cat ? null : cat;
-        if (next) {
-          // Defer so the scroll target exists / the grid has re-filtered.
-          requestAnimationFrame(() => {
-            gridSectionRef.current?.scrollIntoView({
-              behavior: "smooth",
-              block: "start",
-            });
-          });
-        }
-        return next;
-      });
-    },
-    [],
-  );
+  // selectOverdueChip is declared further down (after clearAllOverviewFilters
+  // + setUrlBatch) so its activate branch can reuse the Clear-all pattern
+  // without a use-before-declaration / TDZ error. 2026-06-23.
   // Atomic multi-key URL writer for "Clear all". Sequential useUrlState
   // setters race under React 18 batching — see useUrlBatch jsdoc.
   const setUrlBatch = useUrlBatch();
@@ -1310,6 +1304,37 @@ export default function ProductionPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Toggle an overdue chip: click to filter the grid to that category's
+  // overdue set, click the same chip again to clear, click the other to
+  // switch. On ACTIVATE, clear the layered narrowing filters (search /
+  // state / customer / category + the per-column Overview filters) so the
+  // chip shows its FULL overdue set — a leftover search/customer would
+  // otherwise hide part of the overdue rows the count promised. The date
+  // range (from/to) is LEFT ALONE because the overdue set is already
+  // date-independent. 2026-06-23. The next mode is computed with a plain
+  // read (NOT inside a setState updater) so the updater stays pure and the
+  // clears run once in the handler body.
+  const selectOverdueChip = useCallback(
+    (cat: "BEDFRAME" | "SOFA") => {
+      const next = overduePanelMode === cat ? null : cat;
+      if (next) {
+        // Clear the layered narrowing filters so the full overdue set shows.
+        setUrlBatch({ q: "", state: "", customer: "", cat: "" });
+        setFltSearchInput("");
+        clearAllOverviewFilters();
+        // Defer so the scroll target exists / the grid has re-filtered.
+        requestAnimationFrame(() => {
+          gridSectionRef.current?.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+        });
+      }
+      setOverduePanelMode(next);
+    },
+    [overduePanelMode, setUrlBatch, clearAllOverviewFilters],
+  );
+
   // Lazy-load trigger: any filter being non-default flips shouldFetch=true,
   // which arms ordersUrl in the useCachedJson call above. Once fetched the
   // data is cached in localStorage, so subsequent filter changes filter
@@ -1405,7 +1430,14 @@ export default function ProductionPage({
     () => ({ status: ["COMPLETED", "TRANSFERRED"] }),
     [],
   );
-  const deptDefaultExcluded = clearAllActive ? undefined : DEPT_STATUS_EXCLUDE;
+  // When "Clear all" is active OR a top-bar search is active, do NOT apply the
+  // hide-COMPLETED/TRANSFERRED Status value-filter (gate 3 of 3). data-grid.tsx
+  // documents that global search is intentionally NOT exempt from value
+  // filters, so without this the grid re-hides a COMPLETED row even when it is
+  // in the data and matches the search. Bypassing the value-filter is simpler
+  // than threading the matching ids through forceShowKeys. 2026-06-23.
+  const deptDefaultExcluded =
+    clearAllActive || searchActive ? undefined : DEPT_STATUS_EXCLUDE;
   // BUG-2026-06-23-004 force-show allowlist. Holds the DeptRow `id`
   // (`${po.id}:${jc.id}`) of every row the operator just batch-flipped to
   // COMPLETED via "Apply Completion". Passed to <DataGrid forceShowKeys> so
@@ -2692,8 +2724,11 @@ export default function ProductionPage({
       }
       // Skip the date window while an overdue chip is active — the overdue set
       // is date-independent (matches the chip), so a stale date filter must not
-      // hide overdue rows from the chip's own selection.
-      if (!overduePoIdSet) {
+      // hide overdue rows from the chip's own selection. Also skip while a
+      // search is active (`q`) so the client-side date window can't re-hide a
+      // COMPLETED / old order the operator searched for — mirrors the fetch +
+      // grid value-filter bypasses above. With no search active, byte-identical.
+      if (!overduePoIdSet && !q) {
         if (deferredFltDueFrom && axisVal && axisVal < deferredFltDueFrom) return false;
         if (deferredFltDueTo && axisVal && axisVal > deferredFltDueTo) return false;
       }

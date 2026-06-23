@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-23-003 — Department Performance "Print Report" ignored the on-screen filters (printed a single-day, all-department dump instead of the filtered view)
+
+🟢 **Fixed** · `ui-frontend` / `hr-labor` · caught by owner on prod
+
+**Symptom:** on the Employees → **Department Performance** tab, the operator filters to e.g. Framing / SOFA / 15–18 Jun, clicks **Print Report**, and gets the WRONG report — only the "To" day (18 Jun), ALL departments, ALL categories. The date RANGE, Department, and Category selections are ignored.
+
+**Root cause:** `src/pages/employees.tsx`, `DepartmentPerformanceTab` — the "Print Report" button did `window.open(\`/api/reports/efficiency?date=${dateTo||today}\`)`, which is the generic **Daily Efficiency Report** (single date, all depts, all cats — the same view the noon cron mails out). It was never wired to print the tab's own filtered data. EVERY other tab in this file prints the on-screen filtered view via `printReport()` from `@/lib/print-report`; this one was the odd one out.
+
+**Fix:** rewired "Print Report" to a `handlePrint` that calls `printReport({ title: "Department Performance", filterSummary: \`${dateRangeLabel(dateFrom,dateTo)} · ${deptLabel} · ${catLabel}\`, cards, sections })` over the component's already-filtered `totals` + `daily` state (the tab fetches `/api/department-performance?from&to&departmentCode&category`). Cards = the 4 on-screen KPIs (Workers / Total Working Hrs / Total Production Hrs / Avg Efficiency); columns = the on-screen table (Date / Working Hrs / Production Hrs / Efficiency %). The old single-day report was KEPT as a separate secondary button **"Daily Efficiency (A4)"** (the `/api/reports/efficiency` endpoint is untouched — the cron still uses it). Mirrors the "Department Labor" tab's print pattern.
+
+**Verified live (prod):** clicking Print Report now opens a report titled "Department Performance" (with the Workers/Efficiency cards), NOT the old "Daily Efficiency Report" dump. build:strict clean. **Lesson:** when a page has N tabs each with a "Print Report", they must all print the on-screen FILTERED view — one tab silently opening a different (unfiltered) report is an easy, invisible drift.
+
+---
+
 ## BUG-2026-06-23-002 — /production overdue chip filtered the grid to 0 on browsers holding a stale-SHAPED counts cache (chip read 29, grid showed "No production orders found")
 
 🟢 **Fixed** · `production-orders` / `ui-frontend` / `caching` · caught by owner on prod (hours after -001)

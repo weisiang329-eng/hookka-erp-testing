@@ -5868,33 +5868,67 @@ function DepartmentPerformanceTab({
             : undefined,
       },
     ];
+    // Flatten each day + its per-worker drill-down into one printable table,
+    // mirroring the on-screen Daily Breakdown where every day expands to show
+    // its workers. Day rows print bold; worker rows are indented beneath them.
+    type DeptPerfPrintRow = {
+      isWorker: boolean;
+      label: string;
+      workingMinutes: number;
+      productionMinutes: number;
+      efficiencyPct: number;
+    };
+    const printRows: DeptPerfPrintRow[] = [];
+    for (const d of daily) {
+      printRows.push({
+        isWorker: false,
+        label: formatDateDMY(d.date),
+        workingMinutes: d.workingMinutes,
+        productionMinutes: d.productionMinutes,
+        efficiencyPct: d.efficiencyPct,
+      });
+      for (const w of d.workers ?? []) {
+        printRows.push({
+          isWorker: true,
+          label: w.workerName,
+          workingMinutes: w.workingMinutes,
+          productionMinutes: w.productionMinutes,
+          efficiencyPct: w.efficiencyPct,
+        });
+      }
+    }
+    const hrsCell = (mins: number, bold: boolean) =>
+      mins > 0 ? { text: formatHours(mins), bold } : { text: "—", bold };
     const columns: PrintColumn[] = [
-      { header: "Date", value: (r) => formatDateDMY((r as DeptPerfDailyRow).date) },
+      {
+        header: "Date / Worker",
+        value: (r) => {
+          const row = r as DeptPerfPrintRow;
+          return row.isWorker
+            ? { text: `    ↳ ${row.label}` }
+            : { text: row.label, bold: true };
+        },
+      },
       {
         header: "Working Hrs",
         align: "right",
-        value: (r) => {
-          const row = r as DeptPerfDailyRow;
-          return row.workingMinutes > 0 ? formatHours(row.workingMinutes) : "—";
-        },
+        value: (r) => hrsCell((r as DeptPerfPrintRow).workingMinutes, !(r as DeptPerfPrintRow).isWorker),
       },
       {
         header: "Production Hrs",
         align: "right",
-        value: (r) => {
-          const row = r as DeptPerfDailyRow;
-          return row.productionMinutes > 0 ? formatHours(row.productionMinutes) : "—";
-        },
+        value: (r) => hrsCell((r as DeptPerfPrintRow).productionMinutes, !(r as DeptPerfPrintRow).isWorker),
       },
       {
         header: "Efficiency %",
         align: "right",
         value: (r) => {
-          const row = r as DeptPerfDailyRow;
-          if (row.workingMinutes <= 0) return "—";
+          const row = r as DeptPerfPrintRow;
+          const bold = !row.isWorker;
+          if (row.workingMinutes <= 0) return { text: "—", bold };
           const pct = row.efficiencyPct;
           const color = pct >= 80 ? "#4F7C3A" : pct >= 60 ? "#9C6F1E" : "#9A3A2D";
-          return { text: `${pct.toFixed(1)}%`, color, align: "right" };
+          return { text: `${pct.toFixed(1)}%`, color, align: "right", bold };
         },
       },
     ];
@@ -5903,7 +5937,7 @@ function DepartmentPerformanceTab({
       filterSummary: `${dateRangeLabel(dateFrom, dateTo)} · ${deptLabel} · ${catLabel}`,
       orientation: "portrait",
       cards,
-      sections: [{ columns, rows: daily }],
+      sections: [{ columns, rows: printRows }],
     });
   }, [orderedDepts, departmentCode, category, totals, avgEff, dateFrom, dateTo, daily]);
 

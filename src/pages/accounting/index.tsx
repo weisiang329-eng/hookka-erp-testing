@@ -4591,7 +4591,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
             </div>
           </div>
 
-          <div className="overflow-x-auto">
+          <div>
           <table className="w-full text-sm">
             <thead><tr className="text-xs text-[#6B7280]">
               <th className="text-left py-1">Account</th><th className="text-left py-1">Description</th>

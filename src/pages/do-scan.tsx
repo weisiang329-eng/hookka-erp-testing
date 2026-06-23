@@ -225,14 +225,13 @@ function ItemRow({
 }) {
   // The owner reads the PRODUCT CODE (our SKU, e.g. 1013-(K)) and the
   // colour/fabric (e.g. PC151-01) to identify the item — make these the
-  // prominent line. Above it, the source context: Customer PO · our SO.
-  // Internal product name + size + PO no. drop to a quiet secondary line.
-  const customerPO = (it.customerPOId || "").trim();
-  const soNo = (it.salesOrderNo || "").trim();
+  // prominent line. Above it, the only customer-facing reference: the
+  // Customer PO (there is no customer SO; never show our internal SO no.).
+  // Internal product name + size drop to a quiet secondary line.
+  const context = (it.customerPOId || "").trim();
   const productCode = (it.productCode || "").trim();
   const fabric = (it.fabricCode || "").trim();
-  const context = [customerPO, soNo].filter(Boolean).join(" · ");
-  const detail = [it.sizeLabel, it.productName, it.poNo]
+  const detail = [it.sizeLabel, it.productName]
     .map((v) => (v || "").trim())
     .filter(Boolean)
     .join(" · ");
@@ -707,14 +706,10 @@ export default function DoScanPage() {
 
                 {editableDos.map((d) => {
                   const doChecked = checkedByDo[d.doId] ?? new Set<string>();
-                  // Customer PO for this DO — the office reads this to match the
-                  // truck against the order. Derive it from the DO's lines
-                  // (every line carries the same customer PO; first non-blank
-                  // wins). Falls back to the bare DO no. when none is present.
-                  const doCustomerPO =
-                    d.items
-                      .map((it) => (it.customerPOId || "").trim())
-                      .find(Boolean) || "";
+                  // Header shows the DO number (+ customer / branch). No single
+                  // Customer PO here: one DO can hold lines from several customer
+                  // POs, so a header PO (first line only) would be misleading.
+                  // The per-row Customer PO carries that context instead.
                   return (
                     <div
                       key={d.doId}
@@ -722,23 +717,9 @@ export default function DoScanPage() {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          {doCustomerPO ? (
-                            <>
-                              <p className="text-[10px] uppercase tracking-wide text-gray-400">
-                                Customer PO
-                              </p>
-                              <p className="text-base font-bold text-[#1F1D1B] leading-tight">
-                                {doCustomerPO}
-                              </p>
-                              <p className="text-xs text-gray-500 mt-0.5">
-                                {d.doNo}
-                              </p>
-                            </>
-                          ) : (
-                            <p className="text-sm font-bold text-[#1F1D1B]">
-                              {d.doNo}
-                            </p>
-                          )}
+                          <p className="text-sm font-bold text-[#1F1D1B]">
+                            {d.doNo}
+                          </p>
                         </div>
                         <span className="truncate text-xs text-gray-500 text-right shrink-0">
                           {d.customerName}

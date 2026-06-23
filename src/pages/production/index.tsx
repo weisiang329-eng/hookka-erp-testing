@@ -1406,6 +1406,20 @@ export default function ProductionPage({
     [],
   );
   const deptDefaultExcluded = clearAllActive ? undefined : DEPT_STATUS_EXCLUDE;
+  // BUG-2026-06-23-004 force-show allowlist. Holds the DeptRow `id`
+  // (`${po.id}:${jc.id}`) of every row the operator just batch-flipped to
+  // COMPLETED via "Apply Completion". Passed to <DataGrid forceShowKeys> so
+  // those rows STAY VISIBLE (showing the completion) even though the default
+  // "hide COMPLETED" Status value-filter would otherwise drop them — matching
+  // what a single-cell completion edit and the Folder already do. Lives in
+  // component state only (NOT sessionStorage) so it survives in-session re-
+  // renders / polls but resets on a full page reload: the long-term active
+  // list stays clean. CRITICAL: it does NOT feed the grid `key`, so updating
+  // it never remounts the grid — the checkbox selection + BatchActionToolbar
+  // + Apply-Completion→Apply-PIC→Save-to-Folder chaining all survive. Only
+  // "Apply Completion" populates it; Apply Due Date / Apply PIC don't change
+  // status (no hide) so they leave it alone.
+  const [forceShowCompletedIds, setForceShowCompletedIds] = useState<ReadonlySet<string>>(() => new Set());
   // Reset selection + close batch dialogs when the dept tab changes.
   /* eslint-disable react-hooks/set-state-in-effect -- reset on tab change */
   useEffect(() => {
@@ -1417,6 +1431,9 @@ export default function ProductionPage({
     // Tab change resets Clear All — re-entering a dept gets the
     // default-hide behaviour back.
     setClearAllActive(false);
+    // Switching dept = a fresh sheet; drop the force-show reveal so the new
+    // dept opens with the clean default-hide view.
+    setForceShowCompletedIds((prev) => (prev.size === 0 ? prev : new Set()));
   }, [activeTab]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -6907,6 +6924,11 @@ export default function ProductionPage({
             // history. Mirrors the operator's request: fewer rows
             // means faster page open and a more focused live view.
             defaultExcludedValues={deptDefaultExcluded}
+            // BUG-2026-06-23-004: rows the operator just batch-flipped to
+            // COMPLETED stay visible (exempt from the hide-COMPLETED Status
+            // filter) for the session. Changing this Set does NOT remount the
+            // grid, so the checkbox selection + batch toolbar + chaining survive.
+            forceShowKeys={forceShowCompletedIds}
             // Re-enabled 2026-05-10 after measuring a 5.4s React-render
             // block on Fab Sew (~1.4k rows × 25 cols) immediately after
             // clearing the From-date filter — operator's "卡着 needs refresh"
@@ -7002,6 +7024,12 @@ export default function ProductionPage({
             completedDate: date,
             status: date ? "COMPLETED" : "WAITING",
           }));
+          // BUG-2026-06-23-004: capture the DeptRow composite ids of the rows
+          // being completed so we can force-show them after the optimistic
+          // write (see setForceShowCompletedIds below). Snapshotted here, up
+          // front, independent of the selection which is intentionally kept.
+          const completedRowIds = date ? selectedDeptRows.map((r) => r.id) : [];
+          const clearedRowIds = date ? [] : selectedDeptRows.map((r) => r.id);
           try {
             const res = await fetch("/api/production-orders/bulk-patch", {
               method: "POST",
@@ -7021,9 +7049,13 @@ export default function ProductionPage({
             const failed = (j.results || []).filter((x) => !x.success);
             if (failed.length > 0) {
               toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
+            } else if (date) {
+              // BUG-2026-06-23-004: these rows just flipped to COMPLETED and
+              // would normally vanish under the default hide-COMPLETED filter.
+              // The toast tells the operator they're saved AND kept on screen.
+              toast.success(`Marked ${patches.length} job card${patches.length === 1 ? "" : "s"} Completed — saved & kept visible (they hide on next reload; also in the Folder).`);
             } else {
-              const verb = date ? "Stamped completion date on" : "Cleared completion date on";
-              toast.success(`${verb} ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+              toast.success(`Cleared completion date on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
             }
             // Wei Siang 2026-05-13: operator wants to chain batch ops
             // (Apply Date → Apply PIC → Save to Folder) without re-selecting
@@ -7051,6 +7083,26 @@ export default function ProductionPage({
                 };
               }),
             );
+            // BUG-2026-06-23-004 force-show: keep the just-completed rows on
+            // screen (exempt from the default hide-COMPLETED Status filter)
+            // for the rest of the session. Updating this Set does NOT remount
+            // the grid (it's NOT part of the grid `key`), so the checkbox
+            // selection + batch toolbar + chaining all survive. Rows that were
+            // un-completed (date cleared → WAITING) are dropped from the set —
+            // WAITING isn't hidden, so they don't need the exemption.
+            if (completedRowIds.length > 0 || clearedRowIds.length > 0) {
+              setForceShowCompletedIds((prev) => {
+                const next = new Set(prev);
+                for (const id of completedRowIds) next.add(id);
+                for (const id of clearedRowIds) next.delete(id);
+                // Reference is unchanged only when nothing actually moved.
+                return next.size === prev.size &&
+                  completedRowIds.every((id) => prev.has(id)) &&
+                  clearedRowIds.every((id) => !prev.has(id))
+                  ? prev
+                  : next;
+              });
+            }
             invalidateCachePrefix("/api/production-orders");
             // Read each touched PO fresh (?fresh=1) so the stamped/cleared
             // completion sticks over the serve-stale list snapshot + pins it.

@@ -6,6 +6,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { defaultBankCode } from "@/lib/default-bank";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Plus,
   CreditCard,
@@ -43,11 +44,6 @@ export default function PaymentsPage() {
 
   // Create form state
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
-  const [amount, setAmount] = useState<number>(0);
-  // Raw string the operator is typing — NEVER re-format mid-keystroke
-  // (the toFixed(2) round-trip made "12" impossible to type; same fix as
-  // the CN/DN/JV inputs).
-  const [amountStr, setAmountStr] = useState("");
   const [method, setMethod] = useState<PaymentRecord["method"]>("BANK_TRANSFER");
   const [reference, setReference] = useState("");
   // Owner: the receipt deposits into a SPECIFIC bank/cash account, not a
@@ -92,29 +88,19 @@ export default function PaymentsPage() {
     setAllocations([]);
   };
 
-  const toggleAllocation = (invId: string) => {
-    const existing = allocations.find((a) => a.invoiceId === invId);
-    if (existing) {
-      setAllocations(allocations.filter((a) => a.invoiceId !== invId));
-    } else {
-      const inv = invoices.find((i) => i.id === invId);
-      if (inv) {
-        const remaining = inv.totalSen - inv.paidAmount;
-        setAllocations([...allocations, { invoiceId: invId, amount: remaining }]);
-      }
-    }
-  };
-
-  const updateAllocationAmount = (invId: string, amt: number) => {
-    setAllocations(
-      allocations.map((a) => (a.invoiceId === invId ? { ...a, amount: amt } : a))
-    );
+  // Supplier-payment-style upsert: typing an amount creates the allocation if
+  // it isn't there yet; clearing it (0) drops the invoice from the receipt.
+  const setAllocAmount = (invId: string, sen: number) => {
+    setAllocations((prev) => {
+      const others = prev.filter((a) => a.invoiceId !== invId);
+      return sen > 0 ? [...others, { invoiceId: invId, amount: sen }] : others;
+    });
   };
 
   const totalAllocated = allocations.reduce((sum, a) => sum + a.amount, 0);
 
   const handleCreate = async () => {
-    if (!selectedCustomerId || amount <= 0) return;
+    if (!selectedCustomerId || totalAllocated <= 0) return;
     setCreating(true);
     try {
       // Sprint 3 #4 — idempotency. Payment is the highest-risk POST
@@ -124,7 +110,7 @@ export default function PaymentsPage() {
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: {
           customerId: selectedCustomerId,
-          amount,
+          amount: totalAllocated,
           method,
           reference,
           bankAccount,
@@ -134,8 +120,6 @@ export default function PaymentsPage() {
       if (data.success) {
         setShowCreateModal(false);
         setSelectedCustomerId("");
-        setAmount(0);
-        setAmountStr("");
         setMethod("BANK_TRANSFER");
         setReference("");
         setAllocations([]);
@@ -336,42 +320,16 @@ export default function PaymentsPage() {
               {/* Customer Selection */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Customer</label>
-                <select
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                <SearchableSelect
                   value={selectedCustomerId}
-                  onChange={(e) => handleCustomerChange(e.target.value)}
-                >
-                  <option value="">Select customer...</option>
-                  {customers.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
+                  onChange={handleCustomerChange}
+                  options={customers.map((c) => ({ value: c.id, label: c.name }))}
+                  placeholder="Type customer name..."
+                  allowClear
+                />
               </div>
 
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 max-sm:grid-cols-1">
-                {/* Amount — raw string while typing; sen derived per keystroke
-                    but the FIELD never re-formats (the old toFixed(2)
-                    round-trip made amounts impossible to type). */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Amount (RM)</label>
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    onFocus={(e) => e.currentTarget.select()}
-                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm text-right tabular-nums"
-                    value={amountStr}
-                    onChange={(e) => {
-                      setAmountStr(e.target.value);
-                      const rm = parseFloat(e.target.value);
-                      setAmount(Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0);
-                    }}
-                    placeholder="e.g. 1000.00"
-                  />
-                  {amount > 0 && (
-                    <p className="text-xs text-gray-500 mt-1">= {formatCurrency(amount)}</p>
-                  )}
-                </div>
-
                 {/* Deposit To — the actual bank/cash account the money lands
                     in (drives the GL bank leg; Method stays as metadata). */}
                 <div>
@@ -414,6 +372,15 @@ export default function PaymentsPage() {
                     placeholder="Cheque #, Transfer ref..."
                   />
                 </div>
+
+                {/* Knock-off total — kept at the top beside Reference (matches
+                    the supplier-payment layout). */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Total (RM)</label>
+                  <div className="w-full rounded-md border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-right tabular-nums font-bold text-[#4F7C3A]">
+                    {formatCurrency(totalAllocated)}
+                  </div>
+                </div>
               </div>
 
               {/* Invoice Allocation */}
@@ -429,71 +396,54 @@ export default function PaymentsPage() {
                       <table className="w-full text-sm">
                         <thead className="bg-gray-50">
                           <tr>
-                            <th className="text-left px-3 py-2 font-medium text-gray-600">Select</th>
                             <th className="text-left px-3 py-2 font-medium text-gray-600">Invoice #</th>
                             <th className="text-right px-3 py-2 font-medium text-gray-600">Invoice Amount</th>
                             <th className="text-right px-3 py-2 font-medium text-gray-600">Previously Paid</th>
+                            <th className="text-right px-3 py-2 font-medium text-gray-600">Outstanding</th>
                             <th className="text-right px-3 py-2 font-medium text-gray-600">This Payment</th>
-                            <th className="text-right px-3 py-2 font-medium text-gray-600">Remaining</th>
+                            <th className="text-center px-3 py-2 font-medium text-gray-600">Full</th>
                           </tr>
                         </thead>
                         <tbody>
                           {customerInvoices.map((inv) => {
                             const alloc = allocations.find((a) => a.invoiceId === inv.id);
-                            const remaining = inv.totalSen - inv.paidAmount - (alloc?.amount || 0);
+                            const outstanding = inv.totalSen - inv.paidAmount;
+                            const isFull = !!alloc && alloc.amount === outstanding;
                             return (
                               <tr key={inv.id} className="border-t hover:bg-gray-50">
-                                <td className="px-3 py-2">
-                                  <input
-                                    type="checkbox"
-                                    checked={!!alloc}
-                                    onChange={() => toggleAllocation(inv.id)}
-                                    className="rounded border-gray-300"
-                                  />
-                                </td>
                                 <td className="px-3 py-2 font-mono">{inv.invoiceNo}</td>
                                 <td className="px-3 py-2 text-right">{formatCurrency(inv.totalSen)}</td>
                                 <td className="px-3 py-2 text-right text-gray-500">{formatCurrency(inv.paidAmount)}</td>
+                                <td className="px-3 py-2 text-right font-medium">{formatCurrency(outstanding)}</td>
                                 <td className="px-3 py-2 text-right">
-                                  {alloc ? (
-                                    <input
-                                      type="number" onFocus={(e) => e.currentTarget.select()}
-                                      step="0.01"
-                                      inputMode="decimal"
-                                      min="0"
-                                      className="w-28 border border-gray-300 rounded px-2 py-1 text-sm text-right"
-                                      value={alloc.amount ? (alloc.amount / 100).toFixed(2) : ""}
-                                      onChange={(e) => {
-                                        const rm = parseFloat(e.target.value);
-                                        const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
-                                        updateAllocationAmount(inv.id, sen);
-                                      }}
-                                    />
-                                  ) : (
-                                    <span className="text-gray-400">-</span>
-                                  )}
+                                  <input
+                                    type="number" onFocus={(e) => e.currentTarget.select()}
+                                    step="0.01"
+                                    inputMode="decimal"
+                                    min="0"
+                                    className="w-28 border border-gray-300 rounded px-2 py-1 text-sm text-right tabular-nums"
+                                    value={alloc && alloc.amount ? (alloc.amount / 100).toFixed(2) : ""}
+                                    placeholder="0.00"
+                                    onChange={(e) => {
+                                      const rm = parseFloat(e.target.value);
+                                      const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                                      setAllocAmount(inv.id, sen);
+                                    }}
+                                  />
                                 </td>
-                                <td className="px-3 py-2 text-right">
-                                  <span className={remaining < 0 ? "text-[#9A3A2D]" : "text-gray-600"}>
-                                    {formatCurrency(Math.max(0, remaining))}
-                                  </span>
+                                <td className="px-3 py-2 text-center">
+                                  <input
+                                    type="checkbox"
+                                    checked={isFull}
+                                    onChange={(e) => setAllocAmount(inv.id, e.target.checked ? outstanding : 0)}
+                                    className="rounded border-gray-300"
+                                  />
                                 </td>
                               </tr>
                             );
                           })}
                         </tbody>
                       </table>
-                      <div className="px-3 py-2 bg-gray-50 border-t text-sm font-medium flex justify-between">
-                        <span>Total Allocated:</span>
-                        <span className={totalAllocated > amount ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}>
-                          {formatCurrency(totalAllocated)}
-                          {amount > 0 && totalAllocated !== amount && (
-                            <span className="text-gray-400 ml-2">
-                              (Unallocated: {formatCurrency(amount - totalAllocated)})
-                            </span>
-                          )}
-                        </span>
-                      </div>
                     </div>
                   )}
                 </div>
@@ -503,7 +453,7 @@ export default function PaymentsPage() {
               <Button variant="ghost" onClick={() => setShowCreateModal(false)}>Cancel</Button>
               <Button
                 onClick={handleCreate}
-                disabled={creating || !selectedCustomerId || amount <= 0}
+                disabled={creating || !selectedCustomerId || totalAllocated <= 0}
               >
                 {creating ? "Recording..." : "Record Payment"}
               </Button>

@@ -405,6 +405,15 @@ export default function SupplierPaymentsPage() {
                 placeholder="Cheque #, Transfer ref... (optional)"
               />
             </div>
+
+            {/* Knock-off total — kept at the top, beside Reference, so the
+                operator sees it without scrolling past the allocation table. */}
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-[#6B7280] mb-1">Total (RM)</label>
+              <div className="w-full rounded-md border border-[#E2DDD8] bg-[#FAF8F5] px-3 py-2 text-sm text-right tabular-nums font-bold text-[#4F7C3A]">
+                {formatCurrency(totalBankSen)}
+              </div>
+            </div>
           </div>
 
           {/* Open-PI allocation table */}
@@ -508,14 +517,6 @@ export default function SupplierPaymentsPage() {
                         );
                       })}
                     </tbody>
-                    <tfoot>
-                      <tr className="bg-gray-50 border-t">
-                        <td colSpan={6} className="px-3 py-2 text-right font-medium">Total (RM)</td>
-                        <td colSpan={2} className="px-3 py-2 text-right font-bold text-[#4F7C3A]">
-                          {formatCurrency(totalBankSen)}
-                        </td>
-                      </tr>
-                    </tfoot>
                   </table>
                 </div>
               )}

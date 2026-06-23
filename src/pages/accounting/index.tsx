@@ -4823,6 +4823,13 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
           </div>
         </div>
 
+        {partyId && openBills.length > 0 && (
+          <div className="flex items-center justify-end gap-3 rounded-md border border-[#E2DDD8] bg-[#FAF8F5] px-3 py-2">
+            <span className="text-xs font-medium text-[#6B7280]">Total (RM)</span>
+            <span className="text-lg font-bold text-[#3E6570] tabular-nums">{formatCurrency(totalSen)}</span>
+          </div>
+        )}
+
         {partyId && (openBills.length === 0 ? (
           <p className="text-xs text-[#9CA3AF]">No outstanding bills for this party.</p>
         ) : (
@@ -4857,8 +4864,6 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
         ))}
 
         <div className="flex items-center justify-end gap-4 pt-2 border-t border-[#F0ECE9]">
-          <span className="text-xs text-[#6B7280]">Total (RM)</span>
-          <span className="text-lg font-bold text-[#3E6570] tabular-nums">{formatCurrency(totalSen)}</span>
           <Button variant="primary" size="sm" disabled={posting || !partyId || !bankAccount || totalSen <= 0} onClick={post}>
             Post {verb.toLowerCase()}
           </Button>

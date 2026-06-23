@@ -5653,82 +5653,88 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
       {showForm && (
         <Card>
-          <CardContent className="p-4 space-y-3">
-            <div className="flex flex-wrap items-end gap-3">
+          <CardContent className="p-4 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Date</label>
-                <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className={selCls} />
+                <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className={`${selCls} w-full`} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">
+                  {form.accrued ? "Accrual account" : "Pay from"}
+                  <span className="ml-1 text-[#B4B2A9] cursor-help" title={form.accrued ? "Liability account credited (CR)" : "Bank / cash account credited (CR)"}>ⓘ</span>
+                </label>
+                {form.accrued ? (
+                  <select value={form.accrualAccount} onChange={(e) => setForm({ ...form, accrualAccount: e.target.value })} className={`${selCls} w-full`}>
+                    <option value="">— pick 410-x / 405-0000 —</option>
+                    {accrualOpts.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+                  </select>
+                ) : (
+                  <select value={form.payFrom || defaultBankCode(bankCash)} onChange={(e) => setForm({ ...form, payFrom: e.target.value })} className={`${selCls} w-full`}>
+                    <option value="">— pick bank/cash —</option>
+                    {bankCash.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+                  </select>
+                )}
               </div>
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Payee</label>
-                <input type="text" placeholder="Who was paid" value={form.payee} onChange={(e) => setForm({ ...form, payee: e.target.value })} className={`${selCls} w-48`} />
-              </div>
-              <div>
-                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Description</label>
-                <input type="text" placeholder="e.g. Factory rent June" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={`${selCls} w-64`} />
+                <input type="text" placeholder="Who was paid" value={form.payee} onChange={(e) => setForm({ ...form, payee: e.target.value })} className={`${selCls} w-full`} />
               </div>
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Product line (optional)</label>
-                <select value={form.productLine} onChange={(e) => setForm({ ...form, productLine: e.target.value })} className={selCls}>
+                <select value={form.productLine} onChange={(e) => setForm({ ...form, productLine: e.target.value })} className={`${selCls} w-full`}>
                   <option value="">(shared — allocate by sales ratio)</option>
                   <option value="SOFA">Sofa</option>
                   <option value="BEDFRAME">Bedframe</option>
                 </select>
               </div>
+              <div className="sm:col-span-2">
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Description</label>
+                <input type="text" placeholder="e.g. Factory rent June" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={`${selCls} w-full`} />
+              </div>
             </div>
-            <div className="flex flex-wrap items-end gap-3">
-              <label className="flex items-center gap-2 text-sm text-[#1F1D1B] cursor-pointer pb-2">
-                <input
-                  type="checkbox"
-                  checked={form.accrued}
-                  onChange={(e) => setForm({ ...form, accrued: e.target.checked })}
-                  className="h-4 w-4 accent-[#6B5C32]"
-                />
-                Accrue now, pay later
-              </label>
-              {form.accrued ? (
-                <div>
-                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Accrual account (CR)</label>
-                  <select value={form.accrualAccount} onChange={(e) => setForm({ ...form, accrualAccount: e.target.value })} className={`${selCls} w-72`}>
-                    <option value="">— pick 410-x / 405-0000 —</option>
-                    {accrualOpts.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
-                  </select>
+
+            <label className="flex items-center gap-2 text-sm text-[#1F1D1B] cursor-pointer">
+              <input type="checkbox" checked={form.accrued} onChange={(e) => setForm({ ...form, accrued: e.target.checked })} className="h-4 w-4 accent-[#6B5C32]" />
+              Accrue now, pay later
+            </label>
+
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Expense lines (DR)</label>
+              <div className="border border-[#E2DDD8] rounded-md overflow-hidden">
+                <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1.4fr)_7rem_2rem] bg-[#FAF8F5] text-[11px] font-medium text-[#9CA3AF]">
+                  <div className="px-2.5 py-1.5">Account</div>
+                  <div className="px-2.5 py-1.5">Description</div>
+                  <div className="px-2.5 py-1.5 text-right">Amount (RM)</div>
+                  <div />
                 </div>
-              ) : (
-                <div>
-                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Pay From (CR bank/cash)</label>
-                  <select value={form.payFrom || defaultBankCode(bankCash)} onChange={(e) => setForm({ ...form, payFrom: e.target.value })} className={`${selCls} w-72`}>
-                    <option value="">— pick bank/cash —</option>
-                    {bankCash.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
-                  </select>
-                </div>
-              )}
-            </div>
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-[#6B7280] block">Expense lines (DR)</label>
-              {lines.map((l, i) => (
-                <div key={i} className="flex flex-wrap items-center gap-2">
-                  <div className="w-80">
-                    <AccountPicker
-                      accounts={lineAccounts}
-                      value={l.accountCode}
-                      onChange={(code) => setLines(lines.map((x, j) => (j === i ? { ...x, accountCode: code } : x)))}
-                      placeholder="Account…"
-                    />
+                {lines.map((l, i) => (
+                  <div
+                    key={i}
+                    className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1.4fr)_7rem_2rem] items-center border-t border-[#F0ECE9]"
+                    onKeyDown={(e) => { if (e.key === "Insert") { e.preventDefault(); setLines((prev) => [...prev.slice(0, i + 1), { accountCode: "", description: "", amount: "" }, ...prev.slice(i + 1)]); } }}
+                  >
+                    <div className="px-1 py-1">
+                      <AccountPicker accounts={lineAccounts} value={l.accountCode} onChange={(code) => setLines(lines.map((x, j) => (j === i ? { ...x, accountCode: code } : x)))} placeholder="Account…" />
+                    </div>
+                    <input type="text" placeholder="Line description" value={l.description} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} className="border-0 bg-transparent px-2.5 py-1.5 text-sm w-full focus:outline-none" />
+                    <input type="text" placeholder="0.00" value={l.amount} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))} className="border-0 bg-transparent px-2.5 py-1.5 text-sm w-full text-right tabular-nums focus:outline-none" />
+                    <button onClick={() => setLines(lines.length > 1 ? lines.filter((_, j) => j !== i) : lines)} title="Remove line" className="text-[#B4B2A9] hover:text-[#9A3A2D] text-sm">✕</button>
                   </div>
-                  <input type="text" placeholder="Line description" value={l.description} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} className={`${selCls} w-56`} />
-                  <input type="text" placeholder="Amount (RM)" value={l.amount} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))} className={`${selCls} w-32 text-right tabular-nums`} />
-                  {lines.length > 1 && (
-                    <button onClick={() => setLines(lines.filter((_, j) => j !== i))} className="text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer">remove</button>
-                  )}
+                ))}
+              </div>
+              <div className="flex items-center justify-between mt-2">
+                <div className="flex items-center gap-3">
+                  <Button variant="outline" size="sm" onClick={() => setLines([...lines, { accountCode: "", description: "", amount: "" }])}>
+                    <Plus className="h-4 w-4" /> Add line
+                  </Button>
+                  <span className="text-[11px] text-[#B4B2A9]">press <span className="font-medium text-[#6B7280]">Insert</span> to add a line below</span>
                 </div>
-              ))}
-              <Button variant="outline" size="sm" onClick={() => setLines([...lines, { accountCode: "", description: "", amount: "" }])}>
-                <Plus className="h-4 w-4" /> Line
-              </Button>
+                <span className="text-sm text-[#6B7280]">Total <span className="text-lg font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
+              </div>
             </div>
-            <div className="flex items-center gap-4">
-              <span className="text-sm text-[#6B7280]">Total <span className="font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
+
+            <div className="flex gap-2 pt-3 border-t border-[#F0ECE9]">
               <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || (form.accrued ? !form.accrualAccount : !(form.payFrom || defaultBankCode(bankCash)))} onClick={handleSave}>
                 {saving ? "Posting…" : form.accrued ? "Post (accrued)" : "Post payment"}
               </Button>
@@ -5981,53 +5987,68 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
       {showForm && (
         <Card>
-          <CardContent className="p-4 space-y-3">
-            <div className="flex flex-wrap items-end gap-3">
+          <CardContent className="p-4 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Date</label>
-                <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className={selCls} />
+                <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className={`${selCls} w-full`} />
               </div>
               <div>
-                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Received from</label>
-                <input type="text" placeholder="Who paid us" value={form.receivedFrom} onChange={(e) => setForm({ ...form, receivedFrom: e.target.value })} className={`${selCls} w-48`} />
-              </div>
-              <div>
-                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Description</label>
-                <input type="text" placeholder="e.g. Scrap sale" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={`${selCls} w-64`} />
-              </div>
-              <div>
-                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Deposit To (DR bank/cash)</label>
-                <select value={form.payTo || defaultBankCode(bankCash)} onChange={(e) => setForm({ ...form, payTo: e.target.value })} className={`${selCls} w-72`}>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">
+                  Deposit to
+                  <span className="ml-1 text-[#B4B2A9] cursor-help" title="Bank / cash account debited (DR)">ⓘ</span>
+                </label>
+                <select value={form.payTo || defaultBankCode(bankCash)} onChange={(e) => setForm({ ...form, payTo: e.target.value })} className={`${selCls} w-full`}>
                   <option value="">— pick bank/cash —</option>
                   {bankCash.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
                 </select>
               </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Received from</label>
+                <input type="text" placeholder="Who paid us" value={form.receivedFrom} onChange={(e) => setForm({ ...form, receivedFrom: e.target.value })} className={`${selCls} w-full`} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Description</label>
+                <input type="text" placeholder="e.g. Scrap sale" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={`${selCls} w-full`} />
+              </div>
             </div>
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-[#6B7280] block">Receipt lines (CR — income account or 305-0000 recovery)</label>
-              {lines.map((l, i) => (
-                <div key={i} className="flex flex-wrap items-center gap-2">
-                  <div className="w-80">
-                    <AccountPicker
-                      accounts={lineAccounts}
-                      value={l.accountCode}
-                      onChange={(code) => setLines(lines.map((x, j) => (j === i ? { ...x, accountCode: code } : x)))}
-                      placeholder="Account…"
-                    />
-                  </div>
-                  <input type="text" placeholder="Line description" value={l.description} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} className={`${selCls} w-56`} />
-                  <input type="text" placeholder="Amount (RM)" value={l.amount} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))} className={`${selCls} w-32 text-right tabular-nums`} />
-                  {lines.length > 1 && (
-                    <button onClick={() => setLines(lines.filter((_, j) => j !== i))} className="text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer">remove</button>
-                  )}
+
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Receipt lines (CR — income account or 305-0000 recovery)</label>
+              <div className="border border-[#E2DDD8] rounded-md overflow-hidden">
+                <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1.4fr)_7rem_2rem] bg-[#FAF8F5] text-[11px] font-medium text-[#9CA3AF]">
+                  <div className="px-2.5 py-1.5">Account</div>
+                  <div className="px-2.5 py-1.5">Description</div>
+                  <div className="px-2.5 py-1.5 text-right">Amount (RM)</div>
+                  <div />
                 </div>
-              ))}
-              <Button variant="outline" size="sm" onClick={() => setLines([...lines, { accountCode: "", description: "", amount: "" }])}>
-                <Plus className="h-4 w-4" /> Line
-              </Button>
+                {lines.map((l, i) => (
+                  <div
+                    key={i}
+                    className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1.4fr)_7rem_2rem] items-center border-t border-[#F0ECE9]"
+                    onKeyDown={(e) => { if (e.key === "Insert") { e.preventDefault(); setLines((prev) => [...prev.slice(0, i + 1), { accountCode: "", description: "", amount: "" }, ...prev.slice(i + 1)]); } }}
+                  >
+                    <div className="px-1 py-1">
+                      <AccountPicker accounts={lineAccounts} value={l.accountCode} onChange={(code) => setLines(lines.map((x, j) => (j === i ? { ...x, accountCode: code } : x)))} placeholder="Account…" />
+                    </div>
+                    <input type="text" placeholder="Line description" value={l.description} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} className="border-0 bg-transparent px-2.5 py-1.5 text-sm w-full focus:outline-none" />
+                    <input type="text" placeholder="0.00" value={l.amount} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))} className="border-0 bg-transparent px-2.5 py-1.5 text-sm w-full text-right tabular-nums focus:outline-none" />
+                    <button onClick={() => setLines(lines.length > 1 ? lines.filter((_, j) => j !== i) : lines)} title="Remove line" className="text-[#B4B2A9] hover:text-[#9A3A2D] text-sm">✕</button>
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-center justify-between mt-2">
+                <div className="flex items-center gap-3">
+                  <Button variant="outline" size="sm" onClick={() => setLines([...lines, { accountCode: "", description: "", amount: "" }])}>
+                    <Plus className="h-4 w-4" /> Add line
+                  </Button>
+                  <span className="text-[11px] text-[#B4B2A9]">press <span className="font-medium text-[#6B7280]">Insert</span> to add a line below</span>
+                </div>
+                <span className="text-sm text-[#6B7280]">Total <span className="text-lg font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
+              </div>
             </div>
-            <div className="flex items-center gap-4">
-              <span className="text-sm text-[#6B7280]">Total <span className="font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
+
+            <div className="flex gap-2 pt-3 border-t border-[#F0ECE9]">
               <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || !(form.payTo || defaultBankCode(bankCash))} onClick={handleSave}>
                 {saving ? "Posting…" : "Post receipt"}
               </Button>

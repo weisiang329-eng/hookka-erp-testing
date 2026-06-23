@@ -4736,6 +4736,125 @@ app.post("/:id/notify-customer", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/delivery-orders/:id/resend-notice — operator FORCE re-send of the
+// customer DO/Invoice email (2026-06-24).
+//
+// Why: many DOs were delivered/invoiced BEFORE the backend choke-point trigger
+// shipped, so their deliveredEmailAt / dispatchEmailAt stamps are null AND the
+// customer was never emailed (Houzs Century alone has 128). The normal notice
+// path is one-shot by design (atomic claim on the stamp), so once a stamp is
+// set — or the operator simply wants to re-send — there is no way to re-fire.
+// This endpoint clears the relevant stamp back to NULL so the atomic claim
+// inside queueDoCustomerNotice can win again, then calls that SAME helper
+// (recipient chain + server-rendered PDF fallback + no-recipient silent skip
+// + the atomic re-claim). There is deliberately NO second send path: the only
+// delta vs the auto-notice is that we release the idempotency stamp first.
+//
+// Body: { kind: "DELIVERED" | "DISPATCHED" }.
+//   DELIVERED clears deliveredEmailAt (the invoice notice);
+//   DISPATCHED clears dispatchEmailAt (the dispatch notice).
+//
+// The response surfaces what actually happened so the FE can toast correctly:
+//   { success:true, sent:true, to }                 — queued to the outbox
+//   { success:true, sent:false, skipped:true, reason } — no email / no invoice
+//   { success:false, error }                         — hard failure (4xx/5xx)
+//
+// ⚠️ Deliberately PER-DO only. An auto-blast of all 128 backlog DOs at once is
+// spam + would overwhelm the customer; the operator re-sends the ones they
+// actually need from the DO detail page / list row.
+// ---------------------------------------------------------------------------
+app.post("/:id/resend-notice", async (c) => {
+  // Admin gate — same delivery-orders:update permission every DO mutation uses
+  // (notify-customer, status transitions, edit). A force re-send is a mutation
+  // of the email-sent stamp, so it belongs behind the same gate.
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+
+  const id = c.req.param("id");
+  const body = (await c.req.json().catch(() => ({}))) as { kind?: string };
+  const kind =
+    body.kind === "DISPATCHED" || body.kind === "DELIVERED" ? body.kind : null;
+  if (!kind) {
+    return c.json(
+      { success: false, error: 'kind must be "DISPATCHED" or "DELIVERED"' },
+      400,
+    );
+  }
+
+  try {
+    // Guarantee the stamp columns exist before we clear one (a DO delivered
+    // before the notify feature shipped may predate the column on some envs).
+    await ensureNotifyEmailColumns(c.var.DB);
+
+    const exists = await c.var.DB.prepare(
+      "SELECT id FROM delivery_orders WHERE id = ?",
+    )
+      .bind(id)
+      .first<{ id: string }>();
+    if (!exists) {
+      return c.json(
+        { success: false, error: "Delivery order not found" },
+        404,
+      );
+    }
+
+    // Release the idempotency stamp so queueDoCustomerNotice's atomic claim
+    // (UPDATE ... WHERE col IS NULL) can win and re-fire. The column name is
+    // one of two fixed literals — never user input.
+    const stampCol =
+      kind === "DISPATCHED" ? "dispatchEmailAt" : "deliveredEmailAt";
+    await c.var.DB.prepare(
+      `UPDATE delivery_orders SET ${stampCol} = NULL WHERE id = ?`,
+    )
+      .bind(id)
+      .run();
+
+    // Re-fire through the SAME helper the auto-notice + FE trigger use. It
+    // owns the recipient chain, the server-rendered invoice-PDF fallback, the
+    // no-recipient silent skip, and re-claims the stamp it just had cleared.
+    const res = await queueDoCustomerNotice(c, id, { kind });
+    const j = (await res.json().catch(() => ({}))) as {
+      success?: boolean;
+      queued?: boolean;
+      skipped?: boolean;
+      reason?: string;
+      to?: string;
+      error?: string;
+    };
+
+    if (!res.ok || j?.success === false) {
+      return c.json(
+        { success: false, error: j?.error || "Failed to re-send notice" },
+        // Mirror the helper's status (409 status-guard, 404, 500, ...).
+        (res.status === 200 ? 500 : res.status) as 400 | 404 | 409 | 500,
+      );
+    }
+    if (j?.skipped) {
+      // No recipient / no invoice / nothing to send — re-stamp the cleared
+      // column is NOT needed (queueDoCustomerNotice only claims when it sends),
+      // so the DO is simply left un-emailed and the FE warns the operator.
+      return c.json({
+        success: true,
+        sent: false,
+        skipped: true,
+        reason: j?.reason || "skipped",
+      });
+    }
+    return c.json({ success: true, sent: true, to: j?.to });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[POST /api/delivery-orders/${id}/resend-notice] failed:`,
+      msg,
+    );
+    return c.json(
+      { success: false, error: msg || "Failed to re-send notice" },
+      500,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/delivery-orders/:id/resolve-incomplete — clear the
 // "delivered with issues" flag and create the invoice that was withheld.
 //

@@ -148,6 +148,7 @@ Built to cut token usage: open the named file at the named line range instead of
   - 3PL Providers state + vehicles/drivers sub-table state — L911-1090
   - 3PL Provider helpers (CRUD, rates, fleet, drivers) — L1445-1830
   - DO status tally / search / transition logic — L2069-2790
+  - Customer-notice helpers: customerEmailFor / warnIfNoCustomerEmail (Feature B no-email warning) / resendCustomerNotice (Feature A per-DO Resend invoice email) — search "Feature A"/"Feature B"
   - runBulkDoTransition + truck-run bulk dispatch — L2785-2840
   - DataGrid column defs — L3437-3910
   - Top-level Orders/3PL tab bar render — L4170-4189

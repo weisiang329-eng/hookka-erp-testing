@@ -112,17 +112,28 @@ test("global SEARCH is NOT exempted by forceShowKeys (it's an explicit operator 
 // 2. The dept Production grid wires forceShowKeys to the new state, and that
 //    state is NOT part of the grid `key` (so updating it never remounts).
 // ---------------------------------------------------------------------------
-test("dept grid passes forceShowKeys={forceShowCompletedIds}", () => {
+test("dept grid passes forceShowKeys={deptForceShowKeys} (unions forceShowCompletedIds)", () => {
   const fe = read(FE);
+  // v3 (2026-06-23): the dept grid now passes `deptForceShowKeys` — a memo that
+  // unions forceShowCompletedIds (the Apply-Completion reveal allowlist) with the
+  // search-matched dept-row ids while searching, so a searched COMPLETED order is
+  // exempt from the seeded hide-COMPLETED value-filter.
   assert.match(
     fe,
-    /forceShowKeys=\{forceShowCompletedIds\}/,
-    "The dept <DataGrid> must pass the force-show allowlist as forceShowKeys.",
+    /forceShowKeys=\{deptForceShowKeys\}/,
+    "The dept <DataGrid> must pass the force-show allowlist (deptForceShowKeys) as forceShowKeys.",
   );
   assert.match(
     fe,
     /const \[forceShowCompletedIds, setForceShowCompletedIds\] = useState<ReadonlySet<string>>/,
     "forceShowCompletedIds must be component state (a Set), not sessionStorage.",
+  );
+  // deptForceShowKeys must still be built FROM forceShowCompletedIds (the reveal
+  // allowlist) — search only adds matched rows on top, it must not drop it.
+  assert.match(
+    fe,
+    /const deptForceShowKeys =[\s\S]{0,600}forceShowCompletedIds/,
+    "deptForceShowKeys must union forceShowCompletedIds (the Apply-Completion reveal allowlist).",
   );
 });
 

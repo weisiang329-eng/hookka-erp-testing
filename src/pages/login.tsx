@@ -83,7 +83,11 @@ export default function LoginPage() {
         // shim adds this for /api/* but we're explicit here so a stripped-
         // down login page still works if main.tsx imports change.)
         credentials: "include",
-        body: JSON.stringify({ email: trimmedEmail, password }),
+        // `rememberMe` decides whether the server sets a persistent (on-disk,
+        // survives browser restart) or session-only (cleared on browser close)
+        // auth cookie. Checked → stay logged in across restarts; unchecked →
+        // sign out when the browser closes. See src/api/routes/auth.ts.
+        body: JSON.stringify({ email: trimmedEmail, password, rememberMe }),
       });
       const json = (await res.json()) as LoginResponse;
       if (!res.ok || !json.success) {
@@ -93,10 +97,12 @@ export default function LoginPage() {
         );
         return;
       }
-      // Sprint 7: only the user blob lands in localStorage; the session
+      // Sprint 7: only the user blob lands in client storage; the session
       // token stays in the HttpOnly cookie and the CSRF token is read off
-      // its non-HttpOnly cookie sibling on each mutating request.
-      setAuth({ user: json.data.user });
+      // its non-HttpOnly cookie sibling on each mutating request. `rememberMe`
+      // routes the blob to localStorage (persistent) or sessionStorage
+      // (cleared on browser close) to mirror the cookie's persistence.
+      setAuth({ user: json.data.user, rememberMe });
 
       // 2026-05-27 — Soft 2FA prompt. The server flags SUPER_ADMIN logins
       // that haven't enrolled yet with a severity. We branch BEFORE the

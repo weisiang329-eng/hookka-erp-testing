@@ -109,8 +109,10 @@ export default function InviteAcceptPage() {
       }
       // Sprint 7: only persist the public user blob; the session token is
       // in the HttpOnly cookie set by the server, the CSRF token is read
-      // off its non-HttpOnly cookie sibling.
-      setAuth({ user: json.data.user });
+      // off its non-HttpOnly cookie sibling. accept-invite issues a
+      // persistent cookie, so keep the blob in localStorage to match —
+      // a freshly-onboarded user shouldn't be logged out on browser close.
+      setAuth({ user: json.data.user, rememberMe: true });
       navigate("/", { replace: true });
     } catch (err) {
       setError(humanizeError(err, "Network problem — please try again."));

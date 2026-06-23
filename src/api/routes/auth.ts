@@ -33,6 +33,10 @@ import {
   SESSION_COOKIE,
   CSRF_COOKIE,
 } from "../lib/auth-middleware";
+import {
+  sessionCookieHeader,
+  csrfCookieHeader,
+} from "../lib/session-cookie";
 
 const app = new Hono<Env>();
 
@@ -44,21 +48,11 @@ const app = new Hono<Env>();
 // security review flagged (30-day fixed window was too forgiving for a
 // dashboard that controls money).
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const SESSION_TTL_S = SESSION_TTL_MS / 1000;
 
-// Build the two Set-Cookie headers for a successful dashboard login.
-// - `hookka_session`: HttpOnly + Secure + SameSite=Strict so JS can't read
-//   the token and it never leaves a same-site context. This is the
-//   credential.
-// - `hookka_csrf`:   NOT HttpOnly so the api-client can read it and echo it
-//   in the X-CSRF-Token header (double-submit). Secure + SameSite=Strict to
-//   keep an attacker on a cross-origin page from reading or forging it.
-function sessionCookieHeader(token: string): string {
-  return `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
-}
-function csrfCookieHeader(csrfToken: string): string {
-  return `${CSRF_COOKIE}=${csrfToken}; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
-}
+// Set-Cookie builders live in ../lib/session-cookie so the password-only and
+// 2FA login paths can't drift. "Remember me" → persistent (on-disk) cookie;
+// unchecked → session cookie cleared on browser close. See that file.
+//
 // Clear cookie variants — Max-Age=0 + empty value tells the browser to drop
 // the cookie immediately. Path/SameSite must mirror the originally-issued
 // cookie or the browser ignores the clear.
@@ -75,9 +69,13 @@ function newCsrfToken(): string {
 // Set both cookies on the response (login / accept-invite / TOTP verify).
 // Hono lets us call header() twice with the same name — both Set-Cookie
 // lines land in the response.
-function issueSessionCookies(c: { header: (k: string, v: string, opts?: { append?: boolean }) => void }, sessionToken: string, csrfToken: string): void {
-  c.header("Set-Cookie", sessionCookieHeader(sessionToken), { append: true });
-  c.header("Set-Cookie", csrfCookieHeader(csrfToken), { append: true });
+//
+// `persistent` defaults to true so any caller that doesn't opt in keeps the
+// pre-"Remember me" behaviour (a 7-day persistent cookie). Only the password
+// login passes it through from the checkbox.
+function issueSessionCookies(c: { header: (k: string, v: string, opts?: { append?: boolean }) => void }, sessionToken: string, csrfToken: string, persistent = true): void {
+  c.header("Set-Cookie", sessionCookieHeader(sessionToken, persistent), { append: true });
+  c.header("Set-Cookie", csrfCookieHeader(csrfToken, persistent), { append: true });
 }
 
 type UserRow = {
@@ -135,7 +133,16 @@ function sessionTokenFrom(req: Request): string | null {
 // Returns: { success, data: { token, user } }
 app.post("/login", async (c) => {
   const body = await c.req.json().catch(() => ({}));
-  const { email, password } = body as { email?: string; password?: string };
+  const { email, password, rememberMe } = body as {
+    email?: string;
+    password?: string;
+    rememberMe?: boolean;
+  };
+  // "Remember me" → persistent (on-disk) cookie that survives a browser
+  // restart. Unchecked / absent → session cookie cleared when the browser
+  // closes. Coerce to a strict boolean so a missing/odd value falls back to
+  // the safer session-only behaviour.
+  const persistSession = rememberMe === true;
   if (!email || !password) {
     return c.json(
       { success: false, error: "email and password are required" },
@@ -257,7 +264,7 @@ app.post("/login", async (c) => {
   // and the CSRF token come back in the JSON body. The CSRF token is also
   // available via the non-HttpOnly cookie — we mirror it in the body so
   // tests / curl users can grab it without parsing Set-Cookie.
-  issueSessionCookies(c, token, csrfToken);
+  issueSessionCookies(c, token, csrfToken, persistSession);
   // Soft 2FA prompt fields are folded into the existing data envelope so
   // the FE can read response.data.totpPromptRequired / severity. When the
   // helper returned null (computation failed) we omit both keys — the FE

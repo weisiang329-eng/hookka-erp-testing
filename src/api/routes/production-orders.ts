@@ -42,6 +42,10 @@ import { workerCoversDept } from "../../lib/worker";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
+import {
+  ensureJobCardQrTokenColumn,
+  getOrCreateJobCardQrToken,
+} from "../lib/jobcard-qr-token";
 import { getOrgId, tryGetOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
@@ -5785,6 +5789,97 @@ app.post("/resync-po-numbers", async (c) => {
     errorCount: errors.length,
     errors: errors.slice(0, 10),
   });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/production-orders/packing-rack-tokens
+// Body: { items: [{ poNo, pieceName }] }  → { tokens: { "<poNo>|<pieceName>": "<64hex>" } }
+//
+// AUTHED token mint for the PUBLIC packing-sticker → rack scan flow. Called at
+// sticker-PRINT time (the production page builds the FG sticker set), this
+// resolves each (poNo, pieceName) to its ONE PACKING job_card — exactly like the
+// scan-time resolver in routes/public-rack-qr.ts (resolvePackingCard): narrow the
+// PO's PACKING cards to the one whose wipLabel CONTAINS the short box label, else
+// the sole PACKING card — and lazily mints that card's unguessable 64-hex
+// qr_token (getOrCreateJobCardQrToken). The printed QR then encodes /p/<token>
+// instead of the /worker/scan deep link, so a storekeeper with no Worker-Portal
+// PIN can still set the rack. Minting lives ONLY here (behind read auth — same
+// gate as "show me the QR" on the DO qr-token endpoint); the public route only
+// RESOLVES tokens, never creates them.
+//
+// Returns a map keyed by "<poNo>|<pieceName>" so the client can attach the right
+// token to each sticker; a key is omitted when no single PACKING card resolves
+// (the client then keeps the /worker/scan fallback, so the worker flow is never
+// broken). The token is NEVER logged.
+// ---------------------------------------------------------------------------
+app.post("/packing-rack-tokens", async (c) => {
+  // Read-level gate — minting is an idempotent internal detail of "print the
+  // sticker", same as the DO qr-token endpoint (delivery-orders.ts).
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as {
+    items?: Array<{ poNo?: unknown; pieceName?: unknown }>;
+  };
+  const rawItems = Array.isArray(body.items) ? body.items : [];
+  // De-dup the (poNo, pieceName) pairs — many physical pieces of one PO share a
+  // pieceName and resolve to the same card; resolve + mint once each.
+  const wanted = new Map<string, { poNo: string; pieceName: string }>();
+  for (const it of rawItems) {
+    const poNo = typeof it?.poNo === "string" ? it.poNo.trim() : "";
+    const pieceName =
+      typeof it?.pieceName === "string" ? it.pieceName.trim() : "";
+    if (!poNo) continue;
+    wanted.set(`${poNo}|${pieceName}`, { poNo, pieceName });
+  }
+
+  const tokens: Record<string, string> = {};
+  try {
+    await ensureJobCardQrTokenColumn(c.var.DB);
+    for (const [key, { poNo, pieceName }] of wanted) {
+      // PO header → its PACKING cards (id + wipLabel). poNo is the stored PO
+      // number the sticker encodes verbatim (or, defensively, the PO id).
+      const po = await c.var.DB.prepare(
+        "SELECT id FROM production_orders WHERE poNo = ? OR id = ? LIMIT 1",
+      )
+        .bind(poNo, poNo)
+        .first<{ id: string }>();
+      if (!po) continue;
+      const cardsRes = await c.var.DB.prepare(
+        `SELECT id, wipLabel FROM job_cards
+           WHERE productionOrderId = ? AND departmentCode = 'PACKING'`,
+      )
+        .bind(po.id)
+        .all<{ id: string; wipLabel: string | null }>();
+      const cards = cardsRes.results ?? [];
+      if (cards.length === 0) continue;
+      // Narrow to the ONE card whose wipLabel CONTAINS the box label (the `pn`
+      // value is a SUBSTRING of the longer wipLabel — mirror resolvePackingCard).
+      // Only accept an unambiguous single match; else fall back to the sole
+      // PACKING card (single-compartment PO). No single resolution → skip (the
+      // client keeps the /worker/scan fallback for that sticker).
+      let pick: { id: string } | null = null;
+      const want = pieceName.toUpperCase();
+      if (want) {
+        const narrowed = cards.filter((cd) =>
+          (cd.wipLabel ?? "").toUpperCase().includes(want),
+        );
+        if (narrowed.length === 1) pick = narrowed[0];
+      }
+      if (!pick && cards.length === 1) pick = cards[0];
+      if (!pick) continue;
+      const token = await getOrCreateJobCardQrToken(c.var.DB, pick.id);
+      if (token) tokens[key] = token;
+    }
+    return c.json({ success: true, data: { tokens } });
+  } catch (err) {
+    console.error(
+      "[POST /api/production-orders/packing-rack-tokens] failed:",
+      err,
+    );
+    // Soft-fail: return whatever resolved so the print still proceeds (the
+    // client falls back to /worker/scan for any missing token).
+    return c.json({ success: true, data: { tokens } });
+  }
 });
 
 // (Removed 2026-05-09) POST /api/production-orders/regen-job-cards-bulk

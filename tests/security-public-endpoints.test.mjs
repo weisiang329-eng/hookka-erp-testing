@@ -77,6 +77,15 @@ const EXPECTED_PREFIXES = [
   // label + item count; POST /stock-in writes via the shared
   // buildRackStockInStatements helper. See routes/public-rack-qr.ts.
   "/api/public/rack-qr/",
+  // 2026-06-24 — public packing-sticker → RACK assignment (the ITEM→RACK
+  // direction). A storekeeper scans the QR on a Packing sticker with a normal
+  // phone camera, so no session exists. The gate is the unguessable 64-hex
+  // job_card qr_token (migration 0187), minted lazily only by the AUTHED
+  // sticker-print endpoint. GET returns a minimal no-price summary; POST /rack
+  // performs ONLY set/clear of the rackingNumber on the one token-resolved
+  // PACKING card, via the shared applyPackingRack helper. See
+  // routes/public-rack-write.ts and tests/sticker-rack-public.test.mjs.
+  "/api/public/rack-write/",
 ];
 
 test("public endpoint allowlist (exact paths) is locked in", () => {

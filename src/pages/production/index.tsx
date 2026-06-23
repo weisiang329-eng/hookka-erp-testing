@@ -1661,6 +1661,15 @@ export default function ProductionPage({
     // aggregator (no fg_units row backing it). Used by the renderer to
     // skip standalone rendering — the combined card carries both.
     isSyntheticLegs?: boolean;
+    // The unguessable 64-hex token for the PUBLIC packing-sticker → rack page
+    // (/p/<token>). Resolved + minted at print/show time by the authed
+    // POST /api/production-orders/packing-rack-tokens (keyed by poNo+pieceName →
+    // the PO's ONE matching PACKING job_card). When present, the printed QR
+    // encodes /p/<token> so a storekeeper with NO Worker-Portal PIN can set the
+    // rack; when absent (no single PACKING card resolved, or the mint failed)
+    // the QR keeps the /worker/scan deep link so the logged-in worker flow is
+    // never broken.
+    packingToken?: string;
   };
   const [jobCardStickers, setJobCardStickers] = useState<JobCardSticker[]>([]);
   const [fgStickers, setFgStickers] = useState<FgSticker[]>([]);
@@ -5189,6 +5198,85 @@ export default function ProductionPage({
     return aggregated;
   }, []);
 
+  // Enrich a built FG sticker set with the PUBLIC packing-rack tokens so the
+  // printed QR can deep-link to /p/<token> (the no-login rack-assignment page)
+  // instead of /worker/scan. One batched, authed call to
+  // POST /api/production-orders/packing-rack-tokens resolves each sticker's
+  // (poNo, pieceName) to its ONE PACKING job_card and lazily mints that card's
+  // token; the result maps "<poNo>|<pieceName>" → token. Best-effort: any
+  // sticker without a token keeps the /worker/scan fallback (so the worker scan
+  // + completion flow is unaffected), and a failed call leaves every sticker on
+  // the fallback. Synthetic Legs/Pillow stickers carry no PACKING card of their
+  // own — they print inside their primary's card — so they are not requested.
+  const enrichWithPackingTokens = useCallback(
+    async (stickers: FgSticker[]): Promise<FgSticker[]> => {
+      if (stickers.length === 0) return stickers;
+      const realPieces = stickers.filter(
+        (s) => !s.isSyntheticLegs && !s.isSyntheticPillow && s.poNo,
+      );
+      if (realPieces.length === 0) return stickers;
+      const items = realPieces.map((s) => ({
+        poNo: s.poNo,
+        pieceName: s.pieceName,
+      }));
+      try {
+        const res = await fetch(
+          "/api/production-orders/packing-rack-tokens",
+          {
+            method: "POST",
+            headers: csrfHeaders(),
+            body: JSON.stringify({ items }),
+          },
+        );
+        if (!res.ok) return stickers;
+        const j = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          data?: { tokens?: Record<string, string> };
+        };
+        const tokens = j?.data?.tokens;
+        if (!tokens || typeof tokens !== "object") return stickers;
+        return stickers.map((s) => {
+          const token = tokens[`${s.poNo}|${s.pieceName}`];
+          return token ? { ...s, packingToken: token } : s;
+        });
+      } catch {
+        // Network hiccup — keep the /worker/scan fallback on every sticker.
+        return stickers;
+      }
+    },
+    [],
+  );
+
+  // The QR value a packing sticker should encode. PREFER the public no-login
+  // rack page (/p/<token>) so a storekeeper without a Worker-Portal PIN can set
+  // the rack by just scanning with the phone camera. FALL BACK to the existing
+  // /worker/scan deep link (FG-PACKING sentinel) when no token resolved — that
+  // keeps the logged-in worker scan + completion flow working unchanged. Takes
+  // the source sticker (poNo / piece markers / pieceName) so all four render
+  // sites — on-screen primary, pillow pair, print primary, print pillow — build
+  // the URL identically and can never drift.
+  const packingStickerUrl = useCallback(
+    (s: {
+      poNo: string;
+      pieceNo: number;
+      totalPieces: number;
+      pieceName: string;
+      packingToken?: string;
+    }): string => {
+      const origin =
+        typeof window !== "undefined" && window.location?.origin
+          ? window.location.origin
+          : "";
+      if (s.packingToken) return `${origin}/p/${s.packingToken}`;
+      return `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(
+        s.poNo,
+      )}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(
+        s.pieceName,
+      )}`;
+    },
+    [],
+  );
+
   // PACKING/UPH on-screen FG sticker loader. Wraps fetchFgStickersForOrders
   // with the page-level + grid-level scope, the loading flag, the version
   // guard (prevents stale concurrent loads from overwriting newer data),
@@ -5217,7 +5305,11 @@ export default function ProductionPage({
       return [];
     }
     setLoadingFgPreview(true);
-    const aggregated = await fetchFgStickersForOrders(ordersToProcess);
+    const built = await fetchFgStickersForOrders(ordersToProcess);
+    // Attach the public packing-rack tokens so the printed QR deep-links to
+    // /p/<token> (no-login rack page) instead of /worker/scan. Best-effort;
+    // any sticker without a token keeps the worker-scan fallback.
+    const aggregated = await enrichWithPackingTokens(built);
     // Guard: only commit if no newer load has started. Prevents the
     // stale-overwrite race when filters change mid-fetch.
     if (myVersion !== fgLoadVersion.current) return aggregated;
@@ -5225,7 +5317,12 @@ export default function ProductionPage({
     setFgStickers(aggregated);
     setLoadingFgPreview(false);
     return aggregated;
-  }, [filteredOrders, gridFilteredDeptRows, fetchFgStickersForOrders]);
+  }, [
+    filteredOrders,
+    gridFilteredDeptRows,
+    fetchFgStickersForOrders,
+    enrichWithPackingTokens,
+  ]);
 
   const handlePrintFgStickers = useCallback(async () => {
     if (filteredOrders.length === 0) {
@@ -5366,11 +5463,14 @@ export default function ProductionPage({
         );
         return [];
       }
-      const stickers = await fetchFgStickersForOrders(scoped);
-      if (stickers.length === 0) {
+      const built = await fetchFgStickersForOrders(scoped);
+      if (built.length === 0) {
         toast.warning("No FG units to print for the matched orders.");
         return [];
       }
+      // Same public packing-rack token enrichment as the PACKING tab loader so
+      // a Foam-stage pre-print also carries the /p/<token> deep link.
+      const stickers = await enrichWithPackingTokens(built);
       setFoamPrintStickers(stickers);
       return stickers;
     } catch (err) {
@@ -5380,7 +5480,7 @@ export default function ProductionPage({
     } finally {
       setLoadingFoamPrint(false);
     }
-  }, [fltSearch, toast, fetchFgStickersForOrders, gridFilteredDeptRows, deptRows, selectedDeptRows]);
+  }, [fltSearch, toast, fetchFgStickersForOrders, enrichWithPackingTokens, gridFilteredDeptRows, deptRows, selectedDeptRows]);
 
   // Preview toggle — loads (fresh, so a changed grid filter is honoured)
   // and reveals the on-screen tile strip under the QR Stickers panel.
@@ -8330,7 +8430,7 @@ export default function ProductionPage({
                         <div className="mt-auto pt-1 border-t border-dashed border-black flex items-end gap-1">
                           <QRImg
                             eager
-                            data={typeof window !== "undefined" ? `${window.location.origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}` : ""}
+                            data={packingStickerUrl(s)}
                             size={pillowPair ? 48 : 64}
                             alt="FG QR"
                             className="block shrink-0"
@@ -8356,7 +8456,7 @@ export default function ProductionPage({
                             <div className="text-center min-w-0">
                               <QRImg
                                 eager
-                                data={typeof window !== "undefined" ? `${window.location.origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(pillowPair.poNo)}&p=${pillowPair.pieceNo}&t=${pillowPair.totalPieces}&pn=${encodeURIComponent(pillowPair.pieceName)}` : ""}
+                                data={packingStickerUrl(pillowPair)}
                                 size={50}
                                 alt="Pillow QR"
                                 className="block"
@@ -8490,19 +8590,16 @@ export default function ProductionPage({
                   // Pillow after the LAST Compartment) render inside their
                   // pair partner's card — skip standalone.
                   if (s.isSyntheticLegs || s.isSyntheticPillow) return null;
-                  const origin =
-                    typeof window !== "undefined" && window.location?.origin
-                      ? window.location.origin
-                      : "";
                   // FG/packing sticker QR = a worker-scan completion code (Wei Siang
                   // 2026-06-06: the /track tracking page isn't used; this sticker
                   // is scanned at Packing to mark the unit done + assign a rack).
-                  // FG-PACKING sentinel resolves to the PO's PACKING card on scan.
-                  // Drop the redundant &dept=PACKING — the FG-PACKING sentinel
-                  // already encodes the dept (parseStickerData derives it), so
-                  // omitting it shortens the payload → fewer QR modules → bigger,
-                  // more scannable cells that survive a clipped/dirty corner.
-                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}`;
+                  // Prefer the public no-login rack page (/p/<token>) so a
+                  // storekeeper without a Worker-Portal PIN can set the rack; fall
+                  // back to the /worker/scan deep link (FG-PACKING sentinel, dept
+                  // derived) when no token resolved — that keeps the logged-in
+                  // worker scan + completion flow working. See packingStickerUrl —
+                  // both render sites build this identically.
+                  const trackUrl = packingStickerUrl(s);
                   // Wei Siang 2026-05-15: drop the parent customer name
                   // when a hub is set — "Houzs Century (Houzs KL)" wrapped
                   // to two lines on the 100mm-wide sticker and ate too
@@ -9019,19 +9116,13 @@ export default function ProductionPage({
               // Paired secondaries (Legs / Pillow) print inside their
               // primary's page — skip standalone.
               if (s.isSyntheticLegs || s.isSyntheticPillow) return null;
-              const origin =
-                typeof window !== "undefined" && window.location?.origin
-                  ? window.location.origin
-                  : "";
               // FG/packing sticker QR = a worker-scan completion code (Wei Siang
-                  // 2026-06-06: the /track tracking page isn't used; this sticker
-                  // is scanned at Packing to mark the unit done + assign a rack).
-                  // FG-PACKING sentinel resolves to the PO's PACKING card on scan.
-                  // Drop the redundant &dept=PACKING — the FG-PACKING sentinel
-                  // already encodes the dept (parseStickerData derives it), so
-                  // omitting it shortens the payload → fewer QR modules → bigger,
-                  // more scannable cells that survive a clipped/dirty corner.
-                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}`;
+              // 2026-06-06: the /track tracking page isn't used; this sticker
+              // is scanned at Packing to mark the unit done + assign a rack).
+              // Prefer the public no-login rack page (/p/<token>); fall back to
+              // the /worker/scan deep link when no token resolved. See
+              // packingStickerUrl — both render sites build this identically.
+              const trackUrl = packingStickerUrl(s);
               // Hub-only when set — see on-screen tile comment above.
               const customerLine = s.customerHub || s.customerName;
               // Legs / Pillow render INSIDE their primary's print page —

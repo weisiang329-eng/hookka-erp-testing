@@ -127,7 +127,7 @@ export default function SupplierPaymentsPage() {
   const [rows, setRows] = useState<Record<string, RowState>>({});
   const [posting, setPosting] = useState(false);
 
-  const loadOpenPIs = (supplierId: string) => {
+  const loadOpenPIs = (supplierId: string, prefill?: Record<string, number>) => {
     if (!supplierId) {
       setOpenPIs([]);
       return;
@@ -140,6 +140,16 @@ export default function SupplierPaymentsPage() {
         // Drop fully-settled rows — outstanding must be > 0 to be payable.
         const open = raw.filter((pi) => pi.amountSen - pi.paidAmountSen > 0);
         setOpenPIs(open);
+        // Edit flow: re-seed each PI's amount from the just-voided payment
+        // (MYR booked amount; foreign PIs need their rate re-entered).
+        if (prefill) {
+          const seeded: Record<string, RowState> = {};
+          for (const pi of open) {
+            const amt = prefill[pi.id];
+            if (amt && amt > 0) seeded[pi.id] = { ...emptyRow(), amountStr: (amt / 100).toFixed(2) };
+          }
+          setRows(seeded);
+        }
       })
       .catch(() => setOpenPIs([]))
       .finally(() => setLoadingPIs(false));
@@ -320,6 +330,43 @@ export default function SupplierPaymentsPage() {
       }
     } catch {
       toast.error(`Failed to ${verb.toLowerCase()} payment`);
+    }
+  };
+
+  // Edit = void the original (GL reversed, PIs reopened) then reload the form
+  // prefilled, so the operator corrects and re-posts. Mirrors the expense-PV
+  // edit pattern; the immutable ledger is never mutated in place.
+  const editPayment = async (p: PaymentGroup) => {
+    if (!(await confirm({ title: "Edit payment?", message: `Editing ${p.paymentNo} voids the original and reopens it so you can correct and re-post it. Continue?`, danger: true }))) return;
+    try {
+      const res = await fetch(`/api/supplier-payments/${encodeURIComponent(p.paymentNo)}/lifecycle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "void" }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (!(res.ok && j.success)) { toast.error(j.error || "Failed to reopen payment"); return; }
+      invalidateCachePrefix("/api/supplier-payments");
+      invalidateCachePrefix("/api/purchase-invoices");
+      refreshHistory();
+      setDetail(null);
+      const sup = suppliers.find((s) => s.name === p.supplierName);
+      const prefill: Record<string, number> = {};
+      for (const l of p.lines) if (l.purchaseInvoiceId) prefill[l.purchaseInvoiceId] = l.amountSen;
+      setDate(p.date || today);
+      if (sup) {
+        setSelectedSupplierId(sup.id);
+        setRows({});
+        loadOpenPIs(sup.id, prefill);
+      } else {
+        setSelectedSupplierId("");
+        setRows({});
+        setOpenPIs([]);
+      }
+      toast.success(`${p.paymentNo} voided — adjust and post the corrected payment`);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch {
+      toast.error("Failed to reopen payment");
     }
   };
 
@@ -623,6 +670,9 @@ export default function SupplierPaymentsPage() {
                       <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{formatRM(p.totalBankSen)}</td>
                       <td className="px-3 py-2 text-right text-gray-600">{p.lines?.length ?? 0}</td>
                       <td className="px-3 py-2 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                        {(p.lifecycleState ?? "ACTIVE") === "ACTIVE" && (
+                          <button onClick={() => editPayment(p)} className="text-xs text-[#3E6570] hover:underline mr-2">Edit</button>
+                        )}
                         <span className="mr-2"><LifecycleBadge state={p.lifecycleState} /></span>
                         <LifecycleActions
                           state={p.lifecycleState}

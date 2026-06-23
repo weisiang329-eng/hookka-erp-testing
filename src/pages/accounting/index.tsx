@@ -4740,12 +4740,25 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
   };
   useEffect(loadHistory, [side]);
 
-  const loadOpenBills = (pid: string) => {
+  const loadOpenBills = (pid: string, prefill?: Record<string, number>) => {
     setPartyId(pid); setRows({});
     if (!pid) { setOpenBills([]); return; }
     fetch(`/api/accounting/other-party-bills?type=${side}&partyId=${pid}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; billNo: string; outstandingSen: number }[] }>)
-      .then((j) => { if (j?.success) setOpenBills((j.data ?? []).filter((b) => b.outstandingSen > 0).map((b) => ({ id: b.id, billNo: b.billNo, outstandingSen: b.outstandingSen }))); })
+      .then((j) => {
+        if (!j?.success) return;
+        const open = (j.data ?? []).filter((b) => b.outstandingSen > 0).map((b) => ({ id: b.id, billNo: b.billNo, outstandingSen: b.outstandingSen }));
+        setOpenBills(open);
+        // Edit flow: re-seed each bill's amount from the just-voided payment.
+        if (prefill) {
+          const seeded: Record<string, { amountStr: string; full: boolean }> = {};
+          for (const b of open) {
+            const amt = prefill[b.id];
+            if (amt && amt > 0) seeded[b.id] = { amountStr: (amt / 100).toFixed(2), full: false };
+          }
+          setRows(seeded);
+        }
+      })
       .catch(() => {});
   };
 
@@ -4791,6 +4804,27 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
     const j = asMutationResponse(await res.json());
     if (j?.success) { loadHistory(); if (partyId) loadOpenBills(partyId); }
     else toast.error(j?.error || `${lcVerb} failed`);
+  };
+
+  // Edit = void the original (GL reversed, bills reopened) then reopen the form
+  // prefilled, so the operator corrects and re-posts.
+  const editPayment = async (g: PaymentGroup) => {
+    if (!(await confirm({ title: `Edit ${verb.toLowerCase()}?`, message: `Editing ${g.paymentNo} voids the original and reopens it so you can correct and re-post it. Continue?`, danger: true }))) return;
+    const res = await fetch(`/api/accounting/other-party-payments/${encodeURIComponent(g.paymentNo)}/lifecycle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "void" }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (!j?.success) { toast.error(j?.error || "Failed to reopen"); return; }
+    loadHistory();
+    setDetail(null);
+    setDate(g.date || today);
+    if (g.bankAccount) setBankAccountSel(g.bankAccount);
+    const prefill: Record<string, number> = {};
+    for (const l of g.lines) prefill[l.billId] = l.amountSen;
+    loadOpenBills(g.partyId, prefill);
+    toast.success(`${g.paymentNo} voided — adjust and post the corrected ${verb.toLowerCase()}`);
   };
 
   return (
@@ -4891,6 +4925,9 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
                   <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(g.totalSen)}</td>
                   <td className="px-4 py-1.5 text-center">{g.lines.length}</td>
                   <td className="px-4 py-1.5 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                    {(g.lifecycleState ?? "ACTIVE") === "ACTIVE" && (
+                      <button onClick={() => editPayment(g)} className="text-xs text-[#3E6570] hover:underline mr-2">Edit</button>
+                    )}
                     <span className="mr-2"><LifecycleBadge state={g.lifecycleState} /></span>
                     <LifecycleActions
                       state={g.lifecycleState}

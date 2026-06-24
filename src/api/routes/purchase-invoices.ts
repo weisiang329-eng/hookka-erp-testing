@@ -20,6 +20,7 @@ import {
 import { nextMonthDueDate } from "../../lib/terms";
 import { issueDocNumber } from "../lib/doc-number-service";
 import { checkConvertAvailability, clampDecrement, type ConvertLineRequest } from "../../lib/convert-chain";
+import { buildPiApprovalLegs } from "../../lib/pi-posting";
 import { isPiEditable, piEditBlockedError } from "../../lib/purchase-edit-rules";
 
 // ---------------------------------------------------------------------------
@@ -932,6 +933,57 @@ app.post("/", async (c) => {
     }
   }
 
+  // An APPROVED-on-create PI must hit the GL exactly like the DRAFT/PENDING →
+  // APPROVED transition does (PUT below): DR mapped buckets · CR 400-0000.
+  // Without this a PI born APPROVED (e.g. a bulk import that sets status
+  // directly) feeds AP aging but never the ledger, so 400-0000 drifts from its
+  // subsidiary. Same leg builder as the PUT path + ledgerHasSource keep it
+  // identical and idempotent. Opening balances use /opening-balance/ap
+  // (isOpening, no GL) and never reach this handler. (BUG-2026-06-23-007)
+  const orgId = getOrgId(c);
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ??
+    null;
+  if (
+    status === "APPROVED" &&
+    !(await ledgerHasSource(db, orgId, "purchase_invoice", id))
+  ) {
+    const lines =
+      normalizedItems && normalizedItems.ok
+        ? normalizedItems.rows.map((r) => ({
+            mc: r.materialCode,
+            amt: toHome(r.lineTotalSen),
+            lt: r.lineType,
+          }))
+        : [];
+    const { bucket, pdefault } = await mapPurchaseLinesToAccounts(db, lines);
+    const legs: Parameters<typeof buildJournalEntryStatements>[2] =
+      buildPiApprovalLegs({
+        piNo,
+        supplierName: body.supplierName ?? "",
+        apTotalSen: amountSen,
+        drBucket: bucket,
+        pdefault,
+      }).map((leg) => ({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "purchase_invoice",
+        sourceId: id,
+        legNo: leg.legNo,
+        accountCode: leg.accountCode,
+        debitSen: leg.debitSen,
+        creditSen: leg.creditSen,
+        description: leg.description,
+        actorUserId,
+        orgId,
+      }));
+    const { statements: ls } = await buildJournalEntryStatements(
+      db,
+      orgId,
+      legs,
+    );
+    statements.push(...ls);
+  }
+
   try {
     await db.batch(statements);
   } catch (e) {
@@ -1231,38 +1283,25 @@ app.put("/:id", async (c) => {
           lines,
         );
         const apTotal = Math.round(Number(merged.amountSen) || 0);
-        const sumLines = Object.values(bucket).reduce((s, v) => s + v, 0);
-        if (sumLines !== apTotal)
-          bucket[pdefault] = (bucket[pdefault] ?? 0) + (apTotal - sumLines);
-        const legs: Parameters<typeof buildJournalEntryStatements>[2] = [];
-        let legNo = 1;
-        for (const [acct, amt] of Object.entries(bucket)) {
-          if (amt === 0) continue;
-          legs.push({
+        const legs: Parameters<typeof buildJournalEntryStatements>[2] =
+          buildPiApprovalLegs({
+            piNo,
+            supplierName: existing.supplierName ?? "",
+            apTotalSen: apTotal,
+            drBucket: bucket,
+            pdefault,
+          }).map((leg) => ({
             id: `lje-${crypto.randomUUID().slice(0, 12)}`,
             sourceType: "purchase_invoice",
             sourceId: id,
-            legNo: legNo++,
-            accountCode: acct,
-            debitSen: amt,
-            creditSen: 0,
-            description: `Purchase · PI ${piNo}`,
+            legNo: leg.legNo,
+            accountCode: leg.accountCode,
+            debitSen: leg.debitSen,
+            creditSen: leg.creditSen,
+            description: leg.description,
             actorUserId,
             orgId,
-          });
-        }
-        legs.push({
-          id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-          sourceType: "purchase_invoice",
-          sourceId: id,
-          legNo: legNo++,
-          accountCode: AP_CONTROL,
-          debitSen: 0,
-          creditSen: apTotal,
-          description: `AP · PI ${piNo} · ${existing.supplierName ?? ""}`,
-          actorUserId,
-          orgId,
-        });
+          }));
         const { statements: ls } = await buildJournalEntryStatements(
           db,
           orgId,

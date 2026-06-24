@@ -125,6 +125,20 @@ Entries themselves stay newest-first.
 
 **Verify live:** open `/production` (the default Overview, header "X of 1608 orders") with a dept column previously filtered to exclude Done. Search a COMPLETED order's customer PO → its rows now RENDER (count and body agree). Clear the search → completed orders are hidden again. Search a string that matches nothing → no completed orders appear. **Lesson:** the same bug class can live on two separate render paths; a fix scoped to one grid's mechanism (DataGrid `forceShowKeys`) does NOT cover a hand-rolled matrix with its own filter pipeline — apply the search-exemption in each grid's own filter layer.
 
+## BUG-2026-06-23-007 — Purchase invoice created directly as APPROVED never posted to the GL (only the status-transition posted) → 400-0000 drifts below AP aging
+
+🟢 **Fixed** · `accounting` / `purchase-invoices` · prod evidence: 56 APPROVED PIs (RM 75,340.12) in Creditor Aging, only 1 (RM 30.12) in ledger 400-0000
+
+**Symptom:** A PI created with status APPROVED in one step (bulk import via the piNo-override POST, or any create-as-APPROVED) fed the AP/Creditor Aging — which reads `purchase_invoices` directly — but never wrote ledger legs, so the 400-0000 Trade Creditors control account in Trial Balance / Balance Sheet / GL sat far below the subsidiary. Manual creates default to PENDING_APPROVAL and post on the approval PUT, so only directly-APPROVED docs leaked.
+
+**Root cause:** `purchase-invoices.ts` only built journal legs in the PUT handler, gated on a status *transition* to APPROVED (`body.status !== existing.status`). The POST handler had no `buildJournalEntryStatements` call. A PI born APPROVED never transitions, so it never posted.
+
+**Fix:** new pure leg-builder `src/lib/pi-posting.ts` `buildPiApprovalLegs()` (DR mapped buckets · CR 400-0000; rounding drift parked on pdefault; always Σ DR = Σ CR), unit-tested (`tests/pi-posting.test.mjs`, 6 cases). POST now posts on create-as-APPROVED, idempotent via `ledgerHasSource`, legs joining the same atomic `db.batch` as the PI insert. The PUT transition path was refactored onto the SAME helper so the two can't drift (byte-identical legs, confirmed by adversarial review). Opening-balance PIs use a separate endpoint (`/opening-balance/ap`, `isOpening`, no GL) and never reach this handler — unaffected. Historical rows are NOT retroactively posted (only new create / transition); those go through the owner's opening reconciliation.
+
+**Scope:** backend only (`purchase-invoices.ts` + new isolated `pi-posting.ts`; nothing else imports it). No frontend / operational-module change. Makes create-as-APPROVED PIs post identically to normally-approved PIs, which the reports already handle (Creditor Aging reads `purchase_invoices`; GL 400-0000 now matches it). Sales-invoice (DRAFT→SENT) is the symmetric bug — tracked separately, fix pending.
+
+**Verified:** build:strict clean; 1080/1081 tests pass (+6 new); adversarial money-review SAFE TO SHIP (7/7 — balance, PUT-equivalence, idempotency, opening-balance safety, atomicity, foreign-currency). Live write-path acceptance left to owner: create an APPROVED PI → confirm it appears in Trial Balance / AP control.
+
 ## BUG-2026-06-23-006 — Journal Entry account picker dropdown clipped to ~3 rows (last `overflow-x-auto`-wrapped line-item table)
 
 🟢 **Fixed** · `ui-frontend` · caught by owner on prod (screenshot: JV "Type code or name…" list cut off after CAPITAL / RETAINED EARNING / RESERVES)

@@ -15,6 +15,9 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { MoneyInput } from "@/components/ui/money-input";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa } from "@/lib/export-report";
+import { printVoucher, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
+import { amountInWords } from "@/lib/amount-in-words";
+import { COMPANY } from "@/lib/constants";
 import { COA_TYPE_COLOR, SUCCESS, DANGER, INFO, ACCENT_PLUM } from "@/lib/design-tokens";
 import {
   BookOpen,
@@ -38,6 +41,7 @@ import {
   BarChart3,
   Scale,
   Wallet,
+  Printer,
 } from "lucide-react";
 import type {
   ChartOfAccount,
@@ -73,6 +77,124 @@ function asMutationResponse(v: unknown): MutationResponse | null {
     };
   }
   return null;
+}
+
+// =============== VOUCHER PRINTING (PV / OR / JV) ===============
+//
+// Build a one-page printable voucher from a document's already-loaded data and
+// hand it to printVoucher() (the shared inline-HTML + window.print renderer in
+// src/lib/print-voucher.ts). The three tabs below (PaymentsTab, ReceiptsTab,
+// JournalsTab) map their rows → a VoucherSpec via the builders here. Letterhead
+// comes from COMPANY.HOOKKA — never hardcoded. Money stays integer sen and is
+// formatted with formatCurrency.
+
+// COMPANY.HOOKKA → the VoucherSpec.company shape (single source of truth).
+const VOUCHER_COMPANY: VoucherSpec["company"] = {
+  name: COMPANY.HOOKKA.name,
+  addressLines: COMPANY.HOOKKA.addressLines,
+  regNo: COMPANY.HOOKKA.regNo,
+  tin: COMPANY.HOOKKA.tin,
+  phone: COMPANY.HOOKKA.phone,
+  email: COMPANY.HOOKKA.email,
+};
+
+// "<code> · <name>" using the already-loaded chart of accounts; falls back to
+// the bare code if the account isn't in the COA (deleted / not yet synced).
+function accountLabel(accounts: ChartOfAccount[], code: string): string {
+  const nm = accounts.find((a) => a.code === code)?.name;
+  return nm ? `${code} · ${nm}` : code;
+}
+
+function todayDMY(): string {
+  return formatDateDMY(new Date());
+}
+
+// PV → voucher: expense (DR) lines, "Paid from" bank note, amount in words.
+function buildPvVoucher(
+  pv: PvRow,
+  accounts: ChartOfAccount[],
+): VoucherSpec {
+  const lines: VoucherLine[] = pv.lines.map((l) => ({
+    cells: [accountLabel(accounts, l.accountCode), l.description ?? "", formatCurrency(l.amountSen)],
+  }));
+  const paidFrom = pv.accrued === 1 && !pv.settledAt
+    ? `Accrued to: ${pv.accrualAccount ? accountLabel(accounts, pv.accrualAccount) : "—"}`
+    : `Paid from: ${pv.payFrom ? accountLabel(accounts, pv.payFrom) : "—"}`;
+  return {
+    title: "PAYMENT VOUCHER",
+    company: VOUCHER_COMPANY,
+    docNo: pv.pvNo,
+    date: formatDateDMY(pv.date),
+    partyLabel: "Pay To",
+    partyName: pv.payee ?? "",
+    columns: [{ label: "Account" }, { label: "Description" }, { label: "Amount", align: "right" }],
+    lines,
+    footerNote: paidFrom,
+    totalCells: ["", "Total", formatCurrency(pv.totalSen)],
+    amountWords: amountInWords(pv.totalSen),
+    remarks: pv.description ?? undefined,
+    signatures: [{ label: "Prepared by" }, { label: "Approved by" }, { label: "Received by" }],
+    printedOn: todayDMY(),
+  };
+}
+
+// OR → voucher: income (CR) lines, "Deposited to" bank note, amount in words.
+function buildOrVoucher(
+  or: OrRow,
+  accounts: ChartOfAccount[],
+): VoucherSpec {
+  const lines: VoucherLine[] = or.lines.map((l) => ({
+    cells: [accountLabel(accounts, l.accountCode), l.description ?? "", formatCurrency(l.amountSen)],
+  }));
+  return {
+    title: "OFFICIAL RECEIPT",
+    company: VOUCHER_COMPANY,
+    docNo: or.orNo,
+    date: formatDateDMY(or.date),
+    partyLabel: "Received From",
+    partyName: or.receivedFrom ?? "",
+    columns: [{ label: "Account" }, { label: "Description" }, { label: "Amount", align: "right" }],
+    lines,
+    footerNote: `Deposited to: ${or.payTo ? accountLabel(accounts, or.payTo) : "—"}`,
+    totalCells: ["", "Total", formatCurrency(or.totalSen)],
+    amountWords: amountInWords(or.totalSen),
+    remarks: or.description ?? undefined,
+    signatures: [{ label: "Received by" }, { label: "Issued by" }],
+    printedOn: todayDMY(),
+  };
+}
+
+// JV → voucher: each journal line as Account · Description · Debit · Credit,
+// with a balancing Totals row (ΣDebit = ΣCredit). No amount-in-words.
+function buildJvVoucher(je: JournalEntry): VoucherSpec {
+  const totalDebit = je.lines.reduce((s, l) => s + l.debitSen, 0);
+  const totalCredit = je.lines.reduce((s, l) => s + l.creditSen, 0);
+  const lines: VoucherLine[] = je.lines.map((l) => ({
+    cells: [
+      l.accountName ? `${l.accountCode} · ${l.accountName}` : l.accountCode,
+      l.description ?? "",
+      l.debitSen ? formatCurrency(l.debitSen) : "",
+      l.creditSen ? formatCurrency(l.creditSen) : "",
+    ],
+  }));
+  return {
+    title: "JOURNAL VOUCHER",
+    company: VOUCHER_COMPANY,
+    docNo: je.entryNo,
+    date: formatDateDMY(je.date),
+    partyLabel: "Description",
+    partyName: je.description ?? "",
+    columns: [
+      { label: "Account" },
+      { label: "Description" },
+      { label: "Debit", align: "right" },
+      { label: "Credit", align: "right" },
+    ],
+    lines,
+    totalCells: ["", "Total", formatCurrency(totalDebit), formatCurrency(totalCredit)],
+    signatures: [{ label: "Prepared by" }, { label: "Approved by" }],
+    printedOn: todayDMY(),
+  };
 }
 
 // Phase 2 follow-up (owner) — searchable account combobox: type a keyword
@@ -2335,11 +2457,26 @@ function JournalsTab({
         </span>
       ),
     },
+    {
+      key: "print",
+      label: "",
+      sortable: false,
+      render: (value, row) => (
+        <button
+          onClick={(e) => { e.stopPropagation(); printVoucher(buildJvVoucher(row)); }}
+          title="Print journal voucher"
+          className="inline-flex items-center gap-1 text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer"
+        >
+          <Printer className="h-3 w-3" />print
+        </button>
+      ),
+    },
   ];
 
   const contextMenuItems = (row: JournalEntry): ContextMenuItem[] => {
     const items: ContextMenuItem[] = [
       { label: "View", action: () => {} },
+      { label: "Print voucher", action: (r) => printVoucher(buildJvVoucher(r)) },
     ];
     if (row.status === "DRAFT") {
       items.push({ label: "Post", action: (r) => handlePost(r.id) });
@@ -6459,6 +6596,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                       {r.status === "VOID" ? "VOID" : r.accrued === 1 && !r.settledAt ? "UNPAID (accrued)" : "PAID"}
                     </td>
                     <td className="px-3 py-1.5 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                      <button onClick={() => printVoucher(buildPvVoucher(r, accounts))} title="Print payment voucher" className="inline-flex items-center gap-1 text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3"><Printer className="h-3 w-3" />print</button>
                       {r.status === "POSTED" && (
                         <button onClick={() => startEdit(r)} className="text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3">edit</button>
                       )}
@@ -6748,6 +6886,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                       {(r.lifecycleState ?? "ACTIVE") === "ACTIVE" && r.status}
                     </td>
                     <td className="px-3 py-1.5 text-right">
+                      <button onClick={() => printVoucher(buildOrVoucher(r, accounts))} title="Print official receipt" className="inline-flex items-center gap-1 text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3"><Printer className="h-3 w-3" />print</button>
                       <LifecycleActions
                         state={r.lifecycleState}
                         onVoid={() => handleLifecycle(r.id, r.orNo, "void")}

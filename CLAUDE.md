@@ -9,7 +9,7 @@ low-token. **Before any development task, consult it — do not grep the repo bl
 2. **How to do it** → [`docs/PLAYBOOKS.md`](docs/PLAYBOOKS.md) — fixed steps for recurring
    tasks (add-a-field, fix-camelCase-read-bug, ship+verify, money field, fix-then-sweep,
    new grid / PDF, touching a monster file).
-3. **Avoid the traps** → [`docs/HOOKKA-GOTCHAS.md`](docs/HOOKKA-GOTCHAS.md) — read before any
+3. **Avoid the traps** → [`docs/context-packs/HOOKKA-GOTCHAS.md`](docs/context-packs/HOOKKA-GOTCHAS.md) — read before any
    schema / money / SQL / ship work.
 4. **How deep to review** → [`docs/DEV-OPERATING-FRAMEWORK.md`](docs/DEV-OPERATING-FRAMEWORK.md)
    — fast-lane vs focused vs deep; the high-risk areas that always need deep review.

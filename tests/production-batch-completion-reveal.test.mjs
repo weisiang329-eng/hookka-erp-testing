@@ -306,3 +306,50 @@ test("Overview dept-column filters STILL apply when no search is active (byte-id
       "search-bypass re-runs when the query changes.",
   );
 });
+
+// ---------------------------------------------------------------------------
+// 7. SINGLE-ROW completion reveal (BUG-2026-06-24-006 — the one-by-one half of
+//    BUG-2026-06-23-004). Batch "Apply Completion" feeds forceShowCompletedIds
+//    (section 3), so batch-completed rows stay visible until reload. The TWO
+//    one-by-one paths — the per-row Status-cell flip AND the per-row
+//    completion-date cell — must feed the SAME allowlist, or a row completed
+//    one-at-a-time vanishes on the next ~20s poll (the dept grid default-hides
+//    COMPLETED). This was shipped (baa3a07b), wrongly reverted (741f5fa0), and
+//    the owner reported the one-by-one vanish — so pin BOTH call sites in CI so
+//    the single-row reveal can never be silently dropped again.
+// ---------------------------------------------------------------------------
+test("a markRowCompletedVisible helper feeds forceShowCompletedIds for single-row completion", () => {
+  const fe = read(FE);
+  assert.match(
+    fe,
+    /const markRowCompletedVisible = useCallback\(/,
+    "A markRowCompletedVisible(rowId, completed) helper must exist so single-row " +
+      "completion feeds the same force-show allowlist as batch.",
+  );
+  assert.match(
+    fe,
+    /markRowCompletedVisible = useCallback\(\s*\(rowId[\s\S]{0,400}setForceShowCompletedIds\(/,
+    "markRowCompletedVisible must update forceShowCompletedIds (the shared reveal allowlist).",
+  );
+});
+
+test("the per-row Status-cell flip feeds the reveal allowlist (COMPLETED/TRANSFERRED stays visible)", () => {
+  const fe = read(FE);
+  assert.match(
+    fe,
+    /markRowCompletedVisible\(\s*row\.id,\s*next === "COMPLETED" \|\| next === "TRANSFERRED",?\s*\)/,
+    "The Status-cell <select> onChange must call markRowCompletedVisible(row.id, " +
+      "next === 'COMPLETED' || next === 'TRANSFERRED') after patchJobCard, so a row " +
+      "flipped to a hidden status one-at-a-time stays visible until reload.",
+  );
+});
+
+test("the per-row completion-date cell feeds the reveal allowlist", () => {
+  const fe = read(FE);
+  assert.match(
+    fe,
+    /markRowCompletedVisible\(row\.id, !!v\)/,
+    "The completion-date cell onChange must call markRowCompletedVisible(row.id, !!v) " +
+      "after patchJobCard, so a row completed via the date cell stays visible until reload.",
+  );
+});

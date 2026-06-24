@@ -636,6 +636,15 @@ function WorkingHoursTab({
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
   const { confirm, confirmDialog } = useConfirm();
+  // Each worker's "home" department from the Employee Master, used to DEFAULT
+  // the attendance dept when a row has none — e.g. a phone punch that didn't
+  // scan a department lands here with an empty dept. Wei Siang 2026-06-24:
+  // "没有 scan 那个部门的话, 就根据他 Employee Master 那边 part under 什么部门的放进去".
+  const homeDeptByWorker = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const w of workers) m.set(w.id, w.departmentCode || "");
+    return m;
+  }, [workers]);
   // Effective-dated pay rules — punch→Hours uses the shift/grace/blocks in
   // force ON each row's date (no versions → built-in defaults).
   const payRuleVersions = usePayRuleVersions();
@@ -933,11 +942,17 @@ function WorkingHoursTab({
   const saveRow = useCallback(async (idx: number) => {
     const row = rows[idx];
     if (!row) return;
-    if (!row.workerId || !row.departmentCode) {
+    // Effective dept: the picked dept, else the worker's Employee-Master home
+    // dept. A phone punch with no dept scan lands here with an empty dept, so
+    // we fall back to where the worker is "part under" instead of forcing a
+    // manual pick (Wei Siang 2026-06-24).
+    const effDept =
+      row.departmentCode || homeDeptByWorker.get(row.workerId) || "";
+    if (!row.workerId || !effDept) {
       patchRow(idx, { saveError: "Employee and department are required" });
       return;
     }
-    if (prodCodes.has(row.departmentCode) && !row.category) {
+    if (prodCodes.has(effDept) && !row.category) {
       patchRow(idx, { saveError: "Production dept requires a category" });
       return;
     }
@@ -948,13 +963,13 @@ function WorkingHoursTab({
         : "/api/working-hour-entries";
       const method = row.id ? "PUT" : "POST";
       const body = row.id
-        ? { departmentCode: row.departmentCode, category: row.category, hours: Number(row.hours) || 0, notes: row.notes }
+        ? { departmentCode: effDept, category: row.category, hours: Number(row.hours) || 0, notes: row.notes }
         : {
             workerId: row.workerId,
             // Each row carries its own date — multi-day mode lets the
             // operator log e.g. Mon for one row and Tue for the next.
             date: row.date,
-            departmentCode: row.departmentCode,
+            departmentCode: effDept,
             category: row.category,
             hours: Number(row.hours) || 0,
             notes: row.notes,
@@ -1006,7 +1021,7 @@ function WorkingHoursTab({
         saveError: humanizeError(e, "Couldn't save. Please try again."),
       });
     }
-  }, [rows, patchRow, refreshAttendance, prodCodes]);
+  }, [rows, patchRow, refreshAttendance, prodCodes, homeDeptByWorker]);
 
   const saveAll = useCallback(async () => {
     setBulkSaving(true);
@@ -1427,7 +1442,14 @@ function WorkingHoursTab({
                 const span = group.items.length;
                 return group.items.map((item, segIdx) => {
                   const { row, originalIdx } = item;
-                  const isProd = prodCodes.has(row.departmentCode);
+                  // Default the dept to the worker's Employee-Master home dept
+                  // when the row has none (e.g. a phone punch with no dept
+                  // scan). The dropdown shows it and Save persists it.
+                  const effDept =
+                    row.departmentCode ||
+                    homeDeptByWorker.get(row.workerId) ||
+                    "";
+                  const isProd = prodCodes.has(effDept);
                   const firstSeg = segIdx === 0;
                   return (
                   <tr
@@ -1491,7 +1513,7 @@ function WorkingHoursTab({
                     )}
                     <td className="px-3 py-1.5">
                       <select
-                        value={row.departmentCode}
+                        value={effDept}
                         onChange={(e) => updateField(originalIdx, { departmentCode: e.target.value })}
                         className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
                       >
@@ -5905,7 +5927,7 @@ function DepartmentPerformanceTab({
         value: (r) => {
           const row = r as DeptPerfPrintRow;
           return row.isWorker
-            ? { text: `    ↳ ${row.label}` }
+            ? { text: `    ↳ ${row.label}` }
             : { text: row.label, bold: true };
         },
       },

@@ -1415,6 +1415,11 @@ async function fetchFilteredPOs(
   // its column filter already hides those statuses client-side. Cuts wire
   // + parse cost by ~60% on a typical dept tab.
   excludeCompleted = false,
+  // Sticker-print scope: when non-empty, only POs whose id / poNo / companySOId
+  // / salesOrderId / companyCOId / consignmentOrderId is in this set come back
+  // (2026-06-24 — Fab Sew / Foam print fetch only the visible orders + their
+  // SO/CO group, not the whole org).
+  scopeTokens: string[] | null = null,
 ): Promise<ProductionOrderOut[] | MinimalPOOut[]> {
   // Load the (category, deptCode) → days map once per request. Drives the
   // derived `expectedDueDate` field on each JC — the FE compares it
@@ -1562,12 +1567,28 @@ async function fetchFilteredPOs(
   const deptScopeBinds: string[] = deptFilter
     ? [orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter]
     : [];
+  // Sticker-print scope (2026-06-24): match an order by ANY of its identifying
+  // ids/numbers, so the FE can pass internal po ids (visible rows) AND human
+  // SO/CO numbers (ticked rows) in one list. Each token list binds once per OR
+  // arm. The camelCase identifiers are rewritten to snake_case by the SQL
+  // adapter, same as companySOId / companyCOId in the dept-scope clause above.
+  const hasScope = Array.isArray(scopeTokens) && scopeTokens.length > 0;
+  const scopePh = hasScope ? scopeTokens!.map(() => "?").join(",") : "";
+  const scopeWhere = hasScope
+    ? ` AND (id IN (${scopePh}) OR poNo IN (${scopePh}) OR companySOId IN (${scopePh}) OR salesOrderId IN (${scopePh}) OR companyCOId IN (${scopePh}) OR consignmentOrderId IN (${scopePh}))`
+    : "";
+  const scopeBinds: string[] = hasScope
+    ? [
+        ...(scopeTokens as string[]), ...(scopeTokens as string[]), ...(scopeTokens as string[]),
+        ...(scopeTokens as string[]), ...(scopeTokens as string[]), ...(scopeTokens as string[]),
+      ]
+    : [];
   const poSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders})${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere} ORDER BY created_at DESC, id DESC`
-    : `SELECT * FROM ${poSource} WHERE orgId = ?${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere} ORDER BY created_at DESC, id DESC`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders})${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere}${scopeWhere} ORDER BY created_at DESC, id DESC`
+    : `SELECT * FROM ${poSource} WHERE orgId = ?${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere}${scopeWhere} ORDER BY created_at DESC, id DESC`;
   const poStmt = hasFilter
-    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]), ...deptScopeBinds, ...dueBindings, ...catBindings)
-    : db.prepare(poSql).bind(orgId, ...deptScopeBinds, ...dueBindings, ...catBindings);
+    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]), ...deptScopeBinds, ...dueBindings, ...catBindings, ...scopeBinds)
+    : db.prepare(poSql).bind(orgId, ...deptScopeBinds, ...dueBindings, ...catBindings, ...scopeBinds);
 
   // Dept-narrowing: when caller passes ?dept=FOAM (etc.), return JCs
   // whose wipKey appears in any wipKey that contains a matching-dept JC,
@@ -1758,9 +1779,9 @@ async function fetchFilteredPOs(
         rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
       );
     }
-    if (hasFilter) {
-      // Status-filter path: run POs first, then narrow JCs to only the
-      // matching POs' productionOrderId set. Avoids a full ~9k-row scan
+    if (hasFilter || hasScope) {
+      // Status-filter / sticker-scope path: run POs first, then narrow JCs to
+      // only the matching POs' productionOrderId set. Avoids a full ~9k-row scan
       // when the filter shrinks the PO set to a few hundred. Bind list
       // is chunked at 100 (D1 cap) — see fetchInChunks.
       const pos = await poStmt.all<ProductionOrderRow>();
@@ -1825,9 +1846,9 @@ async function fetchFilteredPOs(
       leadTimeMap,
     );
   }
-  if (hasFilter) {
-    // Status-filter path (full payload): same narrow-by-PO-id trick as the
-    // minimal branch. piece_pics stays a full fetch for now (separate task).
+  if (hasFilter || hasScope) {
+    // Status-filter / sticker-scope path (full payload): same narrow-by-PO-id
+    // trick as the minimal branch. piece_pics stays a full fetch for now.
     // Bind list chunked at 100 — see fetchInChunks.
     const pos = await poStmt.all<ProductionOrderRow>();
     const poRows = pos.results ?? [];
@@ -5169,6 +5190,17 @@ app.get("/", async (c) => {
   const dueFrom = c.req.query("dueFrom") || null;
   const dueTo = c.req.query("dueTo") || null;
 
+  // Sticker-print scope: a CSV of order identifiers — internal id, poNo,
+  // companySOId, salesOrderId, companyCOId, or consignmentOrderId. When
+  // present, only orders matching ANY token come back, so the Fab Sew / Foam
+  // sticker loaders fetch the few visible orders (+ their SO/CO group siblings)
+  // instead of the whole org. Bypasses the list caches below — these are
+  // targeted, always-fresh reads, not the shared grid payload. 2026-06-24.
+  const scopeRaw = c.req.query("scope");
+  const scopeTokens = scopeRaw
+    ? scopeRaw.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+    : null;
+
   const orgId = getOrgId(c);
 
   // The list read can trigger a cold recompute whose SO/CO join SELECTs
@@ -5176,6 +5208,36 @@ app.get("/", async (c) => {
   // hasn't seen an SO/CO write since the ON HOLD deploy doesn't 500 with
   // "column hold_reason does not exist" (BUG-2026-06-24-008). Memoized — cheap.
   await ensurePendingMigrations(c.var.DB);
+
+  // Scoped sticker-print fetch — bypass the KV + snapshot caches (these are
+  // targeted, always-fresh reads driven by which rows are on screen, NOT the
+  // shared grid payload, and each scope set is one-shot so caching is pointless
+  // and risks stale stickers). Pull only the matching orders and return. 2026-06-24.
+  if (scopeTokens && scopeTokens.length > 0) {
+    const data = await fetchFilteredPOs(
+      c.var.DB,
+      orgId,
+      statuses,
+      includeJobCards,
+      includeArchive,
+      minimal,
+      deptFilter,
+      dueFrom,
+      dueTo,
+      catFilter,
+      excludeCompleted,
+      scopeTokens,
+    );
+    await attachCustomerSO(
+      c.var.DB,
+      data as Array<{
+        salesOrderId: string;
+        consignmentOrderId: string;
+        customerSO: string;
+      }>,
+    );
+    return c.json({ success: true, data, total: data.length });
+  }
 
   // Cache check — return early if a fresh response for this (orgId, query)
   // is sitting in KV. Cache key includes the per-org version counter so any

@@ -4387,14 +4387,57 @@ export default function ProductionPage({
     }
     setLoadingFabSew(true);
     try {
-      const res = await fetch(
-        "/api/production-orders?fields=minimal&include=jobCards",
-        { credentials: "include" },
-      );
-      const json = (await res.json().catch(() => null)) as
-        | { success?: boolean; data?: ProductionOrder[] }
-        | null;
-      const all: ProductionOrder[] = json?.success && Array.isArray(json.data) ? json.data : [];
+      // Scoped fetch (2026-06-24 perf): pull ONLY the visible Fab Cut orders +
+      // their SO/CO group siblings, not the whole org. Two phases keep each
+      // request tiny. The Fab Cut grid merges a sofa's pieces into ONE anchor
+      // row, so phase 2 expands each visible SOFA anchor to its group — the
+      // siblings carry the OTHER pieces' Fab Sew job cards.
+      const FETCH_BASE =
+        "/api/production-orders?fields=minimal&include=jobCards";
+      const fetchScope = async (
+        tokens: string[],
+      ): Promise<ProductionOrder[]> => {
+        if (tokens.length === 0) return [];
+        const r = await fetch(
+          `${FETCH_BASE}&scope=${encodeURIComponent(tokens.join(","))}`,
+          { credentials: "include" },
+        );
+        const j = (await r.json().catch(() => null)) as
+          | { success?: boolean; data?: ProductionOrder[] }
+          | null;
+        return j?.success && Array.isArray(j.data) ? j.data : [];
+      };
+      let all = await fetchScope(Array.from(poIds));
+      const sofaGids = new Set<string>();
+      for (const o of all) {
+        if (o.itemCategory !== "SOFA" || !poIds.has(o.id)) continue;
+        const gid =
+          o.companySOId ||
+          o.salesOrderId ||
+          o.companyCOId ||
+          o.consignmentOrderId ||
+          "";
+        if (gid) sofaGids.add(gid);
+      }
+      if (sofaGids.size > 0) {
+        const seen = new Set(all.map((o) => o.id));
+        for (const sib of await fetchScope(Array.from(sofaGids))) {
+          if (!seen.has(sib.id)) {
+            all.push(sib);
+            seen.add(sib.id);
+          }
+        }
+      }
+      // Safety net: a scoped fetch that came back empty (unexpected backend
+      // hiccup) while rows ARE visible falls back to the full fetch so a print
+      // is never silently short. Slower, but correct beats fast-but-wrong.
+      if (all.length === 0) {
+        const r = await fetch(FETCH_BASE, { credentials: "include" });
+        const j = (await r.json().catch(() => null)) as
+          | { success?: boolean; data?: ProductionOrder[] }
+          | null;
+        all = j?.success && Array.isArray(j.data) ? j.data : [];
+      }
       if (all.length === 0) {
         toast.warning("Could not load production orders.");
         return [];
@@ -5462,14 +5505,35 @@ export default function ProductionPage({
     }
     setLoadingFoamPrint(true);
     try {
-      const res = await fetch(
-        "/api/production-orders?fields=minimal&include=jobCards",
-        { credentials: "include" },
-      );
+      // Scoped fetch (2026-06-24 perf): pull only what the active scope needs,
+      // not the whole org. Ticked rows → their SO/CO/po identifiers (a sofa's
+      // companySOId pulls all its compartments); visible grid → the visible po
+      // ids. The free-text Search path matches any field, so it can't be
+      // pre-scoped — it keeps the full fetch.
+      const FETCH_BASE =
+        "/api/production-orders?fields=minimal&include=jobCards";
+      let scopeTokens: string[] = [];
+      if (hasSelectionScope) scopeTokens = Array.from(selSoIds);
+      else if (!q && hasGridScope)
+        scopeTokens = visibleRows.map((r) => r.poId || "").filter(Boolean);
+      const url =
+        scopeTokens.length > 0
+          ? `${FETCH_BASE}&scope=${encodeURIComponent(scopeTokens.join(","))}`
+          : FETCH_BASE;
+      const res = await fetch(url, { credentials: "include" });
       const json = (await res.json().catch(() => null)) as
         | { success?: boolean; data?: ProductionOrder[] }
         | null;
-      const all: ProductionOrder[] = json?.success && Array.isArray(json.data) ? json.data : [];
+      let all: ProductionOrder[] = json?.success && Array.isArray(json.data) ? json.data : [];
+      // Safety net: a scoped fetch that returned nothing falls back to the full
+      // fetch so packing is never silently short.
+      if (all.length === 0 && url !== FETCH_BASE) {
+        const r2 = await fetch(FETCH_BASE, { credentials: "include" });
+        const j2 = (await r2.json().catch(() => null)) as
+          | { success?: boolean; data?: ProductionOrder[] }
+          | null;
+        all = j2?.success && Array.isArray(j2.data) ? j2.data : [];
+      }
       if (all.length === 0) {
         toast.warning("Could not load production orders.");
         return [];

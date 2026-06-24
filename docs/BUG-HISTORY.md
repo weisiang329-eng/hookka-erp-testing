@@ -145,6 +145,18 @@ Entries themselves stay newest-first.
 
 **Verify live:** open `/production` (the default Overview, header "X of 1608 orders") with a dept column previously filtered to exclude Done. Search a COMPLETED order's customer PO → its rows now RENDER (count and body agree). Clear the search → completed orders are hidden again. Search a string that matches nothing → no completed orders appear. **Lesson:** the same bug class can live on two separate render paths; a fix scoped to one grid's mechanism (DataGrid `forceShowKeys`) does NOT cover a hand-rolled matrix with its own filter pipeline — apply the search-exemption in each grid's own filter layer.
 
+## BUG-2026-06-23-008 — Editing an APPROVED foreign-currency PI's line items corrupted its home amount + posted a mis-scaled GL correction
+
+🟢 **Fixed** · `accounting` / `purchase-invoices` · surfaced by today's adversarial review (pre-existing, foreign-currency edit path)
+
+**Symptom:** Editing the line items of an already-APPROVED foreign-currency (USD/CNY) purchase invoice recomputed `amountSen` from the new line totals **without converting to home MYR** (the PUT edit path has no `toHome`, unlike POST). The foreign figure overwrote the stored home amount and the GL edit-correction leg posted a mis-scaled DR/CR (internally balanced — TB stays balanced — but that PI's home value + its 400-0000 contribution become wrong). MYR PIs unaffected.
+
+**Root cause:** the PUT `items[]`-edit branch (`purchase-invoices.ts` ~1091) is currency-blind; only the POST create path converts via `toHome(fxRate)`.
+
+**Fix:** the design already snapshots a PI's currency/rate at creation (change = cancel + re-raise, same as the SST snapshot rule). So block line-editing a foreign PI: when `existing.currency !== 'MYR'` and `items[]` is supplied, return 409 "cancel and re-raise it". This prevents the corruption without risking conversion math in a path that was never currency-aware. (A currency-aware editor can come later if the owner needs it.)
+
+**Scope:** backend guard only; MYR PIs unchanged. Pre-existing bug (NOT introduced this session) — caught by the post-work review the owner requested. **Verified:** build:strict clean; eslint clean.
+
 ## BUG-2026-06-23-007 — Purchase invoice created directly as APPROVED never posted to the GL (only the status-transition posted) → 400-0000 drifts below AP aging
 
 🟢 **Fixed** · `accounting` / `purchase-invoices` · prod evidence: 56 APPROVED PIs (RM 75,340.12) in Creditor Aging, only 1 (RM 30.12) in ledger 400-0000

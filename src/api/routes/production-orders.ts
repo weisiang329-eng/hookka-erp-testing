@@ -26,6 +26,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
+import { archiveUnionSource } from "../lib/archive-union";
 import {
   consumeRawMaterialsForPO,
   postJobCardLabor,
@@ -1439,13 +1440,19 @@ async function fetchFilteredPOs(
   // Phase-5: when includeArchive is set, UNION hot + archive. Hot rows get
   // a projected '' archivedAt so the column lists align with the archive
   // table. rowToPO ignores columns it doesn't know about.
+  // includeArchive UNION: route BOTH the po and jc sources through the
+  // self-healing helper (introspects + brings the archive into column parity,
+  // emits an explicit ordered column list — see src/api/lib/archive-union.ts).
+  // Falls back to the legacy SELECT * literal only if introspection fails.
   const poSource = includeArchive
-    ? `(SELECT *, '' AS "archivedAt" FROM production_orders
+    ? (await archiveUnionSource(db, "production_orders", "production_orders_archive")) ??
+      `(SELECT *, '' AS "archivedAt" FROM production_orders
         UNION ALL
         SELECT * FROM production_orders_archive)`
     : "production_orders";
   const jcSource = includeArchive
-    ? `(SELECT *, '' AS "archivedAt" FROM job_cards
+    ? (await archiveUnionSource(db, "job_cards", "job_cards_archive")) ??
+      `(SELECT *, '' AS "archivedAt" FROM job_cards
         UNION ALL
         SELECT * FROM job_cards_archive)`
     : "job_cards";
@@ -1923,13 +1930,19 @@ async function fetchPaginatedPOs(
     : "";
   const offset = (page - 1) * limit;
 
+  // includeArchive UNION: route BOTH the po and jc sources through the
+  // self-healing helper (introspects + brings the archive into column parity,
+  // emits an explicit ordered column list — see src/api/lib/archive-union.ts).
+  // Falls back to the legacy SELECT * literal only if introspection fails.
   const poSource = includeArchive
-    ? `(SELECT *, '' AS "archivedAt" FROM production_orders
+    ? (await archiveUnionSource(db, "production_orders", "production_orders_archive")) ??
+      `(SELECT *, '' AS "archivedAt" FROM production_orders
         UNION ALL
         SELECT * FROM production_orders_archive)`
     : "production_orders";
   const jcSource = includeArchive
-    ? `(SELECT *, '' AS "archivedAt" FROM job_cards
+    ? (await archiveUnionSource(db, "job_cards", "job_cards_archive")) ??
+      `(SELECT *, '' AS "archivedAt" FROM job_cards
         UNION ALL
         SELECT * FROM job_cards_archive)`
     : "job_cards";

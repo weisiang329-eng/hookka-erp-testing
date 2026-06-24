@@ -50,7 +50,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "debtorledger" | "creditorledger" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "opening" | "audit" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "supplier-discount" | "debtorledger" | "creditorledger" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "opening" | "audit" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -236,6 +236,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   // Debtor / Creditor
   { key: "ar", label: "Debtor Aging", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "ap", label: "Creditor Aging", icon: <Building2 className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "supplier-discount", label: "Supplier Discount", icon: <CreditCard className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "odebtor", label: "Other Debtor", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "odebtorbills", label: "Other Debtor Bills", icon: <BookOpen className="h-4 w-4" />, group: "Debtor / Creditor" },
   { key: "odebtorpay", label: "Other Debtor Receipts", icon: <Wallet className="h-4 w-4" />, group: "Debtor / Creditor" },
@@ -461,6 +462,7 @@ export default function AccountingPage() {
               <APTab apData={apData} onRefresh={fetchAll} />
             </div>
           )}
+          {tab === "supplier-discount" && <SupplierDiscountTab />}
           {tab === "odebtor" && <OtherPartiesTab side="DEBTOR" />}
           {tab === "odebtorbills" && <OtherPartyBillsTab accounts={accounts} side="DEBTOR" />}
           {tab === "odebtorpay" && <OtherPartyPaymentsTab accounts={accounts} side="DEBTOR" />}
@@ -2988,54 +2990,6 @@ function APControlPanel() {
     closingSen: number;
     rows: { date: string; ref: string; type: string; debitSen: number; creditSen: number; runningSen: number }[];
   } | null>(null);
-  const { toast } = useToast();
-  const { confirm } = useConfirm();
-  const [pcns, setPcns] = useState<{ id: string; noteNumber: string; supplierName: string; date: string; reason: string; totalAmount: number; status: string }[]>([]);
-  const [showPcnForm, setShowPcnForm] = useState(false);
-  const [pcnForm, setPcnForm] = useState({ supplierId: "", reason: "", netRm: "", sstRm: "" });
-
-  const loadPcns = () => {
-    fetch("/api/accounting/purchase-credit-notes")
-      .then((r) => r.json() as Promise<{ success?: boolean; data?: typeof pcns }>)
-      .then((j) => { if (j?.success && j.data) setPcns(j.data); })
-      .catch(() => {});
-  };
-  useEffect(loadPcns, []);
-
-  const createPcn = async () => {
-    const netSen = Math.round(Number(pcnForm.netRm) * 100);
-    const sstSen = Math.round(Number(pcnForm.sstRm || 0) * 100);
-    if (!pcnForm.supplierId) { toast.error("Select a supplier"); return; }
-    if (!(netSen > 0)) { toast.error("Net amount must be > 0"); return; }
-    const items: { description: string; quantity: number; unitPriceSen: number; lineType: string }[] = [
-      { description: pcnForm.reason || "Purchase return / credit", quantity: 1, unitPriceSen: netSen, lineType: "STOCKED" },
-    ];
-    if (sstSen > 0) items.push({ description: "SST portion", quantity: 1, unitPriceSen: sstSen, lineType: "TAX" });
-    const res = await fetch("/api/accounting/purchase-credit-notes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ supplierId: pcnForm.supplierId, reason: pcnForm.reason, items }),
-    });
-    const j = asMutationResponse(await res.json());
-    if (j?.success) {
-      setShowPcnForm(false);
-      setPcnForm({ supplierId: "", reason: "", netRm: "", sstRm: "" });
-      loadPcns();
-    } else toast.error(j?.error || "Failed to create purchase CN");
-  };
-
-  const postPcn = async (id: string, noteNumber: string, amount: number) => {
-    if (!(await confirm({ title: "Post credit note?", message: `Post ${noteNumber} (${formatCurrency(amount)})?\n\nDR 400-0000 Trade Creditors / CR purchase accounts — immutable ledger entries.`, danger: false }))) return;
-    const res = await fetch(`/api/accounting/purchase-credit-notes/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "POSTED" }),
-    });
-    const j = asMutationResponse(await res.json());
-    if (j?.success) loadPcns();
-    else toast.error(j?.error || "Failed to post purchase CN");
-  };
-
   useEffect(() => {
     fetch("/api/accounting/ap-control")
       .then((r) => r.json() as Promise<{ success?: boolean; data?: typeof data }>)
@@ -3159,76 +3113,432 @@ function APControlPanel() {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
 
+// =============== TAB: SUPPLIER DISCOUNT ===============
+//
+// Replaces the buried "purchase credit note" form that used to live inside
+// APControlPanel. The owner records a supplier discount/credit (net + optional
+// SST) and OPTIONALLY knocks it off one / many / none of that supplier's
+// unpaid purchase invoices (PIs).
+//
+// Save flow = CREATE then POST: POST creates a DRAFT credit note and returns
+// its id, then we immediately PUT { status:"POSTED", allocations } to post +
+// allocate it. allocations may be empty (record-only). The backend
+// validates every allocation (≤ each PI's outstanding, Σ ≤ the CN total) and
+// returns 400 on a bad one — we surface that error via toast. A left-behind
+// DRAFT (PUT failed) is harmless, so we do NOT auto-retry.
+//
+// Money is integer sen everywhere (RM × 100 via Math.round). UI is English.
+
+type SDSupplier = { id: string; code: string; name: string; isActive?: boolean };
+
+// Open PI for the selected supplier — same shape supplier-payments.tsx reads.
+type SDOpenPI = {
+  id: string;
+  piNo: string;
+  invoiceDate: string;
+  amountSen: number;
+  paidAmountSen: number;
+};
+
+type SDHistoryRow = {
+  id: string;
+  noteNumber: string;
+  supplierName: string;
+  date: string;
+  reason: string;
+  totalAmount: number;
+  status: string;
+  piNo?: string;
+};
+
+// Per-PI allocation row state: ticked + the raw RM string the operator typed.
+type SDAllocRow = { checked: boolean; amountStr: string };
+
+function SupplierDiscountTab() {
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
+
+  // Suppliers (active only) for the picker.
+  const [suppliers, setSuppliers] = useState<SDSupplier[]>([]);
+  const [supplierId, setSupplierId] = useState("");
+
+  // Inputs.
+  const [netRm, setNetRm] = useState("");
+  const [sstRm, setSstRm] = useState("");
+  const [reason, setReason] = useState("");
+
+  // Open PIs for the picked supplier + per-PI allocation rows (keyed by PI id).
+  const [openPIs, setOpenPIs] = useState<SDOpenPI[]>([]);
+  const [loadingPIs, setLoadingPIs] = useState(false);
+  const [allocRows, setAllocRows] = useState<Record<string, SDAllocRow>>({});
+
+  const [saving, setSaving] = useState(false);
+
+  // History list.
+  const [history, setHistory] = useState<SDHistoryRow[]>([]);
+
+  const loadHistory = useCallback(() => {
+    fetch("/api/accounting/purchase-credit-notes")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: SDHistoryRow[] }>)
+      .then((j) => { if (j?.success) setHistory(j.data ?? []); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/suppliers")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: SDSupplier[] }>)
+      .then((j) => { if (j?.success) setSuppliers((j.data ?? []).filter((s) => s.isActive !== false)); })
+      .catch(() => {});
+    loadHistory();
+  }, [loadHistory]);
+
+  // On supplier change, fetch their open PIs (APPROVED / PARTIAL_PAID, then keep
+  // only rows with outstanding > 0) — mirrors supplier-payments.tsx loadOpenPIs.
+  const handleSupplierChange = (id: string) => {
+    setSupplierId(id);
+    setAllocRows({});
+    if (!id) { setOpenPIs([]); return; }
+    setLoadingPIs(true);
+    fetch(`/api/purchase-invoices?supplierId=${encodeURIComponent(id)}&status=APPROVED,PARTIAL_PAID`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: SDOpenPI[] } | SDOpenPI[]>)
+      .then((j) => {
+        const raw = Array.isArray(j) ? j : j?.success ? j.data ?? [] : [];
+        setOpenPIs(raw.filter((pi) => pi.amountSen - pi.paidAmountSen > 0));
+      })
+      .catch(() => setOpenPIs([]))
+      .finally(() => setLoadingPIs(false));
+  };
+
+  const outstandingOf = (pi: SDOpenPI) => pi.amountSen - pi.paidAmountSen;
+
+  const netSen = useMemo(() => {
+    const n = Math.round(Number(netRm) * 100);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }, [netRm]);
+  const sstSen = useMemo(() => {
+    const n = Math.round(Number(sstRm) * 100);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }, [sstRm]);
+  const discountTotalSen = netSen + sstSen;
+
+  // Sen allocated by a single PI row (full-outstanding cap applied at submit too).
+  const rowAllocSen = useCallback(
+    (pi: SDOpenPI): number => {
+      const row = allocRows[pi.id];
+      if (!row || !row.checked) return 0;
+      const n = Math.round(Number(row.amountStr) * 100);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    },
+    [allocRows],
+  );
+
+  const allocatedSen = useMemo(
+    () => openPIs.reduce((sum, pi) => sum + rowAllocSen(pi), 0),
+    [openPIs, rowAllocSen],
+  );
+  const unallocatedSen = discountTotalSen - allocatedSen;
+
+  const setRow = (id: string, patch: Partial<SDAllocRow>) =>
+    setAllocRows((prev) => {
+      const base: SDAllocRow = prev[id] ?? { checked: false, amountStr: "" };
+      return { ...prev, [id]: { ...base, ...patch } };
+    });
+
+  // "Full" shortcut — tick the row and fill its outstanding (in RM).
+  const fillFull = (pi: SDOpenPI) =>
+    setRow(pi.id, { checked: true, amountStr: (outstandingOf(pi) / 100).toFixed(2) });
+
+  const resetForm = () => {
+    setSupplierId("");
+    setNetRm("");
+    setSstRm("");
+    setReason("");
+    setOpenPIs([]);
+    setAllocRows({});
+  };
+
+  const canSave = !!supplierId && netSen > 0 && !saving;
+
+  const handleSave = async () => {
+    if (!supplierId) { toast.error("Select a supplier"); return; }
+    if (!(netSen > 0)) { toast.error("Discount amount (net) must be greater than 0"); return; }
+
+    // Build the allocations from the ticked rows; cap each at its outstanding.
+    const allocations: { piId: string; amountSen: number }[] = [];
+    for (const pi of openPIs) {
+      const amt = rowAllocSen(pi);
+      if (amt <= 0) continue;
+      const cap = outstandingOf(pi);
+      if (amt > cap) {
+        toast.error(`${pi.piNo}: allocation exceeds outstanding (${formatCurrency(cap)})`);
+        return;
+      }
+      allocations.push({ piId: pi.id, amountSen: amt });
+    }
+    if (allocatedSen > discountTotalSen) {
+      toast.error(`Allocated (${formatCurrency(allocatedSen)}) exceeds the discount total (${formatCurrency(discountTotalSen)})`);
+      return;
+    }
+
+    setSaving(true);
+    try {
+      // 1) CREATE the DRAFT credit note. items = net line (+ SST line if any).
+      const items: { description: string; quantity: number; unitPriceSen: number; lineType: string }[] = [
+        { description: reason || "Discount", quantity: 1, unitPriceSen: netSen, lineType: "STOCKED" },
+      ];
+      if (sstSen > 0) items.push({ description: "SST portion", quantity: 1, unitPriceSen: sstSen, lineType: "TAX" });
+
+      const createRes = await fetch("/api/accounting/purchase-credit-notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ supplierId, reason, items }),
+      });
+      const createJson = (await createRes.json()) as { success?: boolean; error?: string; data?: { id?: string } };
+      if (!createRes.ok || !createJson.success || !createJson.data?.id) {
+        toast.error(createJson.error || "Failed to create supplier discount");
+        return;
+      }
+      const newId = createJson.data.id;
+
+      // 2) POST + allocate. If this fails the DRAFT is harmless; do not retry.
+      const postRes = await fetch(`/api/accounting/purchase-credit-notes/${encodeURIComponent(newId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "POSTED", allocations }),
+      });
+      const postJson = (await postRes.json()) as { success?: boolean; error?: string };
+      if (!postRes.ok || !postJson.success) {
+        toast.error(postJson.error || "Failed to post supplier discount");
+        return;
+      }
+
+      toast.success("Supplier discount saved");
+      resetForm();
+      loadHistory();
+    } catch {
+      toast.error("Failed to save supplier discount");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const voidNote = async (row: SDHistoryRow) => {
+    if (!(await confirm({
+      title: "Void supplier discount?",
+      message: `Void ${row.noteNumber} (${formatCurrency(row.totalAmount)})? This reverses the GL posting and re-opens any invoices it was knocked off.`,
+      danger: true,
+    }))) return;
+    try {
+      const res = await fetch(`/api/accounting/purchase-credit-notes/${encodeURIComponent(row.id)}/void`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const j = asMutationResponse(await res.json());
+      if (res.ok && j?.success) {
+        toast.success(`${row.noteNumber} voided`);
+        loadHistory();
+      } else {
+        toast.error(j?.error || "Failed to void supplier discount");
+      }
+    } catch {
+      toast.error("Failed to void supplier discount");
+    }
+  };
+
+  const supplierOptions = useMemo(
+    () => suppliers.map((s) => ({ value: s.id, label: s.code ? `${s.code} — ${s.name}` : s.name })),
+    [suppliers],
+  );
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Supplier Discount</h2>
+        <p className="text-xs text-[#6B7280]">Record a discount/credit from a supplier. Optionally knock it off specific unpaid bills.</p>
+      </div>
+
+      {/* Entry form */}
       <Card>
-        <CardContent className="p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="font-semibold text-[#1F1D1B]">Purchase credit notes</h3>
-              <p className="text-xs text-[#6B7280]">Supplier returns / price credits — pure finance document; posting reverses into the same purchase accounts the PI debited (SST portion → 706-0000).</p>
+        <CardContent className="p-4 space-y-4">
+          {/* Supplier + amounts */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="lg:col-span-2">
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Supplier</label>
+              <SearchableSelect
+                value={supplierId}
+                onChange={handleSupplierChange}
+                options={supplierOptions}
+                placeholder="Type supplier name..."
+                allowClear
+              />
             </div>
-            <Button variant="primary" size="sm" onClick={() => setShowPcnForm(!showPcnForm)}>
-              <Plus className="h-4 w-4" /> New
-            </Button>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Discount amount (net) (RM)</label>
+              <input
+                type="number" step="0.01" min="0" inputMode="decimal"
+                value={netRm}
+                onFocus={(e) => e.currentTarget.select()}
+                onChange={(e) => setNetRm(e.target.value)}
+                placeholder="0.00"
+                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">SST (RM) <span className="font-normal text-[#9CA3AF]">(optional)</span></label>
+              <input
+                type="number" step="0.01" min="0" inputMode="decimal"
+                value={sstRm}
+                onFocus={(e) => e.currentTarget.select()}
+                onChange={(e) => setSstRm(e.target.value)}
+                placeholder="0.00"
+                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+              />
+            </div>
           </div>
-          {showPcnForm && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end border-t border-[#F0ECE9] pt-3">
-              <div>
-                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Supplier</label>
-                <select value={pcnForm.supplierId} onChange={(e) => setPcnForm({ ...pcnForm, supplierId: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm">
-                  <option value="">— select —</option>
-                  {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">Reason</label>
+            <input
+              type="text"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. damaged fabric returned"
+              className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+            />
+          </div>
+
+          {/* Allocation table — only once a supplier is picked. */}
+          {supplierId && (
+            <div className="border-t border-[#F0ECE9] pt-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-[#1F1D1B]">Knock off unpaid bills <span className="font-normal text-[#9CA3AF]">(optional)</span></p>
               </div>
-              <div>
-                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Reason</label>
-                <input type="text" value={pcnForm.reason} onChange={(e) => setPcnForm({ ...pcnForm, reason: e.target.value })} placeholder="e.g. damaged fabric returned" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
-              </div>
-              <div className="flex gap-2 items-end">
-                <div>
-                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Net (RM)</label>
-                  <input type="number" step="0.01" value={pcnForm.netRm} onChange={(e) => setPcnForm({ ...pcnForm, netRm: e.target.value })} className="w-28 rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              {loadingPIs ? (
+                <div className="py-6 text-center text-[#6B7280] text-sm">Loading unpaid bills…</div>
+              ) : openPIs.length === 0 ? (
+                <div className="py-6 text-center text-[#9CA3AF] text-sm">No unpaid bills for this supplier.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                        <th className="px-3 py-2 text-left w-10" />
+                        <th className="px-3 py-2 text-left">PI No.</th>
+                        <th className="px-3 py-2 text-left">Date</th>
+                        <th className="px-3 py-2 text-right">Amount</th>
+                        <th className="px-3 py-2 text-right">Outstanding</th>
+                        <th className="px-3 py-2 text-right">Apply (RM)</th>
+                        <th className="px-3 py-2 text-left w-16" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {openPIs.map((pi) => {
+                        const row = allocRows[pi.id] ?? { checked: false, amountStr: "" };
+                        return (
+                          <tr key={pi.id} className="border-b border-[#F0ECE9]">
+                            <td className="px-3 py-1.5">
+                              <input
+                                type="checkbox"
+                                checked={row.checked}
+                                onChange={(e) => setRow(pi.id, { checked: e.target.checked, amountStr: e.target.checked ? row.amountStr : "" })}
+                                className="h-4 w-4 cursor-pointer accent-[#6B5C32]"
+                              />
+                            </td>
+                            <td className="px-3 py-1.5 tabular-nums text-xs font-medium">{pi.piNo}</td>
+                            <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{formatDateDMY(pi.invoiceDate)}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums text-xs">{formatCurrency(pi.amountSen)}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums text-xs font-medium">{formatCurrency(outstandingOf(pi))}</td>
+                            <td className="px-3 py-1.5 text-right">
+                              <input
+                                type="number" step="0.01" min="0" inputMode="decimal"
+                                value={row.amountStr}
+                                disabled={!row.checked}
+                                onFocus={(e) => e.currentTarget.select()}
+                                onChange={(e) => setRow(pi.id, { amountStr: e.target.value })}
+                                placeholder="0.00"
+                                className="w-28 rounded-md border border-[#E2DDD8] px-2 py-1 text-sm text-right focus:outline-none focus:ring-1 focus:ring-[#6B5C32] disabled:bg-[#F7F4F0] disabled:text-[#9CA3AF]"
+                              />
+                            </td>
+                            <td className="px-3 py-1.5">
+                              <button
+                                type="button"
+                                onClick={() => fillFull(pi)}
+                                className="text-xs text-[#6B5C32] underline decoration-dotted cursor-pointer"
+                              >
+                                Full
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
-                <div>
-                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">SST (RM)</label>
-                  <input type="number" step="0.01" value={pcnForm.sstRm} onChange={(e) => setPcnForm({ ...pcnForm, sstRm: e.target.value })} className="w-24 rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
-                </div>
-                <Button variant="primary" size="sm" onClick={createPcn}>Save</Button>
+              )}
+              {/* Live footer */}
+              <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-xs text-[#6B7280] pt-1">
+                <span>Allocated: <span className="font-semibold text-[#1F1D1B]">{formatCurrency(allocatedSen)}</span></span>
+                <span>Discount total: <span className="font-semibold text-[#1F1D1B]">{formatCurrency(discountTotalSen)}</span></span>
+                <span>Unallocated: <span className={`font-semibold ${unallocatedSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>{formatCurrency(unallocatedSen)}</span></span>
               </div>
             </div>
           )}
-          {pcns.length > 0 && (
+
+          <div className="flex justify-end border-t border-[#F0ECE9] pt-3">
+            <Button variant="primary" size="sm" onClick={handleSave} disabled={!canSave}>
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* History */}
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <h3 className="font-semibold text-[#1F1D1B]">History</h3>
+          {history.length === 0 ? (
+            <div className="py-8 text-center text-[#9CA3AF] text-sm">No supplier discounts yet.</div>
+          ) : (
             <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                  <th className="px-3 py-2 text-left">No.</th>
-                  <th className="px-3 py-2 text-left">Supplier</th>
-                  <th className="px-3 py-2 text-left">Date</th>
-                  <th className="px-3 py-2 text-left">Reason</th>
-                  <th className="px-3 py-2 text-right">Amount</th>
-                  <th className="px-3 py-2 text-right">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pcns.map((n) => (
-                  <tr key={n.id} className="border-b border-[#F0ECE9]">
-                    <td className="px-3 py-1.5 tabular-nums text-xs">{n.noteNumber}</td>
-                    <td className="px-3 py-1.5">{n.supplierName}</td>
-                    <td className="px-3 py-1.5 text-xs text-[#6B7280]">{n.date}</td>
-                    <td className="px-3 py-1.5 text-xs text-[#6B7280]">{n.reason}</td>
-                    <td className="px-3 py-1.5 text-right font-medium">{formatCurrency(n.totalAmount)}</td>
-                    <td className="px-3 py-1.5 text-right">
-                      {n.status === "POSTED" ? (
-                        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-[#EAF3DE] text-[#27500A] border border-[#C0DD97]">POSTED</span>
-                      ) : (
-                        <button onClick={() => postPcn(n.id, n.noteNumber, n.totalAmount)} className="text-xs text-[#6B5C32] underline decoration-dotted cursor-pointer">Post</button>
-                      )}
-                    </td>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left">No.</th>
+                    <th className="px-3 py-2 text-left">Supplier</th>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Knocked off</th>
+                    <th className="px-3 py-2 text-right">Total</th>
+                    <th className="px-3 py-2 text-left">Status</th>
+                    <th className="px-3 py-2" />
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {history.map((n) => (
+                    <tr key={n.id} className="border-b border-[#F0ECE9]">
+                      <td className="px-3 py-1.5 tabular-nums text-xs font-medium">{n.noteNumber}</td>
+                      <td className="px-3 py-1.5">{n.supplierName}</td>
+                      <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{n.date}</td>
+                      <td className="px-3 py-1.5 text-xs text-[#6B7280]">{n.piNo || "—"}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums font-medium">{formatCurrency(n.totalAmount)}</td>
+                      <td className="px-3 py-1.5">
+                        {n.status === "POSTED" ? (
+                          <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-[#EAF3DE] text-[#27500A] border border-[#C0DD97]">POSTED</span>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-[#F3F0EC] text-[#6B7280] border border-[#E2DDD8]">{n.status}</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 text-right">
+                        {n.status === "POSTED" && (
+                          <button onClick={() => voidNote(n)} className="text-xs text-[#9A3A2D] hover:text-[#7A2E24] underline decoration-dotted cursor-pointer">Void</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </CardContent>

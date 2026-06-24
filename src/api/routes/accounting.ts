@@ -31,6 +31,7 @@ import type { BsSection } from "../../lib/bs-section";
 import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
 import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "../lib/doc-number-service";
+import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import {
   prefixForPartyType,
   computeBillTotals,
@@ -1832,7 +1833,12 @@ app.put("/purchase-credit-notes/:id", async (c) => {
     if (!existing) {
       return c.json({ success: false, error: "Purchase CN not found" }, 404);
     }
-    const body = (await c.req.json()) as { status?: string };
+    const body = (await c.req.json()) as {
+      status?: string;
+      // #6 Supplier Discount: optionally knock the credit off specific unpaid
+      // PIs (one / many / none). Each reduces that PI's outstanding.
+      allocations?: { piId: string; amountSen: number }[];
+    };
     if (body.status !== "POSTED") {
       return c.json(
         { success: false, error: "Only status: 'POSTED' is supported" },
@@ -1927,6 +1933,79 @@ app.put("/purchase-credit-notes/:id", async (c) => {
         500,
       );
     }
+    // ── #6 Supplier Discount — optionally knock the credit off specific PIs ──
+    // Validate server-side (don't trust the client): each allocated PI must be
+    // this supplier's, payable, and the amount ≤ its outstanding; Σ ≤ gross.
+    // Each applied amount reduces that PI's paid_amount_sen (subledger) + leaves
+    // a supplier_payments marker (method=CREDIT_NOTE, NO bank/GL leg — the GL
+    // 400-0000 was already reduced by the CN posting above; the markers just
+    // attribute it to PIs and let Void reverse it). Joins the same atomic batch.
+    const allocs = (body.allocations ?? []).filter(
+      (a) => Math.round(a.amountSen) > 0,
+    );
+    if (allocs.length) {
+      const open: PiOpen[] = [];
+      for (const a of allocs) {
+        const pi = await c.var.DB.prepare(
+          "SELECT id, supplierId, amountSen, paid_amount_sen, status FROM purchase_invoices WHERE id = ?",
+        )
+          .bind(a.piId)
+          .first<Record<string, unknown>>();
+        if (!pi) {
+          return c.json({ success: false, error: `Invoice ${a.piId} not found` }, 400);
+        }
+        if (String(pi.supplierId ?? pi.supplier_id ?? "") !== existing.supplierId) {
+          return c.json({ success: false, error: `Invoice ${a.piId} is not this supplier's` }, 400);
+        }
+        const st = String(pi.status ?? "");
+        if (st !== "APPROVED" && st !== "PARTIAL_PAID") {
+          return c.json({ success: false, error: `Invoice ${a.piId} is not in a payable status` }, 400);
+        }
+        const amount = Number(pi.amountSen ?? pi.amount_sen) || 0;
+        const paid = Number(pi.paid_amount_sen ?? pi.paidAmountSen) || 0;
+        open.push({ piId: a.piId, outstandingSen: amount - paid });
+      }
+      const alloc = computeDiscountAlloc({ discountTotalSen: gross, open, allocations: allocs });
+      if (!alloc.ok) {
+        return c.json({ success: false, error: alloc.error }, 400);
+      }
+      const today = new Date().toISOString().slice(0, 10);
+      for (const ap of alloc.applied) {
+        statements.push(
+          c.var.DB.prepare(
+            `INSERT INTO supplier_payments (
+               id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
+               date, amountSen, bookedSen, foreignSen, payFxRate,
+               method, reference, notes, orgId
+             ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, NULL, 'CREDIT_NOTE', ?, ?, ?)`,
+          ).bind(
+            `sp-${crypto.randomUUID().slice(0, 8)}`,
+            existing.noteNumber,
+            existing.supplierId,
+            existing.supplierName,
+            ap.piId,
+            today,
+            ap.appliedSen,
+            existing.noteNumber,
+            `Supplier discount ${existing.noteNumber}`,
+            orgId,
+          ),
+        );
+        statements.push(
+          c.var.DB.prepare(
+            `UPDATE purchase_invoices
+               SET paid_amount_sen = paid_amount_sen + ?,
+                   status = CASE
+                     WHEN paid_amount_sen + ? >= amount_sen THEN 'PAID'
+                     WHEN paid_amount_sen + ? > 0 THEN 'PARTIAL_PAID'
+                     ELSE status
+                   END
+             WHERE id = ?`,
+          ).bind(ap.appliedSen, ap.appliedSen, ap.appliedSen, ap.piId),
+        );
+      }
+    }
+
     await c.var.DB.batch(statements);
     const updated = await c.var.DB.prepare(
       "SELECT * FROM purchase_credit_notes WHERE id = ?",
@@ -1937,6 +2016,116 @@ app.put("/purchase-credit-notes/:id", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// POST /purchase-credit-notes/:id/void — reverse a posted supplier discount:
+// mirror its GL legs, undo the supplier AP counter, and unwind any PI
+// allocations (add the credited amount back to each PI's outstanding + drop the
+// CREDIT_NOTE markers). Idempotent (re-void blocked by status; GL guarded). (#6)
+app.post("/purchase-credit-notes/:id/void", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const existing = await c.var.DB.prepare(
+    "SELECT * FROM purchase_credit_notes WHERE id = ?",
+  )
+    .bind(id)
+    .first<PcnRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "Purchase CN not found" }, 404);
+  }
+  if (existing.status !== "POSTED") {
+    return c.json(
+      { success: false, error: "Only a posted credit note can be voided" },
+      400,
+    );
+  }
+  const orgId = getOrgId(c);
+  const gross = Number(existing.totalAmount) || 0;
+  const now = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [
+    c.var.DB.prepare(
+      "UPDATE purchase_credit_notes SET status = 'CANCELLED', updatedAt = ? WHERE id = ?",
+    ).bind(now, id),
+    c.var.DB.prepare(
+      "UPDATE suppliers SET outstandingSen = outstandingSen + ? WHERE id = ?",
+    ).bind(gross, existing.supplierId),
+  ];
+  // Reverse the GL once: read the original legs, post their mirror.
+  if (
+    (await ledgerHasSource(c.var.DB, orgId, "purchase_credit_note", id)) &&
+    !(await ledgerHasSource(c.var.DB, orgId, "purchase_credit_note_void", id))
+  ) {
+    const orig =
+      (
+        await c.var.DB.prepare(
+          "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE sourceType = 'purchase_credit_note' AND sourceId = ? AND orgId = ?",
+        )
+          .bind(id, orgId)
+          .all<Record<string, unknown>>()
+      ).results ?? [];
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get(
+        "userId",
+      ) ?? null;
+    const revLegs: LedgerEntryInput[] = orig.map((l, i) => ({
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType: "purchase_credit_note_void",
+      sourceId: id,
+      legNo: i + 1,
+      accountCode: String(l.accountCode ?? l.account_code ?? ""),
+      debitSen: Number(l.creditSen ?? l.credit_sen) || 0,
+      creditSen: Number(l.debitSen ?? l.debit_sen) || 0,
+      description: `VOID Purchase CN ${existing.noteNumber}`,
+      actorUserId,
+      orgId,
+    }));
+    const { statements: ls } = await buildJournalEntryStatements(
+      c.var.DB,
+      orgId,
+      revLegs,
+    );
+    statements.push(...ls);
+  }
+  // Unwind PI allocations: every CREDIT_NOTE marker under this CN's number.
+  const markers =
+    (
+      await c.var.DB.prepare(
+        "SELECT id, purchase_invoice_id, booked_sen FROM supplier_payments WHERE paymentNo = ? AND method = 'CREDIT_NOTE' AND orgId = ?",
+      )
+        .bind(existing.noteNumber, orgId)
+        .all<Record<string, unknown>>()
+    ).results ?? [];
+  for (const mk of markers) {
+    const piId = String(mk.purchase_invoice_id ?? mk.purchaseInvoiceId ?? "");
+    const booked = Number(mk.booked_sen ?? mk.bookedSen) || 0;
+    if (piId && booked > 0) {
+      statements.push(
+        c.var.DB.prepare(
+          `UPDATE purchase_invoices
+             SET paid_amount_sen = GREATEST(0, paid_amount_sen - ?),
+                 status = CASE
+                   WHEN paid_amount_sen - ? <= 0 THEN 'APPROVED'
+                   WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID'
+                   ELSE 'PAID'
+                 END
+           WHERE id = ?`,
+        ).bind(booked, booked, booked, piId),
+      );
+    }
+    statements.push(
+      c.var.DB.prepare("DELETE FROM supplier_payments WHERE id = ?").bind(
+        String(mk.id),
+      ),
+    );
+  }
+  await c.var.DB.batch(statements);
+  const updated = await c.var.DB.prepare(
+    "SELECT * FROM purchase_credit_notes WHERE id = ?",
+  )
+    .bind(id)
+    .first<PcnRow>();
+  return c.json({ success: true, data: rowToPcn(updated!) });
 });
 
 // ---------------------------------------------------------------------------
@@ -1956,14 +2145,15 @@ app.get("/ap-control", async (c) => {
       "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE hidden = 0",
     ).all<{ accountCode: string; debitSen: number; creditSen: number }>(),
     c.var.DB.prepare(
-      `SELECT supplierId, supplierName, piNo, amountSen, status, dueDate
+      `SELECT supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate
          FROM purchase_invoices
-        WHERE status = 'APPROVED'`,
+        WHERE status IN ('APPROVED', 'PARTIAL_PAID')`,
     ).all<{
       supplierId: string;
       supplierName: string;
       piNo: string;
       amountSen: number;
+      paid_amount_sen: number | null;
       status: string;
       dueDate: string | null;
     }>(),
@@ -1971,12 +2161,21 @@ app.get("/ap-control", async (c) => {
       "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers",
     ).first<{ s: number }>(),
   ]);
-  // Posted purchase CNs reduce what we owe — net them off the subledger
-  // (the control account already absorbed their DR 400-0000 legs).
+  // Posted purchase CNs reduce what we owe (the control account already absorbed
+  // their DR 400-0000 legs). The ALLOCATED portion of each CN is already netted
+  // off above via the knocked-off PIs' paid_amount_sen; only the UNALLOCATED
+  // remainder (a supplier-level credit not tied to any PI) must be subtracted
+  // here — otherwise an allocated discount is double-counted (#6).
   const pcnRes = await c.var.DB.prepare(
     "SELECT COALESCE(SUM(totalAmount),0) AS s FROM purchase_credit_notes WHERE status = 'POSTED'",
   ).first<{ s: number }>();
-  const pcnPostedSen = Number(pcnRes?.s) || 0;
+  const cnAllocRes = await c.var.DB.prepare(
+    "SELECT COALESCE(SUM(booked_sen),0) AS s FROM supplier_payments WHERE method = 'CREDIT_NOTE'",
+  ).first<{ s: number }>();
+  const pcnPostedSen = Math.max(
+    0,
+    (Number(pcnRes?.s) || 0) - (Number(cnAllocRes?.s) || 0),
+  );
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
   const resolveCtl = await loadAccountResolver(c.var.DB);
@@ -2012,8 +2211,10 @@ app.get("/ap-control", async (c) => {
   const bySupplier = new Map<string, ApAging>();
   let piOutstandingSen = 0;
   for (const pi of piRes.results ?? []) {
-    const amt = Number(pi.amountSen) || 0;
-    if (amt === 0) continue;
+    // Net outstanding = face − paid (paid includes cash payments AND allocated
+    // CN credits), so a knocked-off discount drops the subledger exactly once.
+    const amt = (Number(pi.amountSen) || 0) - (Number(pi.paid_amount_sen) || 0);
+    if (amt <= 0) continue;
     piOutstandingSen += amt;
     let row = bySupplier.get(pi.supplierId);
     if (!row) {

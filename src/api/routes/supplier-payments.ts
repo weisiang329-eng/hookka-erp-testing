@@ -90,6 +90,7 @@ app.get("/", async (c) => {
              AND dl.sourceId = sp.payment_no
              AND dl.orgId = sp.org_id
       WHERE sp.org_id = ? AND (dl.state IS NULL OR dl.state <> 'DELETED')
+        AND COALESCE(sp.method, '') <> 'CREDIT_NOTE'
       ORDER BY sp.date DESC, sp.payment_no DESC, sp.id DESC`,
   )
     .bind(orgId)

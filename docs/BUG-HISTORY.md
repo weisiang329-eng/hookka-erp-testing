@@ -34,6 +34,30 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-24-006 — customer DO/Invoice notices never sent: the outbox drain 500'd on EVERY run because the status CHECK rejected the 'SENDING' claim state
+
+🟢 **Fixed (prod)** · `email-outbox` · `infrastructure` · owner-reported ("發email和簽收沒問題, 就是 dispatch 的 DO 和 invoice… 因為是 noreply 所以看到不到")
+
+**Symptom:** customer dispatch-DO + invoice notification emails were never delivered. 50 notices sat in `outbox_emails` PENDING for 12h+ (0 sent, 0 even marked failed). Invisible because they send from noreply@ (no human Sent copy). Surfaced immediately by the new Mail Center "Auto-sent" view (FEATURE-2026-06-24-002): 33 sent / 0 failed / 50 pending.
+
+**Root cause:** the drain (`processOutbox`, src/api/lib/email-outbox.ts) uses an atomic per-row claim that sets `status='SENDING'` before contacting the provider. Migration 0081's CHECK only allowed `('PENDING','SENT','FAILED','RETRYING')` — 'SENDING' was never added when the claim feature landed. So the claim UPDATE violated `outbox_emails_status_check` and THREW on the very first row → the cron handler returned HTTP 500 → the ENTIRE batch stranded. Every 5-min run failed identically. (The drain-lag belief in the [[arch_customer_notify_emails]] memory — "GitHub schedule throttling" — was wrong: the runs RAN, they FAILED.)
+
+**Found by:** making the drain's 500 return the real exception (it had returned a blank "drain failed"). The cron log then showed `new row for relation "outbox_emails" violates check constraint "outbox_emails_status_check"`. An earlier "giant SELECT OOM" hypothesis was WRONG — verify-before-fix (surfacing the true error) caught it before shipping the wrong fix.
+
+**Fix (runtime self-apply — migration files are inert on prod):** `ensureOutboxMigrations` (email-outbox.ts, runs at enqueue AND drain) now `DROP CONSTRAINT IF EXISTS outbox_emails_status_check` + re-adds it widened to `('PENDING','SENDING','RETRYING','SENT','FAILED')` (superset of all existing statuses → re-ADD validates cleanly). Also hardened the drain (defense-in-depth, NOT the cause): batch pick is metadata-only + per-row lazy body/attachment fetch; a per-row try/catch marks a poison row FAILED/RETRYING with the real error (visible in Auto-sent) instead of stranding the batch; the /api/internal/process-email-outbox 500 now returns the real message.
+
+**Verified (prod):** after deploy, two manual `gh workflow run process-email-outbox.yml` → both runs **success** (the 12:13 runs had failed); `/api/mail-center/outbox` counts went 33/0/50 → **83 sent / 0 pending / 0 failed**; DO-2606-072/063 + INV-2606-146/145… stamped SENT at 12:25 to operation@houzscentury / operation@carresofficial. Regression test: tests/customer-notify.test.mjs (asserts the 'SENDING' widen + metadata-only pick + per-row isolation).
+
+---
+
+## FEATURE-2026-06-24-002 — Mail Center "Auto-sent" folder: see every customer notice the system emailed (DO / Invoice / CN / PO), incl. status / recipient / time / body
+
+🟢 **Shipped (prod)** · `ui-frontend` · `mail-center` · owner request ("做已發的郵件頁面, 做在 Mail Center 裡面")
+
+**Why:** customer notices send from noreply@ via the durable outbox (`outbox_emails`); the owner had no way to confirm whether / what / when they sent. **What:** a read-only "Auto-sent" folder inside Mail Center — `GET /api/mail-center/outbox` (+ `/outbox/:id` for the body), org-scoped, whole-log status roll-up (sent/failed/pending), per-row recipient + subject + time + status + failure reason, attachment NAMES only (never the base64 blobs), click a row to read the exact email the customer got in a sandboxed iframe. Distinct from "Sent" (= human mailbox replies). file:line: src/api/routes/mail-center.ts (the two /outbox reads), src/pages/mail-center/index.tsx (OutboxPanel + OutboxReaderModal + the "autosent" folder). **Layout fix (same deploy):** the panel used `lg:col-span-2` unconditionally → in the 2-col (no reading-pane) grid it had no col 3 to land in and wrapped full-width to the BOTTOM; now `splitView && "lg:col-span-2"` so it occupies the content column exactly like All mail (verified prod: identical grid cells, x=490 / w=1016). Test: tests/mail-center-outbox.test.mjs.
+
+---
+
 ## FEATURE-2026-06-24-001 — ON HOLD reason: putting an SO/CO on hold now REQUIRES a reason, and the reason + who + when shows on the production grid
 
 🟢 **Shipped (staging — feature)** · `sales-orders` · `production-orders` · `ui-frontend` · owner request

@@ -1073,6 +1073,195 @@ app.get("/threads/:id", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Auto-sent system emails (outbox_emails) — the durable customer-notification
+// outbox that the DO-dispatch / Invoice / CN / PO / invite flows enqueue and
+// the cron drains (lib/email-outbox.ts). The owner needs visibility into these:
+// they go out from noreply@ so there is no human "Sent" copy to look at — Wei
+// Siang 2026-06-24 "因為是 noreply 所以看到不到". Read-only; org-scoped; visible to
+// any Mail Center user (SUPER_ADMIN, or a user with a mailbox in scope).
+//
+// outbox_emails columns are snake_case and NOT in column-rename-map.json, so we
+// alias them to camelCase right here — the SAME pattern the drain uses
+// (processOutbox in lib/email-outbox.ts) — rather than relying on the generic
+// snake→camel result transform.
+// ---------------------------------------------------------------------------
+type OutboxReadRow = {
+  id: string;
+  toAddress: string | null;
+  subject: string | null;
+  status: string | null;
+  attempts: number | string | null;
+  lastError: string | null;
+  lastAttemptAt?: string | null;
+  sentAt: string | null;
+  createdAt: string | null;
+  attachmentsJson: string | null;
+  bodyText: string | null;
+  bodyHtml: string | null;
+};
+
+// attachments_json → filenames ONLY. The base64 blobs never ship to the client
+// (the list/detail are about visibility, not re-download). Bad/legacy JSON
+// degrades to [] — never throw on a read path.
+function outboxAttachmentNames(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((a) => String((a as { filename?: string })?.filename || "").trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+const OUTBOX_STATUSES = ["PENDING", "RETRYING", "SENDING", "SENT", "FAILED"];
+
+// GET /api/mail-center/outbox?status=&q=&limit=&offset= — the org's auto-sent
+// log (newest first). Returns metadata + a snippet + attachment NAMES; the full
+// body comes from GET /outbox/:id. Also returns a status roll-up over the WHOLE
+// org log so the panel header can flag failures.
+app.get("/outbox", async (c) => {
+  const orgId = getOrgId(c);
+  const scope = await getMailScope(c, orgId);
+  const empty = { rows: [], counts: { sent: 0, failed: 0, pending: 0 }, hasMore: false };
+  if (!scope.isAdmin && scope.addresses.length === 0) return c.json(empty);
+  c.header("Cache-Control", "no-store");
+
+  const status = (c.req.query("status") || "").trim().toUpperCase();
+  const q = (c.req.query("q") || "").trim().toLowerCase();
+  const limit = Math.min(
+    Math.max(parseInt(c.req.query("limit") || "60", 10) || 60, 1),
+    200,
+  );
+  const offset = Math.max(parseInt(c.req.query("offset") || "0", 10) || 0, 0);
+
+  try {
+    const where: string[] = ["org_id = ?"];
+    const binds: (string | number)[] = [orgId];
+    if (status && OUTBOX_STATUSES.includes(status)) {
+      where.push("status = ?");
+      binds.push(status);
+    }
+    if (q) {
+      where.push("(LOWER(to_address) LIKE ? OR LOWER(subject) LIKE ?)");
+      const like = `%${q}%`;
+      binds.push(like, like);
+    }
+    const whereSql = where.join(" AND ");
+
+    const res = await c.var.DB.prepare(
+      `SELECT id,
+              to_address       AS "toAddress",
+              subject,
+              status,
+              attempts,
+              last_error       AS "lastError",
+              sent_at          AS "sentAt",
+              created_at       AS "createdAt",
+              attachments_json AS "attachmentsJson",
+              body_text        AS "bodyText",
+              body_html        AS "bodyHtml"
+         FROM outbox_emails
+        WHERE ${whereSql}
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?`,
+    )
+      .bind(...binds, limit, offset)
+      .all<OutboxReadRow>();
+
+    const rows = (res.results ?? []).map((r) => ({
+      id: r.id,
+      toAddress: r.toAddress ?? "",
+      subject: r.subject ?? "(no subject)",
+      status: (r.status ?? "PENDING").toUpperCase(),
+      attempts: Number(r.attempts ?? 0),
+      lastError: r.lastError ?? null,
+      sentAt: r.sentAt ?? null,
+      createdAt: r.createdAt ?? "",
+      snippet: (
+        (r.bodyText && r.bodyText.trim()) ||
+        (r.bodyHtml ? stripHtml(r.bodyHtml) : "")
+      ).slice(0, 200),
+      attachmentNames: outboxAttachmentNames(r.attachmentsJson),
+    }));
+
+    // Status roll-up over the WHOLE org log (not just this page) so the header
+    // can show sent / failed / pending totals and surface any failures.
+    const counts = { sent: 0, failed: 0, pending: 0 };
+    const countRes = await c.var.DB.prepare(
+      `SELECT status, COUNT(*) AS n FROM outbox_emails WHERE org_id = ? GROUP BY status`,
+    )
+      .bind(orgId)
+      .all<{ status: string; n: number | string }>();
+    for (const row of countRes.results ?? []) {
+      const s = String(row.status || "").toUpperCase();
+      const n = Number(row.n ?? 0);
+      if (s === "SENT") counts.sent += n;
+      else if (s === "FAILED") counts.failed += n;
+      else counts.pending += n; // PENDING / RETRYING / SENDING
+    }
+
+    return c.json({ rows, counts, hasMore: rows.length === limit });
+  } catch (e) {
+    // outbox_emails may be absent on a very old deploy — degrade to empty
+    // rather than 500 the Mail Center.
+    console.error("[mail-center] outbox read failed:", e);
+    return c.json(empty);
+  }
+});
+
+// GET /api/mail-center/outbox/:id — one auto-sent email incl. the full body
+// (HTML + text) for the reading pane. Attachment NAMES only (no base64 blobs).
+app.get("/outbox/:id", async (c) => {
+  const orgId = getOrgId(c);
+  const scope = await getMailScope(c, orgId);
+  if (!scope.isAdmin && scope.addresses.length === 0) {
+    return c.json({ error: "not found" }, 404);
+  }
+  const id = c.req.param("id");
+  try {
+    const r = await c.var.DB.prepare(
+      `SELECT id,
+              to_address       AS "toAddress",
+              subject,
+              status,
+              attempts,
+              last_error       AS "lastError",
+              last_attempt_at  AS "lastAttemptAt",
+              sent_at          AS "sentAt",
+              created_at       AS "createdAt",
+              attachments_json AS "attachmentsJson",
+              body_text        AS "bodyText",
+              body_html        AS "bodyHtml"
+         FROM outbox_emails
+        WHERE org_id = ? AND id = ? LIMIT 1`,
+    )
+      .bind(orgId, id)
+      .first<OutboxReadRow>();
+    if (!r) return c.json({ error: "not found" }, 404);
+    return c.json({
+      id: r.id,
+      toAddress: r.toAddress ?? "",
+      subject: r.subject ?? "(no subject)",
+      status: (r.status ?? "PENDING").toUpperCase(),
+      attempts: Number(r.attempts ?? 0),
+      lastError: r.lastError ?? null,
+      lastAttemptAt: r.lastAttemptAt ?? null,
+      sentAt: r.sentAt ?? null,
+      createdAt: r.createdAt ?? "",
+      bodyText: r.bodyText ?? "",
+      bodyHtml: r.bodyHtml ?? "",
+      attachmentNames: outboxAttachmentNames(r.attachmentsJson),
+    });
+  } catch (e) {
+    console.error("[mail-center] outbox detail read failed:", e);
+    return c.json({ error: "not found" }, 404);
+  }
+});
+
 // GET /api/mail-center/addresses — our @hookka.com addresses / aliases.
 // The mailbox list MUST match the thread scope at every visibility level, so a
 // non-admin gets exactly the rows whose lower(address) is in scope.addresses

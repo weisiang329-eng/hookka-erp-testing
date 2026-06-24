@@ -217,18 +217,22 @@ function ItemRow({
   checked,
   onToggle,
   addable,
+  hideCustomerPO,
 }: {
   it: EditItem;
   checked: boolean;
   onToggle: () => void;
   addable?: boolean;
+  // The header already shows one shared Customer PO for the whole DO — drop
+  // the per-row copy then to avoid showing the same reference twice.
+  hideCustomerPO?: boolean;
 }) {
   // The owner reads the PRODUCT CODE (our SKU, e.g. 1013-(K)) and the
   // colour/fabric (e.g. PC151-01) to identify the item — make these the
   // prominent line. Above it, the only customer-facing reference: the
   // Customer PO (there is no customer SO; never show our internal SO no.).
   // Internal product name + size drop to a quiet secondary line.
-  const context = (it.customerPOId || "").trim();
+  const context = hideCustomerPO ? "" : (it.customerPOId || "").trim();
   const productCode = (it.productCode || "").trim();
   const fabric = (it.fabricCode || "").trim();
   const detail = [it.sizeLabel, it.productName]
@@ -706,10 +710,19 @@ export default function DoScanPage() {
 
                 {editableDos.map((d) => {
                   const doChecked = checkedByDo[d.doId] ?? new Set<string>();
-                  // Header shows the DO number (+ customer / branch). No single
-                  // Customer PO here: one DO can hold lines from several customer
-                  // POs, so a header PO (first line only) would be misleading.
-                  // The per-row Customer PO carries that context instead.
+                  // Header shows the DO number (+ customer / branch). Show a
+                  // single Customer PO here ONLY when every line on this DO
+                  // (kept + addable) carries the same one — then it's a safe
+                  // page-level reference. When the DO spans several customer
+                  // POs a header PO would be misleading, so we leave it off and
+                  // let the per-row Customer PO carry the context instead.
+                  const poSet = new Set(
+                    [...d.items, ...d.addable]
+                      .map((it) => (it.customerPOId || "").trim())
+                      .filter(Boolean),
+                  );
+                  const sharedCustomerPO =
+                    poSet.size === 1 ? [...poSet][0] : "";
                   return (
                     <div
                       key={d.doId}
@@ -720,6 +733,11 @@ export default function DoScanPage() {
                           <p className="text-sm font-bold text-[#1F1D1B]">
                             {d.doNo}
                           </p>
+                          {sharedCustomerPO && (
+                            <p className="truncate text-xs text-gray-500 mt-0.5">
+                              Customer PO: {sharedCustomerPO}
+                            </p>
+                          )}
                         </div>
                         <span className="truncate text-xs text-gray-500 text-right shrink-0">
                           {d.customerName}
@@ -735,6 +753,7 @@ export default function DoScanPage() {
                             onToggle={() =>
                               toggleChecked(d.doId, it.productionOrderId)
                             }
+                            hideCustomerPO={!!sharedCustomerPO}
                           />
                         ))}
                       </div>
@@ -753,6 +772,7 @@ export default function DoScanPage() {
                                 toggleChecked(d.doId, it.productionOrderId)
                               }
                               addable
+                              hideCustomerPO={!!sharedCustomerPO}
                             />
                           ))}
                         </div>

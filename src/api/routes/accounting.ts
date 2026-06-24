@@ -2966,6 +2966,23 @@ app.get("/audit-log", async (c) => {
       info.set(`fund_transfer|${d.sourceId}`, { reference: d.sourceId, party: "", amountSen: d.amt ?? 0, docDate: (d.dt ?? "").slice(0, 10) });
   }
 
+  // Resolve actorUserId → displayName so the Audit Log shows WHO voided/deleted
+  // each document, not a raw user id (#10). One lookup over the distinct actors.
+  const actorIds = [
+    ...new Set(rows.map((r) => r.actorUserId).filter((x): x is string => !!x)),
+  ];
+  const actorName = new Map<string, string>();
+  if (actorIds.length) {
+    for (const u of (
+      await c.var.DB.prepare(
+        `SELECT id, displayName FROM users WHERE id IN (${marks(actorIds.length)})`,
+      )
+        .bind(...actorIds)
+        .all<{ id: string; displayName: string | null }>()
+    ).results ?? [])
+      if (u.displayName) actorName.set(u.id, u.displayName);
+  }
+
   const data = rows.map((r) => {
     const i = info.get(`${r.sourceType}|${r.sourceId}`);
     return {
@@ -2974,6 +2991,7 @@ app.get("/audit-log", async (c) => {
       party: i?.party ?? "",
       amountSen: i?.amountSen ?? 0,
       docDate: i?.docDate ?? "",
+      actorName: r.actorUserId ? actorName.get(r.actorUserId) ?? null : null,
     };
   });
   return c.json({ success: true, data });

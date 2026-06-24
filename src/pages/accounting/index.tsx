@@ -267,6 +267,7 @@ type AuditRow = {
   state: string;
   actionAt: string | null;
   actorUserId: string | null;
+  actorName?: string | null;
   reference?: string;
   party?: string;
   amountSen?: number;
@@ -287,6 +288,7 @@ function AuditLogTab() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const [rows, setRows] = useState<AuditRow[] | null>(null);
+  const [query, setQuery] = useState("");
 
   const load = useCallback(() => {
     fetch("/api/accounting/audit-log")
@@ -310,18 +312,46 @@ function AuditLogTab() {
     else toast.error(j?.error || "Restore failed");
   };
 
+  // Client-side search over the (≤1000) loaded rows — matches reference, party,
+  // who (actor), type and state (#10).
+  const q = query.trim().toLowerCase();
+  const filtered =
+    rows === null
+      ? null
+      : !q
+        ? rows
+        : rows.filter((r) =>
+            [
+              AUDIT_DOC_MAP[r.sourceType]?.label ?? r.sourceType,
+              r.reference ?? r.sourceId,
+              r.party,
+              r.actorName ?? r.actorUserId,
+              r.state,
+              r.docDate,
+            ].some((v) => (v ?? "").toLowerCase().includes(q)),
+          );
+
   return (
     <div className="space-y-4">
-      <div>
-        <h2 className="text-lg font-semibold text-[#1F1D1B]">Audit Log</h2>
-        <p className="text-xs text-[#6B7280]">Voided &amp; deleted documents — the GL keeps every reversal; restore any of them here.</p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">Audit Log</h2>
+          <p className="text-xs text-[#6B7280]">Voided &amp; deleted documents — the GL keeps every reversal; restore any of them here.</p>
+        </div>
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search reference / party / who…"
+          className="w-72 rounded-md border border-[#E2DDD8] px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+        />
       </div>
       <Card>
         <CardContent className="p-0 overflow-x-auto">
           {rows === null ? (
             <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
-          ) : rows.length === 0 ? (
-            <div className="py-12 text-center text-[#9CA3AF] text-sm">No voided or deleted documents.</div>
+          ) : (filtered ?? []).length === 0 ? (
+            <div className="py-12 text-center text-[#9CA3AF] text-sm">{q ? "No documents match your search." : "No voided or deleted documents."}</div>
           ) : (
             <table className="w-full text-sm">
               <thead>
@@ -338,7 +368,7 @@ function AuditLogTab() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
+                {(filtered ?? []).map((r) => (
                   <tr key={r.id} className="border-b border-[#F0ECE9]">
                     <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.actionAt ? r.actionAt.slice(0, 19).replace("T", " ") : "—"}</td>
                     <td className="px-3 py-1.5 text-xs">{AUDIT_DOC_MAP[r.sourceType]?.label ?? r.sourceType}</td>
@@ -347,7 +377,7 @@ function AuditLogTab() {
                     <td className="px-3 py-1.5 text-xs">{r.party || "—"}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums text-xs">{r.amountSen ? formatCurrency(r.amountSen) : "—"}</td>
                     <td className="px-3 py-1.5"><LifecycleBadge state={r.state} /></td>
-                    <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.actorUserId ?? "—"}</td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.actorName ?? r.actorUserId ?? "—"}</td>
                     <td className="px-3 py-1.5 text-right">
                       <button onClick={() => unvoid(r)} className="text-[#4F7C3A] hover:text-[#3A5C29] text-xs underline decoration-dotted cursor-pointer">unvoid</button>
                     </td>

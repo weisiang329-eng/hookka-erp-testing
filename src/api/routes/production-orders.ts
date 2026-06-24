@@ -1198,6 +1198,13 @@ async function attachCustomerSO(
     // CO-origin POs leave these "" (consignment has no customer DD concept).
     customerDeliveryDate?: string;
     hookkaExpectedDD?: string;
+    // ON HOLD reason (0185) — sourced from the parent SO / CO via the same
+    // batch join. Surfaces on the production grid's ON HOLD chip + a faint
+    // reason line. Sourcing from the order (not a production_orders column)
+    // means editing a hold reason never requires re-cascading to the POs.
+    holdReason?: string;
+    heldBy?: string;
+    heldAt?: string;
   }>,
 ): Promise<void> {
   if (pos.length === 0) return;
@@ -1217,6 +1224,12 @@ async function attachCustomerSO(
   const soDatesMap = new Map<
     string,
     { customerDeliveryDate: string; hookkaExpectedDD: string }
+  >();
+  // order id (SO or CO) → ON HOLD reason triple. Populated from the same SO /
+  // CO chunk queries below (no extra round-trip). Empty for orders not on hold.
+  const holdMap = new Map<
+    string,
+    { holdReason: string; heldBy: string; heldAt: string }
   >();
   // Chunk well under the bound-variable ceiling.
   const CHUNK = 200;
@@ -1238,7 +1251,7 @@ async function attachCustomerSO(
       soChunks.map((slice) =>
         db
           .prepare(
-            `SELECT id, customerSOId, customerPOId, customerPO, reference, customerDeliveryDate, hookkaExpectedDD FROM sales_orders WHERE id IN (${slice.map(() => "?").join(",")})`,
+            `SELECT id, customerSOId, customerPOId, customerPO, reference, customerDeliveryDate, hookkaExpectedDD, hold_reason, held_by, held_at FROM sales_orders WHERE id IN (${slice.map(() => "?").join(",")})`,
           )
           .bind(...slice)
           .all<{
@@ -1249,6 +1262,14 @@ async function attachCustomerSO(
             reference: string | null;
             customerDeliveryDate: string | null;
             hookkaExpectedDD: string | null;
+            // snake_case columns come back camelCased via the db adapter
+            // (postgres.toCamel: hold_reason → holdReason). Dual-keyed below.
+            holdReason?: string | null;
+            hold_reason?: string | null;
+            heldBy?: string | null;
+            held_by?: string | null;
+            heldAt?: string | null;
+            held_at?: string | null;
           }>(),
       ),
     ),
@@ -1256,10 +1277,19 @@ async function attachCustomerSO(
       coChunks.map((slice) =>
         db
           .prepare(
-            `SELECT id, customerCOId FROM consignment_orders WHERE id IN (${slice.map(() => "?").join(",")})`,
+            `SELECT id, customerCOId, hold_reason, held_by, held_at FROM consignment_orders WHERE id IN (${slice.map(() => "?").join(",")})`,
           )
           .bind(...slice)
-          .all<{ id: string; customerCOId: string | null }>(),
+          .all<{
+            id: string;
+            customerCOId: string | null;
+            holdReason?: string | null;
+            hold_reason?: string | null;
+            heldBy?: string | null;
+            held_by?: string | null;
+            heldAt?: string | null;
+            held_at?: string | null;
+          }>(),
       ),
     ),
   ]);
@@ -1276,10 +1306,30 @@ async function attachCustomerSO(
         customerDeliveryDate: (r.customerDeliveryDate || "").slice(0, 10),
         hookkaExpectedDD: (r.hookkaExpectedDD || "").slice(0, 10),
       });
+      // ON HOLD reason (0185) — dual-key read (snake_case → camelCase via the
+      // adapter, but tolerate the raw key too). Only store a non-empty reason.
+      const hr = (r.holdReason ?? r.hold_reason ?? "").trim();
+      if (hr) {
+        holdMap.set(r.id, {
+          holdReason: hr,
+          heldBy: (r.heldBy ?? r.held_by ?? "").trim(),
+          heldAt: (r.heldAt ?? r.held_at ?? "").slice(0, 16).replace("T", " "),
+        });
+      }
     }
   }
   for (const res of coResults) {
-    for (const r of res.results ?? []) coMap.set(r.id, r.customerCOId || "");
+    for (const r of res.results ?? []) {
+      coMap.set(r.id, r.customerCOId || "");
+      const hr = (r.holdReason ?? r.hold_reason ?? "").trim();
+      if (hr) {
+        holdMap.set(r.id, {
+          holdReason: hr,
+          heldBy: (r.heldBy ?? r.held_by ?? "").trim(),
+          heldAt: (r.heldAt ?? r.held_at ?? "").slice(0, 16).replace("T", " "),
+        });
+      }
+    }
   }
   for (const p of pos) {
     p.customerSO =
@@ -1295,6 +1345,13 @@ async function attachCustomerSO(
     const dates = soDatesMap.get(p.salesOrderId);
     p.customerDeliveryDate = dates?.customerDeliveryDate || "";
     p.hookkaExpectedDD = dates?.hookkaExpectedDD || "";
+    // ON HOLD reason (0185) — from the parent SO or CO. Empty for orders not
+    // on hold; the grid only reads these on ON_HOLD rows anyway.
+    const hold =
+      holdMap.get(p.salesOrderId) || holdMap.get(p.consignmentOrderId);
+    p.holdReason = hold?.holdReason || "";
+    p.heldBy = hold?.heldBy || "";
+    p.heldAt = hold?.heldAt || "";
   }
 }
 

@@ -256,6 +256,13 @@ export type SalesOrder = {
   status: SOStatus;
   /** Saved before transitioning to ON_HOLD so we can resume to the correct state. */
   preHoldStatus?: SOStatus;
+  /** ON HOLD reason capture (0185). When an operator puts the order on hold a
+   *  non-empty reason is REQUIRED; it is stored on the SO (with who put it on
+   *  hold and when) and surfaced on the production grid so the shop floor sees
+   *  why a job is paused. Cleared (back to "") on resume / cancel. */
+  holdReason?: string;
+  heldBy?: string;
+  heldAt?: string;
   overdue: string;
   notes: string;
   /** Make-to-stock flag — set when the SO was generated as a placeholder for

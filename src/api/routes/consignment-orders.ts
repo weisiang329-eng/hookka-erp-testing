@@ -116,6 +116,15 @@ export type ConsignmentOrderRow = {
   notes: string | null;
   cancelledAt: string | null;
   cancellationReason: string | null;
+  // ON HOLD reason capture (0185) — CO mirror of the SO columns. snake_case
+  // hold_reason / held_by / held_at; toCamel exposes them as holdReason /
+  // heldBy / heldAt. Dual-keyed on read. NULL when the CO is not on hold.
+  holdReason?: string | null;
+  hold_reason?: string | null;
+  heldBy?: string | null;
+  held_by?: string | null;
+  heldAt?: string | null;
+  held_at?: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -173,6 +182,10 @@ function rowToCO(row: ConsignmentOrderRow, items: ConsignmentOrderItemRow[]) {
     notes: row.notes ?? "",
     cancelledAt: row.cancelledAt ?? null,
     cancellationReason: row.cancellationReason ?? null,
+    // ON HOLD reason capture (0185) — dual-key read.
+    holdReason: row.holdReason ?? row.hold_reason ?? "",
+    heldBy: row.heldBy ?? row.held_by ?? "",
+    heldAt: row.heldAt ?? row.held_at ?? "",
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
     items: items
@@ -469,17 +482,30 @@ app.get("/", async (c) => {
 // <OrderLineItemEditor> form on the frontend can submit identical payloads
 // to either endpoint.
 // ---------------------------------------------------------------------------
-// 0179 self-apply — Postgres migration files are applied manually (deploy.yml
-// does NOT replay them), so ensure the per-line discount column exists before
-// any CO write touches it. Idempotent ADD COLUMN IF NOT EXISTS, once per isolate.
+// 0179 + 0185 self-apply — Postgres migration files are applied manually
+// (deploy.yml does NOT replay them), so ensure the per-line discount column AND
+// the ON HOLD reason columns exist before any CO write touches them. Idempotent
+// ADD COLUMN IF NOT EXISTS, once per isolate. The hold columns mirror the SO
+// side (sales-orders.ts) so a CO held from the production grid carries the same
+// reason / who / when triple; snake_case so no column-rename-map entry needed.
 let _coDiscountColMig: Promise<void> | null = null;
 function ensureDiscountColumn(db: D1Database): Promise<void> {
   if (!_coDiscountColMig) {
-    _coDiscountColMig = db
-      .prepare("ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0")
-      .run()
-      .then(() => undefined)
-      .catch(() => undefined);
+    _coDiscountColMig = (async () => {
+      const stmts = [
+        "ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS hold_reason TEXT",
+        "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS held_by TEXT",
+        "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS held_at TEXT",
+      ];
+      for (const sql of stmts) {
+        try {
+          await db.prepare(sql).run();
+        } catch {
+          // ignore — column may already exist or DDL transiently rejected
+        }
+      }
+    })();
   }
   return _coDiscountColMig;
 }
@@ -1580,6 +1606,21 @@ app.put("/:id", async (c) => {
           400,
         );
       }
+      // ON HOLD reason gate (0185) — CO mirror of the SO rule. Holding a CO
+      // REQUIRES a non-empty reason (FE hold modal enforces it too).
+      if (requested === "ON_HOLD") {
+        const reason =
+          typeof body.holdReason === "string" ? body.holdReason.trim() : "";
+        if (!reason) {
+          return c.json(
+            {
+              success: false,
+              error: "A reason is required to put this order on hold.",
+            },
+            400,
+          );
+        }
+      }
     }
 
     // Pre-flight: block CANCELLED transition when any job_card under this
@@ -1873,7 +1914,7 @@ app.put("/:id", async (c) => {
            customerCO = ?, customerCOId = ?, customerCODate = ?, reference = ?,
            hubId = ?, hubName = ?, companyCODate = ?, customerDeliveryDate = ?,
            hookkaExpectedDD = ?, subtotalSen = ?, totalSen = ?, status = ?,
-           notes = ?, updated_at = ?
+           notes = ?, hold_reason = ?, held_by = ?, held_at = ?, updated_at = ?
          WHERE id = ?`,
       ).bind(
         merged.customerCO,
@@ -1889,6 +1930,24 @@ app.put("/:id", async (c) => {
         totalSen,
         merged.status,
         merged.notes,
+        // ON HOLD reason (0185). Set on → ON_HOLD (the gate above already
+        // proved a non-empty reason); NULLed on a transition out of / not into
+        // hold; preserved when the status is unchanged (header-only edit).
+        merged.status === "ON_HOLD" && merged.status !== existing.status
+          ? (body.holdReason as string).trim()
+          : merged.status !== existing.status
+            ? null
+            : existing.holdReason ?? existing.hold_reason ?? null,
+        merged.status === "ON_HOLD" && merged.status !== existing.status
+          ? ((body.changedBy as string) || "Admin")
+          : merged.status !== existing.status
+            ? null
+            : existing.heldBy ?? existing.held_by ?? null,
+        merged.status === "ON_HOLD" && merged.status !== existing.status
+          ? now
+          : merged.status !== existing.status
+            ? null
+            : existing.heldAt ?? existing.held_at ?? null,
         now,
         id,
       ),

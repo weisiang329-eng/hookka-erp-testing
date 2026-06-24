@@ -104,6 +104,16 @@ export type SalesOrderRow = {
   // column is NOT NULL DEFAULT FALSE in the DB; the type is nullable here
   // so old serialized rows / partial selects don't choke on absent values.
   isServiceOrder: boolean | null;
+  // ON HOLD reason capture (0185). Snake_case DB columns hold_reason / held_by
+  // / held_at; db-pg `toCamel` exposes them on SELECT * rows as holdReason /
+  // heldBy / heldAt (true snake_case folds cleanly). Both keys typed for
+  // dual-key safety. NULL on every order that is not (or was never) on hold.
+  holdReason?: string | null;
+  hold_reason?: string | null;
+  heldBy?: string | null;
+  held_by?: string | null;
+  heldAt?: string | null;
+  held_at?: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -304,6 +314,13 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
     // column default is FALSE; only rows explicitly created via the new
     // Service Order module flip this to true.
     isServiceOrder: row.isServiceOrder === true,
+    // ON HOLD reason capture (0185). Dual-key read — true snake_case columns
+    // come back as holdReason/heldBy/heldAt via toCamel, but read the raw
+    // snake_case key too in case a SELECT bypasses the adapter. NULL → "" so
+    // the detail page can render without null checks.
+    holdReason: row.holdReason ?? row.hold_reason ?? "",
+    heldBy: row.heldBy ?? row.held_by ?? "",
+    heldAt: row.heldAt ?? row.held_at ?? "",
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
   };
@@ -1852,6 +1869,17 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE sales_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
+      // 0185 — ON HOLD reason capture. When an SO is put on hold the operator
+      // must enter a reason; it is stored here (+ who put it on hold and when)
+      // so the production grid can surface "why is this paused" at-a-glance.
+      // snake_case columns (no rename-map dependency — the route SQL references
+      // the literal snake_case names directly). NULLed again on resume/cancel so
+      // a re-activated order never shows a stale reason. Runtime self-apply
+      // because deploy.yml does NOT replay Postgres migration files — the
+      // migration file alone would be inert (see the discount_sen note above).
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS hold_reason TEXT",
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS held_by TEXT",
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS held_at TEXT",
     ];
     for (const sql of stmts) {
       try {
@@ -3194,6 +3222,13 @@ app.put("/:id", async (c) => {
     // Cascade result from ON_HOLD / CANCELLED / RESUME transitions — prepended
     // to the batch below so the SO + PO + JC updates land atomically.
     let cascade: SOCascadeResult | null = null;
+    // ON HOLD reason capture (0185). When the SO transitions INTO ON_HOLD the
+    // operator must supply a non-empty reason (enforced below + on the FE
+    // hold modal — same reject both sides). Stamped onto the SO row + the
+    // so_status_changes audit notes. Cleared (NULL) on any non-hold
+    // transition so a resumed / cancelled order never shows a stale reason.
+    let holdReason: string | null = null; // set on → ON_HOLD, NULL otherwise
+    let clearHoldFields = false; // true on any transition OUT of / not-into hold
 
     // --- Status change with validation ---
     if (body.status && body.status !== existing.status) {
@@ -3215,6 +3250,28 @@ app.put("/:id", async (c) => {
       isDraftToConfirmed =
         (existing.status === "DRAFT" || existing.status === "PENDING") &&
         (newStatus === "CONFIRMED" || newStatus === "IN_PRODUCTION");
+
+      // ON HOLD reason gate (0185). Putting an order on hold REQUIRES a
+      // non-empty reason — the FE hold modal enforces this too; this is the
+      // backend half of the unified FE+BE input-rejection rule. Any other
+      // transition clears the previously stored reason so a resumed /
+      // cancelled order never carries a stale "why paused" note.
+      if (newStatus === "ON_HOLD") {
+        const reason =
+          typeof body.holdReason === "string" ? body.holdReason.trim() : "";
+        if (!reason) {
+          return c.json(
+            {
+              success: false,
+              error: "A reason is required to put this order on hold.",
+            },
+            400,
+          );
+        }
+        holdReason = reason;
+      } else {
+        clearHoldFields = true;
+      }
 
       // Pre-flight: block CANCELLED transition when any job_card under this
       // SO's POs has a completedDate stamped. Stranded inventory would result
@@ -3290,7 +3347,12 @@ app.put("/:id", async (c) => {
             newStatus,
             (body.changedBy as string) || "Admin",
             now,
-            (body.statusNotes as string) || `Status changed to ${newStatus}`,
+            // On a hold, the audit note IS the reason ("On hold: <reason>") so
+            // the status-history panel reads meaningfully instead of the
+            // generic default. Other transitions keep the existing default.
+            holdReason
+              ? `On hold: ${holdReason}`
+              : (body.statusNotes as string) || `Status changed to ${newStatus}`,
             JSON.stringify(cascade?.actions ?? []),
           ),
         );
@@ -3766,6 +3828,7 @@ app.put("/:id", async (c) => {
            customerDeliveryDate = ?, hookkaExpectedDD = ?, hookkaDeliveryOrder = ?,
            subtotalSen = ?, totalSen = ?, status = ?, overdue = ?,
            notes = ?, is_service_order = ?,
+           hold_reason = ?, held_by = ?, held_at = ?,
            updated_at = ?
          WHERE id = ?`,
       ).bind(
@@ -3791,6 +3854,24 @@ app.put("/:id", async (c) => {
         merged.overdue,
         merged.notes,
         mergedIsServiceOrder,
+        // ON HOLD reason (0185). Set on → ON_HOLD; NULLed on any transition
+        // out of / not into hold; preserved otherwise (e.g. a header-only
+        // edit while the order is on hold keeps the existing reason).
+        holdReason !== null
+          ? holdReason
+          : clearHoldFields
+            ? null
+            : existing.holdReason ?? existing.hold_reason ?? null,
+        holdReason !== null
+          ? ((body.changedBy as string) || "Admin")
+          : clearHoldFields
+            ? null
+            : existing.heldBy ?? existing.held_by ?? null,
+        holdReason !== null
+          ? now
+          : clearHoldFields
+            ? null
+            : existing.heldAt ?? existing.held_at ?? null,
         now,
         id,
       ),

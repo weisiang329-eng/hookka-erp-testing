@@ -25,6 +25,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+// Dynamic import() of an absolute path needs a file:// URL on Windows
+// (a bare "C:\..." path throws ERR_UNSUPPORTED_ESM_URL_SCHEME).
+const PROD_API_URL = pathToFileURL(
+  resolve(process.cwd(), "src/api/routes/production-orders.ts"),
+).href;
 
 const SO = resolve(process.cwd(), "src/api/routes/sales-orders.ts");
 const CO = resolve(process.cwd(), "src/api/routes/consignment-orders.ts");
@@ -294,4 +301,210 @@ test("CO detail hold modal requires a reason and sends holdReason + changedBy", 
     /status: newStatus, holdReason: \(holdReason \|\| ""\)\.trim\(\), changedBy: actor/,
     "CO ON_HOLD PUT body must carry holdReason + changedBy(actor).",
   );
+});
+
+// ===========================================================================
+// BEHAVIORAL (runtime) — the bit the structural pins above MISSED.
+//
+// The structural tests only prove `p.holdReason =` appears in the source.
+// They CANNOT catch the real BUG-2026-06-24-001 failure mode: the production
+// grid fetches /api/production-orders?fields=minimal, whose rows are built by
+// rowToMinimalPO. Before the fix, holdReason was NOT a declared key in that
+// projection — it only existed if attachCustomerSO's late mutation happened to
+// survive. customerSO survived (declared "" in the literal) but holdReason
+// did NOT, so an ON_HOLD row's reason never reached the FE — not even "".
+//
+// This test runs the REAL row→minimal projection (rowToMinimalPO) + the REAL
+// SO-join enrich (attachCustomerSO, against a fake D1) the endpoint uses, then
+// JSON-round-trips the row (exactly what the wire / list snapshot does) and
+// asserts the reason is present and correct.
+// ===========================================================================
+
+// Minimal fake D1 — just enough of prepare().bind().all()/first() for
+// attachCustomerSO. It returns a single SO row carrying the snake_case
+// hold columns (mirrors the real SELECT in attachCustomerSO).
+function makeFakeDb(soRow) {
+  return {
+    prepare(sql) {
+      return {
+        _sql: sql,
+        bind() {
+          return this;
+        },
+        async all() {
+          // attachCustomerSO fires one SELECT against sales_orders and one
+          // against consignment_orders. Only the SO query has a match here.
+          if (/FROM sales_orders/.test(this._sql)) {
+            return { results: [soRow] };
+          }
+          return { results: [] };
+        },
+        async first() {
+          return null;
+        },
+      };
+    },
+  };
+}
+
+test("BEHAVIORAL: minimal projection + SO-join enrich carries holdReason to the grid row", async () => {
+  const { rowToMinimalPO, attachCustomerSO } = await import(PROD_API_URL);
+
+  const SO_ID = "so_hold_1";
+  const REASON = "Customer requested fabric change";
+  const HELD_BY = "Wei Siang";
+  const HELD_AT = "2026-06-24T09:30:00.000Z";
+
+  // An ON_HOLD production order linked to the SO above.
+  const poRow = {
+    id: "po_hold_1",
+    poNo: "PO-2606-001",
+    salesOrderId: SO_ID,
+    salesOrderNo: "SO-2606-001",
+    companySOId: "SO-2606-001",
+    consignmentOrderId: "",
+    companyCOId: "",
+    customerPOId: "",
+    customerReference: "",
+    customerName: "Houzs",
+    customerState: "Selangor",
+    productId: "p1",
+    productCode: "BO315-02",
+    productName: "Bedframe",
+    itemCategory: "BEDFRAME",
+    sizeCode: "Q",
+    sizeLabel: "Queen",
+    fabricCode: "M2402-4",
+    quantity: 1,
+    gapInches: null,
+    divanHeightInches: null,
+    legHeightInches: null,
+    specialOrder: "",
+    status: "ON_HOLD",
+    currentDepartment: "WOOD_CUT",
+    progress: 0,
+    completedDate: null,
+    lineNo: 1,
+    targetEndDate: "",
+  };
+
+  // 1) Build the minimal grid row the same way the endpoint does.
+  const minimal = rowToMinimalPO(poRow);
+
+  // The projection alone must ALREADY carry the key (even before the join) —
+  // this is the anchor that lets it survive the list snapshot.
+  assert.equal(
+    minimal.holdReason,
+    "",
+    "rowToMinimalPO must emit holdReason as a declared '' default (the snapshot-safe anchor).",
+  );
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(minimal, "heldBy"),
+    "rowToMinimalPO must emit heldBy as an own key.",
+  );
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(minimal, "heldAt"),
+    "rowToMinimalPO must emit heldAt as an own key.",
+  );
+
+  // 1b) SNAPSHOT-SAFETY — the exact live failure mode. The production grid is
+  //     served from production_orders_list_snapshot, a JSON blob that
+  //     writeSnapshot() captures via JSON.stringify and readSnapshot() returns
+  //     via JSON.parse. Round-trip the bare projection (no join) and confirm the
+  //     keys survive. Before the fix holdReason was NOT an own-property of the
+  //     projection, so a snapshot blob (or KV body) captured around the deploy
+  //     window had NO holdReason key for ANY row — "not even an empty string"
+  //     — which is precisely what was observed on prod.
+  const snapshotBlob = JSON.parse(JSON.stringify(minimal));
+  for (const key of ["holdReason", "heldBy", "heldAt"]) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(snapshotBlob, key),
+      `The list-snapshot blob must contain '${key}' even before the SO join — the key must be a declared own-property of rowToMinimalPO, not a post-hoc mutation the cache can drop.`,
+    );
+  }
+
+  // 2) Run the REAL SO-join enrich against a fake SO row that is ON HOLD.
+  const soRow = {
+    id: SO_ID,
+    customerSOId: "CUST-SO-77",
+    customerPOId: null,
+    customerPO: null,
+    reference: null,
+    customerDeliveryDate: null,
+    hookkaExpectedDD: null,
+    hold_reason: REASON,
+    held_by: HELD_BY,
+    held_at: HELD_AT,
+  };
+  const rows = [minimal];
+  await attachCustomerSO(makeFakeDb(soRow), rows);
+
+  // 3) JSON round-trip — exactly what the wire AND the list snapshot blob do.
+  const onWire = JSON.parse(JSON.stringify(rows[0]));
+
+  // The grid MUST receive the reason (this is the live symptom that was broken).
+  assert.equal(
+    onWire.holdReason,
+    REASON,
+    "The minimal payload for an ON_HOLD order whose SO has hold_reason MUST carry holdReason === the SO reason.",
+  );
+  assert.equal(onWire.heldBy, HELD_BY, "The minimal payload must carry heldBy from the SO.");
+  assert.equal(
+    onWire.heldAt,
+    HELD_AT.slice(0, 16).replace("T", " "),
+    "The minimal payload must carry heldAt (trimmed to minute, space-separated) from the SO.",
+  );
+
+  // Regression guard: customerSO must still resolve from the same join.
+  assert.equal(
+    onWire.customerSO,
+    "CUST-SO-77",
+    "customerSO must still resolve from the SO join (don't regress the existing field).",
+  );
+});
+
+test("BEHAVIORAL: a NON-hold order still exposes the key as '' (present, not missing)", async () => {
+  const { rowToMinimalPO, attachCustomerSO } = await import(PROD_API_URL);
+
+  const SO_ID = "so_nohold_1";
+  const poRow = {
+    id: "po_nohold_1",
+    poNo: "PO-2606-002",
+    salesOrderId: SO_ID,
+    salesOrderNo: "SO-2606-002",
+    companySOId: "SO-2606-002",
+    consignmentOrderId: "",
+    companyCOId: "",
+    quantity: 2,
+    lineNo: 1,
+    status: "IN_PROGRESS",
+  };
+
+  const minimal = rowToMinimalPO(poRow);
+  // SO row with NO hold reason (resumed / never held).
+  const soRow = {
+    id: SO_ID,
+    customerSOId: "CUST-SO-99",
+    customerPOId: null,
+    customerPO: null,
+    reference: null,
+    customerDeliveryDate: null,
+    hookkaExpectedDD: null,
+    hold_reason: null,
+    held_by: null,
+    held_at: null,
+  };
+  const rows = [minimal];
+  await attachCustomerSO(makeFakeDb(soRow), rows);
+  const onWire = JSON.parse(JSON.stringify(rows[0]));
+
+  // The key must be PRESENT as "" — not absent. "Not even an empty string for
+  // ANY row" was the precise live symptom; this pins the always-present invariant.
+  assert.equal(
+    onWire.holdReason,
+    "",
+    "A non-hold order's holdReason must be present as '' (key never missing).",
+  );
+  assert.equal(onWire.heldBy, "", "heldBy must be present as '' on a non-hold order.");
+  assert.equal(onWire.heldAt, "", "heldAt must be present as '' on a non-hold order.");
 });

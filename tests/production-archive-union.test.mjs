@@ -28,6 +28,13 @@ test("helper introspects, self-heals the archive, and is memoized", () => {
   assert.match(helper, /specCache/, "must memoize per (hot|archive) pair");
 });
 
+test("helper backfills org_id so pre-multi-tenant archive rows surface", () => {
+  // Archive rows have NULL org_id → the org-scoped read filters them all out.
+  // The helper must backfill (idempotent) to the default org.
+  assert.match(helper, /UPDATE \$\{archive\} SET "org_id" = \? WHERE "org_id" IS NULL/);
+  assert.match(helper, /DEFAULT_ORG_ID/, "must bind the default org id for the backfill");
+});
+
 test("helper emits an explicit quoted column list, not SELECT *", () => {
   // The whole point: no `SELECT *` in the emitted UNION.
   assert.doesNotMatch(

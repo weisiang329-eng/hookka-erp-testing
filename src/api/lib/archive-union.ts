@@ -32,6 +32,8 @@
 // and the caller falls back to the legacy literal (no regression vs today).
 // ---------------------------------------------------------------------------
 
+import { DEFAULT_ORG_ID } from "./tenant";
+
 type ColInfo = { name: string; ord: number; dataType: string };
 
 // One flight per (hot|archive) pair per isolate. The resolved value is just a
@@ -143,6 +145,23 @@ export async function archiveUnionSource(
         // A column we couldn't add is dropped from the list below, so the UNION
         // still has matching counts (it just omits that column for both sides).
         console.warn("[archive-union] ALTER skipped", archive, c.name, e);
+      }
+    }
+
+    // 1b) Backfill org_id. Archive rows predate multi-tenancy, so once the
+    //     column exists it is NULL on every archived row — and the org-scoped
+    //     read (`WHERE org_id = ?`) then filters them ALL out, so no archived
+    //     row ever surfaces. Backfill to the default org (Hookka is single
+    //     tenant; archive rows all belong to it). Idempotent (`WHERE … IS NULL`
+    //     → no-ops once filled), runs once per isolate via the memoized promise.
+    if (archSet.has("org_id")) {
+      try {
+        await db
+          .prepare(`UPDATE ${archive} SET "org_id" = ? WHERE "org_id" IS NULL`)
+          .bind(DEFAULT_ORG_ID)
+          .run();
+      } catch (e) {
+        console.warn("[archive-union] org_id backfill skipped", archive, e);
       }
     }
 

@@ -58,6 +58,42 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-24-009 — single row-by-row completion vanished from the production grid on the ~20s poll
+
+🟢 **Fixed (prod, `baa3a07b`)** · `production-orders` · `ui-frontend`
+
+**Symptom:** completing a production row ONE AT A TIME (typing the completion cell, or flipping the Status cell to COMPLETED/TRANSFERRED) showed it done for a moment, then the row VANISHED on the next ~20s poll — until a manual reload. Batch-complete did not have this.
+
+**Root cause:** only the BATCH path added the just-completed ids to `forceShowCompletedIds` — the allowlist that keeps a completed row on screen until reload (the poll refetch otherwise drops COMPLETED rows out of the active grid). The two single-row paths (completion cell + status-cell flip) never fed that allowlist.
+
+**Fix:** src/pages/production/index.tsx — a `markRowCompletedVisible(row.id, isCompleted)` useCallback now feeds the same `forceShowCompletedIds` allowlist, called from BOTH the status-cell flip (`next === "COMPLETED" || "TRANSFERRED"`) and the completion cell. Single / batch / folder now behave identically. Test: tests/production-batch-completion-reveal.test.mjs (section 7).
+
+---
+
+## BUG-2026-06-24-008 — completion date / PIC written to job_cards but INVISIBLE on the production grid for a day (WOOD_CUT)
+
+🟢 **Fixed (prod)** · `production-orders` · `infrastructure` · owner-reported ("進了就不該不見、怎麼會不見又跑出來")
+
+**Symptom:** a dept-grid cell edit with NO PO-status change (a PIC assignment or a completion-date set) was written to job_cards — proven via `?fresh=1` reads: SO-2606-160/161/152 WOOD_CUT showed COMPLETED + a PIC in the DB — yet stayed invisible on the operator grid across many refreshes for a full day.
+
+**Root cause:** `invalidateProductionListCaches` only MARKED `production_orders_list_snapshot` stale (built_from = epoch) and relied on serve-stale-while-revalidate to recompute in the background. That revalidation did not reliably rewrite the snapshot, so the read kept serving the stale copy AND re-cached it into the 60s KV layer.
+
+**Fix:** production-orders.ts `invalidateProductionListCaches` now `DELETE FROM production_orders_list_snapshot WHERE org_id = ?` (+ bumps the KV list-cache version) so the next read COLD-recomputes FRESH, regardless of the flaky probe. Cost model (owner asked "會不會爆"): the recompute is LAZY / read-bound (~once per ~20s poll), NOT per-edit — N edits = N instant clears + ONE recompute on the next read. Eager recompute-on-write would be the storm; this avoids it. Test: tests/production-list-cache-invalidate.test.mjs.
+
+---
+
+## BUG-2026-06-24-007 — production list GET 500'd "column hold_reason does not exist" (regression from the -008 DELETE-on-write fix)
+
+🟢 **Fixed (prod)** · `production-orders` · `data-migration`
+
+**Symptom:** shortly after the -008 DELETE-on-write fix shipped, the production list 500'd and the grid blanked.
+
+**Root cause:** the DELETE forces a COLD snapshot recompute on the READ path. That recompute's SQL references the `hold_reason` / `held_by` / `held_at` columns (added for FEATURE-2026-06-24-001 ON HOLD reason) — but those runtime `ALTER … ADD COLUMN IF NOT EXISTS` were only awaited on the POST/PUT WRITE paths, never on the GET. On a prod isolate that hadn't served a write yet, the columns didn't exist → the cold-recompute SELECT threw → 500. Classic "migration file is inert; runtime self-apply must be wired on EVERY path that reads the column."
+
+**Fix:** production-orders.ts — added the hold_reason/held_by/held_at ALTERs to `ensurePendingMigrations`, and `await ensurePendingMigrations(c.var.DB)` at the top of the GET `/` handler (before the cache / withSnapshot read), so the read path self-applies the columns too. Verified: grid restored on prod.
+
+---
+
 ## FEATURE-2026-06-24-001 — ON HOLD reason: putting an SO/CO on hold now REQUIRES a reason, and the reason + who + when shows on the production grid
 
 🟢 **Shipped (staging — feature)** · `sales-orders` · `production-orders` · `ui-frontend` · owner request

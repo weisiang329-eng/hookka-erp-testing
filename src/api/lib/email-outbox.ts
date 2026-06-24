@@ -194,13 +194,13 @@ const BATCH_SIZE = 25;
 // after this window so it's never stranded.
 const STALE_SENDING_MS = 5 * 60_000;
 
+// Batch-pick row — METADATA ONLY (the body/attachments are fetched per-row in
+// the loop; see processOutbox). Keeping the pick light is what stops a queue of
+// PDF-bearing invoices from OOM-ing the whole drain.
 interface OutboxRow {
   id: string;
   toAddress: string;
   subject: string;
-  bodyHtml: string | null;
-  bodyText: string | null;
-  attachmentsJson: string | null;
   status: string;
   attempts: number;
   lastAttemptAt: string | null;
@@ -298,14 +298,18 @@ export async function processOutbox(
   // pickable again, so an evicted eager push never strands an email.
   const staleThreshold = new Date(Date.now() - STALE_SENDING_MS).toISOString();
 
+  // Lightweight pick — METADATA ONLY. body_html / body_text / attachments_json
+  // (the DO/Invoice PDFs ride attachments_json as base64) are fetched PER ROW
+  // inside the loop. Pulling all of them for a 25-row batch in ONE result set
+  // blew past the Worker's memory/response budget once a batch of PDF-bearing
+  // invoices queued up, so .all() THREW → the cron handler 500'd → the ENTIRE
+  // queue stranded (nothing sent, nothing even marked failed). 2026-06-24
+  // BUG: 50 customer DO/Invoice notices stuck PENDING for 12h+.
   const pickRes = await db
     .prepare(
       `SELECT id,
               to_address      AS "toAddress",
               subject,
-              body_html       AS "bodyHtml",
-              body_text       AS "bodyText",
-              attachments_json AS "attachmentsJson",
               status,
               attempts,
               last_attempt_at AS "lastAttemptAt"
@@ -361,53 +365,106 @@ export async function processOutbox(
       continue;
     }
 
-    const send = await sendMail(env, from, {
-      to: row.toAddress,
-      subject: row.subject,
-      html: row.bodyHtml ?? "",
-      text: row.bodyText ?? undefined,
-      // Stored attachments ride along to the provider (Resend
-      // `attachments` / Brevo `attachment`); rows without a value behave
-      // exactly as before.
-      attachments: parseStoredAttachments(row.attachmentsJson),
-    });
-
     const newAttempts = row.attempts + 1;
     const nowIso = new Date().toISOString();
 
-    if (send.ok) {
-      await db
+    // Per-row isolation: a single poison row (oversize body, malformed
+    // attachment, a transient DB/provider blip) must NEVER throw out of the
+    // loop and strand the rest of the batch — that was the 2026-06-24 bug.
+    try {
+      // Lazy per-row body fetch (see the pick comment above) — ONE row's
+      // payload is safely within budget even when it carries a ~MB PDF.
+      const full = await db
         .prepare(
-          `UPDATE outbox_emails
-              SET status = 'SENT', attempts = ?, last_attempt_at = ?, sent_at = ?, last_error = NULL
-            WHERE id = ?`,
+          `SELECT body_html       AS "bodyHtml",
+                  body_text       AS "bodyText",
+                  attachments_json AS "attachmentsJson"
+             FROM outbox_emails WHERE id = ? LIMIT 1`,
         )
-        .bind(newAttempts, nowIso, nowIso, row.id)
-        .run();
-      result.sent++;
-      continue;
-    }
+        .bind(row.id)
+        .first<{
+          bodyHtml: string | null;
+          bodyText: string | null;
+          attachmentsJson: string | null;
+        }>();
 
-    if (newAttempts >= MAX_ATTEMPTS) {
-      await db
-        .prepare(
-          `UPDATE outbox_emails
-              SET status = 'FAILED', attempts = ?, last_attempt_at = ?, last_error = ?
-            WHERE id = ?`,
-        )
-        .bind(newAttempts, nowIso, send.error ?? "unknown", row.id)
-        .run();
-      result.failed++;
-    } else {
-      await db
-        .prepare(
-          `UPDATE outbox_emails
-              SET status = 'RETRYING', attempts = ?, last_attempt_at = ?, last_error = ?
-            WHERE id = ?`,
-        )
-        .bind(newAttempts, nowIso, send.error ?? "unknown", row.id)
-        .run();
-      result.retrying++;
+      const send = await sendMail(env, from, {
+        to: row.toAddress,
+        subject: row.subject,
+        html: full?.bodyHtml ?? "",
+        text: full?.bodyText ?? undefined,
+        // Stored attachments ride along to the provider (Resend `attachments`
+        // / Brevo `attachment`); rows without a value behave exactly as before.
+        attachments: parseStoredAttachments(full?.attachmentsJson ?? null),
+      });
+
+      if (send.ok) {
+        await db
+          .prepare(
+            `UPDATE outbox_emails
+                SET status = 'SENT', attempts = ?, last_attempt_at = ?, sent_at = ?, last_error = NULL
+              WHERE id = ?`,
+          )
+          .bind(newAttempts, nowIso, nowIso, row.id)
+          .run();
+        result.sent++;
+        continue;
+      }
+
+      if (newAttempts >= MAX_ATTEMPTS) {
+        await db
+          .prepare(
+            `UPDATE outbox_emails
+                SET status = 'FAILED', attempts = ?, last_attempt_at = ?, last_error = ?
+              WHERE id = ?`,
+          )
+          .bind(newAttempts, nowIso, send.error ?? "unknown", row.id)
+          .run();
+        result.failed++;
+      } else {
+        await db
+          .prepare(
+            `UPDATE outbox_emails
+                SET status = 'RETRYING', attempts = ?, last_attempt_at = ?, last_error = ?
+              WHERE id = ?`,
+          )
+          .bind(newAttempts, nowIso, send.error ?? "unknown", row.id)
+          .run();
+        result.retrying++;
+      }
+    } catch (rowErr) {
+      // The poison-row guard. Record the real reason on the row (visible in the
+      // Mail Center "Auto-sent" view) and keep draining the rest of the batch.
+      const msg = rowErr instanceof Error ? rowErr.message : String(rowErr);
+      console.error("[email-outbox] row", row.id, "failed:", msg);
+      try {
+        const terminal = newAttempts >= MAX_ATTEMPTS;
+        await db
+          .prepare(
+            `UPDATE outbox_emails
+                SET status = ?, attempts = ?, last_attempt_at = ?, last_error = ?
+              WHERE id = ?`,
+          )
+          .bind(
+            terminal ? "FAILED" : "RETRYING",
+            newAttempts,
+            nowIso,
+            msg.slice(0, 500),
+            row.id,
+          )
+          .run();
+        if (terminal) result.failed++;
+        else result.retrying++;
+      } catch (bookErr) {
+        // Even the bookkeeping write failed — the stale-SENDING reclaim picks
+        // this row up next tick. Log and carry on; never strand the batch.
+        console.error(
+          "[email-outbox] row",
+          row.id,
+          "status write also failed:",
+          bookErr instanceof Error ? bookErr.message : String(bookErr),
+        );
+      }
     }
   }
 

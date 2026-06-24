@@ -506,11 +506,26 @@ test("outbox: attachments_json stored on enqueue and read back by the drain", ()
     2,
     "ensureOutboxMigrations must run at enqueue AND drain",
   );
-  // The drain forwards stored attachments into the provider send.
+  // The drain forwards stored attachments into the provider send. Body +
+  // attachments are fetched PER ROW (`full`), NOT in the batch pick, so a queue
+  // of PDF-bearing invoices can't OOM the drain (2026-06-24 strand bug: 50
+  // customer notices stuck PENDING because the 25-row pick of PDF base64 threw).
   assert.match(
     outboxSrc,
-    /attachments: parseStoredAttachments\(row\.attachmentsJson\)/,
-    "drain sendMail call must pass the stored attachments",
+    /attachments: parseStoredAttachments\(full\?\.attachmentsJson/,
+    "drain sendMail call must pass the stored attachments (per-row fetch)",
+  );
+  assert.match(
+    outboxSrc,
+    /FROM outbox_emails WHERE id = \? LIMIT 1/,
+    "drain must fetch each row's body+attachments PER ROW (the batch pick is " +
+      "metadata-only) so a PDF-heavy queue can't blow the Worker memory budget",
+  );
+  assert.match(
+    outboxSrc,
+    /catch \(rowErr\)/,
+    "drain must isolate a poison row (per-row try/catch marks it FAILED/" +
+      "RETRYING with the error) so one bad row can never strand the whole batch",
   );
 });
 

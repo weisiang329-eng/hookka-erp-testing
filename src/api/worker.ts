@@ -422,8 +422,12 @@ app.post("/api/internal/process-email-outbox", async (c) => {
     );
     return c.json({ ok: true, ...result });
   } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
     console.error("[process-email-outbox] error:", e);
-    return c.json({ ok: false, error: "drain failed" }, 500);
+    // Surface the real reason in the (CRON_SECRET-gated) response so the cron
+    // log shows WHY a drain failed instead of a blank "drain failed". This is
+    // how a future strand gets diagnosed in seconds. 2026-06-24.
+    return c.json({ ok: false, error: `drain failed: ${msg}` }, 500);
   }
 });
 

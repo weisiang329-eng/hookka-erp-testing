@@ -1669,7 +1669,11 @@ export default function MailCenterPage() {
             content area; every other folder keeps the thread list (+ the split
             reading pane). The left rail stays mounted either way. */}
         {folder === "autosent" ? (
-          <div className="min-w-0 lg:col-span-2">
+          // Sits in the content column exactly like the thread list. Only span
+          // cols 2-3 when the 3-col SPLIT grid is active; in the 2-col grid a
+          // col-span-2 has no col 3 to land in and wraps the panel to a new row
+          // (full-width, stuck at the bottom) — the bug Wei Siang spotted.
+          <div className={cn("min-w-0", splitView && "lg:col-span-2")}>
             <OutboxPanel />
           </div>
         ) : (

@@ -128,6 +128,22 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
   pendingMigrations = (async () => {
     const stmts = [
       "ALTER TABLE job_cards ADD COLUMN IF NOT EXISTS distributedAt TEXT",
+      // ON HOLD reason columns (BUG-2026-06-24-008). The production list READ
+      // joins sales_orders / consignment_orders and SELECTs
+      // hold_reason/held_by/held_at (attachCustomerSO). Those columns are added
+      // by the SO/CO WRITE path's own ensure — but the production read's cold
+      // recompute can run BEFORE any SO/CO write has created them on this DB,
+      // so the recompute 500s ("column hold_reason does not exist"). It stayed
+      // hidden while the stale snapshot was served (never recomputed); forcing a
+      // recompute exposed it. Ensure them on the READ path too. TEXT for all
+      // three is type-safe (IF NOT EXISTS no-ops if the SO/CO ensure already
+      // created them; a timestamp string stores fine in TEXT).
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS hold_reason TEXT",
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS held_by TEXT",
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS held_at TEXT",
+      "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS hold_reason TEXT",
+      "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS held_by TEXT",
+      "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS held_at TEXT",
       // BUG-2026-05-12 (FOAM 326 cleanup): WIP cascade idempotency log. Every
       // call to applyWipInventoryChange first INSERTs into this table with
       // ON CONFLICT DO NOTHING; if no row was inserted the cascade
@@ -5154,6 +5170,12 @@ app.get("/", async (c) => {
   const dueTo = c.req.query("dueTo") || null;
 
   const orgId = getOrgId(c);
+
+  // The list read can trigger a cold recompute whose SO/CO join SELECTs
+  // hold_reason/held_by/held_at; ensure those columns exist FIRST so a DB that
+  // hasn't seen an SO/CO write since the ON HOLD deploy doesn't 500 with
+  // "column hold_reason does not exist" (BUG-2026-06-24-008). Memoized — cheap.
+  await ensurePendingMigrations(c.var.DB);
 
   // Cache check — return early if a fresh response for this (orgId, query)
   // is sitting in KV. Cache key includes the per-org version counter so any

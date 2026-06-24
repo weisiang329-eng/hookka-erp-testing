@@ -835,6 +835,18 @@ app.post("/resync-job-card-times", async (c) => {
     ? undefined
     : Math.min(Math.max(Number(c.req.query("limit") ?? 500), 50), 2000);
 
+  // By DEFAULT we only touch INCOMPLETE work — job cards not yet COMPLETED/
+  // TRANSFERRED. A finished step already has its actual time recorded and its
+  // estimate is a historical record; rewriting it would retroactively distort
+  // planned-vs-actual. This matches the owner's rule: a Production Times change
+  // takes effect only on orders still in production ("没有 completion date 的
+  // order"). ?includeCompleted=true restores the old whole-table overwrite for
+  // a deliberate full backfill. 'COMPLETED'/'TRANSFERRED' is the system-wide
+  // done-state (see production-orders.ts). A done order's job cards are all in
+  // these states, so this filter excludes completed orders automatically.
+  const includeCompleted = c.req.query("includeCompleted") === "true";
+  const STATUS_FILTER = "jc.status NOT IN ('COMPLETED','TRANSFERRED')";
+
   // --- 1. Load master Production Times from kv_config ----------------------
   // Server-side direct read — mirrors what /api/kv-config/:key does. We
   // can't import the client helper (it talks to /api/* over fetch).
@@ -884,12 +896,16 @@ app.post("/resync-job-card-times", async (c) => {
            po.poNo AS poNo
          FROM job_cards jc
          LEFT JOIN production_orders po ON po.id = jc.productionOrderId
+         ${includeCompleted ? "" : `WHERE ${STATUS_FILTER}`}
          ORDER BY jc.id ASC`,
       )
       .all<JcRow>();
   } else {
     // limit+1 so we can detect "more pages remain" without a count(*).
-    const cursorClause = cursor ? "WHERE jc.id > ?" : "";
+    const conds: string[] = [];
+    if (cursor) conds.push("jc.id > ?");
+    if (!includeCompleted) conds.push(STATUS_FILTER);
+    const whereClause = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
     const sql = `SELECT
                    jc.id AS id,
                    jc.departmentCode AS deptCode,
@@ -900,7 +916,7 @@ app.post("/resync-job-card-times", async (c) => {
                    po.poNo AS poNo
                  FROM job_cards jc
                  LEFT JOIN production_orders po ON po.id = jc.productionOrderId
-                 ${cursorClause}
+                 ${whereClause}
                  ORDER BY jc.id ASC
                  LIMIT ?`;
     const stmt = cursor

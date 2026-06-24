@@ -4366,6 +4366,38 @@ function buildDefaultProductionTimes(cats: string[]): ProductionTimes {
 // dot indicator is gone. Resilient sync layer in kv-config.ts is
 // unchanged and still auto-retries / backs up to localStorage.)
 
+// After the owner saves Production Times, the new standard minutes must take
+// effect on orders STILL IN PRODUCTION (the owner's rule: "一改就对未完成单生效").
+// est_minutes / productionTimeMinutes were snapshotted onto each job card at
+// creation, so a config change does NOT reach existing orders on its own — this
+// drives /api/bom/resync-job-card-times, which (by default) rewrites ONLY
+// not-yet-COMPLETED/TRANSFERRED job cards from the new master. Completed work
+// keeps its historical time. The endpoint is cursored (500/batch) to stay under
+// the Workers wall-clock; we loop the cursor to the end. Best-effort: a failure
+// is surfaced as a toast and the saved config still stands.
+async function runProductionTimeResync(): Promise<{ updated: number }> {
+  let cursor: string | null = null;
+  let updated = 0;
+  let guard = 0;
+  do {
+    const qs = new URLSearchParams({ limit: "500" });
+    if (cursor) qs.set("cursor", cursor);
+    const res = await fetch(`/api/bom/resync-job-card-times?${qs.toString()}`, {
+      method: "POST",
+    });
+    if (!res.ok) throw new Error(`resync HTTP ${res.status}`);
+    const json = (await res.json()) as {
+      success?: boolean;
+      updated?: number;
+      cursor?: { nextCursor?: string | null };
+    };
+    if (!json?.success) throw new Error("resync returned not-ok");
+    updated += json.updated ?? 0;
+    cursor = json.cursor?.nextCursor ?? null;
+  } while (cursor && ++guard < 100);
+  return { updated };
+}
+
 function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { confirm } = useConfirm();
   const [categories, setCategories] = useState<string[]>([]);
@@ -4428,7 +4460,22 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
       if (state === "idle" && pendingUserSaveRef.current) {
         pendingUserSaveRef.current = false;
         setDirty(false);
-        showToast("Production times saved");
+        showToast("Production times saved — applying to in-progress orders…");
+        // Propagate the new standard times onto orders still in production so
+        // the change takes effect immediately (completed orders untouched).
+        void runProductionTimeResync()
+          .then(({ updated }) => {
+            showToast(
+              updated > 0
+                ? `Applied to in-progress orders (${updated} updated)`
+                : "Saved — no in-progress orders needed updating",
+            );
+          })
+          .catch(() => {
+            showToast(
+              "Saved — couldn't auto-apply to in-progress orders; reopen and Save to retry",
+            );
+          });
       } else if (state === "auth-error") {
         pendingUserSaveRef.current = false;
         showToast("Please re-login — change is saved locally and will retry");

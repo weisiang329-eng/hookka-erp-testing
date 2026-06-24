@@ -34,6 +34,16 @@ Entries themselves stay newest-first.
 
 ---
 
+## FEATURE-2026-06-24-005 — changing BOM "Production Times" now takes effect on in-progress orders (was frozen at order creation)
+
+🟢 **Shipped (prod)** · `bom` · `production-orders` · owner request ("我换 production min…要对那些没有完成、没有 completion date 的 order 直接产生生效")
+
+**Why:** the per-department × category minutes the owner edits in BOM → Production Times (`kv_config['variants-config'].productionTimes`) are SNAPSHOTTED onto each job card's `estMinutes` / `productionTimeMinutes` at creation. Every schedule / ETA / capacity view reads that frozen value, and NOTHING re-read the config — so editing Production Times changed only NEW orders; every existing in-progress order kept its old time. Confirmed by a full consumption trace: `getProductionMinutes` is called only inside the BOM editor (auto-fill), never at order/schedule render; there was also **no FE caller** of the resync endpoint, so the config→order propagation never fired at all.
+
+**Fix:** after a successful Production Times save, the dialog now auto-runs `POST /api/bom/resync-job-card-times` (cursored loop to the end) and toasts the count — so the new standard times reach in-progress orders with no extra click. The endpoint was hardened to **default to incomplete-only**: it now SELECTs with `jc.status NOT IN ('COMPLETED','TRANSFERRED')` (the system-wide done-state) on both the dry-run and the cursored real-run, so a finished step's historical time is never rewritten; `?includeCompleted=true` restores the old full overwrite for a deliberate backfill. Completed orders untouched. build:strict clean (app + base); lock test tests/production-time-resync-scope.test.mjs.
+
+---
+
 ## FEATURE-2026-06-24-003 — DataGrid "Save as Org Default" + print preset are now ORG-WIDE shared (backend), not per-browser
 
 🟢 **Shipped (prod, verified)** · `ui-frontend` · `infrastructure` · owner request

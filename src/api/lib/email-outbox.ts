@@ -103,6 +103,35 @@ function ensureOutboxMigrations(db: D1Database): Promise<void> {
       // real schema error resurfaces on the INSERT/SELECT with a clearer
       // message.
     }
+    // Widen the status CHECK to allow 'SENDING' — the atomic-claim status the
+    // drain sets on a row BEFORE contacting the provider (the per-row lock that
+    // stops the eager push racing the cron into a double-send). Migration 0081
+    // only allowed PENDING/SENT/FAILED/RETRYING, so that claim UPDATE violated
+    // outbox_emails_status_check and THREW, 500ing the ENTIRE drain on the very
+    // first row — the queue never delivered (2026-06-24: 50 customer DO/Invoice
+    // notices stuck PENDING for 12h+, surfaced by the new Auto-sent view).
+    // Postgres has no ADD CONSTRAINT IF NOT EXISTS, so drop + re-add; both are
+    // wrapped so a transient DDL rejection never poisons the cached promise.
+    // The new set is a superset of every status already in the table, so the
+    // re-ADD validates cleanly. Runs once per isolate boot (cached promise).
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE outbox_emails DROP CONSTRAINT IF EXISTS outbox_emails_status_check",
+        )
+        .run();
+    } catch {
+      /* ignore — constraint absent / transient DDL rejection */
+    }
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE outbox_emails ADD CONSTRAINT outbox_emails_status_check CHECK (status IN ('PENDING','SENDING','RETRYING','SENT','FAILED'))",
+        )
+        .run();
+    } catch {
+      /* ignore — already present, or a concurrent isolate re-added it */
+    }
   })();
   return outboxMigrations;
 }

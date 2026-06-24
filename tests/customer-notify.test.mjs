@@ -506,6 +506,15 @@ test("outbox: attachments_json stored on enqueue and read back by the drain", ()
     2,
     "ensureOutboxMigrations must run at enqueue AND drain",
   );
+  // The status CHECK must allow 'SENDING' — the atomic-claim status the drain
+  // sets on a row BEFORE sending. Migration 0081 omitted it, so the claim
+  // UPDATE violated outbox_emails_status_check and THREW, 500ing the whole
+  // drain (2026-06-24: 50 customer notices stuck). Runtime self-apply widens it.
+  assert.match(
+    outboxSrc,
+    /ADD CONSTRAINT outbox_emails_status_check CHECK \(status IN \('PENDING','SENDING','RETRYING','SENT','FAILED'\)\)/,
+    "ensureOutboxMigrations must widen the status CHECK to allow 'SENDING'",
+  );
   // The drain forwards stored attachments into the provider send. Body +
   // attachments are fetched PER ROW (`full`), NOT in the batch pick, so a queue
   // of PDF-bearing invoices can't OOM the drain (2026-06-24 strand bug: 50

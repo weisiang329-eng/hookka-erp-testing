@@ -34,6 +34,38 @@ Entries themselves stay newest-first.
 
 ---
 
+## FEATURE-2026-06-24-003 — DataGrid "Save as Org Default" + print preset are now ORG-WIDE shared (backend), not per-browser
+
+🟢 **Shipped (prod, verified)** · `ui-frontend` · `infrastructure` · owner request
+
+**Why:** the DataGrid "Save as Org Default" and "Save as Production Schedule" print preset wrote ONLY to the local browser's localStorage (old toast literally said "new users on **this browser**"), so a different browser / consultant / user never saw the saved layout. **Fix:** org-default + print presets persist to the backend (org-scoped); personal layout stays localStorage. New route `src/api/routes/datagrid-layouts.ts` (table `datagrid_org_layouts` via runtime self-apply; GET any authed user fail-soft; PUT/DELETE `requireSuperAdmin`). data-grid.tsx: save writes localStorage mirror + publishes to backend; a mount-effect hydrates the shared presets (applies org-default to live state ONLY when no personal override — never clobbers a customized user) + mirrors into the localStorage cache keys so the existing sync reads + the production print read keep working. Every server call best-effort → falls back to localStorage on any failure (grid never breaks). Resolution order unchanged: personal > server org-default > code defaults. **Verified prod:** save→read→delete round-trip all 200, org-scoped, test row cleaned up. Test: tests/datagrid-org-layouts.test.mjs.
+
+---
+
+## FEATURE-2026-06-24-004 — attendance: a row with no scanned department defaults to the worker's Employee-Master home dept
+
+🟢 **Shipped (prod)** · `ui-frontend` · owner request ("没有 scan 那个部门的话, 就根据他 Employee Master part under 什么部门的放进去")
+
+A phone punch with no dept scan landed in the Working Hours grid with an empty dept. Now `homeDeptByWorker` (from the Worker prop's `departmentCode`) supplies an effective dept = `row.departmentCode || worker home dept`, used by the dept dropdown, `isProd`, and the save payload — so the dept auto-fills on display AND persists on save. Never overrides a manually-picked dept. src/pages/employees.tsx.
+
+---
+
+## BUG-2026-06-24-010 — Fab Sew / Foam sticker print fetched the WHOLE org, then filtered client-side (slow / "load 不出来")
+
+🟢 **Fixed (prod, verified)** · `production-orders` · `performance` · owner-reported
+
+Both sticker loaders fetched every production order + job card (`?fields=minimal&include=jobCards`, no filter) and narrowed client-side, so the wire+parse of the whole org was the cost regardless of how few stickers printed. **Fix:** GET /api/production-orders gained `?scope=<csv>` (matches id / poNo / companySOId / salesOrderId / companyCOId / consignmentOrderId); the JC fetch narrows to the returned POs for scoped reads; scoped reads bypass the list caches. Fab Sew loader: phase-1 fetches visible rows' orders, phase-2 expands each visible SOFA anchor to its SO/CO group (siblings carry the other pieces' Fab Sew JCs — unchanged fabric+base match, no sticker dropped). Foam scopes to ticked SO/CO ids or visible po ids (search keeps full). Both keep a full-fetch safety net. **Verified prod:** scoping by a sofa group returned only that group (2 orders, with Fab Sew JCs), not the org. Test: tests/production-sticker-scope.test.mjs.
+
+---
+
+## BUG-2026-06-24-009b — `?includeArchive=true` on GET /production-orders 500s: "each UNION query must have the same number of columns"
+
+🔴 **Identified (not yet fixed)** · `production-orders` · `infrastructure` · found during the 2026-06-24 "why is 559 in production" audit
+
+`fetchFilteredPOs` builds `poSource = (SELECT *, '' AS archivedAt FROM production_orders UNION ALL SELECT * FROM production_orders_archive)` when `includeArchive=true`. The two tables' column counts have drifted (a column added to `production_orders` over time was never mirrored to `production_orders_archive`), so the `SELECT *` UNION fails — **every archive-inclusive read 500s**, so archived production orders can't be viewed anywhere that toggles include-archive. **Surfaced** auditing model "559" (an archived order — not in the 474 active sofas nor the catalog; can't be pulled to confirm until this is fixed). **Fix options:** add the missing column(s) to `production_orders_archive` via runtime self-apply, OR fetch hot + archive as two separate queries and merge in JS (no UNION column-count requirement). Pending owner go-ahead.
+
+---
+
 ## BUG-2026-06-24-006 — customer DO/Invoice notices never sent: the outbox drain 500'd on EVERY run because the status CHECK rejected the 'SENDING' claim state
 
 🟢 **Fixed (prod)** · `email-outbox` · `infrastructure` · owner-reported ("發email和簽收沒問題, 就是 dispatch 的 DO 和 invoice… 因為是 noreply 所以看到不到")

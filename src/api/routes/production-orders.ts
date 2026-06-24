@@ -521,6 +521,17 @@ type MinimalPOOut = {
   // Our Expected DD columns.
   customerDeliveryDate: string;
   hookkaExpectedDD: string;
+  // ON HOLD reason (0185) — sourced from the parent SO / CO, NOT a
+  // production_orders column. Like customerSO above, it is emitted here as a
+  // declared "" default so the key is ALWAYS present on the returned object
+  // (and therefore in any list snapshot blob); attachCustomerSO() then
+  // overwrites it with the real value at the route boundary. WITHOUT this
+  // anchor the field only existed as a transient mutation that the
+  // production_orders_list_snapshot cache dropped, so the grid never saw it
+  // (BUG-2026-06-24-001). The grid reads these only on ON_HOLD rows.
+  holdReason: string;
+  heldBy: string;
+  heldAt: string;
   productId: string;
   productCode: string;
   productName: string;
@@ -800,6 +811,12 @@ export function rowToMinimalPO(
     // Filled by attachCustomerSO at the route boundary (batch-join).
     customerDeliveryDate: "",
     hookkaExpectedDD: "",
+    // ON HOLD reason (0185) — declared "" default so the key is always present
+    // (survives the list snapshot); attachCustomerSO overwrites with the real
+    // SO/CO value. See the MinimalPOOut comment (BUG-2026-06-24-001).
+    holdReason: "",
+    heldBy: "",
+    heldAt: "",
     customerName: row.customerName ?? "",
     customerState: row.customerState ?? "",
     productId: row.productId ?? "",
@@ -859,6 +876,12 @@ function rowToPO(
     customerPOId: row.customerPOId ?? "",
     customerReference: row.customerReference ?? "",
     customerSO: "",
+    // ON HOLD reason (0185) — declared "" default (parity with customerSO);
+    // attachCustomerSO overwrites with the parent SO/CO value at the route
+    // boundary so the key always rides to the FE (BUG-2026-06-24-001).
+    holdReason: "",
+    heldBy: "",
+    heldAt: "",
     customerName: row.customerName ?? "",
     customerState: row.customerState ?? "",
     companySOId: row.companySOId ?? "",
@@ -997,6 +1020,11 @@ function rowsToPOsBatch(
       customerPOId: row.customerPOId ?? "",
       customerReference: row.customerReference ?? "",
       customerSO: "",
+      // ON HOLD reason (0185) — declared "" default (parity with rowToPO /
+      // customerSO); attachCustomerSO overwrites it (BUG-2026-06-24-001).
+      holdReason: "",
+      heldBy: "",
+      heldAt: "",
       customerName: row.customerName ?? "",
       customerState: row.customerState ?? "",
       companySOId: row.companySOId ?? "",
@@ -1176,7 +1204,7 @@ async function fetchAllPOs(
 // at the route boundary. Doing it here (one spot) keeps the many
 // rowToPO / rowToMinimalPO call sites untouched. CO POs fall back to the
 // consignment customer-CO number per Wei Siang's spec.
-async function attachCustomerSO(
+export async function attachCustomerSO(
   db: D1Database,
   pos: Array<{
     salesOrderId: string;

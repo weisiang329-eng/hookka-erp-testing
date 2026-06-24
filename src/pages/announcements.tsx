@@ -182,8 +182,8 @@ export default function AnnouncementsPage() {
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
                 placeholder="Add any details workers should know…"
-                rows={3}
-                className="flex w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] focus-visible:border-transparent"
+                rows={7}
+                className="flex min-h-[10rem] w-full resize-y rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] focus-visible:border-transparent"
               />
             </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">

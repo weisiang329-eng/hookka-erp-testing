@@ -1944,6 +1944,9 @@ app.put("/purchase-credit-notes/:id", async (c) => {
       (a) => Math.round(a.amountSen) > 0,
     );
     if (allocs.length) {
+      // Migration 7 (paid_amount_sen / booked_sen) may be unapplied on prod —
+      // ensure the columns exist before the allocation writes them.
+      await ensurePartialPaymentColumns(c.var.DB);
       const open: PiOpen[] = [];
       for (const a of allocs) {
         const pi = await c.var.DB.prepare(
@@ -2134,10 +2137,32 @@ app.post("/purchase-credit-notes/:id/void", async (c) => {
 // invoices (APPROVED) vs the suppliers.outstandingSen counter, supplier
 // aging by due date, and a supplier statement (PI CR / payment DR).
 // ---------------------------------------------------------------------------
+// Migration 7 (purchase_invoices.paid_amount_sen + supplier_payments FX cols)
+// reaches prod via this runtime self-apply — the owner never ran the paste-SQL,
+// and reading those columns (ap-control) or writing them (supplier discount /
+// payment) must not 500. Idempotent + best-effort; readers also fall back.
+async function ensurePartialPaymentColumns(
+  db: Env["Variables"]["DB"],
+): Promise<void> {
+  for (const sql of [
+    "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS paid_amount_sen INTEGER DEFAULT 0",
+    "ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS booked_sen INTEGER",
+    "ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS foreign_sen INTEGER",
+    "ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS pay_fx_rate DOUBLE PRECISION",
+  ]) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* table missing / no DDL perms — the readers below fall back gracefully */
+    }
+  }
+}
+
 app.get("/ap-control", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
-  const [coaRes, legRes, piRes, supRes] = await Promise.all([
+  await ensurePartialPaymentColumns(c.var.DB);
+  const [coaRes, legRes, supRes] = await Promise.all([
     c.var.DB.prepare(
       "SELECT code, name FROM chart_of_accounts WHERE specialAccountType = 'SCC'",
     ).all<{ code: string; name: string }>(),
@@ -2145,22 +2170,35 @@ app.get("/ap-control", async (c) => {
       "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE hidden = 0",
     ).all<{ accountCode: string; debitSen: number; creditSen: number }>(),
     c.var.DB.prepare(
-      `SELECT supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate
-         FROM purchase_invoices
-        WHERE status IN ('APPROVED', 'PARTIAL_PAID')`,
-    ).all<{
-      supplierId: string;
-      supplierName: string;
-      piNo: string;
-      amountSen: number;
-      paid_amount_sen: number | null;
-      status: string;
-      dueDate: string | null;
-    }>(),
-    c.var.DB.prepare(
       "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers",
     ).first<{ s: number }>(),
   ]);
+  // PI subledger — defensive: prefer net outstanding (amount − paid, incl
+  // PARTIAL_PAID); if paid_amount_sen is STILL absent (ALTER couldn't run), fall
+  // back to the original (APPROVED only, paid=0) so the panel always renders.
+  type PiAgingRow = {
+    supplierId: string;
+    supplierName: string;
+    piNo: string;
+    amountSen: number;
+    paid_amount_sen?: number | null;
+    status: string;
+    dueDate: string | null;
+  };
+  let piRes: { results?: PiAgingRow[] };
+  try {
+    piRes = await c.var.DB.prepare(
+      `SELECT supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate
+         FROM purchase_invoices
+        WHERE status IN ('APPROVED', 'PARTIAL_PAID')`,
+    ).all<PiAgingRow>();
+  } catch {
+    piRes = await c.var.DB.prepare(
+      `SELECT supplierId, supplierName, piNo, amountSen, status, dueDate
+         FROM purchase_invoices
+        WHERE status = 'APPROVED'`,
+    ).all<PiAgingRow>();
+  }
   // Posted purchase CNs reduce what we owe (the control account already absorbed
   // their DR 400-0000 legs). The ALLOCATED portion of each CN is already netted
   // off above via the knocked-off PIs' paid_amount_sen; only the UNALLOCATED
@@ -2169,13 +2207,16 @@ app.get("/ap-control", async (c) => {
   const pcnRes = await c.var.DB.prepare(
     "SELECT COALESCE(SUM(totalAmount),0) AS s FROM purchase_credit_notes WHERE status = 'POSTED'",
   ).first<{ s: number }>();
-  const cnAllocRes = await c.var.DB.prepare(
-    "SELECT COALESCE(SUM(booked_sen),0) AS s FROM supplier_payments WHERE method = 'CREDIT_NOTE'",
-  ).first<{ s: number }>();
-  const pcnPostedSen = Math.max(
-    0,
-    (Number(pcnRes?.s) || 0) - (Number(cnAllocRes?.s) || 0),
-  );
+  let cnAllocSen = 0;
+  try {
+    const cnAllocRes = await c.var.DB.prepare(
+      "SELECT COALESCE(SUM(booked_sen),0) AS s FROM supplier_payments WHERE method = 'CREDIT_NOTE'",
+    ).first<{ s: number }>();
+    cnAllocSen = Number(cnAllocRes?.s) || 0;
+  } catch {
+    cnAllocSen = 0; // supplier_payments / booked_sen not present yet → no netting
+  }
+  const pcnPostedSen = Math.max(0, (Number(pcnRes?.s) || 0) - cnAllocSen);
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
   const resolveCtl = await loadAccountResolver(c.var.DB);

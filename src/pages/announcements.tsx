@@ -14,7 +14,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { Megaphone, Plus, Trash2, CheckCircle, EyeOff, Eye } from "lucide-react";
+import {
+  Megaphone,
+  Plus,
+  Trash2,
+  CheckCircle,
+  EyeOff,
+  Eye,
+  ChevronDown,
+  ChevronRight,
+  BellRing,
+  Users,
+} from "lucide-react";
 
 type Announcement = {
   id: string;
@@ -27,6 +38,18 @@ type Announcement = {
 };
 
 type ListResponse = { success?: boolean; data?: Announcement[] };
+
+// Read-receipt payload for one announcement (GET /api/announcements/:id/acks).
+type AckedWorker = { id: string; name: string; empNo: string; ackedAt: string | null };
+type PendingWorker = { id: string; name: string; empNo: string };
+type AcksData = {
+  total: number;
+  ackedCount: number;
+  acked: AckedWorker[];
+  pending: PendingWorker[];
+};
+type AcksResponse = { success?: boolean; data?: AcksData };
+type RemindResponse = { success?: boolean; pendingCount?: number };
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -45,6 +68,174 @@ function isExpired(a: Announcement): boolean {
   if (!a.expiresAt) return false;
   const t = Date.parse(a.expiresAt);
   return !Number.isNaN(t) && t <= Date.now();
+}
+
+// ---------------------------------------------------------------------------
+// Per-announcement read-receipt panel. Collapsed by default; lazy-fetches the
+// acked-vs-pending split only when the office expands it (so the list load
+// stays cheap). "Remind un-acked" re-pops the notice for everyone who hasn't
+// acknowledged — there is NO push, so remind == re-pop on the worker's next app
+// open; the office still uses this list to chase people in person.
+// ---------------------------------------------------------------------------
+function ReadReceiptPanel({
+  announcement,
+  onFlash,
+  onRemind,
+}: {
+  announcement: Announcement;
+  onFlash: (msg: string) => void;
+  onRemind: () => Promise<number | null>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<AcksData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [reminding, setReminding] = useState(false);
+
+  const fetchAcks = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/announcements/${announcement.id}/acks`);
+      if (!res.ok) return;
+      const json = (await res.json()) as AcksResponse;
+      if (json.success && json.data) setData(json.data);
+    } catch {
+      /* leave data as-is */
+    } finally {
+      setLoading(false);
+    }
+  }, [announcement.id]);
+
+  async function toggle() {
+    const next = !open;
+    setOpen(next);
+    // Lazy-load on first expand; re-fetch on each expand so a freshly-acked
+    // worker shows up without a full page reload.
+    if (next) await fetchAcks();
+  }
+
+  async function handleRemind() {
+    setReminding(true);
+    try {
+      const count = await onRemind();
+      if (count != null) {
+        onFlash(
+          count === 0
+            ? "Everyone has acknowledged — no one to remind"
+            : `Reminder set — it will re-pop for ${count} un-acknowledged ${
+                count === 1 ? "worker" : "workers"
+              }`,
+        );
+      }
+      // Refresh the split if the panel is open (counts are unchanged by a
+      // remind, but keep it consistent if acks landed in the meantime).
+      if (open) await fetchAcks();
+    } finally {
+      setReminding(false);
+    }
+  }
+
+  const ackedCount = data?.ackedCount ?? 0;
+  const total = data?.total ?? 0;
+
+  return (
+    <div className="mt-3 border-t border-[#F0ECE9] pt-3">
+      <button
+        type="button"
+        onClick={toggle}
+        className="flex items-center gap-1.5 text-xs font-semibold text-[#6B5C32] hover:text-[#5a4d2a]"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+        <Users className="h-3.5 w-3.5" />
+        {data ? `Read ${ackedCount} of ${total}` : "Read receipts"}
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-3">
+          {loading && !data ? (
+            <p className="text-xs text-[#8A8680]">Loading…</p>
+          ) : data ? (
+            <>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {/* Acknowledged */}
+                <div className="rounded-lg border border-[#E2DDD8] bg-[#FAFAF8] p-3">
+                  <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-[#2A6B4A]">
+                    <CheckCircle className="h-3.5 w-3.5" />
+                    Acknowledged ({data.acked.length})
+                  </p>
+                  {data.acked.length === 0 ? (
+                    <p className="text-xs text-[#9CA3AF]">No one yet.</p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {data.acked.map((w) => (
+                        <li
+                          key={w.id}
+                          className="flex items-baseline justify-between gap-2 text-xs"
+                        >
+                          <span className="min-w-0 truncate text-[#1F1D1B]">
+                            {w.name || w.empNo || w.id}
+                          </span>
+                          <span className="shrink-0 text-[10px] text-[#9CA3AF]">
+                            {fmtDateTime(w.ackedAt)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                {/* Pending */}
+                <div className="rounded-lg border border-[#E2DDD8] bg-[#FAFAF8] p-3">
+                  <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-[#9A3A2D]">
+                    <EyeOff className="h-3.5 w-3.5" />
+                    Not yet ({data.pending.length})
+                  </p>
+                  {data.pending.length === 0 ? (
+                    <p className="text-xs text-[#9CA3AF]">Everyone has read it.</p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {data.pending.map((w) => (
+                        <li
+                          key={w.id}
+                          className="min-w-0 truncate text-xs text-[#5A5550]"
+                        >
+                          {w.name || w.empNo || w.id}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+              {data.pending.length > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRemind}
+                  disabled={reminding}
+                  className="gap-1.5"
+                >
+                  <BellRing className="h-3.5 w-3.5" />
+                  {reminding
+                    ? "Reminding…"
+                    : `Remind un-acknowledged (${data.pending.length})`}
+                </Button>
+              )}
+              <p className="text-[10px] leading-snug text-[#9CA3AF]">
+                The worker app has no push notification. &ldquo;Remind&rdquo;
+                re-pops this notice on each un-acknowledged worker&apos;s next app
+                open — use the list above to chase them in person too.
+              </p>
+            </>
+          ) : (
+            <p className="text-xs text-[#9A3A2D]">Couldn&apos;t load read receipts.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function AnnouncementsPage() {
@@ -142,6 +333,29 @@ export default function AnnouncementsPage() {
     if (res.ok) {
       showFlash("Announcement deleted");
       await load();
+    }
+  }
+
+  // Re-pop the notice for everyone who hasn't acknowledged. Confirms first (it
+  // changes what workers see), then POSTs the remind and returns the un-acked
+  // count so the panel can flash it. Returns null if the worker cancels or the
+  // request fails.
+  async function remind(a: Announcement): Promise<number | null> {
+    const ok = await confirm({
+      title: "Remind un-acknowledged workers?",
+      message: `Re-pop "${a.title}" on the phones of everyone who hasn't tapped "Got it" yet. There is no push — it shows on their next app open.`,
+      confirmLabel: "Remind",
+    });
+    if (!ok) return null;
+    try {
+      const res = await fetch(`/api/announcements/${a.id}/remind`, {
+        method: "POST",
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as RemindResponse;
+      return typeof json.pendingCount === "number" ? json.pendingCount : 0;
+    } catch {
+      return null;
     }
   }
 
@@ -262,6 +476,11 @@ export default function AnnouncementsPage() {
                           ? ` · hides ${fmtDateTime(a.expiresAt)}`
                           : ""}
                       </p>
+                      <ReadReceiptPanel
+                        announcement={a}
+                        onFlash={showFlash}
+                        onRemind={() => remind(a)}
+                      />
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       <Button

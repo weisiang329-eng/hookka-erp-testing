@@ -421,13 +421,43 @@ export default function WorkerHomePage() {
 
   // Active announcements — best-effort; a failure just leaves the banner empty
   // and never strands the page (same posture as /history).
+  //
+  // The popup gate is now SERVER-driven: the GET also returns `ackedIds` — the
+  // active notices THIS worker has already acknowledged on the server (and
+  // hasn't been reminded about since). We seed the popup-suppress set (ackAnn)
+  // from that so a fresh device re-pops every un-acked notice until the server
+  // confirms the ack, and a "Remind" re-pops it. We MERGE rather than replace
+  // so the optimistic localStorage cache still suppresses a just-tapped notice
+  // if the server round-trip is mid-flight (no flicker on a flaky network).
   const refreshAnnouncements = useCallback(async () => {
     try {
       const res = await workerFetch("/api/worker/announcements");
       const raw = await res.json();
       const j = AnnouncementsEnvelope.parse(raw);
       if (j.success && Array.isArray(j.data)) {
-        setAnnouncements(j.data as Announcement[]);
+        const list = j.data as Announcement[];
+        setAnnouncements(list);
+        const serverAcked = (j as { ackedIds?: unknown }).ackedIds;
+        if (Array.isArray(serverAcked)) {
+          const serverSet = new Set(
+            serverAcked.filter((x): x is string => typeof x === "string"),
+          );
+          // Reconcile to the server truth for the CURRENTLY-active notices:
+          // keep a notice suppressed only if the server says acked. This is
+          // what makes "Remind" re-pop — the server drops the id from ackedIds,
+          // so we drop it from ackAnn here. Notices not in the active list keep
+          // their cached state (offline resilience for older ids).
+          setAckAnn((prev) => {
+            const next = new Set(prev);
+            const activeIds = new Set(list.map((a) => a.id));
+            for (const id of activeIds) {
+              if (serverSet.has(id)) next.add(id);
+              else next.delete(id);
+            }
+            writeAckAnnouncements(next);
+            return next;
+          });
+        }
       }
     } catch {
       /* leave announcements as-is */
@@ -504,11 +534,17 @@ export default function WorkerHomePage() {
   }
 
   // Tap "Got it" on the popup → acknowledge exactly the announcements that were
-  // shown, so the popup never re-pops for them on this device. We also mark them
-  // seen (clears the unread dot) since the worker has now actually read them.
+  // shown. This now does TWO things:
+  //   1. Records a real per-worker ack on the SERVER (POST /:id/ack, idempotent)
+  //      so the office read-receipt shows this worker, and the popup stays
+  //      suppressed even on a fresh device once the server confirms it.
+  //   2. Optimistically updates the localStorage cache (ackAnn + seenAnn) so the
+  //      popup closes instantly and never re-flashes while the POST is in
+  //      flight or if the network is flaky.
   // The re-readable banner stays in place for later reference.
   function acknowledgeAnnouncements(shown: Announcement[]) {
     const shownIds = shown.map((a) => a.id);
+    // Optimistic local suppress (offline cache) — closes the popup immediately.
     setAckAnn((prev) => {
       const next = new Set(prev);
       for (const id of shownIds) next.add(id);
@@ -521,6 +557,18 @@ export default function WorkerHomePage() {
       writeSeenAnnouncements(next);
       return next;
     });
+    // Fire the server ack for each shown id (fire-and-forget; the optimistic
+    // local cache already closed the popup). Idempotent on the backend — a
+    // double-tap or a retry is a no-op. Failures are swallowed: the local cache
+    // still suppresses the popup, and the next app open re-tries via the gate.
+    void Promise.all(
+      shownIds.map((id) =>
+        workerFetch(
+          `/api/worker/announcements/${encodeURIComponent(id)}/ack`,
+          { method: "POST" },
+        ).catch(() => undefined),
+      ),
+    );
   }
 
   // Re-request location after a worker has (hopefully) flipped the browser

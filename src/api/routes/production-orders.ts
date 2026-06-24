@@ -5053,11 +5053,18 @@ function scanOrgId(c: Context<Env>): string {
 
 // Invalidate every cached read of GET /api/production-orders for one org:
 //   (1) bump the KV version key so the 60s Layer-1 cache is skipped, AND
-//   (2) mark the Layer-2 dept-sheet snapshot stale WITHOUT deleting it — keep
-//       the prior copy so the serve-stale-while-revalidate read path can hand
-//       it back instantly (no cold ~2-3s recompute) and refresh in the
-//       background. built_from = epoch forces isSnapshotFresh() false on the
-//       next read, regardless of the (mixed TEXT/TIMESTAMP) updated_at probe.
+//   (2) DELETE the Layer-2 dept-sheet snapshot rows so the next read does a
+//       COLD recompute and returns FRESH data. We previously only marked them
+//       stale (built_from = epoch) and leaned on serve-stale-while-revalidate,
+//       but the background revalidation did NOT reliably rewrite the snapshot —
+//       a dept-cell edit with no PO-status change (PIC / completion-date) stayed
+//       invisible for a FULL DAY across many refreshes, and the stale blank got
+//       re-cached into the 60s KV layer on every read (the 2026-06-24 WOOD_CUT
+//       incident: SO-2606-160/161/152 WOOD_CUT was COMPLETED + had a PIC in
+//       job_cards but the grid showed WAITING / blank). A hard DELETE forces
+//       freshness regardless of the (mixed TEXT/TIMESTAMP) updated_at probe AND
+//       the flaky revalidation. Cost: one ~2-3s cold recompute on the first
+//       read after a write — correctness wins over the snapshot optimization.
 //
 // EVERY production-order write path — scan completion AND dashboard edit — must
 // do BOTH steps; doing only the KV bump leaves the snapshot stale for ~1-3 min
@@ -5069,11 +5076,7 @@ async function invalidateProductionListCaches(
 ): Promise<void> {
   await bumpPoListCacheVersion(c, orgId);
   await c.var.DB
-    .prepare(
-      `UPDATE production_orders_list_snapshot
-          SET built_from = '1970-01-01T00:00:00.000Z'
-        WHERE org_id = ?`,
-    )
+    .prepare(`DELETE FROM production_orders_list_snapshot WHERE org_id = ?`)
     .bind(orgId)
     .run();
 }

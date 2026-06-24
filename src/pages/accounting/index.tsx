@@ -121,7 +121,8 @@ function buildPvVoucher(
     ? `Accrued to: ${pv.accrualAccount ? accountLabel(accounts, pv.accrualAccount) : "—"}`
     : `Paid from: ${pv.payFrom ? accountLabel(accounts, pv.payFrom) : "—"}`;
   return {
-    title: "PAYMENT VOUCHER",
+    // A voided voucher must never print as a clean/valid document.
+    title: pv.status === "VOID" ? "PAYMENT VOUCHER — VOID" : "PAYMENT VOUCHER",
     company: VOUCHER_COMPANY,
     docNo: pv.pvNo,
     date: formatDateDMY(pv.date),
@@ -147,7 +148,7 @@ function buildOrVoucher(
     cells: [accountLabel(accounts, l.accountCode), l.description ?? "", formatCurrency(l.amountSen)],
   }));
   return {
-    title: "OFFICIAL RECEIPT",
+    title: or.status === "VOID" ? "OFFICIAL RECEIPT — VOID" : "OFFICIAL RECEIPT",
     company: VOUCHER_COMPANY,
     docNo: or.orNo,
     date: formatDateDMY(or.date),
@@ -177,8 +178,14 @@ function buildJvVoucher(je: JournalEntry): VoucherSpec {
       l.creditSen ? formatCurrency(l.creditSen) : "",
     ],
   }));
+  const jvTag =
+    je.lifecycleState === "VOID" || je.lifecycleState === "DELETED"
+      ? " — VOID"
+      : je.status === "DRAFT"
+        ? " — DRAFT"
+        : "";
   return {
-    title: "JOURNAL VOUCHER",
+    title: `JOURNAL VOUCHER${jvTag}`,
     company: VOUCHER_COMPANY,
     docNo: je.entryNo,
     date: formatDateDMY(je.date),
@@ -3653,7 +3660,9 @@ function SupplierDiscountTab() {
                   </tr>
                 </thead>
                 <tbody>
-                  {history.map((n) => (
+                  {/* Hide orphan DRAFTs (a Save whose post leg failed) — no GL,
+                      not actionable here; only POSTED / voided notes belong. */}
+                  {history.filter((n) => n.status !== "DRAFT").map((n) => (
                     <tr key={n.id} className="border-b border-[#F0ECE9]">
                       <td className="px-3 py-1.5 tabular-nums text-xs font-medium">{n.noteNumber}</td>
                       <td className="px-3 py-1.5">{n.supplierName}</td>

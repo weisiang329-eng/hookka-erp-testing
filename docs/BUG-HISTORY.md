@@ -34,6 +34,27 @@ Entries themselves stay newest-first.
 
 ---
 
+## FEATURE-2026-06-24-001 — ON HOLD reason: putting an SO/CO on hold now REQUIRES a reason, and the reason + who + when shows on the production grid
+
+🟢 **Shipped (staging — feature)** · `sales-orders` · `production-orders` · `ui-frontend` · owner request
+
+**What it does (symptom it removes):** Before this, "Put On Hold" on a Sales Order (or Consignment Order) popped a plain confirm with no input — the order paused with no recorded reason, and `so_status_changes.changedBy` was always the literal "Admin". The shop floor saw an amber "ON HOLD" chip on the production grid but had no way to know *why* a job was paused. Now holding an order opens a modal that **requires a non-empty reason** (the Confirm button stays disabled until one is typed), captures who put it on hold (the logged-in user) and when, and surfaces that on the production grid: a faint italic one-line reason under the SO ID / product code, plus the full reason + who + when in the ON HOLD chip's hover/tap tooltip.
+
+**Design (required reason enforced FE + BE; snake_case + runtime migration + dual-key reads):**
+- **Schema (runtime ALTER, NOT a migration file — deploy.yml does not replay them):** 3 snake_case columns `hold_reason` / `held_by` / `held_at` added to `sales_orders` in `ensurePendingMigrations` (`src/api/routes/sales-orders.ts` ~L1856) and to `consignment_orders` in the CO `ensureDiscountColumn` ensure block (`src/api/routes/consignment-orders.ts` ~L476). Both ensures are awaited at the top of their PUT before the first write. snake_case → no `column-rename-map.json` entry needed; reads are dual-keyed (`r.holdReason ?? r.hold_reason`).
+- **Capture (FE+BE, same reject both sides):**
+  - SO backend (`src/api/routes/sales-orders.ts`): PUT `/:id` status branch rejects `→ ON_HOLD` with a blank `holdReason` (400 "A reason is required to put this order on hold.", ~L3247); the main `UPDATE sales_orders` (~L3831) sets `hold_reason/held_by/held_at` on hold and NULLs them on any transition out of / not into hold (`clearHoldFields`); the `so_status_changes` audit note becomes `On hold: <reason>` and `changedBy` = the actor (~L3350).
+  - CO backend (`src/api/routes/consignment-orders.ts`): mirror reject (~L1583) + UPDATE write/clear (~L1872).
+  - FE (`src/pages/sales/detail.tsx` Put-On-Hold modal ~L873 + `updateStatus` ~L624; `src/pages/consignment/detail.tsx` ~L711 + ~L402): the hold button opens a reason-capture modal; Confirm disabled while empty; `updateStatus("ON_HOLD", reason)` sends `{ status, holdReason, changedBy: getCurrentUser().displayName }`.
+- **Flow to production (no cascade change — sourced from the order, so editing a reason needs no re-cascade):** `attachCustomerSO` in `src/api/routes/production-orders.ts` (~L1241/L1259) adds `hold_reason/held_by/held_at` to the SO + CO batch-join SELECTs and stamps `holdReason/heldBy/heldAt` onto each PO row.
+- **Display (`src/pages/production/index.tsx`):** dept grid SO-ID cell (~L3742) renders a faint italic truncated reason line under the SO ID + a chip `title` tooltip; ALL-tab overview (~L7880) renders the faint line under the product code + the same tooltip on its pill. `ProductionOrder` + `DeptRow` types carry the 3 fields (`src/pages/production/types.ts`); `baserows-core.ts` (~L525) copies them onto each `DeptRow`.
+
+**Regression test:** new `tests/on-hold-reason.test.mjs` (registered in `package.json`) — 15 structural pins: the 3 snake_case ALTERs on both tables, snake_case (no camelCase write), the FE+BE 400 reject on a blank reason (SO + CO), the UPDATE write + off-hold NULL clear, the `On hold: <reason>` audit note, the production join SELECT + per-row stamp, `DeptRow` carry, and the grid render (faint line + chip tooltip on dept grid AND overview), plus the FE required-modal wiring. Full suite: 1130 pass / 1 skip / 0 fail. build:strict clean (only the 2–3 known jsbarcode/@zxing sandbox errors).
+
+**Routing note:** this is a FEATURE (new capture + display), so per the repo rule it targets `staging`, not `main`. Built in an isolated worktree; not pushed/merged.
+
+---
+
 ## BUG-2026-06-24-002 — Dashboard login "Remember me" checkbox did NOTHING; the owner was kept logged in across browser restarts whether or not it was ticked (no way to get a session that ends on browser close)
 
 🟢 **Fixed** · `auth-rbac` · owner reported the checkbox felt inert

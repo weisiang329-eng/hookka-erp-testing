@@ -387,6 +387,14 @@ export default function SalesOrderDetailPage() {
     items: Array<{ poNo: string; departmentCode: string; departmentName: string; completedDate: string }>;
   }>({ open: false, items: [] });
 
+  // Put-On-Hold modal (0185). Holding an order REQUIRES a non-empty reason —
+  // the Confirm button stays disabled until the operator types one, and an
+  // inline error fires if they somehow submit blank. The reason rides to the
+  // backend (which also rejects blank) and is shown on the production grid.
+  const [holdModal, setHoldModal] = useState<{ open: boolean; reason: string; error: string }>(
+    { open: false, reason: "", error: "" },
+  );
+
   const fetchOrder = useCallback(() => {
     // Only this SO changed — per-id invalidation, not list prefix.
     if (id) invalidateCache(`/api/sales-orders/${id}`);
@@ -621,16 +629,28 @@ export default function SalesOrderDetailPage() {
     [fetchOrder, toast, confirm],
   );
 
-  const updateStatus = useCallback(async (newStatus: SOStatus) => {
+  // `holdReason` is REQUIRED when newStatus === "ON_HOLD" — the hold modal
+  // enforces a non-empty value before calling here, and the backend rejects a
+  // blank reason with a 400 (unified FE+BE input rejection). For every other
+  // transition holdReason is undefined and omitted from the body.
+  const updateStatus = useCallback(async (newStatus: SOStatus, holdReason?: string) => {
     if (!order) return;
     setUpdating(true);
+    // Stamp who performed the transition from the logged-in user (falls back
+    // to "Admin" for an unauthenticated/legacy session) so the audit row and
+    // the production "held by" line name a real person, not the literal "Admin".
+    const actor = getCurrentUser()?.displayName?.trim() || "Admin";
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let res: Response; let data: any;
     try {
       res = await fetch(`/api/sales-orders/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: newStatus }),
+        body: JSON.stringify(
+          newStatus === "ON_HOLD"
+            ? { status: newStatus, holdReason: (holdReason || "").trim(), changedBy: actor }
+            : { status: newStatus, changedBy: actor },
+        ),
       });
       data = await res.json().catch(() => ({}));
     } catch (e) {
@@ -849,6 +869,63 @@ export default function SalesOrderDetailPage() {
         onConfirm={modal.action}
         onCancel={() => setModal(prev => ({ ...prev, open: false }))}
       />
+
+      {/* Put-On-Hold Modal (0185) — a reason is REQUIRED. The Confirm button
+          stays disabled until a non-empty reason is typed; the same rule is
+          enforced on the backend. The reason flows to the production grid. */}
+      {holdModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/40" onClick={() => setHoldModal({ open: false, reason: "", error: "" })} />
+          <div className="relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full max-w-md mx-4 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <PauseCircle className="h-5 w-5 text-[#9C6F1E]" />
+                <h3 className="text-lg font-semibold text-[#1F1D1B]">Put On Hold</h3>
+              </div>
+              <button onClick={() => setHoldModal({ open: false, reason: "", error: "" })} className="text-[#9CA3AF] hover:text-[#374151]"><X className="h-5 w-5" /></button>
+            </div>
+            <p className="text-xs text-[#6B7280]">
+              Production will be paused until the order is resumed. A reason is
+              required — it is shown on the production grid so the shop floor
+              knows why this job is on hold.
+            </p>
+            <div>
+              <label className="block text-xs font-medium text-[#374151] mb-1">
+                Reason <span className="text-[#9A3A2D]">*</span>
+              </label>
+              <textarea
+                autoFocus
+                rows={3}
+                value={holdModal.reason}
+                onChange={(e) => setHoldModal(prev => ({ ...prev, reason: e.target.value, error: "" }))}
+                placeholder="e.g. Waiting on customer fabric confirmation"
+                className="w-full rounded-md border border-[#D9D4CE] px-3 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#E2C66B] resize-none"
+              />
+              {holdModal.error && (
+                <p className="text-xs text-[#9A3A2D] mt-1">{holdModal.error}</p>
+              )}
+            </div>
+            <div className="flex justify-end gap-3">
+              <Button variant="outline" size="sm" onClick={() => setHoldModal({ open: false, reason: "", error: "" })}>Cancel</Button>
+              <Button
+                variant="primary" size="sm"
+                disabled={updating || holdModal.reason.trim().length === 0}
+                onClick={() => {
+                  const reason = holdModal.reason.trim();
+                  if (!reason) {
+                    setHoldModal(prev => ({ ...prev, error: "A reason is required to put this order on hold." }));
+                    return;
+                  }
+                  setHoldModal({ open: false, reason: "", error: "" });
+                  updateStatus("ON_HOLD", reason);
+                }}
+              >
+                <PauseCircle className="h-4 w-4" /> Put On Hold
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* BOM Incomplete Modal — shown on 422 from /confirm. */}
       {bomError.open && (
@@ -1148,16 +1225,11 @@ export default function SalesOrderDetailPage() {
               </Button>
             )}
 
-            {/* Put On Hold */}
+            {/* Put On Hold — opens a modal that REQUIRES a reason (0185). */}
             {canHold && (
               <Button
                 variant="outline" size="sm" disabled={updating}
-                onClick={() => openConfirm(
-                  "Put On Hold",
-                  "Are you sure you want to put this order on hold? Production will be paused until the order is resumed.",
-                  "Put On Hold",
-                  () => updateStatus("ON_HOLD"),
-                )}
+                onClick={() => setHoldModal({ open: true, reason: "", error: "" })}
               >
                 <PauseCircle className="h-4 w-4" /> Put On Hold
               </Button>

@@ -73,6 +73,13 @@ export type ProductionOrder = {
   // the Overview "Customer DD" + "Our Expected DD" columns (Wei Siang 2026-06-03).
   customerDeliveryDate?: string;
   hookkaExpectedDD?: string;
+  // ON HOLD reason (0185) — sourced from the parent SO / CO by the
+  // production-orders API (attachCustomerSO). Surfaced on the production grid's
+  // ON HOLD chip (tooltip) + a faint reason line. Empty for orders not on hold;
+  // payloads cached before this shipped (≤60s TTL) won't carry it → default "".
+  holdReason?: string;
+  heldBy?: string;
+  heldAt?: string;
 };
 
 // Simplified 3-state palette per user spec:
@@ -209,6 +216,12 @@ export type DeptRow = {
   pic2: string;
   status: string;        // job_card status
   poStatus: string;      // parent production_order status — drives ON_HOLD / CANCELLED styling
+  // ON HOLD reason (0185) — copied from the parent SO / CO onto each grid row.
+  // Drives the faint italic reason line under the product code + the ON HOLD
+  // chip tooltip. Empty for rows whose parent order is not on hold.
+  holdReason: string;
+  heldBy: string;
+  heldAt: string;
   // Scheduling info for every one of the 8 departments — NOT just
   // upstreams. The user can toggle any dept column on/off via the grid's
   // Columns button. Each entry is flattened into `sched_<CODE>` keys so

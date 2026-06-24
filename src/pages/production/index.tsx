@@ -3760,29 +3760,51 @@ export default function ProductionPage({
           : row.consignmentOrderId
             ? `/consignment/${row.consignmentOrderId}`
             : null;
+        // ON HOLD reason (0185) — only when this row's parent order is on hold
+        // AND a reason was captured. The full reason + who + when goes in the
+        // chip's hover/tap tooltip; a faint truncated one-liner sits under the
+        // SO ID so the operator sees "why paused" at a glance without clutter.
+        const onHold = row.poStatus === "ON_HOLD";
+        const holdReason = onHold ? (row.holdReason || "").trim() : "";
+        const holdTooltip = holdReason
+          ? `On hold: ${holdReason}${
+              row.heldBy ? ` — ${row.heldBy}` : ""
+            }${row.heldAt ? ` (${row.heldAt})` : ""}`
+          : "";
         return (
-          <span className="flex items-center gap-1.5 tabular-nums">
-            {parentRoute ? (
-              <button
-                type="button"
-                className="doc-number truncate text-[#6B5C32] hover:underline cursor-pointer text-left bg-transparent p-0 border-0"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  navigate(parentRoute);
-                }}
-                onDoubleClick={(e) => e.stopPropagation()}
-                title={`Open ${row.salesOrderId ? "Sales" : "Consignment"} Order ${row.soId}`}
-              >
-                {row.soId}
-              </button>
-            ) : (
-              <span className="doc-number truncate">{row.soId}</span>
-            )}
-            {pillLabel && (
+          <span className="flex flex-col min-w-0 leading-tight tabular-nums">
+            <span className="flex items-center gap-1.5 min-w-0">
+              {parentRoute ? (
+                <button
+                  type="button"
+                  className="doc-number truncate text-[#6B5C32] hover:underline cursor-pointer text-left bg-transparent p-0 border-0"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    navigate(parentRoute);
+                  }}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  title={`Open ${row.salesOrderId ? "Sales" : "Consignment"} Order ${row.soId}`}
+                >
+                  {row.soId}
+                </button>
+              ) : (
+                <span className="doc-number truncate">{row.soId}</span>
+              )}
+              {pillLabel && (
+                <span
+                  className={`text-[9px] font-semibold px-1.5 py-[1px] rounded uppercase tracking-wide cursor-default ${pillCls}`}
+                  title={holdTooltip || undefined}
+                >
+                  {pillLabel}
+                </span>
+              )}
+            </span>
+            {holdReason && (
               <span
-                className={`text-[9px] font-semibold px-1.5 py-[1px] rounded uppercase tracking-wide ${pillCls}`}
+                className="text-[10px] italic text-[#9C6F1E]/70 truncate"
+                title={holdTooltip}
               >
-                {pillLabel}
+                {holdReason}
               </span>
             )}
           </span>
@@ -7869,6 +7891,15 @@ export default function ProductionPage({
                 : order.status === "CANCELLED"
                   ? "bg-[#E5E7EB] text-[#4B5563]"
                   : "";
+            // ON HOLD reason (0185) — full reason + who + when in the chip
+            // tooltip; faint truncated one-liner under the product code.
+            const ovHoldReason =
+              order.status === "ON_HOLD" ? (order.holdReason || "").trim() : "";
+            const ovHoldTooltip = ovHoldReason
+              ? `On hold: ${ovHoldReason}${
+                  order.heldBy ? ` — ${order.heldBy}` : ""
+                }${order.heldAt ? ` (${order.heldAt})` : ""}`
+              : "";
             return (
             <div
               key={order.id}
@@ -7912,7 +7943,10 @@ export default function ProductionPage({
               <div className="px-3 py-1.5 text-xs text-[#1F1D1B] flex items-center gap-1.5 tabular-nums">
                 <span className="truncate">{order.poNo}</span>
                 {pillLabel && (
-                  <span className={`text-[9px] font-semibold px-1.5 py-[1px] rounded uppercase tracking-wide no-underline ${pillCls}`}>
+                  <span
+                    className={`text-[9px] font-semibold px-1.5 py-[1px] rounded uppercase tracking-wide no-underline cursor-default ${pillCls}`}
+                    title={ovHoldTooltip || undefined}
+                  >
                     {pillLabel}
                   </span>
                 )}
@@ -7920,6 +7954,14 @@ export default function ProductionPage({
               <div className="px-3 py-1.5 min-w-0 flex flex-col justify-center">
                 <div className="text-xs font-semibold text-[#1F1D1B] truncate">{order.productCode}</div>
                 <ProductDetailLine order={order} />
+                {ovHoldReason && (
+                  <div
+                    className="text-[10px] italic text-[#9C6F1E]/70 truncate"
+                    title={ovHoldTooltip}
+                  >
+                    On hold: {ovHoldReason}
+                  </div>
+                )}
               </div>
               <div className="px-3 py-1.5 text-xs text-[#6B7280] truncate flex items-center">{order.customerName}</div>
               <div

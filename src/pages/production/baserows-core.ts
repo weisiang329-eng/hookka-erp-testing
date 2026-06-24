@@ -523,6 +523,10 @@ export const buildBaseRows = (
         pic2: jc.pic2Name || "",
         status: jc.status || "",
         poStatus: o.status || "",
+        // ON HOLD reason (0185) — from the parent SO / CO (attachCustomerSO).
+        holdReason: o.holdReason || "",
+        heldBy: o.heldBy || "",
+        heldAt: o.heldAt || "",
         // Sofa PACKING merge case: jc.wipKey === "FG" means this row IS
         // the merged Packing JC (sofa's 3 component branches —
         // Base / Cushion / Armrest — collapse here). Upstream depts

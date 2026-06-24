@@ -24,6 +24,32 @@ const DEPT_NAMES: Record<string, string> = {
   PACKING: "Packing",
 };
 
+// SHORT component-type abbreviations for the sticker, keyed off the job card's
+// wipType. Owner wants the printed sticker to state WHICH PART it is for using
+// these tight labels ("HB" not "Headboard"). Mirrors WIP_TYPE_LABELS in
+// inventory-wip.ts but uses the owner's abbreviations. SOFA_LEG / LEG are
+// included defensively for a possible future leg/foot type — no such wipType
+// exists in the enum today, so it just won't ever match. Anything not in this
+// map (FG / BEDFRAME / SOFA / ACCESSORY merged set rows, blank wipType)
+// returns "" so a merged / non-piece row renders no label rather than a wrong one.
+const WIP_TYPE_SHORT: Record<string, string> = {
+  HEADBOARD: "HB",
+  DIVAN: "Divan",
+  SOFA_BASE: "Base",
+  SOFA_CUSHION: "Cushion",
+  SOFA_ARMREST: "Armrest",
+  SOFA_HEADREST: "Headrest",
+  SOFA_LEG: "Leg",
+  LEG: "Leg",
+};
+
+// Resolve the short component-type label for a job card. Returns "" for any
+// wipType that doesn't map to a physical piece (FG / merged set rows / blank).
+function componentTypeLabel(wipType: string | undefined): string {
+  if (!wipType) return "";
+  return WIP_TYPE_SHORT[wipType.toUpperCase()] || "";
+}
+
 type JobCard = {
   id: string;
   departmentCode: string;
@@ -419,6 +445,18 @@ async function renderStickerLandscape(
     }
   }
 
+  // Component-type label (bottom-right, above the bottom bar) — tells the
+  // worker WHICH PART this sticker is for (HB / Divan / Base / Cushion /
+  // Armrest / Headrest). Big + bold so it reads at a glance. Blank for merged
+  // FG / non-piece rows where wipType doesn't map to a single piece.
+  const compLabel = componentTypeLabel(jc.wipType);
+  if (compLabel) {
+    doc.setFontSize(12);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(31, 29, 27);
+    doc.text(compLabel, pw - 3, 53.5, { align: "right" });
+  }
+
   // Bottom bar — piece label replaces Qty when we have >1 pieces
   doc.setDrawColor(180, 180, 180);
   doc.line(0, 55, pw, 55);
@@ -546,6 +584,18 @@ async function renderStickerPortrait(
   doc.setFont("helvetica", "bold");
   doc.text(`${pieceNo}/${totalPieces}`, rightX, ry);
   ry += 7;
+
+  // Component-type label (which part this box is) — big + bold under the
+  // piece ratio. Blank for merged FG / non-piece rows (e.g. assembled-sofa
+  // FG Packing) where wipType doesn't map to a single piece.
+  const compLabel = componentTypeLabel(jc.wipType);
+  if (compLabel) {
+    doc.setFontSize(14);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(31, 29, 27);
+    doc.text(compLabel, rightX, ry);
+    ry += 6;
+  }
 
   // Label under the piece ratio. For bedframe multi-piece Packing (one card
   // per Divan/HB), the WIP label distinguishes them. For sofa FG Packing

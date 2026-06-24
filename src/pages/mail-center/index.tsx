@@ -1409,6 +1409,19 @@ export default function MailCenterPage() {
         </div>
       )}
 
+      {/* Search — at the TOP (Gmail-style). Was previously buried at the bottom
+          of the left rail, below the whole folder list, so you had to scroll
+          past everything to reach it. */}
+      <div className="relative max-w-md">
+        <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search mail…"
+          className="pl-8"
+        />
+      </div>
+
       {/* Shell: rail / list / (optional) reading-pane. In SPLIT mode (default)
           the lg grid is 3 columns — folders rail, a fixed-ish list column
           ~360-400px, then a flex-1 reading pane (Gmail/Outlook proportions). In
@@ -1636,17 +1649,6 @@ export default function MailCenterPage() {
                 </div>
               </>
             )}
-          </div>
-
-          {/* Search */}
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Search mail…"
-              className="pl-8"
-            />
           </div>
         </aside>
 

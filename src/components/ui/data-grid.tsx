@@ -18,6 +18,7 @@ import React, {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn, formatDateDMY, formatNumber, formatRM, getStatusColor } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
+import { fetchJson, passthrough } from "@/lib/fetch-json";
 import { useToast } from "@/components/ui/toast";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -31,6 +32,81 @@ function userKey(): string {
     return u?.email ? u.email.toLowerCase() : "anon";
   } catch {
     return "anon";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Org-wide layout presets (server-persisted) — see
+// src/api/routes/datagrid-layouts.ts.
+//
+// The "Save as Org Default" and the print preset ("Save as Production
+// Schedule") are ORG-WIDE: persisted to the backend so any user on any browser
+// loads them. The PERSONAL layout stays in localStorage (per-user-per-browser).
+//
+// These helpers funnel through fetchJson so the session cookie travels
+// (credentials:'include') AND the CSRF double-submit header is attached on the
+// mutating PUT/DELETE automatically. Every call is best-effort: on ANY failure
+// we swallow + fall back to the existing localStorage behavior so a grid never
+// breaks (backward compatible).
+// ---------------------------------------------------------------------------
+type ServerLayoutPreset = {
+  visibleCols: string[];
+  colOrder: string[];
+  colWidths: Record<string, string> | null;
+};
+
+async function fetchOrgLayouts(
+  gridId: string,
+): Promise<{ orgDefault: ServerLayoutPreset | null; print: ServerLayoutPreset | null } | null> {
+  try {
+    const res = (await fetchJson(
+      `/api/datagrid-layouts?gridId=${encodeURIComponent(gridId)}`,
+      passthrough,
+    )) as {
+      success?: boolean;
+      orgDefault?: ServerLayoutPreset | null;
+      print?: ServerLayoutPreset | null;
+    };
+    return {
+      orgDefault: res?.orgDefault ?? null,
+      print: res?.print ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function putOrgLayout(
+  gridId: string,
+  kind: "org-default" | "print",
+  visibleCols: string[],
+  colOrder: string[],
+  colWidths?: Record<string, string> | null,
+): Promise<boolean> {
+  try {
+    await fetchJson(`/api/datagrid-layouts`, passthrough, {
+      method: "PUT",
+      body: { gridId, kind, visibleCols, colOrder, colWidths: colWidths ?? null },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteOrgLayout(
+  gridId: string,
+  kind: "org-default" | "print",
+): Promise<boolean> {
+  try {
+    await fetchJson(
+      `/api/datagrid-layouts?gridId=${encodeURIComponent(gridId)}&kind=${kind}`,
+      passthrough,
+      { method: "DELETE" },
+    );
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1141,13 +1217,16 @@ function ColumnCustomizer<T>({
   onClose: () => void;
   // Optional admin actions — only wired when the grid has a `gridId`
   // (without an id there's no stable key to namespace per-grid org default).
-  onSaveAsOrgDefault?: () => boolean;
-  onResetToOrgDefault?: () => boolean;
+  // Async: they publish the layout org-wide to the backend (in addition to the
+  // localStorage cache mirror) and resolve to whether the publish succeeded.
+  onSaveAsOrgDefault?: () => Promise<boolean>;
+  onResetToOrgDefault?: () => Promise<boolean>;
   // Optional print-preset actions (Wei Siang #25) — wired when the grid has a
-  // gridId AND a printPresetLabel. Not admin-gated.
+  // gridId AND a printPresetLabel. Publishing the print preset is SUPER_ADMIN-
+  // gated server-side (same bar as the org-default button below).
   printPresetLabel?: string;
-  onSaveAsPrintPreset?: () => boolean;
-  onResetPrintPreset?: () => boolean;
+  onSaveAsPrintPreset?: () => Promise<boolean>;
+  onResetPrintPreset?: () => Promise<boolean>;
 }) {
   const { toast } = useToast();
   // SUPER_ADMIN is the only role allowed to publish an org-wide default.
@@ -1320,11 +1399,11 @@ function ColumnCustomizer<T>({
               <button
                 type="button"
                 className="flex items-center gap-1.5 text-[11px] font-medium text-[#6B5C32] hover:underline"
-                onClick={() => {
-                  const ok = onSaveAsPrintPreset();
+                onClick={async () => {
+                  const ok = await onSaveAsPrintPreset();
                   toast[ok ? "success" : "error"](
                     ok
-                      ? `Saved — printing "${printPresetLabel}" will use these columns.`
+                      ? `Saved org-wide — printing "${printPresetLabel}" will use these columns on every browser.`
                       : "Could not save print layout.",
                   );
                 }}
@@ -1337,8 +1416,8 @@ function ColumnCustomizer<T>({
                 <button
                   type="button"
                   className="text-[10px] text-[#888] hover:text-[#555] hover:underline"
-                  onClick={() => {
-                    const ok = onResetPrintPreset();
+                  onClick={async () => {
+                    const ok = await onResetPrintPreset();
                     toast[ok ? "success" : "error"](
                       ok
                         ? "Print layout cleared — printout mirrors the screen again."
@@ -1356,11 +1435,11 @@ function ColumnCustomizer<T>({
             <button
               type="button"
               className="flex w-full items-center gap-1.5 text-[11px] font-medium text-[#6B5C32] hover:underline"
-              onClick={() => {
-                const ok = onSaveAsOrgDefault();
+              onClick={async () => {
+                const ok = await onSaveAsOrgDefault();
                 if (ok) {
                   toast.success(
-                    "Saved as Org Default - new users on this browser will see this layout.",
+                    "Saved as Org Default — every user on every browser will see this layout.",
                   );
                 } else {
                   toast.error("Could not save org default.");
@@ -1376,8 +1455,8 @@ function ColumnCustomizer<T>({
             <button
               type="button"
               className="flex w-full items-center gap-1.5 text-[10px] text-[#888] hover:text-[#555] hover:underline"
-              onClick={() => {
-                const ok = onResetToOrgDefault();
+              onClick={async () => {
+                const ok = await onResetToOrgDefault();
                 if (ok) {
                   toast.success("Reset to Org Default.");
                 } else {
@@ -1665,74 +1744,89 @@ export function DataGrid<T extends Record<string, any>>({
     }
   }, [gridId]);
 
-  // Admin-only: snapshot the current Personal layout (visible columns + order)
-  // into the org-default keys so future first-time viewers of this grid see
-  // the curated layout. Personal layouts always still take precedence on
-  // read, so this never clobbers a user who has already customized.
-  const saveAsOrgDefault = useCallback((): boolean => {
+  // Admin-only: snapshot the current Personal layout (visible columns + order +
+  // widths) as the ORG-WIDE default. Persisted to the backend so EVERY user on
+  // EVERY browser sees it (not just this browser). Also mirrored into the
+  // localStorage org-default cache keys so the existing synchronous read paths
+  // (useState initializers, production print read) keep working instantly.
+  // Personal layouts always still take precedence on read, so this never
+  // clobbers a user who has already customized.
+  const saveAsOrgDefault = useCallback(async (): Promise<boolean> => {
     if (!gridId || typeof window === "undefined") return false;
+    const cols = [...visibleKeys];
+    // Local cache mirror first (fast, also the fallback if the server is down).
     try {
-      localStorage.setItem(
-        `datagrid-cols-${gridId}-org-default`,
-        JSON.stringify([...visibleKeys]),
-      );
-      localStorage.setItem(
-        `datagrid-colorder-${gridId}-org-default`,
-        JSON.stringify(columnOrder),
-      );
-      return true;
-    } catch {
-      return false;
-    }
-  }, [gridId, visibleKeys, columnOrder]);
+      localStorage.setItem(`datagrid-cols-${gridId}-org-default`, JSON.stringify(cols));
+      localStorage.setItem(`datagrid-colorder-${gridId}-org-default`, JSON.stringify(columnOrder));
+      localStorage.setItem(`datagrid-colw-${widthStoreId}-org-default`, JSON.stringify(colWidths));
+    } catch { /* ignore */ }
+    // Publish org-wide. Returns false if the backend rejected (e.g. not a
+    // SUPER_ADMIN, or offline) so the toast can warn it stayed local-only.
+    return putOrgLayout(gridId, "org-default", cols, columnOrder, colWidths);
+  }, [gridId, visibleKeys, columnOrder, colWidths, widthStoreId]);
 
   // Snapshot the CURRENT layout into a dedicated PRINT preset
   // (`datagrid-cols-${gridId}-print`) — a printout reads this instead of the
   // live on-screen columns so the operator can curate a print layout once and
   // keep working with a different on-screen view. Not admin-gated. (Wei Siang #25
   // "Save as Production Schedule".)
-  const saveAsPrintPreset = useCallback((): boolean => {
+  const saveAsPrintPreset = useCallback(async (): Promise<boolean> => {
     if (!gridId || typeof window === "undefined") return false;
+    const cols = [...visibleKeys];
+    // Local cache mirror first (the production print read is synchronous and
+    // reads these keys; also the fallback if the server is down).
     try {
-      localStorage.setItem(
-        `datagrid-cols-${gridId}-print`,
-        JSON.stringify([...visibleKeys]),
-      );
-      localStorage.setItem(
-        `datagrid-colorder-${gridId}-print`,
-        JSON.stringify(columnOrder),
-      );
-      return true;
-    } catch {
-      return false;
-    }
-  }, [gridId, visibleKeys, columnOrder]);
+      localStorage.setItem(`datagrid-cols-${gridId}-print`, JSON.stringify(cols));
+      localStorage.setItem(`datagrid-colorder-${gridId}-print`, JSON.stringify(columnOrder));
+    } catch { /* ignore */ }
+    // Publish org-wide so the print layout is shared across browsers/users.
+    return putOrgLayout(gridId, "print", cols, columnOrder, colWidths);
+  }, [gridId, visibleKeys, columnOrder, colWidths]);
 
   // Forget the print preset → the printout falls back to mirroring the on-screen
   // columns again.
-  const resetPrintPreset = useCallback((): boolean => {
+  const resetPrintPreset = useCallback(async (): Promise<boolean> => {
     if (!gridId || typeof window === "undefined") return false;
     try {
       localStorage.removeItem(`datagrid-cols-${gridId}-print`);
       localStorage.removeItem(`datagrid-colorder-${gridId}-print`);
-      return true;
-    } catch {
-      return false;
-    }
+    } catch { /* ignore */ }
+    // Clear the org-wide print preset too so it stops being re-mirrored on the
+    // next load. Best-effort (SUPER_ADMIN-gated server-side).
+    return deleteOrgLayout(gridId, "print");
   }, [gridId]);
 
-  // Drop the user's Personal layout for this grid and re-seed state from the
-  // Org Default (or column-definition defaults if no Org Default exists).
-  const resetToOrgDefault = useCallback((): boolean => {
+  // Drop the user's Personal layout for this grid AND re-pull the ORG-WIDE
+  // default from the backend so the reset lands on the latest published layout
+  // (not a stale local cache). The server org-default is mirrored into the
+  // localStorage cache keys, then state is re-seeded from the freshest
+  // available org-default (server > local cache > column-definition defaults).
+  const resetToOrgDefault = useCallback(async (): Promise<boolean> => {
     if (!gridId || typeof window === "undefined") return false;
     try {
       localStorage.removeItem(`datagrid-cols-${gridId}-${userKey()}`);
       localStorage.removeItem(`datagrid-colorder-${gridId}-${userKey()}`);
+      localStorage.removeItem(`datagrid-colw-${widthStoreId}-${userKey()}`);
       localStorage.removeItem(`datagrid-seen-${gridId}-${userKey()}`);
       localStorage.removeItem(`datagrid-ensured-${gridId}-${userKey()}`);
 
+      // Re-pull the published org-default and refresh the local cache mirror so
+      // a different browser's stale cache can't win. Best-effort: a server
+      // failure just falls back to whatever local org-default cache exists.
+      const remote = await fetchOrgLayouts(gridId);
+      if (remote?.orgDefault) {
+        try {
+          localStorage.setItem(`datagrid-cols-${gridId}-org-default`, JSON.stringify(remote.orgDefault.visibleCols));
+          localStorage.setItem(`datagrid-colorder-${gridId}-org-default`, JSON.stringify(remote.orgDefault.colOrder));
+          if (remote.orgDefault.colWidths) {
+            localStorage.setItem(`datagrid-colw-${widthStoreId}-org-default`, JSON.stringify(remote.orgDefault.colWidths));
+          }
+        } catch { /* ignore */ }
+      }
+
       const orgCols = localStorage.getItem(`datagrid-cols-${gridId}-org-default`);
       const orgOrder = localStorage.getItem(`datagrid-colorder-${gridId}-org-default`);
+      const orgWidths = localStorage.getItem(`datagrid-colw-${widthStoreId}-org-default`);
       setVisibleKeys(
         orgCols
           ? new Set(JSON.parse(orgCols) as string[])
@@ -1743,6 +1837,7 @@ export function DataGrid<T extends Record<string, any>>({
           ? (JSON.parse(orgOrder) as string[])
           : columns.map(c => c.key),
       );
+      setColWidths(orgWidths ? (JSON.parse(orgWidths) as Record<string, string>) : {});
       // Re-seed the seen ledger to the post-reset universe so the
       // reconciliation effect doesn't immediately re-surface columns the
       // org default intentionally hides. Clear ensured flags so a genuine
@@ -1757,7 +1852,80 @@ export function DataGrid<T extends Record<string, any>>({
     } catch {
       return false;
     }
-  }, [gridId, columns]);
+  }, [gridId, columns, widthStoreId]);
+
+  // ── Org-wide preset hydration (server) ──
+  // On mount, pull the org-wide presets for this grid from the backend. This
+  // is what makes "Save as Org Default" / the print preset SHARED across
+  // browsers/users instead of local-only.
+  //
+  //   - org-default: mirrored into the localStorage org-default cache keys
+  //     (so the existing sync read paths keep working), AND applied to LIVE
+  //     state ONLY when the user has NO personal override for this grid — we
+  //     must never clobber a layout the user has customised.
+  //   - print: ALWAYS mirrored into the print cache keys so the production
+  //     print read (which reads localStorage synchronously) honours the shared
+  //     print preset across browsers once the grid has mounted.
+  //
+  // Best-effort: a fetch failure / null result leaves the existing localStorage
+  // behaviour untouched (backward compatible — never breaks the grid). Runs
+  // once per grid mount; the user-key is captured so a sign-in switch re-runs.
+  const orgHydratedRef = useRef<string | null>(null);
+  const userKeyForHydrate = userKey();
+  useEffect(() => {
+    if (!gridId || typeof window === "undefined") return;
+    // One hydration per (grid, user-key); a sign-in switch changes the key and
+    // re-runs. The ref also guards StrictMode's intentional double-mount.
+    const guardKey = `${gridId}::${userKeyForHydrate}`;
+    if (orgHydratedRef.current === guardKey) return;
+    orgHydratedRef.current = guardKey;
+    let cancelled = false;
+    (async () => {
+      const remote = await fetchOrgLayouts(gridId);
+      if (cancelled || !remote) return;
+
+      // Mirror + (conditionally) apply the org-default.
+      if (remote.orgDefault) {
+        try {
+          localStorage.setItem(`datagrid-cols-${gridId}-org-default`, JSON.stringify(remote.orgDefault.visibleCols));
+          localStorage.setItem(`datagrid-colorder-${gridId}-org-default`, JSON.stringify(remote.orgDefault.colOrder));
+          if (remote.orgDefault.colWidths) {
+            localStorage.setItem(`datagrid-colw-${widthStoreId}-org-default`, JSON.stringify(remote.orgDefault.colWidths));
+          }
+        } catch { /* ignore */ }
+
+        // Apply to LIVE state only if the user has no personal layer for this
+        // grid (cols + order). Checking the raw localStorage keys (not state)
+        // is the reliable "has the user customised?" signal — state is seeded
+        // from defaults when they haven't.
+        let hasPersonal = false;
+        try {
+          hasPersonal =
+            localStorage.getItem(`datagrid-cols-${gridId}-${userKeyForHydrate}`) !== null ||
+            localStorage.getItem(`datagrid-colorder-${gridId}-${userKeyForHydrate}`) !== null;
+        } catch { /* ignore */ }
+        if (!hasPersonal) {
+          setVisibleKeys(new Set(remote.orgDefault.visibleCols));
+          setColumnOrder(remote.orgDefault.colOrder);
+          if (remote.orgDefault.colWidths) setColWidths(remote.orgDefault.colWidths);
+        }
+      }
+
+      // Always mirror the print preset so the production print read (sync
+      // localStorage) honours the shared layout across browsers.
+      if (remote.print) {
+        try {
+          localStorage.setItem(`datagrid-cols-${gridId}-print`, JSON.stringify(remote.print.visibleCols));
+          localStorage.setItem(`datagrid-colorder-${gridId}-print`, JSON.stringify(remote.print.colOrder));
+        } catch { /* ignore */ }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  // userKeyForHydrate in deps so a sign-in/out re-hydrates with the new
+  // personal-key check; orgHydratedRef guards against the StrictMode double-run.
+  }, [gridId, widthStoreId, userKeyForHydrate]);
 
   // When the parent passes a new `columns` array (e.g., the production page
   // changes activeTab and rebuilds dept-pill columns, or a column is added

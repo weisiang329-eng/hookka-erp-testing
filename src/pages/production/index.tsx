@@ -5847,6 +5847,38 @@ export default function ProductionPage({
     }
   }, [toast, confirm]);
 
+  // Prefetch the ORG-WIDE print preset into the localStorage print cache for
+  // the active dept grid, so handlePrintSchedule (which reads localStorage
+  // synchronously below) honours the shared "Save as Production Schedule"
+  // layout across browsers — even on a cold first Print click before the
+  // DataGrid's own mount-effect has mirrored it. Read-only GET, best-effort:
+  // any failure is swallowed and the existing localStorage fallback stands.
+  useEffect(() => {
+    if (activeTab === "ALL" || typeof window === "undefined") return;
+    const gridId = `production-dept-${String(activeTab).toLowerCase()}`;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/datagrid-layouts?gridId=${encodeURIComponent(gridId)}`,
+          { credentials: "include", headers: { Accept: "application/json" } },
+        );
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          print?: { visibleCols?: string[]; colOrder?: string[] } | null;
+        };
+        if (cancelled || !json?.print) return;
+        if (Array.isArray(json.print.visibleCols)) {
+          localStorage.setItem(`datagrid-cols-${gridId}-print`, JSON.stringify(json.print.visibleCols));
+        }
+        if (Array.isArray(json.print.colOrder)) {
+          localStorage.setItem(`datagrid-colorder-${gridId}-print`, JSON.stringify(json.print.colOrder));
+        }
+      } catch { /* ignore — print falls back to local cache / on-screen view */ }
+    })();
+    return () => { cancelled = true; };
+  }, [activeTab]);
+
   const handlePrintSchedule = useCallback((markDecision: boolean | null = null) => {
     const today = new Date().toLocaleDateString("en-MY", {
       year: "numeric", month: "short", day: "numeric",

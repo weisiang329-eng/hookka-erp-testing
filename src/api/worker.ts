@@ -839,10 +839,14 @@ import departmentPerformance from "./routes/department-performance";
 // see how long each WIP typically takes.
 import wipTimes from "./routes/wip-times";
 import mailCenter from "./routes/mail-center";
+// Org-wide DataGrid column presets (Save as Org Default / print preset). Shared
+// across browsers/users via the backend; personal layout stays in localStorage.
+import datagridLayouts from "./routes/datagrid-layouts";
 import { announcementsAdmin, announcementsWorker } from "./routes/announcements";
 
 app.route("/api/customers", customers);
 app.route("/api/mail-center", mailCenter);
+app.route("/api/datagrid-layouts", datagridLayouts);
 app.route("/api/bom", bom);
 app.route("/api/products", products);
 app.route("/api/product-configs", productConfigs);

@@ -1100,6 +1100,24 @@ app.put("/:id", async (c) => {
         409,
       );
     }
+    // A foreign-currency PI snapshots its exchange rate at creation (same as the
+    // SST rule). This edit path has NO currency conversion — recomputing
+    // amountSen from the new lines would store the FOREIGN figure as home MYR
+    // and post a mis-scaled GL correction. Block it: to change a foreign PI,
+    // cancel and re-raise it. (BUG-2026-06-23-008)
+    const piCurrency = String(
+      (existing as unknown as { currency?: string | null }).currency ?? "MYR",
+    ).toUpperCase();
+    if (piCurrency !== "MYR") {
+      return c.json(
+        {
+          success: false,
+          error:
+            "A foreign-currency PI can't be line-edited — cancel and re-raise it (the exchange rate is fixed at creation).",
+        },
+        409,
+      );
+    }
     normalizedItems = normalizeItems(body.items);
     if (!normalizedItems.ok) {
       return c.json({ success: false, error: normalizedItems.error }, 400);

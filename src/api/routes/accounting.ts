@@ -2145,14 +2145,15 @@ app.get("/ap-control", async (c) => {
       "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE hidden = 0",
     ).all<{ accountCode: string; debitSen: number; creditSen: number }>(),
     c.var.DB.prepare(
-      `SELECT supplierId, supplierName, piNo, amountSen, status, dueDate
+      `SELECT supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate
          FROM purchase_invoices
-        WHERE status = 'APPROVED'`,
+        WHERE status IN ('APPROVED', 'PARTIAL_PAID')`,
     ).all<{
       supplierId: string;
       supplierName: string;
       piNo: string;
       amountSen: number;
+      paid_amount_sen: number | null;
       status: string;
       dueDate: string | null;
     }>(),
@@ -2160,12 +2161,21 @@ app.get("/ap-control", async (c) => {
       "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers",
     ).first<{ s: number }>(),
   ]);
-  // Posted purchase CNs reduce what we owe — net them off the subledger
-  // (the control account already absorbed their DR 400-0000 legs).
+  // Posted purchase CNs reduce what we owe (the control account already absorbed
+  // their DR 400-0000 legs). The ALLOCATED portion of each CN is already netted
+  // off above via the knocked-off PIs' paid_amount_sen; only the UNALLOCATED
+  // remainder (a supplier-level credit not tied to any PI) must be subtracted
+  // here — otherwise an allocated discount is double-counted (#6).
   const pcnRes = await c.var.DB.prepare(
     "SELECT COALESCE(SUM(totalAmount),0) AS s FROM purchase_credit_notes WHERE status = 'POSTED'",
   ).first<{ s: number }>();
-  const pcnPostedSen = Number(pcnRes?.s) || 0;
+  const cnAllocRes = await c.var.DB.prepare(
+    "SELECT COALESCE(SUM(booked_sen),0) AS s FROM supplier_payments WHERE method = 'CREDIT_NOTE'",
+  ).first<{ s: number }>();
+  const pcnPostedSen = Math.max(
+    0,
+    (Number(pcnRes?.s) || 0) - (Number(cnAllocRes?.s) || 0),
+  );
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
   const resolveCtl = await loadAccountResolver(c.var.DB);
@@ -2201,8 +2211,10 @@ app.get("/ap-control", async (c) => {
   const bySupplier = new Map<string, ApAging>();
   let piOutstandingSen = 0;
   for (const pi of piRes.results ?? []) {
-    const amt = Number(pi.amountSen) || 0;
-    if (amt === 0) continue;
+    // Net outstanding = face − paid (paid includes cash payments AND allocated
+    // CN credits), so a knocked-off discount drops the subledger exactly once.
+    const amt = (Number(pi.amountSen) || 0) - (Number(pi.paid_amount_sen) || 0);
+    if (amt <= 0) continue;
     piOutstandingSen += amt;
     let row = bySupplier.get(pi.supplierId);
     if (!row) {

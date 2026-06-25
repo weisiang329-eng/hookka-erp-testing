@@ -731,15 +731,15 @@ ${tilesHtml}
                                 <p className="text-[11px] truncate opacity-95">
                                   {rackItemDescription(it)}
                                 </p>
-                                {so && (
-                                  <p className="text-[10px] truncate opacity-75">{so}</p>
-                                )}
                                 {(cust || po) && (
                                   <p className="text-[10px] truncate opacity-75">
                                     {cust}
                                     {cust && po ? " · " : ""}
                                     {po}
                                   </p>
+                                )}
+                                {so && (
+                                  <p className="text-[10px] truncate opacity-75">{so}</p>
                                 )}
                               </div>
                             );
@@ -807,9 +807,9 @@ ${tilesHtml}
                             <span className="text-xs text-[#6B7280] shrink-0">Qty: {it.qty}</span>
                           )}
                         </div>
-                        {so && <p className="text-xs text-[#4B5563]">Sales Order: {so}</p>}
                         {it.customerName && <p className="text-xs text-[#6B7280]">Customer: {it.customerName}</p>}
                         {it.customerPOId && <p className="text-xs text-[#6B7280]">Customer PO: {it.customerPOId}</p>}
+                        {so && <p className="text-xs text-[#4B5563]">Sales Order: {so}</p>}
                         {it.stockedInDate && <p className="text-xs text-[#6B7280]">Stocked In: {it.stockedInDate}</p>}
                         {extraNotes && <p className="text-xs text-[#6B7280]">Notes: {extraNotes}</p>}
                       </div>
@@ -1156,8 +1156,9 @@ ${tilesHtml}
                     <div className="mt-1 space-y-0.5 text-[#9A3A2D]">
                       <p>Rack: {stockOutTarget.id}</p>
                       <p>Product: {rackItemDescription(it)}</p>
-                      {so && <p>Sales Order: {so}</p>}
                       {it.customerName && <p>Customer: {it.customerName}</p>}
+                      {it.customerPOId && <p>Customer PO: {it.customerPOId}</p>}
+                      {so && <p>Sales Order: {so}</p>}
                       {it.stockedInDate && <p>Stocked In: {it.stockedInDate}</p>}
                     </div>
                   </div>

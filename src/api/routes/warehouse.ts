@@ -484,7 +484,16 @@ app.get("/:id/details", async (c) => {
     c.var.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
       .bind(id)
       .first<RackLocationRow>(),
-    c.var.DB.prepare("SELECT * FROM rack_items WHERE rackLocationId = ?")
+    // Same customer JOIN as GET / so the detail popup's contents show the
+    // customer name + customer PO (rack_items.customerName is often blank, and
+    // customerPOId isn't a rack_items column at all). po_customer_name aliased
+    // snake_case so toCamel recovers it (a camelCase alias folds + is lost).
+    c.var.DB.prepare(
+      `SELECT ri.*, po.customerPOId AS customerPOId, po.customerName AS po_customer_name
+         FROM rack_items ri
+         LEFT JOIN production_orders po ON po.id = ri.productionOrderId
+        WHERE ri.rackLocationId = ?`,
+    )
       .bind(id)
       .all<RackItemRow>(),
     c.var.DB.prepare(

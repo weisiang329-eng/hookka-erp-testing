@@ -28,6 +28,7 @@ type RackItem = {
   productName?: string;
   sizeLabel?: string;
   customerName?: string;
+  customerPOId?: string;
   qty?: number;
   stockedInDate?: string;
   notes?: string;
@@ -717,22 +718,28 @@ ${tilesHtml}
                       </div>
                       {slot.status === "OCCUPIED" && (
                         <div className="mt-1 space-y-0.5">
-                          {/* Unified per-item line: description + its SO number
-                              (or customer as a fallback), so every occupied rack
-                              card reads consistently regardless of how the item
-                              was stocked (per-piece scan vs legacy office). */}
+                          {/* Per-item identity (owner 2026-06-25): description +
+                              our SO + the customer name · customer PO, so every
+                              occupied rack card shows WHAT the goods are, WHOSE
+                              they are, and against WHICH customer PO. */}
                           {visibleItems.map((it, i) => {
                             const so = rackItemSO(it);
-                            const sub = so
-                              ? so
-                              : it.customerName || "";
+                            const cust = it.customerName || "";
+                            const po = it.customerPOId || "";
                             return (
                               <div key={i} className="leading-tight">
                                 <p className="text-[11px] truncate opacity-95">
                                   {rackItemDescription(it)}
                                 </p>
-                                {sub && (
-                                  <p className="text-[10px] truncate opacity-75">{sub}</p>
+                                {so && (
+                                  <p className="text-[10px] truncate opacity-75">{so}</p>
+                                )}
+                                {(cust || po) && (
+                                  <p className="text-[10px] truncate opacity-75">
+                                    {cust}
+                                    {cust && po ? " · " : ""}
+                                    {po}
+                                  </p>
                                 )}
                               </div>
                             );
@@ -802,6 +809,7 @@ ${tilesHtml}
                         </div>
                         {so && <p className="text-xs text-[#4B5563]">Sales Order: {so}</p>}
                         {it.customerName && <p className="text-xs text-[#6B7280]">Customer: {it.customerName}</p>}
+                        {it.customerPOId && <p className="text-xs text-[#6B7280]">Customer PO: {it.customerPOId}</p>}
                         {it.stockedInDate && <p className="text-xs text-[#6B7280]">Stocked In: {it.stockedInDate}</p>}
                         {extraNotes && <p className="text-xs text-[#6B7280]">Notes: {extraNotes}</p>}
                       </div>

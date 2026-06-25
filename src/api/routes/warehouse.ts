@@ -44,6 +44,12 @@ type RackItemRow = {
   qty: number | null;
   stockedInDate: string | null;
   notes: string | null;
+  // Joined from production_orders on the grid query (GET /) so each item can
+  // show the customer PO + a reliable customer name (rack_items.customerName is
+  // often blank). Optional: the single-rack queries don't join, and itemRowToApi
+  // degrades gracefully when they're absent.
+  customerPOId?: string | null;
+  poCustomerName?: string | null;
 };
 
 type StockMovementRow = {
@@ -71,6 +77,7 @@ type RackItemApi = {
   productName?: string;
   sizeLabel?: string;
   customerName?: string;
+  customerPOId?: string;
   qty?: number;
   stockedInDate?: string;
   notes?: string;
@@ -91,7 +98,10 @@ function itemRowToApi(r: RackItemRow): RackItemApi {
     productCode: r.productCode ?? "",
     productName: r.productName ?? undefined,
     sizeLabel: r.sizeLabel ?? "",
-    customerName: r.customerName ?? "",
+    // rack_items.customerName is often blank (stock-in doesn't capture it); fall
+    // back to the production order's snapshot name so the grid always shows it.
+    customerName: r.customerName || r.poCustomerName || "",
+    customerPOId: r.customerPOId ?? "",
     qty: r.qty ?? 1,
     stockedInDate: r.stockedInDate ?? "",
     notes: r.notes ?? "",
@@ -232,7 +242,17 @@ async function replaceRackItems(
 app.get("/", async (c) => {
   const [locs, items] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM rack_locations ORDER BY rack").all<RackLocationRow>(),
-    c.var.DB.prepare("SELECT * FROM rack_items").all<RackItemRow>(),
+    // LEFT JOIN production_orders so each rack item carries the customer PO + a
+    // reliable customer name (rack_items.customerName is often blank). Same join
+    // pattern as the /movements query; po.customerPOId / po.customerName are
+    // snapshot columns on production_orders.
+    c.var.DB
+      .prepare(
+        `SELECT ri.*, po.customerPOId AS customerPOId, po.customerName AS poCustomerName
+           FROM rack_items ri
+           LEFT JOIN production_orders po ON po.id = ri.productionOrderId`,
+      )
+      .all<RackItemRow>(),
   ]);
   const data = (locs.results ?? []).map((l) => rowToRack(l, items.results ?? []));
   const grouped: Record<string, typeof data> = {};

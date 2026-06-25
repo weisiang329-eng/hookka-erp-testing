@@ -22,14 +22,14 @@ export function generatePackingListPdf(order: DeliveryOrder) {
   let y = drawLetterhead(doc, {
     docTitle: "PACKING LIST",
     docNo: order.doNo,
-    statusText: `SO: ${order.companySOId || "-"}`,
+    statusText: `Our SO: ${order.companySOId || "-"}`,
     company: "HOOKKA",
   });
   doc.setTextColor(31, 29, 27);
 
   // --- Quick Info Row ---
   doc.setDrawColor(200, 200, 200);
-  doc.rect(margin, y, pageW - margin * 2, 14, "S");
+  doc.rect(margin, y, pageW - margin * 2, 20, "S");
 
   doc.setFontSize(8);
   const infoY = y + 5;
@@ -81,7 +81,18 @@ export function generatePackingListPdf(order: DeliveryOrder) {
   doc.setTextColor(31, 29, 27);
   doc.text(order.totalM3.toFixed(2), col3 + 24, infoY2);
 
-  y += 20;
+  // Third row — Customer PO (owner 2026-06-25: every doc must make the customer's
+  // PO explicit alongside our SO + the customer name, so the floor can tell whose
+  // goods these are and against which PO).
+  const infoY3 = y + 15;
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(107, 114, 128);
+  doc.text("Customer PO:", col1, infoY3);
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(31, 29, 27);
+  doc.text(order.customerPOId || "-", col1 + 28, infoY3);
+
+  y += 26;
 
   // --- Items Table with Picked checkbox column ---
   const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);

@@ -8259,6 +8259,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
   const { toast } = useToast();
   const [data, setData] = useState<ObState | null>(null);
   const [openingDate, setOpeningDate] = useState("");
+  const [savingDate, setSavingDate] = useState(false);
   // GL grid — raw RM strings per account so typing never reformats.
   const [amounts, setAmounts] = useState<Record<string, { dr: string; cr: string }>>({});
   const [posting, setPosting] = useState(false);
@@ -8330,6 +8331,27 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
   const totalDr = userDr + (data?.arTotalSen ?? 0);
   const totalCr = userCr + (data?.apTotalSen ?? 0);
   const diff = totalDr - totalCr;
+
+  // Save just the opening date (self-service, no posting required) — sets when
+  // the books start from this Maintenance tab.
+  const saveOpeningDate = async () => {
+    if (!openingDate) { toast.error("Pick an opening date first"); return; }
+    setSavingDate(true);
+    try {
+      const res = await fetch("/api/accounting/opening-date", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ openingDate }),
+      });
+      const j = asMutationResponse(await res.json());
+      if (res.ok && j?.success) toast.success(`Opening date set to ${openingDate}`);
+      else toast.error(j?.error || "Failed to save opening date");
+    } catch {
+      toast.error("Failed to save opening date");
+    } finally {
+      setSavingDate(false);
+    }
+  };
 
   const handlePost = async () => {
     if (!openingDate) {
@@ -8435,12 +8457,17 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
         <CardContent className="p-4 flex flex-wrap items-end gap-4">
           <div>
             <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Opening date</label>
-            <input
-              type="date"
-              value={openingDate}
-              onChange={(e) => setOpeningDate(e.target.value)}
-              className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm"
-            />
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={openingDate}
+                onChange={(e) => setOpeningDate(e.target.value)}
+                className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm"
+              />
+              <Button variant="outline" size="sm" disabled={savingDate || !openingDate} onClick={saveOpeningDate}>
+                {savingDate ? "Saving…" : "Save"}
+              </Button>
+            </div>
           </div>
           <div className="text-sm">
             <span className="text-[#6B7280] mr-2">Total DR</span>

@@ -8833,6 +8833,39 @@ app.get("/opening-balance", async (c) => {
 });
 
 // Add ONE opening invoice (AR). Subledger only — no GL legs, no SST.
+// PUT /opening-date — set just the accounting start date (kv 'opening_date'),
+// self-service, WITHOUT posting opening balances. Lets the owner set when the
+// books start from the Maintenance → Opening Balance tab before they have the
+// opening rows. The opening-balance Post also writes this key (same format).
+app.put("/opening-date", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { openingDate?: string };
+  const d = String(body.openingDate ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    return c.json(
+      { success: false, error: "openingDate must be a YYYY-MM-DD date" },
+      400,
+    );
+  }
+  await c.var.DB.prepare(
+    `INSERT INTO kv_config (key, value, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+  )
+    .bind(OPENING_DATE_KV_KEY, JSON.stringify(d), new Date().toISOString())
+    .run();
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: "opening-date",
+    action: "update",
+    after: { openingDate: d },
+  });
+  return c.json({ success: true, data: { openingDate: d } });
+});
+
 app.post("/opening-balance/ar", async (c) => {
   const denied = await requirePermission(c, "accounting", "create");
   if (denied) return denied;

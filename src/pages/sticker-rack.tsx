@@ -198,24 +198,14 @@ export default function StickerRackPage() {
               <p className="text-xl font-bold mt-0.5 leading-snug">
                 {summary.description || summary.poNo || "Item"}
               </p>
-              <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-300">
-                {summary.poNo && (
-                  <div>
-                    <span className="text-gray-500">PO</span>{" "}
-                    <span className="font-semibold text-white">
-                      {summary.poNo}
-                    </span>
-                  </div>
-                )}
-                {summary.salesOrderNo && (
-                  <div>
-                    <span className="text-gray-500">SO</span>{" "}
-                    <span className="font-semibold text-white">
-                      {summary.salesOrderNo}
-                    </span>
-                  </div>
-                )}
-              </div>
+              {(summary.poNo || summary.salesOrderNo) && (
+                <div className="mt-2 text-xs text-gray-300">
+                  <span className="text-gray-500">Sales Order</span>{" "}
+                  <span className="font-semibold text-white">
+                    {summary.poNo || summary.salesOrderNo}
+                  </span>
+                </div>
+              )}
               <p className="text-xs text-gray-400 mt-2">
                 Current rack:{" "}
                 <span className="font-semibold text-white">

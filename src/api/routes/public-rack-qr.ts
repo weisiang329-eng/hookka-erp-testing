@@ -463,10 +463,47 @@ app.get("/:rackId", async (c: Context<Env>) => {
     )
       .bind(rackId)
       .first<{ n: number }>();
+    // Contents of THIS rack — so the scan page shows WHAT is inside, not just a
+    // count (owner 2026-06-25). description = the stored item name; SO from the
+    // joined production order (fallback: the "SO …" stashed in notes);
+    // stockedInDate as recorded at stock-in. Newest first. Best-effort: a query
+    // failure leaves `items` empty and the page still works off itemCount.
+    let items: Array<{
+      description: string;
+      salesOrderNo: string;
+      stockedInDate: string;
+    }> = [];
+    try {
+      const itemsRes = await c.var.DB.prepare(
+        `SELECT ri.productName AS description, ri.notes AS notes,
+                ri.stockedInDate AS stockedInDate, po.salesOrderNo AS salesOrderNo
+           FROM rack_items ri
+           LEFT JOIN production_orders po ON po.id = ri.productionOrderId
+          WHERE ri.rackLocationId = ?
+          ORDER BY ri.stockedInDate DESC`,
+      )
+        .bind(rackId)
+        .all<{
+          description: string | null;
+          notes: string | null;
+          stockedInDate: string | null;
+          salesOrderNo: string | null;
+        }>();
+      items = (itemsRes.results ?? []).map((r) => ({
+        description: (r.description || "").trim() || "Item",
+        salesOrderNo:
+          (r.salesOrderNo || "").trim() ||
+          (r.notes || "").replace(/^SO\s+/i, "").trim(),
+        stockedInDate: (r.stockedInDate || "").trim(),
+      }));
+    } catch (e) {
+      console.warn("[rack-qr summary] contents query failed:", e);
+    }
     return c.json({
       rackId: rack.id,
       rackLabel: rack.rack,
       itemCount: Number(countRow?.n) || 0,
+      items,
     });
   } catch (err) {
     console.error("[GET /api/public/rack-qr/:rackId] failed:", err);

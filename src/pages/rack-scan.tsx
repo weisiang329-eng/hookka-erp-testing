@@ -36,6 +36,8 @@ import {
   Boxes,
   Camera,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Flashlight,
   PackageCheck,
   Trash2,
@@ -45,7 +47,18 @@ import jsQR from "jsqr";
 import { csrfHeaders } from "@/lib/csrf";
 
 // ── Backend shapes (API contract — see routes/public-rack-qr.ts) ──────────
-type RackSummary = { rackId: string; rackLabel: string; itemCount: number };
+type RackContentItem = {
+  description: string;
+  salesOrderNo: string;
+  stockedInDate: string;
+};
+type RackSummary = {
+  rackId: string;
+  rackLabel: string;
+  itemCount: number;
+  // Owner 2026-06-25: show WHAT is in the rack, not just the count.
+  items?: RackContentItem[];
+};
 
 type ItemLookup = {
   found: boolean;
@@ -107,6 +120,9 @@ export default function RackScanPage() {
   const [summary, setSummary] = useState<RackSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // "In this rack now" contents list — collapsible, open by default (owner
+  // 2026-06-25: see what's inside the rack, full page scroll, no nested scroll).
+  const [contentsOpen, setContentsOpen] = useState(true);
 
   // ── Accumulated stock-in list ────────────────────────────────────────────
   const [lines, setLines] = useState<Line[]>([]);
@@ -287,6 +303,7 @@ export default function RackScanPage() {
           rackId: j.rackId,
           rackLabel: j.rackLabel || j.rackId,
           itemCount: j.itemCount ?? 0,
+          items: j.items ?? [],
         });
       }
     } catch {
@@ -800,6 +817,29 @@ export default function RackScanPage() {
       addedValuesRef.current.clear();
       // Reflect the new total in the rack header.
       setSummary((s) => (s ? { ...s, itemCount: s.itemCount + n } : s));
+      // Refresh "In this rack now" so the just-stocked pieces show, with no
+      // loading flash (background; keep the optimistic count if it fails).
+      void (async () => {
+        try {
+          const rr = await fetch(
+            `/api/public/rack-qr/${encodeURIComponent(rackId || "")}`,
+            { credentials: "include" },
+          );
+          const jj = (await rr.json().catch(() => null)) as
+            | (Partial<RackSummary> & { items?: RackContentItem[] })
+            | null;
+          if (rr.ok && jj && Array.isArray(jj.items)) {
+            const fresh = jj.items;
+            setSummary((s) =>
+              s
+                ? { ...s, itemCount: jj.itemCount ?? s.itemCount, items: fresh }
+                : s,
+            );
+          }
+        } catch {
+          /* keep the optimistic count + existing list */
+        }
+      })();
     } catch {
       setSubmitError("Network error. Please check your connection and try again.");
     } finally {
@@ -1037,9 +1077,7 @@ export default function RackScanPage() {
                         </p>
                         {(it.salesOrderNo || it.poNo) && (
                           <p className="truncate text-xs text-gray-500">
-                            {it.salesOrderNo
-                              ? `SO ${it.salesOrderNo}`
-                              : it.poNo}
+                            {it.salesOrderNo || it.poNo}
                           </p>
                         )}
                       </div>
@@ -1085,6 +1123,57 @@ export default function RackScanPage() {
                 </button>
               )}
             </div>
+
+            {/* In this rack now — the rack's CURRENT contents (owner 2026-06-25):
+                description + Sales Order + stocked-in date. The whole page scrolls
+                (no nested scroll); collapsible, open by default. */}
+            {(summary.items?.length ?? 0) > 0 && (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setContentsOpen((v) => !v)}
+                  className="w-full flex items-center justify-between px-1 py-2"
+                  aria-expanded={contentsOpen}
+                >
+                  <span className="text-base font-bold text-[#1F1D1B]">
+                    In this rack now
+                  </span>
+                  <span className="flex items-center gap-2 text-sm text-gray-500">
+                    <span className="inline-flex items-center justify-center min-w-[24px] rounded-full bg-[#E7E1D8] px-2 py-0.5 text-xs font-semibold text-[#5F5A52]">
+                      {summary.items?.length ?? 0}
+                    </span>
+                    {contentsOpen ? (
+                      <ChevronUp className="h-4 w-4" />
+                    ) : (
+                      <ChevronDown className="h-4 w-4" />
+                    )}
+                  </span>
+                </button>
+                {contentsOpen && (
+                  <ul className="space-y-2 mt-1">
+                    {summary.items?.map((it, i) => (
+                      <li
+                        key={i}
+                        className="rounded-xl bg-white border border-[#E6E0D9] px-3 py-2.5"
+                      >
+                        <p className="text-sm font-medium text-[#1F1D1B] break-words">
+                          {it.description}
+                        </p>
+                        {(it.salesOrderNo || it.stockedInDate) && (
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            {it.salesOrderNo}
+                            {it.salesOrderNo && it.stockedInDate ? " · " : ""}
+                            {it.stockedInDate
+                              ? `stocked in ${it.stockedInDate}`
+                              : ""}
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
 
             <p className="text-[10px] text-center text-gray-400">
               For other changes, contact the Hookka office.

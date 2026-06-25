@@ -724,7 +724,7 @@ ${tilesHtml}
                           {visibleItems.map((it, i) => {
                             const so = rackItemSO(it);
                             const sub = so
-                              ? `SO ${so}`
+                              ? so
                               : it.customerName || "";
                             return (
                               <div key={i} className="leading-tight">
@@ -853,7 +853,7 @@ ${tilesHtml}
                           m.poNo && m.poNo !== primary
                             ? m.poNo
                             : m.salesOrderNo && m.salesOrderNo !== primary
-                            ? `SO ${m.salesOrderNo}`
+                            ? m.salesOrderNo
                             : "";
                         return (
                           <p className="text-xs text-[#4B5563] mt-0.5">
@@ -1128,7 +1128,7 @@ ${tilesHtml}
                     {stockOutTarget.items.map((it, i) => {
                       const so = rackItemSO(it);
                       const tail = so
-                        ? `SO ${so}`
+                        ? so
                         : it.customerName || "-";
                       return (
                         <option key={i} value={i}>
@@ -1335,7 +1335,7 @@ function MovementTable({ movements }: { movements: StockMovement[] }) {
                       m.poNo && m.poNo !== primary
                         ? m.poNo
                         : m.salesOrderNo && m.salesOrderNo !== primary
-                        ? `SO ${m.salesOrderNo}`
+                        ? m.salesOrderNo
                         : "";
                     return (
                       <div className="flex flex-col leading-tight">

@@ -682,6 +682,45 @@ export default function WorkerScanPage() {
   // 2/2 on a qty=2 job card is otherwise indistinguishable.
   const handleDecoded = useCallback(
     async (raw: string) => {
+      // Packing/FG stickers now encode the PUBLIC rack page (/p/<token>) so a
+      // storekeeper with NO Worker-Portal login can scan + choose a rack. But the
+      // INTERNAL scan must STILL do the full flow (mark complete + set rack, and
+      // it repeats on a 2nd/3rd scan). We do NOT rebuild that flow — we resolve
+      // the token back to its poNo + piece label and rewrite the value as the
+      // LEGACY `op=FG-PACKING` deep-link this handler already understands, so
+      // every downstream behaviour (completion, rack picker, rack stock-in mode)
+      // is the EXISTING, unchanged code. The public /p/ page is untouched.
+      const pToken = /\/p\/([0-9a-f]{64})(?:[/?#]|$)/i.exec(raw);
+      if (pToken) {
+        let rebuilt = "";
+        try {
+          const r = await fetch(`/api/public/rack-write/${pToken[1]}`, {
+            credentials: "include",
+          });
+          const j = (await r.json().catch(() => null)) as {
+            success?: boolean;
+            data?: { poNo?: string; description?: string };
+          } | null;
+          if (r.ok && j?.success && j.data?.poNo) {
+            const origin =
+              typeof window !== "undefined" && window.location?.origin
+                ? window.location.origin
+                : "";
+            rebuilt = `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(
+              j.data.poNo,
+            )}&pn=${encodeURIComponent(j.data.description ?? "")}`;
+          }
+        } catch {
+          /* network/parse fail → handled as not-recognised below */
+        }
+        if (!rebuilt) {
+          setResult({ kind: "error", message: t("common.error"), decoded: raw });
+          return;
+        }
+        // Rewrite the scanned value to the legacy FG-PACKING deep-link; every
+        // line below this point is the existing, unchanged handler.
+        raw = rebuilt;
+      }
       // Rack bulk stock-in (#52). A rack QR (HKRACK:<id>) enters/keeps the mode;
       // while in it, every subsequent FG/packing/PO scan is ADDED to that rack's
       // list instead of doing a normal WIP lookup. Checked first so a rack scan

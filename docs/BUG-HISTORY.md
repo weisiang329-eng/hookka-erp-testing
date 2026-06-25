@@ -34,6 +34,22 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-25-004 — packing-rack scan UI: duplicated SO/PO display + mobile Rack Stock-In showed no contents
+
+🟢 **Fixed (prod, backend-verified)** · `ui-frontend` · `warehouse` · owner-reported
+
+(1) The public Assign Rack page (`/p/`, sticker-rack.tsx) showed "PO `<poNo>`" AND "SO `<salesOrderNo>`" — but a production poNo IS the SO line number, so it read as the same thing twice with a misleading "PO" label. Now one line: "Sales Order: `<poNo>`". (2) The Rack grid (warehouse.tsx) + the rack-scan queue prefixed "SO " to a value already starting with "SO-" → "SO SO-2606-062"; dropped the redundant "SO " label (value self-identifies; CO- orders read right too). (3) Mobile Rack Stock-In (rack-scan.tsx) showed only "holds N items", no list. The summary endpoint (public-rack-qr.ts `GET /:rackId`) now also returns the rack contents (description + Sales Order + stocked-in date, newest-first, best-effort), and the page renders an "In this rack now" section — clean cards, collapsible (open by default), whole-page scroll (no nested scroll), background refresh after stock-in. **Verified prod:** `GET /api/public/rack-qr/Rack%201` → items `[{ "2041(A)-(Q) -HB 18\"", SO-2606-062, 2026-06-25 }]` with a CLEAN SO. build:strict clean (app + base).
+
+---
+
+## BUG-2026-06-25-003 — internal Worker-Portal scan couldn't read the new `/p/<token>` packing-sticker QR ("Not found")
+
+🟢 **Fixed (prod, pending owner scan-verify)** · `worker-scan` · owner-reported (urgent — floor blocked)
+
+An earlier feature changed the packing/FG sticker QR to the public rack page URL (`/p/<token>`) so a storekeeper with NO Worker-Portal login can scan + choose a rack (external phone — works). But that change BROKE the INTERNAL Worker-Portal scan: `handleDecoded` only understood the legacy `/worker/scan?op=FG-PACKING` deep-link, so a `/p/<token>` value hit "Not found" and workers could no longer mark-complete + rack a packing piece by scanning. Additive-broke-existing class (see [[feedback_additive_never_break_existing]]). **Fix (FE-only, maximal reuse):** `handleDecoded` (worker/scan.tsx) now detects `/p/<64hex>`, resolves it via the EXISTING public `/api/public/rack-write/:token` (returns poNo + piece description), and rewrites the value to the legacy FG-PACKING deep-link — everything downstream (completion, rack picker, rack stock-in mode, repeat scans) is the existing, unchanged handler; the external `/p/` page is untouched. build:strict + eslint clean.
+
+---
+
 ## BUG-2026-06-25-002 — "559" phantom model on the Production-Time / WIP Times page = a BOM baseModel typo
 
 🟢 **Fixed (prod, verified)** · `bom` · `wip-times` · owner-reported ("为什么 production time 有 559 我们没有 559 这个 model")

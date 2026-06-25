@@ -248,7 +248,11 @@ app.get("/", async (c) => {
     // snapshot columns on production_orders.
     c.var.DB
       .prepare(
-        `SELECT ri.*, po.customerPOId AS customerPOId, po.customerName AS poCustomerName
+        // po.customerPOId is a rename-map column so its alias survives; alias the
+        // PO customer name to snake_case so toCamel recovers it as poCustomerName
+        // (an unquoted camelCase alias folds to lowercase and is lost — the
+        // column-rename-map folded-lowercase trap).
+        `SELECT ri.*, po.customerPOId AS customerPOId, po.customerName AS po_customer_name
            FROM rack_items ri
            LEFT JOIN production_orders po ON po.id = ri.productionOrderId`,
       )

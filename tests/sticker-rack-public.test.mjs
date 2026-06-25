@@ -216,7 +216,11 @@ test("public route never mints tokens — minting stays on the authed endpoint",
   // The mint endpoint is RBAC-gated (read — same gate as 'show me the QR').
   const at = prodRoute.indexOf('app.post("/packing-rack-tokens"');
   assert.ok(at >= 0, "the authed mint endpoint must exist");
-  const block = prodRoute.slice(at, at + 4000);
+  // Window sized to span the whole endpoint (the mint now happens in a
+  // batched parallel pass near the end — the per-piece serial loop was
+  // replaced for performance, so the getOrCreateJobCardQrToken call sits
+  // further down than it used to).
+  const block = prodRoute.slice(at, at + 6500);
   assert.match(
     block,
     /requirePermission\(c,\s*"production-orders",\s*"read"\)/,

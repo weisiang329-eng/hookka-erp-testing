@@ -5396,16 +5396,20 @@ export default function ProductionPage({
     }
     setLoadingFgPreview(true);
     const built = await fetchFgStickersForOrders(ordersToProcess);
-    // Attach the public packing-rack tokens so the printed QR deep-links to
-    // /p/<token> (no-login rack page) instead of /worker/scan. Best-effort;
-    // any sticker without a token keeps the worker-scan fallback.
-    const aggregated = await enrichWithPackingTokens(built);
-    // Guard: only commit if no newer load has started. Prevents the
-    // stale-overwrite race when filters change mid-fetch.
-    if (myVersion !== fgLoadVersion.current) return aggregated;
+    // Stale-load guard (filters changed mid-fetch).
+    if (myVersion !== fgLoadVersion.current) return built;
+    // Paint the preview IMMEDIATELY with the /worker/scan fallback URLs so the
+    // operator isn't stuck on "Loading FG units…" while we mint the public
+    // packing-rack tokens — that mint is the slow part (a batched call that
+    // touches several cards). The QR upgrades to /p/<token> a beat later.
     setJobCardStickers([]);
-    setFgStickers(aggregated);
+    setFgStickers(built);
     setLoadingFgPreview(false);
+    // Now mint + attach the /p/ tokens and upgrade the stickers in place.
+    // Callers that await loadFgStickers (the Print path) still receive the
+    // fully-enriched set, so the PRINTED QR deep-links to /p/<token>.
+    const aggregated = await enrichWithPackingTokens(built);
+    if (myVersion === fgLoadVersion.current) setFgStickers(aggregated);
     return aggregated;
   }, [
     filteredOrders,

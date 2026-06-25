@@ -6021,51 +6021,87 @@ app.post("/packing-rack-tokens", async (c) => {
   const tokens: Record<string, string> = {};
   try {
     await ensureJobCardQrTokenColumn(c.var.DB);
-    for (const [key, { poNo, pieceName }] of wanted) {
-      // PO header → its PACKING cards (id + wipLabel). poNo is the stored PO
-      // number the sticker encodes verbatim (or, defensively, the PO id).
-      const po = await c.var.DB.prepare(
-        "SELECT id FROM production_orders WHERE poNo = ? OR id = ? LIMIT 1",
+    // Batched lookups. This was a serial per-(poNo,pieceName) loop — ~6 DB
+    // round-trips each (PO → PACKING cards → mint × N) — so a handful of
+    // stickers fired dozens of sequential calls and stalled the FG-sticker
+    // preview/print. Now: ONE query for every PO, ONE for every PACKING card,
+    // then mint the UNIQUE tokens in parallel. Output is byte-identical to the
+    // old loop (same pickPackingCard narrowing, same FIX 3 per-wipLabel keys,
+    // same FIX 4 null-token guard).
+    const poNos = [...new Set([...wanted.values()].map((w) => w.poNo))];
+    if (poNos.length > 0) {
+      const poPh = poNos.map(() => "?").join(",");
+      const posRes = await c.var.DB.prepare(
+        `SELECT id, poNo FROM production_orders WHERE poNo IN (${poPh}) OR id IN (${poPh})`,
       )
-        .bind(poNo, poNo)
-        .first<{ id: string }>();
-      if (!po) continue;
-      const cardsRes = await c.var.DB.prepare(
-        `SELECT id, wipLabel, status FROM job_cards
-           WHERE productionOrderId = ? AND departmentCode = 'PACKING'`,
-      )
-        .bind(po.id)
-        .all<{ id: string; wipLabel: string | null; status: string | null }>();
-      const cards = cardsRes.results ?? [];
-      if (cards.length === 0) continue;
-      // Narrow to the ONE PACKING card the box label refers to via the SHARED
-      // tolerant resolver (exact → word-token → substring, single-compartment
-      // unchanged). No unique resolution → skip the per-pieceName key (the
-      // client keeps the /worker/scan fallback for that sticker).
-      const pick = pickPackingCard(cards, pieceName);
-      if (pick) {
-        const token = await getOrCreateJobCardQrToken(c.var.DB, pick.id);
-        // FIX 4: getOrCreateJobCardQrToken returns null when it can't persist a
-        // token (0-row race / vanished card) — never emit a dead token; the
-        // client then keeps the /worker/scan fallback for this sticker.
-        if (token) tokens[key] = token;
+        .bind(...poNos, ...poNos)
+        .all<{ id: string; poNo: string | null }>();
+      // poNo (and, defensively, id) → production_order id.
+      const poIdByKey = new Map<string, string>();
+      for (const po of posRes.results ?? []) {
+        if (po.poNo) poIdByKey.set(po.poNo, po.id);
+        poIdByKey.set(po.id, po.id);
       }
-
-      // FIX 3: when the PO has MULTIPLE PACKING cards, ALSO mint + return a token
-      // for EACH card keyed by `<poNo>|<wipLabel>`, so the client can attach the
-      // correct token per box label even when the pieceName narrowing above is
-      // not unique. Existing `<poNo>|<pieceName>` keys are unchanged; this only
-      // ADDS extra keys. Single-compartment POs (one card) already resolve via
-      // the pieceName key above, so we skip the per-label fan-out for them.
-      if (cards.length > 1) {
-        for (const card of cards) {
-          const label = (card.wipLabel ?? "").trim();
-          if (!label) continue;
-          const labelKey = `${poNo}|${label}`;
-          if (tokens[labelKey]) continue; // already minted (e.g. dup label)
-          const labelToken = await getOrCreateJobCardQrToken(c.var.DB, card.id);
-          if (labelToken) tokens[labelKey] = labelToken;
+      const poIds = [...new Set((posRes.results ?? []).map((p) => p.id))];
+      // Every PACKING card for those POs in one query, grouped by PO.
+      const cardsByPo = new Map<
+        string,
+        Array<{ id: string; wipLabel: string | null; status: string | null }>
+      >();
+      if (poIds.length > 0) {
+        const cPh = poIds.map(() => "?").join(",");
+        const cardsRes = await c.var.DB.prepare(
+          `SELECT id, productionOrderId, wipLabel, status FROM job_cards
+             WHERE productionOrderId IN (${cPh}) AND departmentCode = 'PACKING'`,
+        )
+          .bind(...poIds)
+          .all<{
+            id: string;
+            productionOrderId: string;
+            wipLabel: string | null;
+            status: string | null;
+          }>();
+        for (const card of cardsRes.results ?? []) {
+          const arr = cardsByPo.get(card.productionOrderId) ?? [];
+          arr.push({ id: card.id, wipLabel: card.wipLabel, status: card.status });
+          cardsByPo.set(card.productionOrderId, arr);
         }
+      }
+      // Resolve every wanted key → the ONE card id it should mint (pickPackingCard),
+      // plus the FIX 3 per-wipLabel keys for multi-card POs. Collect first, then
+      // mint the UNIQUE card ids in parallel.
+      const keyToCardId = new Map<string, string>();
+      for (const [key, { poNo, pieceName }] of wanted) {
+        const poId = poIdByKey.get(poNo);
+        if (!poId) continue;
+        const cards = cardsByPo.get(poId) ?? [];
+        if (cards.length === 0) continue;
+        const pick = pickPackingCard(cards, pieceName);
+        if (pick) keyToCardId.set(key, pick.id);
+        // FIX 3 — multi-card PO: also offer a token per wipLabel key.
+        if (cards.length > 1) {
+          for (const card of cards) {
+            const label = (card.wipLabel ?? "").trim();
+            if (!label) continue;
+            const labelKey = `${poNo}|${label}`;
+            if (!keyToCardId.has(labelKey)) keyToCardId.set(labelKey, card.id);
+          }
+        }
+      }
+      // Mint the unique cards in parallel (each touches a distinct job_card row →
+      // no contention). FIX 4: getOrCreateJobCardQrToken returns null when it
+      // can't persist — never emit a dead token.
+      const uniqueCardIds = [...new Set(keyToCardId.values())];
+      const tokenByCardId = new Map<string, string>();
+      await Promise.all(
+        uniqueCardIds.map(async (cid) => {
+          const t = await getOrCreateJobCardQrToken(c.var.DB, cid);
+          if (t) tokenByCardId.set(cid, t);
+        }),
+      );
+      for (const [key, cid] of keyToCardId) {
+        const t = tokenByCardId.get(cid);
+        if (t) tokens[key] = t;
       }
     }
     return c.json({ success: true, data: { tokens } });

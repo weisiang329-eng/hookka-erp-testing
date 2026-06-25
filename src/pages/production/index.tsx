@@ -2586,7 +2586,12 @@ export default function ProductionPage({
       try {
         const res = await fetch(`/api/production-orders/${poId}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
+          // MUST send the CSRF token (every other mutating call here uses
+          // csrfHeaders()); a bare Content-Type PATCH was rejected 403, so the
+          // manual rack dropdown silently rolled back — owner 2026-06-25 "放
+          // Rack 9 不会跑出来". The worker/public rack writes worked because they
+          // already send csrfHeaders().
+          headers: csrfHeaders(),
           body: JSON.stringify({ jobCardId, rackingNumber: rack }),
         });
         if (!res.ok) {

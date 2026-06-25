@@ -33,6 +33,7 @@ import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/
 import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "../lib/doc-number-service";
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
+import { legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
 import {
   prefixForPartyType,
   computeBillTotals,
@@ -348,13 +349,15 @@ app.get("/aging", async (c) => {
     c.var.DB,
     {
       tableName: "accounting_aging_snapshot",
-      sourceTables: ["invoices", "purchase_invoices"],
+      // kv_config so the snapshot rebuilds when opening_date (the pre-opening
+      // floor) is saved — not just when invoices/PIs change.
+      sourceTables: ["invoices", "purchase_invoices", "kv_config"],
     },
     orgId,
     async () => {
       const [invRes, piRes] = await Promise.all([
         c.var.DB.prepare(
-          "SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate FROM invoices",
+          "SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening FROM invoices",
         ).all<{
           customerId: string;
           customerName: string;
@@ -363,9 +366,10 @@ app.get("/aging", async (c) => {
           status: string;
           dueDate: string | null;
           invoiceDate: string | null;
+          isOpening: number | null;
         }>(),
         c.var.DB.prepare(
-          "SELECT supplierId, supplierName, amountSen, status, dueDate, invoiceDate FROM purchase_invoices",
+          "SELECT supplierId, supplierName, amountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices",
         ).all<{
           supplierId: string;
           supplierName: string;
@@ -373,11 +377,14 @@ app.get("/aging", async (c) => {
           status: string;
           dueDate: string | null;
           invoiceDate: string | null;
+          isOpening: number | null;
         }>(),
       ]);
+      const obDateAg = await getOpeningDate(c.var.DB);
 
       const arMap = new Map<string, ArAgingRow>();
       for (const i of invRes.results ?? []) {
+        if (rowBeforeOpening(i.invoiceDate, obDateAg, i.isOpening)) continue; // pre-opening: not extracted
         if (["DRAFT", "CANCELLED", "PAID"].includes(i.status)) continue;
         const outstanding =
           (Number(i.totalSen) || 0) - (Number(i.paidAmount) || 0);
@@ -400,6 +407,7 @@ app.get("/aging", async (c) => {
 
       const apMap = new Map<string, ApAgingRow>();
       for (const p of piRes.results ?? []) {
+        if (rowBeforeOpening(p.invoiceDate, obDateAg, p.isOpening)) continue; // pre-opening: not extracted
         if (["DRAFT", "CANCELLED", "PAID"].includes(p.status)) continue;
         const outstanding = Number(p.amountSen) || 0;
         if (outstanding <= 0) continue;
@@ -1383,10 +1391,10 @@ app.get("/ar-control", async (c) => {
       "SELECT code, name, type, specialAccountType FROM chart_of_accounts WHERE specialAccountType = 'SDC'",
     ).all<{ code: string; name: string; type: string; specialAccountType: string }>(),
     c.var.DB.prepare(
-      "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE hidden = 0",
-    ).all<{ accountCode: string; debitSen: number; creditSen: number }>(),
+      "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
+    ).all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     c.var.DB.prepare(
-      `SELECT customerId, customerName, invoiceNo, totalSen, paidAmount, status, dueDate
+      `SELECT customerId, customerName, invoiceNo, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening
          FROM invoices
         WHERE status NOT IN ('DRAFT','CANCELLED')`,
     ).all<{
@@ -1397,15 +1405,19 @@ app.get("/ar-control", async (c) => {
       paidAmount: number;
       status: string;
       dueDate: string | null;
+      invoiceDate: string | null;
+      isOpening: number | null;
     }>(),
     c.var.DB.prepare(
       "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM customers",
     ).first<{ s: number }>(),
   ]);
+  const obDateAr = await getOpeningDate(c.var.DB);
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
   const resolveCtl = await loadAccountResolver(c.var.DB);
   for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, l.postedAt, obDateAr)) continue; // pre-opening: not extracted
     const code = resolveCtl(l.accountCode);
     dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
     cr.set(code, (cr.get(code) ?? 0) + (Number(l.creditSen) || 0));
@@ -1438,6 +1450,7 @@ app.get("/ar-control", async (c) => {
   const byCustomer = new Map<string, AgingRow>();
   let invoiceOutstandingSen = 0;
   for (const inv of invRes.results ?? []) {
+    if (rowBeforeOpening(inv.invoiceDate, obDateAr, inv.isOpening)) continue; // pre-opening: not extracted
     const unpaid = Math.max(
       0,
       (Number(inv.totalSen) || 0) - (Number(inv.paidAmount) || 0),
@@ -1511,11 +1524,11 @@ app.get("/customer-statement", async (c) => {
       .bind(customerId)
       .first<{ id: string; name: string; code: string; outstandingSen: number }>(),
     c.var.DB.prepare(
-      `SELECT invoiceNo, invoiceDate, totalSen, status FROM invoices
+      `SELECT invoiceNo, invoiceDate, totalSen, status, isOpening FROM invoices
         WHERE customerId = ? AND status NOT IN ('DRAFT','CANCELLED')`,
     )
       .bind(customerId)
-      .all<{ invoiceNo: string; invoiceDate: string; totalSen: number; status: string }>(),
+      .all<{ invoiceNo: string; invoiceDate: string; totalSen: number; status: string; isOpening: number | null }>(),
     c.var.DB.prepare(
       `SELECT receiptNumber, date, amount, status, method FROM payment_records
         WHERE customerId = ?`,
@@ -1544,6 +1557,7 @@ app.get("/customer-statement", async (c) => {
     type: string;
     debitSen: number;
     creditSen: number;
+    isOpening?: number | null;
   };
   const lines: Line[] = [];
   for (const i of invRes.results ?? [])
@@ -1553,6 +1567,7 @@ app.get("/customer-statement", async (c) => {
       type: "INVOICE",
       debitSen: Number(i.totalSen) || 0,
       creditSen: 0,
+      isOpening: i.isOpening,
     });
   for (const p of payRes.results ?? []) {
     lines.push({
@@ -1591,10 +1606,12 @@ app.get("/customer-statement", async (c) => {
   lines.sort((a, b) =>
     a.date === b.date ? a.ref.localeCompare(b.ref) : a.date.localeCompare(b.date),
   );
+  const obDateCs = await getOpeningDate(c.var.DB);
   let openingSen = 0;
   const rows: (Line & { runningSen: number })[] = [];
   let running = 0;
   for (const l of lines) {
+    if (rowBeforeOpening(l.date, obDateCs, l.isOpening)) continue; // pre-opening: not extracted (not even into B/F)
     const delta = l.debitSen - l.creditSen;
     if (l.date < from) {
       openingSen += delta;
@@ -2151,12 +2168,13 @@ app.get("/ap-control", async (c) => {
       "SELECT code, name FROM chart_of_accounts WHERE specialAccountType = 'SCC'",
     ).all<{ code: string; name: string }>(),
     c.var.DB.prepare(
-      "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE hidden = 0",
-    ).all<{ accountCode: string; debitSen: number; creditSen: number }>(),
+      "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
+    ).all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     c.var.DB.prepare(
       "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers",
     ).first<{ s: number }>(),
   ]);
+  const obDateAp = await getOpeningDate(c.var.DB);
   // PI subledger — defensive: prefer net outstanding (amount − paid, incl
   // PARTIAL_PAID); if paid_amount_sen is STILL absent (ALTER couldn't run), fall
   // back to the original (APPROVED only, paid=0) so the panel always renders.
@@ -2168,17 +2186,19 @@ app.get("/ap-control", async (c) => {
     paid_amount_sen?: number | null;
     status: string;
     dueDate: string | null;
+    invoiceDate: string | null;
+    isOpening: number | null;
   };
   let piRes: { results?: PiAgingRow[] };
   try {
     piRes = await c.var.DB.prepare(
-      `SELECT supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate
+      `SELECT supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
         WHERE status IN ('APPROVED', 'PARTIAL_PAID')`,
     ).all<PiAgingRow>();
   } catch {
     piRes = await c.var.DB.prepare(
-      `SELECT supplierId, supplierName, piNo, amountSen, status, dueDate
+      `SELECT supplierId, supplierName, piNo, amountSen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
         WHERE status = 'APPROVED'`,
     ).all<PiAgingRow>();
@@ -2205,6 +2225,7 @@ app.get("/ap-control", async (c) => {
   const cr = new Map<string, number>();
   const resolveCtl = await loadAccountResolver(c.var.DB);
   for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, l.postedAt, obDateAp)) continue; // pre-opening: not extracted
     const code = resolveCtl(l.accountCode);
     dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
     cr.set(code, (cr.get(code) ?? 0) + (Number(l.creditSen) || 0));
@@ -2236,6 +2257,7 @@ app.get("/ap-control", async (c) => {
   const bySupplier = new Map<string, ApAging>();
   let piOutstandingSen = 0;
   for (const pi of piRes.results ?? []) {
+    if (rowBeforeOpening(pi.invoiceDate, obDateAp, pi.isOpening)) continue; // pre-opening: not extracted
     // Net outstanding = face − paid (paid includes cash payments AND allocated
     // CN credits), so a knocked-off discount drops the subledger exactly once.
     const amt = (Number(pi.amountSen) || 0) - (Number(pi.paid_amount_sen) || 0);
@@ -2309,11 +2331,11 @@ app.get("/supplier-statement", async (c) => {
       // Include PARTIAL_PAID (a partly-paid PI still owes money — its full
       // amount is a credit here, the payment a debit; omitting it would drop
       // the credit leg and unbalance the statement). Matches /creditor-ledger.
-      `SELECT piNo, invoiceDate, amountSen, status FROM purchase_invoices
+      `SELECT piNo, invoiceDate, amountSen, status, isOpening FROM purchase_invoices
         WHERE supplierId = ? AND status IN ('APPROVED','PARTIAL_PAID','PAID')`,
     )
       .bind(supplierId)
-      .all<{ piNo: string; invoiceDate: string; amountSen: number; status: string }>(),
+      .all<{ piNo: string; invoiceDate: string; amountSen: number; status: string; isOpening: number | null }>(),
     c.var.DB.prepare(
       // Exclude #6 supplier-discount markers (method='CREDIT_NOTE', amountSen=0,
       // no GL leg) — they'd render as 0.00 PAYMENT noise rows; the CN itself
@@ -2338,6 +2360,7 @@ app.get("/supplier-statement", async (c) => {
     type: string;
     debitSen: number;
     creditSen: number;
+    isOpening?: number | null;
   };
   const lines: Line[] = [];
   for (const pi of piRes.results ?? [])
@@ -2347,6 +2370,7 @@ app.get("/supplier-statement", async (c) => {
       type: "PURCHASE_INVOICE",
       debitSen: 0,
       creditSen: Number(pi.amountSen) || 0,
+      isOpening: pi.isOpening,
     });
   for (const p of payRes.results ?? [])
     lines.push({
@@ -2368,10 +2392,12 @@ app.get("/supplier-statement", async (c) => {
     a.date === b.date ? a.ref.localeCompare(b.ref) : a.date.localeCompare(b.date),
   );
   // AP balance is credit-normal: what we still owe = credits − debits.
+  const obDateSs = await getOpeningDate(c.var.DB);
   let openingSen = 0;
   const rows: (Line & { runningSen: number })[] = [];
   let running = 0;
   for (const l of lines) {
+    if (rowBeforeOpening(l.date, obDateSs, l.isOpening)) continue; // pre-opening: not extracted (not even into B/F)
     const delta = l.creditSen - l.debitSen;
     if (l.date < from) {
       openingSen += delta;
@@ -2400,7 +2426,7 @@ app.get("/supplier-statement", async (c) => {
 // dated transactions → running balance → closing). Same line model as the
 // per-party statement, looped over all parties in a single pass.
 // ---------------------------------------------------------------------------
-type LedgerLine = { date: string; ref: string; type: string; debitSen: number; creditSen: number };
+type LedgerLine = { date: string; ref: string; type: string; debitSen: number; creditSen: number; isOpening?: number | null };
 
 app.get("/debtor-ledger", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
@@ -2409,14 +2435,14 @@ app.get("/debtor-ledger", async (c) => {
   const to = c.req.query("to") || "9999-12-31";
   const [custRes, invRes, payRes, cnRes, dnRes] = await Promise.all([
     c.var.DB.prepare("SELECT id, name, code FROM customers").all<{ id: string; name: string; code: string }>(),
-    c.var.DB.prepare(`SELECT customerId, invoiceNo, invoiceDate, totalSen FROM invoices WHERE status NOT IN ('DRAFT','CANCELLED')`).all<{ customerId: string; invoiceNo: string; invoiceDate: string; totalSen: number }>(),
+    c.var.DB.prepare(`SELECT customerId, invoiceNo, invoiceDate, totalSen, isOpening FROM invoices WHERE status NOT IN ('DRAFT','CANCELLED')`).all<{ customerId: string; invoiceNo: string; invoiceDate: string; totalSen: number; isOpening: number | null }>(),
     c.var.DB.prepare(`SELECT customerId, receiptNumber, date, amount, status FROM payment_records WHERE id NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'payment' AND state IN ('VOID','DELETED'))`).all<{ customerId: string; receiptNumber: string; date: string; amount: number; status: string }>(),
     c.var.DB.prepare(`SELECT customerId, noteNumber, date, totalAmount FROM credit_notes WHERE status IN ('APPROVED','POSTED')`).all<{ customerId: string; noteNumber: string; date: string; totalAmount: number }>(),
     c.var.DB.prepare(`SELECT customerId, noteNumber, date, totalAmount FROM debit_notes WHERE status = 'POSTED'`).all<{ customerId: string; noteNumber: string; date: string; totalAmount: number }>(),
   ]);
   const byParty = new Map<string, LedgerLine[]>();
   const push = (id: string, l: LedgerLine) => { if (!id) return; const arr = byParty.get(id) ?? []; arr.push(l); byParty.set(id, arr); };
-  for (const i of invRes.results ?? []) push(i.customerId, { date: i.invoiceDate ?? "", ref: i.invoiceNo, type: "INVOICE", debitSen: Number(i.totalSen) || 0, creditSen: 0 });
+  for (const i of invRes.results ?? []) push(i.customerId, { date: i.invoiceDate ?? "", ref: i.invoiceNo, type: "INVOICE", debitSen: Number(i.totalSen) || 0, creditSen: 0, isOpening: i.isOpening });
   for (const p of payRes.results ?? []) {
     push(p.customerId, { date: p.date ?? "", ref: p.receiptNumber, type: "RECEIPT", debitSen: 0, creditSen: Number(p.amount) || 0 });
     if (p.status === "BOUNCED") push(p.customerId, { date: p.date ?? "", ref: p.receiptNumber, type: "BOUNCED", debitSen: Number(p.amount) || 0, creditSen: 0 });
@@ -2424,6 +2450,7 @@ app.get("/debtor-ledger", async (c) => {
   for (const n of cnRes.results ?? []) push(n.customerId, { date: n.date ?? "", ref: n.noteNumber, type: "CREDIT_NOTE", debitSen: 0, creditSen: Number(n.totalAmount) || 0 });
   for (const n of dnRes.results ?? []) push(n.customerId, { date: n.date ?? "", ref: n.noteNumber, type: "DEBIT_NOTE", debitSen: Number(n.totalAmount) || 0, creditSen: 0 });
 
+  const obDateDl = await getOpeningDate(c.var.DB);
   const parties: unknown[] = [];
   for (const cust of custRes.results ?? []) {
     const lines = byParty.get(cust.id) ?? [];
@@ -2433,6 +2460,7 @@ app.get("/debtor-ledger", async (c) => {
     const rows: (LedgerLine & { runningSen: number })[] = [];
     let running = 0;
     for (const l of lines) {
+      if (rowBeforeOpening(l.date, obDateDl, l.isOpening)) continue; // pre-opening: not extracted (not even into B/F)
       const delta = l.debitSen - l.creditSen; // debit-normal (AR)
       if (l.date < from) { openingSen += delta; continue; }
       if (l.date > to) continue;
@@ -2452,16 +2480,17 @@ app.get("/creditor-ledger", async (c) => {
   const to = c.req.query("to") || "9999-12-31";
   const [supRes, piRes, payRes, pcnRes] = await Promise.all([
     c.var.DB.prepare("SELECT id, name, code FROM suppliers").all<{ id: string; name: string; code: string | null }>(),
-    c.var.DB.prepare(`SELECT supplierId, piNo, invoiceDate, amountSen FROM purchase_invoices WHERE status IN ('APPROVED','PARTIAL_PAID','PAID')`).all<{ supplierId: string; piNo: string; invoiceDate: string; amountSen: number }>(),
+    c.var.DB.prepare(`SELECT supplierId, piNo, invoiceDate, amountSen, isOpening FROM purchase_invoices WHERE status IN ('APPROVED','PARTIAL_PAID','PAID')`).all<{ supplierId: string; piNo: string; invoiceDate: string; amountSen: number; isOpening: number | null }>(),
     c.var.DB.prepare(`SELECT supplierId, paymentNo, date, amountSen FROM supplier_payments WHERE COALESCE(method,'') <> 'CREDIT_NOTE' AND paymentNo NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'supplier_payment' AND state IN ('VOID','DELETED'))`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
     c.var.DB.prepare(`SELECT supplierId, noteNumber, date, totalAmount FROM purchase_credit_notes WHERE status = 'POSTED'`).all<{ supplierId: string; noteNumber: string; date: string; totalAmount: number }>(),
   ]);
   const byParty = new Map<string, LedgerLine[]>();
   const push = (id: string, l: LedgerLine) => { if (!id) return; const arr = byParty.get(id) ?? []; arr.push(l); byParty.set(id, arr); };
-  for (const pi of piRes.results ?? []) push(pi.supplierId, { date: pi.invoiceDate ?? "", ref: pi.piNo, type: "PURCHASE_INVOICE", debitSen: 0, creditSen: Number(pi.amountSen) || 0 });
+  for (const pi of piRes.results ?? []) push(pi.supplierId, { date: pi.invoiceDate ?? "", ref: pi.piNo, type: "PURCHASE_INVOICE", debitSen: 0, creditSen: Number(pi.amountSen) || 0, isOpening: pi.isOpening });
   for (const p of payRes.results ?? []) push(p.supplierId, { date: p.date ?? "", ref: p.paymentNo, type: "PAYMENT", debitSen: Number(p.amountSen) || 0, creditSen: 0 });
   for (const n of pcnRes.results ?? []) push(n.supplierId, { date: n.date ?? "", ref: n.noteNumber, type: "PURCHASE_CN", debitSen: Number(n.totalAmount) || 0, creditSen: 0 });
 
+  const obDateCl = await getOpeningDate(c.var.DB);
   const parties: unknown[] = [];
   for (const sup of supRes.results ?? []) {
     const lines = byParty.get(sup.id) ?? [];
@@ -2471,6 +2500,7 @@ app.get("/creditor-ledger", async (c) => {
     const rows: (LedgerLine & { runningSen: number })[] = [];
     let running = 0;
     for (const l of lines) {
+      if (rowBeforeOpening(l.date, obDateCl, l.isOpening)) continue; // pre-opening: not extracted (not even into B/F)
       const delta = l.creditSen - l.debitSen; // credit-normal (AP)
       if (l.date < from) { openingSen += delta; continue; }
       if (l.date > to) continue;
@@ -3258,7 +3288,10 @@ app.get("/other-party-aging", async (c) => {
         .bind(orgId, type)
         .all<{ partyId: string; partyName: string; billNo: string; billDate: string; amt: number }>()
     ).results ?? [];
-  const bills = rows.map((r) => ({ partyId: r.partyId, partyName: r.partyName, billNo: r.billNo, billDate: r.billDate, outstandingSen: r.amt }));
+  const obDateOpa = await getOpeningDate(c.var.DB);
+  const bills = rows
+    .filter((r) => !rowBeforeOpening(r.billDate, obDateOpa)) // pre-opening: not extracted (Other bills have no opening seed)
+    .map((r) => ({ partyId: r.partyId, partyName: r.partyName, billNo: r.billNo, billDate: r.billDate, outstandingSen: r.amt }));
   const today = new Date().toISOString().slice(0, 10);
   return c.json({ success: true, data: { aging: bucketAging(bills, today), bills } });
 });
@@ -3658,6 +3691,7 @@ app.get("/trial-balance", async (c) => {
   const resolveTb = await loadAccountResolver(c.var.DB);
   const obDateTb = await getOpeningDate(c.var.DB);
   for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, l.postedAt, obDateTb)) continue; // pre-opening: not extracted
     const d10 =
       isOpeningSource(l.sourceType) && obDateTb
         ? obDateTb
@@ -3774,6 +3808,7 @@ app.get("/gl", async (c) => {
         ? obDateAll
         : String(l.postedAt ?? "").slice(0, 10);
     const all = (legRes.results ?? []).filter((l) => {
+      if (legBeforeOpening(l.sourceType, l.postedAt, obDateAll)) return false; // pre-opening: not extracted
       const d10 = legDay(l);
       if (d10 < from || d10 > to) return false;
       const code = resolveGl(l.accountCode);
@@ -3910,6 +3945,7 @@ app.get("/gl", async (c) => {
       a.id.localeCompare(b.id),
   );
   for (const l of ordered) {
+    if (legBeforeOpening(l.sourceType, l.postedAt, obDateOne)) continue; // pre-opening: not extracted (not even into B/F)
     const d10 = effDay(l);
     const delta = debitNormal
       ? (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0)
@@ -3986,13 +4022,14 @@ async function computeUnclosedAsOf(
   const [legRes, coaRes] = await Promise.all([
     db
       .prepare(
-        "SELECT accountCode, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0",
+        "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
       )
       .all<{
         accountCode: string;
         debitSen: number;
         creditSen: number;
         postedAt: string;
+        sourceType: string;
       }>(),
     db
       .prepare("SELECT code, name, type FROM chart_of_accounts")
@@ -4001,10 +4038,12 @@ async function computeUnclosedAsOf(
   const coa = new Map(
     (coaRes.results ?? []).map((a) => [a.code, a] as const),
   );
+  const obDateUnc = await getOpeningDate(db);
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
   const resolveYc = await loadAccountResolver(db);
   for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, l.postedAt, obDateUnc)) continue; // pre-opening: not extracted
     const d10 = String(l.postedAt ?? "").slice(0, 10);
     if (d10 > endIso) continue;
     const code = resolveYc(l.accountCode);
@@ -4888,6 +4927,7 @@ async function glWindowSigned(
   const obDate = await getOpeningDate(db);
   const net: GlWindow = new Map();
   for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, l.postedAt, obDate)) continue; // pre-opening: not extracted
     // Opening-balance and closing-stock legs are bookkeeping, not trading —
     // exclude from the P&L window (the stock summary already supplies stock).
     if (isOpeningSource(l.sourceType) || l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal") continue;
@@ -4897,7 +4937,6 @@ async function glWindowSigned(
     const code = resolve(l.accountCode);
     net.set(code, (net.get(code) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
   }
-  void obDate;
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, { name: a.name, type: a.type }] as const));
   return { net, coa };
 }
@@ -5727,9 +5766,11 @@ app.get("/cost-expense-classes", async (c) => {
     db.prepare("SELECT code, name, type, pnlCategory FROM chart_of_accounts").all<{ code: string; name: string; type: CoaRow["type"]; pnlCategory: string | null }>(),
   ]);
   const resolve = await loadAccountResolver(db);
+  const obDateCec = await getOpeningDate(db);
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
   const byAcct = new Map<string, number[]>();
   for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, l.postedAt, obDateCec)) continue; // pre-opening: not extracted
     if (isOpeningSource(l.sourceType) || l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal" || l.sourceType === "year_close") continue;
     const ym = String(l.postedAt ?? "").slice(0, 7);
     if (ym < startYm || ym > endYm) continue;
@@ -5916,17 +5957,19 @@ app.get("/cashflow-statement", async (c) => {
   const legRes = await c.var.DB.prepare(
     "SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0",
   ).all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>();
-  const allLegs = (legRes.results ?? []).map((l) => ({
-    code: resolveAcct(l.accountCode),
-    sourceType: l.sourceType,
-    sourceId: l.sourceId,
-    debitSen: l.debitSen,
-    creditSen: l.creditSen,
-    ym:
-      isOpeningSource(l.sourceType) && obDate
-        ? obDate.slice(0, 7)
-        : String(l.postedAt ?? "").slice(0, 7),
-  }));
+  const allLegs = (legRes.results ?? [])
+    .filter((l) => !legBeforeOpening(l.sourceType, l.postedAt, obDate)) // pre-opening: not extracted
+    .map((l) => ({
+      code: resolveAcct(l.accountCode),
+      sourceType: l.sourceType,
+      sourceId: l.sourceId,
+      debitSen: l.debitSen,
+      creditSen: l.creditSen,
+      ym:
+        isOpeningSource(l.sourceType) && obDate
+          ? obDate.slice(0, 7)
+          : String(l.postedAt ?? "").slice(0, 7),
+    }));
 
   const byEntry = new Map<string, typeof allLegs>();
   for (const l of allLegs) {
@@ -6057,6 +6100,7 @@ app.get("/pl", async (c) => {
   // year_close; the BS view counts them at the opening month.
   const obDatePl = await getOpeningDate(c.var.DB);
   for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, l.postedAt, obDatePl)) continue; // pre-opening: not extracted (P&L + BS)
     const opening = isOpeningSource(l.sourceType);
     const ym =
       opening && obDatePl
@@ -7964,6 +8008,7 @@ app.get("/gl-report", async (c) => {
   type RepRow = { id: string; day: string; description: string; sourceType: string; sourceId: string; deDesc: string; debitSen: number; creditSen: number; runningSen: number };
   const buckets = new Map<string, { openingSen: number; rows: Omit<RepRow, "runningSen" | "deDesc">[] }>();
   for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, l.postedAt, obDateRep)) continue; // pre-opening: not extracted (not even into B/F)
     const code = resolveRep(l.accountCode);
     if (!inScope(code)) continue;
     if (accountSet && !accountSet.has(code)) continue;
@@ -8416,7 +8461,7 @@ app.get("/bank-reco", async (c) => {
       sourceId: l.sourceId,
       amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
     }))
-    .filter((l) => l.day >= from && l.day <= to);
+    .filter((l) => !legBeforeOpening(l.sourceType, l.day, obDateBr) && l.day >= from && l.day <= to); // pre-opening: not extracted
   let stmtLines: unknown[] = [];
   let migrationMissing = false;
   const matchedLegIds = new Set<string>();
@@ -8605,7 +8650,7 @@ app.post("/bank-reco/automatch", async (c) => {
     const takenLegs = new Set((matchedRes.results ?? []).map((r) => r.matchedLegId));
     const obDateAm = await getOpeningDate(c.var.DB);
     const freeLegs = (legRes.results ?? [])
-      .filter((l) => !takenLegs.has(l.id))
+      .filter((l) => !takenLegs.has(l.id) && !legBeforeOpening(l.sourceType, l.postedAt, obDateAm)) // pre-opening: not a match candidate
       .map((l) => ({
         id: l.id,
         day:

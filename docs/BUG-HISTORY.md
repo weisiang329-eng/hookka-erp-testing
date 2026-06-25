@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-25-001 — purchase_invoices.status CHECK rejected PARTIAL_PAID (and CANCELLED) → supplier partial-payment / #6 discount-allocation POST 500'd on prod
+
+🟢 **Fixed (prod)** · `accounting` · `data-integrity` · found while clearing the supplier-discount task chips ("confirm prod status CHECK permits PARTIAL_PAID")
+
+**Why:** `0057_purchase_invoices.sql` created the table with an inline
+`status TEXT NOT NULL CHECK (status IN ('DRAFT','PENDING_APPROVAL','APPROVED','PAID'))`
+(Postgres auto-named it `purchase_invoices_status_check`). That list omits both `PARTIAL_PAID` and `CANCELLED`, yet the app writes both: supplier partial payments + the #6 supplier-discount allocation set `status='PARTIAL_PAID'` (`accounting.ts`, `supplier-payments.ts`), and PI cancellation sets `CANCELLED` (`grn.ts` filters on it). Against the original CHECK those writes raise a constraint violation and the whole POST 500s. This is the **second** independent reason supplier partial payments were silently broken on prod — the first being the never-run migration-7 `paid_amount_sen` column (BUG-2026-06-23-009). NOT caught by tests: the suite is pure-logic and never hits a real CHECK constraint.
+
+**Fix:** the runtime self-apply `ensurePartialPaymentColumns` (extracted to `src/api/lib/ensure-partial-payment.ts`, now also called from `supplier-payments.ts` POST + void/restate) gained `ALTER TABLE purchase_invoices DROP CONSTRAINT IF EXISTS purchase_invoices_status_check`, relaxing the enum on next deploy. Migration `0189_pi_status_partial_paid.sql` + owner paste-SQL `Hookka迁移11` re-add a permissive **named** constraint `purchase_invoices_status_chk` covering all 6 statuses the app uses. **Verified:** typecheck + eslint + 1170 tests green; prod chunk rolled `accounting-Bzp1Jg9y.js` → `accounting-D2ouG57q.js`. Live partial-payment write-path test pending owner (run 迁移11 + record one partial supplier payment / discount-allocation, confirm status flips to PARTIAL_PAID without 500).
+
+**Same batch (hardening, shipped together):** CREDIT_NOTE marker defensive filter (`method <> 'CREDIT_NOTE'`) on supplier-statement / creditor-ledger (hides 0-amount noise rows) + supplier-payment void/restate reads+delete (prevents double-rollback if a payment_no ever collided with a discount marker); supplier-statement now includes PARTIAL_PAID PIs (keeps the credit leg, statement stays balanced); removed the dead AP "Supplier counter (outstandingSen)" card (never maintained → always false drift); fixed a stale `delivery-snapshot.ts` migration ref (0117 → 0124). NOTE the `journal-hash.ts:113` "ledger UNIQUE constraint" comment a prior review flagged as a lie is actually **correct** (`0117_ledger_idempotency.sql` really creates it) — false alarm, left as-is.
+
+---
+
 ## FEATURE-2026-06-24-005 — changing BOM "Production Times" now takes effect on in-progress orders (was frozen at order creation)
 
 🟢 **Shipped (prod)** · `bom` · `production-orders` · owner request ("我换 production min…要对那些没有完成、没有 completion date 的 order 直接产生生效")

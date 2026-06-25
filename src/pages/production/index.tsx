@@ -125,10 +125,13 @@ function jobCardBarcodeDataUrl(token: string): string {
     const canvas = document.createElement("canvas");
     JsBarcode(canvas, token, {
       format: "CODE128",
-      // X-dimension (px per narrow module). Guns read this fine; kept low so the
-      // SHORT-token barcode stays narrow (the old too-wide one was the complaint).
-      width: 1.3,
-      height: 44,
+      // RENDER resolution (canvas px per module) — NOT the print width. The
+      // print CSS (td.bc img, ~116px) sets the DISPLAY size, so a HIGH value here
+      // only makes the source bitmap crisp; a low value printed blurry /
+      // unscannable (owner 2026-06-25 "很模糊?會敏感嗎?"). 4px/module = sharp +
+      // gun-scannable; the displayed barcode stays the same narrow ~116px.
+      width: 4,
+      height: 100,
       // The human WIP caption prints below the cell (.bccode), so the bars need
       // no embedded text.
       displayValue: false,
@@ -4602,7 +4605,7 @@ export default function ProductionPage({
       const batch: JobCardSticker[] = await Promise.all(
         onScreenStickers.map(async (s) => ({
           ...s,
-          qrDataUrl: await getQRCodeDataURL(s.qrPayload, 300),
+          qrDataUrl: await getQRCodeDataURL(s.qrPayload, 600),
         })),
       );
       setFgStickers([]); // never mix modes in one print job
@@ -4659,7 +4662,7 @@ export default function ProductionPage({
       const batch: JobCardSticker[] = await Promise.all(
         source.map(async (s) => ({
           ...s,
-          qrDataUrl: await getQRCodeDataURL(s.qrPayload, 300),
+          qrDataUrl: await getQRCodeDataURL(s.qrPayload, 600),
         })),
       );
       setFgStickers([]); // never mix modes in one print job

@@ -22,7 +22,11 @@ export function getQRCodeUrl(data: string, size: number = 150): string {
  */
 export async function getQRCodeDataURL(
   data: string,
-  size: number = 300,
+  // RENDER resolution in px. The caller's print CSS / PDF addImage sets the
+  // DISPLAYED mm size, so a higher source just keeps the printed code crisp +
+  // scannable (owner 2026-06-25: small stickers printed blurry → "扫不敏感").
+  // 600 over 300 ~= 2.8x the bitmap detail; the displayed size is unchanged.
+  size: number = 600,
   margin: number = 2,
 ): Promise<string> {
   return QRCode.toDataURL(data, {

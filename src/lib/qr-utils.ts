@@ -2,6 +2,7 @@
 // QR Code Utilities for Production Sticker Printing
 // ============================================================
 import QRCode from "qrcode";
+import { appOrigin, canonicalizeOrigin } from "./app-origin";
 
 /**
  * Generate a QR code image URL using the free qrserver.com API.
@@ -134,7 +135,10 @@ export function parseRackQr(value: string): string | null {
  * back to "" when rendered without a window so the path stays relative.
  */
 export function rackScanUrl(rackId: string, origin?: string): string {
-  return `${origin ?? (typeof window !== "undefined" ? window.location.origin : "")}/r/${encodeURIComponent(rackId)}`;
+  // Canonical origin so a rack QR printed from the legacy pages.dev prod URL
+  // still shows erp.hookka.com (owner 2026-06-26). Staging/preview/local kept.
+  const base = origin != null ? canonicalizeOrigin(origin) : appOrigin();
+  return `${base}/r/${encodeURIComponent(rackId)}`;
 }
 
 // ============================================================
@@ -206,7 +210,7 @@ export function generateStickerData(
   pieceNo?: number,
   totalPieces?: number,
 ): string {
-  const baseUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
+  const baseUrl = appOrigin() || "http://localhost:3000";
   // FG-<DEPT> sentinels (FG-PACKING / FG-FAB_CUT / FG-FAB_SEW) already encode the
   // dept in the op id, so the &dept= param is redundant — omit it to keep the QR
   // small (version ~5, reliably scannable). Per-JC op ids (no FG- prefix) keep it.
@@ -235,7 +239,7 @@ export function generateSharedStickerData(
   pieceNo?: number,
   totalPieces?: number,
 ): string {
-  const baseUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
+  const baseUrl = appOrigin() || "http://localhost:3000";
   let url = `${baseUrl}${basePath}?po=${encodeURIComponent(poNo)}&wk=${encodeURIComponent(wipKey)}`;
   if (pieceNo && pieceNo > 0) url += `&p=${encodeURIComponent(String(pieceNo))}`;
   if (totalPieces && totalPieces > 0) url += `&t=${encodeURIComponent(String(totalPieces))}`;
@@ -259,8 +263,7 @@ export function generateCompartmentStickerData(
   pieceNo?: number,
   totalPieces?: number,
 ): string {
-  const baseUrl =
-    typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
+  const baseUrl = appOrigin() || "http://localhost:3000";
   let url = `${baseUrl}${basePath}?po=${encodeURIComponent(poNo)}&c=${encodeURIComponent(compartmentCode)}`;
   if (pieceNo && pieceNo > 0) url += `&p=${encodeURIComponent(String(pieceNo))}`;
   if (totalPieces && totalPieces > 0) url += `&t=${encodeURIComponent(String(totalPieces))}`;

@@ -6,6 +6,7 @@ import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { countElapsedWorkingDays } from "@/lib/labor-engine";
 import { computeAttendanceDay, hhmmToMinutes, type AttendanceRules } from "@/lib/attendance-rules";
 import { getQRCodeDataURL } from "@/lib/qr-utils";
+import { appOrigin } from "@/lib/app-origin";
 import {
   resolvePayRulesAsOf,
   toAttendanceRules,
@@ -4884,7 +4885,8 @@ function DepartmentLaborTab({
         (d) => d.code && d.code !== "PRODUCTION_SHORTFALL",
       );
       if (depts.length === 0) return;
-      const origin = window.location.origin;
+      // Canonical origin so printed dept-QR cards show erp.hookka.com on prod.
+      const origin = appOrigin();
       const CATS = ["SOFA", "BEDFRAME", "ACCESSORY"] as const;
       const wanted: Array<{ code: string; label: string; cat: string | null }> = [];
       for (const d of depts) {

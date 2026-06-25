@@ -19,6 +19,7 @@
 // matches the rest of the dashboard.
 // ---------------------------------------------------------------------------
 import { useCallback, useMemo, useState } from "react";
+import { appOrigin } from "@/lib/app-origin";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
@@ -1426,7 +1427,7 @@ export default function UsersPage() {
   };
 
   const copyInviteLink = async (token: string) => {
-    const origin = window.location.origin;
+    const origin = appOrigin();
     const url = `${origin}/invite/${token}`;
     const result = await copyText(url);
     if (result.ok) {

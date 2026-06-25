@@ -18,6 +18,8 @@
 //   • routes/public-do-qr.ts     GET/POST /:token…   (public resolve)
 // ---------------------------------------------------------------------------
 
+import { canonicalizeOrigin } from "../../lib/app-origin";
+
 export type QrTokenTable = "delivery_orders" | "packing_lists";
 
 export function newQrToken(): string {
@@ -81,5 +83,7 @@ export async function getOrCreateQrToken(
 // Public scan URL — origin comes from the live request so prod / preview /
 // local dev each encode their own host into the printed QR.
 export function qrScanUrl(origin: string, token: string): string {
-  return `${origin.replace(/\/+$/, "")}/d/${token}`;
+  // Canonical origin so a DO / Packing-List QR printed via the legacy prod
+  // pages.dev URL still encodes erp.hookka.com (owner 2026-06-26).
+  return `${canonicalizeOrigin(origin).replace(/\/+$/, "")}/d/${token}`;
 }

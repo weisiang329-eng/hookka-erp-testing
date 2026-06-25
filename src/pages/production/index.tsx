@@ -11,6 +11,7 @@ import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData } from "@/lib/qr-utils";
+import { appOrigin } from "@/lib/app-origin";
 import { todayYmdMY } from "@/lib/utils";
 import { deriveBarcodeToken } from "@/lib/job-card-id";
 import { packingRackScanUrl } from "@/api/lib/jobcard-qr-token";
@@ -5353,10 +5354,9 @@ export default function ProductionPage({
       pieceName: string;
       packingToken?: string;
     }): string => {
-      const origin =
-        typeof window !== "undefined" && window.location?.origin
-          ? window.location.origin
-          : "";
+      // Canonical origin: a packing sticker printed from the legacy prod
+      // pages.dev URL still encodes erp.hookka.com (owner 2026-06-26).
+      const origin = appOrigin();
       if (s.packingToken) return packingRackScanUrl(origin, s.packingToken);
       return `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(
         s.poNo,

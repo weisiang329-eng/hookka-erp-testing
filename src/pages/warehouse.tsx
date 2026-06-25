@@ -9,7 +9,7 @@ import { getQRCodeDataURL, rackScanUrl, itemQrValue } from "@/lib/qr-utils";
 import {
   Warehouse, Grid3X3, Package, MapPin, LayoutGrid,
   ArrowDownToLine, ArrowUpFromLine, History, X, ArrowRightLeft,
-  Loader2, RefreshCw, QrCode, Download,
+  Loader2, RefreshCw, QrCode, Download, Search,
 } from "lucide-react";
 
 // ---------- Types ----------
@@ -125,6 +125,12 @@ export default function WarehousePage() {
 
   // Popup / modals
   const [selectedSlot, setSelectedSlot] = useState<RackLocation | null>(null);
+  // Rack Overview search (owner 2026-06-25): substring match — type "9090" to
+  // find PO-009090, "062" to find SO-2606-062 — across each rack item's SO /
+  // customer PO / customer name / product, to see WHICH rack a piece is in.
+  // Pure client-side filter over the already-loaded racks (mirrors the SO/DO
+  // list search); empty query shows every rack.
+  const [rackSearch, setRackSearch] = useState("");
   // Small action menu shown when an EMPTY rack tile is clicked, so the owner can
   // print the rack's QR (to stick on, then scan to stock in) OR jump to stock-in.
   const [emptyRackMenu, setEmptyRackMenu] = useState<RackLocation | null>(null);
@@ -226,6 +232,29 @@ export default function WarehousePage() {
   const popupContents: RackItem[] = rackDetails?.contents ?? selectedSlot?.items ?? [];
   const popupMovements: StockMovement[] = rackDetails?.movements ?? [];
   const loading = rackLoading || movementsLoading || poLoading;
+
+  // Rack Overview search predicate — substring across the searchable identity
+  // fields of ANY item in the rack (partial match: "9090" hits PO-009090).
+  // Empty query → every rack matches.
+  const rackQuery = rackSearch.trim().toLowerCase();
+  const rackHasMatch = (slot: RackLocation): boolean => {
+    if (!rackQuery) return true;
+    return (slot.items || []).some((it) =>
+      [
+        rackItemSO(it),
+        rackItemDescription(it),
+        it.customerName || "",
+        it.customerPOId || "",
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(rackQuery),
+    );
+  };
+  const shownRackCount = RACKS.reduce((n, rn) => {
+    const s = rackLocations.find((x) => x.rack === rn);
+    return n + (s && rackHasMatch(s) ? 1 : 0);
+  }, 0);
 
   // ---------- Actions ----------
   const handleStockIn = async () => {
@@ -673,6 +702,33 @@ ${tilesHtml}
                 </div>
               </div>
 
+              {/* Search — find which rack a piece is in by SO / customer PO /
+                  customer / product. Substring (type "9090" → PO-009090);
+                  client-side over the already-loaded racks. */}
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-[#9C8F73]" />
+                  <input
+                    type="text"
+                    value={rackSearch}
+                    onChange={(e) => setRackSearch(e.target.value)}
+                    placeholder="Search by SO, customer PO, customer, or product…"
+                    className="w-full rounded-md border border-[#E2DDD8] bg-white pl-9 pr-3 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                  />
+                </div>
+                {rackSearch && (
+                  <Button variant="outline" size="sm" onClick={() => setRackSearch("")}>
+                    Clear
+                  </Button>
+                )}
+              </div>
+              {rackQuery && (
+                <p className="text-xs text-[#6B5C32]">
+                  Showing <span className="font-semibold">{shownRackCount}</span> of {RACKS.length} racks
+                  {shownRackCount === 0 ? " — no item matches" : ""}
+                </p>
+              )}
+
               {/* Grid — flat list of 20 racks, 5 per row. Each rack can show
                   multiple items; if more than 3 items we show the first 3 and
                   a "+N more" indicator. Card height auto-grows. */}
@@ -680,6 +736,8 @@ ${tilesHtml}
                 {RACKS.map((rackName) => {
                   const slot = rackLocations.find((s) => s.rack === rackName);
                   if (!slot) return null;
+                  // Hide racks with no item matching the search (empty query = all).
+                  if (rackQuery && !rackHasMatch(slot)) return null;
 
                   const bgColor =
                     slot.status === "OCCUPIED"

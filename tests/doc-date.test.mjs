@@ -53,6 +53,7 @@ test("familyOf — real document families resolve to the right table", () => {
   assert.equal(familyOf("purchase_invoice").dateCol, "invoice_date");
   assert.equal(familyOf("supplier_payment_restate_rev:7").table, "supplier_payments");
   assert.equal(familyOf("other_party_bill").dateCol, "bill_date");
+  assert.equal(familyOf("fund_transfer").table, "fund_transfers"); // date stored in fund_transfers
 });
 
 test("familyOf — bookkeeping / ledger-only / unknown → null (postedAt fallback)", () => {
@@ -61,7 +62,6 @@ test("familyOf — bookkeeping / ledger-only / unknown → null (postedAt fallba
   assert.equal(familyOf("closing_stock"), null);
   assert.equal(familyOf("year_close"), null);
   assert.equal(familyOf("depreciation"), null);
-  assert.equal(familyOf("fund_transfer"), null);
   assert.equal(familyOf("contra"), null);
   assert.equal(familyOf("something_unknown"), null);
 });

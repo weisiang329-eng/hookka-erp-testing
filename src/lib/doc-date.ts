@@ -19,9 +19,10 @@ export interface DocFamily {
 
 // Base family (after suffix-strip) → its source table + columns. Columns are
 // snake_case (the real Postgres names) so they pass the d1-compat untranslated.
-// Bookkeeping / ledger-only types (opening_balance, closing_stock, year_close,
-// depreciation, fund_transfer, contra) are intentionally ABSENT — they have no
-// document date and fall back to postedAt in the resolver.
+// closing_stock / year_close / depreciation have no table but encode their own
+// date in the sourceId (parseSourceIdDate). contra is always same-day so it
+// keeps the postedAt fallback. fund_transfer stores its date in fund_transfers
+// (added 2026-06-25 so a back-dated transfer reports on its own date).
 export const DOC_DATE_FAMILIES: Record<string, DocFamily> = {
   invoice: { table: "invoices", noCol: "invoice_no", dateCol: "invoice_date" },
   payment: { table: "payment_records", noCol: "receipt_number", dateCol: "date" },
@@ -35,6 +36,7 @@ export const DOC_DATE_FAMILIES: Record<string, DocFamily> = {
   official_receipt: { table: "official_receipts", noCol: "or_no", dateCol: "date" },
   other_party_bill: { table: "other_party_bills", noCol: "bill_no", dateCol: "bill_date" },
   other_party_payment: { table: "other_party_payments", noCol: "payment_no", dateCol: "date" },
+  fund_transfer: { table: "fund_transfers", noCol: "transfer_no", dateCol: "date" },
 };
 
 // Reversal / correction legs carry the SAME source document, so strip the

@@ -7033,6 +7033,21 @@ app.post("/fund-transfers", async (c) => {
     return c.json({ success: false, error: "Failed to post fund transfer to ledger" }, 500);
   }
 
+  // Record the transfer's OWN date so reports bucket it by document date, not by
+  // the entry timestamp (ledger postedAt). Best-effort — the transfer is already
+  // posted; if this fails the resolver just falls back to postedAt (a same-day
+  // transfer is unaffected).
+  try {
+    await ensureFundTransfersTable(c.var.DB);
+    await c.var.DB.prepare(
+      "INSERT INTO fund_transfers (id, transfer_no, date, org_id) VALUES (?, ?, ?, ?)",
+    )
+      .bind(`ft-${crypto.randomUUID().slice(0, 8)}`, no, date, orgId)
+      .run();
+  } catch (e) {
+    console.error("[fund-transfer] doc-date row failed (transfer still posted):", e);
+  }
+
   return c.json({ success: true, data: { transferNo: no } });
 });
 
@@ -7076,6 +7091,21 @@ app.get("/fund-transfers", async (c) => {
 
   const rows = legRes.results ?? [];
 
+  // Each transfer's own (document) date, falling back to postedAt for legacy
+  // transfers that predate the fund_transfers table.
+  const ftDate = new Map<string, string>();
+  try {
+    const ftRes = await c.var.DB.prepare(
+      "SELECT transfer_no AS tno, date AS dt FROM fund_transfers WHERE org_id = ?",
+    )
+      .bind(orgId)
+      .all<{ tno: string; dt: string }>();
+    for (const r of ftRes.results ?? [])
+      if (r.tno) ftDate.set(String(r.tno), String(r.dt ?? "").slice(0, 10));
+  } catch {
+    /* table not created yet → postedAt fallback below */
+  }
+
   // Map each transfer no → lifecycle state (default ACTIVE when no record).
   const stateOf = new Map<string, string>();
   for (const l of lifeRes.results ?? []) stateOf.set(l.sourceId, l.state);
@@ -7109,7 +7139,7 @@ app.get("/fund-transfers", async (c) => {
     const resolvedTo = resolve(toLeg.accountCode);
     out.push({
       no: sourceId,
-      date: String(toLeg.postedAt || "").slice(0, 10),
+      date: ftDate.get(sourceId) ?? String(toLeg.postedAt || "").slice(0, 10),
       fromAccount: resolvedFrom,
       toAccount: resolvedTo,
       fromName: nameOf(fromLeg.accountCode),
@@ -8749,6 +8779,34 @@ function isOpeningSource(sourceType: string | null | undefined): boolean {
     sourceType === "opening_balance" ||
     sourceType === "opening_balance_reversal"
   );
+}
+
+// Self-applies the fund_transfers table (transfer_no → its own date), so a
+// back-dated bank transfer reports on its document date instead of postedAt.
+// Idempotent; try/catch so a no-DDL-perms env degrades to the postedAt fallback.
+async function ensureFundTransfersTable(
+  db: Env["Variables"]["DB"],
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS fund_transfers (
+           id TEXT PRIMARY KEY,
+           transfer_no TEXT NOT NULL,
+           date TEXT NOT NULL,
+           org_id TEXT NOT NULL DEFAULT 'hookka',
+           created_at TEXT
+         )`,
+      )
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_fund_transfers_no ON fund_transfers (org_id, transfer_no)",
+      )
+      .run();
+  } catch {
+    /* no DDL perms — Hookka迁移12 paste-SQL covers it; reports fall back to postedAt */
+  }
 }
 
 // Document-date resolver (owner 2026-06-25): the immutable ledger stores only

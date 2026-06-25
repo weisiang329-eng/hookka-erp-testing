@@ -26,6 +26,11 @@ Doc map: [`docs/DOCS-INDEX.md`](docs/DOCS-INDEX.md). The big picture: [`docs/DEV
   `column-rename-map.json` entry or it silently 400s). Read rows dual-keyed:
   `r.camelCase ?? r.snake_case`.
 - **Money = integer sen** (RM × 100); use `MoneyInput` / `roundSen`, never floats.
+- **CSRF is automatic** — `src/lib/api-client.ts` globally patches `window.fetch` to inject
+  `X-CSRF-Token` on every mutating `/api/*` call. No raw fetch is "missing CSRF"; an audit that
+  flags "N fetches missing the CSRF token" is ALL false positives — don't add `csrfHeaders()`.
+- **QR / sticker URLs encode `window.location.origin`** (the print-time domain); scanning is
+  path-based + domain-agnostic but resolves against the DB of whatever site you scan ON.
 - **Verify live on prod after every deploy** — read AND write path. Log every bug to
   `docs/BUG-HISTORY.md` and add a regression test.
 - **UI is 100% English.** Bug fixes merge straight to `main`; features go to `staging`.

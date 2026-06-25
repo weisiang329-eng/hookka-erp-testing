@@ -9,7 +9,6 @@ import { fmtDate, drawLetterhead } from "@/lib/pdf-utils";
 import { compareDoLinesByCustomerPO } from "@/lib/do-item-order";
 // DO-document rack line: per-component rack groups, NO label prefix, joined by
 // " · " (owner's spec). Shares formatRacksCompact's dedup + numeric sort.
-import { formatComponentRacksNoLabel } from "@/lib/rack-format";
 
 // Read-only print-extras from GET /api/delivery-orders/:id/print-extras.
 // All optional — the PDF still renders if not supplied.
@@ -1048,7 +1047,11 @@ function renderPackingSummary(
       const LH_RACK = 2.55; // 6.2pt × 1.15 line height, in mm
       const rowExtras = items.map((it) => {
         const ex = exDo?.items?.[it.id];
-        const rackTxt = formatComponentRacksNoLabel(ex?.componentRacks);
+        // Owner 2026-06-25: a bedframe's HB and Divan can sit in DIFFERENT racks,
+        // so the bare "Rack 6 · Rack 19" was ambiguous (which rack is which piece?).
+        // Use the LABELLED format — "HB: Rack 6 · DIVAN: Rack 19" — so each piece's
+        // rack is tied to that piece (same formatter the single-DO page already uses).
+        const rackTxt = fmtComponentRacks(ex?.componentRacks);
         if (!rackTxt) return null;
         const rackLines = doc.splitTextToSize(rackTxt, QTY_WRAP_W, {
           fontSize: 6.2,

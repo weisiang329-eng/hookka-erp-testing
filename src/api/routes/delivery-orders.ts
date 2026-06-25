@@ -6001,6 +6001,56 @@ export async function applyDeliveryOrderUpdate(
           );
         }
 
+        // Auto stock-out (owner 2026-06-25): dispatch (DRAFT→LOADED) physically
+        // removes the goods from their warehouse racks, so the Rack grid
+        // self-clears instead of accumulating shipped pieces. The STOCK_OUT
+        // movement is already logged per-PO above (the audit record), so here we
+        // only DELETE the rack_items for THIS DO's POs and recompute each
+        // affected rack's stored status. Idempotent (a re-dispatch finds no
+        // rack_items) + scoped to this DO. Wrapped so a warehouse read hiccup
+        // can't block the dispatch; the writes ride the same atomic batch as the
+        // rest of the dispatch cascade.
+        try {
+          const affectedRacks =
+            (
+              await c.var.DB.prepare(
+                `SELECT DISTINCT rackLocationId FROM rack_items
+                   WHERE productionOrderId IN (${ph})`,
+              )
+                .bind(...itemPoIds)
+                .all<{ rackLocationId: string }>()
+            ).results ?? [];
+          if (affectedRacks.length > 0) {
+            statements.push(
+              c.var.DB.prepare(
+                `DELETE FROM rack_items WHERE productionOrderId IN (${ph})`,
+              ).bind(...itemPoIds),
+            );
+            for (const ar of affectedRacks) {
+              statements.push(
+                c.var.DB.prepare(
+                  // Recompute the STORED status (read by the rack picker's
+                  // `SELECT rack, status`). A legacy denormalized single-item
+                  // rack (productCode set, no rack_items) stays OCCUPIED — only
+                  // scan-flow rack_items clear on dispatch.
+                  `UPDATE rack_locations
+                      SET status = CASE
+                        WHEN reserved = 1 THEN 'RESERVED'
+                        WHEN (EXISTS(SELECT 1 FROM rack_items WHERE rackLocationId = ?)
+                              OR productCode IS NOT NULL) THEN 'OCCUPIED'
+                        ELSE 'EMPTY' END
+                    WHERE id = ?`,
+                ).bind(ar.rackLocationId, ar.rackLocationId),
+              );
+            }
+          }
+        } catch (e) {
+          console.warn(
+            `[DO ${existing.doNo}] dispatch rack auto-stock-out skipped:`,
+            e,
+          );
+        }
+
         // BUG-2026-04-30-003: removed wip_items decrement. The UPH +N
         // subtract is now performed at UPH-all-done in
         // applyWipInventoryChange (production-orders.ts, Plan B branch),

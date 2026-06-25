@@ -775,35 +775,37 @@ ${tilesHtml}
                         )}
                       </div>
                       {slot.status === "OCCUPIED" && (
-                        <div className="mt-1 space-y-0.5">
+                        <div className="mt-2 pt-2 border-t border-white/15 divide-y divide-white/10">
                           {/* Per-item identity (owner 2026-06-25): description +
-                              our SO + the customer name · customer PO, so every
-                              occupied rack card shows WHAT the goods are, WHOSE
-                              they are, and against WHICH customer PO. */}
+                              customer · customer PO + our SO. Each item is spaced
+                              out with a faint divider (owner: "排版漂亮一点,别全挤在
+                              一起") so a multi-item rack reads cleanly. */}
                           {visibleItems.map((it, i) => {
                             const so = rackItemSO(it);
                             const cust = it.customerName || "";
                             const po = it.customerPOId || "";
                             return (
-                              <div key={i} className="leading-tight">
-                                <p className="text-[11px] truncate opacity-95">
+                              <div key={i} className="py-1.5 leading-tight">
+                                <p className="text-[12px] font-medium truncate">
                                   {rackItemDescription(it)}
                                 </p>
                                 {(cust || po) && (
-                                  <p className="text-[10px] truncate opacity-75">
+                                  <p className="text-[11px] truncate opacity-90 mt-0.5">
                                     {cust}
                                     {cust && po ? " · " : ""}
                                     {po}
                                   </p>
                                 )}
                                 {so && (
-                                  <p className="text-[10px] truncate opacity-75">{so}</p>
+                                  <p className="text-[10px] truncate opacity-60 mt-0.5">{so}</p>
                                 )}
                               </div>
                             );
                           })}
                           {extraCount > 0 && (
-                            <p className="text-[10px] opacity-80 pt-0.5">+{extraCount} more</p>
+                            <p className="text-[11px] opacity-85 pt-2 text-center">
+                              + {extraCount} more
+                            </p>
                           )}
                         </div>
                       )}

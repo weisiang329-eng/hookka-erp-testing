@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-25-008 — FG-sticker preview/print slow + the "manual rack dropdown" CSRF red herring
+
+🟢 **Fixed (prod + staging)** · `production` · `performance` · owner-reported
+
+(a) **Slow FG-sticker preview/print** — filtering ~6 orders, "Loading FG units…" hung several seconds and "Print All" lagged. Root: `loadFgStickers` (production/index.tsx) **awaited** `enrichWithPackingTokens` BEFORE painting the preview, and that mint endpoint (`POST /api/production-orders/packing-rack-tokens`) ran a **serial** per-(poNo,pieceName) loop (~6 DB calls each → dozens of sequential round-trips). Fix: paint the preview immediately with the `/worker/scan` fallback URL, then upgrade the QRs to `/p/<token>` in the background (Print still awaits the enriched set); the mint endpoint now runs 2 batched queries + a parallel mint, byte-identical output. Commit `bcb000d4`.
+
+(b) **CSRF red herring (NON-bug — recorded so it is NOT re-chased).** The owner's "manual Rack 9 dropdown doesn't save" was first mis-diagnosed as a missing CSRF token in `patchRack` (commit `f9f05433`). That "fix" was a **no-op**: `src/lib/api-client.ts:58` globally monkey-patches `window.fetch` to auto-inject `X-CSRF-Token` on every mutating `/api/*` request, so NO raw fetch is ever missing CSRF. A system-wide "40 fetches missing CSRF" audit was therefore **entirely false positives** — do NOT "fix" them. The real rack bug was BUG-2026-06-25-007 (below).
+
+## BUG-2026-06-25-007 — assigning a packing rack didn't populate the warehouse (text label only, no occupancy row)
+
+🟢 **Fixed (prod + staging, code-verified; pending owner physical scan-verify)** · `warehouse` · `inventory-cascade` · owner-reported (B)
+
+Owner set "Rack 9" on the Production packing-sheet dropdown; the value stuck on the sheet but the piece never appeared under Rack 9 in the **Warehouse** grid. Root: assigning a rack — the office dropdown, the `/p/` piece-sticker scan, AND the worker scan (all via `applyPackingRack`) — wrote ONLY the text `rackingNumber` (job_cards + production_orders). The Warehouse grid renders from `rack_items` (occupancy), which **only** the `/r/` rack-QR stock-in ever wrote — so a rack-assigned piece had no occupancy row. Fix: `applyPackingRack` now ALSO mirrors ONE `rack_items` row per piece — SET inserts, re-assign MOVES (old row removed), `""` CLEARS — and recomputes `rack_locations.status` on both racks (same CASE as the DO-dispatch stock-out); best-effort, hot-card only. The office PATCH funnels `rackingNumber` through `applyPackingRack` (idempotent text re-affirm + occupancy) instead of duplicating the write. NEW shared `packingPieceIdentity` (src/api/lib/packing-piece-identity.ts) locks the `productName`(description) + `notes`(SO) identity used by BOTH the assignment and the `/r/` rack-scan resolve, so they converge on ONE row (no duplicate; a move finds the old row). +9 tests; both packing test files wired into the CI list. Commits `3ec97e43`, `4604c1a0`.
+
 ## BUG-2026-06-25-006 — packing-sticker QR → rack flow inconsistent ("some scan, some don't"): bedframe ambiguity, archived/edited orders, dead tokens, + /r/ "Scan items" rejected /p/ stickers
 
 🟢 **Fixed (prod, code-verified; pending owner physical scan-verify)** · `warehouse` · `worker-scan` · owner-reported (urgent — floor scanning)

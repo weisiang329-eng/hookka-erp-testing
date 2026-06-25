@@ -60,3 +60,37 @@ export function stripLegSuffix(sourceType: string | null | undefined): string {
 export function familyOf(sourceType: string | null | undefined): DocFamily | null {
   return DOC_DATE_FAMILIES[stripLegSuffix(sourceType)] ?? null;
 }
+
+// Last calendar day of a 1-indexed month, as 'YYYY-MM-DD' (handles leap Feb).
+function lastDayOfMonth(year: number, month1to12: number): string {
+  const d = new Date(year, month1to12, 0).getDate(); // day 0 of next month = last day of this one
+  return `${String(year).padStart(4, "0")}-${String(month1to12).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+// Period-end bookkeeping legs have NO source table but DO encode their own date
+// in the sourceId. Return that date (period-END for month-stamped types so the
+// opening-date floor classifies a whole period correctly), else null → postedAt.
+//   depreciation   dep-YYYY-MM-<stamp>      → that month's last day
+//   closing_stock  cs-YYYY-MM-<stamp>       → that month's last day
+//                  (its reversal cs-rev-<stamp> has no month → null → postedAt)
+//   year_close     fyclose-YYYY-MM-DD       → that FY-end date
+// (contra is always same-day and fund_transfer same-day-ish, so both keep the
+//  postedAt fallback — their sourceId carries no reliable own-date.)
+export function parseSourceIdDate(
+  sourceType: string | null | undefined,
+  sourceId: string | null | undefined,
+): string | null {
+  const base = stripLegSuffix(sourceType);
+  const sid = String(sourceId ?? "");
+  let m: RegExpMatchArray | null;
+  if (base === "depreciation" && (m = sid.match(/^dep-(\d{4})-(\d{2})-/))) {
+    return lastDayOfMonth(Number(m[1]), Number(m[2]));
+  }
+  if (base === "closing_stock" && (m = sid.match(/^cs-(\d{4})-(\d{2})-/))) {
+    return lastDayOfMonth(Number(m[1]), Number(m[2]));
+  }
+  if (base === "year_close" && (m = sid.match(/^fyclose-(\d{4}-\d{2}-\d{2})/))) {
+    return m[1];
+  }
+  return null;
+}

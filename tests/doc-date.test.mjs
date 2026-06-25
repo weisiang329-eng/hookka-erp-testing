@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   stripLegSuffix,
   familyOf,
+  parseSourceIdDate,
   DOC_DATE_FAMILIES,
 } from "../src/lib/doc-date.ts";
 
@@ -63,6 +64,29 @@ test("familyOf — bookkeeping / ledger-only / unknown → null (postedAt fallba
   assert.equal(familyOf("fund_transfer"), null);
   assert.equal(familyOf("contra"), null);
   assert.equal(familyOf("something_unknown"), null);
+});
+
+test("parseSourceIdDate — depreciation → that month's last day", () => {
+  assert.equal(parseSourceIdDate("depreciation", "dep-2026-06-1719216340123"), "2026-06-30");
+  assert.equal(parseSourceIdDate("depreciation", "dep-2026-02-99"), "2026-02-28"); // non-leap
+  assert.equal(parseSourceIdDate("depreciation", "dep-2024-02-99"), "2024-02-29"); // leap
+});
+
+test("parseSourceIdDate — closing_stock → month-end; its reversal → null", () => {
+  assert.equal(parseSourceIdDate("closing_stock", "cs-2026-05-1719216340123"), "2026-05-31");
+  // reversal sourceId is cs-rev-<stamp> (no month) → null → postedAt fallback
+  assert.equal(parseSourceIdDate("closing_stock_reversal", "cs-rev-1719216340123"), null);
+});
+
+test("parseSourceIdDate — year_close → the FY-end date", () => {
+  assert.equal(parseSourceIdDate("year_close", "fyclose-2026-08-31"), "2026-08-31");
+});
+
+test("parseSourceIdDate — same-day / mapped / unknown types → null (postedAt fallback)", () => {
+  assert.equal(parseSourceIdDate("contra", "contra-1719216340123"), null);
+  assert.equal(parseSourceIdDate("fund_transfer", "HLBB-OUT-2606-001"), null);
+  assert.equal(parseSourceIdDate("invoice", "inv-uuid"), null);
+  assert.equal(parseSourceIdDate("opening_balance", "ob-1"), null);
 });
 
 test("DOC_DATE_FAMILIES — every entry has table/noCol/dateCol", () => {

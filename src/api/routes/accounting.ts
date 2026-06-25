@@ -34,7 +34,7 @@ import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
-import { DOC_DATE_FAMILIES, stripLegSuffix } from "../../lib/doc-date";
+import { DOC_DATE_FAMILIES, stripLegSuffix, parseSourceIdDate } from "../../lib/doc-date";
 import {
   prefixForPartyType,
   computeBillTotals,
@@ -8802,7 +8802,11 @@ async function loadDocDateResolver(
       return openingDate ?? String(postedAt ?? "").slice(0, 10);
     }
     const d = maps.get(stripLegSuffix(sourceType))?.get(String(sourceId));
-    return d ?? String(postedAt ?? "").slice(0, 10);
+    if (d) return d;
+    // Period-end bookkeeping (depreciation / closing_stock / year_close) encode
+    // their own date in the sourceId; everything else falls back to postedAt.
+    const sp = parseSourceIdDate(sourceType, sourceId);
+    return sp ?? String(postedAt ?? "").slice(0, 10);
   };
   return { docDate, openingDate };
 }

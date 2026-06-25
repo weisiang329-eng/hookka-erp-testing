@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## FEATURE-2026-06-25-005 — show our-SO + customer name + customer PO on every finished-goods surface (rack scan, rack grid, Packing List) + a customer-name alias-fold bug caught live
+
+🟢 **Shipped (prod, backend-verified)** · `warehouse` · `ui-frontend` · owner-requested
+
+Owner ruling: every place a finished piece appears must identify three things at a glance — WHAT (our SO id), WHOSE (customer name), against WHICH customer PO. Rolled the trio across four surfaces:
+- **Rack scan "In this rack now"** (public-rack-qr.ts + rack-scan.tsx): contents query now returns customerName + customerPOId; cards show description / customer · PO / our SO + date. Verified: Rack 1 → "Houzs Century · PO-009090".
+- **Warehouse rack grid** (warehouse.ts + warehouse.tsx): `GET /` now LEFT JOINs production_orders; grid card shows description / our SO / "customer · customer-PO"; slot popup gains a Customer PO line. Verified live: customerPOId **12/12**, customerName **12/12**.
+- **Packing List PDF** (generate-packing-pdf.ts): Quick Info box gains "Customer PO"; header "SO:" → "Our SO:" (distinguishes our SO from the customer's SO).
+- **DO PDF**: no change — already prints Our SO / PO / SO / REF per line + customer name in the header (confirmed by investigation).
+
+**Bug caught during verify:** the warehouse customer-name initially came back **0/12**. Cause: the join aliased `po.customerName AS poCustomerName` — an unquoted camelCase alias that Postgres folds to lowercase (`pocustomername`), which `toCamel` can't recover (the column-rename-map folded-lowercase trap; see [[arch_column_rename_map_gotcha]]). `customerPOId` survived because it's a rename-map column. Fix: alias to snake_case (`AS po_customer_name`) so `toCamel` recovers it → `poCustomerName`. Re-verified 12/12. **Lesson: SQL aliases for camelCase/acronym fields must be snake_case (or rename-map columns), never raw camelCase.** build:strict + eslint clean throughout.
+
+---
+
 ## BUG-2026-06-25-004 — packing-rack scan UI: duplicated SO/PO display + mobile Rack Stock-In showed no contents
 
 🟢 **Fixed (prod, backend-verified)** · `ui-frontend` · `warehouse` · owner-reported

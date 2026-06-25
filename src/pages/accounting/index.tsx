@@ -3114,15 +3114,16 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
 // =============== TAB 5: ACCOUNTS PAYABLE ===============
 
 // Phase 2 (2026-06) — AP control reconciliation + supplier statement.
-// Mirror of ARControlPanel for the payable side.
+// Mirror of ARControlPanel for the payable side. NOTE: the third "supplier
+// running counter (outstandingSen)" card was removed (2026-06-25) — suppliers
+// .outstandingSen is never maintained on PI approve/pay, so it only ever showed
+// a false drift. The real reconciliation is Creditor-control-ledger vs PI.
 function APControlPanel() {
   const [data, setData] = useState<{
     controls: { code: string; name: string; balanceSen: number }[];
     tradeControlSen: number;
     piOutstandingSen: number;
-    supplierCounterSen: number;
     driftControlVsPiSen: number;
-    driftCounterVsPiSen: number;
   } | null>(null);
   const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
   const [stmtSupplier, setStmtSupplier] = useState("");
@@ -3167,7 +3168,7 @@ function APControlPanel() {
   return (
     <div className="space-y-4 mb-2">
       {data && (
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
           <Card>
             <CardContent className="p-4">
               <p className="text-xs text-[#6B7280]">Creditor control (ledger{data.controls.filter((x) => x.code !== "405-0000").map((x) => ` ${x.code}`).join(",")})</p>
@@ -3179,13 +3180,6 @@ function APControlPanel() {
               <p className="text-xs text-[#6B7280]">Booked-unpaid purchase invoices (APPROVED)</p>
               <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.piOutstandingSen)}</p>
               <div className="mt-1">{drift(data.driftControlVsPiSen)}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <p className="text-xs text-[#6B7280]">Supplier running counter (outstandingSen)</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.supplierCounterSen)}</p>
-              <div className="mt-1">{drift(data.driftCounterVsPiSen)}</div>
             </CardContent>
           </Card>
         </div>
@@ -8259,6 +8253,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
   const { toast } = useToast();
   const [data, setData] = useState<ObState | null>(null);
   const [openingDate, setOpeningDate] = useState("");
+  const [savingDate, setSavingDate] = useState(false);
   // GL grid — raw RM strings per account so typing never reformats.
   const [amounts, setAmounts] = useState<Record<string, { dr: string; cr: string }>>({});
   const [posting, setPosting] = useState(false);
@@ -8330,6 +8325,27 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
   const totalDr = userDr + (data?.arTotalSen ?? 0);
   const totalCr = userCr + (data?.apTotalSen ?? 0);
   const diff = totalDr - totalCr;
+
+  // Save just the opening date (self-service, no posting required) — sets when
+  // the books start from this Maintenance tab.
+  const saveOpeningDate = async () => {
+    if (!openingDate) { toast.error("Pick an opening date first"); return; }
+    setSavingDate(true);
+    try {
+      const res = await fetch("/api/accounting/opening-date", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ openingDate }),
+      });
+      const j = asMutationResponse(await res.json());
+      if (res.ok && j?.success) toast.success(`Opening date set to ${openingDate}`);
+      else toast.error(j?.error || "Failed to save opening date");
+    } catch {
+      toast.error("Failed to save opening date");
+    } finally {
+      setSavingDate(false);
+    }
+  };
 
   const handlePost = async () => {
     if (!openingDate) {
@@ -8435,12 +8451,17 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
         <CardContent className="p-4 flex flex-wrap items-end gap-4">
           <div>
             <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Opening date</label>
-            <input
-              type="date"
-              value={openingDate}
-              onChange={(e) => setOpeningDate(e.target.value)}
-              className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm"
-            />
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={openingDate}
+                onChange={(e) => setOpeningDate(e.target.value)}
+                className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm"
+              />
+              <Button variant="outline" size="sm" disabled={savingDate || !openingDate} onClick={saveOpeningDate}>
+                {savingDate ? "Saving…" : "Save"}
+              </Button>
+            </div>
           </div>
           <div className="text-sm">
             <span className="text-[#6B7280] mr-2">Total DR</span>

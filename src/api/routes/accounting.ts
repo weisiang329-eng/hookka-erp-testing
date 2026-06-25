@@ -32,6 +32,7 @@ import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
 import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "../lib/doc-number-service";
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
+import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import {
   prefixForPartyType,
   computeBillTotals,
@@ -2134,30 +2135,13 @@ app.post("/purchase-credit-notes/:id/void", async (c) => {
 // ---------------------------------------------------------------------------
 // AP CONTROL (Phase 2, 2026-06) — mirror of /ar-control for the payable
 // side: SCC creditor-control ledger balances vs Σ booked-unpaid purchase
-// invoices (APPROVED) vs the suppliers.outstandingSen counter, supplier
-// aging by due date, and a supplier statement (PI CR / payment DR).
+// invoices (APPROVED), supplier aging by due date, and a supplier statement
+// (PI CR / payment DR). The suppliers.outstandingSen counter is still computed
+// below but no longer surfaced — its card was removed (2026-06-25) as a dead
+// metric (the counter was never maintained); the control-vs-PI drift is the
+// real reconciliation. `ensurePartialPaymentColumns` self-applies the
+// migration-7 schema so reading paid_amount_sen here never 500s.
 // ---------------------------------------------------------------------------
-// Migration 7 (purchase_invoices.paid_amount_sen + supplier_payments FX cols)
-// reaches prod via this runtime self-apply — the owner never ran the paste-SQL,
-// and reading those columns (ap-control) or writing them (supplier discount /
-// payment) must not 500. Idempotent + best-effort; readers also fall back.
-async function ensurePartialPaymentColumns(
-  db: Env["Variables"]["DB"],
-): Promise<void> {
-  for (const sql of [
-    "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS paid_amount_sen INTEGER DEFAULT 0",
-    "ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS booked_sen INTEGER",
-    "ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS foreign_sen INTEGER",
-    "ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS pay_fx_rate DOUBLE PRECISION",
-  ]) {
-    try {
-      await db.prepare(sql).run();
-    } catch {
-      /* table missing / no DDL perms — the readers below fall back gracefully */
-    }
-  }
-}
-
 app.get("/ap-control", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
@@ -2322,13 +2306,19 @@ app.get("/supplier-statement", async (c) => {
       .bind(supplierId)
       .first<{ id: string; name: string }>(),
     c.var.DB.prepare(
+      // Include PARTIAL_PAID (a partly-paid PI still owes money — its full
+      // amount is a credit here, the payment a debit; omitting it would drop
+      // the credit leg and unbalance the statement). Matches /creditor-ledger.
       `SELECT piNo, invoiceDate, amountSen, status FROM purchase_invoices
-        WHERE supplierId = ? AND status IN ('APPROVED','PAID')`,
+        WHERE supplierId = ? AND status IN ('APPROVED','PARTIAL_PAID','PAID')`,
     )
       .bind(supplierId)
       .all<{ piNo: string; invoiceDate: string; amountSen: number; status: string }>(),
     c.var.DB.prepare(
-      `SELECT paymentNo, date, amountSen FROM supplier_payments WHERE supplierId = ?`,
+      // Exclude #6 supplier-discount markers (method='CREDIT_NOTE', amountSen=0,
+      // no GL leg) — they'd render as 0.00 PAYMENT noise rows; the CN itself
+      // already appears via the purchase_credit_notes query below.
+      `SELECT paymentNo, date, amountSen FROM supplier_payments WHERE supplierId = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'`,
     )
       .bind(supplierId)
       .all<{ paymentNo: string; date: string; amountSen: number }>(),
@@ -2463,7 +2453,7 @@ app.get("/creditor-ledger", async (c) => {
   const [supRes, piRes, payRes, pcnRes] = await Promise.all([
     c.var.DB.prepare("SELECT id, name, code FROM suppliers").all<{ id: string; name: string; code: string | null }>(),
     c.var.DB.prepare(`SELECT supplierId, piNo, invoiceDate, amountSen FROM purchase_invoices WHERE status IN ('APPROVED','PARTIAL_PAID','PAID')`).all<{ supplierId: string; piNo: string; invoiceDate: string; amountSen: number }>(),
-    c.var.DB.prepare(`SELECT supplierId, paymentNo, date, amountSen FROM supplier_payments WHERE paymentNo NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'supplier_payment' AND state IN ('VOID','DELETED'))`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
+    c.var.DB.prepare(`SELECT supplierId, paymentNo, date, amountSen FROM supplier_payments WHERE COALESCE(method,'') <> 'CREDIT_NOTE' AND paymentNo NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'supplier_payment' AND state IN ('VOID','DELETED'))`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
     c.var.DB.prepare(`SELECT supplierId, noteNumber, date, totalAmount FROM purchase_credit_notes WHERE status = 'POSTED'`).all<{ supplierId: string; noteNumber: string; date: string; totalAmount: number }>(),
   ]);
   const byParty = new Map<string, LedgerLine[]>();
@@ -8833,6 +8823,39 @@ app.get("/opening-balance", async (c) => {
 });
 
 // Add ONE opening invoice (AR). Subledger only — no GL legs, no SST.
+// PUT /opening-date — set just the accounting start date (kv 'opening_date'),
+// self-service, WITHOUT posting opening balances. Lets the owner set when the
+// books start from the Maintenance → Opening Balance tab before they have the
+// opening rows. The opening-balance Post also writes this key (same format).
+app.put("/opening-date", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { openingDate?: string };
+  const d = String(body.openingDate ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    return c.json(
+      { success: false, error: "openingDate must be a YYYY-MM-DD date" },
+      400,
+    );
+  }
+  await c.var.DB.prepare(
+    `INSERT INTO kv_config (key, value, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+  )
+    .bind(OPENING_DATE_KV_KEY, JSON.stringify(d), new Date().toISOString())
+    .run();
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: "opening-date",
+    action: "update",
+    after: { openingDate: d },
+  });
+  return c.json({ success: true, data: { openingDate: d } });
+});
+
 app.post("/opening-balance/ar", async (c) => {
   const denied = await requirePermission(c, "accounting", "create");
   if (denied) return denied;

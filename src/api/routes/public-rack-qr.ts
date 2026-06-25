@@ -54,6 +54,7 @@ import {
   isBarcodeToken,
 } from "../../lib/job-card-id";
 import { pickPackingCard } from "../lib/packing-card-resolve";
+import { resolveCard as resolvePackingCardByToken } from "./public-rack-write";
 
 const app = new Hono<Env>();
 
@@ -539,6 +540,43 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
 
     const code = (c.req.query("code") || "").trim();
     if (!code) return c.json(notFound);
+
+    // Packing-sticker public token (/p/<64hex>): a storekeeper on the /r/ rack
+    // page taps "Scan items" and points at a Packing sticker — whose QR is the
+    // public /p/<token> rack-assign URL. Resolve it to the EXACT card the token
+    // was minted on (archive-aware, via the SHARED resolver) so stock-in stamps
+    // that precise card. Path-based, domain-agnostic: old pages.dev + new
+    // erp.hookka.com stickers both resolve. Mirrors the worker/scan.tsx /p/
+    // intercept; the raw /p/ URL stays the per-piece de-dup key on the client.
+    const pToken = code.match(/\/p\/([0-9a-f]{64})(?:[/?#]|$)/i);
+    if (pToken) {
+      const card = await resolvePackingCardByToken(c.var.DB, pToken[1]);
+      if (!card || (card.departmentCode || "").toUpperCase() !== "PACKING") {
+        return c.json(notFound);
+      }
+      const name = (card.productName || card.productCode || card.poNo || "").trim();
+      const size = (card.sizeLabel || "").trim();
+      const description =
+        (card.wipLabel || "").trim() ||
+        (size ? `${name} ${size}`.trim() : name) ||
+        "Item";
+      const cur = await currentRackOfPiece(
+        c.var.DB,
+        description,
+        card.salesOrderNo,
+      );
+      return c.json({
+        found: true,
+        productionOrderId: card.productionOrderId,
+        productName: card.productName || "",
+        poNo: card.poNo,
+        salesOrderNo: (card.salesOrderNo || "").trim(),
+        description,
+        jobCardId: card.id,
+        currentRackId: cur.currentRackId,
+        currentRackLabel: cur.currentRackLabel,
+      });
+    }
 
     // Manual loose item (HKITEM:<name>[|<code>]) — no system PO. Always "found",
     // never resolved to a rack (productionOrderId null), so the caller just adds

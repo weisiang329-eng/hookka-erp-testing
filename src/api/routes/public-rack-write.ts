@@ -57,7 +57,7 @@ const unknownToken = (c: Context<Env>) =>
     404,
   );
 
-type PackingCardRow = {
+export type PackingCardRow = {
   id: string;
   productionOrderId: string | null;
   departmentCode: string | null;
@@ -74,7 +74,10 @@ type PackingCardRow = {
 // Resolve the token to its PACKING job card + the minimal PO header fields the
 // scan page needs. Reads qr_token (snake_case) — the only credential. Returns
 // null when nothing matches.
-async function resolveCard(
+// Exported so the /r/ rack-scan item lookup (public-rack-qr.ts) can resolve a
+// scanned /p/<token> packing sticker to the SAME exact card — one definition,
+// archive-aware, no drift between the two public scan surfaces.
+export async function resolveCard(
   db: D1Database,
   token: string,
 ): Promise<PackingCardRow | null> {

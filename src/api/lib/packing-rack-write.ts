@@ -21,6 +21,8 @@
 // the office path. No NEW column here.
 // ---------------------------------------------------------------------------
 
+import { packingPieceIdentity } from "./packing-piece-identity";
+
 export type PackingRackWriteResult =
   | { ok: true; jobCardId: string; rackingNumber: string }
   | {
@@ -45,16 +47,36 @@ export async function applyPackingRack(
       error: "jobCardId and rackingNumber are required",
     };
   }
+  // Widened lookup (JOIN the PO) so the occupancy mirror below can build the
+  // SAME piece identity the /r/ rack-scan uses (description + SO). The occupancy
+  // fields are optional so the archive fallback's 3-column shape still assigns.
   let jc = await db
     .prepare(
-      "SELECT id, productionOrderId, departmentCode FROM job_cards WHERE id = ?",
+      `SELECT jc.id AS id, jc.productionOrderId AS productionOrderId,
+              jc.departmentCode AS departmentCode, jc.wipLabel AS wipLabel,
+              po.productName AS productName, po.productCode AS productCode,
+              po.sizeLabel AS sizeLabel, po.salesOrderNo AS salesOrderNo,
+              po.poNo AS poNo
+         FROM job_cards jc
+         LEFT JOIN production_orders po ON po.id = jc.productionOrderId
+        WHERE jc.id = ?`,
     )
     .bind(jobCardId)
     .first<{
       id: string;
       productionOrderId: string;
       departmentCode: string | null;
+      wipLabel?: string | null;
+      productName?: string | null;
+      productCode?: string | null;
+      sizeLabel?: string | null;
+      salesOrderNo?: string | null;
+      poNo?: string | null;
     }>();
+  // Only the hot JOIN carries the PO fields needed for the occupancy mirror;
+  // an archived card (fallback below) skips occupancy (a completed/archived PO
+  // is past packing).
+  const fromHotJoin = !!jc;
   // FIX 1 — archive fallback for the guard lookup. An archived card (PO
   // completed → moved to job_cards_archive) is absent from the hot table, so the
   // hot SELECT misses and we'd 404 before the validated write. Look it up in the
@@ -150,5 +172,92 @@ export async function applyPackingRack(
       console.warn("[applyPackingRack] archive PO rack write skipped", e);
     }
   }
+
+  // ---- Warehouse occupancy mirror (best-effort) ---------------------------
+  // Before this, assigning a rack only wrote the TEXT label (above) — the
+  // Warehouse grid reads rack_items, so a packed piece never showed under its
+  // rack (owner 2026-06-25: set Rack 9 → not in Warehouse). Mirror ONE
+  // rack_items row per piece, EXACTLY like the /r/ rack-scan stock-in
+  // (public-rack-qr.ts): identity = productName(=description) + notes(=SO …),
+  // the SAME key currentRackOfPiece matches, so the office dropdown, the /p/
+  // piece scan, and the rack scan all converge on ONE row (no duplicates).
+  // SET inserts, re-assign MOVES (old row removed), "" CLEARS; status recomputes
+  // on both racks via the DO-dispatch CASE. Hot-card only (archived = past
+  // packing); wrapped so an occupancy hiccup never blocks the text write above.
+  if (fromHotJoin && jc) {
+    try {
+      // ONE shared formula with the /r/ rack-scan resolve (public-rack-qr.ts)
+      // so the office dropdown, /p/ scan, and rack scan converge on one row.
+      const { description, notes } = packingPieceIdentity(jc);
+      // The piece's current rack_items row, by the shared identity.
+      const curRow = await db
+        .prepare(
+          `SELECT id, rackLocationId FROM rack_items
+            WHERE productName = ? AND notes = ? ORDER BY id DESC LIMIT 1`,
+        )
+        .bind(description, notes)
+        .first<{ id: number; rackLocationId: string }>();
+      const stmts: D1PreparedStatement[] = [];
+      const affected = new Set<string>();
+      if (!rack) {
+        // CLEAR — remove the piece from the warehouse.
+        if (curRow) {
+          stmts.push(
+            db.prepare("DELETE FROM rack_items WHERE id = ?").bind(curRow.id),
+          );
+          affected.add(curRow.rackLocationId);
+        }
+      } else {
+        // Resolve the rack LABEL → a rack_locations.id (deterministic slot).
+        const loc = await db
+          .prepare(
+            "SELECT id FROM rack_locations WHERE rack = ? ORDER BY position LIMIT 1",
+          )
+          .bind(rack)
+          .first<{ id: string }>();
+        // Idempotent: already in this rack → leave it. Otherwise MOVE/SET.
+        if (loc && !(curRow && curRow.rackLocationId === loc.id)) {
+          if (curRow) {
+            stmts.push(
+              db.prepare("DELETE FROM rack_items WHERE id = ?").bind(curRow.id),
+            );
+            affected.add(curRow.rackLocationId);
+          }
+          const today = new Date().toISOString().split("T")[0];
+          stmts.push(
+            db
+              .prepare(
+                `INSERT INTO rack_items (rackLocationId, productionOrderId,
+                   productCode, productName, sizeLabel, customerName, qty,
+                   stockedInDate, notes)
+                 VALUES (?, ?, '', ?, '', '', 1, ?, ?)`,
+              )
+              .bind(loc.id, jc.productionOrderId, description, today, notes),
+          );
+          affected.add(loc.id);
+        }
+      }
+      // Recompute each affected rack's status (mirror the DO-dispatch CASE so
+      // an emptied rack flips EMPTY/RESERVED and the new rack flips OCCUPIED).
+      for (const rid of affected) {
+        stmts.push(
+          db
+            .prepare(
+              `UPDATE rack_locations SET status = CASE
+                 WHEN reserved = 1 THEN 'RESERVED'
+                 WHEN (EXISTS(SELECT 1 FROM rack_items WHERE rackLocationId = ?)
+                       OR productCode IS NOT NULL) THEN 'OCCUPIED'
+                 ELSE 'EMPTY' END
+               WHERE id = ?`,
+            )
+            .bind(rid, rid),
+        );
+      }
+      if (stmts.length > 0) await db.batch(stmts);
+    } catch (e) {
+      console.warn("[applyPackingRack] occupancy mirror skipped", e);
+    }
+  }
+
   return { ok: true, jobCardId, rackingNumber: rack };
 }

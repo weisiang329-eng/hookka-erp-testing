@@ -48,6 +48,7 @@ import {
   getOrCreateJobCardQrToken,
 } from "../lib/jobcard-qr-token";
 import { pickPackingCard } from "../lib/packing-card-resolve";
+import { applyPackingRack } from "../lib/packing-rack-write";
 import { getOrgId, tryGetOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
@@ -4174,6 +4175,25 @@ async function applyPoUpdate(
         updated.id,
       )
       .run();
+
+    // Mirror the rack assignment through the shared writer so the Warehouse
+    // rack_items occupancy is populated — the office dropdown now shows the
+    // piece under its rack in the Warehouse grid, exactly like the /p/ + worker
+    // scans (owner 2026-06-25 (B): set Rack 9 → not in Warehouse). The inline
+    // UPDATE above already set job_cards.rackingNumber; applyPackingRack
+    // re-affirms it (idempotent), mirrors it onto the PO, and writes/moves/
+    // clears the one rack_items row. NOT_PACKING cards are a no-op inside the
+    // helper. Best-effort — never block the JC mutation on an occupancy hiccup.
+    if (body.rackingNumber !== undefined) {
+      try {
+        await applyPackingRack(db, body.jobCardId, body.rackingNumber);
+      } catch (e) {
+        console.warn(
+          "[production-orders PATCH] rack occupancy mirror skipped",
+          e,
+        );
+      }
+    }
 
     // BUG-2026-06-08 (scan ↔ production sync): when the operator REMOVES the
     // completion on the production page (clears completedDate) on a card that

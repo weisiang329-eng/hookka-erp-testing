@@ -54,6 +54,7 @@ import {
   isBarcodeToken,
 } from "../../lib/job-card-id";
 import { pickPackingCard } from "../lib/packing-card-resolve";
+import { packingPieceIdentity } from "../lib/packing-piece-identity";
 import { resolveCard as resolvePackingCardByToken } from "./public-rack-write";
 
 const app = new Hono<Env>();
@@ -411,7 +412,9 @@ type CurrentRack = { currentRackId: string | null; currentRackLabel: string | nu
 // "" when there's no SO). Stock-OUT matches on this same signature, so move-
 // detection MUST too — see the rack memory.
 function pieceNotes(soNo: string | null): string {
-  return soNo ? `SO ${soNo}` : "";
+  // Delegate to the shared identity helper so the "SO <no>" tag can never drift
+  // from the office / applyPackingRack path.
+  return packingPieceIdentity({ salesOrderNo: soNo }).notes;
 }
 
 // Where (if anywhere) THIS piece currently sits — matched by the SAME per-piece
@@ -554,12 +557,10 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
       if (!card || (card.departmentCode || "").toUpperCase() !== "PACKING") {
         return c.json(notFound);
       }
-      const name = (card.productName || card.productCode || card.poNo || "").trim();
-      const size = (card.sizeLabel || "").trim();
-      const description =
-        (card.wipLabel || "").trim() ||
-        (size ? `${name} ${size}`.trim() : name) ||
-        "Item";
+      // Shared formula with applyPackingRack so a piece assigned via the office
+      // dropdown and the same piece stocked-in via this rack scan resolve to the
+      // identical rack_items identity (no duplicate warehouse rows).
+      const { description } = packingPieceIdentity(card);
       const cur = await currentRackOfPiece(
         c.var.DB,
         description,

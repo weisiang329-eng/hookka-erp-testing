@@ -471,12 +471,19 @@ app.get("/:rackId", async (c: Context<Env>) => {
     let items: Array<{
       description: string;
       salesOrderNo: string;
+      customerName: string;
+      customerPO: string;
       stockedInDate: string;
     }> = [];
     try {
+      // Owner 2026-06-25: each item must identify WHAT (description + our SO),
+      // WHOSE (customer name), and the customer's PO. customerName / customerPOId
+      // are snapshot columns on production_orders (set at create), so a plain
+      // join surfaces them with no extra lookup.
       const itemsRes = await c.var.DB.prepare(
         `SELECT ri.productName AS description, ri.notes AS notes,
-                ri.stockedInDate AS stockedInDate, po.salesOrderNo AS salesOrderNo
+                ri.stockedInDate AS stockedInDate, po.salesOrderNo AS salesOrderNo,
+                po.customerName AS customerName, po.customerPOId AS customerPO
            FROM rack_items ri
            LEFT JOIN production_orders po ON po.id = ri.productionOrderId
           WHERE ri.rackLocationId = ?
@@ -488,12 +495,16 @@ app.get("/:rackId", async (c: Context<Env>) => {
           notes: string | null;
           stockedInDate: string | null;
           salesOrderNo: string | null;
+          customerName: string | null;
+          customerPO: string | null;
         }>();
       items = (itemsRes.results ?? []).map((r) => ({
         description: (r.description || "").trim() || "Item",
         salesOrderNo:
           (r.salesOrderNo || "").trim() ||
           (r.notes || "").replace(/^SO\s+/i, "").trim(),
+        customerName: (r.customerName || "").trim(),
+        customerPO: (r.customerPO || "").trim(),
         stockedInDate: (r.stockedInDate || "").trim(),
       }));
     } catch (e) {

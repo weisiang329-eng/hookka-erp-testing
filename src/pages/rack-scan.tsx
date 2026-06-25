@@ -50,6 +50,9 @@ import { csrfHeaders } from "@/lib/csrf";
 type RackContentItem = {
   description: string;
   salesOrderNo: string;
+  // Owner 2026-06-25: each item must show whose goods (customer) + the customer PO.
+  customerName: string;
+  customerPO: string;
   stockedInDate: string;
 };
 type RackSummary = {
@@ -1159,6 +1162,13 @@ export default function RackScanPage() {
                         <p className="text-sm font-medium text-[#1F1D1B] break-words">
                           {it.description}
                         </p>
+                        {(it.customerName || it.customerPO) && (
+                          <p className="text-xs text-[#1F1D1B] mt-0.5 break-words">
+                            {it.customerName}
+                            {it.customerName && it.customerPO ? " · " : ""}
+                            {it.customerPO}
+                          </p>
+                        )}
                         {(it.salesOrderNo || it.stockedInDate) && (
                           <p className="text-xs text-gray-500 mt-0.5">
                             {it.salesOrderNo}

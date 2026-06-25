@@ -34,6 +34,7 @@ import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
+import { DOC_DATE_FAMILIES, stripLegSuffix, parseSourceIdDate } from "../../lib/doc-date";
 import {
   prefixForPartyType,
   computeBillTotals,
@@ -1391,8 +1392,8 @@ app.get("/ar-control", async (c) => {
       "SELECT code, name, type, specialAccountType FROM chart_of_accounts WHERE specialAccountType = 'SDC'",
     ).all<{ code: string; name: string; type: string; specialAccountType: string }>(),
     c.var.DB.prepare(
-      "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
-    ).all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+      "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
+    ).all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     c.var.DB.prepare(
       `SELECT customerId, customerName, invoiceNo, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening
          FROM invoices
@@ -1412,12 +1413,12 @@ app.get("/ar-control", async (c) => {
       "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM customers",
     ).first<{ s: number }>(),
   ]);
-  const obDateAr = await getOpeningDate(c.var.DB);
+  const { docDate, openingDate: obDateAr } = await loadDocDateResolver(c.var.DB);
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
   const resolveCtl = await loadAccountResolver(c.var.DB);
   for (const l of legRes.results ?? []) {
-    if (legBeforeOpening(l.sourceType, l.postedAt, obDateAr)) continue; // pre-opening: not extracted
+    if (legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDateAr)) continue; // pre-opening: not extracted
     const code = resolveCtl(l.accountCode);
     dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
     cr.set(code, (cr.get(code) ?? 0) + (Number(l.creditSen) || 0));
@@ -2168,13 +2169,13 @@ app.get("/ap-control", async (c) => {
       "SELECT code, name FROM chart_of_accounts WHERE specialAccountType = 'SCC'",
     ).all<{ code: string; name: string }>(),
     c.var.DB.prepare(
-      "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
-    ).all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+      "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
+    ).all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     c.var.DB.prepare(
       "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers",
     ).first<{ s: number }>(),
   ]);
-  const obDateAp = await getOpeningDate(c.var.DB);
+  const { docDate, openingDate: obDateAp } = await loadDocDateResolver(c.var.DB);
   // PI subledger — defensive: prefer net outstanding (amount − paid, incl
   // PARTIAL_PAID); if paid_amount_sen is STILL absent (ALTER couldn't run), fall
   // back to the original (APPROVED only, paid=0) so the panel always renders.
@@ -2225,7 +2226,7 @@ app.get("/ap-control", async (c) => {
   const cr = new Map<string, number>();
   const resolveCtl = await loadAccountResolver(c.var.DB);
   for (const l of legRes.results ?? []) {
-    if (legBeforeOpening(l.sourceType, l.postedAt, obDateAp)) continue; // pre-opening: not extracted
+    if (legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDateAp)) continue; // pre-opening: not extracted
     const code = resolveCtl(l.accountCode);
     dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
     cr.set(code, (cr.get(code) ?? 0) + (Number(l.creditSen) || 0));
@@ -3673,9 +3674,10 @@ app.get("/trial-balance", async (c) => {
   const asOf = c.req.query("asOf") || new Date().toISOString().slice(0, 10);
   const [legRes, coaRes] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
+      "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
     ).all<{
       accountCode: string;
+      sourceId: string;
       debitSen: number;
       creditSen: number;
       postedAt: string;
@@ -3689,13 +3691,10 @@ app.get("/trial-balance", async (c) => {
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
   const resolveTb = await loadAccountResolver(c.var.DB);
-  const obDateTb = await getOpeningDate(c.var.DB);
+  const { docDate, openingDate: obDateTb } = await loadDocDateResolver(c.var.DB);
   for (const l of legRes.results ?? []) {
-    if (legBeforeOpening(l.sourceType, l.postedAt, obDateTb)) continue; // pre-opening: not extracted
-    const d10 =
-      isOpeningSource(l.sourceType) && obDateTb
-        ? obDateTb
-        : String(l.postedAt ?? "").slice(0, 10);
+    const d10 = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
+    if (legBeforeOpening(l.sourceType, d10, obDateTb)) continue; // pre-opening: not extracted
     if (d10 > asOf) continue;
     const code = resolveTb(l.accountCode);
     dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
@@ -3799,17 +3798,15 @@ app.get("/gl", async (c) => {
       }
     };
     const resolveGl = await loadAccountResolver(c.var.DB);
-    // Opening-balance legs are DATED at the kv opening date on every read
-    // surface (their postedAt is the posting timestamp — backdating would
-    // break the hash-chain walk order).
-    const obDateAll = await getOpeningDate(c.var.DB);
-    const legDay = (l: { postedAt: string; sourceType: string }) =>
-      isOpeningSource(l.sourceType) && obDateAll
-        ? obDateAll
-        : String(l.postedAt ?? "").slice(0, 10);
+    // Every read surface dates a leg by its SOURCE DOCUMENT date (opening legs
+    // → kv opening date; bookkeeping/ledger-only → postedAt fallback). Their
+    // postedAt is the entry timestamp — backdating it would break the hash walk.
+    const { docDate, openingDate: obDateAll } = await loadDocDateResolver(c.var.DB);
+    const legDay = (l: { postedAt: string; sourceType: string; sourceId: string }) =>
+      docDate(l.sourceType, l.sourceId, l.postedAt);
     const all = (legRes.results ?? []).filter((l) => {
-      if (legBeforeOpening(l.sourceType, l.postedAt, obDateAll)) return false; // pre-opening: not extracted
       const d10 = legDay(l);
+      if (legBeforeOpening(l.sourceType, d10, obDateAll)) return false; // pre-opening: not extracted
       if (d10 < from || d10 > to) return false;
       const code = resolveGl(l.accountCode);
       if (accountSet && !accountSet.has(code)) return false;
@@ -3829,7 +3826,7 @@ app.get("/gl", async (c) => {
       const code = resolveGl(l.accountCode);
       return {
         id: l.id,
-        postedAt: isOpeningSource(l.sourceType) && obDateAll ? obDateAll : l.postedAt,
+        postedAt: legDay(l),
         accountCode: code,
         accountName: names.get(code) ?? "",
         description: l.description ?? "",
@@ -3931,13 +3928,11 @@ app.get("/gl", async (c) => {
     creditSen: number;
     runningSen: number;
   }[] = [];
-  const obDateOne = await getOpeningDate(c.var.DB);
-  const effDay = (l: { postedAt: string; sourceType: string }) =>
-    isOpeningSource(l.sourceType) && obDateOne
-      ? obDateOne
-      : String(l.postedAt ?? "").slice(0, 10);
-  // Re-sort by EFFECTIVE day — opening legs carry today's insert timestamp
-  // but belong at the opening date, ahead of everything that follows.
+  const { docDate, openingDate: obDateOne } = await loadDocDateResolver(c.var.DB);
+  const effDay = (l: { postedAt: string; sourceType: string; sourceId: string }) =>
+    docDate(l.sourceType, l.sourceId, l.postedAt);
+  // Re-sort by EFFECTIVE (document) day — a leg carries the entry timestamp but
+  // belongs at its source document's date.
   const ordered = [...(legRes.results ?? [])].sort(
     (a, b) =>
       effDay(a).localeCompare(effDay(b)) ||
@@ -3945,8 +3940,8 @@ app.get("/gl", async (c) => {
       a.id.localeCompare(b.id),
   );
   for (const l of ordered) {
-    if (legBeforeOpening(l.sourceType, l.postedAt, obDateOne)) continue; // pre-opening: not extracted (not even into B/F)
     const d10 = effDay(l);
+    if (legBeforeOpening(l.sourceType, d10, obDateOne)) continue; // pre-opening: not extracted (not even into B/F)
     const delta = debitNormal
       ? (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0)
       : (Number(l.creditSen) || 0) - (Number(l.debitSen) || 0);
@@ -3960,7 +3955,7 @@ app.get("/gl", async (c) => {
     totalCreditSen += Number(l.creditSen) || 0;
     rows.push({
       id: l.id,
-      postedAt: isOpeningSource(l.sourceType) && obDateOne ? obDateOne : l.postedAt,
+      postedAt: d10,
       description: l.description ?? "",
       sourceType: l.sourceType,
       sourceId: l.sourceId,
@@ -4022,10 +4017,11 @@ async function computeUnclosedAsOf(
   const [legRes, coaRes] = await Promise.all([
     db
       .prepare(
-        "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
+        "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
       )
       .all<{
         accountCode: string;
+        sourceId: string;
         debitSen: number;
         creditSen: number;
         postedAt: string;
@@ -4038,13 +4034,13 @@ async function computeUnclosedAsOf(
   const coa = new Map(
     (coaRes.results ?? []).map((a) => [a.code, a] as const),
   );
-  const obDateUnc = await getOpeningDate(db);
+  const { docDate, openingDate: obDateUnc } = await loadDocDateResolver(db);
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
   const resolveYc = await loadAccountResolver(db);
   for (const l of legRes.results ?? []) {
-    if (legBeforeOpening(l.sourceType, l.postedAt, obDateUnc)) continue; // pre-opening: not extracted
-    const d10 = String(l.postedAt ?? "").slice(0, 10);
+    const d10 = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
+    if (legBeforeOpening(l.sourceType, d10, obDateUnc)) continue; // pre-opening: not extracted
     if (d10 > endIso) continue;
     const code = resolveYc(l.accountCode);
     dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
@@ -4913,25 +4909,38 @@ app.get("/cleanup-report", async (c) => {
 // ---------------------------------------------------------------------------
 type GlWindow = Map<string, number>; // accountCode → signed (DR−CR) sen
 
+// The per-request document-date resolver context (built once, threaded into
+// the per-window P&L helpers so they don't re-load all source tables N times).
+interface DocDateCtx {
+  docDate: (
+    sourceType: string,
+    sourceId: string,
+    postedAt: string | null | undefined,
+  ) => string;
+  openingDate: string | null;
+}
+
 async function glWindowSigned(
   db: Env["Variables"]["DB"],
   startYm: string | null,
   endYm: string | null,
+  dc: DocDateCtx,
 ): Promise<{ net: GlWindow; coa: Map<string, { name: string; type: CoaRow["type"] }> }> {
   const [legRes, coaRes] = await Promise.all([
-    db.prepare("SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0")
-      .all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+    db.prepare("SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0")
+      .all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     db.prepare("SELECT code, name, type FROM chart_of_accounts").all<{ code: string; name: string; type: CoaRow["type"] }>(),
   ]);
   const resolve = await loadAccountResolver(db);
-  const obDate = await getOpeningDate(db);
+  const { docDate, openingDate: obDate } = dc;
   const net: GlWindow = new Map();
   for (const l of legRes.results ?? []) {
-    if (legBeforeOpening(l.sourceType, l.postedAt, obDate)) continue; // pre-opening: not extracted
+    const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
+    if (legBeforeOpening(l.sourceType, dd, obDate)) continue; // pre-opening: not extracted
     // Opening-balance and closing-stock legs are bookkeeping, not trading —
     // exclude from the P&L window (the stock summary already supplies stock).
     if (isOpeningSource(l.sourceType) || l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal") continue;
-    const ym = String(l.postedAt ?? "").slice(0, 7);
+    const ym = dd.slice(0, 7);
     if (startYm && ym < startYm) continue;
     if (endYm && ym > endYm) continue;
     const code = resolve(l.accountCode);
@@ -5413,6 +5422,7 @@ async function computePnlWindow(
   endYm: string | null,
   line: "all" | "sofa" | "bedframe",
   matData: MaterialCostData,
+  dc: DocDateCtx,
   override: Record<string, string> = {},
 ) {
   // RM / WIP / FG come from the FIFO engine via the precomputed per-request
@@ -5421,7 +5431,7 @@ async function computePnlWindow(
   // All OTHER P&L lines (labour / overhead / carriage / SST / revenue / other
   // income / expenses) still come from the GL window untouched.
   const [gl, ratio] = await Promise.all([
-    glWindowSigned(db, startYm, endYm),
+    glWindowSigned(db, startYm, endYm, dc),
     costByLineWindow(db, startYm, endYm),
   ]);
   // Material window derived synchronously from the single-replay checkpoints.
@@ -5762,17 +5772,18 @@ app.get("/cost-expense-classes", async (c) => {
     }
   }
   const [legRes, coaRes] = await Promise.all([
-    db.prepare("SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0").all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+    db.prepare("SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0").all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     db.prepare("SELECT code, name, type, pnlCategory FROM chart_of_accounts").all<{ code: string; name: string; type: CoaRow["type"]; pnlCategory: string | null }>(),
   ]);
   const resolve = await loadAccountResolver(db);
-  const obDateCec = await getOpeningDate(db);
+  const { docDate, openingDate: obDateCec } = await loadDocDateResolver(db);
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
   const byAcct = new Map<string, number[]>();
   for (const l of legRes.results ?? []) {
-    if (legBeforeOpening(l.sourceType, l.postedAt, obDateCec)) continue; // pre-opening: not extracted
+    const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
+    if (legBeforeOpening(l.sourceType, dd, obDateCec)) continue; // pre-opening: not extracted
     if (isOpeningSource(l.sourceType) || l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal" || l.sourceType === "year_close") continue;
-    const ym = String(l.postedAt ?? "").slice(0, 7);
+    const ym = dd.slice(0, 7);
     if (ym < startYm || ym > endYm) continue;
     const code = resolve(l.accountCode);
     const meta = coa.get(code);
@@ -5824,6 +5835,7 @@ app.get("/pl-trend", async (c) => {
   // Build the FIFO checkpoints ONCE (anchor is the latest month in the trend);
   // every month-window below is then a synchronous lookup, not a fresh replay.
   const matData = await loadMaterialCostData(c.var.DB, orgId, anchor);
+  const dc = await loadDocDateResolver(c.var.DB); // once per request — threaded into every window below
   const cols: { ym: string; netSalesSen: number; cogsSen: number; grossProfitSen: number; otherIncomeSen: number; expenseSen: number; netProfitSen: number }[] = [];
   for (let i = 0; i < months; i++) {
     // newest first: anchor, anchor-1, …
@@ -5831,7 +5843,7 @@ app.get("/pl-trend", async (c) => {
     let m = am - i;
     while (m <= 0) { m += 12; y -= 1; }
     const ym = `${y}-${String(m).padStart(2, "0")}`;
-    const p = await computePnlWindow(c.var.DB, orgId, ym, ym, line, matData);
+    const p = await computePnlWindow(c.var.DB, orgId, ym, ym, line, matData, dc);
     cols.push({
       ym,
       netSalesSen: p.netSalesSen,
@@ -5863,9 +5875,10 @@ app.get("/pl-statement", async (c) => {
   const orgId = getOrgId(c);
   // FIFO checkpoints once — period end is the latest month either window needs.
   const matData = await loadMaterialCostData(c.var.DB, orgId, endYm ?? new Date().toISOString().slice(0, 7));
+  const dc = await loadDocDateResolver(c.var.DB); // once per request
   const [p, y] = await Promise.all([
-    computePnlWindow(c.var.DB, orgId, startYm, endYm, line, matData, pnlOverride),
-    computePnlWindow(c.var.DB, orgId, fyStartYm, endYm, line, matData, pnlOverride),
+    computePnlWindow(c.var.DB, orgId, startYm, endYm, line, matData, dc, pnlOverride),
+    computePnlWindow(c.var.DB, orgId, fyStartYm, endYm, line, matData, dc, pnlOverride),
   ]);
   // Material warnings are material-wide (whole-timeline), not period-specific —
   // merge both windows' lists and de-dupe so the same material can't appear
@@ -5921,11 +5934,12 @@ app.get("/pl-monthly", async (c) => {
   const orgId = getOrgId(c);
   // FIFO checkpoints once for the whole FY matrix (lastYm is the latest column).
   const matData = await loadMaterialCostData(c.var.DB, orgId, lastYm);
+  const dc = await loadDocDateResolver(c.var.DB); // once per request — threaded into every month window
   const cols: PnlMatrixCol[] = [];
-  cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, orgId, fyStartYm, lastYm, line, matData, override) });
+  cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, orgId, fyStartYm, lastYm, line, matData, dc, override) });
   // Months newest-first (after Accumulated) per owner layout (F4 #7).
   for (const ym of [...months].reverse()) {
-    cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, orgId, ym, ym, line, matData, override) });
+    cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, orgId, ym, ym, line, matData, dc, override) });
   }
 
   const matrix = buildPnlMatrix(cols);
@@ -5940,7 +5954,7 @@ app.get("/cashflow-statement", async (c) => {
 
   const resolveAcct = await loadAccountResolver(c.var.DB);
   const fyeMonth = await getFyeMonth(c.var.DB);
-  const obDate = await getOpeningDate(c.var.DB);
+  const { docDate, openingDate: obDate } = await loadDocDateResolver(c.var.DB);
 
   const coaRes = await c.var.DB.prepare(
     "SELECT code, name, type, specialAccountType FROM chart_of_accounts",
@@ -5958,17 +5972,14 @@ app.get("/cashflow-statement", async (c) => {
     "SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0",
   ).all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>();
   const allLegs = (legRes.results ?? [])
-    .filter((l) => !legBeforeOpening(l.sourceType, l.postedAt, obDate)) // pre-opening: not extracted
+    .filter((l) => !legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDate)) // pre-opening: not extracted
     .map((l) => ({
       code: resolveAcct(l.accountCode),
       sourceType: l.sourceType,
       sourceId: l.sourceId,
       debitSen: l.debitSen,
       creditSen: l.creditSen,
-      ym:
-        isOpeningSource(l.sourceType) && obDate
-          ? obDate.slice(0, 7)
-          : String(l.postedAt ?? "").slice(0, 7),
+      ym: docDate(l.sourceType, l.sourceId, l.postedAt).slice(0, 7), // by document date
     }));
 
   const byEntry = new Map<string, typeof allLegs>();
@@ -6074,9 +6085,10 @@ app.get("/pl", async (c) => {
 
   // --- ledger legs ---
   const legRes = await c.var.DB.prepare(
-    "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
+    "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
   ).all<{
     accountCode: string;
+    sourceId: string;
     debitSen: number;
     creditSen: number;
     postedAt: string;
@@ -6098,14 +6110,12 @@ app.get("/pl", async (c) => {
   // Opening-balance legs (BS accounts only) are dated at the kv opening
   // date and are bookkeeping, not trading — the P&L view skips them like
   // year_close; the BS view counts them at the opening month.
-  const obDatePl = await getOpeningDate(c.var.DB);
+  const { docDate, openingDate: obDatePl } = await loadDocDateResolver(c.var.DB);
   for (const l of legRes.results ?? []) {
-    if (legBeforeOpening(l.sourceType, l.postedAt, obDatePl)) continue; // pre-opening: not extracted (P&L + BS)
+    const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
+    if (legBeforeOpening(l.sourceType, dd, obDatePl)) continue; // pre-opening: not extracted (P&L + BS)
     const opening = isOpeningSource(l.sourceType);
-    const ym =
-      opening && obDatePl
-        ? obDatePl.slice(0, 7)
-        : String(l.postedAt ?? "").slice(0, 7);
+    const ym = dd.slice(0, 7);
     const d = Number(l.debitSen) || 0;
     const cr = Number(l.creditSen) || 0;
     const code = resolveAcct(l.accountCode);
@@ -7023,6 +7033,21 @@ app.post("/fund-transfers", async (c) => {
     return c.json({ success: false, error: "Failed to post fund transfer to ledger" }, 500);
   }
 
+  // Record the transfer's OWN date so reports bucket it by document date, not by
+  // the entry timestamp (ledger postedAt). Best-effort — the transfer is already
+  // posted; if this fails the resolver just falls back to postedAt (a same-day
+  // transfer is unaffected).
+  try {
+    await ensureFundTransfersTable(c.var.DB);
+    await c.var.DB.prepare(
+      "INSERT INTO fund_transfers (id, transfer_no, date, org_id) VALUES (?, ?, ?, ?)",
+    )
+      .bind(`ft-${crypto.randomUUID().slice(0, 8)}`, no, date, orgId)
+      .run();
+  } catch (e) {
+    console.error("[fund-transfer] doc-date row failed (transfer still posted):", e);
+  }
+
   return c.json({ success: true, data: { transferNo: no } });
 });
 
@@ -7066,6 +7091,21 @@ app.get("/fund-transfers", async (c) => {
 
   const rows = legRes.results ?? [];
 
+  // Each transfer's own (document) date, falling back to postedAt for legacy
+  // transfers that predate the fund_transfers table.
+  const ftDate = new Map<string, string>();
+  try {
+    const ftRes = await c.var.DB.prepare(
+      "SELECT transfer_no AS tno, date AS dt FROM fund_transfers WHERE org_id = ?",
+    )
+      .bind(orgId)
+      .all<{ tno: string; dt: string }>();
+    for (const r of ftRes.results ?? [])
+      if (r.tno) ftDate.set(String(r.tno), String(r.dt ?? "").slice(0, 10));
+  } catch {
+    /* table not created yet → postedAt fallback below */
+  }
+
   // Map each transfer no → lifecycle state (default ACTIVE when no record).
   const stateOf = new Map<string, string>();
   for (const l of lifeRes.results ?? []) stateOf.set(l.sourceId, l.state);
@@ -7099,7 +7139,7 @@ app.get("/fund-transfers", async (c) => {
     const resolvedTo = resolve(toLeg.accountCode);
     out.push({
       no: sourceId,
-      date: String(toLeg.postedAt || "").slice(0, 10),
+      date: ftDate.get(sourceId) ?? String(toLeg.postedAt || "").slice(0, 10),
       fromAccount: resolvedFrom,
       toAccount: resolvedTo,
       fromName: nameOf(fromLeg.accountCode),
@@ -7990,7 +8030,7 @@ app.get("/gl-report", async (c) => {
     }
   };
   const resolveRep = await loadAccountResolver(c.var.DB);
-  const obDateRep = await getOpeningDate(c.var.DB);
+  const { docDate, openingDate: obDateRep } = await loadDocDateResolver(c.var.DB);
   // Double-entry counter accounts: every leg of the same business event.
   const eventAccounts = new Map<string, Set<string>>();
   for (const l of legRes.results ?? []) {
@@ -8008,14 +8048,11 @@ app.get("/gl-report", async (c) => {
   type RepRow = { id: string; day: string; description: string; sourceType: string; sourceId: string; deDesc: string; debitSen: number; creditSen: number; runningSen: number };
   const buckets = new Map<string, { openingSen: number; rows: Omit<RepRow, "runningSen" | "deDesc">[] }>();
   for (const l of legRes.results ?? []) {
-    if (legBeforeOpening(l.sourceType, l.postedAt, obDateRep)) continue; // pre-opening: not extracted (not even into B/F)
+    const day = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
+    if (legBeforeOpening(l.sourceType, day, obDateRep)) continue; // pre-opening: not extracted (not even into B/F)
     const code = resolveRep(l.accountCode);
     if (!inScope(code)) continue;
     if (accountSet && !accountSet.has(code)) continue;
-    const day =
-      isOpeningSource(l.sourceType) && obDateRep
-        ? obDateRep
-        : String(l.postedAt ?? "").slice(0, 10);
     if (day > to) continue;
     let b = buckets.get(code);
     if (!b) { b = { openingSen: 0, rows: [] }; buckets.set(code, b); }
@@ -8448,14 +8485,11 @@ app.get("/bank-reco", async (c) => {
   )
     .bind(...equivalents)
     .all<{ id: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; description: string; postedAt: string }>();
-  const obDateBr = await getOpeningDate(c.var.DB);
+  const { docDate, openingDate: obDateBr } = await loadDocDateResolver(c.var.DB);
   const legs = (legRes.results ?? [])
     .map((l) => ({
       id: l.id,
-      day:
-        isOpeningSource(l.sourceType) && obDateBr
-          ? obDateBr
-          : String(l.postedAt ?? "").slice(0, 10),
+      day: docDate(l.sourceType, l.sourceId, l.postedAt), // by document date
       description: l.description ?? "",
       sourceType: l.sourceType,
       sourceId: l.sourceId,
@@ -8630,11 +8664,11 @@ app.post("/bank-reco/automatch", async (c) => {
     const marks = equivalents.map(() => "?").join(",");
     const [legRes, lineRes, matchedRes] = await Promise.all([
       c.var.DB.prepare(
-        `SELECT id, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries
+        `SELECT id, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries
           WHERE accountCode IN (${marks}) AND hidden = 0`,
       )
         .bind(...equivalents)
-        .all<{ id: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+        .all<{ id: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
       c.var.DB.prepare(
         `SELECT id, txnDate, amountSen FROM bank_statement_lines
           WHERE accountCode = ? AND matchedLegId IS NULL AND txnDate >= ? AND txnDate <= ?`,
@@ -8648,15 +8682,12 @@ app.post("/bank-reco/automatch", async (c) => {
         .all<{ matchedLegId: string }>(),
     ]);
     const takenLegs = new Set((matchedRes.results ?? []).map((r) => r.matchedLegId));
-    const obDateAm = await getOpeningDate(c.var.DB);
+    const { docDate, openingDate: obDateAm } = await loadDocDateResolver(c.var.DB);
     const freeLegs = (legRes.results ?? [])
-      .filter((l) => !takenLegs.has(l.id) && !legBeforeOpening(l.sourceType, l.postedAt, obDateAm)) // pre-opening: not a match candidate
+      .filter((l) => !takenLegs.has(l.id) && !legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDateAm)) // pre-opening: not a match candidate
       .map((l) => ({
         id: l.id,
-        day:
-          isOpeningSource(l.sourceType) && obDateAm
-            ? obDateAm
-            : String(l.postedAt ?? "").slice(0, 10),
+        day: docDate(l.sourceType, l.sourceId, l.postedAt), // by document date
         amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
       }));
     const dayMs = 86400000;
@@ -8748,6 +8779,94 @@ function isOpeningSource(sourceType: string | null | undefined): boolean {
     sourceType === "opening_balance" ||
     sourceType === "opening_balance_reversal"
   );
+}
+
+// Self-applies the fund_transfers table (transfer_no → its own date), so a
+// back-dated bank transfer reports on its document date instead of postedAt.
+// Idempotent; try/catch so a no-DDL-perms env degrades to the postedAt fallback.
+async function ensureFundTransfersTable(
+  db: Env["Variables"]["DB"],
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS fund_transfers (
+           id TEXT PRIMARY KEY,
+           transfer_no TEXT NOT NULL,
+           date TEXT NOT NULL,
+           org_id TEXT NOT NULL DEFAULT 'hookka',
+           created_at TEXT
+         )`,
+      )
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_fund_transfers_no ON fund_transfers (org_id, transfer_no)",
+      )
+      .run();
+  } catch {
+    /* no DDL perms — Hookka迁移12 paste-SQL covers it; reports fall back to postedAt */
+  }
+}
+
+// Document-date resolver (owner 2026-06-25): the immutable ledger stores only
+// `postedAt` (entry time), but every financial report must bucket/floor by each
+// leg's SOURCE DOCUMENT date (a June invoice entered in July belongs to June).
+// Loads each document family's (id, human-no → own date) ONCE per request and
+// returns docDate(sourceType, sourceId, postedAt):
+//   - opening_balance(_reversal)            → kv opening_date
+//   - a mapped family (invoice/payment/…)   → that document's date (id or no)
+//   - anything else / not found             → postedAt (= legacy behaviour, safe)
+// Each family load is try/caught so a missing table/column just degrades that
+// family to the postedAt fallback. Keyed by BOTH id and human number because
+// posters set sourceId inconsistently (some the UUID, some the doc number).
+async function loadDocDateResolver(
+  db: Env["Variables"]["DB"],
+): Promise<{
+  docDate: (
+    sourceType: string,
+    sourceId: string,
+    postedAt: string | null | undefined,
+  ) => string;
+  openingDate: string | null;
+}> {
+  const openingDate = await getOpeningDate(db);
+  const maps = new Map<string, Map<string, string>>(); // family → (id|no → 'YYYY-MM-DD')
+  for (const [fam, cfg] of Object.entries(DOC_DATE_FAMILIES)) {
+    const m = new Map<string, string>();
+    try {
+      const res = await db
+        .prepare(
+          `SELECT id AS rid, ${cfg.noCol} AS rno, ${cfg.dateCol} AS rdt FROM ${cfg.table}`,
+        )
+        .all<{ rid: string | null; rno: string | null; rdt: string | null }>();
+      for (const r of res.results ?? []) {
+        const d = String(r.rdt ?? "").slice(0, 10);
+        if (!d) continue;
+        if (r.rid) m.set(String(r.rid), d);
+        if (r.rno) m.set(String(r.rno), d);
+      }
+    } catch {
+      /* table/column absent → this family falls back to postedAt */
+    }
+    maps.set(fam, m);
+  }
+  const docDate = (
+    sourceType: string,
+    sourceId: string,
+    postedAt: string | null | undefined,
+  ): string => {
+    if (isOpeningSource(sourceType)) {
+      return openingDate ?? String(postedAt ?? "").slice(0, 10);
+    }
+    const d = maps.get(stripLegSuffix(sourceType))?.get(String(sourceId));
+    if (d) return d;
+    // Period-end bookkeeping (depreciation / closing_stock / year_close) encode
+    // their own date in the sourceId; everything else falls back to postedAt.
+    const sp = parseSourceIdDate(sourceType, sourceId);
+    return sp ?? String(postedAt ?? "").slice(0, 10);
+  };
+  return { docDate, openingDate };
 }
 
 // Per-control-account sums of the opening invoices: AR per parseDebtorCode

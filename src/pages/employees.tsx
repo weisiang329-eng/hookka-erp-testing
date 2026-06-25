@@ -7340,6 +7340,10 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                     <td className="h-10 px-2 text-right">{totals.otSundayHours > 0 ? `${totals.otSundayHours}h` : "-"}</td>
                     <td className="h-10 px-2 text-right">{totals.otPHHours > 0 ? `${totals.otPHHours}h` : "-"}</td>
                     <td className="h-10 px-3 text-right text-[#6B5C32]">{formatCurrency(totals.totalOT)}</td>
+                    {/* Allowance total — was MISSING, which shifted every column
+                        from here right (Gross landed under Allowance, … Net Pay
+                        under PCB). Restores 20 cells = 20 header columns. */}
+                    <td className="h-10 px-3 text-right text-[#4F7C3A]">{totals.allowances > 0 ? formatCurrency(totals.allowances) : "-"}</td>
                     <td className="h-10 px-3 text-right">{formatCurrency(totals.grossPay)}</td>
                     <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{formatCurrency(totals.epfEmployee)}</td>
                     <td className="h-10 px-2 text-right text-[#3E6570] text-xs">{formatCurrency(totals.epfEmployer)}</td>

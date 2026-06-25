@@ -75,8 +75,19 @@ export async function getOrCreateJobCardQrToken(
     )
     .bind(fresh, jobCardId)
     .run();
+  // FIX 4 — never return an UNPERSISTED token. If the re-read confirms our
+  // value (or a parallel print's winning value) is stored, return that. If the
+  // row vanished (card deleted mid-flight) or the qr_token is still empty (the
+  // UPDATE hit 0 rows — e.g. the row changed under us), re-read ONCE more to
+  // settle a transient race; if it is STILL unresolved, return null so the
+  // caller cleanly falls back (the mint omits the key → the client keeps the
+  // /worker/scan fallback). Returning `fresh` here would print a token that no
+  // card carries → a permanently dead /p/<token> page.
   const after = await read();
-  return after?.qr_token ?? fresh;
+  if (after?.qr_token) return after.qr_token;
+  const retry = await read();
+  if (retry?.qr_token) return retry.qr_token;
+  return null;
 }
 
 // Public scan URL — origin comes from the live request so prod / preview /

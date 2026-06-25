@@ -53,6 +53,7 @@ import {
   deptOfBarcodeToken,
   isBarcodeToken,
 } from "../../lib/job-card-id";
+import { pickPackingCard } from "../lib/packing-card-resolve";
 
 const app = new Hono<Env>();
 
@@ -371,26 +372,19 @@ async function resolvePackingCard(
     (
       await db
         .prepare(
-          `SELECT id, wipLabel FROM job_cards
+          `SELECT id, wipLabel, status FROM job_cards
             WHERE productionOrderId = ? AND departmentCode = 'PACKING'`,
         )
         .bind(po.id)
-        .all<{ id: string; wipLabel: string | null }>()
+        .all<{ id: string; wipLabel: string | null; status: string | null }>()
     ).results ?? [];
   if (cards.length === 0) return null;
 
-  // Narrow to the ONE card whose wipLabel contains the box label (mirrors the
-  // worker scanner). Only accept an unambiguous single match; otherwise fall
-  // back to the lone PACKING card (single-compartment PO).
-  let pick: { id: string; wipLabel: string | null } | null = null;
-  const want = (pieceLabel || "").trim().toUpperCase();
-  if (want) {
-    const narrowed = cards.filter((cd) =>
-      (cd.wipLabel ?? "").toUpperCase().includes(want),
-    );
-    if (narrowed.length === 1) pick = narrowed[0];
-  }
-  if (!pick && cards.length === 1) pick = cards[0];
+  // Narrow to the ONE PACKING card the box label refers to via the SHARED
+  // tolerant resolver (exact → word-token → substring; single-compartment PO
+  // returns its sole card unchanged). No unique pick → null (the caller then
+  // drops through to resolvePo's PO-level match — safe + unchanged).
+  const pick = pickPackingCard(cards, pieceLabel || "");
   if (!pick) return null;
 
   const name = (po.productName || po.productCode || po.poNo || "").trim();

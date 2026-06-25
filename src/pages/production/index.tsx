@@ -13,6 +13,7 @@ import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData } from "@/lib/qr-utils";
 import { todayYmdMY } from "@/lib/utils";
 import { deriveBarcodeToken } from "@/lib/job-card-id";
+import { packingRackScanUrl } from "@/api/lib/jobcard-qr-token";
 // Static import (not dynamic) so the schedule code is generated SYNCHRONOUSLY
 // inside the print click gesture — an await before window.open would trip the
 // pop-up blocker. `qrcode` is already a dependency (the sticker QRs use it), so
@@ -5359,7 +5360,7 @@ export default function ProductionPage({
         typeof window !== "undefined" && window.location?.origin
           ? window.location.origin
           : "";
-      if (s.packingToken) return `${origin}/p/${s.packingToken}`;
+      if (s.packingToken) return packingRackScanUrl(origin, s.packingToken);
       return `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(
         s.poNo,
       )}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(

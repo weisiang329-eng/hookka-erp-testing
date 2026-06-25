@@ -39,6 +39,7 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { ensureJobCardQrTokenColumn } from "../lib/jobcard-qr-token";
 import { applyPackingRack } from "../lib/packing-rack-write";
+import { archiveUnionSource } from "../lib/archive-union";
 
 const app = new Hono<Env>();
 
@@ -78,6 +79,22 @@ async function resolveCard(
   token: string,
 ): Promise<PackingCardRow | null> {
   await ensureJobCardQrTokenColumn(db);
+  // FIX 1 — archive-aware resolve. An old printed sticker may belong to a card
+  // whose PO has since been COMPLETED + archived (job_cards → job_cards_archive,
+  // production_orders → production_orders_archive). archiveUnionSource self-heals
+  // the archive's drifted columns (adds the missing qr_token, backfills org_id)
+  // and returns a UNION derived-table SQL string spanning hot + archive; it
+  // falls back to the hot table literal on any introspection failure (no
+  // regression vs the old hot-only resolve). The aliases/columns are unchanged.
+  const jcSrc =
+    (await archiveUnionSource(db, "job_cards", "job_cards_archive")) ??
+    "job_cards";
+  const poSrc =
+    (await archiveUnionSource(
+      db,
+      "production_orders",
+      "production_orders_archive",
+    )) ?? "production_orders";
   return db
     .prepare(
       `SELECT jc.id AS id, jc.productionOrderId AS productionOrderId,
@@ -86,8 +103,8 @@ async function resolveCard(
               po.poNo AS poNo, po.productName AS productName,
               po.productCode AS productCode, po.sizeLabel AS sizeLabel,
               po.salesOrderNo AS salesOrderNo
-         FROM job_cards jc
-         LEFT JOIN production_orders po ON po.id = jc.productionOrderId
+         FROM ${jcSrc} jc
+         LEFT JOIN ${poSrc} po ON po.id = jc.productionOrderId
         WHERE jc.qr_token = ? LIMIT 1`,
     )
     .bind(token)

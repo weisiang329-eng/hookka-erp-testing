@@ -47,6 +47,7 @@ import {
   ensureJobCardQrTokenColumn,
   getOrCreateJobCardQrToken,
 } from "../lib/jobcard-qr-token";
+import { pickPackingCard } from "../lib/packing-card-resolve";
 import { getOrgId, tryGetOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
@@ -6030,30 +6031,42 @@ app.post("/packing-rack-tokens", async (c) => {
         .first<{ id: string }>();
       if (!po) continue;
       const cardsRes = await c.var.DB.prepare(
-        `SELECT id, wipLabel FROM job_cards
+        `SELECT id, wipLabel, status FROM job_cards
            WHERE productionOrderId = ? AND departmentCode = 'PACKING'`,
       )
         .bind(po.id)
-        .all<{ id: string; wipLabel: string | null }>();
+        .all<{ id: string; wipLabel: string | null; status: string | null }>();
       const cards = cardsRes.results ?? [];
       if (cards.length === 0) continue;
-      // Narrow to the ONE card whose wipLabel CONTAINS the box label (the `pn`
-      // value is a SUBSTRING of the longer wipLabel — mirror resolvePackingCard).
-      // Only accept an unambiguous single match; else fall back to the sole
-      // PACKING card (single-compartment PO). No single resolution → skip (the
+      // Narrow to the ONE PACKING card the box label refers to via the SHARED
+      // tolerant resolver (exact → word-token → substring, single-compartment
+      // unchanged). No unique resolution → skip the per-pieceName key (the
       // client keeps the /worker/scan fallback for that sticker).
-      let pick: { id: string } | null = null;
-      const want = pieceName.toUpperCase();
-      if (want) {
-        const narrowed = cards.filter((cd) =>
-          (cd.wipLabel ?? "").toUpperCase().includes(want),
-        );
-        if (narrowed.length === 1) pick = narrowed[0];
+      const pick = pickPackingCard(cards, pieceName);
+      if (pick) {
+        const token = await getOrCreateJobCardQrToken(c.var.DB, pick.id);
+        // FIX 4: getOrCreateJobCardQrToken returns null when it can't persist a
+        // token (0-row race / vanished card) — never emit a dead token; the
+        // client then keeps the /worker/scan fallback for this sticker.
+        if (token) tokens[key] = token;
       }
-      if (!pick && cards.length === 1) pick = cards[0];
-      if (!pick) continue;
-      const token = await getOrCreateJobCardQrToken(c.var.DB, pick.id);
-      if (token) tokens[key] = token;
+
+      // FIX 3: when the PO has MULTIPLE PACKING cards, ALSO mint + return a token
+      // for EACH card keyed by `<poNo>|<wipLabel>`, so the client can attach the
+      // correct token per box label even when the pieceName narrowing above is
+      // not unique. Existing `<poNo>|<pieceName>` keys are unchanged; this only
+      // ADDS extra keys. Single-compartment POs (one card) already resolve via
+      // the pieceName key above, so we skip the per-label fan-out for them.
+      if (cards.length > 1) {
+        for (const card of cards) {
+          const label = (card.wipLabel ?? "").trim();
+          if (!label) continue;
+          const labelKey = `${poNo}|${label}`;
+          if (tokens[labelKey]) continue; // already minted (e.g. dup label)
+          const labelToken = await getOrCreateJobCardQrToken(c.var.DB, card.id);
+          if (labelToken) tokens[labelKey] = labelToken;
+        }
+      }
     }
     return c.json({ success: true, data: { tokens } });
   } catch (err) {

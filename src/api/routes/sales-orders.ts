@@ -4161,6 +4161,36 @@ app.put("/:id", async (c) => {
           .prepare("DELETE FROM production_orders WHERE salesOrderId = ?")
           .bind(id);
 
+        // FIX 5 — preserve packing-sticker tokens across the re-explosion. The
+        // rebuild DELETEs every job_card for this SO's POs and recreates them
+        // with brand-new ids, orphaning the qr_token on any already-printed
+        // PACKING sticker → its /p/<token> page would 404. Copy the about-to-be-
+        // deleted PACKING cards (that have a minted token) into job_cards_archive
+        // FIRST, so the archive-aware resolver (FIX 1) keeps those old stickers
+        // working. Archive the FULL rows (SELECT jc.*) exactly like the admin
+        // archive run, so the column list always matches. Best-effort + awaited
+        // before the batch: a failure here must NEVER block the rebuild.
+        try {
+          const archivedAt = new Date().toISOString();
+          await c.var.DB.prepare(
+            `INSERT INTO job_cards_archive
+               SELECT jc.*, ? AS "archivedAt"
+                 FROM job_cards jc
+                WHERE jc.productionOrderId IN (
+                        SELECT id FROM production_orders WHERE salesOrderId = ?)
+                  AND jc.departmentCode = 'PACKING'
+                  AND jc.qr_token IS NOT NULL
+                  AND jc.qr_token <> ''`,
+          )
+            .bind(archivedAt, id)
+            .run();
+        } catch (e) {
+          console.warn(
+            "[sales-orders PUT] preserve packing qr_token to archive skipped",
+            e,
+          );
+        }
+
         await c.var.DB.batch([
           deleteFgUnitsStmt,
           deleteJcsStmt,

@@ -45,7 +45,7 @@ export async function applyPackingRack(
       error: "jobCardId and rackingNumber are required",
     };
   }
-  const jc = await db
+  let jc = await db
     .prepare(
       "SELECT id, productionOrderId, departmentCode FROM job_cards WHERE id = ?",
     )
@@ -55,6 +55,28 @@ export async function applyPackingRack(
       productionOrderId: string;
       departmentCode: string | null;
     }>();
+  // FIX 1 — archive fallback for the guard lookup. An archived card (PO
+  // completed → moved to job_cards_archive) is absent from the hot table, so the
+  // hot SELECT misses and we'd 404 before the validated write. Look it up in the
+  // archive so the PACKING / UNKNOWN_RACK guards still apply and the rack can
+  // still be set. Best-effort (the archive table always exists in prod; tolerate
+  // its absence in any stripped environment).
+  if (!jc) {
+    try {
+      jc = await db
+        .prepare(
+          "SELECT id, productionOrderId, departmentCode FROM job_cards_archive WHERE id = ?",
+        )
+        .bind(jobCardId)
+        .first<{
+          id: string;
+          productionOrderId: string;
+          departmentCode: string | null;
+        }>();
+    } catch (e) {
+      console.warn("[applyPackingRack] archive lookup skipped", e);
+    }
+  }
   if (!jc) {
     return { ok: false, code: "NOT_FOUND", error: "Job card not found" };
   }
@@ -82,15 +104,51 @@ export async function applyPackingRack(
     }
   }
   const nowIso = new Date().toISOString();
-  await db
+  const jcUpd = await db
     .prepare("UPDATE job_cards SET rackingNumber = ? WHERE id = ?")
     .bind(rack || null, jobCardId)
     .run();
-  await db
+  // FIX 1 — archive fallback. The card may have been moved to job_cards_archive
+  // (its PO completed + archived) since the sticker was printed; the hot UPDATE
+  // above then matches 0 rows. Mirror the write onto the archive sibling so an
+  // archived card's rack can still be set/cleared. `rackingNumber` is the same
+  // alias the hot write uses — the supabase-compat rewriter maps it to the real
+  // stored column (`racking_number`) on the archive too (created via CREATE
+  // TABLE … AS SELECT * from job_cards, so it carries that column). Best-effort:
+  // wrapped so a missing/locked archive never breaks the hot path.
+  const jcChanges =
+    (jcUpd as unknown as { meta?: { changes?: number } }).meta?.changes ?? 0;
+  if (jcChanges === 0) {
+    try {
+      await db
+        .prepare("UPDATE job_cards_archive SET rackingNumber = ? WHERE id = ?")
+        .bind(rack || null, jobCardId)
+        .run();
+    } catch (e) {
+      console.warn("[applyPackingRack] archive rack write skipped", e);
+    }
+  }
+  // Mirror onto the PO header (hot first; archive fallback when the PO was
+  // archived too) so the Packing sheet / packing list / DO read the new rack.
+  const poUpd = await db
     .prepare(
       "UPDATE production_orders SET rackingNumber = ?, updated_at = ? WHERE id = ?",
     )
     .bind(rack || null, nowIso, jc.productionOrderId)
     .run();
+  const poChanges =
+    (poUpd as unknown as { meta?: { changes?: number } }).meta?.changes ?? 0;
+  if (poChanges === 0) {
+    try {
+      await db
+        .prepare(
+          "UPDATE production_orders_archive SET rackingNumber = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(rack || null, nowIso, jc.productionOrderId)
+        .run();
+    } catch (e) {
+      console.warn("[applyPackingRack] archive PO rack write skipped", e);
+    }
+  }
   return { ok: true, jobCardId, rackingNumber: rack };
 }

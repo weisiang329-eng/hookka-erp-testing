@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-25-006 — packing-sticker QR → rack flow inconsistent ("some scan, some don't"): bedframe ambiguity, archived/edited orders, dead tokens, + /r/ "Scan items" rejected /p/ stickers
+
+🟢 **Fixed (prod, code-verified; pending owner physical scan-verify)** · `warehouse` · `worker-scan` · owner-reported (urgent — floor scanning)
+
+A whole-system QR/barcode audit (every generator↔scanner pair) found the ONLY broken pair was the packing-sticker `/p/<token>` → rack flow; everything else (dept stickers, `/r/` `HKRACK:`, `HKITEM:`, `HKJC:`/schedule barcode+QR, `/d/` DO QR, shared Sew/Uph `wk=`/`c=`) works. "Some work, some don't" = **single-compartment sofas resolve; multi-compartment bedframes + completed/archived + edited orders broke.** Root causes + fixes (all ADDITIVE — NO generator/QR-format change, so every already-printed sticker keeps scanning; parsing stays path-based + domain-agnostic so old `pages.dev` and new `erp.hookka.com` hosts both resolve):
+
+1. **Substring-narrowing collision** — mint + both scan-resolvers narrowed a PACKING card by `wipLabel.includes(pieceName)` and accepted only an exact-1 match; overlapping bedframe labels (e.g. "DIVAN" in both "Divan 5FT" and "Headboard Divan Frame") → ambiguous → no unique pick. Fix: NEW shared `pickPackingCard` (src/api/lib/packing-card-resolve.ts) — exact → word-token → substring tiers, prefer non-COMPLETED; single-compartment returns its sole card UNCHANGED; wired into the mint (production-orders.ts) + resolvePackingCard (public-rack-qr.ts) so they can't diverge. +12 unit tests.
+2. **Resolver ignored the archive** — resolveCard queried hot `job_cards` only; a completed→archived card's token 404'd. Fix: resolveCard (public-rack-write.ts) now resolves across hot+archive via `archiveUnionSource` (self-heals the archive's `qr_token`); applyPackingRack gains a hot-first/archive-fallback guard-lookup + write (0-row → mirror to `*_archive`), best-effort, hot path unchanged.
+3. **Dead/dangling tokens** — getOrCreateJobCardQrToken could return an UNPERSISTED token (0-row UPDATE / vanished card) → a permanently dead `/p/` page. Fix: re-read; if still unpersisted return null so the caller cleanly falls back instead of printing a dead token.
+4. **Token lost on SO item re-explosion** — the rebuild DELETEs job_cards; Fix: archive the about-to-be-deleted PACKING cards (with tokens) first so old stickers still resolve via #2 (best-effort, never blocks rebuild).
+5. **`/r/` "Scan items" rejected `/p/` stickers** ("Not recognised") — the item-lookup didn't parse the public token. Fix: `GET /:rackId/item` now matches `/p/<64hex>` and resolves it to the EXACT card via the shared (exported) archive-aware resolveCard, stamping that precise card; the raw `/p/` URL stays the per-piece de-dup key.
+6. Mint a token per PACKING card for multi-card POs (additive keys); centralized the `/p/` URL via `packingRackScanUrl`; migration 0191 `ALTER TABLE job_cards_archive ADD COLUMN IF NOT EXISTS qr_token`.
+
+**Domain note:** QRs already encode `window.location.origin` (no host hardcoded) — printing from `erp.hookka.com` yields the official host automatically; the old `hookka-erp-testing.pages.dev` stickers still scan (path-based). No QR-generator edit (that class broke the internal scanner once — see [[feedback_additive_never_break_existing]]). build:strict clean (app+base); full suite 1193 pass / 0 fail. Live smoke: junk `/p/` token → clean 404 (direct) / `found:false` (rack-scan), real PO still resolves. Already-printed stickers whose token was never persisted (pre-fix dangling / card rebuilt) can't be revived — they need a reprint. Commits c2722551 (7 unified fixes) + 68e243e4 (/r/ intercept).
+
+---
+
 ## FEATURE-2026-06-25-005 — show our-SO + customer name + customer PO on every finished-goods surface (rack scan, rack grid, Packing List) + a customer-name alias-fold bug caught live
 
 🟢 **Shipped (prod, backend-verified)** · `warehouse` · `ui-frontend` · owner-requested

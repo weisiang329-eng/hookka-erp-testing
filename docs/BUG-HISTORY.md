@@ -34,6 +34,18 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-25-002 — "559" phantom model on the Production-Time / WIP Times page = a BOM baseModel typo
+
+🟢 **Fixed (prod, verified)** · `bom` · `wip-times` · owner-reported ("为什么 production time 有 559 我们没有 559 这个 model")
+
+**Symptom:** the WIP Times / Production-Time page showed ~21 rows labelled `559 -Left Arm`, `559 -Back Cushion 3S`, `559 -Right Arm (Foam/Frame/WC/FC)` etc. — a model "559" that doesn't exist (259 products, none "559"; not in active production; production_orders_archive empty).
+
+**Root cause:** WIP labels are built from BOM wipCode templates containing the `{MODEL}` token (`{MODEL} -Left Arm` …); `/api/wip-times` (wip-times.ts:97 `model: baseModel ?? productCode`) resolves `{MODEL}` from **`bom_templates.baseModel`**. The ACTIVE BOM for product **5539-3S** (`bom-1778323452421`) had `baseModel = "559"` — a typo (the "3" dropped from "5539"), so every `{MODEL}` on that BOM rendered "559". A full sweep of all 259 BOMs confirmed this was the ONLY real numeric-base typo (the other 77 "mismatches" — `1003(A)`, `2023(HF)(W)` … — are legitimate variant base models). The product record + all 16 sibling 5539-* BOMs were correctly "5539".
+
+**Fix:** `PUT /api/bom/templates/bom-1778323452421 { baseModel: "5539" }` — the partial-patch handler (bom.ts:497) updated only that one column. **Verified live:** wip-times now renders all 21 labels as `5539 -…`, zero starting "559". Pure data fix — no code change, wipComponents untouched.
+
+---
+
 ## BUG-2026-06-25-001 — purchase_invoices.status CHECK rejected PARTIAL_PAID (and CANCELLED) → supplier partial-payment / #6 discount-allocation POST 500'd on prod
 
 🟢 **Fixed (prod)** · `accounting` · `data-integrity` · found while clearing the supplier-discount task chips ("confirm prod status CHECK permits PARTIAL_PAID")

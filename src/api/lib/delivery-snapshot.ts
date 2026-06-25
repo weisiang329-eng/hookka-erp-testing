@@ -3,7 +3,7 @@
 // Delivery Orders endpoints.
 //
 // Pattern mirrors lib/dashboard-snapshot.ts (PR 1, claude/dashboard-snapshot).
-// See migrations-postgres/0117_delivery_snapshots.sql for the table defs
+// See migrations-postgres/0124_delivery_snapshots.sql for the table defs
 // and the architecture overview.
 //
 // Two snapshot tables, same shape, different source-table sets for the

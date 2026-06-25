@@ -1,0 +1,6 @@
+-- Mirror of migrations-postgres/0189_pi_status_partial_paid.sql (record only).
+-- Postgres-only change: relaxes the purchase_invoices.status CHECK constraint to
+-- permit 'PARTIAL_PAID' and 'CANCELLED'. No columns are added/renamed, so there
+-- is nothing here for the rename-map scanner. SQLite cannot ALTER a CHECK
+-- constraint in place; the real change lives in the postgres file + the runtime
+-- self-apply (src/api/lib/ensure-partial-payment.ts). CI does not run this file.

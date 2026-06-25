@@ -25,6 +25,7 @@ import {
 } from "../lib/journal-hash";
 import { computeAlloc } from "../../lib/supplier-payment-alloc";
 import { issueDocNumber } from "../lib/doc-number-service";
+import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 
@@ -190,6 +191,12 @@ app.post("/", async (c) => {
           400,
         );
       }
+
+      // Self-apply the partial-payment schema (migration-7 columns +
+      // PARTIAL_PAID status CHECK relax) before any PI read/write — without this
+      // the paid_amount_sen write or the PARTIAL_PAID status flip fails on a
+      // prod that never ran migration 7 / still has the original 0057 CHECK.
+      await ensurePartialPaymentColumns(c.var.DB);
 
       // 1. Validate payFrom is a postable SBK/SCH bank/cash account.
       const acct = await c.var.DB.prepare(
@@ -409,11 +416,17 @@ async function buildSupplierPaymentLifecycle(
   action: LifecycleAction,
   actorUserId: string | null,
 ): Promise<{ statements: D1PreparedStatement[]; newState: DocState }> {
+  // Void/unvoid flips PI status to PARTIAL_PAID/APPROVED → ensure the schema
+  // (migration-7 columns + relaxed status CHECK) before those writes.
+  await ensurePartialPaymentColumns(db);
   const rows =
     (
       await db
         .prepare(
-          "SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ?",
+          // Exclude #6 supplier-discount markers (method='CREDIT_NOTE') —
+          // they carry a non-zero booked_sen, so a real payment that ever
+          // shared this payment_no would double-roll-back the PI. Defensive.
+          "SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'",
         )
         .bind(paymentNo)
         .all<{ purchaseInvoiceId: string | null; booked_sen: number | null }>()
@@ -502,10 +515,15 @@ async function buildSupplierPaymentRestate(
   actorUserId: string | null,
   stamp: number,
 ): Promise<D1PreparedStatement[]> {
+  // Restate rolls PI paid amounts to PARTIAL_PAID/APPROVED → ensure the schema
+  // (migration-7 columns + relaxed status CHECK) before those writes.
+  await ensurePartialPaymentColumns(db);
   const oldRows =
     (
       await db
-        .prepare("SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ?")
+        // Exclude #6 supplier-discount markers (method='CREDIT_NOTE') from the
+        // rollback set — defensive against a future payment_no collision.
+        .prepare("SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'")
         .bind(paymentNo)
         .all<{ purchaseInvoiceId: string | null; booked_sen: number | null }>()
     ).results ?? [];
@@ -532,9 +550,10 @@ async function buildSupplierPaymentRestate(
         .bind(b, b, b, r.purchaseInvoiceId),
     );
   }
-  // 2. Drop the old sub-ledger rows.
+  // 2. Drop the old sub-ledger rows (never the #6 CREDIT_NOTE markers — those
+  // belong to a purchase-CN, not this payment; defensive against a collision).
   statements.push(
-    db.prepare("DELETE FROM supplier_payments WHERE payment_no = ?").bind(paymentNo),
+    db.prepare("DELETE FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'").bind(paymentNo),
   );
 
   // 3. Re-run the per-PI FX allocation for the NEW data (mirrors the POST loop).

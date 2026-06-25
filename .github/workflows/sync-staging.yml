@@ -131,6 +131,18 @@ jobs:
             --dbname="$STAGING_URL" \
             prod.dump
 
+      - name: ANALYZE staging (refresh planner stats after restore)
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          # pg_restore loads rows + indexes but NOT planner statistics, so the
+          # first data-heavy page loads crawl (seq scans on an un-analyzed DB).
+          # ANALYZE rebuilds the stats so the planner picks good plans.
+          # Stats-only — never touches data.
+          psql "$STAGING_URL" -v ON_ERROR_STOP=1 -c "ANALYZE;"
+          echo "ANALYZE complete."
+
       - name: Verify staging matches prod
         env:
           PROD_URL: ${{ secrets.PROD_DATABASE_URL }}

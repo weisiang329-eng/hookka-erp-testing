@@ -1,0 +1,33 @@
+name: Analyze staging DB
+
+# One-shot ANALYZE of the staging Supabase `public` schema. Run this after a
+# prod→staging sync: pg_restore loads rows + indexes but does NOT refresh the
+# planner statistics, so the first data-heavy page loads crawl (seq scans on an
+# un-analyzed DB). ANALYZE rebuilds the stats so the planner picks good plans.
+# Stats-only — never touches data.
+#
+# Uses the STAGING_DATABASE_URL secret (session pooler URL) — same one the
+# sync workflow uses; no credentials are exposed.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: analyze-staging
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: ANALYZE staging public schema
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          echo "Running ANALYZE on staging…"
+          psql "$STAGING_URL" -v ON_ERROR_STOP=1 -c "ANALYZE;"
+          echo "ANALYZE complete."
+          # Quick sanity: how many tables now have stats.
+          psql "$STAGING_URL" -tA -c "SELECT count(*) || ' tables analyzed' FROM pg_stat_user_tables WHERE last_analyze IS NOT NULL OR last_autoanalyze IS NOT NULL;"

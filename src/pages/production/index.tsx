@@ -19,7 +19,7 @@ import { packingRackScanUrl } from "@/api/lib/jobcard-qr-token";
 // pop-up blocker. `qrcode` is already a dependency (the sticker QRs use it), so
 // this adds no new chunk. Its toCanvas(canvas, text, opts, cb) overload runs
 // fully synchronously when a callback is passed (see jobCardQrDataUrl below).
-import QRCode from "qrcode";
+import JsBarcode from "jsbarcode";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 // useTimeout — P4.3 effect-replacement (still referenced at L2386+).
@@ -102,51 +102,40 @@ type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
 // Wei Siang 2026-05-29: drag a header's right edge to resize; double-click to
 // reset. Widths persist per-browser in localStorage. Shared with every header
 // cell via context so we don't thread two callbacks through 15 call sites.
-// Render a WIP's SHORT 10-digit barcode token (`<deptNN><8hash>`) as a QR-code
-// PNG data URL, SYNCHRONOUSLY, for the Production Schedule print.
+// Render a WIP's SHORT 10-digit barcode token (`<deptNN><8hash>`) as a 1D
+// Code 128 barcode PNG data URL, SYNCHRONOUSLY, for the Production Schedule print.
 //
-// 2026-06-24 (Wei Siang: schedule barcode "太宽 / 一页放不下几个", scan 又不够灵敏):
-// the printed code was a 1D Code 128. Even at the minimal 10-digit token its
-// bars had to be drawn ~264px (~70mm) wide to stay phone-scannable, so only
-// ~3-4 fit across an A4-landscape row and density couldn't improve without
-// re-breaking scanning. Switched to a QR of the SAME 10-digit token: 10 digits
-// is a tiny version-1 (21×21) symbol that prints ~12mm square — far narrower,
-// many more per page — and a 2D code is far more scan-tolerant on a phone than
-// a thin 1D code (the no-sticker depts already scan QR fine). The ENCODED VALUE
-// is unchanged (deriveBarcodeToken), so the scanner's parseJobCardBarcode +
-// worker.ts / public-rack-qr.ts dept-scoped re-derivation resolve it with zero
-// change, and every previously printed Code 128 (same token) still scans.
+// History: a 2026-06-24 change had switched this to a QR (the OLD Code 128 of a
+// LONGER id needed ~70mm to stay PHONE-scannable → only 3-4 per row). Owner
+// 2026-06-25: the floor scans the printed schedule with a 1D BARCODE GUN, not a
+// phone — so Code 128 is right (guns read 1D faster + at finer bar widths than a
+// phone camera, and the gun was the actual scan tool all along). Encoding the
+// SHORT 10-digit token keeps the bars narrow enough to fit the column (the old
+// too-wide complaint was a long id). The ENCODED VALUE is unchanged
+// (deriveBarcodeToken), so the scanner's parseJobCardBarcode + the worker.ts /
+// public-rack-qr.ts dept-scoped re-derivation resolve it with zero change, and
+// the sticker QR flows (getQRCodeDataURL) are untouched — only the schedule's 1D
+// column reverts.
 //
-// QR is generated synchronously here: `qrcode`'s toCanvas(canvas, text, opts,
-// cb) overload runs fully inline when a callback is supplied (it does NOT defer
-// to a microtask), so there is no await before window.open and the pop-up
-// blocker is never tripped. "" on failure so a bad row never blocks the print.
-function jobCardQrDataUrl(token: string): string {
+// JsBarcode draws synchronously to the canvas, so there is no await before
+// window.open and the pop-up blocker is never tripped. "" on failure so a bad
+// row never blocks the print.
+function jobCardBarcodeDataUrl(token: string): string {
   try {
     const canvas = document.createElement("canvas");
-    let url = "";
-    QRCode.toCanvas(
-      canvas,
-      token,
-      {
-        // ~6mm of render resolution per side; the print CSS (td.bc img) sizes
-        // the final ~12mm square, so this is just the source bitmap crispness.
-        width: 240,
-        // A quiet zone is REQUIRED by the QR spec for a scanner to lock on, and
-        // it survives slight clipping near a printer's non-printable margin.
-        margin: 2,
-        // Q = ~25% damage recovery — shop-floor printouts get smudged / shaved
-        // at the page edge; matches the sticker QRs (getQRCodeDataURL).
-        errorCorrectionLevel: "Q",
-      },
-      (err) => {
-        // Synchronous callback: throw so the outer try/catch yields "" and the
-        // print degrades gracefully rather than emitting a broken <img>.
-        if (err) throw err;
-        url = canvas.toDataURL("image/png");
-      },
-    );
-    return url;
+    JsBarcode(canvas, token, {
+      format: "CODE128",
+      // X-dimension (px per narrow module). Guns read this fine; kept low so the
+      // SHORT-token barcode stays narrow (the old too-wide one was the complaint).
+      width: 1.3,
+      height: 44,
+      // The human WIP caption prints below the cell (.bccode), so the bars need
+      // no embedded text.
+      displayValue: false,
+      // Quiet zone — REQUIRED for a scanner to lock on; survives edge clipping.
+      margin: 8,
+    });
+    return canvas.toDataURL("image/png");
   } catch {
     return "";
   }
@@ -6152,19 +6141,19 @@ export default function ProductionPage({
       if (showScan) {
         for (const r of printRows) {
           if (r.jobCardId && !barcodeByJc.has(r.jobCardId)) {
-            // Encode the SHORT 10-digit barcode token (<deptNN><8hash>). The
-            // scanner resolves it by re-deriving across the dept's cards (dept =
-            // the 2 digits) — works for new AND old cards alike, no id
-            // migration. The QR of this same token is far narrower than the old
-            // 1D Code 128 (many more per page) and easier to scan on a phone.
+            // Encode the SHORT 10-digit barcode token (<deptNN><8hash>) as a 1D
+            // Code 128 barcode. The scanner resolves it by re-deriving across the
+            // dept's cards (dept = the 2 digits) — works for new AND old cards
+            // alike, no id migration. (Owner 2026-06-25: the floor scans the
+            // schedule with a barcode GUN, so 1D Code 128, not a QR.)
             const token = deriveBarcodeToken(r.jobCardId, activeTab);
-            barcodeByJc.set(r.jobCardId, jobCardQrDataUrl(token));
+            barcodeByJc.set(r.jobCardId, jobCardBarcodeDataUrl(token));
           }
         }
       }
       const renderCell = (col: Column<DeptRow>, r: DeptRow): string => {
         const key = col.key;
-        // "Barcode" column: the QR (image) + the human WIP name below it.
+        // "Barcode" column: the 1D Code 128 barcode (image) + the human WIP name below it.
         if (key === "scanCode") {
           const bc = (r.jobCardId && barcodeByJc.get(r.jobCardId)) || "";
           if (!bc) return "";
@@ -6314,8 +6303,8 @@ export default function ProductionPage({
        ~12mm square fits far more per A4-landscape row, and a phone reads a v1 QR
        far more reliably than thin bars. Sized by WIDTH with height:auto so the
        square is never distorted. Column ~16mm wide (was 276px / ~73mm). */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 62px; }
-    table.schedule td.bc img { width: 46px; height: auto; display: block; margin: 0 auto; }
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 124px; }
+    table.schedule td.bc img { width: 116px; height: auto; display: block; margin: 0 auto; }
     /* The human WIP name printed below the QR so the worker can confirm the
        code matches the piece. Wraps on word breaks (it's a readable name). */
     table.schedule td.bc .bccode { display: block; font-family: Arial, sans-serif; font-size: 9px; line-height: 1.1; color: #000; margin-top: 1px; word-break: normal; overflow-wrap: anywhere; }

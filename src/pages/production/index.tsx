@@ -3329,9 +3329,21 @@ export default function ProductionPage({
 
   const deptRows = useMemo<DeptRow[]>(() => {
     if (activeTab === "ALL") return [];
-    // Cheap pass: filter the precomputed flat row list by the active tab's
-    // departmentCode. Previously this pass rebuilt every row (with the full
-    // picker + buildSched chain) on every tab switch.
+    // Live editable-field overlay (owner 2026-06-26 "填进去会一瞬间不见"). The
+    // baseRows web worker rebuilds a PO's rows a beat after an edit (~2s on a
+    // complex PO). Without this, an edited cell shows its OLD value until the
+    // worker catches up — the flicker / vanish on rack / PIC / completion /
+    // Sent. The patch* handlers update `orders` optimistically + synchronously,
+    // so we overlay those editable fields from the LIVE job card here → every
+    // edit reflects INSTANTLY; the worker still rebuilds the DERIVED fields
+    // (scheduling / overdue) in the background. The overlay equals the live
+    // values, so it's a no-op whenever nothing is in flight.
+    const liveJc = new Map<string, Record<string, unknown>>();
+    for (const o of filteredOrders) {
+      for (const jc of o.jobCards) {
+        liveJc.set(jc.id, jc as unknown as Record<string, unknown>);
+      }
+    }
     const rows: DeptRow[] = baseRows
       .filter((r) => r._deptCode === activeTab)
       .map((r, i) => {
@@ -3340,7 +3352,24 @@ export default function ProductionPage({
         // baseRows (which React would otherwise see as unchanged refs).
         const { _deptCode: _drop, ...clean } = r;
         void _drop;
-        return { ...clean, rowNo: i + 1 };
+        const jc = liveJc.get(clean.jobCardId);
+        if (!jc) return { ...clean, rowNo: i + 1 };
+        // Mirror baserows-core.ts's exact field formulas so the overlay equals
+        // what the worker would produce (identical when idle, instant on edit).
+        const distributedAt =
+          (jc.distributedAt as string | null | undefined) ?? null;
+        return {
+          ...clean,
+          rowNo: i + 1,
+          rack: ((jc.rackingNumber as string) || "") as DeptRow["rack"],
+          dueDate: (jc.dueDate as string) || "",
+          completedDate: (jc.completedDate as string) || "",
+          distributedAt,
+          sent: distributedAt ? "Yes" : "No",
+          pic1: (jc.pic1Name as string) || "",
+          pic2: (jc.pic2Name as string) || "",
+          status: ((jc.status as string) || "") as DeptRow["status"],
+        };
       });
 
     // FAB_CUT used to merge multiple component JCs into one row (sofa: by
@@ -3350,7 +3379,7 @@ export default function ProductionPage({
     // (Wei Siang Apr 26 2026). FAB_CUT now behaves identically to every
     // other dept — one row per matching JobCard, no merge.
     return rows;
-  }, [baseRows, activeTab]);
+  }, [baseRows, activeTab, filteredOrders]);
 
   // Force-show allowlist passed to the dept <DataGrid>. Two sources unioned:
   //   1. forceShowCompletedIds — rows the operator just flipped to COMPLETED

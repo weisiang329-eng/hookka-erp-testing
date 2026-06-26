@@ -291,6 +291,7 @@ export function parseStickerData(
   wipKey?: string;
   compartment?: string;
   pieceLabel?: string;
+  jobCardId?: string;
 } | null {
   try {
     const u = new URL(url);
@@ -333,7 +334,19 @@ export function parseStickerData(
       // matching dept card on scan instead of prompting the worker to pick.
       // Optional + backward compatible — older stickers without pn still parse.
       const pieceLabel = u.searchParams.get("pn") || undefined;
-      return { opId, deptCode, poNo, pieceNo, totalPieces, pieceLabel };
+      // FG-PACKING stickers may also carry jc=<packing job_card id> — the
+      // stable id the scan can resolve by even when poNo drifted. Optional +
+      // backward compatible (older stickers without jc parse unchanged).
+      const jobCardId = u.searchParams.get("jc") || undefined;
+      return {
+        opId,
+        deptCode,
+        poNo,
+        pieceNo,
+        totalPieces,
+        pieceLabel,
+        jobCardId,
+      };
     }
     return null;
   } catch {

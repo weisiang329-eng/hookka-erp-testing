@@ -219,8 +219,10 @@ test("public route never mints tokens — minting stays on the authed endpoint",
   // Window sized to span the whole endpoint (the mint now happens in a
   // batched parallel pass near the end — the per-piece serial loop was
   // replaced for performance, so the getOrCreateJobCardQrToken call sits
-  // further down than it used to).
-  const block = prodRoute.slice(at, at + 6500);
+  // further down than it used to). Widened 2026-06-26 when the additive
+  // poNo-drift recovery (trim/CI + fg_units fallback, BUG-2026-06-26) grew
+  // the endpoint before the mint pass.
+  const block = prodRoute.slice(at, at + 9500);
   assert.match(
     block,
     /requirePermission\(c,\s*"production-orders",\s*"read"\)/,
@@ -336,4 +338,91 @@ test("the token is never written to a log line", () => {
       `a log line must not include the token value: ${line}`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// (j) poNo-drift recovery — the mint endpoint resolves a drifted/edited poNo
+// the SAME way the worker.ts scan-lookup does, so a reprint still gets a /p/
+// token instead of the login-page fallback (BUG-2026-06-26, TASK 1). These
+// pin the two paths in lock-step: loosening either trips CI.
+// ---------------------------------------------------------------------------
+
+test("worker.ts scan-lookup has the trim/CI + fg_units poNo fallback (the reference)", () => {
+  assert.match(
+    workerRoute,
+    /LOWER\(TRIM\(poNo\)\)\s*=\s*LOWER\(TRIM\(\?\)\)/,
+    "scan-lookup must retry poNo case/space-insensitively",
+  );
+  assert.match(
+    workerRoute,
+    /SELECT\s+poId\s+FROM\s+fg_units\s+WHERE\s+poNo\s*=\s*\?\s+AND\s+poId\s+IS\s+NOT\s+NULL/,
+    "scan-lookup must fall back to fg_units.poId",
+  );
+});
+
+test("mint endpoint mirrors the poNo-drift recovery (trim/CI + fg_units, live-PO only)", () => {
+  const at = prodRoute.indexOf('app.post("/packing-rack-tokens"');
+  assert.ok(at >= 0, "the mint endpoint must exist");
+  const block = prodRoute.slice(at, at + 9500);
+  assert.match(
+    block,
+    /LOWER\(TRIM\(poNo\)\)\s+IN/,
+    "mint must retry unresolved poNos case/space-insensitively",
+  );
+  assert.match(
+    block,
+    /FROM\s+fg_units\s+WHERE\s+poNo\s+IN/,
+    "mint must fall back to fg_units for unresolved poNos",
+  );
+  // Recovered fg_units poIds must be confirmed against a LIVE production_order
+  // (a purged PO → honest miss → reprint, same contract as worker.ts).
+  assert.match(
+    block,
+    /SELECT\s+id\s+FROM\s+production_orders\s+WHERE\s+id\s+IN/,
+    "mint must confirm a recovered poId still points at a live PO",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// (k) FG-PACKING sticker carries the packing job-card id (&jc=) so an external
+// scan resolves by the stable card id even when the printed poNo drifted AND
+// the token mint couldn't persist (TASK 2). Additive — old stickers (no jc)
+// must still resolve via po=/pn=. Pins every consumer of the shared QR scheme.
+// ---------------------------------------------------------------------------
+
+test("mint endpoint returns the resolved card-id map alongside tokens", () => {
+  const at = prodRoute.indexOf('app.post("/packing-rack-tokens"');
+  const block = prodRoute.slice(at, at + 9500);
+  assert.match(
+    block,
+    /data:\s*\{\s*tokens,\s*cardIds\s*\}/,
+    "mint must return { tokens, cardIds } so the client can embed &jc=",
+  );
+});
+
+test("parseStickerData reads the optional jc= job-card id", () => {
+  const qr = read("src/lib/qr-utils.ts");
+  assert.match(
+    qr,
+    /searchParams\.get\("jc"\)/,
+    "parseStickerData must read jc= off the sticker URL",
+  );
+});
+
+test("packingStickerUrl appends &jc= to the fallback when the card id is known", () => {
+  const page = read("src/pages/production/index.tsx");
+  assert.match(
+    page,
+    /url\s*\+=\s*`&jc=\$\{encodeURIComponent\(s\.packingJobCardId\)\}`/,
+    "the /worker/scan fallback URL must carry &jc= when packingJobCardId is set",
+  );
+});
+
+test("worker scan resolves a jc-bearing sticker by card id first (additive short-circuit)", () => {
+  const scan = read("src/pages/worker/scan.tsx");
+  assert.match(
+    scan,
+    /if\s*\(parsed\?\.jobCardId\)\s*\{[\s\S]*?findMatches\(parsed\.jobCardId\)/,
+    "handleDecoded must try findMatches(parsed.jobCardId) before the po= path",
+  );
 });

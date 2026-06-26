@@ -34,6 +34,18 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-26-003 — customer DISPATCH email arrived with no DO attachment (+ driver phone often blank)
+
+🟢 **Fixed (prod + staging)** · `delivery-orders` · `customer-notify` · owner-reported
+
+**Symptom.** Customers received the dispatch (DO) email and the delivered (Invoice) email but **no PDF attachment**; the dispatch email also showed driver name + lorry plate but **no driver phone**.
+
+**Root cause (attachment).** Customer notices fire from the **backend transition choke-point** (`queueDoCustomerNotice(c, doId, { kind })`, delivery-orders.ts ~104 — the BUG-008 fix that guarantees the email always sends). The branded DO/Invoice PDF is rendered **client-side** (jsPDF) and only reaches the endpoint when the *frontend* posts `pdfBase64`. A backend-fired notice has no `pdfBase64`: the **invoice** branch already had a server-side fallback (`buildSimpleTablePdf` from invoice_items), but the **DISPATCH (DO) branch had none** → the DO email went out attachment-less. Fix: added a matching server-side DO PDF fallback in the DISPATCHED branch (simple table from `delivery_order_items`: code · description · qty · rack), so the notice always carries an attachment regardless of firing path. `hasAttachment` then drives the "please find attached" wording honestly.
+
+**Root cause (driver phone).** Not a code gap — the email already passes `driverContact: doRow.driverPhone` and dispatch pulls it from the selected 3PL driver (`SELECT phone FROM three_pl_drivers`, ~3257) into `delivery_orders.driverPhone`. It's blank only when dispatch used a **typed driver name (no 3PL driver selected)** or the **3PL driver record has no phone on file**. Action = enter phones on the 3PL driver records + select the driver (don't type) at dispatch; no code change. (An email-time re-lookup by driverId is a possible future hardening.)
+
+**Verify.** build:strict + base typecheck clean. Owner does one real dispatch → confirms the DO PDF is attached + (with a 3PL driver selected) the Contact No. row shows.
+
 ## BUG-2026-06-26-002 — PIC cell flicker: assigned worker shows → vanishes → reappears
 
 🟢 **Fixed (staging; pending owner live-verify)** · `production` · `ui-frontend` · owner-reported

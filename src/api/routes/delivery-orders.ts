@@ -5194,6 +5194,50 @@ export async function queueDoCustomerNotice(
             contentBase64: attachablePdf,
           },
         ];
+      } else {
+        // Server-rendered fallback DO PDF. The dispatch notice usually fires
+        // from the backend transition choke-point (queueDoCustomerNotice({kind}))
+        // which has NO client-rendered branded PDF — so without this the customer
+        // got the DO email with NOTHING attached (owner 2026-06-26). Mirrors the
+        // invoice fallback below: a clean simple-table DO via buildSimpleTablePdf.
+        // Best-effort — a render failure must not kill the notice.
+        try {
+          const itRes = await c.var.DB.prepare(
+            `SELECT productCode, productName, quantity, rackingNumber
+               FROM delivery_order_items WHERE deliveryOrderId = ?`,
+          )
+            .bind(id)
+            .all<{
+              productCode: string | null;
+              productName: string | null;
+              quantity: number;
+              rackingNumber: string | null;
+            }>();
+          const lineRows = (itRes.results ?? []).map((it) => [
+            it.productCode || "-",
+            it.productName || "-",
+            String(it.quantity ?? 0),
+            it.rackingNumber || "-",
+          ]);
+          const bytes = await buildSimpleTablePdf({
+            title: `Delivery Order ${doRow.doNo}`,
+            subtitle: `${doRow.customerName} · Dispatched ${fmtEmailDate(doRow.dispatchedAt)}`,
+            columns: ["Product Code", "Description", "Qty", "Rack"],
+            rows: lineRows,
+            footer: `HOOKKA INDUSTRIES SDN BHD · Delivery Order ${doRow.doNo}`,
+          });
+          attachments = [
+            {
+              filename: `${doRow.doNo}.pdf`,
+              contentBase64: bytesToBase64(bytes),
+            },
+          ];
+        } catch (pdfErr) {
+          console.warn(
+            `[delivery-orders] ${doRow.doNo}: fallback DO PDF failed — sending notice without attachment`,
+            pdfErr instanceof Error ? pdfErr.message : pdfErr,
+          );
+        }
       }
       subjectHtmlText = dispatchNoticeTemplate({
         doNo: doRow.doNo,

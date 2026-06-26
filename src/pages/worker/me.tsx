@@ -11,7 +11,7 @@
 // ============================================================
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { LogOut, Plus, Clock, Search, ChevronDown } from "lucide-react";
+import { LogOut, Plus, Clock, Search, ChevronDown, Megaphone } from "lucide-react";
 import {
   useT,
   useLangState,
@@ -24,6 +24,10 @@ import {
   WORKER_ME_KEY,
   type WorkerMe,
 } from "@/layouts/WorkerLayout";
+import {
+  AnnouncementMedia,
+  type Announcement,
+} from "./announcement-media";
 
 type LeaveRecord = {
   id: string;
@@ -60,6 +64,26 @@ function asString(v: unknown): string | null {
 
 function asNumber(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+// Local copies of the announcement helpers (the shared announcement-media file
+// can't export non-component functions alongside the component — fast-refresh
+// lint). Kept in sync with worker/index.tsx.
+function localizeAnnouncement(
+  a: Announcement,
+  lang: WorkerLang,
+): { title: string; body: string } {
+  const t = a.translations?.[lang];
+  return {
+    title: t?.title?.trim() ? t.title : a.title,
+    body: t?.body?.trim() ? t.body : a.body,
+  };
+}
+function fmtDay(iso: string): string {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short" });
 }
 
 function asWorkerMe(v: unknown): WorkerMe | null {
@@ -326,6 +350,50 @@ export default function WorkerMePage() {
     },
     [stdDept, loadStandardTimes],
   );
+
+  // Past announcements archive (relocated from /worker home, owner 2026-06-26):
+  // expired/hidden notices, read-only WITH media. Collapsed by default; lazy-
+  // loads on first open and re-fetches on every open so a just-expired notice
+  // shows without a hard refresh. Best-effort: a failure leaves an empty list.
+  const [pastOpen, setPastOpen] = useState(false);
+  const [pastAnn, setPastAnn] = useState<Announcement[] | null>(null);
+  const [pastLoading, setPastLoading] = useState(false);
+  // Per-row collapse (holds the COLLAPSED ids, default expanded).
+  const [collapsedPast, setCollapsedPast] = useState<Set<string>>(new Set());
+  const togglePastCollapsed = useCallback((id: string) => {
+    setCollapsedPast((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const loadPastAnnouncements = useCallback(async () => {
+    setPastLoading(true);
+    try {
+      const res = await workerFetch("/api/worker/announcements?include=past");
+      const j = (await res.json()) as {
+        success?: boolean;
+        data?: unknown;
+      };
+      if (j?.success && Array.isArray(j.data)) {
+        setPastAnn(j.data as Announcement[]);
+      } else {
+        setPastAnn([]);
+      }
+    } catch {
+      setPastAnn((prev) => prev ?? []);
+    } finally {
+      setPastLoading(false);
+    }
+  }, []);
+  const togglePastOpen = useCallback(() => {
+    setPastOpen((wasOpen) => {
+      const nextOpen = !wasOpen;
+      if (nextOpen) void loadPastAnnouncements();
+      return nextOpen;
+    });
+  }, [loadPastAnnouncements]);
 
   const loadLeaves = useCallback(async () => {
     try {
@@ -825,6 +893,16 @@ export default function WorkerMePage() {
                 ? "Standard minutes per WIP. Pick a department to view."
                 : "Standard minutes per WIP for your department."}
             </p>
+            {/* Single-department label — when the worker belongs to exactly
+                one department the selector is hidden, so show that dept as a
+                small static chip so they can see which one this is. */}
+            {stdDepts.length === 1 && (
+              <div className="mb-2">
+                <span className="inline-flex h-7 items-center rounded border border-[#D8D2CC] bg-[#F3EFE9] px-2.5 text-xs font-semibold text-[#6B5C32]">
+                  {stdDepts[0]}
+                </span>
+              </div>
+            )}
             {/* Department selector — only when the worker is in >1 department.
                 Segmented chips, brand olive active (matches the language
                 buttons above). Default = primary (the backend's chosen dept). */}
@@ -897,6 +975,80 @@ export default function WorkerMePage() {
                   </div>
                 );
               })()
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Past announcements (archive) — relocated from the home tab (owner
+          2026-06-26). Collapsed by default; lazy-loads on first open. Read-only,
+          WITH media (reuses the shared AnnouncementMedia). Each row is itself
+          foldable, mirroring the live list on home. */}
+      <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
+        <button
+          type="button"
+          onClick={togglePastOpen}
+          className="w-full px-4 py-3 flex items-center justify-between text-left"
+          aria-expanded={pastOpen}
+        >
+          <span className="flex items-center gap-2">
+            <Megaphone className="h-4 w-4 text-[#6B5C32]" />
+            <span className="text-sm font-semibold">
+              {t("home.pastAnnouncements")}
+            </span>
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 text-[#8A8680] transition-transform ${pastOpen ? "rotate-180" : ""}`}
+          />
+        </button>
+        {pastOpen && (
+          <div className="border-t border-[#F0ECE9]">
+            {pastLoading && pastAnn === null ? (
+              <p className="px-4 py-3 text-xs text-[#9CA3AF]">
+                {t("common.loading")}
+              </p>
+            ) : pastAnn && pastAnn.length > 0 ? (
+              <ul className="divide-y divide-[#F0ECE9]">
+                {pastAnn.map((a) => {
+                  const collapsed = collapsedPast.has(a.id);
+                  const { title, body } = localizeAnnouncement(a, lang);
+                  return (
+                    <li key={a.id} className="px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => togglePastCollapsed(a.id)}
+                        className="flex w-full items-start gap-2 text-left"
+                      >
+                        <p className="min-w-0 flex-1 text-sm font-semibold text-[#5A5550] break-words">
+                          {title}
+                        </p>
+                        <ChevronDown
+                          className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${collapsed ? "" : "rotate-180"}`}
+                        />
+                      </button>
+                      {!collapsed && (
+                        <div className="mt-0.5 pl-0">
+                          {body && (
+                            <p className="whitespace-pre-wrap break-words text-xs text-[#5A5550]">
+                              {body}
+                            </p>
+                          )}
+                          <AnnouncementMedia attachments={a.attachments} />
+                          {a.createdAt && (
+                            <p className="mt-1 text-[10px] text-[#9CA3AF]">
+                              {fmtDay(a.createdAt)}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="px-4 py-3 text-xs text-[#9CA3AF]">
+                {t("home.noPastAnnouncements")}
+              </p>
             )}
           </div>
         )}

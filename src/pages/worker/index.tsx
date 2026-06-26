@@ -25,11 +25,13 @@ import {
   Megaphone,
   MapPin,
   ChevronDown,
-  FileText,
-  Download,
 } from "lucide-react";
 import { useT, useWorkerLang } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
+import {
+  AnnouncementMedia,
+  type Announcement,
+} from "./announcement-media";
 import { deriveWipName } from "@/lib/wip-name";
 import { compressImage } from "@/lib/image-compress";
 import { z } from "zod";
@@ -111,28 +113,10 @@ type AttendanceRow = {
   lateMinutes?: number;
   status: string;
 };
-// Office → worker announcement. The office types ONE language; the backend
-// auto-translates title+body into all four worker-portal languages on POST and
-// returns them here. Each worker sees the version matching their chosen portal
-// language, falling back to the original posted title/body.
-// One media file attached to a notice (image/video/PDF). The bytes live in the
-// shared /api/files store; render inline by `mime`.
-type AnnouncementAttachment = {
-  fileId: string;
-  name: string;
-  mime: string;
-};
-type Announcement = {
-  id: string;
-  title: string;
-  body: string;
-  createdAt: string | null;
-  translations?: Record<
-    "en" | "ms" | "zh" | "my",
-    { title: string; body: string }
-  > | null;
-  attachments?: AnnouncementAttachment[];
-};
+// Announcement / AnnouncementAttachment types and the AnnouncementMedia
+// component now live in ./announcement-media (shared with /worker/me's past-
+// announcements archive). localizeAnnouncement / fmtDay stay local below (a
+// shared file can't export both a component and helpers — fast-refresh lint).
 
 // Pick the worker-language version of a notice, falling back to the original
 // posted text whenever the translation is missing/empty (Claude outage, or a
@@ -146,67 +130,6 @@ function localizeAnnouncement(
     title: t?.title?.trim() ? t.title : a.title,
     body: t?.body?.trim() ? t.body : a.body,
   };
-}
-
-// Render an announcement's media on the phone: images inline, video with native
-// controls, PDF (and anything else) as a tappable download button. Files are
-// served from the shared /api/files store. Kept compact so a long media list
-// doesn't crowd the small screen.
-function AnnouncementMedia({
-  attachments,
-}: {
-  attachments?: AnnouncementAttachment[];
-}) {
-  if (!attachments || attachments.length === 0) return null;
-  return (
-    <div className="mt-2 space-y-2">
-      {attachments.map((att) => {
-        // Worker-token proxy (NOT /api/files — that's cookie-gated and 401s on
-        // the phone, which is why announcement media never rendered before).
-        const href = `/api/worker/ann-files/${att.fileId}/download`;
-        const mime = att.mime || "";
-        if (mime.startsWith("image/")) {
-          return (
-            <a key={att.fileId} href={href} target="_blank" rel="noreferrer">
-              <img
-                src={href}
-                alt={att.name || "image"}
-                loading="lazy"
-                className="w-full rounded-lg border border-[#E2DDD8] object-contain"
-              />
-            </a>
-          );
-        }
-        if (mime.startsWith("video/")) {
-          return (
-            <video
-              key={att.fileId}
-              src={href}
-              controls
-              preload="metadata"
-              className="w-full rounded-lg border border-[#E2DDD8] bg-black"
-            />
-          );
-        }
-        // PDF / other → download/open button.
-        return (
-          <a
-            key={att.fileId}
-            href={href}
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center gap-2 rounded-lg border border-[#E2DDD8] bg-[#FAFAF8] px-3 py-2 text-xs font-medium text-[#5A5550] active:bg-[#F3EFE9]"
-          >
-            <FileText className="h-4 w-4 shrink-0 text-[#9A3A2D]" />
-            <span className="min-w-0 flex-1 truncate">
-              {att.name || "Attachment"}
-            </span>
-            <Download className="h-4 w-4 shrink-0 text-[#8A8680]" />
-          </a>
-        );
-      })}
-    </div>
-  );
 }
 type HistoryData = {
   range: { from: string; to: string };
@@ -505,25 +428,8 @@ export default function WorkerHomePage() {
   const [ackAnn, setAckAnn] = useState<Set<string>>(() =>
     readAckAnnouncements(),
   );
-  // ---- Past announcements (archive) ----
-  // Expired/hidden notices that have dropped out of the live list above. They
-  // are NOT loaded with the page — the section starts collapsed and lazy-loads
-  // the archive on the first tap (owner 2026-06-26: re-readable history).
-  const [pastOpen, setPastOpen] = useState(false);
-  const [pastAnn, setPastAnn] = useState<Announcement[] | null>(null);
-  const [pastLoading, setPastLoading] = useState(false);
-  // Per-row collapse for the archive (same fold pattern as the live list; holds
-  // the COLLAPSED ids, default expanded). Kept separate from collapsedAnn so the
-  // two lists never share/clobber each other's open state.
-  const [collapsedPast, setCollapsedPast] = useState<Set<string>>(new Set());
-  const togglePastCollapsed = useCallback((id: string) => {
-    setCollapsedPast((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
+  // Past announcements (archive) moved to /worker/me (owner 2026-06-26) — the
+  // home tab keeps only the live banner + must-ack popup.
 
   // ---- Location permission (Feature B) ----
   const [locState, setLocState] = useState<LocationState>("unknown");
@@ -600,39 +506,6 @@ export default function WorkerHomePage() {
       /* leave announcements as-is */
     }
   }, []);
-
-  // Lazy-load the archive (expired/hidden notices) the FIRST time the worker
-  // expands the "Past announcements" section. Read-only, best-effort: a failure
-  // leaves an empty list, never strands the page. Re-fetch on every open so a
-  // notice that just expired shows up without a hard refresh.
-  const loadPastAnnouncements = useCallback(async () => {
-    setPastLoading(true);
-    try {
-      const res = await workerFetch(
-        "/api/worker/announcements?include=past",
-      );
-      const raw = await res.json();
-      const j = AnnouncementsEnvelope.parse(raw);
-      if (j.success && Array.isArray(j.data)) {
-        setPastAnn(j.data as Announcement[]);
-      } else {
-        setPastAnn([]);
-      }
-    } catch {
-      setPastAnn((prev) => prev ?? []);
-    } finally {
-      setPastLoading(false);
-    }
-  }, []);
-
-  const togglePastOpen = useCallback(() => {
-    setPastOpen((wasOpen) => {
-      const nextOpen = !wasOpen;
-      // Lazy-load (or refresh) on open.
-      if (nextOpen) void loadPastAnnouncements();
-      return nextOpen;
-    });
-  }, [loadPastAnnouncements]);
 
   useEffect(() => {
     refreshToday();
@@ -968,77 +841,6 @@ export default function WorkerHomePage() {
         </div>
       )}
 
-      {/* Past announcements (archive) — expired/hidden notices that dropped out
-          of the live list above. Collapsed by default; tapping the header
-          lazy-loads the archive (read-only). Each past row is itself
-          foldable, mirroring the live list. */}
-      <div className="bg-white rounded-xl border border-[#D8D2CC] shadow-sm overflow-hidden">
-        <button
-          type="button"
-          onClick={togglePastOpen}
-          className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-[#5A5550]"
-          aria-expanded={pastOpen}
-        >
-          <Megaphone className="h-4 w-4 text-[#8A8680]" />
-          <span className="text-sm font-semibold">
-            {t("home.pastAnnouncements")}
-          </span>
-          <ChevronDown
-            className={`ml-auto h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${pastOpen ? "rotate-180" : ""}`}
-          />
-        </button>
-        {pastOpen && (
-          <div className="border-t border-[#F0ECE9]">
-            {pastLoading && pastAnn === null ? (
-              <p className="px-4 py-3 text-xs text-[#9CA3AF]">
-                {t("common.loading")}
-              </p>
-            ) : pastAnn && pastAnn.length > 0 ? (
-              <ul className="divide-y divide-[#F0ECE9]">
-                {pastAnn.map((a) => {
-                  const collapsed = collapsedPast.has(a.id);
-                  const { title, body } = localizeAnnouncement(a, lang);
-                  return (
-                    <li key={a.id} className="px-4 py-3">
-                      <button
-                        type="button"
-                        onClick={() => togglePastCollapsed(a.id)}
-                        className="flex w-full items-start gap-2 text-left"
-                      >
-                        <p className="min-w-0 flex-1 text-sm font-semibold text-[#5A5550] break-words">
-                          {title}
-                        </p>
-                        <ChevronDown
-                          className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${collapsed ? "" : "rotate-180"}`}
-                        />
-                      </button>
-                      {!collapsed && (
-                        <div className="mt-0.5 pl-0">
-                          {body && (
-                            <p className="whitespace-pre-wrap break-words text-xs text-[#5A5550]">
-                              {body}
-                            </p>
-                          )}
-                          {a.createdAt && (
-                            <p className="mt-1 text-[10px] text-[#9CA3AF]">
-                              {fmtDay(a.createdAt)}
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            ) : (
-              <p className="px-4 py-3 text-xs text-[#9CA3AF]">
-                {t("home.noPastAnnouncements")}
-              </p>
-            )}
-          </div>
-        )}
-      </div>
-
       {/* Location nudge (Feature B) — shown when location is denied/unavailable
           so the worker's punch can stamp "At factory". Never blocks clock-in. */}
       {showLocNudge && (
@@ -1067,36 +869,43 @@ export default function WorkerHomePage() {
         </div>
       )}
 
+      {/* Full-width clock button, framed exactly like the SCAN JOB CARD button
+          below (no outer white card; owner 2026-06-26). Keeps the teal colour.
+          When clocked in we show a small time/worked summary above the
+          full-width CLOCK OUT button. */}
       {/* Clock card */}
       {SHOW_CLOCK && (
-      <div className="bg-white rounded-xl p-4 border border-[#D8D2CC] shadow-sm">
+      <div className="space-y-2">
         {!clockedIn ? (
           <button
             type="button"
             onClick={() => handleClock("CLOCK_IN")}
             disabled={clocking}
-            className="w-full h-14 rounded-lg bg-[#3E6570] hover:bg-[#355863] text-white text-lg font-semibold disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
+            className="block w-full h-20 rounded-xl bg-[#3E6570] hover:bg-[#355863] text-white text-xl font-bold tracking-wide shadow-md active:shadow-sm active:translate-y-[1px] transition-all disabled:opacity-60"
           >
-            {clocking ? (
-              <>
-                <Camera className="h-5 w-5" />
-                {t("home.openingCamera")}
-              </>
-            ) : (
-              <>
-                <Clock className="h-5 w-5" />
-                {t("home.clockIn")}
-              </>
-            )}
+            <span className="h-full w-full flex items-center justify-center gap-3">
+              {clocking ? (
+                <>
+                  <Camera className="h-7 w-7" />
+                  {t("home.openingCamera")}
+                </>
+              ) : (
+                <>
+                  <Clock className="h-7 w-7" />
+                  {t("home.clockIn")}
+                </>
+              )}
+            </span>
           </button>
         ) : (
-          <div>
-            <div className="flex items-center justify-between mb-3">
+          <>
+            {/* Time / worked summary — light strip, not a framed card. */}
+            <div className="flex items-center justify-between rounded-lg bg-[#F3EFE9] px-4 py-2.5">
               <div>
                 <p className="text-xs text-[#8A8680]">
                   {clockedOut ? t("home.clockedOutAt") : t("home.clockedInAt")}
                 </p>
-                <p className="text-xl font-bold">
+                <p className="text-lg font-bold">
                   {clockedOut ? data.attendance!.clockOut : data.attendance!.clockIn}
                 </p>
               </div>
@@ -1105,7 +914,7 @@ export default function WorkerHomePage() {
                   <p className="text-xs text-[#8A8680]">
                     {t("home.workedHours")}
                   </p>
-                  <p className="text-xl font-bold">
+                  <p className="text-lg font-bold">
                     {fmtHM(data.attendance!.workingMinutes)}
                   </p>
                 </div>
@@ -1116,19 +925,24 @@ export default function WorkerHomePage() {
                 type="button"
                 onClick={() => handleClock("CLOCK_OUT")}
                 disabled={clocking}
-                className="w-full h-11 rounded-lg bg-[#F0ECE9] hover:bg-[#E5E0DB] text-[#1F1D1B] text-sm font-semibold disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
+                className="block w-full h-20 rounded-xl bg-[#3E6570] hover:bg-[#355863] text-white text-xl font-bold tracking-wide shadow-md active:shadow-sm active:translate-y-[1px] transition-all disabled:opacity-60"
               >
-                {clocking ? (
-                  <>
-                    <Camera className="h-4 w-4" />
-                    {t("home.openingCamera")}
-                  </>
-                ) : (
-                  t("home.clockOut")
-                )}
+                <span className="h-full w-full flex items-center justify-center gap-3">
+                  {clocking ? (
+                    <>
+                      <Camera className="h-7 w-7" />
+                      {t("home.openingCamera")}
+                    </>
+                  ) : (
+                    <>
+                      <Clock className="h-7 w-7" />
+                      {t("home.clockOut")}
+                    </>
+                  )}
+                </span>
               </button>
             )}
-          </div>
+          </>
         )}
         {clockErr && (
           <div className="mt-2 text-center">

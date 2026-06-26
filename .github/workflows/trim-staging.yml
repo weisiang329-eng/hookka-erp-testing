@@ -198,16 +198,21 @@ jobs:
           DELETE FROM folder_job_cards     WHERE job_card_id        IN (SELECT id FROM _del_jc);
           DELETE FROM wip_cascade_log      WHERE job_card_id        IN (SELECT id FROM _del_jc);
           DELETE FROM qc_inspections       WHERE production_order_id IN (SELECT id FROM _del_po);
-          DELETE FROM fg_units             WHERE po_id              IN (SELECT id FROM _del_po);
+          DELETE FROM invoices             WHERE sales_order_id IN (SELECT id FROM _del_so)
+                                              OR delivery_order_id IN (SELECT id FROM _del_do);
+          DELETE FROM fg_units             WHERE po_id IN (SELECT id FROM _del_po)
+                                              OR so_id IN (SELECT id FROM _del_so);
           DELETE FROM fg_batches           WHERE production_order_id IN (SELECT id FROM _del_po);
           DELETE FROM stock_movements      WHERE production_order_id IN (SELECT id FROM _del_po);
           DELETE FROM delivery_order_items WHERE production_order_id IN (SELECT id FROM _del_po);
-          DELETE FROM delivery_orders      WHERE id                 IN (SELECT id FROM _del_do);
-          DELETE FROM invoices             WHERE sales_order_id     IN (SELECT id FROM _del_so);
-          DELETE FROM sales_order_items    WHERE sales_order_id     IN (SELECT id FROM _del_so);
-          DELETE FROM job_cards            WHERE id                 IN (SELECT id FROM _del_jc);
-          DELETE FROM production_orders    WHERE id                 IN (SELECT id FROM _del_po);
-          DELETE FROM sales_orders         WHERE id                 IN (SELECT id FROM _del_so);
+          UPDATE delivery_orders SET sales_order_id = NULL
+                 WHERE sales_order_id IN (SELECT id FROM _del_so)
+                   AND id NOT IN (SELECT id FROM _del_do);
+          DELETE FROM delivery_orders      WHERE id IN (SELECT id FROM _del_do);
+          DELETE FROM sales_order_items    WHERE sales_order_id IN (SELECT id FROM _del_so);
+          DELETE FROM job_cards            WHERE id IN (SELECT id FROM _del_jc);
+          DELETE FROM production_orders    WHERE id IN (SELECT id FROM _del_po);
+          DELETE FROM sales_orders         WHERE id IN (SELECT id FROM _del_so);
           COMMIT;"
           echo "=== remaining counts after delete ==="
           psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "

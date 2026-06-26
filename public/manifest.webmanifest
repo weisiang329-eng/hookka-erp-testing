@@ -1,0 +1,32 @@
+{
+  "name": "Hookka Worker Portal",
+  "short_name": "Hookka",
+  "description": "Hookka shop-floor worker portal — clock in, scan job cards, view pay.",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#6B5C32",
+  "background_color": "#1F1D1B",
+  "start_url": "/worker",
+  "scope": "/",
+  "lang": "en",
+  "icons": [
+    {
+      "src": "/pwa-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

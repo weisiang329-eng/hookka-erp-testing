@@ -139,9 +139,43 @@ async function loadRackCatalog(
   }));
 }
 
+// Read the optional ?p=<pieceNo> query param — the physical piece this sticker
+// represents. Returns null when absent / not a positive integer (old single-
+// piece prints), in which case the route stays on the legacy card-level path.
+function readPieceNo(c: Context<Env>): number | null {
+  const raw = (c.req.query("p") || "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+// Resolve the per-piece rack for one (card, pieceNo), or null when there is no
+// per-piece row / column (back-compat: caller then shows the card-level rack).
+// Best-effort — never throws; a missing racking_number column reads as null.
+async function pieceRackOf(
+  db: D1Database,
+  jobCardId: string,
+  pieceNo: number,
+): Promise<{ exists: boolean; rack: string }> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT racking_number AS rack FROM piece_pics WHERE jobCardId = ? AND pieceNo = ? LIMIT 1",
+      )
+      .bind(jobCardId, pieceNo)
+      .first<{ rack: string | null }>();
+    if (!row) return { exists: false, rack: "" };
+    return { exists: true, rack: (row.rack || "").trim() };
+  } catch {
+    return { exists: false, rack: "" };
+  }
+}
+
 // GET /api/public/rack-write/:token — minimal piece summary + rack picker list.
 // NO prices / customers / addresses: only enough to know what is being racked
 // (poNo, SO no., piece/WIP description, current rack) + the rack catalog.
+// When ?p=<pieceNo> is present, the "current rack" reflects THAT piece's
+// per-piece rack (piece_pics.racking_number); without it, the card-level rack.
 app.get("/:token", async (c) => {
   const token = (c.req.param("token") || "").trim();
   if (!TOKEN_RE.test(token)) return unknownToken(c);
@@ -154,13 +188,21 @@ app.get("/:token", async (c) => {
       return unknownToken(c);
     }
     const racks = await loadRackCatalog(c.var.DB);
+    // Per-piece current rack when ?p= is present and that piece row exists;
+    // otherwise the legacy card-level rack (back-compat).
+    let currentRack = (card.rackingNumber || "").trim();
+    const pieceNo = readPieceNo(c);
+    if (pieceNo != null && card.id) {
+      const pr = await pieceRackOf(c.var.DB, card.id, pieceNo);
+      if (pr.exists) currentRack = pr.rack;
+    }
     return c.json({
       success: true,
       data: {
         poNo: card.poNo ?? "",
         salesOrderNo: (card.salesOrderNo || "").trim(),
         description: pieceDescription(card),
-        rackingNumber: (card.rackingNumber || "").trim(),
+        rackingNumber: currentRack,
         racks,
       },
     });
@@ -207,7 +249,15 @@ app.post("/:token/rack", async (c) => {
     if (!card) return unknownToken(c);
     // The jobCardId is taken from the TOKEN'S resolved row only — never from the
     // request — so a tampered payload cannot point the write at another card.
-    const res = await applyPackingRack(c.var.DB, card.id, rackingNumber);
+    // pieceNo comes from the URL (?p=) — the sticker self-identifies which
+    // physical piece it is; absent → card-level (legacy) behavior in the helper.
+    const pieceNo = readPieceNo(c);
+    const res = await applyPackingRack(
+      c.var.DB,
+      card.id,
+      rackingNumber,
+      pieceNo,
+    );
     if (!res.ok) {
       // NOT_PACKING / UNKNOWN_RACK / BAD_INPUT → 400 (validation); NOT_FOUND →
       // 404 (the token's card vanished between GET and POST).

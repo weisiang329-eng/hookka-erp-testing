@@ -233,7 +233,12 @@ type Result =
   // Department QR (owner 2026-06-11): "I am now working in <dept>" — the
   // day's hours re-route to this department (and, for per-line QRs, this
   // Sofa/Bedframe line) from `time` until the next scan or punch-out.
-  | { kind: "deptscan"; deptName: string; category: string | null; time: string };
+  | { kind: "deptscan"; deptName: string; category: string | null; time: string }
+  // Owner 2026-06-26 unified scan model: the scanned sticker belongs to a
+  // DIFFERENT department than the worker's CURRENT one (latest dept-QR scan /
+  // punch) — block it and show the "wrong department" popup instead of letting
+  // them complete someone else's work (which also mis-attributed their time).
+  | { kind: "deptBlock"; currentDept: string; stickerDept: string };
 
 // Shape of /api/worker/history — we pass from=today&to=today so we
 // only get today's slice. Fields unused on this page are elided from
@@ -641,6 +646,36 @@ export default function WorkerScanPage() {
     [],
   );
 
+  // Owner 2026-06-26 unified scan model: a worker may only complete WIPs for
+  // their CURRENT department (= the dept QR they last scanned, else their punch
+  // / home dept). Resolve the scanned card's department and, if it differs,
+  // surface the "wrong department" popup and STOP (the worker must scan that
+  // dept's QR first). Fail-open: any lookup error → don't block (never wedge a
+  // legitimate scan because the current-dept check hiccuped).
+  const blockIfWrongDept = useCallback(
+    async (jc: JobCard): Promise<boolean> => {
+      const stickerDept = (jc.departmentCode || "").trim().toUpperCase();
+      if (!stickerDept) return false; // unknown dept (e.g. shared sticker) — don't block here
+      try {
+        const res = await workerFetch("/api/worker/current-dept");
+        if (!res.ok) return false;
+        const j = (await res.json().catch(() => null)) as {
+          success?: boolean;
+          data?: { currentDept?: string };
+        } | null;
+        const cur = (j?.data?.currentDept || "").trim().toUpperCase();
+        if (cur && cur !== stickerDept) {
+          setResult({ kind: "deptBlock", currentDept: cur, stickerDept });
+          return true;
+        }
+      } catch {
+        /* fail-open */
+      }
+      return false;
+    },
+    [],
+  );
+
   const doLookup = useCallback(
     async (query?: string) => {
       const term = (query ?? input).trim();
@@ -879,6 +914,7 @@ export default function WorkerScanPage() {
           const hit =
             matches.find((m) => m.jobCard.id === barcodeJcId) ?? matches[0];
           if (hit) {
+            if (await blockIfWrongDept(hit.jobCard)) return;
             setResult({ kind: "lookup", ...hit, wholeCard: true });
           } else {
             setResult({
@@ -929,6 +965,7 @@ export default function WorkerScanPage() {
           const jcMatches = await findMatches(parsed.jobCardId);
           const hit = jcMatches.find((m) => m.jobCard.id === parsed.jobCardId);
           if (hit) {
+            if (await blockIfWrongDept(hit.jobCard)) return;
             setResult({ kind: "lookup", ...hit, piece });
             return;
           }
@@ -1034,6 +1071,7 @@ export default function WorkerScanPage() {
           // QR in view would mark a job done. Require an explicit confirm
           // tap. The lookup card already renders the item details + a
           // Complete / Cancel pair; handleConfirmScan runs only on tap.)
+          if (await blockIfWrongDept(matches[0].jobCard)) return;
           setResult({ kind: "lookup", ...matches[0], piece });
         } else if (matches.length > 1) {
           setResult({ kind: "choices", options: matches, piece });
@@ -2542,6 +2580,35 @@ export default function WorkerScanPage() {
                 QR: {result.decoded}
               </p>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Wrong-department block (owner 2026-06-26 unified scan model). The
+          scanned sticker belongs to a department the worker is NOT currently in
+          — they must scan that department's QR first. */}
+      {result.kind === "deptBlock" && (
+        <div className="bg-[#FDF6F4] border border-[#F5C5BF] rounded-xl p-4 text-[#9A3A2D]">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="h-5 w-5 mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <p className="font-semibold">Wrong department</p>
+              <p className="text-sm mt-1 break-words">
+                You are in <strong>{result.currentDept}</strong>. This sticker is
+                for <strong>{result.stickerDept}</strong>.
+              </p>
+              <div className="mt-2 rounded-md bg-[#FAEEDA] p-2.5 text-xs leading-relaxed text-[#854F0B]">
+                Scan the <strong>{result.stickerDept}</strong> department QR first
+                to switch, then scan this sticker again.
+              </div>
+              <button
+                type="button"
+                onClick={() => setResult({ kind: "idle" })}
+                className="mt-3 h-9 rounded-lg border border-[#D8D2CC] bg-white px-4 text-sm font-semibold text-[#5A5550]"
+              >
+                OK
+              </button>
+            </div>
           </div>
         </div>
       )}

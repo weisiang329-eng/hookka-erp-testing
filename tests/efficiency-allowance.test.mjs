@@ -31,7 +31,7 @@ const eff = await import(
 // A minimal DbLike that routes each query to canned rows by SQL fingerprint —
 // the helper runs exactly three: departments, the job-card proration (carries
 // the unique `contrib_min` alias), and working_hour_entries.
-function mockDb({ depts, jc, whe }) {
+function mockDb({ depts, jc, whe, addProd }) {
   return {
     prepare(sql) {
       return {
@@ -40,6 +40,10 @@ function mockDb({ depts, jc, whe }) {
             async all() {
               if (sql.includes("FROM departments")) return { results: depts };
               if (sql.includes("contrib_min")) return { results: jc };
+              // ADD_PROD numerator credit — checked before working_hour_entries
+              // (the ADD_PROD SQL also references hours, but FROM that table).
+              if (sql.includes("worker_nonprod_requests"))
+                return { results: addProd ?? [] };
               if (sql.includes("working_hour_entries")) return { results: whe };
               return { results: [] };
             },
@@ -95,6 +99,78 @@ test("efficiency = prodMin ÷ (production-dept hours × 60) × 100", async () =>
   // W2: only non-production hours → denominator 0 → efficiency undefined (—).
   assert.equal(m.get("W2").pct, null);
   assert.equal(m.get("W2").daysWithEntries, 1);
+});
+
+test("ADD_PROD: no approved extra-time claims → efficiency is byte-identical", async () => {
+  // Same inputs as the headline test, but explicitly empty addProd. The number
+  // must not move a hair vs. the no-feature world.
+  const db = mockDb({
+    depts: [{ code: "FAB_SEW", isProduction: 1 }],
+    jc: [{ workerId: "W1", productionMinutes: 480 }],
+    whe: [
+      { workerId: "W1", departmentCode: "FAB_SEW", date: "2026-06-01", hours: 8 },
+    ],
+    addProd: [],
+  });
+  const m = await eff.computeMonthlyEfficiencyByWorker(db, "2026-06-01", "2026-06-30");
+  assert.equal(m.get("W1").pct, 100); // 480 / (8×60) = 100%, unchanged
+  assert.equal(m.get("W1").prodMinutes, 480);
+});
+
+test("ADD_PROD: WORKED EXAMPLE — 1h-standard job took 3h, +2h approved", async () => {
+  // A customize job whose WIP standard was 1h (60 min) actually took 3h. The
+  // worker is credited 60 prod-min for the completed job and clocked 3h in
+  // Upholstery. They claim +2h extra production time; admin approves.
+  //
+  //   OLD efficiency = 60 / (3×60) = 33.3%   (looks unfairly low — overran)
+  //   NEW efficiency = (60 + 120) / (3×60) = 180/180 = 100%
+  //
+  // The +120 ADD_PROD minutes join the NUMERATOR; the 3h clock-hours stay the
+  // denominator (no working_hour_entries row is written for the claim).
+  const baseInputs = {
+    depts: [{ code: "UPHOLSTERY", isProduction: 1 }],
+    jc: [{ workerId: "W7", productionMinutes: 60 }], // 1h WIP standard credited
+    whe: [
+      { workerId: "W7", departmentCode: "UPHOLSTERY", date: "2026-06-04", hours: 3 },
+    ],
+  };
+
+  // OLD (no claim): 60 / 180 = 33.33%
+  const before = await eff.computeMonthlyEfficiencyByWorker(
+    mockDb({ ...baseInputs, addProd: [] }),
+    "2026-06-01",
+    "2026-06-30",
+  );
+  assert.ok(Math.abs(before.get("W7").pct - 33.3333) < 0.01);
+  assert.equal(before.get("W7").prodMinutes, 60);
+
+  // NEW (+2h approved): (60+120) / 180 = 100%
+  const after = await eff.computeMonthlyEfficiencyByWorker(
+    mockDb({
+      ...baseInputs,
+      addProd: [{ workerId: "W7", hours: 2 }], // +2h = +120 min to numerator
+    }),
+    "2026-06-01",
+    "2026-06-30",
+  );
+  assert.equal(after.get("W7").prodMinutes, 180);
+  assert.equal(after.get("W7").prodHours, 3); // denominator UNCHANGED
+  assert.equal(after.get("W7").pct, 100);
+});
+
+test("ADD_PROD: a half-hour claim (0.5h) credits 30 min to the numerator", async () => {
+  const db = mockDb({
+    depts: [{ code: "FOAM", isProduction: 1 }],
+    jc: [{ workerId: "W8", productionMinutes: 30 }],
+    whe: [
+      { workerId: "W8", departmentCode: "FOAM", date: "2026-06-05", hours: 1 },
+    ],
+    addProd: [{ workerId: "W8", hours: 0.5 }], // 30 min
+  });
+  const m = await eff.computeMonthlyEfficiencyByWorker(db, "2026-06-01", "2026-06-30");
+  // (30 + 30) / (1×60) = 100%
+  assert.equal(m.get("W8").prodMinutes, 60);
+  assert.equal(m.get("W8").pct, 100);
 });
 
 test("a worker with hours but zero completed cards is a real 0%, not null", async () => {

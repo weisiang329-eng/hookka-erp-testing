@@ -11,7 +11,7 @@
 // ============================================================
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { LogOut, Plus, Clock, Search, ChevronDown } from "lucide-react";
+import { LogOut, Plus, Clock, Search, ChevronDown, Megaphone } from "lucide-react";
 import {
   useT,
   useLangState,
@@ -24,6 +24,10 @@ import {
   WORKER_ME_KEY,
   type WorkerMe,
 } from "@/layouts/WorkerLayout";
+import {
+  AnnouncementMedia,
+  type Announcement,
+} from "./announcement-media";
 
 type LeaveRecord = {
   id: string;
@@ -60,6 +64,26 @@ function asString(v: unknown): string | null {
 
 function asNumber(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+// Local copies of the announcement helpers (the shared announcement-media file
+// can't export non-component functions alongside the component — fast-refresh
+// lint). Kept in sync with worker/index.tsx.
+function localizeAnnouncement(
+  a: Announcement,
+  lang: WorkerLang,
+): { title: string; body: string } {
+  const t = a.translations?.[lang];
+  return {
+    title: t?.title?.trim() ? t.title : a.title,
+    body: t?.body?.trim() ? t.body : a.body,
+  };
+}
+function fmtDay(iso: string): string {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short" });
 }
 
 function asWorkerMe(v: unknown): WorkerMe | null {
@@ -186,6 +210,127 @@ export default function WorkerMePage() {
   const [leaveSubmitting, setLeaveSubmitting] = useState(false);
   const [leaveError, setLeaveError] = useState<string | null>(null);
 
+  // Non-production hours (owner 2026-06-26): a worker who spent part of the day
+  // on non-production work (e.g. helping R&D) applies here. An admin approves
+  // from the Working Hours screen, which writes a non-production working-hours
+  // row so those hours are excluded from the efficiency denominator — keeping
+  // the worker's efficiency fair. ADD-only on top of the existing portal.
+  // Time adjustment (owner 2026-06-26): the worker picks a TYPE —
+  //   • Non-production — existing: any NON-production dept; the approved hours
+  //     land in a non-prod working-hours row, EXCLUDED from the efficiency
+  //     denominator, so efficiency stays fair.
+  //   • Extra production time (ADD_PROD) — a PRODUCTION dept + hours + optional
+  //     job/WIP ref; the approved hours are ADDED to the efficiency numerator
+  //     (extra production output) when a job ran longer than its WIP standard.
+  // ADD-only on top of the existing portal — the non-prod path is unchanged.
+  type NonprodDept = { code: string; name: string };
+  type NonprodRequest = {
+    id: string;
+    date: string;
+    departmentCode: string;
+    hours: number;
+    note: string;
+    status: "PENDING" | "APPROVED" | "REJECTED";
+    kind?: "NONPROD" | "ADD_PROD";
+    jobCardId?: string;
+    createdAt?: string;
+    decidedAt?: string;
+  };
+  const [npDepts, setNpDepts] = useState<NonprodDept[]>([]);
+  const [prodDepts, setProdDepts] = useState<NonprodDept[]>([]);
+  const [npRequests, setNpRequests] = useState<NonprodRequest[]>([]);
+  const [npShowForm, setNpShowForm] = useState(false);
+  const [npKind, setNpKind] = useState<"NONPROD" | "ADD_PROD">("NONPROD");
+  const [npDept, setNpDept] = useState("");
+  const [npDate, setNpDate] = useState(() => new Date().toISOString().slice(0, 10));
+  // The worker enters MINUTES (owner 2026-06-27: "20" meant 20 min, not 20h).
+  // We store `npMinutes` as the raw input and convert to hours (minutes / 60)
+  // only at submit time — the backend + efficiency math keep `hours` as the
+  // stored unit, so nothing downstream changes.
+  const [npMinutes, setNpMinutes] = useState("");
+  const [npJobRef, setNpJobRef] = useState("");
+  const [npNote, setNpNote] = useState("");
+  const [npSubmitting, setNpSubmitting] = useState(false);
+  const [npError, setNpError] = useState<string | null>(null);
+  // The whole Time adjustment card folds like the Standard Times / Past
+  // announcements cards below it (owner 2026-06-27). Collapsed by default;
+  // tapping the header expands to reveal the apply form + My requests list.
+  const [taOpen, setTaOpen] = useState(false);
+  // Mount-time "now" for the My-requests 14-day retention window. Captured in a
+  // lazy initializer (NOT during render — Date.now() in render is impure) so it
+  // stays stable across re-renders; the page re-mounts when the worker reopens
+  // the tab, so the window is fresh enough.
+  const [nowMs] = useState(() => Date.now());
+
+  const loadNonprod = useCallback(async () => {
+    try {
+      const [dRes, pRes, rRes] = await Promise.all([
+        workerFetch("/api/worker/nonprod-departments"),
+        workerFetch("/api/worker/production-departments"),
+        workerFetch("/api/worker/nonprod-requests"),
+      ]);
+      const dj = (await dRes.json()) as { success?: boolean; data?: NonprodDept[] };
+      const pj = (await pRes.json()) as { success?: boolean; data?: NonprodDept[] };
+      const rj = (await rRes.json()) as { success?: boolean; data?: NonprodRequest[] };
+      if (dj?.success && Array.isArray(dj.data)) setNpDepts(dj.data);
+      if (pj?.success && Array.isArray(pj.data)) setProdDepts(pj.data);
+      if (rj?.success && Array.isArray(rj.data)) setNpRequests(rj.data);
+    } catch {
+      /* leave as-is — card shows empty / retries on next open */
+    }
+  }, []);
+
+  async function handleSubmitNonprod(e: React.FormEvent) {
+    e.preventDefault();
+    setNpError(null);
+    // Worker enters MINUTES → convert to hours for the API (stored unit).
+    const minutesNum = Number(npMinutes);
+    if (!npDept) {
+      setNpError(t("nonprod.pickDept"));
+      return;
+    }
+    // 1 min .. 24h (1440 min). Integer minutes; fractional hours (e.g. 20/60)
+    // are fine for the backend's 0 < hours <= 24 check.
+    if (
+      !Number.isFinite(minutesNum) ||
+      minutesNum <= 0 ||
+      minutesNum > 24 * 60
+    ) {
+      setNpError(t("nonprod.hours"));
+      return;
+    }
+    const hoursNum = minutesNum / 60;
+    setNpSubmitting(true);
+    try {
+      const res = await workerFetch("/api/worker/nonprod-requests", {
+        method: "POST",
+        body: JSON.stringify({
+          date: npDate,
+          departmentCode: npDept,
+          hours: hoursNum,
+          note: npNote,
+          kind: npKind,
+          jobCardId: npKind === "ADD_PROD" ? npJobRef.trim() : "",
+        }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !j?.success) {
+        setNpError(j?.error || t("common.error"));
+        return;
+      }
+      setNpShowForm(false);
+      setNpDept("");
+      setNpMinutes("");
+      setNpJobRef("");
+      setNpNote("");
+      await loadNonprod();
+    } catch {
+      setNpError(t("common.error"));
+    } finally {
+      setNpSubmitting(false);
+    }
+  }
+
   // Standard Times (owner 2026-06-26): the worker's OWN department's standard
   // minutes per WIP, so they know the time limit (no more "totally don't know").
   type StdTimeRow = {
@@ -200,17 +345,36 @@ export default function WorkerMePage() {
   const [stdLoading, setStdLoading] = useState(false);
   const [stdRows, setStdRows] = useState<StdTimeRow[]>([]);
   const [stdSearch, setStdSearch] = useState("");
+  // Multi-department (owner 2026-06-26): the worker's full department set +
+  // which one is currently being viewed. The backend returns the deduped set
+  // (incl. primary) on every /wip-times hit, so the selector only renders when
+  // the worker genuinely belongs to >1 department.
+  const [stdDepts, setStdDepts] = useState<string[]>([]);
+  const [stdDept, setStdDept] = useState<string | null>(null);
 
-  const loadStandardTimes = useCallback(async () => {
+  const loadStandardTimes = useCallback(async (dept?: string) => {
     setStdLoading(true);
     try {
-      const res = await workerFetch("/api/worker/wip-times");
+      const url = dept
+        ? `/api/worker/wip-times?dept=${encodeURIComponent(dept)}`
+        : "/api/worker/wip-times";
+      const res = await workerFetch(url);
       const j = (await res.json()) as {
         success?: boolean;
-        data?: { department?: string; rows?: StdTimeRow[] };
+        data?: {
+          department?: string;
+          departmentCodes?: string[];
+          rows?: StdTimeRow[];
+        };
       };
       if (j?.success && Array.isArray(j.data?.rows)) {
         setStdRows(j.data.rows);
+      }
+      if (j?.success && Array.isArray(j.data?.departmentCodes)) {
+        setStdDepts(j.data.departmentCodes);
+      }
+      if (j?.success && typeof j.data?.department === "string") {
+        setStdDept(j.data.department);
       }
       setStdLoaded(true);
     } catch {
@@ -219,6 +383,59 @@ export default function WorkerMePage() {
       setStdLoading(false);
     }
   }, []);
+
+  const selectStandardDept = useCallback(
+    (dept: string) => {
+      if (dept === stdDept) return;
+      setStdDept(dept);
+      void loadStandardTimes(dept);
+    },
+    [stdDept, loadStandardTimes],
+  );
+
+  // Past announcements archive (relocated from /worker home, owner 2026-06-26):
+  // expired/hidden notices, read-only WITH media. Collapsed by default; lazy-
+  // loads on first open and re-fetches on every open so a just-expired notice
+  // shows without a hard refresh. Best-effort: a failure leaves an empty list.
+  const [pastOpen, setPastOpen] = useState(false);
+  const [pastAnn, setPastAnn] = useState<Announcement[] | null>(null);
+  const [pastLoading, setPastLoading] = useState(false);
+  // Per-row collapse (holds the COLLAPSED ids, default expanded).
+  const [collapsedPast, setCollapsedPast] = useState<Set<string>>(new Set());
+  const togglePastCollapsed = useCallback((id: string) => {
+    setCollapsedPast((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const loadPastAnnouncements = useCallback(async () => {
+    setPastLoading(true);
+    try {
+      const res = await workerFetch("/api/worker/announcements?include=past");
+      const j = (await res.json()) as {
+        success?: boolean;
+        data?: unknown;
+      };
+      if (j?.success && Array.isArray(j.data)) {
+        setPastAnn(j.data as Announcement[]);
+      } else {
+        setPastAnn([]);
+      }
+    } catch {
+      setPastAnn((prev) => prev ?? []);
+    } finally {
+      setPastLoading(false);
+    }
+  }, []);
+  const togglePastOpen = useCallback(() => {
+    setPastOpen((wasOpen) => {
+      const nextOpen = !wasOpen;
+      if (nextOpen) void loadPastAnnouncements();
+      return nextOpen;
+    });
+  }, [loadPastAnnouncements]);
 
   const loadLeaves = useCallback(async () => {
     try {
@@ -231,6 +448,7 @@ export default function WorkerMePage() {
   }, []);
 
   // Refresh /me and leaves on mount
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot mount data load; setState lives inside async callbacks (loadLeaves / loadNonprod are stable useCallbacks) */
   useEffect(() => {
     workerFetch("/api/worker-auth/me")
       .then((r) => r.json())
@@ -250,7 +468,9 @@ export default function WorkerMePage() {
         /* ignore — keep cached */
       });
     loadLeaves();
-  }, [loadLeaves]);
+    void loadNonprod();
+  }, [loadLeaves, loadNonprod]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   async function handleSavePhone() {
     setPhoneSaving(true);
@@ -550,6 +770,279 @@ export default function WorkerMePage() {
         </div>
       </div>
 
+      {/* Time adjustment — non-production OR extra production time (owner
+          2026-06-26). Worker picks the type, then dept + hours + reason.
+          Collapsible (owner 2026-06-27): folds like the Standard Times / Past
+          announcements cards below — collapsed by default, chevron on the
+          right, expands on tap to reveal the apply form + My requests. A small
+          count chip on the collapsed header flags PENDING requests. */}
+      {(() => {
+        const pendingCount = npRequests.filter(
+          (r) => r.status === "PENDING",
+        ).length;
+        return (
+      <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setTaOpen((v) => !v)}
+          className="w-full px-4 py-3 flex items-center justify-between text-left"
+          aria-expanded={taOpen}
+        >
+          <span className="flex items-center gap-2">
+            <Clock className="h-4 w-4 text-[#6B5C32]" />
+            <span className="text-sm font-semibold">{t("timeadj.title")}</span>
+            {pendingCount > 0 && (
+              <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-[#FDF3E0] text-[#9C6F1E] text-[10px] font-bold">
+                {pendingCount}
+              </span>
+            )}
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 text-[#8A8680] transition-transform ${taOpen ? "rotate-180" : ""}`}
+          />
+        </button>
+
+        {taOpen && (
+          <div className="px-4 pb-4 border-t border-[#F0ECE9] pt-3">
+        <div className="flex items-center justify-end mb-2">
+          <button
+            type="button"
+            onClick={() => {
+              setNpShowForm((v) => !v);
+              setNpError(null);
+            }}
+            className="text-xs flex items-center gap-1 px-2.5 py-1 rounded bg-[#F0ECE9] hover:bg-[#E5E0DB] font-semibold"
+          >
+            <Plus className="h-3 w-3" />
+            {t("nonprod.apply")}
+          </button>
+        </div>
+        <p className="text-xs text-[#8A8680] mb-3">
+          {npKind === "ADD_PROD" ? t("timeadj.introAddProd") : t("nonprod.intro")}
+        </p>
+
+        {npShowForm && (
+          <form
+            onSubmit={handleSubmitNonprod}
+            className="space-y-2 mb-3 bg-[#FAF9F7] p-3 rounded-lg"
+          >
+            {/* TYPE toggle — Non-production (protects efficiency) vs Extra
+                production time (counts as production output). */}
+            <div>
+              <label className="text-xs text-[#5A5550] block mb-1">
+                {t("timeadj.type")}
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {(["NONPROD", "ADD_PROD"] as const).map((k) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => {
+                      setNpKind(k);
+                      setNpDept("");
+                      setNpError(null);
+                    }}
+                    className={`h-10 rounded border text-xs font-semibold px-2 ${
+                      npKind === k
+                        ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                        : "border-[#D8D2CC] bg-white text-[#5A5550]"
+                    }`}
+                  >
+                    {k === "NONPROD"
+                      ? t("timeadj.typeNonprod")
+                      : t("timeadj.typeAddProd")}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-[#5A5550] block mb-1">
+                {t("nonprod.department")}
+              </label>
+              <select
+                value={npDept}
+                onChange={(e) => setNpDept(e.target.value)}
+                className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+              >
+                <option value="">{t("nonprod.pickDept")}</option>
+                {(npKind === "ADD_PROD" ? prodDepts : npDepts).map((d) => (
+                  <option key={d.code} value={d.code}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-[#5A5550] block mb-1">
+                  {t("nonprod.date")}
+                </label>
+                <input
+                  type="date"
+                  value={npDate}
+                  onChange={(e) => setNpDate(e.target.value)}
+                  className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-[#5A5550] block mb-1">
+                  {t("timeadj.minutesLabel")}
+                </label>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  max="1440"
+                  step="1"
+                  value={npMinutes}
+                  onChange={(e) => setNpMinutes(e.target.value)}
+                  className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                  placeholder="20"
+                />
+              </div>
+            </div>
+            {npKind === "ADD_PROD" && (
+              <div>
+                <label className="text-xs text-[#5A5550] block mb-1">
+                  {t("timeadj.jobRef")}
+                </label>
+                <input
+                  type="text"
+                  value={npJobRef}
+                  onChange={(e) => setNpJobRef(e.target.value)}
+                  className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                  placeholder={t("timeadj.jobRefPlaceholder")}
+                />
+              </div>
+            )}
+            <div>
+              <label className="text-xs text-[#5A5550] block mb-1">
+                {npKind === "ADD_PROD" ? t("timeadj.reason") : t("nonprod.note")}
+              </label>
+              <input
+                type="text"
+                value={npNote}
+                onChange={(e) => setNpNote(e.target.value)}
+                className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+              />
+            </div>
+            {npError && <p className="text-xs text-[#9A3A2D]">{npError}</p>}
+            <button
+              type="submit"
+              disabled={npSubmitting}
+              className="w-full h-10 rounded bg-[#6B5C32] text-white text-sm font-semibold disabled:opacity-60"
+            >
+              {npSubmitting ? t("common.loading") : t("nonprod.submit")}
+            </button>
+          </form>
+        )}
+
+        <p className="text-xs text-[#8A8680] font-medium mb-1.5">
+          {t("nonprod.myRequests")}
+        </p>
+        {(() => {
+          // Worker-side display rule (owner 2026-06-27) — DB rows are NEVER
+          // deleted (payroll/efficiency-relevant; admin keeps the full set).
+          // We only trim what the WORKER sees so the list stays short:
+          //   • PENDING always shows (any age)
+          //   • APPROVED / REJECTED only from the last 14 days
+          //   • then hard-cap at the 10 most recent, newest first
+          // Best available timestamp: decidedAt (when it was approved/rejected)
+          // → createdAt (when it was applied) → date (the day it is FOR).
+          const RETAIN_MS = 14 * 24 * 60 * 60 * 1000;
+          const now = nowMs;
+          const tsOf = (r: NonprodRequest) => {
+            const raw = r.decidedAt || r.createdAt || r.date || "";
+            const ms = Date.parse(raw);
+            return Number.isNaN(ms) ? 0 : ms;
+          };
+          const sorted = [...npRequests].sort((a, b) => tsOf(b) - tsOf(a));
+          const filtered = sorted.filter((r) => {
+            if (r.status === "PENDING") return true;
+            const ts = tsOf(r);
+            return ts > 0 && now - ts <= RETAIN_MS;
+          });
+          const shown = filtered.slice(0, 10);
+          const anyHidden = shown.length < npRequests.length;
+          if (npRequests.length === 0) {
+            return (
+              <p className="text-sm text-[#8A8680]">{t("nonprod.noRequests")}</p>
+            );
+          }
+          return (
+            <>
+          <div className="space-y-1.5">
+            {shown.map((r) => {
+              const isAddProd = r.kind === "ADD_PROD";
+              // Stored `hours` × 60 = minutes (owner 2026-06-27: show minutes).
+              // "X min" under an hour, "Xh Ym" (or "Xh") at/over an hour.
+              const totalMin = Math.round((r.hours ?? 0) * 60);
+              const hh = Math.floor(totalMin / 60);
+              const mm = totalMin % 60;
+              const durLabel =
+                totalMin < 60
+                  ? `${totalMin} ${t("timeadj.minSuffix")}`
+                  : mm === 0
+                    ? `${hh}h`
+                    : `${hh}h ${mm}${t("timeadj.minSuffix")}`;
+              const deptName =
+                (isAddProd ? prodDepts : npDepts).find(
+                  (d) => d.code === r.departmentCode,
+                )?.name ||
+                npDepts.find((d) => d.code === r.departmentCode)?.name ||
+                prodDepts.find((d) => d.code === r.departmentCode)?.name ||
+                r.departmentCode;
+              return (
+                <div
+                  key={r.id}
+                  className="flex items-center justify-between text-sm py-1.5 border-b border-[#F0ECE9] last:border-0"
+                >
+                  <div className="min-w-0">
+                    <p className="font-medium truncate">
+                      {deptName} · {durLabel}
+                      <span
+                        className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                          isAddProd
+                            ? "bg-[#E4ECF5] text-[#2A5A8A]"
+                            : "bg-[#F0ECE9] text-[#6B5C32]"
+                        }`}
+                      >
+                        {isAddProd
+                          ? t("timeadj.typeAddProd")
+                          : t("timeadj.typeNonprod")}
+                      </span>
+                    </p>
+                    <p className="text-xs text-[#8A8680]">{r.date}</p>
+                  </div>
+                  <span
+                    className={`shrink-0 text-xs px-2 py-0.5 rounded font-semibold ${
+                      r.status === "APPROVED"
+                        ? "bg-[#E0F0E8] text-[#2A6B4A]"
+                        : r.status === "REJECTED"
+                          ? "bg-[#FDF6F4] text-[#9A3A2D]"
+                          : "bg-[#FDF3E0] text-[#9C6F1E]"
+                    }`}
+                  >
+                    {t(`nonprod.status.${r.status}`)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          {anyHidden && (
+            <p className="mt-2 text-[11px] text-[#9CA3AF]">
+              {t("nonprod.olderKept")}
+            </p>
+          )}
+            </>
+          );
+        })()}
+          </div>
+        )}
+      </div>
+        );
+      })()}
+
       {/* Standard Times — the worker's OWN department's minutes per WIP
           (owner 2026-06-26). Collapsed by default; loads on first open. */}
       <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
@@ -564,7 +1057,12 @@ export default function WorkerMePage() {
           <span className="flex items-center gap-2">
             <Clock className="h-4 w-4 text-[#6B5C32]" />
             <span className="text-sm font-semibold">
-              Standard Times{me.departmentCode ? ` · ${me.departmentCode}` : ""}
+              Standard Times
+              {stdDept
+                ? ` · ${stdDept}`
+                : me.departmentCode
+                  ? ` · ${me.departmentCode}`
+                  : ""}
             </span>
           </span>
           <ChevronDown
@@ -575,8 +1073,41 @@ export default function WorkerMePage() {
         {stdOpen && (
           <div className="px-4 pb-4">
             <p className="text-xs text-[#8A8680] mb-2">
-              Standard minutes per WIP for your department.
+              {stdDepts.length > 1
+                ? "Standard minutes per WIP. Pick a department to view."
+                : "Standard minutes per WIP for your department."}
             </p>
+            {/* Single-department label — when the worker belongs to exactly
+                one department the selector is hidden, so show that dept as a
+                small static chip so they can see which one this is. */}
+            {stdDepts.length === 1 && (
+              <div className="mb-2">
+                <span className="inline-flex h-7 items-center rounded border border-[#D8D2CC] bg-[#F3EFE9] px-2.5 text-xs font-semibold text-[#6B5C32]">
+                  {stdDepts[0]}
+                </span>
+              </div>
+            )}
+            {/* Department selector — only when the worker is in >1 department.
+                Segmented chips, brand olive active (matches the language
+                buttons above). Default = primary (the backend's chosen dept). */}
+            {stdDepts.length > 1 && (
+              <div className="flex flex-wrap gap-2 mb-2">
+                {stdDepts.map((code) => (
+                  <button
+                    key={code}
+                    type="button"
+                    onClick={() => selectStandardDept(code)}
+                    className={`h-9 px-3 rounded border text-xs font-semibold ${
+                      stdDept === code
+                        ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                        : "bg-white text-[#1F1D1B] border-[#D8D2CC]"
+                    }`}
+                  >
+                    {code}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="relative mb-2">
               <Search className="h-4 w-4 text-[#B0AAA3] absolute left-2.5 top-1/2 -translate-y-1/2" />
               <input
@@ -628,6 +1159,80 @@ export default function WorkerMePage() {
                   </div>
                 );
               })()
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Past announcements (archive) — relocated from the home tab (owner
+          2026-06-26). Collapsed by default; lazy-loads on first open. Read-only,
+          WITH media (reuses the shared AnnouncementMedia). Each row is itself
+          foldable, mirroring the live list on home. */}
+      <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
+        <button
+          type="button"
+          onClick={togglePastOpen}
+          className="w-full px-4 py-3 flex items-center justify-between text-left"
+          aria-expanded={pastOpen}
+        >
+          <span className="flex items-center gap-2">
+            <Megaphone className="h-4 w-4 text-[#6B5C32]" />
+            <span className="text-sm font-semibold">
+              {t("home.pastAnnouncements")}
+            </span>
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 text-[#8A8680] transition-transform ${pastOpen ? "rotate-180" : ""}`}
+          />
+        </button>
+        {pastOpen && (
+          <div className="border-t border-[#F0ECE9]">
+            {pastLoading && pastAnn === null ? (
+              <p className="px-4 py-3 text-xs text-[#9CA3AF]">
+                {t("common.loading")}
+              </p>
+            ) : pastAnn && pastAnn.length > 0 ? (
+              <ul className="divide-y divide-[#F0ECE9]">
+                {pastAnn.map((a) => {
+                  const collapsed = collapsedPast.has(a.id);
+                  const { title, body } = localizeAnnouncement(a, lang);
+                  return (
+                    <li key={a.id} className="px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => togglePastCollapsed(a.id)}
+                        className="flex w-full items-start gap-2 text-left"
+                      >
+                        <p className="min-w-0 flex-1 text-sm font-semibold text-[#5A5550] break-words">
+                          {title}
+                        </p>
+                        <ChevronDown
+                          className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${collapsed ? "" : "rotate-180"}`}
+                        />
+                      </button>
+                      {!collapsed && (
+                        <div className="mt-0.5 pl-0">
+                          {body && (
+                            <p className="whitespace-pre-wrap break-words text-xs text-[#5A5550]">
+                              {body}
+                            </p>
+                          )}
+                          <AnnouncementMedia attachments={a.attachments} />
+                          {a.createdAt && (
+                            <p className="mt-1 text-[10px] text-[#9CA3AF]">
+                              {fmtDay(a.createdAt)}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="px-4 py-3 text-xs text-[#9CA3AF]">
+                {t("home.noPastAnnouncements")}
+              </p>
             )}
           </div>
         )}

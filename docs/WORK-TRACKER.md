@@ -9,6 +9,25 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-06-26 (late) — CURRENT STATE (tidy summary; detailed logs below)
+
+**✅ LIVE on prod + staging:** PIC flicker fix · mint+jc sticker · packing-list per-piece racks · Standard Times (#B) · announcement collapse · 2-PIC everywhere · DO-email PDF · schedule Barcode→QR · **PIC2 save fix** (Hyperdrive read-after-write false mismatch).
+
+**🟡 ON STAGING — awaiting owner verify → then promote to prod:**
+- Real-logo PWA icons · Auto-sent mail full-detail view (was a modal)
+- **Announcement photos/PDF now render** — worker-token file proxy `/api/worker/ann-files/:id/download` (root cause: `/api/files` is cookie-gated, 401s on the phone)
+- Media lightbox (square tiles + fullscreen swipe) · Past-announcements moved to Me tab (below Standard Times) · Clock-in full-width (no box-in-box) · single-dept label
+- **Announcement targeting** — All / specific departments / specific people, multi-select (default All)
+- **Web Push** — announcement→push (respects targeting) + 8:00/18:00 clock reminders. ⚠️ needs VAPID secrets set to work
+- **#C Time-adjustment** — non-prod hours + NEW extra-production-time claim; efficiency = (WIP std min + approved extra min) ÷ ((prod clock-hrs − approved non-prod) × 60); no-claim workers byte-identical. ⚠️ owner verify the efficiency math
+- Earlier staging batch: #3 mail-list UI · #5+/r/ per-piece QR/rack · #D media columns · #E archive · multi-dept · staging trim
+
+**⚙️ DEPLOY STEPS before Web Push works:** set Worker secrets `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` / `PUSH_CRON_SECRET` (+ `VAPID_PUBLIC_KEY` matching the committed fallback) on prod AND staging; add `PUSH_CRON_SECRET` as a GitHub repo secret for the clock-reminder workflow.
+
+**🔍 Investigated, NOT bugs:** Eff-allowance @86% = per-worker "Eff. Threshold %" set ≤86 (data edit, not code) · Fab Cut "10 min" = BOM `dept_working_times` data (fix in WIP Times maint); WIP-time edits aren't audited so there's no record of who changed it (could add `emitAudit`).
+
+---
+
 ## 2026-06-26 — Coding-base kickoff → staging deploy + test (owner rapid-fire)
 
 **Branch: `feat/packing-mint-jc` → pushed to `staging` (NOT main/prod). Owner ruling: route this whole batch to staging, verify, then decide prod promotion.**
@@ -28,6 +47,22 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 - Doc-date basis · opening_date floor · PARTIAL_PAID (paste `Hookka迁移11` + test partial supplier payment) · QR canonical domain · customer-email drain. (All backend-shipped earlier.)
 
 **Owner notes this session:** staging slowness = Tokyo region + small tier, NOT data volume (prod has same data, fast) — trim won't fix speed (owner trimmed anyway for shorter lists). Login bounce on staging = use incognito + prod creds (DB cloned from prod).
+
+### Owner "把 pending 全部做掉" — parallel-agent build batch (late 2026-06-26) — SHIPPED to staging
+Built via parallel worktree subagents, each reviewed + cherry-picked onto `staging` (typecheck app+base clean, tests pass). **STAGING-ONLY — owner must verify before prod:**
+- **#3** Auto-sent mail view restyled to match the normal mail list (OutboxPanel rows/header).
+- **#B-2** Standard Times multi-department selector (worker with >1 dept picks which dept's WIP times; backend `?dept=` validated vs the worker's set).
+- **#E** Worker portal "Past announcements" archive — expired/hidden notices re-readable (collapsible).
+- **#5 + /r/** Per-PIECE packing QR/rack: `piece_pics.racking_number` (mig 0192 + runtime self-apply), `/p/<token>?p=N`, per-piece `applyPackingRack`, `packingPieceIdentity` carries pieceNo, AND the `/r/` "scan items into rack" stock-in is per-piece — fixes "2nd DIVAN piece already in this rack". Additive (single-piece/old stickers byte-identical).
+- **#D** Announcements carry image/video/PDF (mig 0193 `announcements.attachments` + runtime self-apply; reuses `/api/files`; worker renders inline).
+- **PWA phase-1** installable worker portal (manifest + safe SW [network-first nav, never caches /api, version-keyed, prod-only] + Android/iOS install prompt + already-installed detection + geolocation re-ask suppression). build:strict passes. **SW is the riskiest — verify the app still loads.**
+- **#C** Non-production hours APPLY (worker) + APPROVE (admin Working Hours) — new `worker_nonprod_requests` (mig 0110 + runtime self-apply); approve writes a non-prod `working_hour_entry` via the EXISTING path → efficiency denominator already excludes non-prod (departments.isProduction) → efficiency rises, NO pay-formula change.
+
+**Investigated, NOT bugs (no code):**
+- **Efficiency allowance @86%** → BY DESIGN: per-worker "Eff. Allowance (RM)" + "Eff. Threshold %" columns; that worker's threshold is set ≤86. Fix = data edit (raise threshold). Label is just misleading. (docs/investigations/2026-06-26-efficiency-allowance-86pct.md)
+- **Fab Cut "suddenly 10 min"** → BOM-config data (the bedframe products' Fab Cut minutes in dept_working_times = 10), not a code regression; fix in WIP Times maintenance.
+
+**STILL PENDING (the one big piece not built):** PWA **phase 2/3 = Web Push notifications** (announcement→push + 8:00/18:00 clock reminders) — needs VAPID + subscription storage + send + cron. Phase-1 install is the prerequisite (done); iOS push needs the PWA installed (16.4+).
 
 ### Owner spec batch (late 2026-06-26) — design/propose, then build (logged so none drop)
 - **#A Department scan restriction — ❌ DROPPED by owner (2026-06-26).** Owner decided NOT to build the restriction/popup. Simpler model kept: the department is inferred from WHO scans (their own section), exactly like the shared Sew/Uph sticker (women's section → FAB_SEW, men's → UPHOLSTERY). No blocking, no "wrong dept" popup. Don't re-propose. ~~(proposed): worker may only scan stickers of their CURRENT dept (= latest dept-scan today, else punch dept); cross-dept scan → blocked popup "you are in <DEPT>". Choke point = `GET /scan-lookup` (skip shared Sew/Uph `wk=`/`c=` stickers, already self-route by section) + backend guard on scan-complete / scan-complete-dept. NO current enforcement exists. Full flow map done (clock→dept_scan_events→buckets→working_hour_entries via dept-scan-split.ts/punch-autofill.ts). Mockup popup → build after owner confirms current-dept rule + edge cases.

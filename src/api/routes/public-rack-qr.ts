@@ -55,6 +55,7 @@ import {
 } from "../../lib/job-card-id";
 import { pickPackingCard } from "../lib/packing-card-resolve";
 import { packingPieceIdentity } from "../lib/packing-piece-identity";
+import { ensurePiecePicsRackingColumn } from "../lib/packing-rack-write";
 import { resolveCard as resolvePackingCardByToken } from "./public-rack-write";
 
 const app = new Hono<Env>();
@@ -91,6 +92,14 @@ export type RackStockInItem = {
   // productionOrderId + wipLabel match. NOT used by the rack_items / movements
   // writes below (those are unchanged); only the rackingNumber stamp reads it.
   jobCardId?: string | null;
+  // PER-PIECE (mig 0192): the physical piece number + the WIP's total piece count
+  // for a multi-piece card (a DIVAN of 2 → pieceNo 1/2, totalPieces 2). When set
+  // AND totalPieces > 1, the rack_items notes carry a "· pc N of M" suffix so each
+  // physical piece is a DISTINCT row (the 2nd piece can sit on its own rack).
+  // Optional: the worker route reuses this helper without them, and a single-
+  // piece / no-pieceNo piece writes the legacy "SO <no>" notes (byte-identical).
+  pieceNo?: number | null;
+  totalPieces?: number | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -135,8 +144,16 @@ export function buildRackStockInStatements(
     // SO number → "SO <no>" in notes (the only spare text column on rack_items
     // that the warehouse list/detail route already surfaces). Optional field,
     // so guard for the worker route which calls this helper without it.
-    const soNo = (item.salesOrderNo ?? "").trim();
-    const notes = soNo ? `SO ${soNo}` : "";
+    // Delegate to the shared identity helper so the "SO <no>" tag — and the
+    // per-piece "· pc N of M" suffix (mig 0192, when pieceNo + totalPieces > 1) —
+    // can never drift from the office / applyPackingRack / currentRackOfPiece
+    // path. Single-piece / no-pieceNo → byte-identical legacy "SO <no>" / "".
+    const soNo = (item.salesOrderNo ?? "").trim() || null;
+    const notes = packingPieceIdentity({
+      salesOrderNo: soNo,
+      pieceNo: item.pieceNo ?? null,
+      totalPieces: item.totalPieces ?? null,
+    }).notes;
     statements.push(
       db
         .prepare(
@@ -407,14 +424,64 @@ async function resolvePackingCard(
 
 type CurrentRack = { currentRackId: string | null; currentRackLabel: string | null };
 
+// Pull the ?p=<pieceNo> off a scanned /p/<token>?p=N URL (the per-piece marker
+// the packing sticker encodes). Returns a positive integer or null (no ?p=, junk,
+// or a non-URL string → single-piece / card-level behaviour). Mirrors
+// public-rack-write.ts readPieceNo so the two public scan paths read it the same.
+function parsePieceNoFromUrl(code: string): number | null {
+  try {
+    const raw = (new URL(code).searchParams.get("p") || "").trim();
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+  } catch {
+    return null;
+  }
+}
+
+// How many physical pieces a PACKING card has = its piece_pics row count
+// (mirrors applyPackingRack's per-piece resolution EXACTLY). A multi-piece WIP
+// (a DIVAN of 2) has 2 rows → totalPieces 2; a single-piece card has 1 (or 0 if
+// piece_pics was never seeded) → 1. Best-effort: a missing table / failed count
+// reads as 1 (single-piece, legacy behaviour). This is the SAME count
+// applyPackingRack uses to decide per-piece vs card-level, so the two paths
+// converge on the identical rack_items identity (no duplicate warehouse rows).
+async function pieceCountOf(
+  db: D1Database,
+  jobCardId: string | null,
+): Promise<number> {
+  if (!jobCardId) return 1;
+  try {
+    const cnt = await db
+      .prepare("SELECT COUNT(*) AS n FROM piece_pics WHERE jobCardId = ?")
+      .bind(jobCardId)
+      .first<{ n: number }>();
+    return Math.max(1, Number(cnt?.n ?? 0));
+  } catch {
+    return 1;
+  }
+}
+
 // The per-piece signature stock-in writes: rack_items.productName holds the human
 // description (the WIP label, e.g. '8" Divan- 6FT'), and notes holds "SO <no>" (or
 // "" when there's no SO). Stock-OUT matches on this same signature, so move-
 // detection MUST too — see the rack memory.
-function pieceNotes(soNo: string | null): string {
-  // Delegate to the shared identity helper so the "SO <no>" tag can never drift
-  // from the office / applyPackingRack path.
-  return packingPieceIdentity({ salesOrderNo: soNo }).notes;
+//
+// PER-PIECE (mig 0192): when a pieceNo is supplied AND the WIP genuinely has >1
+// piece, packingPieceIdentity appends "· pc N of M" so the notes signature is
+// DISTINCT per physical piece (the 2nd DIVAN piece no longer collides with the
+// 1st). When pieceNo is absent / 0, or totalPieces ≤ 1, the notes are
+// byte-identical to the legacy "SO <no>" / "" — so old single-piece rows still
+// match + move/clear.
+function pieceNotes(
+  soNo: string | null,
+  pieceNo?: number | null,
+  totalPieces?: number | null,
+): string {
+  // Delegate to the shared identity helper so the "SO <no>" tag (and the per-
+  // piece "· pc N of M" suffix) can never drift from the office / applyPackingRack
+  // path.
+  return packingPieceIdentity({ salesOrderNo: soNo, pieceNo, totalPieces }).notes;
 }
 
 // Where (if anywhere) THIS piece currently sits — matched by the SAME per-piece
@@ -430,6 +497,12 @@ async function currentRackOfPiece(
   db: D1Database,
   description: string,
   soNo: string | null,
+  // Per-piece (mig 0192): when present + the WIP has >1 piece, the lookup keys on
+  // the piece-distinct notes ("SO <no> · pc N of M") so the 2nd DIVAN piece is
+  // found independently of the 1st. Omitted / single-piece → legacy notes, so an
+  // existing card-level row still matches (back-compat).
+  pieceNo?: number | null,
+  totalPieces?: number | null,
 ): Promise<CurrentRack> {
   const name = (description || "").trim();
   if (!name) return { currentRackId: null, currentRackLabel: null };
@@ -441,7 +514,7 @@ async function currentRackOfPiece(
         WHERE ri.productName = ? AND ri.notes = ?
         ORDER BY ri.id DESC LIMIT 1`,
     )
-    .bind(name, pieceNotes(soNo))
+    .bind(name, pieceNotes(soNo, pieceNo, totalPieces))
     .first<{ rackLocationId: string | null; rack: string | null }>();
   return {
     currentRackId: row?.rackLocationId ?? null,
@@ -534,6 +607,8 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
     salesOrderNo: null,
     description: "",
     jobCardId: null,
+    pieceNo: null,
+    totalPieces: null,
     currentRackId: null,
     currentRackLabel: null,
   };
@@ -557,6 +632,17 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
       if (!card || (card.departmentCode || "").toUpperCase() !== "PACKING") {
         return c.json(notFound);
       }
+      // The packing sticker QR is /p/<token>?p=<pieceNo> — each physical piece of
+      // a multi-piece WIP (a DIVAN of 2) carries its own piece number, so two
+      // pieces resolve to DISTINCT warehouse identities (no "already in this
+      // rack" collapse). The link only carries ?p=, not &t=, so derive
+      // totalPieces from the card's piece_pics count — the SAME count
+      // applyPackingRack uses, so the office-dropdown row and this rack-scan row
+      // converge on one identity. No ?p= (old single-piece prints) → pieceNo null
+      // → byte-identical card-level identity.
+      const scanPieceNo = parsePieceNoFromUrl(code);
+      const totalPieces =
+        scanPieceNo != null ? await pieceCountOf(c.var.DB, card.id) : null;
       // Shared formula with applyPackingRack so a piece assigned via the office
       // dropdown and the same piece stocked-in via this rack scan resolve to the
       // identical rack_items identity (no duplicate warehouse rows).
@@ -565,6 +651,8 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
         c.var.DB,
         description,
         card.salesOrderNo,
+        scanPieceNo,
+        totalPieces,
       );
       return c.json({
         found: true,
@@ -574,6 +662,10 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
         salesOrderNo: (card.salesOrderNo || "").trim(),
         description,
         jobCardId: card.id,
+        // Per-piece markers threaded back so stock-in writes the SAME
+        // piece-distinct identity (null when single-piece / no ?p=).
+        pieceNo: scanPieceNo,
+        totalPieces: totalPieces && totalPieces > 1 ? totalPieces : null,
         currentRackId: cur.currentRackId,
         currentRackLabel: cur.currentRackLabel,
       });
@@ -595,6 +687,9 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
         description: manual.name,
         // No system PO → no job_card to stamp.
         jobCardId: null,
+        // A loose HKITEM piece has no system piece numbering.
+        pieceNo: null,
+        totalPieces: null,
         currentRackId: null,
         currentRackLabel: null,
       });
@@ -621,7 +716,27 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
         : null) ?? (await resolvePo(c.var.DB, term));
     if (!po) return c.json(notFound);
 
-    const cur = await currentRackOfPiece(c.var.DB, po.description, po.salesOrderNo);
+    // Per-piece (mig 0192): a FG-PACKING sticker encodes ?p=<pieceNo>&t=<total>,
+    // so parseStickerData hands us the piece number — each physical piece of a
+    // multi-piece WIP resolves to a DISTINCT warehouse identity. Prefer the
+    // resolved card's piece_pics count for totalPieces (the SAME count
+    // applyPackingRack uses, so the office row + this scan converge), falling back
+    // to the sticker's own t= when no card / no count. No p= (old single-piece
+    // prints) → pieceNo null → byte-identical card-level identity.
+    const scanPieceNo = sticker?.pieceNo ?? null;
+    let totalPieces: number | null = null;
+    if (scanPieceNo != null) {
+      const counted = await pieceCountOf(c.var.DB, po.jobCardId);
+      totalPieces = counted > 1 ? counted : (sticker?.totalPieces ?? null);
+    }
+
+    const cur = await currentRackOfPiece(
+      c.var.DB,
+      po.description,
+      po.salesOrderNo,
+      scanPieceNo,
+      totalPieces,
+    );
     return c.json({
       found: true,
       productionOrderId: po.productionOrderId,
@@ -635,6 +750,10 @@ app.get("/:rackId/item", async (c: Context<Env>) => {
       // sticker). The scan page threads it back into stock-in so the rack stamp
       // hits this card's rackingNumber precisely. null for a PO-level match.
       jobCardId: po.jobCardId,
+      // Per-piece markers threaded back so stock-in writes the SAME
+      // piece-distinct identity (null when single-piece / no p=).
+      pieceNo: scanPieceNo,
+      totalPieces: totalPieces && totalPieces > 1 ? totalPieces : null,
       currentRackId: cur.currentRackId,
       currentRackLabel: cur.currentRackLabel,
     });
@@ -668,6 +787,10 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
         salesOrderNo?: string | null;
         description?: string;
         jobCardId?: string | null;
+        // Per-piece markers (mig 0192) so a multi-piece WIP writes one DISTINCT
+        // rack_items row per physical piece. Optional / null = legacy card-level.
+        pieceNo?: number | null;
+        totalPieces?: number | null;
         qty?: number;
       }>;
     };
@@ -681,14 +804,31 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
     // sum a client qty here). The row's productName stores the human
     // `description` (productName + size) so the rack grid reads "1013 King Size
     // Headboard"; the SO number rides along to be written into notes.
-    const items: RackStockInItem[] = rawItems.map((it) => ({
-      productionOrderId: it.productionOrderId || null,
-      productName: (it.description || it.productName || "").toString(),
-      poNo: it.poNo || null,
-      salesOrderNo: (it.salesOrderNo ?? "").toString().trim() || null,
-      jobCardId: it.jobCardId || null,
-      qty: 1,
-    }));
+    const items: RackStockInItem[] = rawItems.map((it) => {
+      const pieceNo =
+        it.pieceNo != null && Number.isFinite(it.pieceNo) && it.pieceNo > 0
+          ? Math.floor(it.pieceNo)
+          : null;
+      const totalPieces =
+        it.totalPieces != null &&
+        Number.isFinite(it.totalPieces) &&
+        it.totalPieces > 1
+          ? Math.floor(it.totalPieces)
+          : null;
+      return {
+        productionOrderId: it.productionOrderId || null,
+        productName: (it.description || it.productName || "").toString(),
+        poNo: it.poNo || null,
+        salesOrderNo: (it.salesOrderNo ?? "").toString().trim() || null,
+        jobCardId: it.jobCardId || null,
+        // Per-piece markers ride through to buildRackStockInStatements (notes
+        // suffix) AND the move-detect signature below — only diverge from the
+        // legacy identity when BOTH are present (pieceNo set + totalPieces > 1).
+        pieceNo,
+        totalPieces,
+        qty: 1,
+      };
+    });
 
     // Move-aware, PER PIECE: for any piece already racked in a DIFFERENT rack,
     // delete THAT one piece's row first so it is MOVED, not duplicated. Match on
@@ -707,11 +847,24 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
       if (!it.productionOrderId) continue; // manual/loose piece → always add
       const name = (it.productName || "").trim();
       if (!name) continue;
-      const notes = pieceNotes(it.salesOrderNo ?? null);
+      // Per-piece signature (mig 0192): the "· pc N of M" suffix makes the 2nd
+      // DIVAN piece a DISTINCT key, so the move-delete of one piece never nukes
+      // its sibling. Single-piece / no-pieceNo → legacy "SO <no>" key (unchanged).
+      const notes = pieceNotes(
+        it.salesOrderNo ?? null,
+        it.pieceNo ?? null,
+        it.totalPieces ?? null,
+      );
       const sig = `${name} | ${notes}`;
       if (seenMove.has(sig)) continue;
       seenMove.add(sig);
-      const cur = await currentRackOfPiece(c.var.DB, name, it.salesOrderNo ?? null);
+      const cur = await currentRackOfPiece(
+        c.var.DB,
+        name,
+        it.salesOrderNo ?? null,
+        it.pieceNo ?? null,
+        it.totalPieces ?? null,
+      );
       if (cur.currentRackId && cur.currentRackId !== rackId) {
         moveDeletes.push(
           c.var.DB
@@ -754,10 +907,45 @@ app.post("/:rackId/stock-in", async (c: Context<Env>) => {
     // wipLabel, so it matched no card). Fall back to that signature match only
     // for a legacy/PO-level piece that carries no jobCardId (here `productName`
     // IS the wipLabel-derived description from resolvePo).
+    //
+    // PER-PIECE (mig 0192): a multi-piece WIP must NOT stamp the card-level
+    // job_cards.rackingNumber — that one column can't hold two different racks
+    // and stamping it would clobber a sibling piece's rack. Instead write THIS
+    // piece's piece_pics.racking_number (mirrors applyPackingRack's per-piece
+    // path) and still bump the card's updated_at so the snapshot cache
+    // invalidates and the Packing sheet re-reads. Single-piece / legacy pieces
+    // keep the exact card-level stamp below (byte-identical).
     const rackLabel = rack.rack ?? "";
     const rackingUpdates: D1PreparedStatement[] = [];
     for (const it of items) {
       if (!rackLabel) continue;
+      const perPiece =
+        it.jobCardId != null &&
+        it.pieceNo != null &&
+        it.pieceNo > 0 &&
+        it.totalPieces != null &&
+        it.totalPieces > 1;
+      if (perPiece) {
+        // Self-applies the column the FIRST time via the shared ensure (mig 0192);
+        // the column-rename map already carries racking_number → keep snake_case.
+        await ensurePiecePicsRackingColumn(c.var.DB);
+        rackingUpdates.push(
+          c.var.DB
+            .prepare(
+              `UPDATE piece_pics SET racking_number = ?
+                 WHERE jobCardId = ? AND pieceNo = ?`,
+            )
+            .bind(rackLabel, it.jobCardId, it.pieceNo),
+        );
+        // Bump the card so the production_orders snapshot cache invalidates and
+        // the Packing sheet re-reads (the card-level rackingNumber is left alone).
+        rackingUpdates.push(
+          c.var.DB
+            .prepare("UPDATE job_cards SET updated_at = NOW() WHERE id = ?")
+            .bind(it.jobCardId),
+        );
+        continue;
+      }
       if (it.jobCardId) {
         rackingUpdates.push(
           c.var.DB

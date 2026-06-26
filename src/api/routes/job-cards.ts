@@ -300,11 +300,36 @@ app.get("/summary", async (c) => {
     .bind(from, to, from, to)
     .all<WorkerProdSummaryRow>();
 
-  const data = (res.results ?? []).map((r) => ({
-    workerId: r.workerId,
-    productionMinutes: Math.round(Number(r.productionMinutes) || 0),
-    jcCount: Number(r.jcCount) || 0,
-  }));
+  const byWorker = new Map<
+    string,
+    { workerId: string; productionMinutes: number; jcCount: number }
+  >();
+  for (const r of res.results ?? []) {
+    byWorker.set(r.workerId, {
+      workerId: r.workerId,
+      productionMinutes: Math.round(Number(r.productionMinutes) || 0),
+      jcCount: Number(r.jcCount) || 0,
+    });
+  }
+
+  // Approved EXTRA PRODUCTION TIME (kind='ADD_PROD') → add to the per-worker
+  // production minutes (the Efficiency % numerator on the Employees page). A
+  // worker with no approved claims is unaffected; a worker with claims but no
+  // completed JCs in range still surfaces (jcCount 0) so the credit shows.
+  const { computeApprovedAddProdMinutesByWorker } = await import(
+    "../lib/efficiency-allowance"
+  );
+  const addProd = await computeApprovedAddProdMinutesByWorker(c.var.DB, from, to);
+  for (const [wid, mins] of addProd) {
+    const cur = byWorker.get(wid);
+    if (cur) {
+      cur.productionMinutes += mins;
+    } else {
+      byWorker.set(wid, { workerId: wid, productionMinutes: mins, jcCount: 0 });
+    }
+  }
+
+  const data = Array.from(byWorker.values());
   const _snap_payload = { data, total: data.length };
   try {
     await writeSnapshot(

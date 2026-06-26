@@ -22,6 +22,7 @@ import {
   type WorkerLang,
 } from "@/lib/worker-i18n";
 import { useVersionCheck } from "@/lib/use-version-check";
+import PwaInstallPrompt from "@/components/pwa-install-prompt";
 
 // Keys used across the portal. Single source of truth so other
 // pages (e.g. login) can clear / set them consistently.
@@ -171,6 +172,10 @@ export default function WorkerLayout() {
 
       {/* ----- Page body ----- */}
       <main className="flex-1 max-w-md w-full mx-auto px-4 py-4 pb-28">
+        {/* PWA install card — Android one-tap install / iOS Add-to-Home hint.
+            Self-hides when already installed or once dismissed. Skipped on the
+            login screen (nothing to anchor an install decision to yet). */}
+        {!isLogin && <PwaInstallPrompt />}
         <Outlet />
       </main>
 

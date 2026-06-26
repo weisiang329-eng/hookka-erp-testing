@@ -92,6 +92,20 @@ export async function getOrCreateJobCardQrToken(
 
 // Public scan URL — origin comes from the live request so prod / preview /
 // local dev each encode their own host into the printed QR.
-export function packingRackScanUrl(origin: string, token: string): string {
-  return `${origin.replace(/\/+$/, "")}/p/${token}`;
+//
+// `pieceNo` (optional) makes the link target ONE physical piece: a DIVAN of 2
+// pieces prints 2 stickers that encode `/p/<token>?p=1` and `/p/<token>?p=2`, so
+// each can be racked separately (the public route writes piece_pics.racking_number
+// for that piece instead of the card-level job_cards.rackingNumber). ADDITIVE:
+// when pieceNo is omitted/0 the URL is the bare `/p/<token>` form exactly as
+// before — old prints + genuine single-piece cards keep card-level behavior.
+export function packingRackScanUrl(
+  origin: string,
+  token: string,
+  pieceNo?: number,
+): string {
+  const base = `${origin.replace(/\/+$/, "")}/p/${token}`;
+  return pieceNo && pieceNo > 0
+    ? `${base}?p=${encodeURIComponent(String(pieceNo))}`
+    : base;
 }

@@ -28,6 +28,10 @@ import {
 } from "lucide-react";
 import { useT, useWorkerLang } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
+import {
+  AnnouncementMedia,
+  type Announcement,
+} from "./announcement-media";
 import { deriveWipName } from "@/lib/wip-name";
 import { compressImage } from "@/lib/image-compress";
 import { z } from "zod";
@@ -94,6 +98,9 @@ type CompletedRow = {
   // Co-PICs the worker shared this JC with — used to surface "shared with X"
   // when the worker taps the share badge.
   sharedWith?: Array<{ id: string; name: string }>;
+  // Approved EXTRA PRODUCTION TIME (kind='ADD_PROD') linked to this job, in
+  // minutes. 0 when there's no approved extra-time claim for this JC.
+  addProdMinutes?: number;
 };
 type AttendanceRow = {
   date: string;
@@ -109,20 +116,10 @@ type AttendanceRow = {
   lateMinutes?: number;
   status: string;
 };
-// Office → worker announcement. The office types ONE language; the backend
-// auto-translates title+body into all four worker-portal languages on POST and
-// returns them here. Each worker sees the version matching their chosen portal
-// language, falling back to the original posted title/body.
-type Announcement = {
-  id: string;
-  title: string;
-  body: string;
-  createdAt: string | null;
-  translations?: Record<
-    "en" | "ms" | "zh" | "my",
-    { title: string; body: string }
-  > | null;
-};
+// Announcement / AnnouncementAttachment types and the AnnouncementMedia
+// component now live in ./announcement-media (shared with /worker/me's past-
+// announcements archive). localizeAnnouncement / fmtDay stay local below (a
+// shared file can't export both a component and helpers — fast-refresh lint).
 
 // Pick the worker-language version of a notice, falling back to the original
 // posted text whenever the translation is missing/empty (Claude outage, or a
@@ -148,6 +145,9 @@ type HistoryData = {
     productionMinutes: number;
     overtimeMinutes: number;
     completedCount: number;
+    // Extra production time (kind='ADD_PROD') credited to the numerator this
+    // period, in minutes. 0 when the worker has no approved extra-time claims.
+    addProdMinutes?: number;
     efficiencyPct: number;
   };
 };
@@ -268,16 +268,50 @@ function writeAckAnnouncements(ids: Set<string>): void {
 // unstamped (the existing getPunchLocation handles that).
 type LocationState = "unknown" | "granted" | "denied" | "unavailable";
 
+// PWA permission re-ask suppression. Before ever calling getCurrentPosition
+// (which can re-surface the OS prompt and burns a GPS fix), consult the
+// Permissions API. When it reports a settled state we use it directly:
+//   - 'granted' → "granted" with NO prompt and NO GPS spin-up.
+//   - 'denied'  → "denied" with NO prompt (the browser wouldn't ask again anyway).
+//   - 'prompt'  → unknown → null, so the caller falls through to the live request.
+// Returns null when the API is unsupported (iOS Safari, older browsers) — also
+// a fall-through to the live request.
+async function queryLocationPermission(): Promise<LocationState | null> {
+  try {
+    if (typeof navigator === "undefined" || !navigator.permissions?.query) {
+      return null;
+    }
+    const status = await navigator.permissions.query({
+      name: "geolocation" as PermissionName,
+    });
+    if (status.state === "granted") return "granted";
+    if (status.state === "denied") return "denied";
+    return null; // 'prompt' — let the caller decide whether to ask.
+  } catch {
+    return null; // some browsers throw on the geolocation query — fall through.
+  }
+}
+
 // Request a position once. Resolves the resulting permission state. A success
 // means the worker granted (or had already granted) location; a failure with
 // PERMISSION_DENIED means denied; anything else (no geolocation API, timeout,
 // position unavailable) is "unavailable" — both surface the same nudge.
-function requestLocationPermission(): Promise<LocationState> {
+//
+// `passive` (default false): when true, skip the live getCurrentPosition call
+// if the Permissions API already knows the answer — used by the on-open probe
+// so an already-granted worker is NOT re-prompted and we don't spin the GPS.
+// The explicit retry button passes passive=false so it always re-checks live.
+async function requestLocationPermission(
+  passive = false,
+): Promise<LocationState> {
+  if (typeof navigator === "undefined" || !navigator.geolocation) {
+    return "unavailable";
+  }
+  if (passive) {
+    const known = await queryLocationPermission();
+    if (known) return known; // 'granted' / 'denied' settled without prompting.
+  }
   return new Promise((resolve) => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) {
-      resolve("unavailable");
-      return;
-    }
     navigator.geolocation.getCurrentPosition(
       () => resolve("granted"),
       (err) => {
@@ -400,6 +434,8 @@ export default function WorkerHomePage() {
   const [ackAnn, setAckAnn] = useState<Set<string>>(() =>
     readAckAnnouncements(),
   );
+  // Past announcements (archive) moved to /worker/me (owner 2026-06-26) — the
+  // home tab keeps only the live banner + must-ack popup.
 
   // ---- Location permission (Feature B) ----
   const [locState, setLocState] = useState<LocationState>("unknown");
@@ -490,7 +526,11 @@ export default function WorkerHomePage() {
   /* eslint-disable react-hooks/set-state-in-effect -- async permission probe; setState lives inside the resolved promise */
   useEffect(() => {
     let alive = true;
-    requestLocationPermission().then((s) => {
+    // passive=true → if the Permissions API already knows the worker granted
+    // (or hard-denied) location, use that and DON'T re-prompt / spin the GPS.
+    // Only an undecided ('prompt') / unsupported state falls through to a live
+    // request, which is the one case where surfacing the OS prompt is correct.
+    requestLocationPermission(true).then((s) => {
       if (alive) setLocState(s);
     });
     return () => {
@@ -705,6 +745,7 @@ export default function WorkerHomePage() {
                         {body}
                       </p>
                     )}
+                    <AnnouncementMedia attachments={a.attachments} />
                     {a.createdAt && (
                       <p className="mt-1.5 text-[11px] text-[#9CA3AF]">
                         {fmtDay(a.createdAt)}
@@ -791,6 +832,7 @@ export default function WorkerHomePage() {
                           {body}
                         </p>
                       )}
+                      <AnnouncementMedia attachments={a.attachments} />
                       {a.createdAt && (
                         <p className="mt-1 text-[10px] text-[#9CA3AF]">
                           {fmtDay(a.createdAt)}
@@ -833,36 +875,43 @@ export default function WorkerHomePage() {
         </div>
       )}
 
+      {/* Full-width clock button, framed exactly like the SCAN JOB CARD button
+          below (no outer white card; owner 2026-06-26). Keeps the teal colour.
+          When clocked in we show a small time/worked summary above the
+          full-width CLOCK OUT button. */}
       {/* Clock card */}
       {SHOW_CLOCK && (
-      <div className="bg-white rounded-xl p-4 border border-[#D8D2CC] shadow-sm">
+      <div className="space-y-2">
         {!clockedIn ? (
           <button
             type="button"
             onClick={() => handleClock("CLOCK_IN")}
             disabled={clocking}
-            className="w-full h-14 rounded-lg bg-[#3E6570] hover:bg-[#355863] text-white text-lg font-semibold disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
+            className="block w-full h-20 rounded-xl bg-[#3E6570] hover:bg-[#355863] text-white text-xl font-bold tracking-wide shadow-md active:shadow-sm active:translate-y-[1px] transition-all disabled:opacity-60"
           >
-            {clocking ? (
-              <>
-                <Camera className="h-5 w-5" />
-                {t("home.openingCamera")}
-              </>
-            ) : (
-              <>
-                <Clock className="h-5 w-5" />
-                {t("home.clockIn")}
-              </>
-            )}
+            <span className="h-full w-full flex items-center justify-center gap-3">
+              {clocking ? (
+                <>
+                  <Camera className="h-7 w-7" />
+                  {t("home.openingCamera")}
+                </>
+              ) : (
+                <>
+                  <Clock className="h-7 w-7" />
+                  {t("home.clockIn")}
+                </>
+              )}
+            </span>
           </button>
         ) : (
-          <div>
-            <div className="flex items-center justify-between mb-3">
+          <>
+            {/* Time / worked summary — light strip, not a framed card. */}
+            <div className="flex items-center justify-between rounded-lg bg-[#F3EFE9] px-4 py-2.5">
               <div>
                 <p className="text-xs text-[#8A8680]">
                   {clockedOut ? t("home.clockedOutAt") : t("home.clockedInAt")}
                 </p>
-                <p className="text-xl font-bold">
+                <p className="text-lg font-bold">
                   {clockedOut ? data.attendance!.clockOut : data.attendance!.clockIn}
                 </p>
               </div>
@@ -871,7 +920,7 @@ export default function WorkerHomePage() {
                   <p className="text-xs text-[#8A8680]">
                     {t("home.workedHours")}
                   </p>
-                  <p className="text-xl font-bold">
+                  <p className="text-lg font-bold">
                     {fmtHM(data.attendance!.workingMinutes)}
                   </p>
                 </div>
@@ -882,19 +931,24 @@ export default function WorkerHomePage() {
                 type="button"
                 onClick={() => handleClock("CLOCK_OUT")}
                 disabled={clocking}
-                className="w-full h-11 rounded-lg bg-[#F0ECE9] hover:bg-[#E5E0DB] text-[#1F1D1B] text-sm font-semibold disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
+                className="block w-full h-20 rounded-xl bg-[#3E6570] hover:bg-[#355863] text-white text-xl font-bold tracking-wide shadow-md active:shadow-sm active:translate-y-[1px] transition-all disabled:opacity-60"
               >
-                {clocking ? (
-                  <>
-                    <Camera className="h-4 w-4" />
-                    {t("home.openingCamera")}
-                  </>
-                ) : (
-                  t("home.clockOut")
-                )}
+                <span className="h-full w-full flex items-center justify-center gap-3">
+                  {clocking ? (
+                    <>
+                      <Camera className="h-7 w-7" />
+                      {t("home.openingCamera")}
+                    </>
+                  ) : (
+                    <>
+                      <Clock className="h-7 w-7" />
+                      {t("home.clockOut")}
+                    </>
+                  )}
+                </span>
               </button>
             )}
-          </div>
+          </>
         )}
         {clockErr && (
           <div className="mt-2 text-center">
@@ -1055,6 +1109,15 @@ export default function WorkerHomePage() {
         </div>
       )}
 
+      {/* Extra production time credited this period (kind='ADD_PROD'). Only
+          shown when the worker has approved extra-time claims — otherwise the
+          row is absent and the KPI strip looks exactly as before. */}
+      {hist && (hist.totals.addProdMinutes ?? 0) > 0 && (
+        <div className="-mt-1 text-xs text-[#2A5A8A]">
+          + {mins2hrs(hist.totals.addProdMinutes ?? 0)} {t("timeadj.extraApproved")}
+        </div>
+      )}
+
       {/* Daily attendance MOVED to the Pay page (owner 2026-06-12: the per-day
           punch records belong under the pay breakdown, following its month
           picker). Home stays focused on today + completed pieces. */}
@@ -1125,6 +1188,13 @@ export default function WorkerHomePage() {
                       </button>
                     )}
                   </div>
+                  {(c.addProdMinutes ?? 0) > 0 && (
+                    <div className="mt-1">
+                      <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-[#E4ECF5] text-[#2A5A8A] font-semibold">
+                        +{c.addProdMinutes} min {t("timeadj.extraApproved")}
+                      </span>
+                    </div>
+                  )}
                   {openShare === c.jobCardId && c.piecesShared > 0 && (
                     <div className="mt-1.5 ml-0 px-2.5 py-1.5 rounded bg-[#FAF7EE] border border-[#E5DEC6] text-[11px] text-[#5A5550]">
                       {c.sharedWith && c.sharedWith.length > 0

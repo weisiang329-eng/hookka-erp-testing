@@ -87,9 +87,12 @@ test("POST reads EXACTLY ONE body field (rackingNumber); no other mutation", () 
     "the public POST must never read jobCardId/status/poNo/productionOrderId from the request",
   );
   // The card id passed to the write is the TOKEN's resolved row, never the body.
+  // (A trailing optional pieceNo arg — from the ?p= URL param — is permitted; it
+  // is read from the URL, not the request body, so the tenant-safety contract is
+  // unchanged.)
   assert.match(
     publicRoute,
-    /applyPackingRack\(c\.var\.DB,\s*card\.id,\s*rackingNumber\)/,
+    /applyPackingRack\(\s*c\.var\.DB,\s*card\.id,\s*rackingNumber\s*,?/,
     "the write must use the token-resolved card.id, not a request-supplied id",
   );
 });
@@ -162,7 +165,7 @@ test("BOTH the worker path and the public path use the shared applyPackingRack (
   );
   assert.match(
     publicRoute,
-    /applyPackingRack\(c\.var\.DB,\s*card\.id,/,
+    /applyPackingRack\(\s*c\.var\.DB,\s*card\.id,/,
     "public route must call the shared helper",
   );
 });

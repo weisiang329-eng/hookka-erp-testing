@@ -47,8 +47,26 @@ import {
   // rowToMinimalPO for the phone's "already done" pre-check (BUG-2026-06-08).
   type PiecePicRow as ProdPiecePicRow,
 } from "./production-orders";
+import {
+  SupabaseStorageNotConfiguredError,
+  getFile,
+  signedDownloadUrl,
+} from "../lib/supabase-storage";
+import { DEFAULT_ORG_ID } from "../lib/tenant";
 
 const app = new Hono<Env>();
+
+// Shape of the file_assets columns the worker announcement-file proxy needs.
+// file_assets predates the snake_case rule and is queried with bare camelCase
+// names (matches src/api/routes/files.ts), so the PG driver returns them as-is.
+type WorkerFileAssetRow = {
+  id: string;
+  resourceType: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  r2Key: string;
+};
 
 // Piece-rate per department (in sen).  MVP flat-rate — replace with per-op
 // rates from a config table later.  Mirrors the mock so /today's earnings
@@ -157,6 +175,43 @@ async function getWorker(
   return { ok: true, workerId, worker: w };
 }
 
+// The worker's CURRENT department (owner 2026-06-26 — unified scan model):
+// the dept of their MOST RECENT dept-QR scan today, else the attendance punch
+// dept, else their home departmentCode. This is the single source of truth for
+// "what can this worker scan/complete right now" — a sticker for any OTHER dept
+// is blocked. Mirrors how dept-scan-split derives the labour buckets, so the
+// scan boundary and the time attribution agree.
+async function getCurrentDeptForWorker(
+  db: D1Database,
+  workerId: string,
+  date: string,
+  homeDept: string | null | undefined,
+): Promise<string> {
+  try {
+    const ds = await db
+      .prepare(
+        "SELECT departmentcode FROM dept_scan_events WHERE workerid = ? AND date = ? ORDER BY atmin DESC LIMIT 1",
+      )
+      .bind(workerId, date)
+      .first<{ departmentcode: string | null }>();
+    if (ds?.departmentcode) return ds.departmentcode.trim().toUpperCase();
+  } catch {
+    /* table may be absent pre-ensure — fall through to punch/home */
+  }
+  try {
+    const at = await db
+      .prepare(
+        "SELECT departmentCode FROM attendance_records WHERE employeeId = ? AND date = ? ORDER BY clockIn DESC LIMIT 1",
+      )
+      .bind(workerId, date)
+      .first<{ departmentCode: string | null }>();
+    if (at?.departmentCode) return at.departmentCode.trim().toUpperCase();
+  } catch {
+    /* fall through */
+  }
+  return (homeDept || "").trim().toUpperCase();
+}
+
 function genId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -225,6 +280,63 @@ type ProductionOrderRow = {
   itemCategory: string | null;
   sizeLabel: string | null;
 };
+
+// ============================================================
+// GET /api/worker/ann-files/:id/download
+//
+// Worker-token-authed proxy to an ANNOUNCEMENT attachment. The dashboard file
+// route (/api/files/:id/download) sits behind the session-cookie gate, so the
+// worker portal (X-Worker-Token only) can't reach it — that was why posted
+// announcement photos/PDFs never rendered on the phone. Mirrors the dashboard
+// download (302 to a short-lived signed URL, byte-stream fallback) but
+// authenticates via the worker token and HARD-RESTRICTS to resourceType
+// 'announcement' so it can never serve any other resource's files. Additive —
+// the dashboard route is untouched. Path is /ann-files (NOT /announcements/...):
+// /api/worker/announcements is a separate sub-app that would swallow that prefix.
+// ============================================================
+app.get("/ann-files/:id/download", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  if (!c.env.SUPABASE_PROJECT_REF || !c.env.SUPABASE_SERVICE_KEY) {
+    return c.json({ success: false, error: "file storage unavailable" }, 503);
+  }
+  const id = c.req.param("id");
+  const row = await c.var.DB.prepare(
+    "SELECT id, resourceType, filename, contentType, sizeBytes, r2Key FROM file_assets WHERE id = ? AND orgId = ?",
+  )
+    .bind(id, DEFAULT_ORG_ID)
+    .first<WorkerFileAssetRow>();
+  // Only announcement attachments are serveable here — anything else 404s so a
+  // worker token can't be used to fish out arbitrary file_assets rows.
+  if (!row || row.resourceType !== "announcement") {
+    return c.json({ success: false, error: "Not found" }, 404);
+  }
+  try {
+    const url = await signedDownloadUrl(c.env, row.r2Key, 300);
+    if (url) {
+      return c.redirect(url, 302);
+    }
+    // Presigning unavailable — stream the bytes through the Worker.
+    const obj = await getFile(c.env, row.r2Key);
+    if (!obj) return c.json({ success: false, error: "Not found" }, 404);
+    return new Response(obj.body, {
+      headers: {
+        "Content-Type": row.contentType,
+        "Content-Length": String(row.sizeBytes),
+        // Inline so the phone renders photos in the grid / lightbox and opens
+        // PDFs in the browser viewer. nosniff guards against polyglots.
+        "Content-Disposition": `inline; filename="${(row.filename || "file").replace(/"/g, "")}"`,
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (err) {
+    if (err instanceof SupabaseStorageNotConfiguredError) {
+      return c.json({ success: false, error: "file storage unavailable" }, 503);
+    }
+    console.error("[worker/ann-file] download failed:", err);
+    return c.json({ success: false, error: "download failed" }, 500);
+  }
+});
 
 // ============================================================
 // GET /api/worker/today
@@ -380,7 +492,7 @@ app.get("/today", async (c) => {
 });
 
 // ============================================================
-// GET /api/worker/wip-times — the worker's OWN department's standard times.
+// GET /api/worker/wip-times?dept=<CODE> — a department's standard times.
 //
 // Owner 2026-06-26: workers "totally don't know" the standard minutes per WIP
 // for their dept → disputes. This read-only reference shows ONLY their own
@@ -389,13 +501,43 @@ app.get("/today", async (c) => {
 // lib/wip-times-core (one source, no drift). Org-agnostic like the rest of
 // this file (single-org). Returns the per-WIP standard minutes (bomMaxMinutes
 // = the conservative limit; min==max for the common single-valued case).
+//
+// Multi-department (owner 2026-06-26): a worker in >1 department can pick which
+// department's WIP times to view via ?dept=<CODE>. The request is validated
+// against the worker's OWN department set (primary departmentCode + the parsed
+// departmentCodes JSON array) — an unknown/foreign/absent dept silently falls
+// back to the primary, so no caller can read a department they're not in. The
+// payload also returns `departmentCodes` (the deduped set incl. primary) so the
+// front-end can render the selector without a separate /me round-trip (and it's
+// always fresh, unlike the login-time localStorage cache).
 // ============================================================
 app.get("/wip-times", async (c) => {
   const auth = await getWorker(c);
   if (!auth.ok) return auth.response;
-  const dept = (auth.worker.departmentCode || "").trim().toUpperCase();
+  const primary = (auth.worker.departmentCode || "").trim().toUpperCase();
+  // The worker's full department set: primary + the parsed JSON array, deduped,
+  // upper-cased. parseWorkerDepartmentCodes already folds in the primary as a
+  // fallback when the array is missing/empty.
+  const deptSet = Array.from(
+    new Set(
+      parseWorkerDepartmentCodes(
+        auth.worker.departmentCodes,
+        auth.worker.departmentCode,
+      )
+        .map((d) => d.trim().toUpperCase())
+        .filter((d) => d.length > 0),
+    ),
+  );
+  // Honour ?dept=<CODE> only if it's one the worker actually belongs to;
+  // otherwise default to the primary.
+  const requested = (c.req.query("dept") || "").trim().toUpperCase();
+  const dept =
+    requested && deptSet.includes(requested) ? requested : primary;
   if (!dept) {
-    return c.json({ success: true, data: { department: "", rows: [] } });
+    return c.json({
+      success: true,
+      data: { department: "", departmentCodes: deptSet, rows: [] },
+    });
   }
   const bomRows = await loadActiveBomRows(c.var.DB, null, null);
   const agg = aggregateWipTimes(bomRows, { dept });
@@ -406,7 +548,29 @@ app.get("/wip-times", async (c) => {
     minutes: r.bomMaxMinutes,
     productCount: r.productCount,
   }));
-  return c.json({ success: true, data: { department: dept, rows } });
+  return c.json({
+    success: true,
+    data: { department: dept, departmentCodes: deptSet, rows },
+  });
+});
+
+// ============================================================
+// GET /api/worker/current-dept — the worker's CURRENT department (owner
+// 2026-06-26 unified scan model). The phone uses this to block scanning a
+// sticker that belongs to a DIFFERENT department (it shows the "wrong
+// department" popup instead of completing). Current dept = latest dept-QR scan
+// today → punch dept → home dept.
+// ============================================================
+app.get("/current-dept", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const dept = await getCurrentDeptForWorker(
+    c.var.DB,
+    auth.workerId,
+    todayYmd(),
+    auth.worker.departmentCode,
+  );
+  return c.json({ success: true, data: { currentDept: dept } });
 });
 
 // ============================================================
@@ -1150,6 +1314,34 @@ app.get("/history", async (c) => {
     wheMinutesByDate.set(d, (wheMinutesByDate.get(d) ?? 0) + mins);
   }
 
+  // Approved EXTRA PRODUCTION TIME claims (kind='ADD_PROD') for this worker in
+  // range. These add to the production NUMERATOR (totals.productionMinutes) and
+  // annotate the matching Completed Products row when linked to a job card.
+  // Soft-fails to empty (cold isolate / missing column) → pre-feature numbers.
+  let addProdTotalMin = 0;
+  const addProdMinByJobCard = new Map<string, number>();
+  try {
+    await ensureNonprodRequests(c.var.DB);
+    const apRes = await c.var.DB.prepare(
+      `SELECT hours, job_card_id AS jobCardId
+         FROM worker_nonprod_requests
+        WHERE worker_id = ? AND kind = 'ADD_PROD' AND status = 'APPROVED'
+          AND date >= ? AND date <= ?`,
+    )
+      .bind(workerId, fromStr, toStr)
+      .all<{ hours: number | string | null; jobCardId: string | null }>();
+    for (const r of apRes.results ?? []) {
+      const h = typeof r.hours === "number" ? r.hours : Number(r.hours) || 0;
+      const mins = Math.round(h * 60);
+      addProdTotalMin += mins;
+      const jc = (r.jobCardId ?? "").trim();
+      if (jc) addProdMinByJobCard.set(jc, (addProdMinByJobCard.get(jc) ?? 0) + mins);
+    }
+  } catch {
+    addProdTotalMin = 0;
+    addProdMinByJobCard.clear();
+  }
+
   const standardMins = hoursPerDay * 60;
   // Late minutes per punch day (owner 2026-06-11: the phone must show "how
   // late that day"). Same effective-dated rules + ceiling the auto-dock uses
@@ -1295,6 +1487,10 @@ app.get("/history", async (c) => {
     sizeLabel?: string;
     // Co-PICs the worker shared this JC with (id + name). Empty when solo.
     sharedWith: Array<{ id: string; name: string }>;
+    // Approved EXTRA PRODUCTION TIME (kind='ADD_PROD') linked to this job card,
+    // in minutes. 0 when the worker has no approved extra-time claim for this JC.
+    // Surfaced as "+N min approved (extra time)" on the card.
+    addProdMinutes: number;
   };
   // Resolve the names of every co-PIC that appears anywhere in this batch
   // so we can attach them to each completed card. Cheap one-shot lookup.
@@ -1412,6 +1608,7 @@ app.get("/history", async (c) => {
         id,
         name: coPicNameById.get(id) ?? id,
       })),
+      addProdMinutes: addProdMinByJobCard.get(jc.id) ?? 0,
     });
   }
   completed.sort((a, b) =>
@@ -1490,16 +1687,19 @@ app.get("/history", async (c) => {
       overtimeMinutes += row?.overtimeMinutes ?? 0;
     }
   }
-  const productionMinutes = completed.reduce(
-    (s, r) => s + (r.myMinutes || 0),
-    0,
-  );
+  // Numerator = completed WIP standard minutes + approved EXTRA PRODUCTION TIME
+  // (kind='ADD_PROD'). The extra-time credit is 0 for a worker with no approved
+  // claims → totals.productionMinutes and efficiencyPct stay byte-identical.
+  const productionMinutes =
+    completed.reduce((s, r) => s + (r.myMinutes || 0), 0) + addProdTotalMin;
   const totals = {
     days: workedDates.size,
     workedMinutes,
     productionMinutes,
     overtimeMinutes,
     completedCount: completed.length,
+    // Extra production time credited to the numerator this period (display).
+    addProdMinutes: addProdTotalMin,
     efficiencyPct:
       workedMinutes > 0
         ? Math.round((productionMinutes / workedMinutes) * 100)
@@ -1970,6 +2170,301 @@ app.patch("/profile", async (c) => {
     return c.json({ success: true, data: { phone } });
   }
   return c.json({ success: true, data: { phone: worker.phone ?? "" } });
+});
+
+// ============================================================
+// Non-production hours APPLY + APPROVE (additive, owner 2026-06-26).
+//
+// A worker who spent part of a day on NON-production work (R&D / repair /
+// warehouse / maintenance / shortfall) produces no Production Time, so their
+// efficiency looks unfairly low. They APPLY here for "X hours in <non-prod
+// dept> on <date>"; an admin APPROVES from the Working Hours screen, which
+// writes a normal working_hour_entries row for that non-prod dept. Because the
+// efficiency denominator counts ONLY isProduction departments (see
+// efficiency-allowance.ts), those hours are excluded from the denominator →
+// efficiency rises, with ZERO formula change.
+//
+// Runtime self-apply: the table reaches prod via this CREATE-IF-NOT-EXISTS
+// (migrations don't auto-replay on deploy). Awaited before the first read/write.
+// ============================================================
+let _nonprodReqMig: Promise<void> | null = null;
+export function ensureNonprodRequests(db: D1Database): Promise<void> {
+  if (_nonprodReqMig) return _nonprodReqMig;
+  _nonprodReqMig = (async () => {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS worker_nonprod_requests (
+           id TEXT PRIMARY KEY,
+           worker_id TEXT NOT NULL,
+           date TEXT NOT NULL,
+           department_code TEXT NOT NULL,
+           hours DOUBLE PRECISION NOT NULL,
+           note TEXT,
+           status TEXT NOT NULL DEFAULT 'PENDING',
+           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+           decided_at TEXT,
+           decided_by TEXT,
+           entry_id TEXT
+         )`,
+      )
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_worker_nonprod_requests_worker ON worker_nonprod_requests(worker_id, date DESC)",
+      )
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_worker_nonprod_requests_status ON worker_nonprod_requests(status, created_at DESC)",
+      )
+      .run();
+    // Time-adjustment extension (migration 0196, owner 2026-06-26). Additive:
+    //   kind        — 'NONPROD' (existing, default) | 'ADD_PROD' (extra production time)
+    //   job_card_id — optional WIP/job ref for an ADD_PROD claim
+    // Pre-existing 0110 rows default kind='NONPROD' / job_card_id=NULL, so their
+    // behaviour is byte-identical. snake_case = no column-rename-map entry.
+    await db
+      .prepare(
+        "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'NONPROD'",
+      )
+      .run();
+    await db
+      .prepare(
+        "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS job_card_id TEXT",
+      )
+      .run();
+  })();
+  return _nonprodReqMig;
+}
+
+type NonprodRequestRow = {
+  id: string;
+  worker_id: string;
+  date: string;
+  department_code: string;
+  hours: number | string;
+  note: string | null;
+  status: string;
+  created_at: string | null;
+  decided_at: string | null;
+  decided_by: string | null;
+  entry_id: string | null;
+  kind: string | null;
+  job_card_id: string | null;
+};
+
+// Dual-key the snake_case row (the db-pg toCamel transform also exposes camelCase
+// aliases; reading both ways is the safe pattern for this codebase).
+function rowToNonprodRequest(r: NonprodRequestRow & Record<string, unknown>) {
+  const num = (a: unknown, b: unknown) => {
+    const v = a ?? b;
+    return typeof v === "number" ? v : Number(v) || 0;
+  };
+  const str = (a: unknown, b: unknown) => {
+    const v = a ?? b;
+    return typeof v === "string" ? v : "";
+  };
+  // kind defaults to 'NONPROD' so a row written before the column existed (or
+  // any legacy 0110 row) reads as non-production — byte-identical behaviour.
+  const kindRaw = str(r.kind, r.kind);
+  return {
+    id: str(r.id, r.id),
+    workerId: str(r.workerId, r.worker_id),
+    date: str(r.date, r.date),
+    departmentCode: str(r.departmentCode, r.department_code),
+    hours: num(r.hours, r.hours),
+    note: str(r.note, r.note),
+    status: str(r.status, r.status),
+    createdAt: str(r.createdAt, r.created_at),
+    decidedAt: str(r.decidedAt, r.decided_at),
+    decidedBy: str(r.decidedBy, r.decided_by),
+    kind: kindRaw === "ADD_PROD" ? "ADD_PROD" : "NONPROD",
+    jobCardId: str(r.jobCardId, r.job_card_id),
+  };
+}
+
+// ============================================================
+// GET /api/worker/nonprod-departments
+//
+// The NON-production departments the worker may apply hours against (only
+// these are selectable — a production dept would be counted in the efficiency
+// denominator and defeat the whole point). Source: departments.isProduction.
+// ============================================================
+app.get("/nonprod-departments", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const res = await c.var.DB.prepare(
+    "SELECT code, name, shortName, isProduction, sequence FROM departments ORDER BY sequence",
+  ).all<{
+    code: string;
+    name: string | null;
+    shortName: string | null;
+    isProduction: number | boolean | null;
+    sequence: number | null;
+  }>();
+  const data = (res.results ?? [])
+    .filter((d) => !d.isProduction)
+    .map((d) => ({
+      code: d.code,
+      name: d.shortName || d.name || d.code,
+    }));
+  return c.json({ success: true, data });
+});
+
+// ============================================================
+// GET /api/worker/production-departments
+//
+// The PRODUCTION departments a worker may claim EXTRA PRODUCTION TIME against
+// (kind = 'ADD_PROD'). Mirror of /nonprod-departments but isProduction=true.
+// Approved ADD_PROD hours are added to the efficiency NUMERATOR (not the
+// denominator), so only production depts are selectable here.
+// ============================================================
+app.get("/production-departments", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const res = await c.var.DB.prepare(
+    "SELECT code, name, shortName, isProduction, sequence FROM departments ORDER BY sequence",
+  ).all<{
+    code: string;
+    name: string | null;
+    shortName: string | null;
+    isProduction: number | boolean | null;
+    sequence: number | null;
+  }>();
+  const data = (res.results ?? [])
+    .filter((d) => !!d.isProduction)
+    .map((d) => ({
+      code: d.code,
+      name: d.shortName || d.name || d.code,
+    }));
+  return c.json({ success: true, data });
+});
+
+// ============================================================
+// GET /api/worker/nonprod-requests — my non-production hour requests
+// ============================================================
+app.get("/nonprod-requests", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const { workerId } = auth;
+  await ensureNonprodRequests(c.var.DB);
+  const res = await c.var.DB.prepare(
+    "SELECT * FROM worker_nonprod_requests WHERE worker_id = ? ORDER BY created_at DESC LIMIT 30",
+  )
+    .bind(workerId)
+    .all<NonprodRequestRow>();
+  const data = (res.results ?? []).map((r) =>
+    rowToNonprodRequest(r as NonprodRequestRow & Record<string, unknown>),
+  );
+  return c.json({ success: true, data });
+});
+
+// ============================================================
+// POST /api/worker/nonprod-requests
+// Body: { date, departmentCode, hours, note?, kind?, jobCardId? }
+//   kind = 'NONPROD' (default, existing) — only a NON-production dept;
+//          approved hours land in a non-prod working_hour_entries row, which
+//          the efficiency denominator EXCLUDES (protects efficiency).
+//   kind = 'ADD_PROD' — only a PRODUCTION dept; approved hours are added to the
+//          efficiency NUMERATOR (extra production output), jobCardId optional.
+// Creates a PENDING request. Validation mirrors the admin approve path:
+// a sane date, 0 < hours <= 24, and a dept matching the chosen kind.
+// ============================================================
+app.post("/nonprod-requests", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const { worker } = auth;
+  await ensureNonprodRequests(c.var.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const date = String((body as { date?: unknown }).date ?? "").slice(0, 10);
+  const departmentCode = String(
+    (body as { departmentCode?: unknown }).departmentCode ?? "",
+  )
+    .trim()
+    .toUpperCase();
+  const hours = Number((body as { hours?: unknown }).hours);
+  const note = String((body as { note?: unknown }).note ?? "").slice(0, 500);
+  // kind defaults to NONPROD (existing behaviour). Anything other than the
+  // explicit ADD_PROD token reject-normalises to NONPROD — old clients that
+  // never send `kind` keep working exactly as before.
+  const kind =
+    String((body as { kind?: unknown }).kind ?? "")
+      .trim()
+      .toUpperCase() === "ADD_PROD"
+      ? "ADD_PROD"
+      : "NONPROD";
+  // jobCardId only meaningful for ADD_PROD (optional WIP/job reference).
+  const jobCardId =
+    kind === "ADD_PROD"
+      ? String((body as { jobCardId?: unknown }).jobCardId ?? "").trim() || null
+      : null;
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return c.json({ success: false, error: "A valid date is required" }, 400);
+  }
+  if (!Number.isFinite(hours) || hours <= 0 || hours > 24) {
+    return c.json(
+      { success: false, error: "Hours must be between 0 and 24" },
+      400,
+    );
+  }
+  if (!departmentCode) {
+    return c.json({ success: false, error: "Department is required" }, 400);
+  }
+  // Reject (don't normalize) a dept that doesn't match the chosen kind:
+  //   NONPROD  → must be a NON-production dept (denominator-excluded)
+  //   ADD_PROD → must be a PRODUCTION dept (numerator credit)
+  const dept = await c.var.DB.prepare(
+    "SELECT code, isProduction FROM departments WHERE code = ?",
+  )
+    .bind(departmentCode)
+    .first<{ code: string; isProduction: number | boolean | null }>();
+  if (!dept) {
+    return c.json({ success: false, error: "Unknown department" }, 400);
+  }
+  if (kind === "ADD_PROD") {
+    if (!dept.isProduction) {
+      return c.json(
+        {
+          success: false,
+          error: "Extra production time needs a production department",
+        },
+        400,
+      );
+    }
+  } else if (dept.isProduction) {
+    return c.json(
+      {
+        success: false,
+        error: "Only non-production departments can be applied for",
+      },
+      400,
+    );
+  }
+
+  const id = genId("npr");
+  const now = new Date().toISOString();
+  await c.var.DB.prepare(
+    `INSERT INTO worker_nonprod_requests
+       (id, worker_id, date, department_code, hours, note, status, created_at, kind, job_card_id)
+     VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
+  )
+    .bind(id, worker.id, date, departmentCode, hours, note, now, kind, jobCardId)
+    .run();
+  const row = await c.var.DB.prepare(
+    "SELECT * FROM worker_nonprod_requests WHERE id = ?",
+  )
+    .bind(id)
+    .first<NonprodRequestRow>();
+  return c.json(
+    {
+      success: true,
+      data: row
+        ? rowToNonprodRequest(row as NonprodRequestRow & Record<string, unknown>)
+        : { id },
+    },
+    201,
+  );
 });
 
 // ============================================================

@@ -795,6 +795,166 @@ const dict: Dict = {
     my: 'ထွက်ရန်',
   },
 
+  // ---- Non-production hours ----
+  'nonprod.title': {
+    en: 'Non-production hours',
+    ms: 'Jam bukan pengeluaran',
+    zh: '非生产工时',
+    my: 'ထုတ်လုပ်မှုမဟုတ်သော အချိန်',
+  },
+  'nonprod.intro': {
+    en: 'Did some hours of non-production work today (e.g. helping R&D)? Apply here so it counts as non-production and your efficiency stays fair.',
+    ms: 'Ada buat kerja bukan pengeluaran hari ini (cth. bantu R&D)? Mohon di sini supaya ia dikira sebagai bukan pengeluaran dan kecekapan anda kekal adil.',
+    zh: '今天做了非生产工作（例如协助研发）？在这里申请，让它计为非生产工时，效率才公平。',
+    my: 'ဒီနေ့ ထုတ်လုပ်မှုမဟုတ်သော အလုပ် (ဥပမာ R&D ကူညီ) လုပ်ခဲ့ပါသလား? ဤနေရာတွင် လျှောက်ထားပါ။',
+  },
+  'nonprod.apply': {
+    en: 'Apply hours',
+    ms: 'Mohon jam',
+    zh: '申请工时',
+    my: 'အချိန်လျှောက်ရန်',
+  },
+  'nonprod.department': {
+    en: 'Department',
+    ms: 'Jabatan',
+    zh: '部门',
+    my: 'ဌာန',
+  },
+  'nonprod.date': {
+    en: 'Date',
+    ms: 'Tarikh',
+    zh: '日期',
+    my: 'ရက်စွဲ',
+  },
+  'nonprod.hours': {
+    en: 'Hours',
+    ms: 'Jam',
+    zh: '小时',
+    my: 'နာရီ',
+  },
+  'nonprod.note': {
+    en: 'Note (optional)',
+    ms: 'Nota (pilihan)',
+    zh: '备注（可选）',
+    my: 'မှတ်ချက် (မဖြစ်မနေမဟုတ်)',
+  },
+  'nonprod.submit': {
+    en: 'Submit request',
+    ms: 'Hantar permohonan',
+    zh: '提交申请',
+    my: 'တောင်းဆိုချက်တင်ရန်',
+  },
+  'nonprod.myRequests': {
+    en: 'My requests',
+    ms: 'Permohonan saya',
+    zh: '我的申请',
+    my: 'ကျွန်ုပ်၏တောင်းဆိုချက်များ',
+  },
+  'nonprod.noRequests': {
+    en: 'No requests yet.',
+    ms: 'Belum ada permohonan.',
+    zh: '暂无申请。',
+    my: 'တောင်းဆိုချက်မရှိသေးပါ။',
+  },
+  'nonprod.olderKept': {
+    en: 'Older requests are kept on file.',
+    ms: 'Permohonan lama disimpan dalam rekod.',
+    zh: '较早的申请已存档保留。',
+    my: 'အဟောင်းတောင်းဆိုချက်များကို မှတ်တမ်းတွင်သိမ်းထားသည်။',
+  },
+  'nonprod.pickDept': {
+    en: 'Pick a department',
+    ms: 'Pilih jabatan',
+    zh: '选择部门',
+    my: 'ဌာနရွေးပါ',
+  },
+  'nonprod.status.PENDING': {
+    en: 'Pending',
+    ms: 'Menunggu',
+    zh: '待批',
+    my: 'စောင့်ဆိုင်းဆဲ',
+  },
+  'nonprod.status.APPROVED': {
+    en: 'Approved',
+    ms: 'Diluluskan',
+    zh: '已批准',
+    my: 'အတည်ပြုပြီး',
+  },
+  'nonprod.status.REJECTED': {
+    en: 'Rejected',
+    ms: 'Ditolak',
+    zh: '已拒绝',
+    my: 'ငြင်းပယ်ပြီး',
+  },
+
+  // ---- Time adjustment (extends non-production hours, owner 2026-06-26) ----
+  'timeadj.title': {
+    en: 'Time adjustment',
+    ms: 'Pelarasan masa',
+    zh: '工时调整',
+    my: 'အချိန်ချိန်ညှိခြင်း',
+  },
+  'timeadj.type': {
+    en: 'Type',
+    ms: 'Jenis',
+    zh: '类型',
+    my: 'အမျိုးအစား',
+  },
+  'timeadj.typeNonprod': {
+    en: 'Non-production',
+    ms: 'Bukan pengeluaran',
+    zh: '非生产',
+    my: 'ထုတ်လုပ်မှုမဟုတ်',
+  },
+  'timeadj.typeAddProd': {
+    en: 'Extra production time',
+    ms: 'Masa pengeluaran tambahan',
+    zh: '额外生产工时',
+    my: 'ထပ်ဆောင်းထုတ်လုပ်ချိန်',
+  },
+  'timeadj.introAddProd': {
+    en: 'A production job took longer than its standard time? Claim the extra production hours here. Once approved, it counts as production output so your efficiency stays fair.',
+    ms: 'Kerja pengeluaran ambil masa lebih daripada masa standard? Mohon jam pengeluaran tambahan di sini. Setelah diluluskan, ia dikira sebagai pengeluaran supaya kecekapan anda kekal adil.',
+    zh: '某项生产工作超出了标准工时？在此申报额外的生产工时。批准后将计为生产产出，让你的效率保持公平。',
+    my: 'ထုတ်လုပ်မှုအလုပ်တစ်ခု စံအချိန်ထက်ကြာခဲ့ပါသလား? ဤနေရာတွင် ထပ်ဆောင်းထုတ်လုပ်ချိန်ကို တောင်းဆိုပါ။',
+  },
+  'timeadj.minutesLabel': {
+    en: 'Minutes',
+    ms: 'Minit',
+    zh: '分钟',
+    my: 'မိနစ်',
+  },
+  'timeadj.minSuffix': {
+    en: 'min',
+    ms: 'min',
+    zh: '分钟',
+    my: 'မိနစ်',
+  },
+  'timeadj.jobRef': {
+    en: 'Job / WIP reference (optional)',
+    ms: 'Rujukan kerja / WIP (pilihan)',
+    zh: '工单 / WIP 参考（可选）',
+    my: 'အလုပ် / WIP ကိုးကား (မဖြစ်မနေမဟုတ်)',
+  },
+  'timeadj.jobRefPlaceholder': {
+    en: 'e.g. PO number or job card',
+    ms: 'cth. nombor PO atau kad kerja',
+    zh: '例如 PO 编号或工卡',
+    my: 'ဥပမာ PO နံပါတ် သို့မဟုတ် အလုပ်ကတ်',
+  },
+  'timeadj.reason': {
+    en: 'Reason',
+    ms: 'Sebab',
+    zh: '原因',
+    my: 'အကြောင်းပြချက်',
+  },
+  'timeadj.extraApproved': {
+    en: 'approved (extra time)',
+    ms: 'diluluskan (masa tambahan)',
+    zh: '已批准（额外工时）',
+    my: 'အတည်ပြုပြီး (ထပ်ဆောင်းအချိန်)',
+  },
+
   // ---- Leaves ----
   'leave.title': {
     en: 'Leave',
@@ -915,6 +1075,19 @@ const dict: Dict = {
     ms: 'Faham',
     zh: '知道了',
     my: 'သဘောပေါက်ပါပြီ',
+  },
+  // Collapsed archive header + empty state for expired/hidden notices.
+  'home.pastAnnouncements': {
+    en: 'Past announcements',
+    ms: 'Pengumuman lepas',
+    zh: '过往公告',
+    my: 'ယခင်ကြေညာချက်များ',
+  },
+  'home.noPastAnnouncements': {
+    en: 'No past announcements',
+    ms: 'Tiada pengumuman lepas',
+    zh: '没有过往公告',
+    my: 'ယခင်ကြေညာချက် မရှိပါ',
   },
 
   // ---- Location prompt (Feature B — cut "No GPS" punches) ----

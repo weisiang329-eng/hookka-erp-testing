@@ -616,6 +616,197 @@ function hoursFromPunch(
 type SortColumn = "date" | "employee" | "department" | "category" | "hours";
 type SortDir = "asc" | "desc";
 
+// ===== Non-production hours: pending-approvals card (owner 2026-06-26) =====
+//
+// Workers apply for non-production hours from the phone (POST
+// /api/worker/nonprod-requests). The office reviews PENDING requests here and
+// Approves / Rejects them. On APPROVE the backend writes a normal
+// working_hour_entries row for that worker / date / non-prod dept — which the
+// efficiency denominator excludes (it counts only isProduction depts), so the
+// worker's efficiency rises with NO formula change. Lives at the top of the
+// Working Hours tab so the office sees pending requests right where it edits
+// the hours grid.
+type NonprodReq = {
+  id: string;
+  workerId: string;
+  workerName: string;
+  date: string;
+  departmentCode: string;
+  hours: number;
+  note: string;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  // Time-adjustment kind (owner 2026-06-26):
+  //   NONPROD  — non-production hours; approving writes a non-prod hours row
+  //              (excluded from the efficiency denominator).
+  //   ADD_PROD — extra production time on a production dept; approving credits
+  //              the hours to the efficiency numerator (no hours row written).
+  kind?: "NONPROD" | "ADD_PROD";
+  jobCardId?: string;
+};
+
+function NonprodApprovalsCard({
+  departments,
+  onApproved,
+}: {
+  departments: DepartmentLite[];
+  onApproved: () => void;
+}) {
+  const { toast } = useToast();
+  const [reqs, setReqs] = useState<NonprodReq[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const deptName = useCallback(
+    (code: string) =>
+      departments.find((d) => d.code === code)?.shortName ||
+      departments.find((d) => d.code === code)?.name ||
+      code,
+    [departments],
+  );
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(
+        "/api/working-hour-entries/nonprod-requests?status=PENDING",
+      );
+      const j = (await res.json()) as { success?: boolean; data?: NonprodReq[] };
+      setReqs(Array.isArray(j?.data) ? j.data : []);
+    } catch {
+      setReqs([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot mount fetch; setState lives inside the async refresh callback (stable useCallback) */
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const decide = useCallback(
+    async (id: string, action: "approve" | "reject") => {
+      setBusyId(id);
+      try {
+        const res = await fetch(
+          `/api/working-hour-entries/nonprod-requests/${id}/${action}`,
+          { method: "POST" },
+        );
+        const j = (await res.json()) as { success?: boolean; error?: string };
+        if (!res.ok || !j?.success) {
+          toast.error(j?.error || "Could not update the request");
+          return;
+        }
+        toast.success(
+          action === "approve" ? "Approved — hours added" : "Rejected",
+        );
+        await refresh();
+        if (action === "approve") onApproved();
+      } catch {
+        toast.error("Could not update the request");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [refresh, onApproved, toast],
+  );
+
+  // Hide the card entirely when there's nothing pending (keeps the tab clean).
+  if (!loading && reqs.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Clock className="h-5 w-5 text-[#9C6F1E]" />
+          Time adjustment requests
+          {reqs.length > 0 && (
+            <span className="ml-1 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-[#9C6F1E] px-1.5 text-[11px] font-bold text-white">
+              {reqs.length}
+            </span>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <p className="text-sm text-[#8A8680]">Loading…</p>
+        ) : (
+          <div className="space-y-2">
+            {reqs.map((r) => {
+              // Owner 2026-06-27: workers enter/read MINUTES. Stored `hours`
+              // × 60 = minutes; show "X min" under an hour, else "Xh Ym".
+              const totalMin = Math.round((r.hours ?? 0) * 60);
+              const hh = Math.floor(totalMin / 60);
+              const mm = totalMin % 60;
+              const durLabel =
+                totalMin < 60
+                  ? `${totalMin} min`
+                  : mm === 0
+                    ? `${hh}h`
+                    : `${hh}h ${mm}min`;
+              return (
+              <div
+                key={r.id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="text-sm font-medium truncate">
+                    {r.workerName} · {durLabel} · {deptName(r.departmentCode)}
+                    <span
+                      className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                        r.kind === "ADD_PROD"
+                          ? "bg-[#E4ECF5] text-[#2A5A8A]"
+                          : "bg-[#F0ECE9] text-[#6B5C32]"
+                      }`}
+                    >
+                      {r.kind === "ADD_PROD"
+                        ? "Extra production time"
+                        : "Non-production"}
+                    </span>
+                  </p>
+                  <p className="text-xs text-[#8A8680]">
+                    {r.date}
+                    {r.kind === "ADD_PROD" && r.jobCardId
+                      ? ` · Job: ${r.jobCardId}`
+                      : ""}
+                    {r.note ? ` — ${r.note}` : ""}
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void decide(r.id, "reject")}
+                    disabled={busyId === r.id}
+                    title="Reject this request"
+                  >
+                    <XCircle className="h-4 w-4 mr-1" /> Reject
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => void decide(r.id, "approve")}
+                    disabled={busyId === r.id}
+                    title={
+                      r.kind === "ADD_PROD"
+                        ? "Approve — credits the extra production time to efficiency"
+                        : "Approve — adds the non-production hours so efficiency stays fair"
+                    }
+                  >
+                    <Check className="h-4 w-4 mr-1" />
+                    {busyId === r.id ? "…" : "Approve"}
+                  </Button>
+                </div>
+              </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function WorkingHoursTab({
   workers,
   refreshAttendance,
@@ -1197,6 +1388,7 @@ function WorkingHoursTab({
     <div className="space-y-4">
       {confirmDialog}
       <PublicHolidaysCard />
+      <NonprodApprovalsCard departments={allDepts} onApproved={() => void refresh()} />
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between flex-wrap gap-3">

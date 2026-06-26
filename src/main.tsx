@@ -38,6 +38,26 @@ window.addEventListener('vite:preloadError', () => {
   window.location.reload()
 })
 
+// Per-build id injected by Vite (vite.config.ts `define`). Used to cache-bust
+// the service worker registration URL on each deploy.
+declare const __BUILD_ID__: string
+
+// PWA Phase 1 — register the minimal service worker (public/sw.js) for
+// installability + an offline app-shell. PRODUCTION builds only: a SW in dev
+// would cache Vite's HMR modules and break hot reload. The ?v= query is the
+// per-build id so the browser re-fetches sw.js on every deploy (the file is
+// otherwise byte-identical and would be served from HTTP cache). The SW itself
+// is conservative — network-first navigation, never caches /api/*. See sw.js.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register(`/sw.js?v=${__BUILD_ID__}`)
+      .catch(() => {
+        /* registration failure is non-fatal — the app runs without the SW */
+      })
+  })
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ConfirmProvider>

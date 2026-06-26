@@ -1,0 +1,83 @@
+name: Push Clock Reminder (Worker Portal)
+
+# Sends a Web Push "Clock in" reminder at 08:00 MYT and a "Clock out" reminder
+# at 18:00 MYT to every worker who opted into notifications on their phone.
+# Hits POST /api/push/clock-reminder with { kind: 'IN' | 'OUT' }.
+#
+# MYT = UTC+8, so:
+#   08:00 MYT = 00:00 UTC  → kind IN
+#   18:00 MYT = 10:00 UTC  → kind OUT
+#
+# Because both schedules run from this ONE workflow file, we map the trigger
+# time to the kind at runtime (github.event.schedule). The manual
+# workflow_dispatch button takes a `kind` input (default IN) for testing.
+#
+# NOTE: GitHub only runs `schedule:` on the repo's DEFAULT branch (main →
+# production). On the staging branch this file rides along but won't auto-fire;
+# use the workflow_dispatch button (or curl the endpoint) to test there.
+#
+# Auth: the endpoint expects an x-push-secret header matching the
+# PUSH_CRON_SECRET repo secret AND the PUSH_CRON_SECRET env var on Cloudflare
+# Pages (same value on both). Server returns 503 if its env var is missing/too
+# short, 403 if the header differs. Mirrors the auto-clockout / mail-sync
+# secret convention.
+on:
+  schedule:
+    - cron: "0 0 * * *"   # 08:00 MYT → clock IN
+    - cron: "0 10 * * *"  # 18:00 MYT → clock OUT
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "IN (clock in) or OUT (clock out)"
+        default: "IN"
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/push/clock-reminder
+        env:
+          PUSH_CRON_SECRET: ${{ secrets.PUSH_CRON_SECRET }}
+          # The 10:00 UTC schedule means clock OUT; everything else (00:00 UTC
+          # schedule or a manual dispatch without an OUT input) means clock IN.
+          SCHEDULE: ${{ github.event.schedule }}
+          DISPATCH_KIND: ${{ github.event.inputs.kind }}
+        run: |
+          if [ -z "$PUSH_CRON_SECRET" ]; then
+            echo "::error::PUSH_CRON_SECRET repo secret is empty. See workflow header for setup."
+            exit 1
+          fi
+
+          # Decide the kind. Manual dispatch input wins; otherwise map the cron
+          # schedule (10:00 UTC = OUT, 00:00 UTC = IN).
+          if [ "$DISPATCH_KIND" = "OUT" ]; then
+            KIND="OUT"
+          elif [ "$DISPATCH_KIND" = "IN" ]; then
+            KIND="IN"
+          elif [ "$SCHEDULE" = "0 10 * * *" ]; then
+            KIND="OUT"
+          else
+            KIND="IN"
+          fi
+          echo "Sending clock-reminder kind=$KIND"
+
+          # 60s timeout: a warm Pages worker responds in ~2-3s, but a cold start
+          # during Hyperdrive's first SQL round-trip can stretch to 30s+.
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 60 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-push-secret: $PUSH_CRON_SECRET" \
+            --data "{\"kind\":\"$KIND\"}" \
+            'https://hookka-erp-testing.pages.dev/api/push/clock-reminder')
+
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+
+          echo "Status: $status"
+          echo "Body: $body"
+
+          if [ "$status" -ne 200 ]; then
+            echo "::error::clock-reminder failed with HTTP $status"
+            exit 1
+          fi

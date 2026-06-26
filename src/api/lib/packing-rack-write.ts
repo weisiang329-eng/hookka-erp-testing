@@ -23,6 +23,31 @@
 
 import { packingPieceIdentity } from "./packing-piece-identity";
 
+// Runtime self-apply for the per-PIECE rack column (mig 0192). A migration file
+// is INERT on prod (deploys do NOT replay migrations-postgres/*.sql) — the
+// column reaches prod via this ADD COLUMN IF NOT EXISTS. ensurePiecePicsForJc
+// (production-orders.ts) also self-applies it; this is the safety net for the
+// public/worker rack-write path, which may not have gone through that helper.
+// Memoised so the DDL runs at most once per worker isolate.
+let piecePicsRackingColumnEnsured: Promise<void> | null = null;
+// Exported so the /r/ rack-scan stock-in (public-rack-qr.ts) self-applies the
+// SAME per-piece rack column via this ONE memoised DDL — no second copy to drift.
+export function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
+  if (piecePicsRackingColumnEnsured) return piecePicsRackingColumnEnsured;
+  piecePicsRackingColumnEnsured = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE piece_pics ADD COLUMN IF NOT EXISTS racking_number TEXT",
+        )
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected
+    }
+  })();
+  return piecePicsRackingColumnEnsured;
+}
+
 export type PackingRackWriteResult =
   | { ok: true; jobCardId: string; rackingNumber: string }
   | {
@@ -35,10 +60,20 @@ export type PackingRackWriteResult =
 // already established trust (worker token, or an unguessable per-card qr_token)
 // and resolved the jobCardId; this helper owns the validation + the writes so
 // neither path can skip a guard. `rackingNumber` may be "" to clear.
+//
+// `pieceNo` (optional, mig 0192) targets ONE physical piece of a multi-piece WIP:
+// a DIVAN of 2 pieces can put piece 1 on Rack A and piece 2 on Rack B. When a
+// pieceNo is supplied AND the WIP has more than one piece, the rack is written
+// to that piece's piece_pics.racking_number row (NOT the card-level
+// job_cards.rackingNumber) and the warehouse occupancy mirror keys a rack_items
+// row PER PIECE (piece-distinct identity). When pieceNo is omitted / 0, or the
+// WIP is genuinely a single piece, behavior is EXACTLY the legacy card-level
+// path — old single-piece stickers and the office dropdown are unaffected.
 export async function applyPackingRack(
   db: D1Database,
   jobCardId: string | null | undefined,
   rackingNumber: string | null | undefined,
+  pieceNo?: number | null,
 ): Promise<PackingRackWriteResult> {
   if (!jobCardId || rackingNumber == null) {
     return {
@@ -126,6 +161,126 @@ export async function applyPackingRack(
     }
   }
   const nowIso = new Date().toISOString();
+
+  // ---- Per-PIECE mode resolution (mig 0192) -------------------------------
+  // A pieceNo only "wins" when the WIP genuinely has more than one physical
+  // piece (a single-piece card is always card-level — keeps the legacy path).
+  // We count piece_pics rows for this card; a 1-row / 0-row / unreadable count
+  // falls back to card-level (back-compat, never throws the write).
+  let totalPieces = 1;
+  let perPiece = false;
+  const wantPiece = pieceNo != null && pieceNo > 0;
+  if (wantPiece && fromHotJoin) {
+    try {
+      const cnt = await db
+        .prepare("SELECT COUNT(*) AS n FROM piece_pics WHERE jobCardId = ?")
+        .bind(jobCardId)
+        .first<{ n: number }>();
+      totalPieces = Math.max(1, Number(cnt?.n ?? 0));
+      // Confirm the targeted piece row exists before committing to per-piece.
+      if (totalPieces > 1) {
+        const pieceRow = await db
+          .prepare(
+            "SELECT id FROM piece_pics WHERE jobCardId = ? AND pieceNo = ? LIMIT 1",
+          )
+          .bind(jobCardId, pieceNo)
+          .first<{ id: number }>();
+        perPiece = !!pieceRow;
+      }
+    } catch (e) {
+      console.warn("[applyPackingRack] piece-count lookup skipped", e);
+      perPiece = false;
+    }
+  }
+
+  if (perPiece) {
+    // PER-PIECE write — set/clear THIS piece's rack on piece_pics; the card-level
+    // job_cards.rackingNumber + PO mirror are deliberately left untouched so a
+    // sibling piece's rack (and the card-level legacy value) are not clobbered.
+    await ensurePiecePicsRackingColumn(db);
+    await db
+      .prepare(
+        "UPDATE piece_pics SET racking_number = ? WHERE jobCardId = ? AND pieceNo = ?",
+      )
+      .bind(rack || null, jobCardId, pieceNo)
+      .run();
+    // Warehouse occupancy mirror — piece-distinct identity (notes carry the
+    // piece marker) so two pieces of one WIP get two DISTINCT rack_items rows.
+    if (jc) {
+      try {
+        const { description, notes } = packingPieceIdentity({
+          ...jc,
+          pieceNo,
+          totalPieces,
+        });
+        const curRow = await db
+          .prepare(
+            `SELECT id, rackLocationId FROM rack_items
+              WHERE productName = ? AND notes = ? ORDER BY id DESC LIMIT 1`,
+          )
+          .bind(description, notes)
+          .first<{ id: number; rackLocationId: string }>();
+        const stmts: D1PreparedStatement[] = [];
+        const affected = new Set<string>();
+        if (!rack) {
+          if (curRow) {
+            stmts.push(
+              db.prepare("DELETE FROM rack_items WHERE id = ?").bind(curRow.id),
+            );
+            affected.add(curRow.rackLocationId);
+          }
+        } else {
+          const loc = await db
+            .prepare(
+              "SELECT id FROM rack_locations WHERE rack = ? ORDER BY position LIMIT 1",
+            )
+            .bind(rack)
+            .first<{ id: string }>();
+          if (loc && !(curRow && curRow.rackLocationId === loc.id)) {
+            if (curRow) {
+              stmts.push(
+                db
+                  .prepare("DELETE FROM rack_items WHERE id = ?")
+                  .bind(curRow.id),
+              );
+              affected.add(curRow.rackLocationId);
+            }
+            const today = new Date().toISOString().split("T")[0];
+            stmts.push(
+              db
+                .prepare(
+                  `INSERT INTO rack_items (rackLocationId, productionOrderId,
+                     productCode, productName, sizeLabel, customerName, qty,
+                     stockedInDate, notes)
+                   VALUES (?, ?, '', ?, '', '', 1, ?, ?)`,
+                )
+                .bind(loc.id, jc.productionOrderId, description, today, notes),
+            );
+            affected.add(loc.id);
+          }
+        }
+        for (const rid of affected) {
+          stmts.push(
+            db
+              .prepare(
+                `UPDATE rack_locations SET status = CASE
+                   WHEN reserved = 1 THEN 'RESERVED'
+                   WHEN (EXISTS(SELECT 1 FROM rack_items WHERE rackLocationId = ?)
+                         OR productCode IS NOT NULL) THEN 'OCCUPIED'
+                   ELSE 'EMPTY' END
+                 WHERE id = ?`,
+              )
+              .bind(rid, rid),
+          );
+        }
+        if (stmts.length > 0) await db.batch(stmts);
+      } catch (e) {
+        console.warn("[applyPackingRack] per-piece occupancy mirror skipped", e);
+      }
+    }
+    return { ok: true, jobCardId, rackingNumber: rack };
+  }
+
   const jcUpd = await db
     .prepare("UPDATE job_cards SET rackingNumber = ? WHERE id = ?")
     .bind(rack || null, jobCardId)

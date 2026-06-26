@@ -2062,6 +2062,219 @@ app.patch("/profile", async (c) => {
 });
 
 // ============================================================
+// Non-production hours APPLY + APPROVE (additive, owner 2026-06-26).
+//
+// A worker who spent part of a day on NON-production work (R&D / repair /
+// warehouse / maintenance / shortfall) produces no Production Time, so their
+// efficiency looks unfairly low. They APPLY here for "X hours in <non-prod
+// dept> on <date>"; an admin APPROVES from the Working Hours screen, which
+// writes a normal working_hour_entries row for that non-prod dept. Because the
+// efficiency denominator counts ONLY isProduction departments (see
+// efficiency-allowance.ts), those hours are excluded from the denominator →
+// efficiency rises, with ZERO formula change.
+//
+// Runtime self-apply: the table reaches prod via this CREATE-IF-NOT-EXISTS
+// (migrations don't auto-replay on deploy). Awaited before the first read/write.
+// ============================================================
+let _nonprodReqMig: Promise<void> | null = null;
+export function ensureNonprodRequests(db: D1Database): Promise<void> {
+  if (_nonprodReqMig) return _nonprodReqMig;
+  _nonprodReqMig = (async () => {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS worker_nonprod_requests (
+           id TEXT PRIMARY KEY,
+           worker_id TEXT NOT NULL,
+           date TEXT NOT NULL,
+           department_code TEXT NOT NULL,
+           hours DOUBLE PRECISION NOT NULL,
+           note TEXT,
+           status TEXT NOT NULL DEFAULT 'PENDING',
+           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+           decided_at TEXT,
+           decided_by TEXT,
+           entry_id TEXT
+         )`,
+      )
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_worker_nonprod_requests_worker ON worker_nonprod_requests(worker_id, date DESC)",
+      )
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_worker_nonprod_requests_status ON worker_nonprod_requests(status, created_at DESC)",
+      )
+      .run();
+  })();
+  return _nonprodReqMig;
+}
+
+type NonprodRequestRow = {
+  id: string;
+  worker_id: string;
+  date: string;
+  department_code: string;
+  hours: number | string;
+  note: string | null;
+  status: string;
+  created_at: string | null;
+  decided_at: string | null;
+  decided_by: string | null;
+  entry_id: string | null;
+};
+
+// Dual-key the snake_case row (the db-pg toCamel transform also exposes camelCase
+// aliases; reading both ways is the safe pattern for this codebase).
+function rowToNonprodRequest(r: NonprodRequestRow & Record<string, unknown>) {
+  const num = (a: unknown, b: unknown) => {
+    const v = a ?? b;
+    return typeof v === "number" ? v : Number(v) || 0;
+  };
+  const str = (a: unknown, b: unknown) => {
+    const v = a ?? b;
+    return typeof v === "string" ? v : "";
+  };
+  return {
+    id: str(r.id, r.id),
+    workerId: str(r.workerId, r.worker_id),
+    date: str(r.date, r.date),
+    departmentCode: str(r.departmentCode, r.department_code),
+    hours: num(r.hours, r.hours),
+    note: str(r.note, r.note),
+    status: str(r.status, r.status),
+    createdAt: str(r.createdAt, r.created_at),
+    decidedAt: str(r.decidedAt, r.decided_at),
+    decidedBy: str(r.decidedBy, r.decided_by),
+  };
+}
+
+// ============================================================
+// GET /api/worker/nonprod-departments
+//
+// The NON-production departments the worker may apply hours against (only
+// these are selectable — a production dept would be counted in the efficiency
+// denominator and defeat the whole point). Source: departments.isProduction.
+// ============================================================
+app.get("/nonprod-departments", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const res = await c.var.DB.prepare(
+    "SELECT code, name, shortName, isProduction, sequence FROM departments ORDER BY sequence",
+  ).all<{
+    code: string;
+    name: string | null;
+    shortName: string | null;
+    isProduction: number | boolean | null;
+    sequence: number | null;
+  }>();
+  const data = (res.results ?? [])
+    .filter((d) => !d.isProduction)
+    .map((d) => ({
+      code: d.code,
+      name: d.shortName || d.name || d.code,
+    }));
+  return c.json({ success: true, data });
+});
+
+// ============================================================
+// GET /api/worker/nonprod-requests — my non-production hour requests
+// ============================================================
+app.get("/nonprod-requests", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const { workerId } = auth;
+  await ensureNonprodRequests(c.var.DB);
+  const res = await c.var.DB.prepare(
+    "SELECT * FROM worker_nonprod_requests WHERE worker_id = ? ORDER BY created_at DESC LIMIT 30",
+  )
+    .bind(workerId)
+    .all<NonprodRequestRow>();
+  const data = (res.results ?? []).map((r) =>
+    rowToNonprodRequest(r as NonprodRequestRow & Record<string, unknown>),
+  );
+  return c.json({ success: true, data });
+});
+
+// ============================================================
+// POST /api/worker/nonprod-requests
+// Body: { date, departmentCode, hours, note? } — creates a PENDING request.
+// Validation mirrors the admin approve path: only a NON-production dept, a
+// sane date, and 0 < hours <= 24.
+// ============================================================
+app.post("/nonprod-requests", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const { worker } = auth;
+  await ensureNonprodRequests(c.var.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const date = String((body as { date?: unknown }).date ?? "").slice(0, 10);
+  const departmentCode = String(
+    (body as { departmentCode?: unknown }).departmentCode ?? "",
+  )
+    .trim()
+    .toUpperCase();
+  const hours = Number((body as { hours?: unknown }).hours);
+  const note = String((body as { note?: unknown }).note ?? "").slice(0, 500);
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return c.json({ success: false, error: "A valid date is required" }, 400);
+  }
+  if (!Number.isFinite(hours) || hours <= 0 || hours > 24) {
+    return c.json(
+      { success: false, error: "Hours must be between 0 and 24" },
+      400,
+    );
+  }
+  if (!departmentCode) {
+    return c.json({ success: false, error: "Department is required" }, 400);
+  }
+  // Only a NON-production dept may be applied for — reject, don't normalize.
+  const dept = await c.var.DB.prepare(
+    "SELECT code, isProduction FROM departments WHERE code = ?",
+  )
+    .bind(departmentCode)
+    .first<{ code: string; isProduction: number | boolean | null }>();
+  if (!dept) {
+    return c.json({ success: false, error: "Unknown department" }, 400);
+  }
+  if (dept.isProduction) {
+    return c.json(
+      {
+        success: false,
+        error: "Only non-production departments can be applied for",
+      },
+      400,
+    );
+  }
+
+  const id = genId("npr");
+  const now = new Date().toISOString();
+  await c.var.DB.prepare(
+    `INSERT INTO worker_nonprod_requests
+       (id, worker_id, date, department_code, hours, note, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+  )
+    .bind(id, worker.id, date, departmentCode, hours, note, now)
+    .run();
+  const row = await c.var.DB.prepare(
+    "SELECT * FROM worker_nonprod_requests WHERE id = ?",
+  )
+    .bind(id)
+    .first<NonprodRequestRow>();
+  return c.json(
+    {
+      success: true,
+      data: row
+        ? rowToNonprodRequest(row as NonprodRequestRow & Record<string, unknown>)
+        : { id },
+    },
+    201,
+  );
+});
+
+// ============================================================
 // GET /api/worker/team-stats?from=YYYY-MM-DD&to=YYYY-MM-DD
 //
 // Operator Leader dashboard aggregator. Returns a per-(department × category)

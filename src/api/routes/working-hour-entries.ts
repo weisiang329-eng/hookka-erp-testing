@@ -22,8 +22,17 @@
 import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { ensureNonprodRequests } from "./worker";
 
 const app = new Hono<Env>();
+
+// authMiddleware stashes the resolved user id on the context via c.set('userId').
+// Env.Variables only types DB / dbTimer, so read it through a loose cast (same
+// pattern as routes/presence.ts).
+function getUserId(c: Context<Env>): string {
+  const id = (c as unknown as { get: (k: string) => unknown }).get("userId");
+  return typeof id === "string" ? id : "";
+}
 
 type EntryRow = {
   id: string;
@@ -1077,6 +1086,222 @@ app.delete("/:id", async (c) => {
   if (!existing) return c.json({ success: false, error: "Entry not found" }, 404);
   await c.var.DB.prepare("DELETE FROM working_hour_entries WHERE id = ?").bind(id).run();
   return c.json({ success: true, data: { id } });
+});
+
+// ---------------------------------------------------------------------------
+// Non-production hours APPROVE / REJECT (admin side, owner 2026-06-26).
+//
+// A worker applies for "X hours in <non-prod dept> on <date>" via the worker
+// portal (POST /api/worker/nonprod-requests). The office sees PENDING requests
+// on the Working Hours screen and Approves / Rejects them here.
+//
+//   GET    /nonprod-requests?status=PENDING        list requests for review
+//   POST   /nonprod-requests/:id/approve           write the WHE row + mark APPROVED
+//   POST   /nonprod-requests/:id/reject            mark REJECTED
+//
+// On APPROVE we write a normal working_hour_entries row for that worker / date /
+// non-prod dept / hours using the SAME write path the Working Hours grid uses
+// (resolveOrCreateAttendance → validateEntry → INSERT). Non-prod depts carry no
+// category, so the row passes validateEntry and is EXCLUDED from the efficiency
+// denominator (which counts only isProduction depts) — efficiency rises with no
+// formula change. Idempotent: approving an already-decided request is a no-op.
+// ---------------------------------------------------------------------------
+type NonprodReqRow = {
+  id: string;
+  worker_id: string;
+  date: string;
+  department_code: string;
+  hours: number | string;
+  note: string | null;
+  status: string;
+  created_at: string | null;
+  decided_at: string | null;
+  decided_by: string | null;
+  entry_id: string | null;
+};
+
+function reqRowToJson(r: NonprodReqRow & Record<string, unknown>) {
+  const pick = (a: unknown, b: unknown) => a ?? b;
+  return {
+    id: String(pick(r.id, r.id) ?? ""),
+    workerId: String(pick(r.workerId, r.worker_id) ?? ""),
+    date: String(pick(r.date, r.date) ?? ""),
+    departmentCode: String(pick(r.departmentCode, r.department_code) ?? ""),
+    hours: Number(pick(r.hours, r.hours)) || 0,
+    note: String(pick(r.note, r.note) ?? ""),
+    status: String(pick(r.status, r.status) ?? ""),
+    createdAt: String(pick(r.createdAt, r.created_at) ?? ""),
+    decidedAt: String(pick(r.decidedAt, r.decided_at) ?? ""),
+    decidedBy: String(pick(r.decidedBy, r.decided_by) ?? ""),
+  };
+}
+
+app.get("/nonprod-requests", async (c) => {
+  const denied = await requirePermission(c, "attendance", "read");
+  if (denied) return denied;
+  await ensureNonprodRequests(c.var.DB);
+  const status = (c.req.query("status") ?? "").trim().toUpperCase();
+  const rows = ["PENDING", "APPROVED", "REJECTED"].includes(status)
+    ? await c.var.DB
+        .prepare(
+          "SELECT * FROM worker_nonprod_requests WHERE status = ? ORDER BY created_at DESC LIMIT 200",
+        )
+        .bind(status)
+        .all<NonprodReqRow>()
+    : await c.var.DB
+        .prepare(
+          "SELECT * FROM worker_nonprod_requests ORDER BY created_at DESC LIMIT 200",
+        )
+        .all<NonprodReqRow>();
+  const reqs = (rows.results ?? []).map((r) =>
+    reqRowToJson(r as NonprodReqRow & Record<string, unknown>),
+  );
+  // Attach worker names so the office sees who applied (cheap one-shot lookup).
+  const ids = Array.from(new Set(reqs.map((r) => r.workerId).filter(Boolean)));
+  const nameById = new Map<string, string>();
+  if (ids.length > 0) {
+    const ph = ids.map(() => "?").join(",");
+    const wr = await c.var.DB
+      .prepare(`SELECT id, name, empNo FROM workers WHERE id IN (${ph})`)
+      .bind(...ids)
+      .all<{ id: string; name: string; empNo: string }>();
+    for (const w of wr.results ?? []) nameById.set(w.id, w.name || w.empNo);
+  }
+  const data = reqs.map((r) => ({
+    ...r,
+    workerName: nameById.get(r.workerId) ?? r.workerId,
+  }));
+  return c.json({ success: true, data, total: data.length });
+});
+
+app.post("/nonprod-requests/:id/approve", async (c) => {
+  const denied = await requirePermission(c, "attendance", "update");
+  if (denied) return denied;
+  await ensureNonprodRequests(c.var.DB);
+  const id = c.req.param("id");
+  const req = await c.var.DB
+    .prepare("SELECT * FROM worker_nonprod_requests WHERE id = ?")
+    .bind(id)
+    .first<NonprodReqRow>();
+  if (!req) return c.json({ success: false, error: "Request not found" }, 404);
+  const reqJson = reqRowToJson(req as NonprodReqRow & Record<string, unknown>);
+  if (reqJson.status !== "PENDING") {
+    return c.json(
+      { success: false, error: `Request already ${reqJson.status}` },
+      409,
+    );
+  }
+
+  // Guard (defence in depth — the worker apply path already rejects prod depts):
+  // only a NON-production dept may be approved, else the hours would land in the
+  // efficiency denominator and defeat the purpose.
+  if (PRODUCTION_DEPTS.has(reqJson.departmentCode)) {
+    const d = await c.var.DB
+      .prepare("SELECT isProduction FROM departments WHERE code = ?")
+      .bind(reqJson.departmentCode)
+      .first<{ isProduction: number | boolean | null }>();
+    if (!d || d.isProduction) {
+      return c.json(
+        {
+          success: false,
+          error: "Cannot approve hours for a production department",
+        },
+        400,
+      );
+    }
+  } else {
+    const d = await c.var.DB
+      .prepare("SELECT isProduction FROM departments WHERE code = ?")
+      .bind(reqJson.departmentCode)
+      .first<{ isProduction: number | boolean | null }>();
+    if (!d) {
+      return c.json({ success: false, error: "Unknown department" }, 400);
+    }
+    if (d.isProduction) {
+      return c.json(
+        {
+          success: false,
+          error: "Cannot approve hours for a production department",
+        },
+        400,
+      );
+    }
+  }
+
+  // Resolve / create the parent attendance row (SAME helper the Working Hours
+  // grid POST uses), then write the working_hour_entries row through the SAME
+  // validated shape. Non-prod dept → no category → passes validateEntry.
+  const att = await resolveOrCreateAttendance(c, reqJson.workerId, reqJson.date);
+  if (!att) return c.json({ success: false, error: "Worker not found" }, 400);
+
+  const v = validateEntry({
+    departmentCode: reqJson.departmentCode,
+    category: "",
+    hours: reqJson.hours,
+    notes: reqJson.note
+      ? `Non-production (approved): ${reqJson.note}`
+      : "Non-production (approved)",
+  });
+  if (!v.ok) return c.json({ success: false, error: v.error }, 400);
+
+  const entryId = genId();
+  await c.var.DB.prepare(
+    `INSERT INTO working_hour_entries (id, attendanceId, workerId, date, departmentCode, category, hours, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      entryId,
+      att.id,
+      att.employeeId,
+      att.date,
+      v.data.departmentCode,
+      v.data.category || null,
+      v.data.hours,
+      v.data.notes,
+    )
+    .run();
+
+  const decidedBy = getUserId(c);
+  await c.var.DB.prepare(
+    `UPDATE worker_nonprod_requests
+       SET status = 'APPROVED', decided_at = ?, decided_by = ?, entry_id = ?
+     WHERE id = ?`,
+  )
+    .bind(new Date().toISOString(), decidedBy, entryId, id)
+    .run();
+
+  return c.json({
+    success: true,
+    data: { id, status: "APPROVED", entryId },
+  });
+});
+
+app.post("/nonprod-requests/:id/reject", async (c) => {
+  const denied = await requirePermission(c, "attendance", "update");
+  if (denied) return denied;
+  await ensureNonprodRequests(c.var.DB);
+  const id = c.req.param("id");
+  const req = await c.var.DB
+    .prepare("SELECT * FROM worker_nonprod_requests WHERE id = ?")
+    .bind(id)
+    .first<NonprodReqRow>();
+  if (!req) return c.json({ success: false, error: "Request not found" }, 404);
+  const reqJson = reqRowToJson(req as NonprodReqRow & Record<string, unknown>);
+  if (reqJson.status !== "PENDING") {
+    return c.json(
+      { success: false, error: `Request already ${reqJson.status}` },
+      409,
+    );
+  }
+  const decidedBy = getUserId(c);
+  await c.var.DB.prepare(
+    `UPDATE worker_nonprod_requests
+       SET status = 'REJECTED', decided_at = ?, decided_by = ?
+     WHERE id = ?`,
+  )
+    .bind(new Date().toISOString(), decidedBy, id)
+    .run();
+  return c.json({ success: true, data: { id, status: "REJECTED" } });
 });
 
 export default app;

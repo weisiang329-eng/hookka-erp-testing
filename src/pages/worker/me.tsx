@@ -186,6 +186,85 @@ export default function WorkerMePage() {
   const [leaveSubmitting, setLeaveSubmitting] = useState(false);
   const [leaveError, setLeaveError] = useState<string | null>(null);
 
+  // Non-production hours (owner 2026-06-26): a worker who spent part of the day
+  // on non-production work (e.g. helping R&D) applies here. An admin approves
+  // from the Working Hours screen, which writes a non-production working-hours
+  // row so those hours are excluded from the efficiency denominator — keeping
+  // the worker's efficiency fair. ADD-only on top of the existing portal.
+  type NonprodDept = { code: string; name: string };
+  type NonprodRequest = {
+    id: string;
+    date: string;
+    departmentCode: string;
+    hours: number;
+    note: string;
+    status: "PENDING" | "APPROVED" | "REJECTED";
+  };
+  const [npDepts, setNpDepts] = useState<NonprodDept[]>([]);
+  const [npRequests, setNpRequests] = useState<NonprodRequest[]>([]);
+  const [npShowForm, setNpShowForm] = useState(false);
+  const [npDept, setNpDept] = useState("");
+  const [npDate, setNpDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [npHours, setNpHours] = useState("");
+  const [npNote, setNpNote] = useState("");
+  const [npSubmitting, setNpSubmitting] = useState(false);
+  const [npError, setNpError] = useState<string | null>(null);
+
+  const loadNonprod = useCallback(async () => {
+    try {
+      const [dRes, rRes] = await Promise.all([
+        workerFetch("/api/worker/nonprod-departments"),
+        workerFetch("/api/worker/nonprod-requests"),
+      ]);
+      const dj = (await dRes.json()) as { success?: boolean; data?: NonprodDept[] };
+      const rj = (await rRes.json()) as { success?: boolean; data?: NonprodRequest[] };
+      if (dj?.success && Array.isArray(dj.data)) setNpDepts(dj.data);
+      if (rj?.success && Array.isArray(rj.data)) setNpRequests(rj.data);
+    } catch {
+      /* leave as-is — card shows empty / retries on next open */
+    }
+  }, []);
+
+  async function handleSubmitNonprod(e: React.FormEvent) {
+    e.preventDefault();
+    setNpError(null);
+    const hoursNum = Number(npHours);
+    if (!npDept) {
+      setNpError(t("nonprod.pickDept"));
+      return;
+    }
+    if (!Number.isFinite(hoursNum) || hoursNum <= 0 || hoursNum > 24) {
+      setNpError(t("nonprod.hours"));
+      return;
+    }
+    setNpSubmitting(true);
+    try {
+      const res = await workerFetch("/api/worker/nonprod-requests", {
+        method: "POST",
+        body: JSON.stringify({
+          date: npDate,
+          departmentCode: npDept,
+          hours: hoursNum,
+          note: npNote,
+        }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !j?.success) {
+        setNpError(j?.error || t("common.error"));
+        return;
+      }
+      setNpShowForm(false);
+      setNpDept("");
+      setNpHours("");
+      setNpNote("");
+      await loadNonprod();
+    } catch {
+      setNpError(t("common.error"));
+    } finally {
+      setNpSubmitting(false);
+    }
+  }
+
   // Standard Times (owner 2026-06-26): the worker's OWN department's standard
   // minutes per WIP, so they know the time limit (no more "totally don't know").
   type StdTimeRow = {
@@ -259,6 +338,7 @@ export default function WorkerMePage() {
   }, []);
 
   // Refresh /me and leaves on mount
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot mount data load; setState lives inside async callbacks (loadLeaves / loadNonprod are stable useCallbacks) */
   useEffect(() => {
     workerFetch("/api/worker-auth/me")
       .then((r) => r.json())
@@ -278,7 +358,9 @@ export default function WorkerMePage() {
         /* ignore — keep cached */
       });
     loadLeaves();
-  }, [loadLeaves]);
+    void loadNonprod();
+  }, [loadLeaves, loadNonprod]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   async function handleSavePhone() {
     setPhoneSaving(true);
@@ -576,6 +658,137 @@ export default function WorkerMePage() {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Non-production hours — apply + my requests (owner 2026-06-26). */}
+      <div className="bg-white rounded-xl p-4 border border-[#D8D2CC]">
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-sm font-semibold">{t("nonprod.title")}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setNpShowForm((v) => !v);
+              setNpError(null);
+            }}
+            className="text-xs flex items-center gap-1 px-2.5 py-1 rounded bg-[#F0ECE9] hover:bg-[#E5E0DB] font-semibold"
+          >
+            <Plus className="h-3 w-3" />
+            {t("nonprod.apply")}
+          </button>
+        </div>
+        <p className="text-xs text-[#8A8680] mb-3">{t("nonprod.intro")}</p>
+
+        {npShowForm && (
+          <form
+            onSubmit={handleSubmitNonprod}
+            className="space-y-2 mb-3 bg-[#FAF9F7] p-3 rounded-lg"
+          >
+            <div>
+              <label className="text-xs text-[#5A5550] block mb-1">
+                {t("nonprod.department")}
+              </label>
+              <select
+                value={npDept}
+                onChange={(e) => setNpDept(e.target.value)}
+                className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+              >
+                <option value="">{t("nonprod.pickDept")}</option>
+                {npDepts.map((d) => (
+                  <option key={d.code} value={d.code}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-[#5A5550] block mb-1">
+                  {t("nonprod.date")}
+                </label>
+                <input
+                  type="date"
+                  value={npDate}
+                  onChange={(e) => setNpDate(e.target.value)}
+                  className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-[#5A5550] block mb-1">
+                  {t("nonprod.hours")}
+                </label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  min="0"
+                  max="24"
+                  step="0.5"
+                  value={npHours}
+                  onChange={(e) => setNpHours(e.target.value)}
+                  className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                  placeholder="2"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-[#5A5550] block mb-1">
+                {t("nonprod.note")}
+              </label>
+              <input
+                type="text"
+                value={npNote}
+                onChange={(e) => setNpNote(e.target.value)}
+                className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+              />
+            </div>
+            {npError && <p className="text-xs text-[#9A3A2D]">{npError}</p>}
+            <button
+              type="submit"
+              disabled={npSubmitting}
+              className="w-full h-10 rounded bg-[#6B5C32] text-white text-sm font-semibold disabled:opacity-60"
+            >
+              {npSubmitting ? t("common.loading") : t("nonprod.submit")}
+            </button>
+          </form>
+        )}
+
+        <p className="text-xs text-[#8A8680] font-medium mb-1.5">
+          {t("nonprod.myRequests")}
+        </p>
+        {npRequests.length === 0 ? (
+          <p className="text-sm text-[#8A8680]">{t("nonprod.noRequests")}</p>
+        ) : (
+          <div className="space-y-1.5">
+            {npRequests.slice(0, 8).map((r) => {
+              const deptName =
+                npDepts.find((d) => d.code === r.departmentCode)?.name ||
+                r.departmentCode;
+              return (
+                <div
+                  key={r.id}
+                  className="flex items-center justify-between text-sm py-1.5 border-b border-[#F0ECE9] last:border-0"
+                >
+                  <div className="min-w-0">
+                    <p className="font-medium truncate">
+                      {deptName} · {r.hours}h
+                    </p>
+                    <p className="text-xs text-[#8A8680]">{r.date}</p>
+                  </div>
+                  <span
+                    className={`shrink-0 text-xs px-2 py-0.5 rounded font-semibold ${
+                      r.status === "APPROVED"
+                        ? "bg-[#E0F0E8] text-[#2A6B4A]"
+                        : r.status === "REJECTED"
+                          ? "bg-[#FDF6F4] text-[#9A3A2D]"
+                          : "bg-[#FDF3E0] text-[#9C6F1E]"
+                    }`}
+                  >
+                    {t(`nonprod.status.${r.status}`)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Standard Times — the worker's OWN department's minutes per WIP

@@ -795,6 +795,92 @@ const dict: Dict = {
     my: 'ထွက်ရန်',
   },
 
+  // ---- Non-production hours ----
+  'nonprod.title': {
+    en: 'Non-production hours',
+    ms: 'Jam bukan pengeluaran',
+    zh: '非生产工时',
+    my: 'ထုတ်လုပ်မှုမဟုတ်သော အချိန်',
+  },
+  'nonprod.intro': {
+    en: 'Did some hours of non-production work today (e.g. helping R&D)? Apply here so it counts as non-production and your efficiency stays fair.',
+    ms: 'Ada buat kerja bukan pengeluaran hari ini (cth. bantu R&D)? Mohon di sini supaya ia dikira sebagai bukan pengeluaran dan kecekapan anda kekal adil.',
+    zh: '今天做了非生产工作（例如协助研发）？在这里申请，让它计为非生产工时，效率才公平。',
+    my: 'ဒီနေ့ ထုတ်လုပ်မှုမဟုတ်သော အလုပ် (ဥပမာ R&D ကူညီ) လုပ်ခဲ့ပါသလား? ဤနေရာတွင် လျှောက်ထားပါ။',
+  },
+  'nonprod.apply': {
+    en: 'Apply hours',
+    ms: 'Mohon jam',
+    zh: '申请工时',
+    my: 'အချိန်လျှောက်ရန်',
+  },
+  'nonprod.department': {
+    en: 'Department',
+    ms: 'Jabatan',
+    zh: '部门',
+    my: 'ဌာန',
+  },
+  'nonprod.date': {
+    en: 'Date',
+    ms: 'Tarikh',
+    zh: '日期',
+    my: 'ရက်စွဲ',
+  },
+  'nonprod.hours': {
+    en: 'Hours',
+    ms: 'Jam',
+    zh: '小时',
+    my: 'နာရီ',
+  },
+  'nonprod.note': {
+    en: 'Note (optional)',
+    ms: 'Nota (pilihan)',
+    zh: '备注（可选）',
+    my: 'မှတ်ချက် (မဖြစ်မနေမဟုတ်)',
+  },
+  'nonprod.submit': {
+    en: 'Submit request',
+    ms: 'Hantar permohonan',
+    zh: '提交申请',
+    my: 'တောင်းဆိုချက်တင်ရန်',
+  },
+  'nonprod.myRequests': {
+    en: 'My requests',
+    ms: 'Permohonan saya',
+    zh: '我的申请',
+    my: 'ကျွန်ုပ်၏တောင်းဆိုချက်များ',
+  },
+  'nonprod.noRequests': {
+    en: 'No requests yet.',
+    ms: 'Belum ada permohonan.',
+    zh: '暂无申请。',
+    my: 'တောင်းဆိုချက်မရှိသေးပါ။',
+  },
+  'nonprod.pickDept': {
+    en: 'Pick a department',
+    ms: 'Pilih jabatan',
+    zh: '选择部门',
+    my: 'ဌာနရွေးပါ',
+  },
+  'nonprod.status.PENDING': {
+    en: 'Pending',
+    ms: 'Menunggu',
+    zh: '待批',
+    my: 'စောင့်ဆိုင်းဆဲ',
+  },
+  'nonprod.status.APPROVED': {
+    en: 'Approved',
+    ms: 'Diluluskan',
+    zh: '已批准',
+    my: 'အတည်ပြုပြီး',
+  },
+  'nonprod.status.REJECTED': {
+    en: 'Rejected',
+    ms: 'Ditolak',
+    zh: '已拒绝',
+    my: 'ငြင်းပယ်ပြီး',
+  },
+
   // ---- Leaves ----
   'leave.title': {
     en: 'Leave',

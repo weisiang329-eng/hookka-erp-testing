@@ -478,6 +478,49 @@ app.get("/scan-lookup", async (c) => {
     }
   }
 
+  // FG-PACKING fallback (owner 2026-06-26: "Not found: FG-PACKING / SO-2604-206-04").
+  // That sticker carries ONLY po=<poNo> — unlike dept stickers (op=<job_card.id>,
+  // rescued by the jc-id path above), it has NO job-card-id to fall back on, and
+  // the matches above are exact poNo/id only. So if the printed poNo DRIFTED from
+  // the current production_orders.poNo (the SO was edited → pieces renumbered, a
+  // trailing space, a case difference), the scan dead-ends at "Not found".
+  // Recover it: (a) trim/case-insensitive poNo retry; then (b) resolve via
+  // fg_units — the sticker's po equals the UNIT's stored poNo, and fg_units.poId
+  // is the stable PO id, so the piece is found even after the poNo string moved.
+  // Only loads a LIVE production_order (a purged PO → nothing → honest Not-found
+  // → reprint). Additive: runs only after every existing path missed.
+  if (poRows.length === 0) {
+    poRows =
+      (
+        await c.var.DB.prepare(
+          "SELECT * FROM production_orders WHERE LOWER(TRIM(poNo)) = LOWER(TRIM(?)) LIMIT 5",
+        )
+          .bind(term)
+          .all<PoRowFull>()
+      ).results ?? [];
+  }
+  if (poRows.length === 0) {
+    try {
+      const fu = await c.var.DB.prepare(
+        "SELECT poId FROM fg_units WHERE poNo = ? AND poId IS NOT NULL LIMIT 1",
+      )
+        .bind(term)
+        .first<{ poId: string | null }>();
+      if (fu?.poId) {
+        poRows =
+          (
+            await c.var.DB.prepare(
+              "SELECT * FROM production_orders WHERE id = ? LIMIT 1",
+            )
+              .bind(fu.poId)
+              .all<PoRowFull>()
+          ).results ?? [];
+      }
+    } catch (e) {
+      console.warn("[scan-lookup] fg_units fallback failed:", e);
+    }
+  }
+
   if (poRows.length === 0) return c.json({ success: true, data: [] });
 
   const poIds = poRows.map((p) => p.id);

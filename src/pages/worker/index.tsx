@@ -337,16 +337,50 @@ function writeAckAnnouncements(ids: Set<string>): void {
 // unstamped (the existing getPunchLocation handles that).
 type LocationState = "unknown" | "granted" | "denied" | "unavailable";
 
+// PWA permission re-ask suppression. Before ever calling getCurrentPosition
+// (which can re-surface the OS prompt and burns a GPS fix), consult the
+// Permissions API. When it reports a settled state we use it directly:
+//   - 'granted' → "granted" with NO prompt and NO GPS spin-up.
+//   - 'denied'  → "denied" with NO prompt (the browser wouldn't ask again anyway).
+//   - 'prompt'  → unknown → null, so the caller falls through to the live request.
+// Returns null when the API is unsupported (iOS Safari, older browsers) — also
+// a fall-through to the live request.
+async function queryLocationPermission(): Promise<LocationState | null> {
+  try {
+    if (typeof navigator === "undefined" || !navigator.permissions?.query) {
+      return null;
+    }
+    const status = await navigator.permissions.query({
+      name: "geolocation" as PermissionName,
+    });
+    if (status.state === "granted") return "granted";
+    if (status.state === "denied") return "denied";
+    return null; // 'prompt' — let the caller decide whether to ask.
+  } catch {
+    return null; // some browsers throw on the geolocation query — fall through.
+  }
+}
+
 // Request a position once. Resolves the resulting permission state. A success
 // means the worker granted (or had already granted) location; a failure with
 // PERMISSION_DENIED means denied; anything else (no geolocation API, timeout,
 // position unavailable) is "unavailable" — both surface the same nudge.
-function requestLocationPermission(): Promise<LocationState> {
+//
+// `passive` (default false): when true, skip the live getCurrentPosition call
+// if the Permissions API already knows the answer — used by the on-open probe
+// so an already-granted worker is NOT re-prompted and we don't spin the GPS.
+// The explicit retry button passes passive=false so it always re-checks live.
+async function requestLocationPermission(
+  passive = false,
+): Promise<LocationState> {
+  if (typeof navigator === "undefined" || !navigator.geolocation) {
+    return "unavailable";
+  }
+  if (passive) {
+    const known = await queryLocationPermission();
+    if (known) return known; // 'granted' / 'denied' settled without prompting.
+  }
   return new Promise((resolve) => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) {
-      resolve("unavailable");
-      return;
-    }
     navigator.geolocation.getCurrentPosition(
       () => resolve("granted"),
       (err) => {
@@ -611,7 +645,11 @@ export default function WorkerHomePage() {
   /* eslint-disable react-hooks/set-state-in-effect -- async permission probe; setState lives inside the resolved promise */
   useEffect(() => {
     let alive = true;
-    requestLocationPermission().then((s) => {
+    // passive=true → if the Permissions API already knows the worker granted
+    // (or hard-denied) location, use that and DON'T re-prompt / spin the GPS.
+    // Only an undecided ('prompt') / unsupported state falls through to a live
+    // request, which is the one case where surfacing the OS prompt is correct.
+    requestLocationPermission(true).then((s) => {
       if (alive) setLocState(s);
     });
     return () => {

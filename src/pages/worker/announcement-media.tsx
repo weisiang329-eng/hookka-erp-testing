@@ -42,6 +42,9 @@ export type Announcement = {
     { title: string; body: string }
   > | null;
   attachments?: AnnouncementAttachment[];
+  // Category — GENERAL | WARNING | SOP | LEARNING (normalized server-side;
+  // missing/unknown → GENERAL). Drives the colored pill badge on every surface.
+  category?: "GENERAL" | "WARNING" | "SOP" | "LEARNING";
 };
 
 // NOTE: localizeAnnouncement / fmtDay are intentionally NOT exported from this

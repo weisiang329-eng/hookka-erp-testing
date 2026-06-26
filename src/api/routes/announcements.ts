@@ -186,8 +186,34 @@ function ensureAnnouncementsTable(db: D1Database): Promise<void> {
     } catch {
       _announcementsMig = null;
     }
+    // Category (added 2026-06-27). One of GENERAL | WARNING | SOP | LEARNING —
+    // a single lowercase-word column so NO column-rename-map entry is needed.
+    // Existing rows default to GENERAL → fully back-compatible. INERT migration
+    // file — this runtime ALTER is the load-bearing copy, awaited before the
+    // first read/write. Same best-effort self-heal posture as the columns above.
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'GENERAL'",
+        )
+        .run();
+    } catch {
+      _announcementsMig = null;
+    }
   })();
   return _announcementsMig;
+}
+
+// The four announcement categories. GENERAL is the back-compat default.
+type AnnouncementCategory = "GENERAL" | "WARNING" | "SOP" | "LEARNING";
+
+// Normalize an arbitrary stored/incoming value (missing / unknown / lowercase)
+// to a known category, uppercased, defaulting to GENERAL. Mirrors the FE helper
+// in src/lib/announcement-category.ts so both sides agree.
+function readCategory(v: unknown): AnnouncementCategory {
+  const s = String(v ?? "").trim().toUpperCase();
+  if (s === "WARNING" || s === "SOP" || s === "LEARNING") return s;
+  return "GENERAL";
 }
 
 // One attached media file on an announcement. `fileId` points at the existing
@@ -275,6 +301,10 @@ type AnnouncementRow = {
   targetDeptCodes?: string | string[] | null;
   target_worker_ids?: string | string[] | null;
   targetWorkerIds?: string | string[] | null;
+  // Category — GENERAL | WARNING | SOP | LEARNING. A single lowercase-word
+  // column, so the PG driver hands it back as `category` unchanged; declared
+  // dual-keyed defensively. Missing/unknown normalizes to GENERAL on read.
+  category?: string | null;
 };
 
 // Targeting kinds. ALL = everyone (the back-compat default); the others narrow
@@ -382,6 +412,9 @@ function toPublic(r: AnnouncementRow) {
     targetWorkerIds: readStringArray(
       r.targetWorkerIds ?? r.target_worker_ids ?? null,
     ),
+    // Category — normalized (uppercase, unknown/missing → GENERAL) so the office
+    // list + worker portal always get one of the four known values.
+    category: readCategory(r.category),
   };
 }
 
@@ -552,6 +585,8 @@ admin.post("/", async (c) => {
       | undefined,
   );
   const targetType = deriveTargetType(reqDeptCodes, reqWorkerIds);
+  // Category — GENERAL | WARNING | SOP | LEARNING; default/invalid → GENERAL.
+  const category = readCategory((body as { category?: unknown }).category);
   const userId =
     (c as unknown as { get: (k: string) => string | undefined }).get(
       "userId",
@@ -570,8 +605,9 @@ admin.post("/", async (c) => {
   await c.var.DB.prepare(
     `INSERT INTO announcements
        (id, org_id, title, body, is_active, expires_at, created_by, created_at,
-        translations, attachments, target_type, target_dept_codes, target_worker_ids)
-     VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        translations, attachments, target_type, target_dept_codes, target_worker_ids,
+        category)
+     VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -586,6 +622,7 @@ admin.post("/", async (c) => {
       targetType,
       reqDeptCodes.length ? JSON.stringify(reqDeptCodes) : null,
       reqWorkerIds.length ? JSON.stringify(reqWorkerIds) : null,
+      category,
     )
     .run();
   const row = await c.var.DB.prepare(
@@ -712,6 +749,12 @@ admin.patch("/:id", async (c) => {
     binds.push(nextDepts.length ? JSON.stringify(nextDepts) : null);
     sets.push("target_worker_ids = ?");
     binds.push(nextWorkers.length ? JSON.stringify(nextWorkers) : null);
+  }
+  // Category edit — only when the body carries `category`. Normalized to one of
+  // the four known values (default/invalid → GENERAL). Absent key = unchanged.
+  if ("category" in (body as object)) {
+    sets.push("category = ?");
+    binds.push(readCategory((body as { category?: unknown }).category));
   }
   if ("expiresAt" in (body as object)) {
     const raw = (body as { expiresAt?: unknown }).expiresAt;

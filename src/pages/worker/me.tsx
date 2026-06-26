@@ -28,6 +28,13 @@ import {
   AnnouncementMedia,
   type Announcement,
 } from "./announcement-media";
+import { AnnouncementCategoryBadge } from "@/components/announcement-category-badge";
+import {
+  ANNOUNCEMENT_CATEGORIES,
+  ANNOUNCEMENT_CATEGORY_ORDER,
+  normalizeAnnouncementCategory,
+  type AnnouncementCategory,
+} from "@/lib/announcement-category";
 
 type LeaveRecord = {
   id: string;
@@ -400,6 +407,11 @@ export default function WorkerMePage() {
   const [pastOpen, setPastOpen] = useState(false);
   const [pastAnn, setPastAnn] = useState<Announcement[] | null>(null);
   const [pastLoading, setPastLoading] = useState(false);
+  // Category filter for the archive (owner 2026-06-27). "ALL" default; the
+  // other chips narrow the (already-fetched) list client-side. null = All.
+  const [pastCatFilter, setPastCatFilter] = useState<AnnouncementCategory | null>(
+    null,
+  );
   // Per-row collapse (holds the COLLAPSED ids, default expanded).
   const [collapsedPast, setCollapsedPast] = useState<Set<string>>(new Set());
   const togglePastCollapsed = useCallback((id: string) => {
@@ -1192,43 +1204,111 @@ export default function WorkerMePage() {
                 {t("common.loading")}
               </p>
             ) : pastAnn && pastAnn.length > 0 ? (
-              <ul className="divide-y divide-[#F0ECE9]">
-                {pastAnn.map((a) => {
-                  const collapsed = collapsedPast.has(a.id);
-                  const { title, body } = localizeAnnouncement(a, lang);
-                  return (
-                    <li key={a.id} className="px-4 py-3">
+              (() => {
+                // Per-category counts (off the full fetched list) for the chips.
+                const countOf = (cat: AnnouncementCategory) =>
+                  pastAnn.filter(
+                    (a) => normalizeAnnouncementCategory(a.category) === cat,
+                  ).length;
+                // Apply the chosen filter (null = All).
+                const shown = pastCatFilter
+                  ? pastAnn.filter(
+                      (a) =>
+                        normalizeAnnouncementCategory(a.category) ===
+                        pastCatFilter,
+                    )
+                  : pastAnn;
+                return (
+                  <>
+                    {/* Category filter chips — All + the 4 types. Filters the
+                        already-fetched list client-side; "All" is default. */}
+                    <div className="flex flex-wrap gap-1.5 px-4 pt-3">
                       <button
                         type="button"
-                        onClick={() => togglePastCollapsed(a.id)}
-                        className="flex w-full items-start gap-2 text-left"
+                        onClick={() => setPastCatFilter(null)}
+                        className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                          pastCatFilter === null
+                            ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                            : "border-[#D8D2CC] bg-white text-[#5A5550]"
+                        }`}
                       >
-                        <p className="min-w-0 flex-1 text-sm font-semibold text-[#5A5550] break-words">
-                          {title}
-                        </p>
-                        <ChevronDown
-                          className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${collapsed ? "" : "rotate-180"}`}
-                        />
+                        All ({pastAnn.length})
                       </button>
-                      {!collapsed && (
-                        <div className="mt-0.5 pl-0">
-                          {body && (
-                            <p className="whitespace-pre-wrap break-words text-xs text-[#5A5550]">
-                              {body}
-                            </p>
-                          )}
-                          <AnnouncementMedia attachments={a.attachments} />
-                          {a.createdAt && (
-                            <p className="mt-1 text-[10px] text-[#9CA3AF]">
-                              {fmtDay(a.createdAt)}
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
+                      {ANNOUNCEMENT_CATEGORY_ORDER.map((cat) => {
+                        const meta = ANNOUNCEMENT_CATEGORIES[cat];
+                        const Icon = meta.icon;
+                        const n = countOf(cat);
+                        const active = pastCatFilter === cat;
+                        return (
+                          <button
+                            key={cat}
+                            type="button"
+                            onClick={() => setPastCatFilter(cat)}
+                            className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                              active
+                                ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                                : "border-[#D8D2CC] bg-white text-[#5A5550]"
+                            }`}
+                          >
+                            <Icon className="h-3 w-3" />
+                            {meta.label} ({n})
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {shown.length === 0 ? (
+                      <p className="px-4 py-3 text-xs text-[#9CA3AF]">
+                        {t("home.noPastAnnouncements")}
+                      </p>
+                    ) : (
+                      <ul className="mt-2 divide-y divide-[#F0ECE9]">
+                        {shown.map((a) => {
+                          const collapsed = collapsedPast.has(a.id);
+                          const { title, body } = localizeAnnouncement(a, lang);
+                          return (
+                            <li key={a.id} className="px-4 py-3">
+                              <div className="mb-1">
+                                <AnnouncementCategoryBadge
+                                  category={a.category}
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => togglePastCollapsed(a.id)}
+                                className="flex w-full items-start gap-2 text-left"
+                              >
+                                <p className="min-w-0 flex-1 text-sm font-semibold text-[#5A5550] break-words">
+                                  {title}
+                                </p>
+                                <ChevronDown
+                                  className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${collapsed ? "" : "rotate-180"}`}
+                                />
+                              </button>
+                              {!collapsed && (
+                                <div className="mt-0.5 pl-0">
+                                  {body && (
+                                    <p className="whitespace-pre-wrap break-words text-xs text-[#5A5550]">
+                                      {body}
+                                    </p>
+                                  )}
+                                  <AnnouncementMedia
+                                    attachments={a.attachments}
+                                  />
+                                  {a.createdAt && (
+                                    <p className="mt-1 text-[10px] text-[#9CA3AF]">
+                                      {fmtDay(a.createdAt)}
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </>
+                );
+              })()
             ) : (
               <p className="px-4 py-3 text-xs text-[#9CA3AF]">
                 {t("home.noPastAnnouncements")}

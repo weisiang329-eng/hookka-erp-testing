@@ -111,8 +111,133 @@ jobs:
              ORDER BY n_live_tup DESC
              LIMIT 60;"
 
-      - name: Execute — NOT YET CONFIGURED (safety stop)
-        if: inputs.mode == 'execute'
+      - name: Report — SO cut + chain column map + blast radius
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          CUTOFF: ${{ inputs.cutoff }}
+          PGCONNECT_TIMEOUT: '30'
         run: |
-          echo "::error::execute mode is not configured yet — the purge SQL is authored after the report run is reviewed. Re-run in report mode."
-          exit 1
+          echo "=== SALES ORDER cut on company_so_date < ${CUTOFF} (undated = KEPT) ==="
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -v cut="$CUTOFF" -c "
+            SELECT
+              count(*) FILTER (WHERE company_so_date >= :'cut')                         AS keep_so,
+              count(*) FILTER (WHERE company_so_date <  :'cut')                          AS delete_so,
+              count(*) FILTER (WHERE company_so_date IS NULL OR company_so_date = '')    AS undated_kept
+            FROM sales_orders;"
+
+          echo '=== chain tables — full column list (to confirm every link column) ==='
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "
+            SELECT table_name,
+                   string_agg(column_name, ', ' ORDER BY ordinal_position) AS columns
+              FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name IN (
+                 'sales_orders','sales_order_items','so_status_changes',
+                 'production_orders','job_cards','job_card_events','piece_pics',
+                 'fg_units','fg_batches','fg_scan_history','wip_items','wip_cascade_log',
+                 'cost_ledger','stock_movements','qc_inspections','qc_inspection_items',
+                 'delivery_orders','delivery_order_items','invoices','invoice_items',
+                 'folder_job_cards','dept_scan_events')
+             GROUP BY table_name ORDER BY table_name;"
+
+          echo '=== blast radius — rows the pre-cutoff SO chain would remove (certain links only) ==='
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -v cut="$CUTOFF" -c "
+            WITH del_so AS (SELECT id FROM sales_orders WHERE company_so_date < :'cut'),
+                 del_po AS (SELECT id FROM production_orders WHERE sales_order_id IN (SELECT id FROM del_so))
+            SELECT
+              (SELECT count(*) FROM del_so)                                                          AS sales_orders,
+              (SELECT count(*) FROM sales_order_items WHERE sales_order_id IN (SELECT id FROM del_so)) AS sales_order_items,
+              (SELECT count(*) FROM del_po)                                                          AS production_orders,
+              (SELECT count(*) FROM job_cards WHERE production_order_id IN (SELECT id FROM del_po))   AS job_cards,
+              (SELECT count(*) FROM job_card_events WHERE job_card_id IN
+                 (SELECT id FROM job_cards WHERE production_order_id IN (SELECT id FROM del_po)))     AS job_card_events,
+              (SELECT count(*) FROM piece_pics WHERE job_card_id IN
+                 (SELECT id FROM job_cards WHERE production_order_id IN (SELECT id FROM del_po)))     AS piece_pics;"
+
+      - name: Execute — delete the pre-cutoff SO chain (ONE transaction)
+        if: inputs.mode == 'execute'
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          CUTOFF: ${{ inputs.cutoff }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          # All-or-nothing: a single BEGIN/COMMIT with ON_ERROR_STOP. Any error
+          # (e.g. an unexpected column / FK) aborts before COMMIT → nothing is
+          # deleted. Roots on sales_orders.company_so_date < cutoff (undated SOs
+          # are KEPT). Children deleted by confirmed link columns; job_card_events
+          # / piece_pics / fg_scan_history / qc_inspection_items / invoice_items /
+          # invoice_payments ride their FK ON DELETE CASCADE. DOs are removed only
+          # when EVERY item belongs to a deleted PO (mixed DOs keep their header +
+          # other items; their deleted-PO items are removed). Undo = re-run the
+          # prod→staging sync. Polymorphic/ambiguous tables (cost_ledger,
+          # so_status_changes, wip_items, dept_scan_events) are intentionally left
+          # — they are logs/ledger, not rows the SO/PO/DO lists render.
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -v cut="$CUTOFF" <<'SQL'
+          BEGIN;
+          CREATE TEMP TABLE _del_so ON COMMIT DROP AS
+            SELECT id FROM sales_orders
+             WHERE company_so_date IS NOT NULL AND company_so_date <> '' AND company_so_date < :'cut';
+          CREATE TEMP TABLE _del_po ON COMMIT DROP AS
+            SELECT id FROM production_orders WHERE sales_order_id IN (SELECT id FROM _del_so);
+          CREATE TEMP TABLE _del_jc ON COMMIT DROP AS
+            SELECT id FROM job_cards WHERE production_order_id IN (SELECT id FROM _del_po);
+          CREATE TEMP TABLE _del_do ON COMMIT DROP AS
+            SELECT d.id FROM delivery_orders d
+             WHERE EXISTS (SELECT 1 FROM delivery_order_items i
+                            WHERE i.delivery_order_id = d.id
+                              AND i.production_order_id IN (SELECT id FROM _del_po))
+               AND NOT EXISTS (SELECT 1 FROM delivery_order_items i
+                                WHERE i.delivery_order_id = d.id
+                                  AND (i.production_order_id IS NULL
+                                       OR i.production_order_id NOT IN (SELECT id FROM _del_po)));
+          \echo '=== targets to delete ==='
+          SELECT (SELECT count(*) FROM _del_so) AS sales_orders,
+                 (SELECT count(*) FROM _del_po) AS production_orders,
+                 (SELECT count(*) FROM _del_jc) AS job_cards,
+                 (SELECT count(*) FROM _del_do) AS fully_ours_delivery_orders;
+          DO $$
+          DECLARE d int; t int;
+          BEGIN
+            SELECT count(*) INTO t FROM sales_orders;
+            SELECT count(*) INTO d FROM _del_so;
+            IF d = 0 THEN
+              RAISE EXCEPTION 'cutoff matched 0 sales orders — aborting (check company_so_date format)';
+            END IF;
+            IF d = t THEN
+              RAISE EXCEPTION 'cutoff matched ALL % sales orders — aborting (check company_so_date format)', t;
+            END IF;
+            RAISE NOTICE 'deleting % of % sales orders', d, t;
+          END $$;
+          DELETE FROM folder_job_cards     WHERE job_card_id        IN (SELECT id FROM _del_jc);
+          DELETE FROM wip_cascade_log      WHERE job_card_id        IN (SELECT id FROM _del_jc);
+          DELETE FROM qc_inspections       WHERE production_order_id IN (SELECT id FROM _del_po);
+          DELETE FROM fg_units             WHERE po_id              IN (SELECT id FROM _del_po);
+          DELETE FROM fg_batches           WHERE production_order_id IN (SELECT id FROM _del_po);
+          DELETE FROM stock_movements      WHERE production_order_id IN (SELECT id FROM _del_po);
+          DELETE FROM delivery_order_items WHERE production_order_id IN (SELECT id FROM _del_po);
+          DELETE FROM delivery_orders      WHERE id                 IN (SELECT id FROM _del_do);
+          DELETE FROM invoices             WHERE sales_order_id     IN (SELECT id FROM _del_so);
+          DELETE FROM sales_order_items    WHERE sales_order_id     IN (SELECT id FROM _del_so);
+          DELETE FROM job_cards            WHERE id                 IN (SELECT id FROM _del_jc);
+          DELETE FROM production_orders    WHERE id                 IN (SELECT id FROM _del_po);
+          DELETE FROM sales_orders         WHERE id                 IN (SELECT id FROM _del_so);
+          COMMIT;
+          SQL
+          echo "=== remaining counts after delete ==="
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "
+            SELECT (SELECT count(*) FROM sales_orders) AS sales_orders,
+                   (SELECT count(*) FROM production_orders) AS production_orders,
+                   (SELECT count(*) FROM job_cards) AS job_cards,
+                   (SELECT count(*) FROM delivery_orders) AS delivery_orders,
+                   (SELECT count(*) FROM invoices) AS invoices;"
+          echo "=== orphan check (must be 0) ==="
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "
+            SELECT
+              (SELECT count(*) FROM production_orders p
+                 WHERE p.sales_order_id IS NOT NULL
+                   AND p.sales_order_id NOT IN (SELECT id FROM sales_orders)) AS orphan_production_orders,
+              (SELECT count(*) FROM job_cards j
+                 WHERE j.production_order_id IS NOT NULL
+                   AND j.production_order_id NOT IN (SELECT id FROM production_orders)) AS orphan_job_cards;"
+          echo "=== ANALYZE (refresh planner stats) ==="
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "ANALYZE;"

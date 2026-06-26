@@ -15,7 +15,9 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { MoneyInput } from "@/components/ui/money-input";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa } from "@/lib/export-report";
-import { printVoucher, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
+import { printVoucher, printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
+import { useRowSelection } from "@/lib/use-row-selection";
+import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
 import { amountInWords } from "@/lib/amount-in-words";
 import { COMPANY } from "@/lib/constants";
 import { COA_TYPE_COLOR, SUCCESS, DANGER, INFO, ACCENT_PLUM } from "@/lib/design-tokens";
@@ -2340,6 +2342,7 @@ function JournalsTab({
 }) {
   const { confirm } = useConfirm();
   const [showForm, setShowForm] = useState(false);
+  const [selectedJvs, setSelectedJvs] = useState<JournalEntry[]>([]);
 
   const handlePost = async (id: string) => {
     await fetch(`/api/accounting/journals/${id}`, {
@@ -2516,6 +2519,20 @@ function JournalsTab({
 
       {showForm && <JournalEntryForm accounts={accounts} onSave={() => { setShowForm(false); onRefresh(); }} onCancel={() => setShowForm(false)} />}
 
+      <BatchActionsBar
+        count={selectedJvs.length}
+        onPrint={() => printVouchers(selectedJvs.map(buildJvVoucher))}
+        exportName="journal-vouchers"
+        exportAoa={() => [
+          ["Entry No", "Date", "Description", "Debit (RM)", "Credit (RM)"],
+          ...selectedJvs.map((r) => {
+            const dr = r.lines.reduce((s, l) => s + (Number(l.debitSen) || 0), 0);
+            const cr = r.lines.reduce((s, l) => s + (Number(l.creditSen) || 0), 0);
+            return [r.entryNo ?? r.id, r.date ?? "", r.description ?? "", (dr / 100).toFixed(2), (cr / 100).toFixed(2)];
+          }),
+        ]}
+      />
+
       <Card>
         <CardContent className="p-4">
           <DataGrid
@@ -2525,6 +2542,8 @@ function JournalsTab({
             virtualize
             gridId="accounting-journals"
             contextMenuItems={contextMenuItems}
+            selectable
+            onSelectionChange={setSelectedJvs}
           />
         </CardContent>
       </Card>
@@ -6345,6 +6364,8 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     return true;
   });
 
+  const pvSel = useRowSelection(visibleRows, (r) => r.pvNo ?? r.id);
+
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const handleSave = async () => {
@@ -6558,6 +6579,17 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
         </select>
       </div>
 
+      <BatchActionsBar
+        count={pvSel.count}
+        onClear={pvSel.clear}
+        onPrint={() => printVouchers(pvSel.selectedRows.map((r) => buildPvVoucher(r, accounts)))}
+        exportName="expense-vouchers"
+        exportAoa={() => [
+          ["PV No", "Date", "Pay To", "Amount (RM)", "Status"],
+          ...pvSel.selectedRows.map((r) => [r.pvNo ?? r.id, r.date ?? "", r.payee ?? "", (Number(r.totalSen ?? 0) / 100).toFixed(2), r.status ?? ""]),
+        ]}
+      />
+
       <Card>
         <CardContent className="p-0 overflow-x-auto">
           {rows === null ? (
@@ -6566,6 +6598,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 w-8"><input type="checkbox" checked={pvSel.allSelected} onChange={pvSel.toggleAll} className="h-3.5 w-3.5 accent-[#6B5C32]" /></th>
                   <th className="px-3 py-2 text-left">PV No</th>
                   <th className="px-3 py-2 text-left">Date</th>
                   <th className="px-3 py-2 text-left">Payee / Description</th>
@@ -6583,6 +6616,9 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     className={`border-b border-[#F0ECE9] cursor-pointer hover:bg-[#FAF8F5] ${r.status === "VOID" ? "opacity-50" : ""}`}
                     onClick={() => setExpandedPv((m) => ({ ...m, [r.id]: !m[r.id] }))}
                   >
+                    <td className="px-3 py-1.5 w-8" onClick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={pvSel.isSelected(r.pvNo ?? r.id)} onChange={() => pvSel.toggle(r.pvNo ?? r.id)} className="h-3.5 w-3.5 accent-[#6B5C32]" />
+                    </td>
                     <td className="px-3 py-1.5 tabular-nums text-xs whitespace-nowrap">
                       <span className="inline-block w-3 text-[#9CA3AF]">{expandedPv[r.id] ? "▾" : "▸"}</span> {r.pvNo}
                     </td>
@@ -6616,7 +6652,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   </tr>
                   {expandedPv[r.id] && (
                     <tr className="bg-[#FAF8F5] border-b border-[#F0ECE9]">
-                      <td colSpan={8} className="px-8 py-2">
+                      <td colSpan={9} className="px-8 py-2">
                         {r.lines.length === 0 ? (
                           <div className="text-xs text-[#9CA3AF]">No line detail.</div>
                         ) : (
@@ -6648,7 +6684,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   </React.Fragment>
                 ))}
                 {visibleRows.length === 0 && (
-                  <tr><td colSpan={8} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No payments match</td></tr>
+                  <tr><td colSpan={9} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No payments match</td></tr>
                 )}
               </tbody>
             </table>
@@ -6698,6 +6734,8 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
       a.specialAccountType !== "SBK" &&
       a.specialAccountType !== "SCH",
   );
+
+  const orSel = useRowSelection(rows ?? [], (r) => r.orNo ?? r.id);
 
   const load = useCallback(() => {
     fetch("/api/accounting/official-receipts")
@@ -6859,6 +6897,17 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
         </Card>
       )}
 
+      <BatchActionsBar
+        count={orSel.count}
+        onClear={orSel.clear}
+        onPrint={() => printVouchers(orSel.selectedRows.map((r) => buildOrVoucher(r, accounts)))}
+        exportName="official-receipts"
+        exportAoa={() => [
+          ["OR No", "Date", "Received From", "Amount (RM)", "Status"],
+          ...orSel.selectedRows.map((r) => [r.orNo ?? r.id, r.date ?? "", r.receivedFrom ?? "", (Number(r.totalSen ?? 0) / 100).toFixed(2), r.status ?? ""]),
+        ]}
+      />
+
       <Card>
         <CardContent className="p-0 overflow-x-auto">
           {rows === null ? (
@@ -6867,6 +6916,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 w-8"><input type="checkbox" checked={orSel.allSelected} onChange={orSel.toggleAll} className="h-3.5 w-3.5 accent-[#6B5C32]" /></th>
                   <th className="px-3 py-2 text-left">OR No</th>
                   <th className="px-3 py-2 text-left">Date</th>
                   <th className="px-3 py-2 text-left">From / Description</th>
@@ -6879,6 +6929,9 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.id} className={`border-b border-[#F0ECE9] ${r.status === "VOID" ? "opacity-50" : ""}`}>
+                    <td className="px-3 py-1.5 w-8">
+                      <input type="checkbox" checked={orSel.isSelected(r.orNo ?? r.id)} onChange={() => orSel.toggle(r.orNo ?? r.id)} className="h-3.5 w-3.5 accent-[#6B5C32]" />
+                    </td>
                     <td className="px-3 py-1.5 tabular-nums text-xs">{r.orNo}</td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.date}</td>
                     <td className="px-3 py-1.5">{[r.receivedFrom, r.description].filter(Boolean).join(" · ")}</td>
@@ -6900,7 +6953,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   </tr>
                 ))}
                 {rows.length === 0 && (
-                  <tr><td colSpan={7} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No receipts yet</td></tr>
+                  <tr><td colSpan={8} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No receipts yet</td></tr>
                 )}
               </tbody>
             </table>

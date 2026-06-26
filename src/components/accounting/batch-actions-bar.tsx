@@ -3,7 +3,7 @@ import { exportReportCsv, exportReportXlsx } from "@/lib/export-report";
 
 export function BatchActionsBar(props: {
   count: number;
-  onClear: () => void;
+  onClear?: () => void;
   onPrint?: () => void;
   exportName: string; // base filename, no extension
   exportAoa: () => (string | number)[][]; // header row + selected body rows
@@ -33,9 +33,11 @@ export function BatchActionsBar(props: {
       >
         <FileSpreadsheet className="h-3.5 w-3.5" /> Excel
       </button>
-      <button onClick={props.onClear} className="inline-flex items-center gap-1 text-[#6B7280] hover:text-[#1F1D1B]">
-        <X className="h-3.5 w-3.5" /> Clear
-      </button>
+      {props.onClear && (
+        <button onClick={props.onClear} className="inline-flex items-center gap-1 text-[#6B7280] hover:text-[#1F1D1B]">
+          <X className="h-3.5 w-3.5" /> Clear
+        </button>
+      )}
     </div>
   );
 }

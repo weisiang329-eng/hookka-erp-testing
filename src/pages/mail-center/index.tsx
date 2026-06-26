@@ -1930,19 +1930,15 @@ function OutboxPanel() {
   return (
     <Card className="overflow-hidden">
       <CardContent className="p-0">
-        {/* Header + status roll-up */}
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/30 px-3 py-2">
-          <div className="flex items-center gap-2">
-            <Bell className="h-4 w-4 text-amber-700" />
-            <div>
-              <p className="text-sm font-semibold leading-tight">
-                Auto-sent emails
-              </p>
-              <p className="text-[11px] text-muted-foreground">
-                Notices the system sent to customers — Delivery Order, Invoice,
-                etc. (from noreply@)
-              </p>
-            </div>
+        {/* Toolbar — same single-line density as the normal mail list
+            toolbar (bg-muted/30 · px-3 py-1.5): title on the left, status
+            roll-up + count + refresh on the right. */}
+        <div className="flex items-center justify-between gap-2 border-b border-border bg-muted/30 px-3 py-1.5">
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Bell className="h-3.5 w-3.5 text-amber-700" />
+            <span className="font-medium text-foreground/80">
+              Auto-sent emails
+            </span>
           </div>
           <div className="flex items-center gap-1.5 text-[11px]">
             <span className="rounded-full bg-green-100 px-2 py-0.5 font-semibold text-green-800">
@@ -2012,45 +2008,53 @@ function OutboxPanel() {
         ) : (
           <ul className="divide-y divide-border">
             {items.map((it) => (
-              <li key={it.id}>
-                <button
-                  type="button"
-                  onClick={() => setOpenId(it.id)}
-                  className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition hover:bg-muted/50"
-                >
+              <li
+                key={it.id}
+                className="group relative flex items-center border-l-2 border-transparent transition hover:bg-muted/50"
+              >
+                {/* Status chip column — stands in for the select/star lead of
+                    the normal list; keeps the outbox-specific
+                    Sent/Failed/Pending state visible without breaking the row
+                    rhythm. */}
+                <span className="flex shrink-0 items-center pl-3 pr-1">
                   <span
                     className={cn(
-                      "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold",
+                      "rounded-full px-2 py-0.5 text-[10px] font-semibold",
                       outboxStatusTone(it.status),
                     )}
                   >
                     {outboxStatusLabel(it.status)}
                   </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-medium">
-                        {it.toAddress || "(no recipient)"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setOpenId(it.id)}
+                  className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-1.5 pr-2 text-left"
+                >
+                  {/* Recipient — fixed-ish width + bold, matches CompactRow
+                      sender. */}
+                  <span className="w-32 shrink-0 truncate text-sm font-medium text-foreground/80 sm:w-40">
+                    {it.toAddress || "(no recipient)"}
+                  </span>
+                  {/* Subject (+ attachment count / failure note) on one line. */}
+                  <span className="min-w-0 flex-1 truncate text-sm">
+                    <span className="text-foreground/70">{it.subject}</span>
+                    {it.attachmentNames.length > 0 && (
+                      <span className="text-muted-foreground/70">
+                        {" · "}
+                        {it.attachmentNames.length} attachment
+                        {it.attachmentNames.length === 1 ? "" : "s"}
                       </span>
-                      <span className="shrink-0 text-[11px] text-muted-foreground">
-                        {fmtMailTime(it.sentAt || it.createdAt)}
-                      </span>
-                    </span>
-                    <span className="block truncate text-xs text-muted-foreground">
-                      {it.subject}
-                      {it.attachmentNames.length > 0 && (
-                        <span className="ml-1 text-muted-foreground/70">
-                          · {it.attachmentNames.length} attachment
-                          {it.attachmentNames.length === 1 ? "" : "s"}
-                        </span>
-                      )}
-                    </span>
+                    )}
                     {it.status === "FAILED" && it.lastError && (
-                      <span className="block truncate text-[11px] text-red-700">
-                        {it.lastError}
-                      </span>
+                      <span className="text-red-700"> — {it.lastError}</span>
                     )}
                   </span>
                 </button>
+                {/* Date — right-aligned, same treatment as CompactRow. */}
+                <span className="shrink-0 px-2 text-xs text-muted-foreground">
+                  {fmtMailTime(it.sentAt || it.createdAt)}
+                </span>
               </li>
             ))}
           </ul>

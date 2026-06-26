@@ -111,8 +111,10 @@ import {
   Search,
   RefreshCw,
   Inbox,
+  ArrowLeft,
   ArrowDownLeft,
   ArrowUpRight,
+  Paperclip,
   PenSquare,
   ChevronRight,
   Users,
@@ -1880,7 +1882,11 @@ function OutboxPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [reloadKey, setReloadKey] = useState(0);
-  const [openId, setOpenId] = useState<string | null>(null);
+  // The auto-sent email opened in the full detail view (replaces the old
+  // centered modal). null = show the list. When set, the content area renders
+  // OutboxDetailView in place of the list, mirroring the inbox split-vs-full
+  // detail chrome so an auto-sent notice opens the SAME way a normal mail does.
+  const [selectedOutboxId, setSelectedOutboxId] = useState<string | null>(null);
 
   useEffect(() => {
     // NB: no synchronous setState in the effect body (react-hooks/
@@ -1926,6 +1932,18 @@ function OutboxPanel() {
     { v: "FAILED", l: "Failed" },
     { v: "PENDING", l: "Pending" },
   ];
+
+  // Detail view — same full-page detail chrome as a normal mail (back button,
+  // subject header, message card, toolbar styling). Replaces the old modal.
+  if (selectedOutboxId) {
+    return (
+      <OutboxDetailView
+        key={selectedOutboxId}
+        id={selectedOutboxId}
+        onBack={() => setSelectedOutboxId(null)}
+      />
+    );
+  }
 
   return (
     <Card className="overflow-hidden">
@@ -2028,7 +2046,7 @@ function OutboxPanel() {
                 </span>
                 <button
                   type="button"
-                  onClick={() => setOpenId(it.id)}
+                  onClick={() => setSelectedOutboxId(it.id)}
                   className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-1.5 pr-2 text-left"
                 >
                   {/* Recipient — fixed-ish width + bold, matches CompactRow
@@ -2060,9 +2078,6 @@ function OutboxPanel() {
           </ul>
         )}
       </CardContent>
-      {openId && (
-        <OutboxReaderModal id={openId} onClose={() => setOpenId(null)} />
-      )}
     </Card>
   );
 }
@@ -2081,20 +2096,42 @@ type OutboxDetail = {
   attachmentNames: string[];
 };
 
-function OutboxReaderModal({
+// Inject the same base styles the inbox detail uses so an auto-sent email body
+// renders identically to a normal mail body (mirrors detail.tsx's emailSrcDoc:
+// `<base target=_blank>` for links, a readable system-ui body, responsive imgs).
+function outboxEmailSrcDoc(rawHtml: string): string {
+  const inject = `<base target="_blank"><meta charset="utf-8"><style>html,body{margin:0;padding:10px;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:1.5;color:#1f1d1b;word-break:break-word;overflow-x:hidden}img{max-width:100%;height:auto}table{max-width:100%}</style>`;
+  if (/<head[^>]*>/i.test(rawHtml))
+    return rawHtml.replace(/<head([^>]*)>/i, `<head$1>${inject}`);
+  if (/<html[^>]*>/i.test(rawHtml))
+    return rawHtml.replace(/<html([^>]*)>/i, `<html$1><head>${inject}</head>`);
+  return `<!doctype html><html><head>${inject}</head><body>${rawHtml}</body></html>`;
+}
+
+// Full-detail view for an auto-sent (outbox) email. Same chrome as a normal
+// inbox mail (MailCenterDetailPage): a "Back to inbox" button + a read-only
+// toolbar bar on top, the subject header with a status/sent metadata line, then
+// the email rendered in the SAME bordered message card (avatar + from/to header
+// + sandboxed-iframe body). Auto-sent notices are OUTBOUND system emails with
+// no reply thread, so this is read-only — no reply box, no star/label/assign —
+// but it is laid out and typed identically so the two open the same way. Data
+// still comes from GET /api/mail-center/outbox/:id (same source as the old
+// modal); only the presentation changed.
+function OutboxDetailView({
   id,
-  onClose,
+  onBack,
 }: {
   id: string;
-  onClose: () => void;
+  onBack: () => void;
 }) {
   const [data, setData] = useState<OutboxDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     // No synchronous setState in the effect body (react-hooks/
-    // set-state-in-effect); `loading` starts true and the modal mounts once
-    // per id, so the fetch just flips it false when done.
+    // set-state-in-effect); `loading` starts true and the view mounts once per
+    // id (keyed), so the fetch just flips it false when done.
     let alive = true;
     (async () => {
       try {
@@ -2104,7 +2141,11 @@ function OutboxReaderModal({
         const j = (await res.json().catch(() => null)) as
           | (OutboxDetail & { error?: string })
           | null;
-        if (alive && res.ok && j && !j.error) setData(j);
+        if (!alive) return;
+        if (res.ok && j && !j.error) setData(j);
+        else setError("Couldn’t load this email.");
+      } catch {
+        if (alive) setError("Couldn’t load this email — network error.");
       } finally {
         if (alive) setLoading(false);
       }
@@ -2114,103 +2155,192 @@ function OutboxReaderModal({
     };
   }, [id]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Render the body the same way the inbox detail does: prefer the HTML part,
+  // fall back to a HTML-looking text part, else plain text in a <pre>.
+  const rawHtml =
+    data?.bodyHtml?.trim() ||
+    (looksLikeOutboxHtml(data?.bodyText) ? (data?.bodyText || "").trim() : "");
+  const plain = rawHtml ? "" : data?.bodyText?.trim() || "";
+  // Auto-sent system mail goes out from noreply@ — the "sender" in the card.
+  const senderName = "Hookka";
+  const initial = "H";
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-3">
-          <div className="min-w-0">
-            <p className="truncate text-base font-semibold">
-              {data?.subject ?? "…"}
-            </p>
-            <p className="truncate text-xs text-muted-foreground">
-              To: {data?.toAddress ?? ""}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded p-1 text-muted-foreground transition hover:bg-muted"
-            aria-label="Close"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
+    <div className="space-y-4">
+      {/* Top bar — "Back to inbox" + a read-only toolbar, matching the inbox
+          detail header row. Auto-sent emails have no reply thread, so the
+          toolbar shows only the read-only status (no Reply/Star/Trash actions). */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onBack}
+          className="gap-1.5"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to inbox
+        </Button>
         {data && (
-          <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/20 px-5 py-2 text-xs">
-            <span
-              className={cn(
-                "rounded-full px-2 py-0.5 font-semibold",
-                outboxStatusTone(data.status),
-              )}
-            >
-              {outboxStatusLabel(data.status)}
-            </span>
-            {data.sentAt ? (
-              <span className="text-muted-foreground">
-                Sent {fmtMailTime(data.sentAt)}
-              </span>
-            ) : (
-              <span className="text-muted-foreground">
-                Queued {fmtMailTime(data.createdAt)}
-              </span>
+          <span
+            className={cn(
+              "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold",
+              outboxStatusTone(data.status),
             )}
-            {data.attempts > 0 && (
-              <span className="text-muted-foreground">
-                · {data.attempts} attempt{data.attempts === 1 ? "" : "s"}
-              </span>
-            )}
-            {data.attachmentNames.length > 0 && (
-              <span className="text-muted-foreground">
-                · 📎 {data.attachmentNames.join(", ")}
-              </span>
-            )}
-          </div>
+          >
+            {outboxStatusLabel(data.status)}
+          </span>
         )}
-
-        {data?.status === "FAILED" && data.lastError && (
-          <div className="border-b border-red-100 bg-red-50 px-5 py-2 text-xs text-red-700">
-            Error: {data.lastError}
-          </div>
-        )}
-
-        <div className="min-h-0 flex-1 overflow-auto">
-          {loading ? (
-            <div className="px-5 py-10 text-center text-sm text-muted-foreground">
-              Loading…
-            </div>
-          ) : data?.bodyHtml ? (
-            // Sandboxed iframe — renders the exact email the customer received,
-            // with no script/same-origin access (these are our own templates,
-            // but sandbox keeps it safe regardless).
-            <iframe
-              title="email body"
-              sandbox=""
-              className="h-[60vh] w-full border-0 bg-white"
-              srcDoc={data.bodyHtml}
-            />
-          ) : (
-            <pre className="whitespace-pre-wrap px-5 py-4 text-sm">
-              {data?.bodyText || "(no content)"}
-            </pre>
-          )}
-        </div>
       </div>
+
+      {error && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          {error}
+        </div>
+      )}
+
+      {!data && loading && (
+        <p className="py-12 text-center text-sm text-muted-foreground">
+          Loading…
+        </p>
+      )}
+
+      {!data && !loading && !error && (
+        <p className="py-12 text-center text-sm text-muted-foreground">
+          Email not found.
+        </p>
+      )}
+
+      {data && (
+        <>
+          {/* Subject header — same styling as the inbox detail subject block. */}
+          <div className="space-y-2 border-b border-border pb-3">
+            <h1 className="text-xl font-semibold leading-snug text-foreground">
+              {data.subject || "(no subject)"}
+            </h1>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span>
+                to{" "}
+                <strong className="text-foreground/90">
+                  {data.toAddress || "(no recipient)"}
+                </strong>
+              </span>
+              <Badge className="text-[10px]">Auto-sent</Badge>
+              {data.sentAt ? (
+                <span>Sent {fmtMailTime(data.sentAt)}</span>
+              ) : (
+                <span>Queued {fmtMailTime(data.createdAt)}</span>
+              )}
+              {data.attempts > 0 && (
+                <span>
+                  · {data.attempts} attempt{data.attempts === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
+            {data.status === "FAILED" && data.lastError && (
+              <p className="rounded-md border border-red-100 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-700">
+                Error: {data.lastError}
+              </p>
+            )}
+          </div>
+
+          {/* Message card — same layout as an inbound/outbound message in the
+              inbox detail: brand avatar (it's from us), a from/to header line,
+              the timestamp on the right, then the body in a sandboxed iframe
+              (or a plain-text <pre> fallback), then the attachment names. */}
+          <Card className="border-amber-200 bg-amber-50/40">
+            <CardContent className="p-4">
+              <div className="flex items-start gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#6B5C32] text-sm font-semibold text-white">
+                  {initial}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate text-sm font-semibold text-foreground">
+                          {senderName}
+                        </span>
+                        <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                      </div>
+                      <p className="truncate text-xs text-muted-foreground">
+                        &lt;noreply@&gt;
+                      </p>
+                    </div>
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {fmtMailTime(data.sentAt || data.createdAt)}
+                    </span>
+                  </div>
+                  {data.toAddress && (
+                    <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                      To: {data.toAddress}
+                    </p>
+                  )}
+                  {rawHtml ? (
+                    <iframe
+                      title="Email"
+                      sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                      srcDoc={outboxEmailSrcDoc(rawHtml)}
+                      className="mt-2 w-full border-t border-border/60 bg-white"
+                      style={{ minHeight: 80 }}
+                      onLoad={(e) => {
+                        try {
+                          const d = e.currentTarget.contentWindow?.document;
+                          if (d)
+                            e.currentTarget.style.height = `${Math.min(
+                              d.body.scrollHeight + 24,
+                              4000,
+                            )}px`;
+                        } catch {
+                          /* cross-origin guard — keep the min height */
+                        }
+                      }}
+                    />
+                  ) : (
+                    <pre className="mt-2 whitespace-pre-wrap break-words border-t border-border/60 pt-2 font-sans text-sm leading-relaxed text-foreground/90">
+                      {plain || "(empty)"}
+                    </pre>
+                  )}
+
+                  {/* Attachments — auto-sent emails only carry the file NAMES
+                      (no signed URL on the outbox log), so they list as
+                      non-clickable chips, matching the inbox attachment chip
+                      styling. */}
+                  {data.attachmentNames.length > 0 && (
+                    <div className="mt-3 border-t border-border/60 pt-2">
+                      <div className="mb-1.5 flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <Paperclip className="h-3 w-3" />
+                        {data.attachmentNames.length} attachment
+                        {data.attachmentNames.length === 1 ? "" : "s"}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {data.attachmentNames.map((name, i) => (
+                          <span
+                            key={`${name}-${i}`}
+                            className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2.5 py-1 text-xs text-foreground/90"
+                            title={name}
+                          >
+                            <Paperclip className="h-3 w-3 shrink-0 text-muted-foreground" />
+                            <span className="truncate">{name}</span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </>
+      )}
     </div>
+  );
+}
+
+// Whether a text body actually looks like HTML (e.g. some templates put a full
+// HTML doc into the text part). Mirrors detail.tsx's looksLikeHtml.
+function looksLikeOutboxHtml(s: string | undefined): boolean {
+  return /<(?:!doctype|html|body|head|div|table|tr|td|p|br|span|a|img|style|font|center|ul|ol|li|h[1-6])[\s>/]/i.test(
+    s || "",
   );
 }
 

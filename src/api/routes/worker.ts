@@ -157,6 +157,43 @@ async function getWorker(
   return { ok: true, workerId, worker: w };
 }
 
+// The worker's CURRENT department (owner 2026-06-26 — unified scan model):
+// the dept of their MOST RECENT dept-QR scan today, else the attendance punch
+// dept, else their home departmentCode. This is the single source of truth for
+// "what can this worker scan/complete right now" — a sticker for any OTHER dept
+// is blocked. Mirrors how dept-scan-split derives the labour buckets, so the
+// scan boundary and the time attribution agree.
+async function getCurrentDeptForWorker(
+  db: D1Database,
+  workerId: string,
+  date: string,
+  homeDept: string | null | undefined,
+): Promise<string> {
+  try {
+    const ds = await db
+      .prepare(
+        "SELECT departmentcode FROM dept_scan_events WHERE workerid = ? AND date = ? ORDER BY atmin DESC LIMIT 1",
+      )
+      .bind(workerId, date)
+      .first<{ departmentcode: string | null }>();
+    if (ds?.departmentcode) return ds.departmentcode.trim().toUpperCase();
+  } catch {
+    /* table may be absent pre-ensure — fall through to punch/home */
+  }
+  try {
+    const at = await db
+      .prepare(
+        "SELECT departmentCode FROM attendance_records WHERE employeeId = ? AND date = ? ORDER BY clockIn DESC LIMIT 1",
+      )
+      .bind(workerId, date)
+      .first<{ departmentCode: string | null }>();
+    if (at?.departmentCode) return at.departmentCode.trim().toUpperCase();
+  } catch {
+    /* fall through */
+  }
+  return (homeDept || "").trim().toUpperCase();
+}
+
 function genId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -407,6 +444,25 @@ app.get("/wip-times", async (c) => {
     productCount: r.productCount,
   }));
   return c.json({ success: true, data: { department: dept, rows } });
+});
+
+// ============================================================
+// GET /api/worker/current-dept — the worker's CURRENT department (owner
+// 2026-06-26 unified scan model). The phone uses this to block scanning a
+// sticker that belongs to a DIFFERENT department (it shows the "wrong
+// department" popup instead of completing). Current dept = latest dept-QR scan
+// today → punch dept → home dept.
+// ============================================================
+app.get("/current-dept", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const dept = await getCurrentDeptForWorker(
+    c.var.DB,
+    auth.workerId,
+    todayYmd(),
+    auth.worker.departmentCode,
+  );
+  return c.json({ success: true, data: { currentDept: dept } });
 });
 
 // ============================================================

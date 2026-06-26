@@ -502,7 +502,28 @@ export default function DeliveryDetailPage() {
               size="sm"
               onClick={async () => {
                 const { generatePackingListPdf } = await import("@/lib/generate-packing-pdf");
-                generatePackingListPdf(order as unknown as import("@/types").DeliveryOrder);
+                // Fetch the per-item print-extras so the rack column can show the
+                // per-piece STACKED racks (HB: Rack 19 / Divan: Rack 19, 20).
+                // Best-effort — the list still prints (flat rack) without them.
+                let extras: import("@/lib/generate-do-pdf").DOPrintExtras = {};
+                try {
+                  const r = await fetch(
+                    `/api/delivery-orders/${encodeURIComponent(
+                      (order as { id: string }).id,
+                    )}/print-extras`,
+                  );
+                  const j = (await r.json()) as {
+                    success?: boolean;
+                    data?: import("@/lib/generate-do-pdf").DOPrintExtras;
+                  };
+                  if (j?.success && j.data) extras = j.data;
+                } catch {
+                  /* graceful — packing list still renders without extras */
+                }
+                generatePackingListPdf(
+                  order as unknown as import("@/types").DeliveryOrder,
+                  extras,
+                );
               }}
             >
               <ClipboardList className="h-4 w-4" /> Print Packing List

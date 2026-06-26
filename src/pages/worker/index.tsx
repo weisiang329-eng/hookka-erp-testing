@@ -32,6 +32,7 @@ import {
   AnnouncementMedia,
   type Announcement,
 } from "./announcement-media";
+import { AnnouncementCategoryBadge } from "@/components/announcement-category-badge";
 import { deriveWipName } from "@/lib/wip-name";
 import { compressImage } from "@/lib/image-compress";
 import { z } from "zod";
@@ -737,6 +738,9 @@ export default function WorkerHomePage() {
                 const { title, body } = localizeAnnouncement(a, lang);
                 return (
                   <div key={a.id} className="py-3">
+                    <div className="mb-1">
+                      <AnnouncementCategoryBadge category={a.category} />
+                    </div>
                     <p className="text-base font-bold text-[#1F1D1B] break-words">
                       {title}
                     </p>
@@ -800,6 +804,11 @@ export default function WorkerHomePage() {
               const { title, body } = localizeAnnouncement(a, lang);
               return (
                 <li key={a.id} className="px-4 py-3">
+                  {/* Category badge — always visible (even when collapsed) so
+                      the worker can scan notice types at a glance. */}
+                  <div className="mb-1">
+                    <AnnouncementCategoryBadge category={a.category} />
+                  </div>
                   {/* Header row — tap to fold/unfold (owner 2026-06-26). The
                       click still bubbles to the <ul> so it also marks seen. */}
                   <button

@@ -35,6 +35,13 @@ import {
   UserRound,
   Globe,
 } from "lucide-react";
+import {
+  ANNOUNCEMENT_CATEGORIES,
+  ANNOUNCEMENT_CATEGORY_ORDER,
+  normalizeAnnouncementCategory,
+  type AnnouncementCategory,
+} from "@/lib/announcement-category";
+import { AnnouncementCategoryBadge } from "@/components/announcement-category-badge";
 
 // One media file attached to a notice. `fileId` lives in the existing
 // /api/files store; the worker portal renders it inline (image/video) or as a
@@ -59,6 +66,7 @@ type Announcement = {
   targetType?: TargetType;
   targetDeptCodes?: string[];
   targetWorkerIds?: string[];
+  category?: AnnouncementCategory;
 };
 
 // Minimal shapes from the existing /api/departments + /api/workers list
@@ -355,6 +363,8 @@ export default function AnnouncementsPage() {
   const [loading, setLoading] = useState(true);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  // Category for the next post (default General Memo). Persisted on POST below.
+  const [category, setCategory] = useState<AnnouncementCategory>("GENERAL");
   const [expiresAt, setExpiresAt] = useState("");
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -572,6 +582,8 @@ export default function AnnouncementsPage() {
           // Targeting — empty lists = "All workers".
           targetDeptCodes,
           targetWorkerIds,
+          // Category — GENERAL | WARNING | SOP | LEARNING.
+          category,
         }),
       });
       if (!res.ok) {
@@ -581,6 +593,7 @@ export default function AnnouncementsPage() {
       }
       setTitle("");
       setBody("");
+      setCategory("GENERAL");
       setExpiresAt("");
       setAttachments([]);
       resetTargeting();
@@ -735,6 +748,37 @@ export default function AnnouncementsPage() {
                   ))}
                 </div>
               )}
+            </div>
+            {/* Category — tag the notice as one of four types (default General
+                Memo). Segmented buttons, each carrying its own icon + color so
+                the office picks visually. Persisted on post and shown as a badge
+                on the posted list + every worker surface. */}
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-[#5A5550]">
+                Category
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {ANNOUNCEMENT_CATEGORY_ORDER.map((value) => {
+                  const meta = ANNOUNCEMENT_CATEGORIES[value];
+                  const Icon = meta.icon;
+                  const selected = category === value;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setCategory(value)}
+                      className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium ${
+                        selected
+                          ? "border-[#6B5C32] bg-[#F3EFE9] text-[#5a4d2a]"
+                          : "border-[#E2DDD8] bg-white text-[#5A5550] hover:bg-[#FAFAF8]"
+                      }`}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                      {meta.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             {/* Recipients — DEFAULT "All". The office can scope the notice to
                 specific departments and/or specific workers; the worker portal
@@ -914,6 +958,9 @@ export default function AnnouncementsPage() {
                   <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
+                        <AnnouncementCategoryBadge
+                          category={normalizeAnnouncementCategory(a.category)}
+                        />
                         <span className="font-semibold text-[#1F1D1B]">
                           {a.title}
                         </span>

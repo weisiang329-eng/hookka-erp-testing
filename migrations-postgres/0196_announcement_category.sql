@@ -1,0 +1,16 @@
+-- 0196_announcement_category.sql (Supabase / Postgres mirror)
+--
+-- Adds a category to announcements so a notice can be tagged as one of four
+-- types: GENERAL | WARNING | SOP | LEARNING.
+--
+-- NOTE: Hookka deploys do NOT replay migration files — this file is INERT on
+-- prod. The column reaches prod ONLY via the runtime self-apply in
+-- src/api/routes/announcements.ts (ensureAnnouncementsTable, awaited at the top
+-- of every handler before the first read/write). This file is the schema
+-- source-of-truth / fresh-DB bootstrap; the runtime ALTER is what actually
+-- lands the column. Keep the two in sync.
+--
+-- Category — a single lowercase-word column, so NO column-rename-map entry is
+-- needed. Existing rows default to GENERAL, so the change is fully
+-- back-compatible (categoryless notices render as "General Memo").
+ALTER TABLE announcements ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'GENERAL';

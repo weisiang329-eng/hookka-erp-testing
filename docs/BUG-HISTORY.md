@@ -34,6 +34,16 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-26-002 — PIC cell flicker: assigned worker shows → vanishes → reappears
+
+🟢 **Fixed (staging; pending owner live-verify)** · `production` · `ui-frontend` · owner-reported
+
+**Symptom.** On the Production sheet, selecting a PIC for a row: the name appears, then **vanishes for a beat, then reappears**. Completion date in the same row never flickered.
+
+**Root cause.** The live editable-field overlay (`deptRows` useMemo, BUG... d5bcbe20) displays PIC by reading `jc.pic1Name` / `jc.pic2Name` directly — and so does `baserows-core.ts` (:522-523). After a PIC write, `mergeFreshPOs` re-reads the one PO via `?fresh=1` and the background list snapshot both return the stored `pic1Id` but **not always the JOINED `pic1Name`**, so for the window between the optimistic set and the name-carrying fetch the overlay rendered an empty name → the cell blanked → then a later fetch (or the worker rebuild) repopulated `pic1Name` → reappeared. Completion date never flickered because `completedDate` is a **stored** field (no join) that every fetch returns directly.
+
+**Fix (frontend-only, additive).** The overlay now derives the display name from `pic1Id`/`pic2Id` via the loaded `workers` roster when `pic{1,2}Name` is absent: `pic1: picName(jc.pic1Name, jc.pic1Id)`. `pic1Id` is always present (the optimistic patch sets it, the backend stores it, every fetch returns it), so the name stays on screen continuously regardless of which fetch omits the joined name. `workers` added to the `deptRows` deps. The overlay value is what's displayed (it overrides the baseRows pic for live-jc rows), so this single change is sufficient. `production-orders.ts` / `baserows-core.ts` untouched. build:strict clean (3 known jsbarcode/@zxing only). Pending owner live-verify on staging: assign a PIC → name stays put, no flicker.
+
 ## BUG-2026-06-26-001 — packing-sticker mint dead-ended on poNo drift → external phone hit the LOGIN page; + FG-PACKING sticker now carries the job-card id
 
 🟢 **Fixed (staging; pending owner physical scan-verify)** · `warehouse` · `worker-scan` · handoff (PACKING-SCAN / PENDING-TASKS TASK 1+2)

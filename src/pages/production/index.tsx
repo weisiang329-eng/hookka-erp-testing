@@ -3358,6 +3358,19 @@ export default function ProductionPage({
         liveJc.set(jc.id, jc as unknown as Record<string, unknown>);
       }
     }
+    // Resolve a PIC's display name from its worker id when the live job card
+    // carries pic{1,2}Id but no pic{1,2}Name. After assigning a PIC, the
+    // fresh-PO read-back + the list snapshot return the stored pic ID but not
+    // always the JOINED name, so reading pic1Name alone blanked the cell for a
+    // beat ("选了人 → 出现 → 不见 → 又出来"). pic1Id is always present, so this
+    // keeps the name on screen continuously. Completion date never flickered
+    // because it's a stored field with no join. BUG-2026-06-26-002.
+    const workerNameById = new Map<string, string>();
+    for (const w of workers) workerNameById.set(w.id, w.name);
+    const picName = (name: unknown, id: unknown): string =>
+      (name as string) ||
+      (typeof id === "string" ? workerNameById.get(id) ?? "" : "") ||
+      "";
     const rows: DeptRow[] = baseRows
       .filter((r) => r._deptCode === activeTab)
       .map((r, i) => {
@@ -3380,8 +3393,8 @@ export default function ProductionPage({
           completedDate: (jc.completedDate as string) || "",
           distributedAt,
           sent: distributedAt ? "Yes" : "No",
-          pic1: (jc.pic1Name as string) || "",
-          pic2: (jc.pic2Name as string) || "",
+          pic1: picName(jc.pic1Name, jc.pic1Id),
+          pic2: picName(jc.pic2Name, jc.pic2Id),
           status: ((jc.status as string) || "") as DeptRow["status"],
         };
       });
@@ -3393,7 +3406,7 @@ export default function ProductionPage({
     // (Wei Siang Apr 26 2026). FAB_CUT now behaves identically to every
     // other dept — one row per matching JobCard, no merge.
     return rows;
-  }, [baseRows, activeTab, filteredOrders]);
+  }, [baseRows, activeTab, filteredOrders, workers]);
 
   // Force-show allowlist passed to the dept <DataGrid>. Two sources unioned:
   //   1. forceShowCompletedIds — rows the operator just flipped to COMPLETED

@@ -5425,20 +5425,20 @@ export default function ProductionPage({
     }
     setLoadingFgPreview(true);
     const built = await fetchFgStickersForOrders(ordersToProcess);
-    // Stale-load guard (filters changed mid-fetch).
-    if (myVersion !== fgLoadVersion.current) return built;
-    // Paint the preview IMMEDIATELY with the /worker/scan fallback URLs so the
-    // operator isn't stuck on "Loading FG units…" while we mint the public
-    // packing-rack tokens — that mint is the slow part (a batched call that
-    // touches several cards). The QR upgrades to /p/<token> a beat later.
-    setJobCardStickers([]);
-    setFgStickers(built);
-    setLoadingFgPreview(false);
-    // Now mint + attach the /p/ tokens and upgrade the stickers in place.
-    // Callers that await loadFgStickers (the Print path) still receive the
-    // fully-enriched set, so the PRINTED QR deep-links to /p/<token>.
+    // Mint + attach the public /p/ tokens BEFORE we show or print, so the
+    // printed QR is ALWAYS the no-login /p/<token> link, never the /worker/scan
+    // fallback (which opens the LOGIN page when an external phone scans it).
+    // The Print flow renders from this fgStickers state, so painting the
+    // fallback first then upgrading let a quick Print grab the fallback — the
+    // external-scan regression (owner 2026-06-26 "外部手机扫又不行了"). The mint
+    // endpoint is now BATCHED (fast), so awaiting it here doesn't stall the
+    // preview the way the old serial loop did.
     const aggregated = await enrichWithPackingTokens(built);
-    if (myVersion === fgLoadVersion.current) setFgStickers(aggregated);
+    // Stale-load guard (filters changed mid-fetch).
+    if (myVersion !== fgLoadVersion.current) return aggregated;
+    setJobCardStickers([]);
+    setFgStickers(aggregated);
+    setLoadingFgPreview(false);
     return aggregated;
   }, [
     filteredOrders,

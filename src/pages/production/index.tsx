@@ -2091,7 +2091,16 @@ export default function ProductionPage({
   // True while network/5xx failures are kept + auto-retrying (BUG-2026-06-09).
   // Drives the red "retrying" banner so the operator sees it's working, not stuck.
   const [retryPending, setRetryPending] = useState(false);
-  const DEBOUNCE_MS = 2000;
+  // Near-immediate save (owner 2026-06-26: "点了改了直接存进去"). Was 2000ms —
+  // that batched DENSE editing, but the floor edits one row at a time (at most a
+  // 20-30 Batch Edit, which is its own path), so the 2s wait gave NO batching
+  // benefit, only a "2s loading" feel. CRITICAL: the data-loss SAFETY is NOT the
+  // debounce — it's retry+rollback (BUG-2026-06-09), the post-write direct read-
+  // back (mergeFreshPOs), refetch-preserves-staged-drafts (BUG-2026-05-12-004),
+  // and CSRF (BUG-2026-05-12-005, now the global window.fetch interceptor) — ALL
+  // UNCHANGED. So shrinking the debounce only makes the save fire ~immediately;
+  // genuinely rapid edits within 250ms still coalesce into one batched flush.
+  const DEBOUNCE_MS = 250;
 
   // True when a written patch touched PIC1 / PIC2 / Completion — the three
   // fields whose post-write display must come from a direct-to-DB read (see

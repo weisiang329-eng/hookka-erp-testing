@@ -1,6 +1,8 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { DeliveryOrder } from "@/lib/mock-data";
+import type { DOPrintExtras } from "@/lib/generate-do-pdf";
+import { formatRacksCompact } from "@/lib/rack-format";
 import { drawLetterhead } from "@/lib/pdf-utils";
 
 function fmtDate(iso: string): string {
@@ -9,11 +11,30 @@ function fmtDate(iso: string): string {
   return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" });
 }
 
+// Per-piece STACKED rack cell (owner 2026-06-26): each component on its OWN
+// line, labelled + compact — "HB: Rack 19" / "Divan: Rack 19, 20" — instead of
+// one flat aggregate far to the right. jsPDF autoTable line-breaks on "\n", so
+// the cell auto-grows to the piece count. Reuses formatRacksCompact so the
+// per-component grouping ("Rack 19, 20") can never drift from the grid / DO
+// forms. Empty components are dropped; returns "" when nothing resolves (caller
+// falls back to the flat rackingNumber).
+function fmtRackStacked(
+  componentRacks?: { label: string; racks: string[] }[] | null,
+): string {
+  if (!componentRacks || componentRacks.length === 0) return "";
+  const lines: string[] = [];
+  for (const cr of componentRacks) {
+    const compact = formatRacksCompact(cr.racks ?? []);
+    if (compact) lines.push(`${cr.label}: ${compact}`);
+  }
+  return lines.join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Packing List PDF - Compact warehouse picking document
 // ---------------------------------------------------------------------------
 
-export function generatePackingListPdf(order: DeliveryOrder) {
+export function generatePackingListPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const margin = 15;
@@ -104,7 +125,9 @@ export function generatePackingListPdf(order: DeliveryOrder) {
     item.sizeLabel,
     item.fabricCode,
     String(item.quantity),
-    item.rackingNumber || "-",
+    fmtRackStacked(extras?.items?.[item.id]?.componentRacks) ||
+      item.rackingNumber ||
+      "-",
     "\u2610", // ☐ checkbox character
   ]);
 
@@ -136,7 +159,7 @@ export function generatePackingListPdf(order: DeliveryOrder) {
       3: { cellWidth: 20 },
       4: { cellWidth: 20 },
       5: { cellWidth: 12, halign: "right" },
-      6: { cellWidth: 30, fontStyle: "bold" }, // rack column
+      6: { cellWidth: 34, fontStyle: "bold" }, // rack column (per-piece stacked)
       7: { cellWidth: 16, halign: "center", fontSize: 12 },
     },
     foot: [["", "", "", "", "Total", String(totalQty), "", ""]],

@@ -6918,11 +6918,16 @@ app.post("/:id/scan-complete-dept", async (c) => {
     return c.json({ success: false, error: "Worker not found" }, 400);
   }
 
-  // The compartment set for this variant in this department. Already-finished
-  // cards are excluded so a double-scan is a no-op (idempotent).
+  // The compartment set for this variant in this department. COMPLETED cards are
+  // KEPT (only TRANSFERRED excluded) so a 2nd different worker can co-sign as
+  // PIC2 even after the 1st worker's scan already completed the card — owner
+  // 2026-06-26 removed the single-PIC restriction: every dept allows two people
+  // to scan while a PIC slot is open (Fab Cut / Fab Sew used to be 1-PIC because
+  // completed cards were filtered out here). Same-worker rescan stays a no-op
+  // (the slot loop below skips a slot this worker already holds).
   const cardsRes = await db
     .prepare(
-      "SELECT * FROM job_cards WHERE productionOrderId = ? AND departmentCode = ? AND status NOT IN ('COMPLETED','TRANSFERRED')",
+      "SELECT * FROM job_cards WHERE productionOrderId = ? AND departmentCode = ? AND status <> 'TRANSFERRED'",
     )
     .bind(poId, deptCode)
     .all<JobCardRow>();
@@ -6954,21 +6959,31 @@ app.post("/:id/scan-complete-dept", async (c) => {
 
   for (const jc of cards) {
     await ensurePiecePicsForJc(db, jc);
-    // Fill every still-empty pic1 slot with the scanning worker so the whole
-    // card (all pieces) completes in this one scan. Slots already claimed by
-    // someone else are left untouched (they still count as "done").
+    // Two-person fill, mirroring scan-complete-shared (owner 2026-06-26 — no
+    // more single-PIC on any dept): for each piece slot, fill PIC1 if open; else
+    // if PIC1 is a DIFFERENT worker and PIC2 is open, this worker co-signs as
+    // PIC2 (minutes split 50/50 at read time); a slot this worker already holds,
+    // or one whose PIC1+PIC2 are both other people, is left untouched.
     const slotsRes = await db
       .prepare("SELECT * FROM piece_pics WHERE jobCardId = ?")
       .bind(jc.id)
       .all<PiecePicRow>();
     for (const slot of slotsRes.results ?? []) {
-      if (slot.pic1Id) continue;
-      await db
-        .prepare(
-          `UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, completedAt = ?, lastScanAt = ? WHERE id = ?`,
-        )
-        .bind(worker.id, worker.name, nowIso, nowIso, slot.id)
-        .run();
+      if (!slot.pic1Id) {
+        await db
+          .prepare(
+            `UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, completedAt = ?, lastScanAt = ? WHERE id = ?`,
+          )
+          .bind(worker.id, worker.name, nowIso, nowIso, slot.id)
+          .run();
+      } else if (slot.pic1Id !== worker.id && !slot.pic2Id) {
+        await db
+          .prepare(
+            `UPDATE piece_pics SET pic2Id = ?, pic2Name = ?, lastScanAt = ? WHERE id = ?`,
+          )
+          .bind(worker.id, worker.name, nowIso, slot.id)
+          .run();
+      }
     }
 
     const allSlotsRes = await db
@@ -7117,7 +7132,9 @@ app.post("/:id/scan-complete-dept", async (c) => {
 //   - Sewing section (covers FAB_SEW / FAB_CUT — the cut+sew group cross within
 //     their section) → completes this variant's FABRIC SEWING. One scan fans
 //     out across every compartment card (BASE + CUSHION + ARMREST) of FAB_SEW
-//     on the PO; sewing is single-person (fills pic1, no pic2 — never shares).
+//     on the PO; sewing is ALSO 2-person now (1st = pic1, 2nd different worker
+//     = pic2, minutes split 50/50) — owner 2026-06-26 removed the single-PIC
+//     rule everywhere, so the slot loop fills pic2 the same as upholstery.
 //   - Upholstery section (covers UPHOLSTERY) → completes this variant's
 //     UPHOLSTERY, same per-PO fan-out. Upholstery MAY be shared: 1st worker =
 //     pic1, a 2nd different worker = pic2 (minutes split 50/50 at read time),

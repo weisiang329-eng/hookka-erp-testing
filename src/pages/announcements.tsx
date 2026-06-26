@@ -495,6 +495,7 @@ export default function AnnouncementsPage() {
     setUploading(true);
     const added: Attachment[] = [];
     let failed = 0;
+    let failReason = "";
     try {
       for (const file of picked) {
         const fd = new FormData();
@@ -516,12 +517,18 @@ export default function AnnouncementsPage() {
           });
         } else {
           failed++;
+          if (!failReason) {
+            const errMsg = (j as { error?: string } | null)?.error;
+            failReason = errMsg
+              ? `${errMsg} (${res.status})`
+              : `HTTP ${res.status}`;
+          }
         }
       }
       if (added.length) setAttachments((prev) => [...prev, ...added]);
       if (failed > 0) {
         setError(
-          `${failed} file${failed === 1 ? "" : "s"} failed to upload`,
+          `${failed} file${failed === 1 ? "" : "s"} failed to upload — ${failReason}`,
         );
       }
     } catch {

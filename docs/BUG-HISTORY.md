@@ -34,6 +34,22 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-26-004 — Production sheet: setting PIC 2 fails with a false "verify-readback mismatch — pic2Id … db has null" (PIC 1 saves fine; retry works)
+
+🟢 **Fixed** · `production-orders` · `infrastructure` · owner-reported
+
+**Symptom.** On the Production sheet, choosing **PIC 2** for a job card showed a red toast: `Job card save failed: verify-readback mismatch — pic2Id: tried "worker-180ac843", db has null. Cell reverted — click again to retry.` **PIC 1 always saved fine**, and clicking PIC 2 again often succeeded.
+
+**Investigation (ruled out).** Not the rename-map gotcha: `column-rename-map.json` has both `pic1Id→pic1_id` and `pic2Id→pic2_id`, and the SQL rewriter (`supabase-compat.ts transformBody`) rewrites both identically on write AND on the readback SELECT. Not a pic2-specific write/FK/trigger issue: `applyPoUpdate` (`production-orders.ts` ~L4133) binds `pic2Id` symmetrically with `pic1Id` in the same UPDATE, there is no FK/trigger on `job_cards.pic2Id` (migration 0001 — plain `TEXT` + a non-enforcing index `idx_jc_pic2`), and PIC 1 / PIC 2 share one code path. Not a recent regression: the verify-readback block predates the report.
+
+**Root cause (confirmed — cross-connection read-after-write race).** `/bulk-patch` writes each job card via a **loopback `fetch()` PATCH** to `/:id` (applyPoUpdate), which runs as a **separate Worker subrequest on its own DB connection**. After the loopback loop resolves, `/bulk-patch` verifies the write with a `SELECT … FROM job_cards WHERE id IN (…)` that runs on the **outer** request's connection. **Hyperdrive caches simple parameterized SELECTs at the proxy**, so the outer readback can be served a **stale pre-write snapshot** of the row even though the loopback PATCH already committed — the textbook read-after-write race across two connections. The asymmetry is operational, not structural: PIC 1 is the first edit on a fresh row, but by the time PIC 2 is set there is an established cached read of the row (already carrying PIC 1, still `pic2Id = null`), so the readback returns `db has null` → the cell falsely reverts. Nondeterministic → "click again works."
+
+**Fix (`src/api/routes/production-orders.ts`, /bulk-patch verify-readback ~L7874–7967).** Made the verify-readback robust to the lag: the first pass now **collects** mismatched rows instead of failing them immediately, then does **ONE cache-bypassed re-read** of just those rows via `c.var.DB.batch([...])`. `SupabaseAdapter.batch` wraps statements in `sql.begin` (an explicit transaction), which Hyperdrive does **not** cache — so the re-read is forced back to the primary and sees the just-written value. Only rows that **still** mismatch after the fresh read are flipped to `success:false`, so a genuinely unpersisted write surfaces exactly as before. The clear/PIC1/other-field paths are untouched (the diff logic is factored into one `diffPatch` helper used by both passes).
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` and `npx tsc -p tsconfig.json --noEmit` both clean (0 errors). New regression test `tests/production-bulk-patch-readback-reread.test.mjs` (5 assertions) pins: the first pass defers via a `mismatched` accumulator, the re-read uses `db.batch`, the mismatch error is only emitted after the re-read, PIC1/PIC2 are symmetric in the SELECT, and `SupabaseAdapter.batch` still uses `sql.begin`. Existing `production-fresh-po-direct-db.test.mjs` still green (6/6). Live prod verify (write→read of a PIC2 set on the Production sheet) pending deploy.
+
+---
+
 ## BUG-2026-06-26-003 — customer DISPATCH email arrived with no DO attachment (+ driver phone often blank)
 
 🟢 **Fixed (prod + staging)** · `delivery-orders` · `customer-notify` · owner-reported

@@ -6039,6 +6039,12 @@ app.post("/packing-rack-tokens", async (c) => {
   }
 
   const tokens: Record<string, string> = {};
+  // Parallel map: the same "<poNo>|<pieceName>" key → the resolved PACKING
+  // job_card id. The client embeds it on the sticker as &jc= so the
+  // /worker/scan fallback can resolve by card id even when poNo drifted and
+  // the token mint couldn't persist (TASK 2 robustness). Always populated when
+  // a card resolves, independent of whether the token minted.
+  const cardIds: Record<string, string> = {};
   try {
     await ensureJobCardQrTokenColumn(c.var.DB);
     // Batched lookups. This was a serial per-(poNo,pieceName) loop — ~6 DB
@@ -6058,11 +6064,91 @@ app.post("/packing-rack-tokens", async (c) => {
         .all<{ id: string; poNo: string | null }>();
       // poNo (and, defensively, id) → production_order id.
       const poIdByKey = new Map<string, string>();
+      const resolvedIds = new Set<string>();
       for (const po of posRes.results ?? []) {
         if (po.poNo) poIdByKey.set(po.poNo, po.id);
         poIdByKey.set(po.id, po.id);
+        resolvedIds.add(po.id);
       }
-      const poIds = [...new Set((posRes.results ?? []).map((p) => p.id))];
+
+      // ADDITIVE poNo-drift recovery (the mint-side twin of the worker.ts
+      // scan-lookup fallback, ~line 481). FG-PACKING stickers carry ONLY po=
+      // (no jc-id to fall back on), so if the printed poNo drifted from the
+      // current production_orders.poNo (SO edited → pieces renumbered, a
+      // trailing space, a case change) the exact match above misses → no card
+      // → no /p/ token → the reprint keeps the /worker/scan fallback that
+      // dead-ends at the LOGIN page on an external phone. Recover the misses in
+      // TWO batched queries (never a per-poNo loop): (a) trim/case-insensitive
+      // poNo, then (b) fg_units (sticker po = the unit's stored poNo →
+      // fg_units.poId is the stable PO id). Only resolves a LIVE PO (purged PO →
+      // honest miss → reprint), and never overrides an exact hit. BUG-2026-06-26.
+      const unresolved = poNos.filter((p) => !poIdByKey.has(p));
+      if (unresolved.length > 0) {
+        try {
+          const ph = unresolved.map(() => "?").join(",");
+          const ciRes = await c.var.DB.prepare(
+            `SELECT id, poNo FROM production_orders WHERE LOWER(TRIM(poNo)) IN (${ph})`,
+          )
+            .bind(...unresolved.map((p) => p.trim().toLowerCase()))
+            .all<{ id: string; poNo: string | null }>();
+          const byNorm = new Map<string, string>();
+          for (const po of ciRes.results ?? []) {
+            if (po.poNo && !byNorm.has(po.poNo.trim().toLowerCase())) {
+              byNorm.set(po.poNo.trim().toLowerCase(), po.id);
+            }
+          }
+          for (const w of unresolved) {
+            const id = byNorm.get(w.trim().toLowerCase());
+            if (id) {
+              poIdByKey.set(w, id);
+              resolvedIds.add(id);
+            }
+          }
+        } catch (e) {
+          console.warn("[packing-rack-tokens] CI poNo fallback failed:", e);
+        }
+      }
+      const stillUnresolved = poNos.filter((p) => !poIdByKey.has(p));
+      if (stillUnresolved.length > 0) {
+        try {
+          const ph = stillUnresolved.map(() => "?").join(",");
+          const fuRes = await c.var.DB.prepare(
+            `SELECT poNo, poId FROM fg_units WHERE poNo IN (${ph}) AND poId IS NOT NULL`,
+          )
+            .bind(...stillUnresolved)
+            .all<{ poNo: string | null; poId: string | null }>();
+          const fuByPoNo = new Map<string, string>();
+          for (const u of fuRes.results ?? []) {
+            if (u.poNo && u.poId && !fuByPoNo.has(u.poNo)) {
+              fuByPoNo.set(u.poNo, u.poId);
+            }
+          }
+          // Confirm each recovered poId still points at a LIVE production_order
+          // (a purged PO → drop it → honest miss, same contract as worker.ts).
+          const candidateIds = [...new Set(fuByPoNo.values())].filter(
+            (id) => !resolvedIds.has(id),
+          );
+          if (candidateIds.length > 0) {
+            const livePh = candidateIds.map(() => "?").join(",");
+            const liveRes = await c.var.DB.prepare(
+              `SELECT id FROM production_orders WHERE id IN (${livePh})`,
+            )
+              .bind(...candidateIds)
+              .all<{ id: string }>();
+            const liveIds = new Set((liveRes.results ?? []).map((r) => r.id));
+            for (const [poNo, poId] of fuByPoNo) {
+              if (liveIds.has(poId)) {
+                poIdByKey.set(poNo, poId);
+                resolvedIds.add(poId);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("[packing-rack-tokens] fg_units fallback failed:", e);
+        }
+      }
+
+      const poIds = [...resolvedIds];
       // Every PACKING card for those POs in one query, grouped by PO.
       const cardsByPo = new Map<
         string,
@@ -6120,11 +6206,12 @@ app.post("/packing-rack-tokens", async (c) => {
         }),
       );
       for (const [key, cid] of keyToCardId) {
+        cardIds[key] = cid;
         const t = tokenByCardId.get(cid);
         if (t) tokens[key] = t;
       }
     }
-    return c.json({ success: true, data: { tokens } });
+    return c.json({ success: true, data: { tokens, cardIds } });
   } catch (err) {
     console.error(
       "[POST /api/production-orders/packing-rack-tokens] failed:",
@@ -6132,7 +6219,7 @@ app.post("/packing-rack-tokens", async (c) => {
     );
     // Soft-fail: return whatever resolved so the print still proceeds (the
     // client falls back to /worker/scan for any missing token).
-    return c.json({ success: true, data: { tokens } });
+    return c.json({ success: true, data: { tokens, cardIds } });
   }
 });
 

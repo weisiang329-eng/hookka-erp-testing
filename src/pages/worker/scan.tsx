@@ -917,6 +917,22 @@ export default function WorkerScanPage() {
       setRackChoice("");
       setRackSaved(false);
       try {
+        // FG-PACKING stickers now also carry jc=<packing job_card id> (TASK 2).
+        // The card id is immune to poNo drift — the very reason the po= lookup
+        // can dead-end at the LOGIN page on an external phone. Resolve by it
+        // FIRST: a single clean hit short-circuits to the SAME lookup card the
+        // po=/pn= flow would build (the PACKING card keeps its real jc id →
+        // rack picker + per-piece Complete are the existing, unchanged code).
+        // Anything else falls through to every existing path below, so old
+        // stickers (no jc) and drifted/rotated ids behave exactly as before.
+        if (parsed?.jobCardId) {
+          const jcMatches = await findMatches(parsed.jobCardId);
+          const hit = jcMatches.find((m) => m.jobCard.id === parsed.jobCardId);
+          if (hit) {
+            setResult({ kind: "lookup", ...hit, piece });
+            return;
+          }
+        }
         // Shared Sew/Uph compartment sticker. The QR carries EITHER the short
         // compartment code (c=<subtype>, e.g. DIVAN / SOFA_BASE — the low-density
         // form that scans reliably) OR the legacy full wipKey (wk=). Resolve the

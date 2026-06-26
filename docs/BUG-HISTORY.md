@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-26-001 — packing-sticker mint dead-ended on poNo drift → external phone hit the LOGIN page; + FG-PACKING sticker now carries the job-card id
+
+🟢 **Fixed (staging; pending owner physical scan-verify)** · `warehouse` · `worker-scan` · handoff (PACKING-SCAN / PENDING-TASKS TASK 1+2)
+
+**Symptom.** A reprinted packing FG sticker opened the Worker-Portal **login page** when scanned by an external (no-login) phone, instead of the public `/p/<token>` "Assign Rack" page. Owner case: `…/worker/scan?op=FG-PACKING&po=SO-2604-206-04…` → "Not found".
+
+**Root cause.** The token-mint endpoint `POST /api/production-orders/packing-rack-tokens` (production-orders.ts ~6055) resolved the PACKING job card by an **exact** `poNo`/`id` match only. If the SO was edited after the sticker printed (line renumbered, trailing space, case change), the mint found no card → emitted no `/p/` token → the printed `/worker/scan` fallback (login-gated) was all the sticker had. The **worker-scan** side already had the recovery (commit `e92f8ce3`: trim/CI poNo, then `fg_units.poId`); the **mint** side was never brought into lock-step — that asymmetry is this bug.
+
+**Fix (additive, both halves).**
+- **TASK 1 — mint robustness.** After the exact lookup, the mint now recovers unresolved poNos in TWO batched queries (no per-poNo loop): (a) `LOWER(TRIM(poNo)) IN (…)`, then (b) `fg_units WHERE poNo IN (…)` → confirm each recovered `poId` still points at a **live** `production_order` (purged PO → honest miss → reprint, same contract as worker.ts). Never overrides an exact hit. After this, the owner reprints affected stickers and the external scan mints a real `/p/` token.
+- **TASK 2 — `&jc=` belt-and-suspenders.** FG-PACKING stickers carried only `po=` (no job-card id to fall back on, unlike dept stickers). The mint now also returns a `cardIds` map; the FG sticker's `/worker/scan` fallback URL gains `&jc=<packing job_card id>` (production/index.tsx `packingStickerUrl`); `parseStickerData` reads `jc` (qr-utils.ts); worker `handleDecoded` resolves `parsed.jobCardId` FIRST (additive short-circuit — falls through to the existing `po=`/`pn=` flow on miss). So a scan resolves by the **stable card id** even when poNo drifted AND the token mint couldn't persist. **Shared-artifact change verified: old stickers (no `jc`) parse + resolve unchanged; the `/p/` token path is still preferred when present.**
+
+**Verified.** build:strict clean (only the 3 known jsbarcode/@zxing sandbox errors); full suite 1225 pass / 0 fail; +6 source-assertion regression tests in `tests/sticker-rack-public.test.mjs` pinning the mint↔scan lock-step and every `jc=` consumer. Pending owner live scan on staging: reprint a drifted-poNo sticker → external phone → `/p/` opens.
+
 ## BUG-2026-06-25-008 — FG-sticker preview/print slow + the "manual rack dropdown" CSRF red herring
 
 🟢 **Fixed (prod + staging)** · `production` · `performance` · owner-reported

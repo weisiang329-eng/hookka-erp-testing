@@ -1682,6 +1682,11 @@ export default function ProductionPage({
     // the QR keeps the /worker/scan deep link so the logged-in worker flow is
     // never broken.
     packingToken?: string;
+    // The resolved PACKING job_card id (from the same mint call). Embedded on
+    // the /worker/scan fallback URL as &jc= so an external scan can resolve by
+    // card id even when the printed poNo drifted AND the token mint couldn't
+    // persist — the FG-PACKING sticker otherwise carries only po= (TASK 2).
+    packingJobCardId?: string;
   };
   const [jobCardStickers, setJobCardStickers] = useState<JobCardSticker[]>([]);
   const [fgStickers, setFgStickers] = useState<FgSticker[]>([]);
@@ -5360,13 +5365,25 @@ export default function ProductionPage({
         if (!res.ok) return stickers;
         const j = (await res.json().catch(() => ({}))) as {
           success?: boolean;
-          data?: { tokens?: Record<string, string> };
+          data?: {
+            tokens?: Record<string, string>;
+            cardIds?: Record<string, string>;
+          };
         };
         const tokens = j?.data?.tokens;
         if (!tokens || typeof tokens !== "object") return stickers;
+        const cardIds = j?.data?.cardIds;
         return stickers.map((s) => {
-          const token = tokens[`${s.poNo}|${s.pieceName}`];
-          return token ? { ...s, packingToken: token } : s;
+          const key = `${s.poNo}|${s.pieceName}`;
+          const token = tokens[key];
+          const jcId =
+            cardIds && typeof cardIds === "object" ? cardIds[key] : undefined;
+          if (!token && !jcId) return s;
+          return {
+            ...s,
+            ...(token ? { packingToken: token } : {}),
+            ...(jcId ? { packingJobCardId: jcId } : {}),
+          };
         });
       } catch {
         // Network hiccup — keep the /worker/scan fallback on every sticker.
@@ -5391,16 +5408,25 @@ export default function ProductionPage({
       totalPieces: number;
       pieceName: string;
       packingToken?: string;
+      packingJobCardId?: string;
     }): string => {
       // Canonical origin: a packing sticker printed from the legacy prod
       // pages.dev URL still encodes erp.hookka.com (owner 2026-06-26).
       const origin = appOrigin();
       if (s.packingToken) return packingRackScanUrl(origin, s.packingToken);
-      return `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(
+      // Fallback deep-link. ADD &jc=<packing card id> when known so the scan
+      // resolves by the stable card id even if the printed poNo drifted (TASK
+      // 2). Additive — po=/p=/t=/pn= unchanged, so OLD stickers (and stickers
+      // minted before a card id was available) still resolve exactly as before.
+      let url = `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(
         s.poNo,
       )}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(
         s.pieceName,
       )}`;
+      if (s.packingJobCardId) {
+        url += `&jc=${encodeURIComponent(s.packingJobCardId)}`;
+      }
+      return url;
     },
     [],
   );

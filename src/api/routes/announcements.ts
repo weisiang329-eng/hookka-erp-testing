@@ -603,9 +603,38 @@ function workerIdOf(c: Context<Env>): string {
   );
 }
 
+// Cap on the past/archive list so a worker phone never pulls an unbounded
+// history. The office row count is tiny, but keep it bounded anyway.
+const PAST_ANNOUNCEMENTS_LIMIT = 30;
+
 worker.get("/", async (c) => {
   await ensureAnnouncementsTable(c.var.DB);
   const workerId = workerIdOf(c);
+
+  // ── Past/archive branch (additive) ──────────────────────────────────────
+  // GET /api/worker/announcements?include=past returns the notices that have
+  // DROPPED OUT of the live list — i.e. hidden (is_active=false) OR expired
+  // (expires_at in the past). DELETED rows are hard-deleted from the table, so
+  // they can never appear here. Read-only, newest first, capped. No ack/popup
+  // data — the archive is purely re-readable history. The live (default) branch
+  // below is untouched, so nothing about the existing worker home changes.
+  if ((c.req.query("include") ?? "").toLowerCase() === "past") {
+    const pastRes = await c.var.DB.prepare(
+      "SELECT * FROM announcements WHERE org_id = ? ORDER BY created_at DESC",
+    )
+      .bind(DEFAULT_ORG_ID)
+      .all<AnnouncementRow>();
+    const past = (pastRes.results ?? []).filter(
+      (r) =>
+        !isActiveFlag(r.isActive ?? r.is_active ?? null) ||
+        !notExpired(r.expiresAt ?? r.expires_at ?? null),
+    );
+    return c.json({
+      success: true,
+      data: past.slice(0, PAST_ANNOUNCEMENTS_LIMIT).map(toPublic),
+    });
+  }
+
   // The worker portal is single-tenant against the default org (no org scope
   // exists anywhere on the worker side); read that org's notices and keep only
   // the active + not-expired ones. We filter the is_active flag in JS (not a

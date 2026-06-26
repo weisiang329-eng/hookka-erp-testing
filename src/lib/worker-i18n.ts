@@ -916,6 +916,19 @@ const dict: Dict = {
     zh: '知道了',
     my: 'သဘောပေါက်ပါပြီ',
   },
+  // Collapsed archive header + empty state for expired/hidden notices.
+  'home.pastAnnouncements': {
+    en: 'Past announcements',
+    ms: 'Pengumuman lepas',
+    zh: '过往公告',
+    my: 'ယခင်ကြေညာချက်များ',
+  },
+  'home.noPastAnnouncements': {
+    en: 'No past announcements',
+    ms: 'Tiada pengumuman lepas',
+    zh: '没有过往公告',
+    my: 'ယခင်ကြေညာချက် မရှိပါ',
+  },
 
   // ---- Location prompt (Feature B — cut "No GPS" punches) ----
   'home.locationNeededTitle': {

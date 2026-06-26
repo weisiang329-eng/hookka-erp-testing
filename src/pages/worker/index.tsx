@@ -400,6 +400,25 @@ export default function WorkerHomePage() {
   const [ackAnn, setAckAnn] = useState<Set<string>>(() =>
     readAckAnnouncements(),
   );
+  // ---- Past announcements (archive) ----
+  // Expired/hidden notices that have dropped out of the live list above. They
+  // are NOT loaded with the page — the section starts collapsed and lazy-loads
+  // the archive on the first tap (owner 2026-06-26: re-readable history).
+  const [pastOpen, setPastOpen] = useState(false);
+  const [pastAnn, setPastAnn] = useState<Announcement[] | null>(null);
+  const [pastLoading, setPastLoading] = useState(false);
+  // Per-row collapse for the archive (same fold pattern as the live list; holds
+  // the COLLAPSED ids, default expanded). Kept separate from collapsedAnn so the
+  // two lists never share/clobber each other's open state.
+  const [collapsedPast, setCollapsedPast] = useState<Set<string>>(new Set());
+  const togglePastCollapsed = useCallback((id: string) => {
+    setCollapsedPast((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   // ---- Location permission (Feature B) ----
   const [locState, setLocState] = useState<LocationState>("unknown");
@@ -476,6 +495,39 @@ export default function WorkerHomePage() {
       /* leave announcements as-is */
     }
   }, []);
+
+  // Lazy-load the archive (expired/hidden notices) the FIRST time the worker
+  // expands the "Past announcements" section. Read-only, best-effort: a failure
+  // leaves an empty list, never strands the page. Re-fetch on every open so a
+  // notice that just expired shows up without a hard refresh.
+  const loadPastAnnouncements = useCallback(async () => {
+    setPastLoading(true);
+    try {
+      const res = await workerFetch(
+        "/api/worker/announcements?include=past",
+      );
+      const raw = await res.json();
+      const j = AnnouncementsEnvelope.parse(raw);
+      if (j.success && Array.isArray(j.data)) {
+        setPastAnn(j.data as Announcement[]);
+      } else {
+        setPastAnn([]);
+      }
+    } catch {
+      setPastAnn((prev) => prev ?? []);
+    } finally {
+      setPastLoading(false);
+    }
+  }, []);
+
+  const togglePastOpen = useCallback(() => {
+    setPastOpen((wasOpen) => {
+      const nextOpen = !wasOpen;
+      // Lazy-load (or refresh) on open.
+      if (nextOpen) void loadPastAnnouncements();
+      return nextOpen;
+    });
+  }, [loadPastAnnouncements]);
 
   useEffect(() => {
     refreshToday();
@@ -804,6 +856,77 @@ export default function WorkerHomePage() {
           </ul>
         </div>
       )}
+
+      {/* Past announcements (archive) — expired/hidden notices that dropped out
+          of the live list above. Collapsed by default; tapping the header
+          lazy-loads the archive (read-only). Each past row is itself
+          foldable, mirroring the live list. */}
+      <div className="bg-white rounded-xl border border-[#D8D2CC] shadow-sm overflow-hidden">
+        <button
+          type="button"
+          onClick={togglePastOpen}
+          className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-[#5A5550]"
+          aria-expanded={pastOpen}
+        >
+          <Megaphone className="h-4 w-4 text-[#8A8680]" />
+          <span className="text-sm font-semibold">
+            {t("home.pastAnnouncements")}
+          </span>
+          <ChevronDown
+            className={`ml-auto h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${pastOpen ? "rotate-180" : ""}`}
+          />
+        </button>
+        {pastOpen && (
+          <div className="border-t border-[#F0ECE9]">
+            {pastLoading && pastAnn === null ? (
+              <p className="px-4 py-3 text-xs text-[#9CA3AF]">
+                {t("common.loading")}
+              </p>
+            ) : pastAnn && pastAnn.length > 0 ? (
+              <ul className="divide-y divide-[#F0ECE9]">
+                {pastAnn.map((a) => {
+                  const collapsed = collapsedPast.has(a.id);
+                  const { title, body } = localizeAnnouncement(a, lang);
+                  return (
+                    <li key={a.id} className="px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => togglePastCollapsed(a.id)}
+                        className="flex w-full items-start gap-2 text-left"
+                      >
+                        <p className="min-w-0 flex-1 text-sm font-semibold text-[#5A5550] break-words">
+                          {title}
+                        </p>
+                        <ChevronDown
+                          className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${collapsed ? "" : "rotate-180"}`}
+                        />
+                      </button>
+                      {!collapsed && (
+                        <div className="mt-0.5 pl-0">
+                          {body && (
+                            <p className="whitespace-pre-wrap break-words text-xs text-[#5A5550]">
+                              {body}
+                            </p>
+                          )}
+                          {a.createdAt && (
+                            <p className="mt-1 text-[10px] text-[#9CA3AF]">
+                              {fmtDay(a.createdAt)}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="px-4 py-3 text-xs text-[#9CA3AF]">
+                {t("home.noPastAnnouncements")}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Location nudge (Feature B) — shown when location is denied/unavailable
           so the worker's punch can stamp "At factory". Never blocks clock-in. */}

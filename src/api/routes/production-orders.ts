@@ -7871,12 +7871,40 @@ app.post("/bulk-patch", async (c) => {
         v === null || v === undefined || v === "" ? null : v;
       return norm(a) === norm(b);
     };
-    // Walk the original results array; flip success→false on any row
-    // whose readback doesn't match the requested fields.
+    // Compute the requested-vs-actual diffs for ONE patch against ONE
+    // readback row. Returns the human-readable diff strings (empty = match).
+    type ReadbackRow = Record<string, unknown>;
+    const diffPatch = (
+      req: Record<string, unknown>,
+      actual: ReadbackRow,
+    ): string[] => {
+      const diffs: string[] = [];
+      for (const [k, v] of Object.entries(req)) {
+        if (k === "poId" || k === "jobCardId" || k === "pic1Name" || k === "pic2Name") continue;
+        const actualVal = (actual as Record<string, unknown>)[k];
+        if (!looseEq(actualVal, v)) {
+          diffs.push(`${k}: tried ${JSON.stringify(v)}, db has ${JSON.stringify(actualVal)}`);
+        }
+      }
+      return diffs;
+    };
+
+    // First pass: walk every successful row and collect the ones whose
+    // readback doesn't match. We do NOT fail them yet — the first SELECT
+    // runs on the OUTER request's connection, which Hyperdrive can serve
+    // from its read query cache: the loopback PATCH that wrote pic2_id ran
+    // as a SEPARATE subrequest on a DIFFERENT connection, so the outer read
+    // can land on a cached pre-write snapshot of the row (the textbook
+    // read-after-write race across two connections). Symptom: the SECOND PIC
+    // set on a card ("set PIC1 → ok, then set PIC2") spuriously reverts with
+    // `pic2Id: tried "...", db has null`, and clicking again works — the
+    // signature of a nondeterministic cache race, NOT a write bug.
+    // BUG-2026-06-26-001.
+    const mismatched: Array<{ idx: number; jcId: string; firstDiffs: string[] }> = [];
     for (let i = 0; i < results.length; i++) {
       const r = results[i];
       if (!r.success) continue;
-      const req = patches[i];
+      const req = patches[i] as Record<string, unknown>;
       const actual = byId.get(r.jobCardId);
       if (!actual) {
         results[i] = {
@@ -7886,20 +7914,55 @@ app.post("/bulk-patch", async (c) => {
         };
         continue;
       }
-      const diffs: string[] = [];
-      for (const [k, v] of Object.entries(req)) {
-        if (k === "poId" || k === "jobCardId" || k === "pic1Name" || k === "pic2Name") continue;
-        const actualVal = (actual as Record<string, unknown>)[k];
-        if (!looseEq(actualVal, v)) {
-          diffs.push(`${k}: tried ${JSON.stringify(v)}, db has ${JSON.stringify(actualVal)}`);
-        }
-      }
+      const diffs = diffPatch(req, actual);
       if (diffs.length > 0) {
-        results[i] = {
-          ...r,
-          success: false,
-          error: `verify-readback mismatch — ${diffs.join("; ")}`,
-        };
+        mismatched.push({ idx: i, jcId: r.jobCardId, firstDiffs: diffs });
+      }
+    }
+
+    // Second pass — ONE cache-bypassed re-read of only the mismatched rows.
+    // Running the SELECT inside an explicit transaction (db.batch wraps the
+    // statement in sql.begin) makes Hyperdrive treat it as non-cacheable, so
+    // this re-read is forced back to the primary and sees the just-written
+    // value. Only rows that STILL mismatch after the fresh read are genuine
+    // write failures and get flipped to success:false — a true unpersisted
+    // write surfaces exactly as before, while the read-after-write lag is
+    // absorbed by the single retry. (No tight loop: one extra read is enough;
+    // the lag is the cross-connection cache, not Postgres replication.)
+    if (mismatched.length > 0) {
+      const reIds = mismatched.map((m) => m.jcId);
+      const rePlaceholders = reIds.map(() => "?").join(",");
+      let reById = new Map<string, ReadbackRow>();
+      try {
+        const reReadBatch = await c.var.DB.batch<ReadbackRow>([
+          c.var.DB
+            .prepare(
+              `SELECT id, status, dueDate, completedDate, pic1Id, pic1Name, pic2Id, pic2Name,
+                      actualMinutes, rackingNumber, overdue, distributedAt
+                 FROM job_cards WHERE id IN (${rePlaceholders})`,
+            )
+            .bind(...reIds),
+        ]);
+        const reRows = reReadBatch[0]?.results ?? [];
+        reById = new Map(reRows.map((row) => [String(row.id), row] as const));
+      } catch {
+        // Re-read itself failed — fall back to the first-pass verdict so a
+        // transient read blip can't mask a real mismatch.
+        reById = new Map();
+      }
+      for (const m of mismatched) {
+        const r = results[m.idx];
+        const req = patches[m.idx] as Record<string, unknown>;
+        const fresh = reById.get(m.jcId);
+        // No fresh row (re-read failed / row vanished) → trust the first pass.
+        const finalDiffs = fresh ? diffPatch(req, fresh) : m.firstDiffs;
+        if (finalDiffs.length > 0) {
+          results[m.idx] = {
+            ...r,
+            success: false,
+            error: `verify-readback mismatch — ${finalDiffs.join("; ")}`,
+          };
+        }
       }
     }
   }

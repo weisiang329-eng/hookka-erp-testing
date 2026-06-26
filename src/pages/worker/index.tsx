@@ -24,6 +24,7 @@ import {
   Camera,
   Megaphone,
   MapPin,
+  ChevronDown,
 } from "lucide-react";
 import { useT, useWorkerLang } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
@@ -378,6 +379,18 @@ export default function WorkerHomePage() {
 
   // ---- Announcements (Feature A) ----
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  // Per-announcement collapse (owner 2026-06-26: long announcements eat the
+  // screen — tap the header to fold/unfold, same as the Standard Times card).
+  // Holds the COLLAPSED ids; default is expanded (id absent → open).
+  const [collapsedAnn, setCollapsedAnn] = useState<Set<string>>(new Set());
+  const toggleAnnCollapsed = useCallback((id: string) => {
+    setCollapsedAnn((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
   // Which announcement ids this device has already opened (drives the dot).
   const [seenAnn, setSeenAnn] = useState<Set<string>>(() =>
     readSeenAnnouncements(),
@@ -466,6 +479,7 @@ export default function WorkerHomePage() {
 
   useEffect(() => {
     refreshToday();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot mount data load; refresh* are stable useCallbacks
     refreshAnnouncements();
   }, [refreshToday, refreshAnnouncements]);
 
@@ -741,27 +755,39 @@ export default function WorkerHomePage() {
           >
             {announcements.map((a) => {
               const unread = !seenAnn.has(a.id);
+              const collapsed = collapsedAnn.has(a.id);
               const { title, body } = localizeAnnouncement(a, lang);
               return (
                 <li key={a.id} className="px-4 py-3">
-                  <div className="flex items-start gap-2">
+                  {/* Header row — tap to fold/unfold (owner 2026-06-26). The
+                      click still bubbles to the <ul> so it also marks seen. */}
+                  <button
+                    type="button"
+                    onClick={() => toggleAnnCollapsed(a.id)}
+                    className="flex w-full items-start gap-2 text-left"
+                  >
                     {unread && (
                       <span
                         aria-hidden
                         className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-[#9A3A2D]"
                       />
                     )}
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-semibold text-[#1F1D1B] break-words">
-                        {title}
-                        {unread && (
-                          <span className="ml-1.5 align-middle text-[10px] font-bold uppercase tracking-wide text-[#9A3A2D]">
-                            {t("home.newBadge")}
-                          </span>
-                        )}
-                      </p>
+                    <p className="min-w-0 flex-1 text-sm font-semibold text-[#1F1D1B] break-words">
+                      {title}
+                      {unread && (
+                        <span className="ml-1.5 align-middle text-[10px] font-bold uppercase tracking-wide text-[#9A3A2D]">
+                          {t("home.newBadge")}
+                        </span>
+                      )}
+                    </p>
+                    <ChevronDown
+                      className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${collapsed ? "" : "rotate-180"}`}
+                    />
+                  </button>
+                  {!collapsed && (
+                    <div className="mt-0.5 pl-0">
                       {body && (
-                        <p className="mt-0.5 whitespace-pre-wrap break-words text-xs text-[#5A5550]">
+                        <p className="whitespace-pre-wrap break-words text-xs text-[#5A5550]">
                           {body}
                         </p>
                       )}
@@ -771,7 +797,7 @@ export default function WorkerHomePage() {
                         </p>
                       )}
                     </div>
-                  </div>
+                  )}
                 </li>
               );
             })}

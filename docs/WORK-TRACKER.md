@@ -9,6 +9,33 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-06-26 — Coding-base kickoff → staging deploy + test (owner rapid-fire)
+
+**Branch: `feat/packing-mint-jc` → pushed to `staging` (NOT main/prod). Owner ruling: route this whole batch to staging, verify, then decide prod promotion.**
+
+**✅ Shipped to staging:**
+- **TASK 1 — packing mint poNo-drift fallback** (`production-orders.ts` POST `/packing-rack-tokens`): mirror worker.ts scan-lookup recovery (trim/CI poNo → `fg_units.poId`, live-PO only). + **TASK 2 — FG-PACKING sticker carries `&jc=`** (mint returns `cardIds`; `packingStickerUrl` appends jc; `parseStickerData` reads jc; worker `handleDecoded` resolves jc first). +6 source-assert tests. BUG-2026-06-26-001. ⚠️ Owner later said **packing scan no longer needs internal/external split** — but KEEP the public `/p/` + `/r/` codes (warehouse rack stock-in uses them); the mint/jc work is additive/harmless, left in place.
+- **PIC cell flicker fix** (BUG-2026-06-26-002): the live overlay + baserows read `pic1Name`; the `?fresh=1` read-back + list snapshot return `pic1Id` but not always the joined name → cell blanked → flicker. Fix: overlay derives name from `pic1Id` via the `workers` roster when `pic{1,2}Name` empty (`deptRows` overlay, `production/index.tsx`). **All production departments** (one shared row model / PIC renderer). Completion date never flickered (stored field).
+- **Packing List per-piece STACKED rack layout** (owner-approved mockup): rack column shows `HB: Rack 19` / `Divan: Rack 19, 20` (labelled, compact, newline-stacked); `generatePackingListPdf` takes optional `DOPrintExtras`; new `fmtRackStacked` reuses `formatRacksCompact`; col 30→34mm; falls back to flat rackingNumber; call site fetches `/print-extras`.
+- **Staging DB refresh** (sync-staging.yml) + **staging trim**: deleted the 347 pre-2026-05-01 sales-order chains (619 POs, 9434 job cards, 923 fg_units, 151 invoices, 91 fully-owned DOs, etc.) via new `trim-staging.yml` (staging-scoped GH workflow, single transaction, FK-ordered, divide-by-zero guard, ANALYZE). 564 SOs kept, **0 orphans**. Undo = re-run sync. `trim-staging.yml` lives on `main` (inert tool — report default, execute needs `confirm=TRIM`); can be removed.
+
+**🟡 In progress / queued (this session):**
+- **② Unify the two rack UIs** (owner approved direction): make `warehouse.tsx` rack-contents card + `rack-scan.tsx` public `/r/` stock-in page share ONE rack card (same olive header + same item row: product code → customer·PO → SO; public adds trash + Stock In). Mockup approved 2026-06-26. NOT built yet.
+- **③ Barcode scan feedback** — owner: QR scan turns blue (hit) but Barcode shows no blue/red; the gun/phone capture is also less sensitive. Add the same colour feedback to the barcode path. NEED to pinpoint the exact scan screen (worker-portal result card vs `/r/` rack scan). NOT built.
+
+**⚪ Owner live-verify (staging) — no code unless a check fails:**
+- Completed-row vanish (TASK 3) — owner tests one-by-one / batch / status-cell completion, names the path that drops a row → wire into `forceShowCompletedIds`.
+- Doc-date basis · opening_date floor · PARTIAL_PAID (paste `Hookka迁移11` + test partial supplier payment) · QR canonical domain · customer-email drain. (All backend-shipped earlier.)
+
+**Owner notes this session:** staging slowness = Tokyo region + small tier, NOT data volume (prod has same data, fast) — trim won't fix speed (owner trimmed anyway for shorter lists). Login bounce on staging = use incognito + prod creds (DB cloned from prod).
+
+### Owner spec batch (late 2026-06-26) — design/propose, then build (logged so none drop)
+- **#A Department scan restriction — ❌ DROPPED by owner (2026-06-26).** Owner decided NOT to build the restriction/popup. Simpler model kept: the department is inferred from WHO scans (their own section), exactly like the shared Sew/Uph sticker (women's section → FAB_SEW, men's → UPHOLSTERY). No blocking, no "wrong dept" popup. Don't re-propose. ~~(proposed): worker may only scan stickers of their CURRENT dept (= latest dept-scan today, else punch dept); cross-dept scan → blocked popup "you are in <DEPT>". Choke point = `GET /scan-lookup` (skip shared Sew/Uph `wk=`/`c=` stickers, already self-route by section) + backend guard on scan-complete / scan-complete-dept. NO current enforcement exists. Full flow map done (clock→dept_scan_events→buckets→working_hour_entries via dept-scan-split.ts/punch-autofill.ts). Mockup popup → build after owner confirms current-dept rule + edge cases.
+- **#B Show Production WIP Time to workers by their dept** (mockup requested): WIP time IS per-dept (BOM Time per WIP×dept; `dept_working_times`; FAB_CUT card mins = Σ BOM dept slots). Workers "totally don't know" the standard minutes → disputes. Worker Portal needs a read-only "your dept's standard times" view (their dept ONLY, from `workers.departmentCode`). Mockup the Worker-Portal placement.
+- **#C Non-Production hours apply + approve flow** (design): depts have a Prod/Non-prod flag (Warehouse/Repair/Maint/Shortfall/R&D = Non-prod; Packing/Fab/etc = Prod). Worker who did non-prod work but missed the scan applies "Xh in <non-prod dept> today" → approval (prefer the approve action in the Working Hours screen). On approve: 9h all-prod → e.g. 7h prod + 2h non-prod, so efficiency = output/prod-hours (7/7 = 100%). Design where it lives.
+- **#D Announcements rich media**: support image / video / PDF upload (tutorials, SOP PDFs, feature guides) — currently text-only. Reuse `/api/files`?
+- **#E Announcement UX in Worker Portal**: (1) collapse/expand each announcement (tap to fold/unfold even after "got it" — long ones eat space); (2) expired announcements currently VANISH from the worker portal — owner wants past ones still READABLE (archive). Clarify Hide (manual) vs Expired (auto past hide-date) vs Delete. Worker portal (worker/index.tsx) home shows only Live, non-hidden.
+
 ## 2026-06-25
 
 ### QR/Barcode · Rack · Packing · Warehouse · Payroll — rapid-QA batch (owner rapid-fire)

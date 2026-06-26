@@ -11,7 +11,7 @@
 // ============================================================
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { LogOut, Plus } from "lucide-react";
+import { LogOut, Plus, Clock, Search, ChevronDown } from "lucide-react";
 import {
   useT,
   useLangState,
@@ -185,6 +185,40 @@ export default function WorkerMePage() {
   const [leaveReason, setLeaveReason] = useState("");
   const [leaveSubmitting, setLeaveSubmitting] = useState(false);
   const [leaveError, setLeaveError] = useState<string | null>(null);
+
+  // Standard Times (owner 2026-06-26): the worker's OWN department's standard
+  // minutes per WIP, so they know the time limit (no more "totally don't know").
+  type StdTimeRow = {
+    wipLabel: string;
+    wipType: string;
+    itemCategory: string;
+    minutes: number;
+    productCount: number;
+  };
+  const [stdOpen, setStdOpen] = useState(false);
+  const [stdLoaded, setStdLoaded] = useState(false);
+  const [stdLoading, setStdLoading] = useState(false);
+  const [stdRows, setStdRows] = useState<StdTimeRow[]>([]);
+  const [stdSearch, setStdSearch] = useState("");
+
+  const loadStandardTimes = useCallback(async () => {
+    setStdLoading(true);
+    try {
+      const res = await workerFetch("/api/worker/wip-times");
+      const j = (await res.json()) as {
+        success?: boolean;
+        data?: { department?: string; rows?: StdTimeRow[] };
+      };
+      if (j?.success && Array.isArray(j.data?.rows)) {
+        setStdRows(j.data.rows);
+      }
+      setStdLoaded(true);
+    } catch {
+      /* leave empty — the card shows a retry-on-reopen */
+    } finally {
+      setStdLoading(false);
+    }
+  }, []);
 
   const loadLeaves = useCallback(async () => {
     try {
@@ -514,6 +548,89 @@ export default function WorkerMePage() {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Standard Times — the worker's OWN department's minutes per WIP
+          (owner 2026-06-26). Collapsed by default; loads on first open. */}
+      <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
+        <button
+          type="button"
+          onClick={() => {
+            setStdOpen((v) => !v);
+            if (!stdLoaded && !stdLoading) void loadStandardTimes();
+          }}
+          className="w-full px-4 py-3 flex items-center justify-between text-left"
+        >
+          <span className="flex items-center gap-2">
+            <Clock className="h-4 w-4 text-[#6B5C32]" />
+            <span className="text-sm font-semibold">
+              Standard Times{me.departmentCode ? ` · ${me.departmentCode}` : ""}
+            </span>
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 text-[#8A8680] transition-transform ${stdOpen ? "rotate-180" : ""}`}
+          />
+        </button>
+
+        {stdOpen && (
+          <div className="px-4 pb-4">
+            <p className="text-xs text-[#8A8680] mb-2">
+              Standard minutes per WIP for your department.
+            </p>
+            <div className="relative mb-2">
+              <Search className="h-4 w-4 text-[#B0AAA3] absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={stdSearch}
+                onChange={(e) => setStdSearch(e.target.value)}
+                placeholder="Search product / WIP…"
+                className="w-full h-10 pl-8 pr-3 rounded border border-[#D8D2CC] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              />
+            </div>
+            {stdLoading ? (
+              <p className="text-sm text-[#8A8680] py-2">{t("common.loading")}</p>
+            ) : (
+              (() => {
+                const q = stdSearch.trim().toUpperCase();
+                const shown = q
+                  ? stdRows.filter((r) => r.wipLabel.toUpperCase().includes(q))
+                  : stdRows;
+                if (stdRows.length === 0) {
+                  return (
+                    <p className="text-sm text-[#8A8680] py-2">
+                      No standard times found for your department.
+                    </p>
+                  );
+                }
+                if (shown.length === 0) {
+                  return (
+                    <p className="text-sm text-[#8A8680] py-2">No match.</p>
+                  );
+                }
+                return (
+                  <div className="max-h-80 overflow-y-auto -mx-1">
+                    {shown.map((r, i) => (
+                      <div
+                        key={`${r.wipLabel}-${i}`}
+                        className="flex items-center justify-between gap-2 px-1 py-2 border-b border-[#F0ECE9] last:border-0"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{r.wipLabel}</p>
+                          {r.itemCategory && (
+                            <p className="text-xs text-[#8A8680]">{r.itemCategory}</p>
+                          )}
+                        </div>
+                        <span className="shrink-0 text-xs font-semibold px-2 py-1 rounded bg-[#E0F0E8] text-[#2A6B4A]">
+                          {r.minutes} min
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()
+            )}
+          </div>
+        )}
       </div>
 
       {/* Logout */}

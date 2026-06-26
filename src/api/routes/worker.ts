@@ -28,6 +28,7 @@ import { deriveBarcodeToken, deptOfBarcodeToken, isBarcodeToken } from "../../li
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
 import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
 import { applyPackingRack } from "../lib/packing-rack-write";
+import { loadActiveBomRows, aggregateWipTimes } from "../lib/wip-times-core";
 import {
   recordDeptScan,
   autofillWorkingHoursFromPunch,
@@ -376,6 +377,36 @@ app.get("/today", async (c) => {
       earningsSen,
     },
   });
+});
+
+// ============================================================
+// GET /api/worker/wip-times — the worker's OWN department's standard times.
+//
+// Owner 2026-06-26: workers "totally don't know" the standard minutes per WIP
+// for their dept → disputes. This read-only reference shows ONLY their own
+// department's numbers (filtered by workers.departmentCode). Shares the BOM
+// walk + dedup + aggregate with the dashboard GET /api/wip-times via
+// lib/wip-times-core (one source, no drift). Org-agnostic like the rest of
+// this file (single-org). Returns the per-WIP standard minutes (bomMaxMinutes
+// = the conservative limit; min==max for the common single-valued case).
+// ============================================================
+app.get("/wip-times", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const dept = (auth.worker.departmentCode || "").trim().toUpperCase();
+  if (!dept) {
+    return c.json({ success: true, data: { department: "", rows: [] } });
+  }
+  const bomRows = await loadActiveBomRows(c.var.DB, null, null);
+  const agg = aggregateWipTimes(bomRows, { dept });
+  const rows = agg.map((r) => ({
+    wipLabel: r.wipLabel,
+    wipType: r.wipType,
+    itemCategory: r.itemCategory,
+    minutes: r.bomMaxMinutes,
+    productCount: r.productCount,
+  }));
+  return c.json({ success: true, data: { department: dept, rows } });
 });
 
 // ============================================================

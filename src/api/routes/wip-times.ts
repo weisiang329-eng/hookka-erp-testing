@@ -30,6 +30,7 @@ import {
   resolveWipTokens,
   type BomVariantContext,
 } from "../lib/bom-wip-breakdown";
+import { loadActiveBomRows, aggregateWipTimes } from "../lib/wip-times-core";
 
 const app = new Hono<Env>();
 
@@ -109,64 +110,6 @@ function buildVariantContext(
   };
 }
 
-type EmittedRow = {
-  productCode: string;
-  baseModel: string;
-  category: string;
-  wipLabel: string;
-  wipType: string;
-  quantity: number;
-  departmentCode: string;
-  bomMinutes: number;
-  hasZeroMinutes: boolean;
-};
-
-function walkTree(
-  nodes: BomWipNode[] | undefined,
-  ctx: BomVariantContext,
-  productCode: string,
-  baseModel: string,
-  category: string,
-  out: EmittedRow[],
-): void {
-  if (!Array.isArray(nodes)) return;
-  for (const node of nodes) {
-    if (!node || typeof node !== "object") continue;
-    const rawCode = String(node.wipCode || "");
-    const rawLabel = String(node.wipLabel || rawCode || "");
-    const wipLabel = rawLabel
-      ? resolveWipTokens(rawLabel, ctx)
-      : resolveWipTokens(rawCode, ctx);
-    const wipType = String(node.wipType || "").toUpperCase();
-    const quantity = Number(node.quantity) > 0 ? Number(node.quantity) : 1;
-    const procs = Array.isArray(node.processes) ? node.processes : [];
-    for (const p of procs) {
-      const dept = String(p?.deptCode || "").toUpperCase();
-      if (!dept) continue;
-      const minutes = Number(p?.minutes);
-      const m = Number.isFinite(minutes) ? minutes : 0;
-      // Skip rows with no label at all — they'd render as orphans. Keep
-      // 0-minute rows though: per Wei Siang 2026-05-11 Q2=A, gaps in
-      // BOM data must be visible so they can be filled.
-      if (!wipLabel) continue;
-      out.push({
-        productCode,
-        baseModel,
-        category,
-        wipLabel,
-        wipType,
-        quantity,
-        departmentCode: dept,
-        bomMinutes: m,
-        hasZeroMinutes: m === 0,
-      });
-    }
-    if (Array.isArray(node.children)) {
-      walkTree(node.children, ctx, productCode, baseModel, category, out);
-    }
-  }
-}
-
 app.get("/", async (c) => {
   const denied = await requirePermission(c, "production-orders", "read");
   if (denied) return denied;
@@ -184,166 +127,10 @@ app.get("/", async (c) => {
       ? categoryParam
       : null;
 
-  // Pull ACTIVE BOMs only, LEFT JOIN to products for defaultVariants. Some
-  // products may not have defaults set yet — those rows keep raw tokens
-  // in the WIP label (still useful as "BOM exists but no defaults").
-  // Quote camelCase aliases (Postgres lowercases unquoted ones).
-  const where: string[] = [
-    "bt.orgId = ?",
-    "UPPER(bt.versionStatus) = 'ACTIVE'",
-  ];
-  const bindings: unknown[] = [orgId];
-  if (category) {
-    where.push("UPPER(bt.category) = ?");
-    bindings.push(category);
-  }
-  const sql = `
-    SELECT
-      bt.productCode      AS "productCode",
-      bt.baseModel        AS "baseModel",
-      bt.category         AS "category",
-      bt.wipComponents    AS "wipComponents",
-      p.defaultVariants   AS "defaultVariants",
-      p.sizeCode          AS "sizeCode",
-      p.sizeLabel         AS "sizeLabel"
-    FROM bom_templates bt
-    LEFT JOIN products p ON p.code = bt.productCode AND p.orgId = bt.orgId
-    WHERE ${where.join(" AND ")}
-  `;
-
-  const result = await c.var.DB.prepare(sql)
-    .bind(...bindings)
-    .all<BomRow>();
-
-  const rows: EmittedRow[] = [];
-  for (const row of result.results ?? []) {
-    if (!row.wipComponents) continue;
-    let tree: unknown;
-    try {
-      tree = JSON.parse(row.wipComponents);
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(tree)) continue;
-    let defaults: DefaultVariantsBlob | null = null;
-    if (row.defaultVariants) {
-      try {
-        defaults = JSON.parse(row.defaultVariants) as DefaultVariantsBlob;
-      } catch {
-        defaults = null;
-      }
-    }
-    const ctx = buildVariantContext(
-      row.productCode,
-      row.baseModel,
-      row.sizeCode,
-      row.sizeLabel,
-      defaults,
-    );
-    walkTree(
-      tree as BomWipNode[],
-      ctx,
-      row.productCode,
-      row.baseModel ?? "",
-      (row.category ?? "").toUpperCase(),
-      rows,
-    );
-  }
-
-  // Apply dept filter post-walk (cheaper than re-walking the tree).
-  const filtered = dept
-    ? rows.filter((r) => r.departmentCode === dept)
-    : rows;
-
-  // Dedup pass — per Wei Siang 2026-05-11 v3 "如果相同的 wip 出来就不需要
-  // 了 show 一次可以了". Now that variant tokens are resolved (sizeLabel ↦
-  // "6FT", divanHeight ↦ "8\""), divan WIPs naturally share a label across
-  // every K-size bedframe; collapse them into a single row with min/max/avg
-  // minutes plus the product count. Headboard WIPs use {PRODUCT_CODE} so
-  // their labels stay unique → 1 product per bucket (still shown, just
-  // doesn't collapse with anything).
-  //
-  // LHF/RHF folding (v5, Wei Siang 2026-05-11):
-  // `5530-1A(LHF) -Base (FC)` and `5530-1A(RHF) -Base (FC)` are mirror
-  // operations with identical production time, so the dedup key strips
-  // `(LHF)` / `(RHF)`. The displayed wipLabel uses the same stripped form
-  // so the table reads `5530-1A -Base (FC)` once with productCount=2.
-  // Inline-edit naturally follows: PUT /api/wip-times matches by stripped
-  // label too, so saving once updates BOTH BOMs.
-  const stripOrientation = (s: string): string =>
-    s.replace(/\s*\((LHF|RHF)\)/gi, "").replace(/\s+/g, " ").trim();
-  type AggBucket = {
-    wipLabel: string;
-    departmentCode: string;
-    wipType: string;
-    minutes: number[];
-    quantities: number[];
-    productCodes: Set<string>;
-    categories: Set<string>;
-  };
-  const buckets = new Map<string, AggBucket>();
-  for (const r of filtered) {
-    const dedupLabel = stripOrientation(r.wipLabel);
-    const key = `${dedupLabel}::${r.departmentCode}`;
-    let b = buckets.get(key);
-    if (!b) {
-      b = {
-        wipLabel: dedupLabel,
-        departmentCode: r.departmentCode,
-        wipType: r.wipType,
-        minutes: [],
-        quantities: [],
-        productCodes: new Set(),
-        categories: new Set(),
-      };
-      buckets.set(key, b);
-    }
-    b.minutes.push(r.bomMinutes);
-    b.quantities.push(r.quantity);
-    b.productCodes.add(r.productCode);
-    if (r.category) b.categories.add(r.category);
-  }
-
-  const agg = Array.from(buckets.values()).map((b) => {
-    const min = b.minutes.length ? Math.min(...b.minutes) : 0;
-    const max = b.minutes.length ? Math.max(...b.minutes) : 0;
-    const avg = b.minutes.length
-      ? Math.round(b.minutes.reduce((s, m) => s + m, 0) / b.minutes.length)
-      : 0;
-    const qMin = b.quantities.length ? Math.min(...b.quantities) : 1;
-    const qMax = b.quantities.length ? Math.max(...b.quantities) : 1;
-    const cats = Array.from(b.categories).sort();
-    return {
-      wipLabel: b.wipLabel,
-      departmentCode: b.departmentCode,
-      wipType: b.wipType,
-      itemCategory: cats[0] ?? "",
-      itemCategories: cats.join(", "),
-      bomMinMinutes: min,
-      bomMaxMinutes: max,
-      bomAvgMinutes: avg,
-      quantityMin: qMin,
-      quantityMax: qMax,
-      productCount: b.productCodes.size,
-      // Surface the actual product codes (sorted) so the Edit BOM Time
-      // dialog can list which products this row's edit will touch.
-      // Kept sorted for stable display + dialog-list ordering.
-      productCodes: Array.from(b.productCodes).sort(),
-      hasZeroMinutes: b.minutes.some((m) => m === 0),
-    };
-  });
-
-  // Sort by max minutes desc (longest WIPs surface first — what planners
-  // scan for); same-minute rows fall back to category → wipLabel.
-  agg.sort((a, b) => {
-    if (a.bomMaxMinutes !== b.bomMaxMinutes)
-      return b.bomMaxMinutes - a.bomMaxMinutes;
-    if (a.itemCategory !== b.itemCategory)
-      return a.itemCategory.localeCompare(b.itemCategory);
-    if (a.departmentCode !== b.departmentCode)
-      return a.departmentCode.localeCompare(b.departmentCode);
-    return a.wipLabel.localeCompare(b.wipLabel);
-  });
+  // Walk + dedup + aggregate now live in lib/wip-times-core (shared with the
+  // worker-portal endpoint so both compute identical numbers — no drift).
+  const bomRows = await loadActiveBomRows(c.var.DB, orgId, category);
+  const agg = aggregateWipTimes(bomRows, { dept });
 
   return c.json({ success: true, data: agg });
 });

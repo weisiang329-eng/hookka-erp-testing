@@ -70,6 +70,12 @@ const ALLOWED_MIME = new Set([
   "image/heic",
   "image/heif",
   "application/pdf",
+  // Video (announcement tutorials / clips). MP4 & MOV share the ISO-BMFF ftyp
+  // box; WebM is EBML; both are brand/magic-byte checked in sniffMime below.
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/3gpp",
 ]);
 
 // Magic-byte signatures for the allowed MIME types. We enforce that the
@@ -116,16 +122,37 @@ function sniffMime(bytes: Uint8Array): string | null {
     bytes[3] === 0x46
   )
     return "application/pdf";
-  // HEIC/HEIF: ftypheic / ftypheix / ftypmif1 / ftypmsf1 etc. — bytes 4-7
-  // are "ftyp", bytes 8-11 hint the brand. We don't strictly verify the
-  // brand here; presence of an ISO-BMFF "ftyp" box is a solid signal.
+  // WebM (EBML header): 1A 45 DF A3
+  if (
+    bytes[0] === 0x1a &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0xdf &&
+    bytes[3] === 0xa3
+  )
+    return "video/webm";
+  // ISO Base Media: an "ftyp" box at bytes 4-7 covers BOTH HEIC/HEIF still
+  // images AND MP4 / MOV / 3GP video. Disambiguate by the major brand at
+  // bytes 8-11 (previously every ftyp file was mislabelled image/heic, which
+  // is why video uploads — declared video/mp4 — failed the type match).
   if (
     bytes[4] === 0x66 &&
     bytes[5] === 0x74 &&
     bytes[6] === 0x79 &&
     bytes[7] === 0x70
-  )
-    return "image/heic";
+  ) {
+    const brand = String.fromCharCode(
+      bytes[8],
+      bytes[9],
+      bytes[10],
+      bytes[11],
+    );
+    if (/^(heic|heix|hevc|heim|heis|hevm|hevs|mif1|msf1)$/.test(brand))
+      return "image/heic";
+    if (brand === "qt  ") return "video/quicktime";
+    if (brand.startsWith("3gp")) return "video/3gpp";
+    // isom / iso2 / mp41 / mp42 / avc1 / M4V / dash / … → MP4 family.
+    return "video/mp4";
+  }
   return null;
 }
 
@@ -136,6 +163,14 @@ function mimeMatches(declared: string, sniffed: string): boolean {
   if (declared === sniffed) return true;
   if (declared === "image/jpg" && sniffed === "image/jpeg") return true;
   if (declared === "image/heif" && sniffed === "image/heic") return true;
+  // A .mov may be declared video/quicktime but carry a generic MP4 ftyp brand
+  // (or the reverse) — accept any pairing within the MP4/MOV family.
+  if (
+    (declared === "video/quicktime" || declared === "video/mp4") &&
+    (sniffed === "video/mp4" || sniffed === "video/quicktime")
+  )
+    return true;
+  if (declared === "video/3gpp" && sniffed === "video/mp4") return true;
   return false;
 }
 

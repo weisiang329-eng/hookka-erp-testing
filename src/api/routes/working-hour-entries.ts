@@ -1323,6 +1323,73 @@ app.post("/nonprod-requests/:id/approve", async (c) => {
     )
     .run();
 
+  // ----- SPLIT the day: move the approved hours OUT of production -----
+  // Writing the non-prod row above only ADDS hours to the day. On its own that
+  // leaves the worker's PRODUCTION-dept hours (the efficiency denominator)
+  // unchanged, so the approval has no effect on efficiency. To make the
+  // approval matter we mirror the manual split the Working Hours grid does:
+  // DEDUCT the approved hours from this worker's production-dept
+  // working_hour_entries on the SAME date, largest entry first, floored at 0.
+  //
+  // Net effect: the day's TOTAL clocked hours stay constant (pay unaffected) —
+  // we added `hours` to a non-prod dept and removed the same `hours` from
+  // production depts — but the denominator (production hours) drops, so
+  // efficiency rises. If the worker has no production hours that day (or fewer
+  // than approved) we deduct only what's available and never go negative; the
+  // worst case is the denominator reaching 0 for that day's prod entries.
+  try {
+    // Which departments count toward the production denominator? Authoritative
+    // source = departments.isProduction (the exact flag the efficiency
+    // computation uses), not the hardcoded PRODUCTION_DEPTS set.
+    const deptRows = await c.var.DB
+      .prepare("SELECT code, isProduction FROM departments")
+      .bind()
+      .all<{ code: string; isProduction: number | boolean | null }>();
+    const prodDeptCodes = new Set<string>();
+    for (const d of deptRows.results ?? []) {
+      if (d.isProduction) prodDeptCodes.add(d.code);
+    }
+
+    // This worker's working_hour_entries for the approved date, restricted to
+    // production depts and positive hours, largest first.
+    const dayRows = await c.var.DB
+      .prepare(
+        `SELECT id, departmentCode, hours FROM working_hour_entries
+          WHERE workerId = ? AND date = ?`,
+      )
+      .bind(reqJson.workerId, reqJson.date)
+      .all<{ id: string; departmentCode: string; hours: number }>();
+    const prodEntries = (dayRows.results ?? [])
+      .map((r) => ({
+        id: r.id,
+        departmentCode: r.departmentCode,
+        hours: typeof r.hours === "number" ? r.hours : Number(r.hours) || 0,
+      }))
+      .filter((r) => prodDeptCodes.has(r.departmentCode) && r.hours > 0)
+      .sort((a, b) => b.hours - a.hours);
+
+    let remaining = reqJson.hours;
+    for (const e of prodEntries) {
+      if (remaining <= 0) break;
+      const take = Math.min(e.hours, remaining);
+      const newHours = e.hours - take; // floored at 0 by construction (take ≤ hours)
+      remaining -= take;
+      // SAME UPDATE shape the grid edit (PUT /:id) uses — only hours changes.
+      await c.var.DB.prepare(
+        `UPDATE working_hour_entries
+           SET hours = ?, updatedAt = datetime('now')
+         WHERE id = ?`,
+      )
+        .bind(newHours, e.id)
+        .run();
+    }
+  } catch (e) {
+    // A failure here must not lose the approval (the non-prod row is already
+    // written and the request will be marked APPROVED below). Log and continue;
+    // the office can re-split manually via the Working Hours grid if needed.
+    console.warn("[nonprod-approve] production-hours split failed:", e);
+  }
+
   const decidedBy = getUserId(c);
   await c.var.DB.prepare(
     `UPDATE worker_nonprod_requests

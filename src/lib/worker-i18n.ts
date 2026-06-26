@@ -912,11 +912,17 @@ const dict: Dict = {
     zh: '某项生产工作超出了标准工时？在此申报额外的生产工时。批准后将计为生产产出，让你的效率保持公平。',
     my: 'ထုတ်လုပ်မှုအလုပ်တစ်ခု စံအချိန်ထက်ကြာခဲ့ပါသလား? ဤနေရာတွင် ထပ်ဆောင်းထုတ်လုပ်ချိန်ကို တောင်းဆိုပါ။',
   },
-  'timeadj.hoursLabel': {
-    en: 'Hours (0.5 = 30 min)',
-    ms: 'Jam (0.5 = 30 min)',
-    zh: '小时（0.5 = 30 分钟）',
-    my: 'နာရီ (0.5 = ၃၀ မိနစ်)',
+  'timeadj.minutesLabel': {
+    en: 'Minutes',
+    ms: 'Minit',
+    zh: '分钟',
+    my: 'မိနစ်',
+  },
+  'timeadj.minSuffix': {
+    en: 'min',
+    ms: 'min',
+    zh: '分钟',
+    my: 'မိနစ်',
   },
   'timeadj.jobRef': {
     en: 'Job / WIP reference (optional)',

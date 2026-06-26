@@ -732,14 +732,26 @@ function NonprodApprovalsCard({
           <p className="text-sm text-[#8A8680]">Loading…</p>
         ) : (
           <div className="space-y-2">
-            {reqs.map((r) => (
+            {reqs.map((r) => {
+              // Owner 2026-06-27: workers enter/read MINUTES. Stored `hours`
+              // × 60 = minutes; show "X min" under an hour, else "Xh Ym".
+              const totalMin = Math.round((r.hours ?? 0) * 60);
+              const hh = Math.floor(totalMin / 60);
+              const mm = totalMin % 60;
+              const durLabel =
+                totalMin < 60
+                  ? `${totalMin} min`
+                  : mm === 0
+                    ? `${hh}h`
+                    : `${hh}h ${mm}min`;
+              return (
               <div
                 key={r.id}
                 className="flex items-center justify-between gap-3 rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
               >
                 <div className="min-w-0">
                   <p className="text-sm font-medium truncate">
-                    {r.workerName} · {r.hours}h · {deptName(r.departmentCode)}
+                    {r.workerName} · {durLabel} · {deptName(r.departmentCode)}
                     <span
                       className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold ${
                         r.kind === "ADD_PROD"
@@ -786,7 +798,8 @@ function NonprodApprovalsCard({
                   </Button>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </CardContent>

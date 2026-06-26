@@ -241,7 +241,11 @@ export default function WorkerMePage() {
   const [npKind, setNpKind] = useState<"NONPROD" | "ADD_PROD">("NONPROD");
   const [npDept, setNpDept] = useState("");
   const [npDate, setNpDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [npHours, setNpHours] = useState("");
+  // The worker enters MINUTES (owner 2026-06-27: "20" meant 20 min, not 20h).
+  // We store `npMinutes` as the raw input and convert to hours (minutes / 60)
+  // only at submit time — the backend + efficiency math keep `hours` as the
+  // stored unit, so nothing downstream changes.
+  const [npMinutes, setNpMinutes] = useState("");
   const [npJobRef, setNpJobRef] = useState("");
   const [npNote, setNpNote] = useState("");
   const [npSubmitting, setNpSubmitting] = useState(false);
@@ -268,15 +272,23 @@ export default function WorkerMePage() {
   async function handleSubmitNonprod(e: React.FormEvent) {
     e.preventDefault();
     setNpError(null);
-    const hoursNum = Number(npHours);
+    // Worker enters MINUTES → convert to hours for the API (stored unit).
+    const minutesNum = Number(npMinutes);
     if (!npDept) {
       setNpError(t("nonprod.pickDept"));
       return;
     }
-    if (!Number.isFinite(hoursNum) || hoursNum <= 0 || hoursNum > 24) {
+    // 1 min .. 24h (1440 min). Integer minutes; fractional hours (e.g. 20/60)
+    // are fine for the backend's 0 < hours <= 24 check.
+    if (
+      !Number.isFinite(minutesNum) ||
+      minutesNum <= 0 ||
+      minutesNum > 24 * 60
+    ) {
       setNpError(t("nonprod.hours"));
       return;
     }
+    const hoursNum = minutesNum / 60;
     setNpSubmitting(true);
     try {
       const res = await workerFetch("/api/worker/nonprod-requests", {
@@ -297,7 +309,7 @@ export default function WorkerMePage() {
       }
       setNpShowForm(false);
       setNpDept("");
-      setNpHours("");
+      setNpMinutes("");
       setNpJobRef("");
       setNpNote("");
       await loadNonprod();
@@ -833,18 +845,18 @@ export default function WorkerMePage() {
               </div>
               <div>
                 <label className="text-xs text-[#5A5550] block mb-1">
-                  {t("timeadj.hoursLabel")}
+                  {t("timeadj.minutesLabel")}
                 </label>
                 <input
                   type="number"
-                  inputMode="decimal"
-                  min="0"
-                  max="24"
-                  step="0.5"
-                  value={npHours}
-                  onChange={(e) => setNpHours(e.target.value)}
+                  inputMode="numeric"
+                  min="1"
+                  max="1440"
+                  step="1"
+                  value={npMinutes}
+                  onChange={(e) => setNpMinutes(e.target.value)}
                   className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
-                  placeholder="2"
+                  placeholder="20"
                 />
               </div>
             </div>
@@ -893,6 +905,17 @@ export default function WorkerMePage() {
           <div className="space-y-1.5">
             {npRequests.slice(0, 8).map((r) => {
               const isAddProd = r.kind === "ADD_PROD";
+              // Stored `hours` × 60 = minutes (owner 2026-06-27: show minutes).
+              // "X min" under an hour, "Xh Ym" (or "Xh") at/over an hour.
+              const totalMin = Math.round((r.hours ?? 0) * 60);
+              const hh = Math.floor(totalMin / 60);
+              const mm = totalMin % 60;
+              const durLabel =
+                totalMin < 60
+                  ? `${totalMin} ${t("timeadj.minSuffix")}`
+                  : mm === 0
+                    ? `${hh}h`
+                    : `${hh}h ${mm}${t("timeadj.minSuffix")}`;
               const deptName =
                 (isAddProd ? prodDepts : npDepts).find(
                   (d) => d.code === r.departmentCode,
@@ -907,7 +930,7 @@ export default function WorkerMePage() {
                 >
                   <div className="min-w-0">
                     <p className="font-medium truncate">
-                      {deptName} · {r.hours}h
+                      {deptName} · {durLabel}
                       <span
                         className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold ${
                           isAddProd

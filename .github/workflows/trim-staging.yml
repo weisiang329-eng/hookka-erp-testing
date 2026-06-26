@@ -118,10 +118,10 @@ jobs:
           PGCONNECT_TIMEOUT: '30'
         run: |
           echo "=== SALES ORDER cut on company_so_date < ${CUTOFF} (undated = KEPT) ==="
-          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -v cut="$CUTOFF" -c "
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "
             SELECT
-              count(*) FILTER (WHERE company_so_date >= :'cut')                         AS keep_so,
-              count(*) FILTER (WHERE company_so_date <  :'cut')                          AS delete_so,
+              count(*) FILTER (WHERE company_so_date >= '${CUTOFF}')                     AS keep_so,
+              count(*) FILTER (WHERE company_so_date <  '${CUTOFF}')                     AS delete_so,
               count(*) FILTER (WHERE company_so_date IS NULL OR company_so_date = '')    AS undated_kept
             FROM sales_orders;"
 
@@ -141,8 +141,8 @@ jobs:
              GROUP BY table_name ORDER BY table_name;"
 
           echo '=== blast radius — rows the pre-cutoff SO chain would remove (certain links only) ==='
-          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -v cut="$CUTOFF" -c "
-            WITH del_so AS (SELECT id FROM sales_orders WHERE company_so_date < :'cut'),
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "
+            WITH del_so AS (SELECT id FROM sales_orders WHERE company_so_date < '${CUTOFF}'),
                  del_po AS (SELECT id FROM production_orders WHERE sales_order_id IN (SELECT id FROM del_so))
             SELECT
               (SELECT count(*) FROM del_so)                                                          AS sales_orders,
@@ -172,42 +172,29 @@ jobs:
           # prod→staging sync. Polymorphic/ambiguous tables (cost_ledger,
           # so_status_changes, wip_items, dept_scan_events) are intentionally left
           # — they are logs/ledger, not rows the SO/PO/DO lists render.
-          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -v cut="$CUTOFF" <<'SQL'
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "
           BEGIN;
           CREATE TEMP TABLE _del_so ON COMMIT DROP AS
             SELECT id FROM sales_orders
-             WHERE company_so_date IS NOT NULL AND company_so_date <> '' AND company_so_date < :'cut';
+             WHERE company_so_date IS NOT NULL AND company_so_date <> '' AND company_so_date < '${CUTOFF}';
           CREATE TEMP TABLE _del_po ON COMMIT DROP AS
             SELECT id FROM production_orders WHERE sales_order_id IN (SELECT id FROM _del_so);
           CREATE TEMP TABLE _del_jc ON COMMIT DROP AS
             SELECT id FROM job_cards WHERE production_order_id IN (SELECT id FROM _del_po);
           CREATE TEMP TABLE _del_do ON COMMIT DROP AS
             SELECT d.id FROM delivery_orders d
-             WHERE EXISTS (SELECT 1 FROM delivery_order_items i
-                            WHERE i.delivery_order_id = d.id
-                              AND i.production_order_id IN (SELECT id FROM _del_po))
-               AND NOT EXISTS (SELECT 1 FROM delivery_order_items i
-                                WHERE i.delivery_order_id = d.id
-                                  AND (i.production_order_id IS NULL
-                                       OR i.production_order_id NOT IN (SELECT id FROM _del_po)));
-          \echo '=== targets to delete ==='
-          SELECT (SELECT count(*) FROM _del_so) AS sales_orders,
+             WHERE EXISTS (SELECT 1 FROM delivery_order_items i WHERE i.delivery_order_id = d.id AND i.production_order_id IN (SELECT id FROM _del_po))
+               AND NOT EXISTS (SELECT 1 FROM delivery_order_items i WHERE i.delivery_order_id = d.id AND (i.production_order_id IS NULL OR i.production_order_id NOT IN (SELECT id FROM _del_po)));
+          SELECT 'targets' AS label,
+                 (SELECT count(*) FROM _del_so) AS sales_orders,
                  (SELECT count(*) FROM _del_po) AS production_orders,
                  (SELECT count(*) FROM _del_jc) AS job_cards,
                  (SELECT count(*) FROM _del_do) AS fully_ours_delivery_orders;
-          DO $$
-          DECLARE d int; t int;
-          BEGIN
-            SELECT count(*) INTO t FROM sales_orders;
-            SELECT count(*) INTO d FROM _del_so;
-            IF d = 0 THEN
-              RAISE EXCEPTION 'cutoff matched 0 sales orders — aborting (check company_so_date format)';
-            END IF;
-            IF d = t THEN
-              RAISE EXCEPTION 'cutoff matched ALL % sales orders — aborting (check company_so_date format)', t;
-            END IF;
-            RAISE NOTICE 'deleting % of % sales orders', d, t;
-          END $$;
+          SELECT CASE
+                   WHEN (SELECT count(*) FROM _del_so) = 0 THEN (1/0)
+                   WHEN (SELECT count(*) FROM _del_so) = (SELECT count(*) FROM sales_orders) THEN (1/0)
+                   ELSE 0
+                 END AS guard_must_be_partial_cut;
           DELETE FROM folder_job_cards     WHERE job_card_id        IN (SELECT id FROM _del_jc);
           DELETE FROM wip_cascade_log      WHERE job_card_id        IN (SELECT id FROM _del_jc);
           DELETE FROM qc_inspections       WHERE production_order_id IN (SELECT id FROM _del_po);
@@ -221,8 +208,7 @@ jobs:
           DELETE FROM job_cards            WHERE id                 IN (SELECT id FROM _del_jc);
           DELETE FROM production_orders    WHERE id                 IN (SELECT id FROM _del_po);
           DELETE FROM sales_orders         WHERE id                 IN (SELECT id FROM _del_so);
-          COMMIT;
-          SQL
+          COMMIT;"
           echo "=== remaining counts after delete ==="
           psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "
             SELECT (SELECT count(*) FROM sales_orders) AS sales_orders,

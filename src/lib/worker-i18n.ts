@@ -881,6 +881,68 @@ const dict: Dict = {
     my: 'ငြင်းပယ်ပြီး',
   },
 
+  // ---- Time adjustment (extends non-production hours, owner 2026-06-26) ----
+  'timeadj.title': {
+    en: 'Time adjustment',
+    ms: 'Pelarasan masa',
+    zh: '工时调整',
+    my: 'အချိန်ချိန်ညှိခြင်း',
+  },
+  'timeadj.type': {
+    en: 'Type',
+    ms: 'Jenis',
+    zh: '类型',
+    my: 'အမျိုးအစား',
+  },
+  'timeadj.typeNonprod': {
+    en: 'Non-production',
+    ms: 'Bukan pengeluaran',
+    zh: '非生产',
+    my: 'ထုတ်လုပ်မှုမဟုတ်',
+  },
+  'timeadj.typeAddProd': {
+    en: 'Extra production time',
+    ms: 'Masa pengeluaran tambahan',
+    zh: '额外生产工时',
+    my: 'ထပ်ဆောင်းထုတ်လုပ်ချိန်',
+  },
+  'timeadj.introAddProd': {
+    en: 'A production job took longer than its standard time? Claim the extra production hours here. Once approved, it counts as production output so your efficiency stays fair.',
+    ms: 'Kerja pengeluaran ambil masa lebih daripada masa standard? Mohon jam pengeluaran tambahan di sini. Setelah diluluskan, ia dikira sebagai pengeluaran supaya kecekapan anda kekal adil.',
+    zh: '某项生产工作超出了标准工时？在此申报额外的生产工时。批准后将计为生产产出，让你的效率保持公平。',
+    my: 'ထုတ်လုပ်မှုအလုပ်တစ်ခု စံအချိန်ထက်ကြာခဲ့ပါသလား? ဤနေရာတွင် ထပ်ဆောင်းထုတ်လုပ်ချိန်ကို တောင်းဆိုပါ။',
+  },
+  'timeadj.hoursLabel': {
+    en: 'Hours (0.5 = 30 min)',
+    ms: 'Jam (0.5 = 30 min)',
+    zh: '小时（0.5 = 30 分钟）',
+    my: 'နာရီ (0.5 = ၃၀ မိနစ်)',
+  },
+  'timeadj.jobRef': {
+    en: 'Job / WIP reference (optional)',
+    ms: 'Rujukan kerja / WIP (pilihan)',
+    zh: '工单 / WIP 参考（可选）',
+    my: 'အလုပ် / WIP ကိုးကား (မဖြစ်မနေမဟုတ်)',
+  },
+  'timeadj.jobRefPlaceholder': {
+    en: 'e.g. PO number or job card',
+    ms: 'cth. nombor PO atau kad kerja',
+    zh: '例如 PO 编号或工卡',
+    my: 'ဥပမာ PO နံပါတ် သို့မဟုတ် အလုပ်ကတ်',
+  },
+  'timeadj.reason': {
+    en: 'Reason',
+    ms: 'Sebab',
+    zh: '原因',
+    my: 'အကြောင်းပြချက်',
+  },
+  'timeadj.extraApproved': {
+    en: 'approved (extra time)',
+    ms: 'diluluskan (masa tambahan)',
+    zh: '已批准（额外工时）',
+    my: 'အတည်ပြုပြီး (ထပ်ဆောင်းအချိန်)',
+  },
+
   // ---- Leaves ----
   'leave.title': {
     en: 'Leave',

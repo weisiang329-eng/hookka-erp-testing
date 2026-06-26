@@ -1118,10 +1118,14 @@ type NonprodReqRow = {
   decided_at: string | null;
   decided_by: string | null;
   entry_id: string | null;
+  kind: string | null;
+  job_card_id: string | null;
 };
 
 function reqRowToJson(r: NonprodReqRow & Record<string, unknown>) {
   const pick = (a: unknown, b: unknown) => a ?? b;
+  // kind defaults to 'NONPROD' for legacy / pre-column rows — byte-identical.
+  const kindRaw = String(pick(r.kind, r.kind) ?? "");
   return {
     id: String(pick(r.id, r.id) ?? ""),
     workerId: String(pick(r.workerId, r.worker_id) ?? ""),
@@ -1133,6 +1137,8 @@ function reqRowToJson(r: NonprodReqRow & Record<string, unknown>) {
     createdAt: String(pick(r.createdAt, r.created_at) ?? ""),
     decidedAt: String(pick(r.decidedAt, r.decided_at) ?? ""),
     decidedBy: String(pick(r.decidedBy, r.decided_by) ?? ""),
+    kind: kindRaw === "ADD_PROD" ? "ADD_PROD" : "NONPROD",
+    jobCardId: String(pick(r.jobCardId, r.job_card_id) ?? ""),
   };
 }
 
@@ -1192,6 +1198,62 @@ app.post("/nonprod-requests/:id/approve", async (c) => {
     );
   }
 
+  // ----- ADD_PROD (extra production time) -----
+  // Owner 2026-06-26: a worker claims extra production time on a PRODUCTION
+  // dept (a job that overran its WIP standard). Approving simply marks the
+  // request APPROVED — it does NOT write a working_hour_entries row. The
+  // approved hours are read at efficiency-compute time and added to the
+  // NUMERATOR (credited production minutes); writing a WHE row would instead
+  // inflate the DENOMINATOR (production-dept clock-hours) and defeat the point.
+  // We still verify the dept really is a production dept (reject, don't fix).
+  if (reqJson.kind === "ADD_PROD") {
+    const d = await c.var.DB.prepare(
+      "SELECT isProduction FROM departments WHERE code = ?",
+    )
+      .bind(reqJson.departmentCode)
+      .first<{ isProduction: number | boolean | null }>();
+    if (!d) {
+      return c.json({ success: false, error: "Unknown department" }, 400);
+    }
+    if (!d.isProduction) {
+      return c.json(
+        {
+          success: false,
+          error: "Extra production time needs a production department",
+        },
+        400,
+      );
+    }
+    const decidedBy = getUserId(c);
+    await c.var.DB.prepare(
+      `UPDATE worker_nonprod_requests
+         SET status = 'APPROVED', decided_at = ?, decided_by = ?
+       WHERE id = ?`,
+    )
+      .bind(new Date().toISOString(), decidedBy, id)
+      .run();
+    // The efficiency NUMERATOR for the office Efficiency Overview is served via
+    // the cached /api/job-cards/summary snapshot, which keys freshness on the
+    // job_cards table only — an ADD_PROD approval doesn't touch job_cards, so
+    // explicitly wipe that snapshot so the next read recomputes with the credit.
+    try {
+      const { getOrgId } = await import("../lib/tenant");
+      const { invalidateSnapshot } = await import("../lib/snapshot");
+      await invalidateSnapshot(
+        c.var.DB,
+        { tableName: "job_cards_summary_snapshot", sourceTables: ["job_cards"] },
+        getOrgId(c),
+      );
+    } catch (e) {
+      console.warn("[nonprod-approve] job_cards_summary_snapshot wipe failed:", e);
+    }
+    return c.json({
+      success: true,
+      data: { id, status: "APPROVED", kind: "ADD_PROD" },
+    });
+  }
+
+  // ----- NONPROD (existing behaviour, unchanged) -----
   // Guard (defence in depth — the worker apply path already rejects prod depts):
   // only a NON-production dept may be approved, else the hours would land in the
   // efficiency denominator and defeat the purpose.

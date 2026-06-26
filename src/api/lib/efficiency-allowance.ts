@@ -105,6 +105,53 @@ const JC_PROD_MINUTES_SQL = `
 `;
 
 /**
+ * Approved EXTRA-PRODUCTION-TIME minutes per worker for [periodStart, periodEnd]
+ * (inclusive YYYY-MM-DD), keyed on the request's `date`.
+ *
+ * These are `worker_nonprod_requests` rows with kind = 'ADD_PROD' and status =
+ * 'APPROVED' — a worker's claim that a job took longer than its WIP standard
+ * (e.g. a 1h-standard customize job that actually took 3h → +2h). Approving the
+ * claim is what makes the time count: it is added to the efficiency NUMERATOR
+ * (credited production minutes), NOT the denominator. The hours never become a
+ * working_hour_entries row, so they can't inflate production-dept clock-hours.
+ *
+ * Returns minutes (hours × 60, rounded). A worker with no approved ADD_PROD
+ * claims simply isn't in the map → 0 added → byte-identical to the old number.
+ *
+ * Soft-fails to an empty map if the column/table isn't there yet (a cold
+ * isolate that hasn't run ensureNonprodRequests) so efficiency never 500s.
+ */
+export async function computeApprovedAddProdMinutesByWorker(
+  db: DbLike,
+  periodStart: string,
+  periodEnd: string,
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  try {
+    const res = await db
+      .prepare(
+        `SELECT worker_id AS workerId, hours
+           FROM worker_nonprod_requests
+          WHERE kind = 'ADD_PROD'
+            AND status = 'APPROVED'
+            AND date >= ? AND date <= ?`,
+      )
+      .bind(periodStart, periodEnd)
+      .all<{ workerId: string; hours: number | string | null }>();
+    for (const r of res.results ?? []) {
+      const wid = r.workerId;
+      if (!wid) continue;
+      const h = typeof r.hours === "number" ? r.hours : Number(r.hours) || 0;
+      out.set(wid, (out.get(wid) ?? 0) + Math.round(h * 60));
+    }
+  } catch {
+    // Table/column not present yet, or any read hiccup → no extra credit.
+    // Efficiency falls back to the exact pre-feature number.
+  }
+  return out;
+}
+
+/**
  * Month-cumulative efficiency per worker for [periodStart, periodEnd]
  * (inclusive YYYY-MM-DD). Returns one entry per worker seen in either the
  * job-card or working-hour data for the window.
@@ -136,6 +183,19 @@ export async function computeMonthlyEfficiencyByWorker(
       r.workerId,
       Math.round(Number(r.productionMinutes) || 0),
     );
+  }
+
+  // 2b. Approved EXTRA PRODUCTION TIME (kind='ADD_PROD') → add to the NUMERATOR.
+  // A worker who legitimately spent longer than the WIP standard on a job gets
+  // that approved extra time credited as production output. Excluded entirely
+  // when there are no approved claims (map empty) → unchanged efficiency.
+  const addProdByWorker = await computeApprovedAddProdMinutesByWorker(
+    db,
+    periodStart,
+    periodEnd,
+  );
+  for (const [wid, mins] of addProdByWorker) {
+    prodMinByWorker.set(wid, (prodMinByWorker.get(wid) ?? 0) + mins);
   }
 
   // 3. Working-hour rows for the window — sum production-dept hours (the

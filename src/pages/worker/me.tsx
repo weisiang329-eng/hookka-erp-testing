@@ -215,6 +215,14 @@ export default function WorkerMePage() {
   // from the Working Hours screen, which writes a non-production working-hours
   // row so those hours are excluded from the efficiency denominator — keeping
   // the worker's efficiency fair. ADD-only on top of the existing portal.
+  // Time adjustment (owner 2026-06-26): the worker picks a TYPE —
+  //   • Non-production — existing: any NON-production dept; the approved hours
+  //     land in a non-prod working-hours row, EXCLUDED from the efficiency
+  //     denominator, so efficiency stays fair.
+  //   • Extra production time (ADD_PROD) — a PRODUCTION dept + hours + optional
+  //     job/WIP ref; the approved hours are ADDED to the efficiency numerator
+  //     (extra production output) when a job ran longer than its WIP standard.
+  // ADD-only on top of the existing portal — the non-prod path is unchanged.
   type NonprodDept = { code: string; name: string };
   type NonprodRequest = {
     id: string;
@@ -223,26 +231,34 @@ export default function WorkerMePage() {
     hours: number;
     note: string;
     status: "PENDING" | "APPROVED" | "REJECTED";
+    kind?: "NONPROD" | "ADD_PROD";
+    jobCardId?: string;
   };
   const [npDepts, setNpDepts] = useState<NonprodDept[]>([]);
+  const [prodDepts, setProdDepts] = useState<NonprodDept[]>([]);
   const [npRequests, setNpRequests] = useState<NonprodRequest[]>([]);
   const [npShowForm, setNpShowForm] = useState(false);
+  const [npKind, setNpKind] = useState<"NONPROD" | "ADD_PROD">("NONPROD");
   const [npDept, setNpDept] = useState("");
   const [npDate, setNpDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [npHours, setNpHours] = useState("");
+  const [npJobRef, setNpJobRef] = useState("");
   const [npNote, setNpNote] = useState("");
   const [npSubmitting, setNpSubmitting] = useState(false);
   const [npError, setNpError] = useState<string | null>(null);
 
   const loadNonprod = useCallback(async () => {
     try {
-      const [dRes, rRes] = await Promise.all([
+      const [dRes, pRes, rRes] = await Promise.all([
         workerFetch("/api/worker/nonprod-departments"),
+        workerFetch("/api/worker/production-departments"),
         workerFetch("/api/worker/nonprod-requests"),
       ]);
       const dj = (await dRes.json()) as { success?: boolean; data?: NonprodDept[] };
+      const pj = (await pRes.json()) as { success?: boolean; data?: NonprodDept[] };
       const rj = (await rRes.json()) as { success?: boolean; data?: NonprodRequest[] };
       if (dj?.success && Array.isArray(dj.data)) setNpDepts(dj.data);
+      if (pj?.success && Array.isArray(pj.data)) setProdDepts(pj.data);
       if (rj?.success && Array.isArray(rj.data)) setNpRequests(rj.data);
     } catch {
       /* leave as-is — card shows empty / retries on next open */
@@ -270,6 +286,8 @@ export default function WorkerMePage() {
           departmentCode: npDept,
           hours: hoursNum,
           note: npNote,
+          kind: npKind,
+          jobCardId: npKind === "ADD_PROD" ? npJobRef.trim() : "",
         }),
       });
       const j = (await res.json()) as { success?: boolean; error?: string };
@@ -280,6 +298,7 @@ export default function WorkerMePage() {
       setNpShowForm(false);
       setNpDept("");
       setNpHours("");
+      setNpJobRef("");
       setNpNote("");
       await loadNonprod();
     } catch {
@@ -728,10 +747,11 @@ export default function WorkerMePage() {
         </div>
       </div>
 
-      {/* Non-production hours — apply + my requests (owner 2026-06-26). */}
+      {/* Time adjustment — non-production OR extra production time (owner
+          2026-06-26). Worker picks the type, then dept + hours + reason. */}
       <div className="bg-white rounded-xl p-4 border border-[#D8D2CC]">
         <div className="flex items-center justify-between mb-2">
-          <p className="text-sm font-semibold">{t("nonprod.title")}</p>
+          <p className="text-sm font-semibold">{t("timeadj.title")}</p>
           <button
             type="button"
             onClick={() => {
@@ -744,13 +764,44 @@ export default function WorkerMePage() {
             {t("nonprod.apply")}
           </button>
         </div>
-        <p className="text-xs text-[#8A8680] mb-3">{t("nonprod.intro")}</p>
+        <p className="text-xs text-[#8A8680] mb-3">
+          {npKind === "ADD_PROD" ? t("timeadj.introAddProd") : t("nonprod.intro")}
+        </p>
 
         {npShowForm && (
           <form
             onSubmit={handleSubmitNonprod}
             className="space-y-2 mb-3 bg-[#FAF9F7] p-3 rounded-lg"
           >
+            {/* TYPE toggle — Non-production (protects efficiency) vs Extra
+                production time (counts as production output). */}
+            <div>
+              <label className="text-xs text-[#5A5550] block mb-1">
+                {t("timeadj.type")}
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {(["NONPROD", "ADD_PROD"] as const).map((k) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => {
+                      setNpKind(k);
+                      setNpDept("");
+                      setNpError(null);
+                    }}
+                    className={`h-10 rounded border text-xs font-semibold px-2 ${
+                      npKind === k
+                        ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                        : "border-[#D8D2CC] bg-white text-[#5A5550]"
+                    }`}
+                  >
+                    {k === "NONPROD"
+                      ? t("timeadj.typeNonprod")
+                      : t("timeadj.typeAddProd")}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div>
               <label className="text-xs text-[#5A5550] block mb-1">
                 {t("nonprod.department")}
@@ -761,7 +812,7 @@ export default function WorkerMePage() {
                 className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
               >
                 <option value="">{t("nonprod.pickDept")}</option>
-                {npDepts.map((d) => (
+                {(npKind === "ADD_PROD" ? prodDepts : npDepts).map((d) => (
                   <option key={d.code} value={d.code}>
                     {d.name}
                   </option>
@@ -782,7 +833,7 @@ export default function WorkerMePage() {
               </div>
               <div>
                 <label className="text-xs text-[#5A5550] block mb-1">
-                  {t("nonprod.hours")}
+                  {t("timeadj.hoursLabel")}
                 </label>
                 <input
                   type="number"
@@ -797,9 +848,23 @@ export default function WorkerMePage() {
                 />
               </div>
             </div>
+            {npKind === "ADD_PROD" && (
+              <div>
+                <label className="text-xs text-[#5A5550] block mb-1">
+                  {t("timeadj.jobRef")}
+                </label>
+                <input
+                  type="text"
+                  value={npJobRef}
+                  onChange={(e) => setNpJobRef(e.target.value)}
+                  className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                  placeholder={t("timeadj.jobRefPlaceholder")}
+                />
+              </div>
+            )}
             <div>
               <label className="text-xs text-[#5A5550] block mb-1">
-                {t("nonprod.note")}
+                {npKind === "ADD_PROD" ? t("timeadj.reason") : t("nonprod.note")}
               </label>
               <input
                 type="text"
@@ -827,8 +892,13 @@ export default function WorkerMePage() {
         ) : (
           <div className="space-y-1.5">
             {npRequests.slice(0, 8).map((r) => {
+              const isAddProd = r.kind === "ADD_PROD";
               const deptName =
+                (isAddProd ? prodDepts : npDepts).find(
+                  (d) => d.code === r.departmentCode,
+                )?.name ||
                 npDepts.find((d) => d.code === r.departmentCode)?.name ||
+                prodDepts.find((d) => d.code === r.departmentCode)?.name ||
                 r.departmentCode;
               return (
                 <div
@@ -838,6 +908,17 @@ export default function WorkerMePage() {
                   <div className="min-w-0">
                     <p className="font-medium truncate">
                       {deptName} · {r.hours}h
+                      <span
+                        className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                          isAddProd
+                            ? "bg-[#E4ECF5] text-[#2A5A8A]"
+                            : "bg-[#F0ECE9] text-[#6B5C32]"
+                        }`}
+                      >
+                        {isAddProd
+                          ? t("timeadj.typeAddProd")
+                          : t("timeadj.typeNonprod")}
+                      </span>
                     </p>
                     <p className="text-xs text-[#8A8680]">{r.date}</p>
                   </div>

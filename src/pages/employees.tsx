@@ -635,6 +635,13 @@ type NonprodReq = {
   hours: number;
   note: string;
   status: "PENDING" | "APPROVED" | "REJECTED";
+  // Time-adjustment kind (owner 2026-06-26):
+  //   NONPROD  — non-production hours; approving writes a non-prod hours row
+  //              (excluded from the efficiency denominator).
+  //   ADD_PROD — extra production time on a production dept; approving credits
+  //              the hours to the efficiency numerator (no hours row written).
+  kind?: "NONPROD" | "ADD_PROD";
+  jobCardId?: string;
 };
 
 function NonprodApprovalsCard({
@@ -712,7 +719,7 @@ function NonprodApprovalsCard({
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
           <Clock className="h-5 w-5 text-[#9C6F1E]" />
-          Non-production hour requests
+          Time adjustment requests
           {reqs.length > 0 && (
             <span className="ml-1 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-[#9C6F1E] px-1.5 text-[11px] font-bold text-white">
               {reqs.length}
@@ -733,9 +740,23 @@ function NonprodApprovalsCard({
                 <div className="min-w-0">
                   <p className="text-sm font-medium truncate">
                     {r.workerName} · {r.hours}h · {deptName(r.departmentCode)}
+                    <span
+                      className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                        r.kind === "ADD_PROD"
+                          ? "bg-[#E4ECF5] text-[#2A5A8A]"
+                          : "bg-[#F0ECE9] text-[#6B5C32]"
+                      }`}
+                    >
+                      {r.kind === "ADD_PROD"
+                        ? "Extra production time"
+                        : "Non-production"}
+                    </span>
                   </p>
                   <p className="text-xs text-[#8A8680]">
                     {r.date}
+                    {r.kind === "ADD_PROD" && r.jobCardId
+                      ? ` · Job: ${r.jobCardId}`
+                      : ""}
                     {r.note ? ` — ${r.note}` : ""}
                   </p>
                 </div>
@@ -754,7 +775,11 @@ function NonprodApprovalsCard({
                     size="sm"
                     onClick={() => void decide(r.id, "approve")}
                     disabled={busyId === r.id}
-                    title="Approve — adds the non-production hours so efficiency stays fair"
+                    title={
+                      r.kind === "ADD_PROD"
+                        ? "Approve — credits the extra production time to efficiency"
+                        : "Approve — adds the non-production hours so efficiency stays fair"
+                    }
                   >
                     <Check className="h-4 w-4 mr-1" />
                     {busyId === r.id ? "…" : "Approve"}

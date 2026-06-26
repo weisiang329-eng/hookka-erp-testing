@@ -98,6 +98,9 @@ type CompletedRow = {
   // Co-PICs the worker shared this JC with — used to surface "shared with X"
   // when the worker taps the share badge.
   sharedWith?: Array<{ id: string; name: string }>;
+  // Approved EXTRA PRODUCTION TIME (kind='ADD_PROD') linked to this job, in
+  // minutes. 0 when there's no approved extra-time claim for this JC.
+  addProdMinutes?: number;
 };
 type AttendanceRow = {
   date: string;
@@ -142,6 +145,9 @@ type HistoryData = {
     productionMinutes: number;
     overtimeMinutes: number;
     completedCount: number;
+    // Extra production time (kind='ADD_PROD') credited to the numerator this
+    // period, in minutes. 0 when the worker has no approved extra-time claims.
+    addProdMinutes?: number;
     efficiencyPct: number;
   };
 };
@@ -1103,6 +1109,15 @@ export default function WorkerHomePage() {
         </div>
       )}
 
+      {/* Extra production time credited this period (kind='ADD_PROD'). Only
+          shown when the worker has approved extra-time claims — otherwise the
+          row is absent and the KPI strip looks exactly as before. */}
+      {hist && (hist.totals.addProdMinutes ?? 0) > 0 && (
+        <div className="-mt-1 text-xs text-[#2A5A8A]">
+          + {mins2hrs(hist.totals.addProdMinutes ?? 0)} {t("timeadj.extraApproved")}
+        </div>
+      )}
+
       {/* Daily attendance MOVED to the Pay page (owner 2026-06-12: the per-day
           punch records belong under the pay breakdown, following its month
           picker). Home stays focused on today + completed pieces. */}
@@ -1173,6 +1188,13 @@ export default function WorkerHomePage() {
                       </button>
                     )}
                   </div>
+                  {(c.addProdMinutes ?? 0) > 0 && (
+                    <div className="mt-1">
+                      <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-[#E4ECF5] text-[#2A5A8A] font-semibold">
+                        +{c.addProdMinutes} min {t("timeadj.extraApproved")}
+                      </span>
+                    </div>
+                  )}
                   {openShare === c.jobCardId && c.piecesShared > 0 && (
                     <div className="mt-1.5 ml-0 px-2.5 py-1.5 rounded bg-[#FAF7EE] border border-[#E5DEC6] text-[11px] text-[#5A5550]">
                       {c.sharedWith && c.sharedWith.length > 0

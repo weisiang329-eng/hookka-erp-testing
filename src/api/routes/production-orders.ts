@@ -363,6 +363,10 @@ export type PiecePicRow = {
   completedAt: string | null;
   lastScanAt: string | null;
   boundStickerKey: string | null;
+  // Per-PIECE warehouse rack (mig 0192). New snake_case column; dual-keyed read
+  // (rackingNumber from toCamel folding, racking_number raw) so it survives both.
+  rackingNumber?: string | null;
+  racking_number?: string | null;
 };
 
 // Shape mirrored to the frontend — matches the in-memory PiecePic type.
@@ -2256,10 +2260,33 @@ async function fetchFreshMinimalPO(
 // Ensure piece_pics rows exist for a job card. Creates wipQty (or 1) slots on
 // demand and returns the ordered array. Mirrors the in-memory ensurePiecePics
 // semantics, but persists to D1 so subsequent scans find the same slots.
+// Runtime self-apply for the per-PIECE rack column (mig 0192). A migration file
+// alone is INERT on prod (deploys do NOT replay migrations-postgres/*.sql) — the
+// column reaches prod only via this ADD COLUMN IF NOT EXISTS, awaited inside
+// ensurePiecePicsForJc before any piece_pics row is created/read. Memoised so
+// the DDL runs at most once per worker isolate.
+let piecePicsRackingColumnEnsured: Promise<void> | null = null;
+export function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
+  if (piecePicsRackingColumnEnsured) return piecePicsRackingColumnEnsured;
+  piecePicsRackingColumnEnsured = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE piece_pics ADD COLUMN IF NOT EXISTS racking_number TEXT",
+        )
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected
+    }
+  })();
+  return piecePicsRackingColumnEnsured;
+}
+
 async function ensurePiecePicsForJc(
   db: D1Database,
   jc: JobCardRow,
 ): Promise<PiecePicRow[]> {
+  await ensurePiecePicsRackingColumn(db);
   const existing = await db
     .prepare("SELECT * FROM piece_pics WHERE jobCardId = ? ORDER BY pieceNo")
     .bind(jc.id)

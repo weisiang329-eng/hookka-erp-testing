@@ -252,8 +252,8 @@ Built to cut token usage: open the named file at the named line range instead of
 | `src/pages/production/wip-times.tsx` — per-dept minute rates | `src/api/routes/bom-master-templates.ts` — master variants | `bom_templates` / `bom_versions` / `bom_master_templates` | `tests/production-orders-dept-narrow-guard.test.mjs` |
 | `src/pages/production/scan.tsx` — shop-floor dept scan | `src/api/routes/cnc-templates.ts` — Model→Size/Seat derive | `cnc_templates` | `tests/production-overdue-counts.test.mjs` |
 | `src/pages/production/fg-scan.tsx` — FG scan | `src/api/routes/inventory-wip.ts` — in-flight WIP per dept/PO | `production_lead_times_history` / `hookka_dd_buffer_history` | `tests/production-wip-producer-output.test.mjs` |
-| | `src/api/lib/packing-rack-write.ts` — `applyPackingRack` (rack set/clear + occupancy mirror; shared by office PATCH / /p/ / worker) | `rack_items` / `rack_locations` (occupancy mirror) | `tests/packing-piece-identity.test.mjs` |
-| | `src/api/lib/packing-piece-identity.ts` — `packingPieceIdentity` (shared piece warehouse identity) | | |
+| | `src/api/lib/packing-rack-write.ts` — `applyPackingRack(db, jc, rack, pieceNo?)` (rack set/clear + occupancy mirror; shared by office PATCH / /p/ / worker; per-PIECE rack via `piece_pics.racking_number` when pieceNo+totalPieces>1, else card-level legacy) | `rack_items` / `rack_locations` / `piece_pics.racking_number` (mig 0192) | `tests/packing-piece-identity.test.mjs` / `tests/sticker-rack-public.test.mjs` |
+| | `src/api/lib/packing-piece-identity.ts` — `packingPieceIdentity` (shared piece warehouse identity; appends `· pc N of M` to notes when pieceNo set + multi-piece) | | |
 | `src/pages/production/dept.tsx` / `overview.tsx` — thin wrappers | `src/api/routes/wip-times.ts` — minute counts | `kv_config` | `tests/sofa-combo.test.mjs` |
 | `src/pages/bom.tsx` — BOM Management (7211) | `src/api/routes/production-leadtimes.ts` — due-date buffer | | |
 | `src/pages/cnc-templates.tsx` — CNC drilldown | | | |

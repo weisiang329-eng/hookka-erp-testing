@@ -5458,7 +5458,13 @@ export default function ProductionPage({
       // Canonical origin: a packing sticker printed from the legacy prod
       // pages.dev URL still encodes erp.hookka.com (owner 2026-06-26).
       const origin = appOrigin();
-      if (s.packingToken) return packingRackScanUrl(origin, s.packingToken);
+      // Pass the piece number so each physical sticker of a multi-piece WIP gets
+      // its OWN public rack link (/p/<token>?p=<pieceNo>) and can be racked
+      // separately. Single-piece cards (pieceNo 1, totalPieces 1) still send
+      // ?p=1 — harmless, the route only diverges from card-level when the piece
+      // actually carries a per-piece rack.
+      if (s.packingToken)
+        return packingRackScanUrl(origin, s.packingToken, s.pieceNo);
       // Fallback deep-link. ADD &jc=<packing card id> when known so the scan
       // resolves by the stable card id even if the printed poNo drifted (TASK
       // 2). Additive — po=/p=/t=/pn= unchanged, so OLD stickers (and stickers

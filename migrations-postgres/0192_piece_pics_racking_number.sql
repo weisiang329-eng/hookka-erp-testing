@@ -1,0 +1,21 @@
+-- 0192_piece_pics_racking_number.sql
+-- Per-PIECE warehouse rack for a packed piece.
+--
+-- Until now a packing job card carried ONE rack number (job_cards.rackingNumber,
+-- card-level) and the warehouse occupancy mirror keyed a rack_items row by the
+-- piece IDENTITY (description + SO). A WIP with qty=2 (e.g. a DIVAN of 2 pieces)
+-- collapsed its 2 physical pieces to ONE identity, so scanning the 2nd piece
+-- into a different rack reported "already in this rack" — there was no place to
+-- hold a DISTINCT rack per piece.
+--
+-- This adds a per-piece rack column on piece_pics (which already has one row per
+-- physical piece, keyed by piece_no). The /p/<token>?p=<pieceNo> public scan and
+-- applyPackingRack() write THIS column for the targeted piece; a scan with NO
+-- ?p= (old single-piece prints) keeps the existing card-level behavior.
+--
+-- ADDITIVE + back-compat. Like all Hookka migrations it is INERT on prod
+-- (deploys do NOT replay migrations-postgres/*.sql) — the runtime self-apply in
+-- ensurePiecePicsRackingColumn() (production-orders.ts, awaited inside
+-- ensurePiecePicsForJc) is what reaches prod.
+
+ALTER TABLE piece_pics ADD COLUMN IF NOT EXISTS racking_number TEXT;

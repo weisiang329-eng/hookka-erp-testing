@@ -190,11 +190,11 @@ jobs:
                  (SELECT count(*) FROM _del_po) AS production_orders,
                  (SELECT count(*) FROM _del_jc) AS job_cards,
                  (SELECT count(*) FROM _del_do) AS fully_ours_delivery_orders;
-          SELECT CASE
-                   WHEN (SELECT count(*) FROM _del_so) = 0 THEN (1/0)
-                   WHEN (SELECT count(*) FROM _del_so) = (SELECT count(*) FROM sales_orders) THEN (1/0)
+          SELECT 1 / (CASE
+                   WHEN (SELECT count(*) FROM _del_so) BETWEEN 1
+                        AND ((SELECT count(*) FROM sales_orders) - 1) THEN 1
                    ELSE 0
-                 END AS guard_must_be_partial_cut;
+                 END) AS guard_must_be_partial_cut;
           DELETE FROM folder_job_cards     WHERE job_card_id        IN (SELECT id FROM _del_jc);
           DELETE FROM wip_cascade_log      WHERE job_card_id        IN (SELECT id FROM _del_jc);
           DELETE FROM qc_inspections       WHERE production_order_id IN (SELECT id FROM _del_po);

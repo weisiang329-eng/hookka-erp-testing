@@ -47,8 +47,26 @@ import {
   // rowToMinimalPO for the phone's "already done" pre-check (BUG-2026-06-08).
   type PiecePicRow as ProdPiecePicRow,
 } from "./production-orders";
+import {
+  SupabaseStorageNotConfiguredError,
+  getFile,
+  signedDownloadUrl,
+} from "../lib/supabase-storage";
+import { DEFAULT_ORG_ID } from "../lib/tenant";
 
 const app = new Hono<Env>();
+
+// Shape of the file_assets columns the worker announcement-file proxy needs.
+// file_assets predates the snake_case rule and is queried with bare camelCase
+// names (matches src/api/routes/files.ts), so the PG driver returns them as-is.
+type WorkerFileAssetRow = {
+  id: string;
+  resourceType: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  r2Key: string;
+};
 
 // Piece-rate per department (in sen).  MVP flat-rate — replace with per-op
 // rates from a config table later.  Mirrors the mock so /today's earnings
@@ -262,6 +280,63 @@ type ProductionOrderRow = {
   itemCategory: string | null;
   sizeLabel: string | null;
 };
+
+// ============================================================
+// GET /api/worker/ann-files/:id/download
+//
+// Worker-token-authed proxy to an ANNOUNCEMENT attachment. The dashboard file
+// route (/api/files/:id/download) sits behind the session-cookie gate, so the
+// worker portal (X-Worker-Token only) can't reach it — that was why posted
+// announcement photos/PDFs never rendered on the phone. Mirrors the dashboard
+// download (302 to a short-lived signed URL, byte-stream fallback) but
+// authenticates via the worker token and HARD-RESTRICTS to resourceType
+// 'announcement' so it can never serve any other resource's files. Additive —
+// the dashboard route is untouched. Path is /ann-files (NOT /announcements/...):
+// /api/worker/announcements is a separate sub-app that would swallow that prefix.
+// ============================================================
+app.get("/ann-files/:id/download", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  if (!c.env.SUPABASE_PROJECT_REF || !c.env.SUPABASE_SERVICE_KEY) {
+    return c.json({ success: false, error: "file storage unavailable" }, 503);
+  }
+  const id = c.req.param("id");
+  const row = await c.var.DB.prepare(
+    "SELECT id, resourceType, filename, contentType, sizeBytes, r2Key FROM file_assets WHERE id = ? AND orgId = ?",
+  )
+    .bind(id, DEFAULT_ORG_ID)
+    .first<WorkerFileAssetRow>();
+  // Only announcement attachments are serveable here — anything else 404s so a
+  // worker token can't be used to fish out arbitrary file_assets rows.
+  if (!row || row.resourceType !== "announcement") {
+    return c.json({ success: false, error: "Not found" }, 404);
+  }
+  try {
+    const url = await signedDownloadUrl(c.env, row.r2Key, 300);
+    if (url) {
+      return c.redirect(url, 302);
+    }
+    // Presigning unavailable — stream the bytes through the Worker.
+    const obj = await getFile(c.env, row.r2Key);
+    if (!obj) return c.json({ success: false, error: "Not found" }, 404);
+    return new Response(obj.body, {
+      headers: {
+        "Content-Type": row.contentType,
+        "Content-Length": String(row.sizeBytes),
+        // Inline so the phone renders photos in the grid / lightbox and opens
+        // PDFs in the browser viewer. nosniff guards against polyglots.
+        "Content-Disposition": `inline; filename="${(row.filename || "file").replace(/"/g, "")}"`,
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (err) {
+    if (err instanceof SupabaseStorageNotConfiguredError) {
+      return c.json({ success: false, error: "file storage unavailable" }, 503);
+    }
+    console.error("[worker/ann-file] download failed:", err);
+    return c.json({ success: false, error: "download failed" }, 500);
+  }
+});
 
 // ============================================================
 // GET /api/worker/today

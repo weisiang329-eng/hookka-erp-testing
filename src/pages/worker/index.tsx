@@ -161,7 +161,9 @@ function AnnouncementMedia({
   return (
     <div className="mt-2 space-y-2">
       {attachments.map((att) => {
-        const href = `/api/files/${att.fileId}/download`;
+        // Worker-token proxy (NOT /api/files — that's cookie-gated and 401s on
+        // the phone, which is why announcement media never rendered before).
+        const href = `/api/worker/ann-files/${att.fileId}/download`;
         const mime = att.mime || "";
         if (mime.startsWith("image/")) {
           return (

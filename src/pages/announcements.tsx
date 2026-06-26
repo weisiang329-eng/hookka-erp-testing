@@ -31,6 +31,9 @@ import {
   FileText,
   File as FileIcon,
   X,
+  Building2,
+  UserRound,
+  Globe,
 } from "lucide-react";
 
 // One media file attached to a notice. `fileId` lives in the existing
@@ -42,6 +45,8 @@ type Attachment = {
   mime: string;
 };
 
+type TargetType = "ALL" | "DEPTS" | "WORKERS" | "MIXED";
+
 type Announcement = {
   id: string;
   title: string;
@@ -51,6 +56,19 @@ type Announcement = {
   createdAt: string | null;
   createdBy: string | null;
   attachments?: Attachment[];
+  targetType?: TargetType;
+  targetDeptCodes?: string[];
+  targetWorkerIds?: string[];
+};
+
+// Minimal shapes from the existing /api/departments + /api/workers list
+// endpoints, used to populate the recipient picker.
+type DeptOption = { code: string; name: string };
+type WorkerOption = {
+  id: string;
+  name: string;
+  empNo: string;
+  departmentCode: string;
 };
 
 // Coarse media kind for picking the right icon / preview in the composer + list.
@@ -92,6 +110,28 @@ function isExpired(a: Announcement): boolean {
   if (!a.expiresAt) return false;
   const t = Date.parse(a.expiresAt);
   return !Number.isNaN(t) && t <= Date.now();
+}
+
+// Short "To: …" line for the posted list. ALL → "All workers"; otherwise a
+// compact summary like "Packing · 3 people". Dept codes resolve to names via
+// the supplied lookup, falling back to the raw code.
+function targetSummary(
+  a: Announcement,
+  deptName: (code: string) => string,
+): string {
+  const type = a.targetType ?? "ALL";
+  if (type === "ALL") return "All workers";
+  const depts = a.targetDeptCodes ?? [];
+  const workers = a.targetWorkerIds ?? [];
+  const parts: string[] = [];
+  if (depts.length === 1) parts.push(deptName(depts[0]));
+  else if (depts.length > 1)
+    parts.push(`${deptName(depts[0])} +${depts.length - 1} depts`);
+  if (workers.length > 0)
+    parts.push(
+      `${workers.length} ${workers.length === 1 ? "person" : "people"}`,
+    );
+  return parts.length > 0 ? parts.join(" · ") : "All workers";
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +366,95 @@ export default function AnnouncementsPage() {
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ---- Recipient targeting (compose). DEFAULT = everyone ("ALL"). ----
+  // audience drives which picker shows; the selected sets can combine (depts +
+  // specific people both non-empty → backend stores MIXED).
+  const [audience, setAudience] = useState<"ALL" | "DEPTS" | "WORKERS">("ALL");
+  const [selDepts, setSelDepts] = useState<Set<string>>(new Set());
+  const [selWorkers, setSelWorkers] = useState<Set<string>>(new Set());
+  const [deptOpts, setDeptOpts] = useState<DeptOption[]>([]);
+  const [workerOpts, setWorkerOpts] = useState<WorkerOption[]>([]);
+  const [workerSearch, setWorkerSearch] = useState("");
+
+  // Resolve a dept code → name for the posted "To: …" summary (falls back to
+  // the raw code if the dept list hasn't loaded or the code is unknown).
+  const deptName = useCallback(
+    (code: string) => deptOpts.find((d) => d.code === code)?.name ?? code,
+    [deptOpts],
+  );
+
+  // Load the dept + worker pickers once on mount (reuses existing endpoints).
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const [dRes, wRes] = await Promise.all([
+          fetch("/api/departments"),
+          fetch("/api/workers"),
+        ]);
+        if (dRes.ok) {
+          const dj = (await dRes.json()) as { data?: DeptOption[] };
+          if (alive && Array.isArray(dj.data)) {
+            setDeptOpts(dj.data.map((d) => ({ code: d.code, name: d.name })));
+          }
+        }
+        if (wRes.ok) {
+          const wj = (await wRes.json()) as {
+            data?: Array<{
+              id: string;
+              name: string;
+              empNo: string;
+              departmentCode: string;
+              status?: string;
+            }>;
+          };
+          if (alive && Array.isArray(wj.data)) {
+            setWorkerOpts(
+              wj.data
+                .filter((w) => (w.status ?? "ACTIVE") === "ACTIVE")
+                .map((w) => ({
+                  id: w.id,
+                  name: w.name,
+                  empNo: w.empNo,
+                  departmentCode: w.departmentCode,
+                })),
+            );
+          }
+        }
+      } catch {
+        /* leave pickers empty — composer still works as "All" */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  function toggleDept(code: string) {
+    setSelDepts((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      return next;
+    });
+  }
+  function toggleWorker(id: string) {
+    setSelWorkers((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  // Reset the targeting back to "everyone" (after a successful post, or when the
+  // office switches the audience mode back to All).
+  function resetTargeting() {
+    setAudience("ALL");
+    setSelDepts(new Set());
+    setSelWorkers(new Set());
+    setWorkerSearch("");
+  }
+
   const load = useCallback(async () => {
     try {
       const res = await fetch("/api/announcements");
@@ -415,6 +544,13 @@ export default function AnnouncementsPage() {
     }
     setPosting(true);
     try {
+      // Derive the targeting payload from the chosen audience. ALL sends empty
+      // lists (backend defaults target_type to ALL = everyone); DEPTS / WORKERS
+      // send the picked codes/ids. The backend combines them (→ MIXED) if both
+      // are non-empty.
+      const targetDeptCodes = audience === "DEPTS" ? Array.from(selDepts) : [];
+      const targetWorkerIds =
+        audience === "WORKERS" ? Array.from(selWorkers) : [];
       const res = await fetch("/api/announcements", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -426,6 +562,9 @@ export default function AnnouncementsPage() {
           expiresAt: expiresAt || undefined,
           // Media manifest — already uploaded to /api/files above.
           attachments,
+          // Targeting — empty lists = "All workers".
+          targetDeptCodes,
+          targetWorkerIds,
         }),
       });
       if (!res.ok) {
@@ -437,6 +576,7 @@ export default function AnnouncementsPage() {
       setBody("");
       setExpiresAt("");
       setAttachments([]);
+      resetTargeting();
       showFlash("Announcement posted");
       await load();
     } finally {
@@ -589,6 +729,136 @@ export default function AnnouncementsPage() {
                 </div>
               )}
             </div>
+            {/* Recipients — DEFAULT "All". The office can scope the notice to
+                specific departments and/or specific workers; the worker portal
+                filters server-side so only the targeted phones ever see it. */}
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-[#5A5550]">
+                Recipients
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {(
+                  [
+                    { key: "ALL", label: "All workers", Icon: Globe },
+                    { key: "DEPTS", label: "Departments", Icon: Building2 },
+                    { key: "WORKERS", label: "Specific people", Icon: UserRound },
+                  ] as const
+                ).map(({ key, label, Icon }) => {
+                  const selected = audience === key;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => {
+                        if (key === "ALL") resetTargeting();
+                        else setAudience(key);
+                      }}
+                      className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium ${
+                        selected
+                          ? "border-[#6B5C32] bg-[#F3EFE9] text-[#5a4d2a]"
+                          : "border-[#E2DDD8] bg-white text-[#5A5550] hover:bg-[#FAFAF8]"
+                      }`}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {audience === "DEPTS" && (
+                <div className="mt-3 rounded-lg border border-[#E2DDD8] bg-[#FAFAF8] p-3">
+                  {deptOpts.length === 0 ? (
+                    <p className="text-xs text-[#9CA3AF]">
+                      No departments available.
+                    </p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {deptOpts.map((d) => {
+                        const on = selDepts.has(d.code);
+                        return (
+                          <button
+                            key={d.code}
+                            type="button"
+                            onClick={() => toggleDept(d.code)}
+                            className={`rounded-full border px-3 py-1 text-xs font-medium ${
+                              on
+                                ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                                : "border-[#E2DDD8] bg-white text-[#5A5550] hover:bg-[#F3EFE9]"
+                            }`}
+                          >
+                            {d.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <p className="mt-2 text-[11px] text-[#9CA3AF]">
+                    {selDepts.size === 0
+                      ? "Pick one or more departments — everyone in them sees this notice."
+                      : `${selDepts.size} department${
+                          selDepts.size === 1 ? "" : "s"
+                        } selected`}
+                  </p>
+                </div>
+              )}
+
+              {audience === "WORKERS" && (
+                <div className="mt-3 rounded-lg border border-[#E2DDD8] bg-[#FAFAF8] p-3">
+                  <Input
+                    value={workerSearch}
+                    onChange={(e) => setWorkerSearch(e.target.value)}
+                    placeholder="Search workers by name or emp no…"
+                    className="mb-2 h-8 text-xs"
+                  />
+                  {workerOpts.length === 0 ? (
+                    <p className="text-xs text-[#9CA3AF]">No workers available.</p>
+                  ) : (
+                    <div className="max-h-56 space-y-1 overflow-y-auto">
+                      {workerOpts
+                        .filter((w) => {
+                          const q = workerSearch.trim().toLowerCase();
+                          if (!q) return true;
+                          return (
+                            (w.name || "").toLowerCase().includes(q) ||
+                            (w.empNo || "").toLowerCase().includes(q)
+                          );
+                        })
+                        .map((w) => {
+                          const on = selWorkers.has(w.id);
+                          return (
+                            <label
+                              key={w.id}
+                              className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-[#F3EFE9]"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={on}
+                                onChange={() => toggleWorker(w.id)}
+                                className="h-3.5 w-3.5 accent-[#6B5C32]"
+                              />
+                              <span className="min-w-0 flex-1 truncate text-[#1F1D1B]">
+                                {w.name || w.empNo || w.id}
+                              </span>
+                              <span className="shrink-0 text-[10px] text-[#9CA3AF]">
+                                {w.empNo}
+                                {w.departmentCode ? ` · ${w.departmentCode}` : ""}
+                              </span>
+                            </label>
+                          );
+                        })}
+                    </div>
+                  )}
+                  <p className="mt-2 text-[11px] text-[#9CA3AF]">
+                    {selWorkers.size === 0
+                      ? "Tick the workers who should see this notice."
+                      : `${selWorkers.size} ${
+                          selWorkers.size === 1 ? "person" : "people"
+                        } selected`}
+                  </p>
+                </div>
+              )}
+            </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-[#5A5550]">
@@ -660,7 +930,23 @@ export default function AnnouncementsPage() {
                         </p>
                       )}
                       <PostedAttachments attachments={a.attachments ?? []} />
-                      <p className="mt-1.5 text-xs text-[#9CA3AF]">
+                      <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs text-[#9CA3AF]">
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                            (a.targetType ?? "ALL") === "ALL"
+                              ? "bg-[#F3EFE9] text-[#8A8680]"
+                              : "bg-[#EDE9F3] text-[#5B4B8A]"
+                          }`}
+                        >
+                          {(a.targetType ?? "ALL") === "ALL" ? (
+                            <Globe className="h-3 w-3" />
+                          ) : (
+                            <Users className="h-3 w-3" />
+                          )}
+                          To: {targetSummary(a, deptName)}
+                        </span>
+                      </p>
+                      <p className="mt-1 text-xs text-[#9CA3AF]">
                         Posted {fmtDateTime(a.createdAt)}
                         {a.expiresAt
                           ? ` · hides ${fmtDateTime(a.expiresAt)}`

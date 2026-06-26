@@ -153,6 +153,35 @@ function ensureAnnouncementsTable(db: D1Database): Promise<void> {
     } catch {
       _announcementsMig = null;
     }
+    // Audience targeting (added 2026-06-26). A notice can go to everyone
+    // (default) or be scoped to specific departments and/or specific workers.
+    //   target_type       : ALL | DEPTS | WORKERS | MIXED  (default ALL)
+    //   target_dept_codes : JSON array of dept codes (e.g. '["PACKING","FOAM"]')
+    //   target_worker_ids : JSON array of workers.id values
+    // The worker GET shows a notice iff target_type='ALL' OR one of the worker's
+    // dept codes is in target_dept_codes OR the worker's id is in
+    // target_worker_ids. Existing rows default to ALL → fully back-compatible.
+    // INERT migration file (0194) — these runtime ALTERs are the load-bearing
+    // copy, awaited before the first read/write. Same self-heal posture as above.
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS target_type TEXT NOT NULL DEFAULT 'ALL'",
+        )
+        .run();
+      await db
+        .prepare(
+          "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS target_dept_codes TEXT",
+        )
+        .run();
+      await db
+        .prepare(
+          "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS target_worker_ids TEXT",
+        )
+        .run();
+    } catch {
+      _announcementsMig = null;
+    }
   })();
   return _announcementsMig;
 }
@@ -232,7 +261,21 @@ type AnnouncementRow = {
   // read dual-keyed defensively just like translations above.
   attachments?: string | unknown[] | null;
   attachments_json?: string | unknown[] | null;
+  // Targeting (snake_case columns; the PG driver folds them to camelCase on
+  // read → declare both and read dual-keyed). target_dept_codes /
+  // target_worker_ids are JSON string arrays (TEXT); target_type is one of
+  // ALL | DEPTS | WORKERS | MIXED.
+  target_type?: string | null;
+  targetType?: string | null;
+  target_dept_codes?: string | string[] | null;
+  targetDeptCodes?: string | string[] | null;
+  target_worker_ids?: string | string[] | null;
+  targetWorkerIds?: string | string[] | null;
 };
+
+// Targeting kinds. ALL = everyone (the back-compat default); the others narrow
+// the audience to departments and/or specific workers.
+type TargetType = "ALL" | "DEPTS" | "WORKERS" | "MIXED";
 
 function isActiveFlag(v: boolean | number | null): boolean {
   // Postgres returns a real boolean; the SQLite/d1-compat path can hand back
@@ -283,6 +326,32 @@ function readTranslations(
   return raw;
 }
 
+// Parse a stored JSON string-array (target dept codes / worker ids). Tolerates
+// a JSON string OR an already-parsed array (the PG driver may hand TEXT back
+// either way); returns a clean string[] (possibly empty), dropping blanks.
+function readStringArray(
+  v: string | string[] | null | undefined,
+): string[] {
+  if (v == null) return [];
+  let arr: unknown = v;
+  if (typeof v === "string") {
+    if (!v.trim()) return [];
+    try {
+      arr = JSON.parse(v);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((x): x is string => typeof x === "string" && x.length > 0);
+}
+
+// Normalize the stored/incoming target_type to a known kind, defaulting to ALL.
+function readTargetType(r: AnnouncementRow): TargetType {
+  const t = String(r.targetType ?? r.target_type ?? "ALL").toUpperCase();
+  return t === "DEPTS" || t === "WORKERS" || t === "MIXED" ? t : "ALL";
+}
+
 // Public (worker-facing) shape — camelCase for the frontend. Same shape the
 // admin list uses so one TS type covers both pages.
 function toPublic(r: AnnouncementRow) {
@@ -300,7 +369,28 @@ function toPublic(r: AnnouncementRow) {
     // Media attachments (image/video/PDF). Always an array (empty when none) so
     // both the worker portal and the admin list can map over it directly.
     attachments: normalizeAttachments(r.attachments ?? r.attachments_json ?? null),
+    // Targeting — the office list shows a "To: …" summary off these; the worker
+    // GET filters on them before a notice ever reaches a phone.
+    targetType: readTargetType(r),
+    targetDeptCodes: readStringArray(
+      r.targetDeptCodes ?? r.target_dept_codes ?? null,
+    ),
+    targetWorkerIds: readStringArray(
+      r.targetWorkerIds ?? r.target_worker_ids ?? null,
+    ),
   };
+}
+
+// Derive the canonical target_type from which target lists are non-empty.
+// Empty both → ALL (everyone); only depts → DEPTS; only workers → WORKERS;
+// both → MIXED. The worker GET can then short-circuit on ALL.
+function deriveTargetType(deptCodes: string[], workerIds: string[]): TargetType {
+  const hasDepts = deptCodes.length > 0;
+  const hasWorkers = workerIds.length > 0;
+  if (hasDepts && hasWorkers) return "MIXED";
+  if (hasDepts) return "DEPTS";
+  if (hasWorkers) return "WORKERS";
+  return "ALL";
 }
 
 function genId(): string {
@@ -440,6 +530,24 @@ admin.post("/", async (c) => {
   const attachments = normalizeAttachments(
     (body as { attachments?: unknown }).attachments,
   );
+  // Optional targeting. The composer passes targetDeptCodes / targetWorkerIds
+  // (empty when "All"); we derive the canonical target_type from which lists are
+  // non-empty. Absent both → ALL (back-compat: everyone sees it).
+  const reqDeptCodes = readStringArray(
+    (body as { targetDeptCodes?: unknown }).targetDeptCodes as
+      | string
+      | string[]
+      | null
+      | undefined,
+  );
+  const reqWorkerIds = readStringArray(
+    (body as { targetWorkerIds?: unknown }).targetWorkerIds as
+      | string
+      | string[]
+      | null
+      | undefined,
+  );
+  const targetType = deriveTargetType(reqDeptCodes, reqWorkerIds);
   const userId =
     (c as unknown as { get: (k: string) => string | undefined }).get(
       "userId",
@@ -457,8 +565,9 @@ admin.post("/", async (c) => {
   });
   await c.var.DB.prepare(
     `INSERT INTO announcements
-       (id, org_id, title, body, is_active, expires_at, created_by, created_at, translations, attachments)
-     VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?)`,
+       (id, org_id, title, body, is_active, expires_at, created_by, created_at,
+        translations, attachments, target_type, target_dept_codes, target_worker_ids)
+     VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -470,6 +579,9 @@ admin.post("/", async (c) => {
       nowIso,
       translations ? JSON.stringify(translations) : null,
       attachments.length ? JSON.stringify(attachments) : null,
+      targetType,
+      reqDeptCodes.length ? JSON.stringify(reqDeptCodes) : null,
+      reqWorkerIds.length ? JSON.stringify(reqWorkerIds) : null,
     )
     .run();
   const row = await c.var.DB.prepare(
@@ -535,6 +647,46 @@ admin.patch("/:id", async (c) => {
     );
     sets.push("attachments = ?");
     binds.push(next.length ? JSON.stringify(next) : null);
+  }
+  // Re-target when the body carries EITHER targeting list (the composer sends
+  // the full current set). We rewrite all three columns together so the derived
+  // target_type stays consistent: re-reading the OTHER list from the body if
+  // present, else from the existing row, so a depts-only edit doesn't wipe a
+  // previously-set worker list (and vice-versa).
+  if (
+    "targetDeptCodes" in (body as object) ||
+    "targetWorkerIds" in (body as object)
+  ) {
+    const nextDepts =
+      "targetDeptCodes" in (body as object)
+        ? readStringArray(
+            (body as { targetDeptCodes?: unknown }).targetDeptCodes as
+              | string
+              | string[]
+              | null
+              | undefined,
+          )
+        : readStringArray(
+            existing.targetDeptCodes ?? existing.target_dept_codes ?? null,
+          );
+    const nextWorkers =
+      "targetWorkerIds" in (body as object)
+        ? readStringArray(
+            (body as { targetWorkerIds?: unknown }).targetWorkerIds as
+              | string
+              | string[]
+              | null
+              | undefined,
+          )
+        : readStringArray(
+            existing.targetWorkerIds ?? existing.target_worker_ids ?? null,
+          );
+    sets.push("target_type = ?");
+    binds.push(deriveTargetType(nextDepts, nextWorkers));
+    sets.push("target_dept_codes = ?");
+    binds.push(nextDepts.length ? JSON.stringify(nextDepts) : null);
+    sets.push("target_worker_ids = ?");
+    binds.push(nextWorkers.length ? JSON.stringify(nextWorkers) : null);
   }
   if ("expiresAt" in (body as object)) {
     const raw = (body as { expiresAt?: unknown }).expiresAt;
@@ -688,9 +840,69 @@ function workerIdOf(c: Context<Env>): string {
 // history. The office row count is tiny, but keep it bounded anyway.
 const PAST_ANNOUNCEMENTS_LIMIT = 30;
 
+// Resolve THIS worker's department code set (uppercased) so the GET can filter
+// targeted notices before they reach the phone. The `workers` table predates
+// the snake_case rule, so it's queried with bare camelCase names (matches
+// worker.ts). departmentCodes is the multi-dept JSON array (e.g. an Operator
+// Leader); fall back to the single departmentCode. A worker matches a DEPTS
+// notice if ANY of their codes is targeted.
+async function workerDeptCodes(
+  db: D1Database,
+  workerId: string,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!workerId) return out;
+  const row = await db
+    .prepare("SELECT departmentCode, departmentCodes FROM workers WHERE id = ?")
+    .bind(workerId)
+    .first<{
+      departmentCode?: string | null;
+      departmentCodes?: string | null;
+    }>();
+  if (!row) return out;
+  const add = (v: unknown) => {
+    if (typeof v === "string" && v.trim()) out.add(v.trim().toUpperCase());
+  };
+  add(row.departmentCode);
+  if (row.departmentCodes) {
+    try {
+      const arr = JSON.parse(row.departmentCodes);
+      if (Array.isArray(arr)) for (const x of arr) add(x);
+    } catch {
+      /* fall back to the single code already added */
+    }
+  }
+  return out;
+}
+
+// A worker sees a notice iff it targets ALL, OR one of their dept codes is in
+// target_dept_codes, OR their id is in target_worker_ids. Dept codes compared
+// case-insensitively (worker codes are uppercased in workerDeptCodes; we upper
+// the targeted codes here too).
+function workerCanSee(
+  r: AnnouncementRow,
+  workerId: string,
+  myDeptCodes: Set<string>,
+): boolean {
+  const type = readTargetType(r);
+  if (type === "ALL") return true;
+  const depts = readStringArray(
+    r.targetDeptCodes ?? r.target_dept_codes ?? null,
+  );
+  if (depts.some((d) => myDeptCodes.has(d.toUpperCase()))) return true;
+  const ids = readStringArray(
+    r.targetWorkerIds ?? r.target_worker_ids ?? null,
+  );
+  if (ids.includes(workerId)) return true;
+  return false;
+}
+
 worker.get("/", async (c) => {
   await ensureAnnouncementsTable(c.var.DB);
   const workerId = workerIdOf(c);
+  // This worker's dept code set — needed by both the active and past branches
+  // to filter targeted notices to the right audience.
+  const myDeptCodes = await workerDeptCodes(c.var.DB, workerId);
 
   // ── Past/archive branch (additive) ──────────────────────────────────────
   // GET /api/worker/announcements?include=past returns the notices that have
@@ -707,8 +919,11 @@ worker.get("/", async (c) => {
       .all<AnnouncementRow>();
     const past = (pastRes.results ?? []).filter(
       (r) =>
-        !isActiveFlag(r.isActive ?? r.is_active ?? null) ||
-        !notExpired(r.expiresAt ?? r.expires_at ?? null),
+        // Same audience gate as the live list — a worker only ever sees the
+        // archive of notices that were targeted at them.
+        workerCanSee(r, workerId, myDeptCodes) &&
+        (!isActiveFlag(r.isActive ?? r.is_active ?? null) ||
+          !notExpired(r.expiresAt ?? r.expires_at ?? null)),
     );
     return c.json({
       success: true,
@@ -729,7 +944,8 @@ worker.get("/", async (c) => {
   const active = (res.results ?? []).filter(
     (r) =>
       isActiveFlag(r.isActive ?? r.is_active ?? null) &&
-      notExpired(r.expiresAt ?? r.expires_at ?? null),
+      notExpired(r.expiresAt ?? r.expires_at ?? null) &&
+      workerCanSee(r, workerId, myDeptCodes),
   );
   // This worker's ack rows (id + when they acked). Drives the SERVER-side
   // popup gate: the phone re-pops any active notice this worker has NOT acked,

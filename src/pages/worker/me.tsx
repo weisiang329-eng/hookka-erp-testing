@@ -233,6 +233,8 @@ export default function WorkerMePage() {
     status: "PENDING" | "APPROVED" | "REJECTED";
     kind?: "NONPROD" | "ADD_PROD";
     jobCardId?: string;
+    createdAt?: string;
+    decidedAt?: string;
   };
   const [npDepts, setNpDepts] = useState<NonprodDept[]>([]);
   const [prodDepts, setProdDepts] = useState<NonprodDept[]>([]);
@@ -250,6 +252,15 @@ export default function WorkerMePage() {
   const [npNote, setNpNote] = useState("");
   const [npSubmitting, setNpSubmitting] = useState(false);
   const [npError, setNpError] = useState<string | null>(null);
+  // The whole Time adjustment card folds like the Standard Times / Past
+  // announcements cards below it (owner 2026-06-27). Collapsed by default;
+  // tapping the header expands to reveal the apply form + My requests list.
+  const [taOpen, setTaOpen] = useState(false);
+  // Mount-time "now" for the My-requests 14-day retention window. Captured in a
+  // lazy initializer (NOT during render — Date.now() in render is impure) so it
+  // stays stable across re-renders; the page re-mounts when the worker reopens
+  // the tab, so the window is fresh enough.
+  const [nowMs] = useState(() => Date.now());
 
   const loadNonprod = useCallback(async () => {
     try {
@@ -760,10 +771,40 @@ export default function WorkerMePage() {
       </div>
 
       {/* Time adjustment — non-production OR extra production time (owner
-          2026-06-26). Worker picks the type, then dept + hours + reason. */}
-      <div className="bg-white rounded-xl p-4 border border-[#D8D2CC]">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-sm font-semibold">{t("timeadj.title")}</p>
+          2026-06-26). Worker picks the type, then dept + hours + reason.
+          Collapsible (owner 2026-06-27): folds like the Standard Times / Past
+          announcements cards below — collapsed by default, chevron on the
+          right, expands on tap to reveal the apply form + My requests. A small
+          count chip on the collapsed header flags PENDING requests. */}
+      {(() => {
+        const pendingCount = npRequests.filter(
+          (r) => r.status === "PENDING",
+        ).length;
+        return (
+      <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setTaOpen((v) => !v)}
+          className="w-full px-4 py-3 flex items-center justify-between text-left"
+          aria-expanded={taOpen}
+        >
+          <span className="flex items-center gap-2">
+            <Clock className="h-4 w-4 text-[#6B5C32]" />
+            <span className="text-sm font-semibold">{t("timeadj.title")}</span>
+            {pendingCount > 0 && (
+              <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-[#FDF3E0] text-[#9C6F1E] text-[10px] font-bold">
+                {pendingCount}
+              </span>
+            )}
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 text-[#8A8680] transition-transform ${taOpen ? "rotate-180" : ""}`}
+          />
+        </button>
+
+        {taOpen && (
+          <div className="px-4 pb-4 border-t border-[#F0ECE9] pt-3">
+        <div className="flex items-center justify-end mb-2">
           <button
             type="button"
             onClick={() => {
@@ -899,11 +940,39 @@ export default function WorkerMePage() {
         <p className="text-xs text-[#8A8680] font-medium mb-1.5">
           {t("nonprod.myRequests")}
         </p>
-        {npRequests.length === 0 ? (
-          <p className="text-sm text-[#8A8680]">{t("nonprod.noRequests")}</p>
-        ) : (
+        {(() => {
+          // Worker-side display rule (owner 2026-06-27) — DB rows are NEVER
+          // deleted (payroll/efficiency-relevant; admin keeps the full set).
+          // We only trim what the WORKER sees so the list stays short:
+          //   • PENDING always shows (any age)
+          //   • APPROVED / REJECTED only from the last 14 days
+          //   • then hard-cap at the 10 most recent, newest first
+          // Best available timestamp: decidedAt (when it was approved/rejected)
+          // → createdAt (when it was applied) → date (the day it is FOR).
+          const RETAIN_MS = 14 * 24 * 60 * 60 * 1000;
+          const now = nowMs;
+          const tsOf = (r: NonprodRequest) => {
+            const raw = r.decidedAt || r.createdAt || r.date || "";
+            const ms = Date.parse(raw);
+            return Number.isNaN(ms) ? 0 : ms;
+          };
+          const sorted = [...npRequests].sort((a, b) => tsOf(b) - tsOf(a));
+          const filtered = sorted.filter((r) => {
+            if (r.status === "PENDING") return true;
+            const ts = tsOf(r);
+            return ts > 0 && now - ts <= RETAIN_MS;
+          });
+          const shown = filtered.slice(0, 10);
+          const anyHidden = shown.length < npRequests.length;
+          if (npRequests.length === 0) {
+            return (
+              <p className="text-sm text-[#8A8680]">{t("nonprod.noRequests")}</p>
+            );
+          }
+          return (
+            <>
           <div className="space-y-1.5">
-            {npRequests.slice(0, 8).map((r) => {
+            {shown.map((r) => {
               const isAddProd = r.kind === "ADD_PROD";
               // Stored `hours` × 60 = minutes (owner 2026-06-27: show minutes).
               // "X min" under an hour, "Xh Ym" (or "Xh") at/over an hour.
@@ -960,8 +1029,19 @@ export default function WorkerMePage() {
               );
             })}
           </div>
+          {anyHidden && (
+            <p className="mt-2 text-[11px] text-[#9CA3AF]">
+              {t("nonprod.olderKept")}
+            </p>
+          )}
+            </>
+          );
+        })()}
+          </div>
         )}
       </div>
+        );
+      })()}
 
       {/* Standard Times — the worker's OWN department's minutes per WIP
           (owner 2026-06-26). Collapsed by default; loads on first open. */}

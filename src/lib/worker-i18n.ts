@@ -856,6 +856,12 @@ const dict: Dict = {
     zh: '暂无申请。',
     my: 'တောင်းဆိုချက်မရှိသေးပါ။',
   },
+  'nonprod.olderKept': {
+    en: 'Older requests are kept on file.',
+    ms: 'Permohonan lama disimpan dalam rekod.',
+    zh: '较早的申请已存档保留。',
+    my: 'အဟောင်းတောင်းဆိုချက်များကို မှတ်တမ်းတွင်သိမ်းထားသည်။',
+  },
   'nonprod.pickDept': {
     en: 'Pick a department',
     ms: 'Pilih jabatan',

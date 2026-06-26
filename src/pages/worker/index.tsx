@@ -25,6 +25,8 @@ import {
   Megaphone,
   MapPin,
   ChevronDown,
+  FileText,
+  Download,
 } from "lucide-react";
 import { useT, useWorkerLang } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
@@ -113,6 +115,13 @@ type AttendanceRow = {
 // auto-translates title+body into all four worker-portal languages on POST and
 // returns them here. Each worker sees the version matching their chosen portal
 // language, falling back to the original posted title/body.
+// One media file attached to a notice (image/video/PDF). The bytes live in the
+// shared /api/files store; render inline by `mime`.
+type AnnouncementAttachment = {
+  fileId: string;
+  name: string;
+  mime: string;
+};
 type Announcement = {
   id: string;
   title: string;
@@ -122,6 +131,7 @@ type Announcement = {
     "en" | "ms" | "zh" | "my",
     { title: string; body: string }
   > | null;
+  attachments?: AnnouncementAttachment[];
 };
 
 // Pick the worker-language version of a notice, falling back to the original
@@ -136,6 +146,65 @@ function localizeAnnouncement(
     title: t?.title?.trim() ? t.title : a.title,
     body: t?.body?.trim() ? t.body : a.body,
   };
+}
+
+// Render an announcement's media on the phone: images inline, video with native
+// controls, PDF (and anything else) as a tappable download button. Files are
+// served from the shared /api/files store. Kept compact so a long media list
+// doesn't crowd the small screen.
+function AnnouncementMedia({
+  attachments,
+}: {
+  attachments?: AnnouncementAttachment[];
+}) {
+  if (!attachments || attachments.length === 0) return null;
+  return (
+    <div className="mt-2 space-y-2">
+      {attachments.map((att) => {
+        const href = `/api/files/${att.fileId}/download`;
+        const mime = att.mime || "";
+        if (mime.startsWith("image/")) {
+          return (
+            <a key={att.fileId} href={href} target="_blank" rel="noreferrer">
+              <img
+                src={href}
+                alt={att.name || "image"}
+                loading="lazy"
+                className="w-full rounded-lg border border-[#E2DDD8] object-contain"
+              />
+            </a>
+          );
+        }
+        if (mime.startsWith("video/")) {
+          return (
+            <video
+              key={att.fileId}
+              src={href}
+              controls
+              preload="metadata"
+              className="w-full rounded-lg border border-[#E2DDD8] bg-black"
+            />
+          );
+        }
+        // PDF / other → download/open button.
+        return (
+          <a
+            key={att.fileId}
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-2 rounded-lg border border-[#E2DDD8] bg-[#FAFAF8] px-3 py-2 text-xs font-medium text-[#5A5550] active:bg-[#F3EFE9]"
+          >
+            <FileText className="h-4 w-4 shrink-0 text-[#9A3A2D]" />
+            <span className="min-w-0 flex-1 truncate">
+              {att.name || "Attachment"}
+            </span>
+            <Download className="h-4 w-4 shrink-0 text-[#8A8680]" />
+          </a>
+        );
+      })}
+    </div>
+  );
 }
 type HistoryData = {
   range: { from: string; to: string };
@@ -757,6 +826,7 @@ export default function WorkerHomePage() {
                         {body}
                       </p>
                     )}
+                    <AnnouncementMedia attachments={a.attachments} />
                     {a.createdAt && (
                       <p className="mt-1.5 text-[11px] text-[#9CA3AF]">
                         {fmtDay(a.createdAt)}
@@ -843,6 +913,7 @@ export default function WorkerHomePage() {
                           {body}
                         </p>
                       )}
+                      <AnnouncementMedia attachments={a.attachments} />
                       {a.createdAt && (
                         <p className="mt-1 text-[10px] text-[#9CA3AF]">
                           {fmtDay(a.createdAt)}

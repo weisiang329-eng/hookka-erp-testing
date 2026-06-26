@@ -8,7 +8,7 @@
 // Backend: /api/announcements (admin, auth-gated via requirePermission). The
 // worker side reads /api/worker/announcements. See src/api/routes/announcements.ts.
 // ============================================================
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,7 +25,22 @@ import {
   ChevronRight,
   BellRing,
   Users,
+  Paperclip,
+  ImageIcon,
+  Video,
+  FileText,
+  File as FileIcon,
+  X,
 } from "lucide-react";
+
+// One media file attached to a notice. `fileId` lives in the existing
+// /api/files store; the worker portal renders it inline (image/video) or as a
+// download link (PDF) by `mime`.
+type Attachment = {
+  fileId: string;
+  name: string;
+  mime: string;
+};
 
 type Announcement = {
   id: string;
@@ -35,7 +50,16 @@ type Announcement = {
   expiresAt: string | null;
   createdAt: string | null;
   createdBy: string | null;
+  attachments?: Attachment[];
 };
+
+// Coarse media kind for picking the right icon / preview in the composer + list.
+function attachmentKind(mime: string): "image" | "video" | "pdf" | "file" {
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime === "application/pdf") return "pdf";
+  return "file";
+}
 
 type ListResponse = { success?: boolean; data?: Announcement[] };
 
@@ -238,6 +262,53 @@ function ReadReceiptPanel({
   );
 }
 
+// Small icon for an attachment kind (composer chips + posted-list rows).
+function AttachmentIcon({ mime }: { mime: string }) {
+  const kind = attachmentKind(mime);
+  if (kind === "image") return <ImageIcon className="h-3.5 w-3.5 shrink-0" />;
+  if (kind === "video") return <Video className="h-3.5 w-3.5 shrink-0" />;
+  if (kind === "pdf") return <FileText className="h-3.5 w-3.5 shrink-0" />;
+  return <FileIcon className="h-3.5 w-3.5 shrink-0" />;
+}
+
+// Read-only attachment list shown on a POSTED announcement (the composer uses
+// its own removable chips). Images render as a small thumbnail; everything else
+// is an icon + name that opens the file in a new tab.
+function PostedAttachments({ attachments }: { attachments: Attachment[] }) {
+  if (!attachments.length) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-2">
+      {attachments.map((att) => {
+        const href = `/api/files/${att.fileId}/download`;
+        const isImage = attachmentKind(att.mime) === "image";
+        return (
+          <a
+            key={att.fileId}
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-1.5 rounded-md border border-[#E2DDD8] bg-[#FAFAF8] px-2 py-1 text-xs text-[#5A5550] hover:bg-[#F3EFE9]"
+            title={att.name}
+          >
+            {isImage ? (
+              <img
+                src={href}
+                alt={att.name}
+                className="h-8 w-8 rounded object-cover"
+              />
+            ) : (
+              <AttachmentIcon mime={att.mime} />
+            )}
+            <span className="max-w-[12rem] truncate">
+              {att.name || "attachment"}
+            </span>
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function AnnouncementsPage() {
   const { confirm } = useConfirm();
   const [items, setItems] = useState<Announcement[]>([]);
@@ -248,6 +319,12 @@ export default function AnnouncementsPage() {
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  // Media to attach to the next post. Each file is uploaded to /api/files the
+  // moment it's picked; we keep only the lightweight {fileId,name,mime} manifest
+  // that gets saved on the announcement POST.
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -266,12 +343,67 @@ export default function AnnouncementsPage() {
   }, []);
 
   useEffect(() => {
+    // Initial list load on mount — load() sets state from the fetch result,
+    // which is the intended one-shot fetch-on-mount (not a render cascade).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [load]);
 
   function showFlash(msg: string) {
     setFlash(msg);
     setTimeout(() => setFlash(null), 2500);
+  }
+
+  // Upload each picked file to the SHARED /api/files store (resourceType
+  // "announcement"), then keep its {fileId,name,mime} manifest entry. We reuse
+  // the existing upload endpoint — no new storage. CSRF is injected globally by
+  // api-client (window.fetch patch), so no header needed here.
+  async function handleFilesPicked(e: React.ChangeEvent<HTMLInputElement>) {
+    const picked = Array.from(e.target.files ?? []);
+    // Reset the input so re-picking the same file fires onChange again.
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    if (picked.length === 0) return;
+    setUploading(true);
+    const added: Attachment[] = [];
+    let failed = 0;
+    try {
+      for (const file of picked) {
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("resourceType", "announcement");
+        // No announcement id yet at compose time — bucket the uploads under a
+        // stable "compose" folder; the saved manifest is what links them.
+        fd.append("resourceId", "compose");
+        const res = await fetch("/api/files", { method: "POST", body: fd });
+        const j = (await res.json().catch(() => null)) as {
+          success?: boolean;
+          data?: { id: string; filename: string; contentType: string };
+        } | null;
+        if (res.ok && j?.success && j.data) {
+          added.push({
+            fileId: j.data.id,
+            name: j.data.filename || file.name,
+            mime: j.data.contentType || file.type,
+          });
+        } else {
+          failed++;
+        }
+      }
+      if (added.length) setAttachments((prev) => [...prev, ...added]);
+      if (failed > 0) {
+        setError(
+          `${failed} file${failed === 1 ? "" : "s"} failed to upload`,
+        );
+      }
+    } catch {
+      setError("Upload failed — network error");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function removeAttachment(fileId: string) {
+    setAttachments((prev) => prev.filter((a) => a.fileId !== fileId));
   }
 
   async function handlePost(e: React.FormEvent) {
@@ -292,6 +424,8 @@ export default function AnnouncementsPage() {
           // datetime-local gives a local "YYYY-MM-DDTHH:mm" string; the backend
           // Date.parse handles it. Empty → never expires.
           expiresAt: expiresAt || undefined,
+          // Media manifest — already uploaded to /api/files above.
+          attachments,
         }),
       });
       if (!res.ok) {
@@ -302,6 +436,7 @@ export default function AnnouncementsPage() {
       setTitle("");
       setBody("");
       setExpiresAt("");
+      setAttachments([]);
       showFlash("Announcement posted");
       await load();
     } finally {
@@ -400,6 +535,60 @@ export default function AnnouncementsPage() {
                 className="flex min-h-[10rem] w-full resize-y rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] focus-visible:border-transparent"
               />
             </div>
+            {/* Media attachments — tutorials (image/video) + SOP PDFs. Each
+                file uploads to the shared /api/files store the moment it's
+                picked; the chips below are the to-be-saved manifest. */}
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-[#5A5550]">
+                Attachments{" "}
+                <span className="text-[#9CA3AF]">
+                  (optional — images, videos, PDFs)
+                </span>
+              </label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*,video/*,application/pdf"
+                multiple
+                onChange={handleFilesPicked}
+                className="hidden"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={uploading}
+                onClick={() => fileInputRef.current?.click()}
+                className="gap-1.5"
+              >
+                <Paperclip className="h-3.5 w-3.5" />
+                {uploading ? "Uploading…" : "Attach files"}
+              </Button>
+              {attachments.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {attachments.map((att) => (
+                    <span
+                      key={att.fileId}
+                      className="flex items-center gap-1.5 rounded-md border border-[#E2DDD8] bg-[#FAFAF8] px-2 py-1 text-xs text-[#5A5550]"
+                      title={att.name}
+                    >
+                      <AttachmentIcon mime={att.mime} />
+                      <span className="max-w-[12rem] truncate">
+                        {att.name || "attachment"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(att.fileId)}
+                        className="text-[#9CA3AF] hover:text-[#9A3A2D]"
+                        aria-label={`Remove ${att.name || "attachment"}`}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-[#5A5550]">
@@ -470,6 +659,7 @@ export default function AnnouncementsPage() {
                           {a.body}
                         </p>
                       )}
+                      <PostedAttachments attachments={a.attachments ?? []} />
                       <p className="mt-1.5 text-xs text-[#9CA3AF]">
                         Posted {fmtDateTime(a.createdAt)}
                         {a.expiresAt

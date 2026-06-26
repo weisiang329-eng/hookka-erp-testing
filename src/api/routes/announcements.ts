@@ -136,8 +136,64 @@ function ensureAnnouncementsTable(db: D1Database): Promise<void> {
     } catch {
       _announcementsMig = null;
     }
+    // Media attachments (added 2026-06-26). A lightweight JSON manifest of the
+    // files attached to a notice — tutorial images/videos and SOP PDFs the
+    // worker portal renders inline / as a download link. The bytes live in the
+    // existing /api/files store; this column only holds
+    //   [ { fileId, name, mime }, ... ]
+    // as a TEXT blob (kept TEXT not JSONB so the SQLite test mirror matches).
+    // INERT migration file (0192) — this runtime ALTER is the load-bearing copy,
+    // awaited before the first read/write. Same self-heal posture as above.
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS attachments TEXT",
+        )
+        .run();
+    } catch {
+      _announcementsMig = null;
+    }
   })();
   return _announcementsMig;
+}
+
+// One attached media file on an announcement. `fileId` points at the existing
+// /api/files store; `name` is the original filename (for the PDF download
+// label) and `mime` drives how the worker portal renders it (image/video/pdf).
+export type AnnouncementAttachment = {
+  fileId: string;
+  name: string;
+  mime: string;
+};
+
+// Coerce arbitrary request/DB input into a clean attachments array. Tolerates a
+// parsed array OR a JSON string (the PG driver may hand TEXT back either way),
+// drops any entry missing a fileId, and trims/normalizes the three fields.
+function normalizeAttachments(raw: unknown): AnnouncementAttachment[] {
+  let arr: unknown = raw;
+  if (typeof arr === "string") {
+    const s = arr.trim();
+    if (!s) return [];
+    try {
+      arr = JSON.parse(s);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(arr)) return [];
+  const out: AnnouncementAttachment[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const fileId = String(o.fileId ?? "").trim();
+    if (!fileId) continue;
+    out.push({
+      fileId,
+      name: String(o.name ?? "").trim(),
+      mime: String(o.mime ?? "").trim(),
+    });
+  }
+  return out;
 }
 
 // The Postgres driver transforms snake_case columns to camelCase ON READ
@@ -171,6 +227,11 @@ type AnnouncementRow = {
   // read it dual-keyed defensively (translations / translations_json).
   translations?: AnnouncementTranslations | string | null;
   translations_json?: AnnouncementTranslations | string | null;
+  // Media manifest — a JSON string (TEXT column) of {fileId,name,mime} entries.
+  // The toCamel folder leaves the all-lowercase `attachments` key as-is, but we
+  // read dual-keyed defensively just like translations above.
+  attachments?: string | unknown[] | null;
+  attachments_json?: string | unknown[] | null;
 };
 
 function isActiveFlag(v: boolean | number | null): boolean {
@@ -236,6 +297,9 @@ function toPublic(r: AnnouncementRow) {
     // All four translations (or null). The worker FE picks the one matching
     // the worker's chosen portal language, falling back to title/body above.
     translations: readTranslations(r),
+    // Media attachments (image/video/PDF). Always an array (empty when none) so
+    // both the worker portal and the admin list can map over it directly.
+    attachments: normalizeAttachments(r.attachments ?? r.attachments_json ?? null),
   };
 }
 
@@ -370,6 +434,12 @@ admin.post("/", async (c) => {
     }
     expiresAt = new Date(t).toISOString();
   }
+  // Optional media manifest — image/video/PDF already uploaded via /api/files.
+  // Normalized (drops malformed entries); stored as a JSON string (null when
+  // none) so the column stays empty for text-only notices.
+  const attachments = normalizeAttachments(
+    (body as { attachments?: unknown }).attachments,
+  );
   const userId =
     (c as unknown as { get: (k: string) => string | undefined }).get(
       "userId",
@@ -387,8 +457,8 @@ admin.post("/", async (c) => {
   });
   await c.var.DB.prepare(
     `INSERT INTO announcements
-       (id, org_id, title, body, is_active, expires_at, created_by, created_at, translations)
-     VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, ?)`,
+       (id, org_id, title, body, is_active, expires_at, created_by, created_at, translations, attachments)
+     VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -399,6 +469,7 @@ admin.post("/", async (c) => {
       userId,
       nowIso,
       translations ? JSON.stringify(translations) : null,
+      attachments.length ? JSON.stringify(attachments) : null,
     )
     .run();
   const row = await c.var.DB.prepare(
@@ -454,6 +525,16 @@ admin.patch("/:id", async (c) => {
     binds.push(text);
     nextText = text;
     textChanged = true;
+  }
+  // Replace the media manifest when the body carries `attachments` (a full
+  // array — the composer always sends the complete current set). Absent key =
+  // leave the existing attachments untouched.
+  if ("attachments" in (body as object)) {
+    const next = normalizeAttachments(
+      (body as { attachments?: unknown }).attachments,
+    );
+    sets.push("attachments = ?");
+    binds.push(next.length ? JSON.stringify(next) : null);
   }
   if ("expiresAt" in (body as object)) {
     const raw = (body as { expiresAt?: unknown }).expiresAt;

@@ -200,17 +200,36 @@ export default function WorkerMePage() {
   const [stdLoading, setStdLoading] = useState(false);
   const [stdRows, setStdRows] = useState<StdTimeRow[]>([]);
   const [stdSearch, setStdSearch] = useState("");
+  // Multi-department (owner 2026-06-26): the worker's full department set +
+  // which one is currently being viewed. The backend returns the deduped set
+  // (incl. primary) on every /wip-times hit, so the selector only renders when
+  // the worker genuinely belongs to >1 department.
+  const [stdDepts, setStdDepts] = useState<string[]>([]);
+  const [stdDept, setStdDept] = useState<string | null>(null);
 
-  const loadStandardTimes = useCallback(async () => {
+  const loadStandardTimes = useCallback(async (dept?: string) => {
     setStdLoading(true);
     try {
-      const res = await workerFetch("/api/worker/wip-times");
+      const url = dept
+        ? `/api/worker/wip-times?dept=${encodeURIComponent(dept)}`
+        : "/api/worker/wip-times";
+      const res = await workerFetch(url);
       const j = (await res.json()) as {
         success?: boolean;
-        data?: { department?: string; rows?: StdTimeRow[] };
+        data?: {
+          department?: string;
+          departmentCodes?: string[];
+          rows?: StdTimeRow[];
+        };
       };
       if (j?.success && Array.isArray(j.data?.rows)) {
         setStdRows(j.data.rows);
+      }
+      if (j?.success && Array.isArray(j.data?.departmentCodes)) {
+        setStdDepts(j.data.departmentCodes);
+      }
+      if (j?.success && typeof j.data?.department === "string") {
+        setStdDept(j.data.department);
       }
       setStdLoaded(true);
     } catch {
@@ -219,6 +238,15 @@ export default function WorkerMePage() {
       setStdLoading(false);
     }
   }, []);
+
+  const selectStandardDept = useCallback(
+    (dept: string) => {
+      if (dept === stdDept) return;
+      setStdDept(dept);
+      void loadStandardTimes(dept);
+    },
+    [stdDept, loadStandardTimes],
+  );
 
   const loadLeaves = useCallback(async () => {
     try {
@@ -564,7 +592,12 @@ export default function WorkerMePage() {
           <span className="flex items-center gap-2">
             <Clock className="h-4 w-4 text-[#6B5C32]" />
             <span className="text-sm font-semibold">
-              Standard Times{me.departmentCode ? ` · ${me.departmentCode}` : ""}
+              Standard Times
+              {stdDept
+                ? ` · ${stdDept}`
+                : me.departmentCode
+                  ? ` · ${me.departmentCode}`
+                  : ""}
             </span>
           </span>
           <ChevronDown
@@ -575,8 +608,31 @@ export default function WorkerMePage() {
         {stdOpen && (
           <div className="px-4 pb-4">
             <p className="text-xs text-[#8A8680] mb-2">
-              Standard minutes per WIP for your department.
+              {stdDepts.length > 1
+                ? "Standard minutes per WIP. Pick a department to view."
+                : "Standard minutes per WIP for your department."}
             </p>
+            {/* Department selector — only when the worker is in >1 department.
+                Segmented chips, brand olive active (matches the language
+                buttons above). Default = primary (the backend's chosen dept). */}
+            {stdDepts.length > 1 && (
+              <div className="flex flex-wrap gap-2 mb-2">
+                {stdDepts.map((code) => (
+                  <button
+                    key={code}
+                    type="button"
+                    onClick={() => selectStandardDept(code)}
+                    className={`h-9 px-3 rounded border text-xs font-semibold ${
+                      stdDept === code
+                        ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                        : "bg-white text-[#1F1D1B] border-[#D8D2CC]"
+                    }`}
+                  >
+                    {code}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="relative mb-2">
               <Search className="h-4 w-4 text-[#B0AAA3] absolute left-2.5 top-1/2 -translate-y-1/2" />
               <input

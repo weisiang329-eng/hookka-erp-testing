@@ -417,7 +417,7 @@ app.get("/today", async (c) => {
 });
 
 // ============================================================
-// GET /api/worker/wip-times — the worker's OWN department's standard times.
+// GET /api/worker/wip-times?dept=<CODE> — a department's standard times.
 //
 // Owner 2026-06-26: workers "totally don't know" the standard minutes per WIP
 // for their dept → disputes. This read-only reference shows ONLY their own
@@ -426,13 +426,43 @@ app.get("/today", async (c) => {
 // lib/wip-times-core (one source, no drift). Org-agnostic like the rest of
 // this file (single-org). Returns the per-WIP standard minutes (bomMaxMinutes
 // = the conservative limit; min==max for the common single-valued case).
+//
+// Multi-department (owner 2026-06-26): a worker in >1 department can pick which
+// department's WIP times to view via ?dept=<CODE>. The request is validated
+// against the worker's OWN department set (primary departmentCode + the parsed
+// departmentCodes JSON array) — an unknown/foreign/absent dept silently falls
+// back to the primary, so no caller can read a department they're not in. The
+// payload also returns `departmentCodes` (the deduped set incl. primary) so the
+// front-end can render the selector without a separate /me round-trip (and it's
+// always fresh, unlike the login-time localStorage cache).
 // ============================================================
 app.get("/wip-times", async (c) => {
   const auth = await getWorker(c);
   if (!auth.ok) return auth.response;
-  const dept = (auth.worker.departmentCode || "").trim().toUpperCase();
+  const primary = (auth.worker.departmentCode || "").trim().toUpperCase();
+  // The worker's full department set: primary + the parsed JSON array, deduped,
+  // upper-cased. parseWorkerDepartmentCodes already folds in the primary as a
+  // fallback when the array is missing/empty.
+  const deptSet = Array.from(
+    new Set(
+      parseWorkerDepartmentCodes(
+        auth.worker.departmentCodes,
+        auth.worker.departmentCode,
+      )
+        .map((d) => d.trim().toUpperCase())
+        .filter((d) => d.length > 0),
+    ),
+  );
+  // Honour ?dept=<CODE> only if it's one the worker actually belongs to;
+  // otherwise default to the primary.
+  const requested = (c.req.query("dept") || "").trim().toUpperCase();
+  const dept =
+    requested && deptSet.includes(requested) ? requested : primary;
   if (!dept) {
-    return c.json({ success: true, data: { department: "", rows: [] } });
+    return c.json({
+      success: true,
+      data: { department: "", departmentCodes: deptSet, rows: [] },
+    });
   }
   const bomRows = await loadActiveBomRows(c.var.DB, null, null);
   const agg = aggregateWipTimes(bomRows, { dept });
@@ -443,7 +473,10 @@ app.get("/wip-times", async (c) => {
     minutes: r.bomMaxMinutes,
     productCount: r.productCount,
   }));
-  return c.json({ success: true, data: { department: dept, rows } });
+  return c.json({
+    success: true,
+    data: { department: dept, departmentCodes: deptSet, rows },
+  });
 });
 
 // ============================================================

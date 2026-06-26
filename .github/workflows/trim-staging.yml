@@ -1,0 +1,118 @@
+name: Trim staging (delete pre-cutoff data)
+
+# Staging-ONLY data trim. Deletes business documents dated before a cutoff
+# (default 2026-05-01) so the staging lists are shorter/lighter for testing.
+#
+# SAFETY:
+#   * This workflow can ONLY see STAGING_DATABASE_URL — it has NO access to the
+#     prod database secret, so it is physically incapable of touching prod.
+#   * `mode: report` (default) is READ-ONLY — it introspects the FK graph, the
+#     date columns, and row counts. It deletes NOTHING. Run this first.
+#   * `mode: execute` runs the cascade delete inside a single transaction. It
+#     requires confirm = TRIM.
+#   * UNDO: re-run "Sync prod → staging" (sync-staging.yml) to restore the full
+#     prod clone. Staging is disposable, so that is the recovery path.
+#
+# Lives on the `staging` branch; dispatch with:
+#   gh workflow run trim-staging.yml --ref staging -f mode=report
+#   gh workflow run trim-staging.yml --ref staging -f mode=execute -f confirm=TRIM
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'report (read-only, default) | execute (deletes)'
+        required: true
+        type: choice
+        default: report
+        options:
+          - report
+          - execute
+      cutoff:
+        description: 'Delete documents dated BEFORE this date (YYYY-MM-DD)'
+        required: true
+        type: string
+        default: '2026-05-01'
+      confirm:
+        description: 'Type TRIM to confirm (only needed for execute)'
+        required: false
+        type: string
+
+concurrency:
+  group: trim-staging
+  cancel-in-progress: false
+
+jobs:
+  trim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Guard — execute needs confirm=TRIM
+        if: inputs.mode == 'execute'
+        run: |
+          if [[ "${{ inputs.confirm }}" != "TRIM" ]]; then
+            echo "::error::execute mode requires confirm input to be exactly 'TRIM'. Got: '${{ inputs.confirm }}'"
+            exit 1
+          fi
+          echo "Execute confirmed for cutoff ${{ inputs.cutoff }}."
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo sh -c 'echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo install -d /etc/apt/keyrings
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+
+      # ---------------------------------------------------------------------
+      # REPORT (read-only) — map the live schema so the purge can be designed
+      # against reality, not the migration files (the live staging schema is a
+      # clone of prod and is the source of truth).
+      # ---------------------------------------------------------------------
+      - name: Report — FK graph (child → parent + delete rule)
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          echo '=== Foreign keys: child -> parent (delete rule: a=noaction r=restrict c=cascade n=setnull d=setdefault) ==='
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "
+            SELECT conrelid::regclass::text AS child,
+                   confrelid::regclass::text AS parent,
+                   confdeltype AS del_rule,
+                   conname
+              FROM pg_constraint
+             WHERE contype = 'f'
+             ORDER BY parent, child;"
+
+      - name: Report — candidate date columns on document tables
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          echo '=== date-ish columns (date/timestamp types OR name ILIKE %date%) ==='
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "
+            SELECT table_name, column_name, data_type
+              FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND ( data_type IN ('date','timestamp without time zone','timestamp with time zone')
+                     OR column_name ILIKE '%date%' )
+             ORDER BY table_name, column_name;"
+
+      - name: Report — row counts for every base table
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          echo '=== live row counts per table (n_live_tup estimate, then exact for the big chains) ==='
+          psql "$STAGING_URL" -P pager=off -v ON_ERROR_STOP=1 -c "
+            SELECT relname AS table, n_live_tup AS est_rows
+              FROM pg_stat_user_tables
+             ORDER BY n_live_tup DESC
+             LIMIT 60;"
+
+      - name: Execute — NOT YET CONFIGURED (safety stop)
+        if: inputs.mode == 'execute'
+        run: |
+          echo "::error::execute mode is not configured yet — the purge SQL is authored after the report run is reviewed. Re-run in report mode."
+          exit 1

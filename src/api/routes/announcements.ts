@@ -33,6 +33,10 @@ import {
   translateAnnouncement,
   type AnnouncementTranslations,
 } from "../lib/translate-announcement";
+// Web Push fan-out (additive). After a notice is created we fire a push to the
+// subscribed worker devices, RESPECTING the same targeting the worker GET uses.
+// Best-effort: wrapped in try/catch so a push failure NEVER faults the create.
+import { sendPushToSubscribers } from "./push";
 
 // ---- runtime schema self-apply (idempotent, once per isolate) ----
 let _announcementsMig: Promise<void> | null = null;
@@ -589,6 +593,27 @@ admin.post("/", async (c) => {
   )
     .bind(id)
     .first<AnnouncementRow>();
+  // Web Push fan-out (additive, best-effort). Push the new notice to every
+  // subscribed worker device that the notice is targeted at — ALL → no filter;
+  // DEPTS/WORKERS/MIXED → pass the same dept/worker lists the worker GET filters
+  // on (sendPushToSubscribers resolves dept codes → worker ids and intersects).
+  // Wrapped in try/catch so a push error can NEVER block or fault the create.
+  try {
+    await sendPushToSubscribers(c.var.DB, c.env, {
+      title,
+      body: text || title,
+      url: "/worker",
+      tag: `ann-${id}`,
+      // ALL → leave both undefined (everyone). Otherwise pass whichever lists
+      // are non-empty so the helper narrows to the same audience the worker
+      // GET would show this notice to.
+      targetDeptCodes: reqDeptCodes.length ? reqDeptCodes : undefined,
+      targetWorkerIds: reqWorkerIds.length ? reqWorkerIds : undefined,
+    });
+  } catch (err) {
+    // Best-effort only — log and move on. The announcement is already created.
+    console.error("[announcements] push fan-out failed (non-fatal):", err);
+  }
   return c.json({ success: true, data: row ? toPublic(row) : null }, 201);
 });
 

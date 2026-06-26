@@ -15,9 +15,33 @@
 // Self-contained: no props. Mount once inside the worker layout.
 // ============================================================
 import { useEffect, useState } from "react";
-import { Download, Share, X } from "lucide-react";
+import { Bell, Download, Share, X } from "lucide-react";
+import { getWorkerToken, workerFetch } from "@/layouts/WorkerLayout";
 
 const DISMISS_KEY = "hookka.pwa.install.dismissed";
+// Separate dismiss key for the notification opt-in card so dismissing one
+// doesn't hide the other.
+const NOTIF_DISMISS_KEY = "hookka.pwa.notif.dismissed";
+
+// VAPID application-server PUBLIC key (committed — it is a public value by
+// design). The opt-in fetches the live key from GET /api/push/vapid-public-key
+// first; this constant is only a fallback so the button still works if that
+// request is momentarily unavailable. Must match the VAPID_PUBLIC_KEY env on
+// the worker (and the VAPID_PRIVATE_KEY secret it pairs with).
+const VAPID_PUBLIC_KEY_FALLBACK =
+  "BLN6AkwN9tygMrpGpA7IQnrS7Bc8el6ggxm5KGpbd8gCJEF5lGZzh4sIilL4OKQx22Ox4Q_IMsn4eIOguCinVjk";
+
+// base64url → Uint8Array (PushManager.subscribe wants the key as a byte array).
+// Typed `Uint8Array<ArrayBuffer>` (concrete buffer, not ArrayBufferLike) so it
+// satisfies the BufferSource type of applicationServerKey under strict lib.dom.
+function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
+  const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+  const b64 = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(b64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
 
 // The shape of the (non-standard but widely-shipped) beforeinstallprompt event.
 type BeforeInstallPromptEvent = Event & {
@@ -55,6 +79,25 @@ function wasDismissed(): boolean {
   }
 }
 
+function notifWasDismissed(): boolean {
+  try {
+    return localStorage.getItem(NOTIF_DISMISS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+// True when this browser supports Web Push at all (SW + PushManager +
+// Notification). Old/unsupported browsers simply never see the opt-in card.
+function pushSupported(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    "serviceWorker" in navigator &&
+    "PushManager" in window &&
+    "Notification" in window
+  );
+}
+
 export default function PwaInstallPrompt() {
   // Stashed Android/Chromium install event (null until the browser offers it).
   const [deferred, setDeferred] = useState<BeforeInstallPromptEvent | null>(
@@ -64,6 +107,40 @@ export default function PwaInstallPrompt() {
   const [show, setShow] = useState(false);
   // iOS variant (manual hint) vs Android variant (one-tap button).
   const [iosHint, setIosHint] = useState(false);
+
+  // Notification opt-in card — shown separately from the install card. Only
+  // surfaces when the browser supports push, a worker is logged in, permission
+  // hasn't been denied, the device isn't already subscribed, and the worker
+  // hasn't dismissed it before. `busy` guards the button while subscribing.
+  const [showNotif, setShowNotif] = useState(false);
+  const [notifBusy, setNotifBusy] = useState(false);
+
+  // Decide whether to offer the notification opt-in. Runs once on mount: checks
+  // support + permission + existing subscription, all best-effort (any failure
+  // just leaves the card hidden — never throws into render).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!pushSupported()) return;
+      if (notifWasDismissed()) return;
+      if (!getWorkerToken()) return; // only on a logged-in worker portal
+      // Permission already denied → don't nag (the browser blocks re-prompts).
+      if (Notification.permission === "denied") return;
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const existing = await reg.pushManager.getSubscription();
+        // Already subscribed → nothing to offer.
+        if (existing) return;
+      } catch {
+        // SW not ready / push query failed — be conservative and skip.
+        return;
+      }
+      if (!cancelled) setShowNotif(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     // Installed already, or the worker dismissed the card before → stay hidden.
@@ -121,9 +198,70 @@ export default function PwaInstallPrompt() {
     setShow(false);
   }
 
-  if (!show) return null;
+  function dismissNotif() {
+    try {
+      localStorage.setItem(NOTIF_DISMISS_KEY, "1");
+    } catch {
+      /* ignore storage failures — worst case the card shows again */
+    }
+    setShowNotif(false);
+  }
+
+  // Turn on notifications: request permission → subscribe via PushManager using
+  // the VAPID public key (fetched live, with a committed fallback) → POST the
+  // subscription to /api/push/subscribe (worker-token authed). Best-effort: any
+  // failure just hides the card without nagging again this session.
+  async function enableNotifications() {
+    if (notifBusy) return;
+    setNotifBusy(true);
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        // Denied/dismissed — don't re-prompt; the browser blocks it anyway.
+        dismissNotif();
+        return;
+      }
+      // Prefer the live VAPID public key; fall back to the committed constant.
+      let appServerKey = VAPID_PUBLIC_KEY_FALLBACK;
+      try {
+        const res = await fetch("/api/push/vapid-public-key");
+        if (res.ok) {
+          const json = (await res.json()) as { key?: string };
+          if (json && typeof json.key === "string" && json.key) {
+            appServerKey = json.key;
+          }
+        }
+      } catch {
+        /* use the fallback constant */
+      }
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(appServerKey),
+      });
+      // POST the subscription JSON (endpoint + keys) to the worker-token-authed
+      // subscribe endpoint. workerFetch attaches X-Worker-Token automatically.
+      await workerFetch("/api/push/subscribe", {
+        method: "POST",
+        body: JSON.stringify(sub.toJSON()),
+      });
+      // Subscribed — hide the card (don't persist a dismiss; if they unsubscribe
+      // later the mount check re-offers it on the next portal open).
+      setShowNotif(false);
+    } catch {
+      // Permission flow / subscribe / network failed — hide without nagging.
+      setShowNotif(false);
+    } finally {
+      setNotifBusy(false);
+    }
+  }
+
+  // Nothing to show if neither card is active.
+  if (!show && !showNotif) return null;
 
   return (
+    <>
+      {show && (
     <div className="mb-4 rounded-lg border border-[#D8D2CC] bg-white p-3 shadow-sm">
       <div className="flex items-start gap-3">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded bg-[#6B5C32] text-white">
@@ -165,5 +303,43 @@ export default function PwaInstallPrompt() {
         </button>
       </div>
     </div>
+      )}
+
+      {showNotif && (
+        <div className="mb-4 rounded-lg border border-[#D8D2CC] bg-white p-3 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded bg-[#6B5C32] text-white">
+              <Bell className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-[#1F1D1B]">
+                Turn on notifications
+              </p>
+              <p className="mt-0.5 text-xs text-[#6B655C]">
+                Get clock-in reminders and shop-floor announcements on this
+                device.
+              </p>
+              <button
+                type="button"
+                onClick={enableNotifications}
+                disabled={notifBusy}
+                className="mt-2 inline-flex items-center gap-1.5 rounded bg-[#6B5C32] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#5a4d2a] disabled:opacity-60"
+              >
+                <Bell className="h-3.5 w-3.5" />
+                {notifBusy ? "Turning on..." : "Turn on"}
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={dismissNotif}
+              aria-label="Dismiss"
+              className="shrink-0 rounded p-1 text-[#8A8680] transition-colors hover:bg-[#F0ECE9] hover:text-[#1F1D1B]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

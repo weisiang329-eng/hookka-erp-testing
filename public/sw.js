@@ -24,7 +24,7 @@
 // Bump this string on any SW logic change to force a clean cache swap.
 // The build id is appended at register time via the ?v= query (see main.tsx),
 // but we also key the cache name so old caches are dropped on activate.
-const CACHE = 'hookka-shell-v1';
+const CACHE = 'hookka-shell-v2';
 
 // The minimal app shell to pre-cache so a cold offline open still paints.
 // Keep this tiny: just the entry HTML + the manifest + icons. Hashed JS/CSS
@@ -131,4 +131,66 @@ self.addEventListener('fetch', (event) => {
 // Allow the page to tell a waiting SW to activate immediately.
 self.addEventListener('message', (event) => {
   if (event.data === 'SKIP_WAITING') self.skipWaiting();
+});
+
+// ============================================================
+// Web Push (additive) — Worker Portal notifications.
+//
+// The backend (src/api/lib/web-push.ts) sends an aes128gcm-encrypted JSON
+// payload: { title, body, url?, icon?, badge?, tag? }. We show a system
+// notification on `push`, and on `notificationclick` focus an already-open
+// worker tab (or open a new one) at the payload's url. Nothing here touches the
+// caching rules above.
+// ============================================================
+self.addEventListener('push', (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    // Non-JSON payload — fall back to plain text in the body.
+    try {
+      data = { body: event.data ? event.data.text() : '' };
+    } catch {
+      data = {};
+    }
+  }
+  const title = data.title || 'Hookka';
+  const options = {
+    body: data.body || '',
+    // Icons reuse the PWA install icons (already in public/). badge is the
+    // monochrome status-bar glyph; both 404-safe — the OS just omits a missing one.
+    icon: data.icon || '/pwa-icon-192.png',
+    badge: data.badge || '/pwa-icon-192.png',
+    // Coalesce repeat reminders so a worker isn't buried under duplicates.
+    tag: data.tag || undefined,
+    data: { url: data.url || '/worker' },
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || '/worker';
+
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then((clientList) => {
+        // Focus an already-open worker-portal tab if there is one; otherwise
+        // open a fresh window at the target URL.
+        for (const client of clientList) {
+          try {
+            const url = new URL(client.url);
+            if (url.pathname.startsWith('/worker') && 'focus' in client) {
+              return client.focus();
+            }
+          } catch {
+            /* ignore unparseable client URLs */
+          }
+        }
+        if (self.clients.openWindow) return self.clients.openWindow(target);
+        return undefined;
+      }),
+  );
 });

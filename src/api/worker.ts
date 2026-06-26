@@ -114,6 +114,18 @@ export type Env = {
     // GET /github-runs.
     GITHUB_TOKEN?: string;
     GITHUB_REPO?: string;
+    // Web Push (Worker Portal notifications). VAPID keypair for signing the
+    // push requests + encrypting payloads (see src/api/lib/web-push.ts).
+    // VAPID_PUBLIC_KEY is a public value (also baked into the client as a
+    // fallback); VAPID_PRIVATE_KEY is a secret (`wrangler secret put`).
+    // VAPID_SUBJECT is the mailto:/https: contact RFC 8292 requires.
+    VAPID_PUBLIC_KEY?: string;
+    VAPID_PRIVATE_KEY?: string;
+    VAPID_SUBJECT?: string;
+    // Shared secret the clock-reminder cron presents as x-push-secret on
+    // POST /api/push/clock-reminder (server→server, not CSRF). Set via
+    // `wrangler secret put PUSH_CRON_SECRET` (>= 16 chars).
+    PUSH_CRON_SECRET?: string;
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route
@@ -637,6 +649,15 @@ app.post("/api/mail-center/inbound", async (c) => {
   }
 });
 
+// Web Push — Worker Portal notifications (additive). Registered BEFORE
+// authMiddleware because each handler does its OWN auth: /subscribe +
+// /unsubscribe gate on X-Worker-Token, /clock-reminder on the x-push-secret
+// shared secret, /vapid-public-key is intentionally public. Same posture as
+// the /api/internal/* cron triggers and /api/mail-center/inbound above.
+// Mounted here (not in the auth-gated block below) so the worker token — not a
+// dashboard session — is the credential. See src/api/routes/push.ts.
+app.route("/api/push", push);
+
 // Global auth gate for /api/* — skips PUBLIC_PATHS (login/logout/health) and
 // PUBLIC_PREFIXES (worker-auth, worker, fg-units) handled inside the middleware.
 // MUST be registered BEFORE any route that touches business data.
@@ -771,6 +792,9 @@ import mdm from "./routes/mdm";
 // the storage-supabase-migration). Returns 503 until SUPABASE_PROJECT_REF
 // + SUPABASE_SERVICE_KEY are configured; see docs/DR-RUNBOOK.md.
 import files from "./routes/files";
+// Web Push — Worker Portal notifications. Mounted at /api/push BEFORE the auth
+// gate (each handler self-auths via worker token / push-cron secret).
+import push from "./routes/push";
 import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";

@@ -77,6 +77,12 @@ type ItemLookup = {
   // rackingNumber — the only way to pick the right one of a bedframe PO's many
   // PACKING cards. null for a manual / PO-level match.
   jobCardId: string | null;
+  // PER-PIECE (mig 0192): the physical piece number + the WIP's total piece count
+  // for a multi-piece sticker (a DIVAN of 2 → pieceNo 1/2, totalPieces 2). Posted
+  // back to stock-in so each physical piece writes its OWN distinct rack row (the
+  // 2nd piece no longer reads "already in this rack"). null = single-piece/legacy.
+  pieceNo: number | null;
+  totalPieces: number | null;
   // When set AND different from the scanned rack, the item currently lives in
   // another rack — the UI offers Move-here / Skip before adding the line.
   currentRackId: string | null;
@@ -99,6 +105,10 @@ type Line = {
   // The exact job_card this piece resolved to (from the /item response); posted
   // back to stock-in so the rack stamp lands on THIS card. null when none.
   jobCardId: string | null;
+  // Per-piece markers (mig 0192) carried from /item → posted to stock-in so a
+  // multi-piece WIP writes one distinct rack row per physical piece. null/legacy.
+  pieceNo: number | null;
+  totalPieces: number | null;
   qty: number; // always 1 (kept for the POST contract / totals)
 };
 
@@ -411,6 +421,9 @@ export default function RackScanPage() {
           salesOrderNo: j.salesOrderNo,
           // Carry the resolved card id so stock-in stamps that exact card.
           jobCardId: j.jobCardId ?? null,
+          // Carry the per-piece markers so a multi-piece WIP writes a distinct row.
+          pieceNo: j.pieceNo ?? null,
+          totalPieces: j.totalPieces ?? null,
           qty: 1,
         };
         // In a DIFFERENT rack → park for a Move / Skip decision. Lower tone:
@@ -796,6 +809,10 @@ export default function RackScanPage() {
               salesOrderNo: x.salesOrderNo,
               // The exact card to stamp the rack onto (resolved at /item time).
               jobCardId: x.jobCardId,
+              // Per-piece markers so a multi-piece WIP writes one distinct row per
+              // physical piece (the 2nd DIVAN piece gets its own rack).
+              pieceNo: x.pieceNo,
+              totalPieces: x.totalPieces,
               qty: 1,
             })),
           }),

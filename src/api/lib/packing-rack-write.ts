@@ -30,7 +30,9 @@ import { packingPieceIdentity } from "./packing-piece-identity";
 // public/worker rack-write path, which may not have gone through that helper.
 // Memoised so the DDL runs at most once per worker isolate.
 let piecePicsRackingColumnEnsured: Promise<void> | null = null;
-function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
+// Exported so the /r/ rack-scan stock-in (public-rack-qr.ts) self-applies the
+// SAME per-piece rack column via this ONE memoised DDL — no second copy to drift.
+export function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
   if (piecePicsRackingColumnEnsured) return piecePicsRackingColumnEnsured;
   piecePicsRackingColumnEnsured = (async () => {
     try {

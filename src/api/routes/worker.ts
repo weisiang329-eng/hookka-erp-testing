@@ -1689,9 +1689,37 @@ app.get("/history", async (c) => {
   }
   // Numerator = completed WIP standard minutes + approved EXTRA PRODUCTION TIME
   // (kind='ADD_PROD'). The extra-time credit is 0 for a worker with no approved
-  // claims → totals.productionMinutes and efficiencyPct stay byte-identical.
+  // claims → totals.productionMinutes stays byte-identical.
   const productionMinutes =
     completed.reduce((s, r) => s + (r.myMinutes || 0), 0) + addProdTotalMin;
+
+  // efficiencyPct — UNIFIED 2026-06-27 to the CANONICAL formula so the worker's
+  // own phone number equals exactly what the office Efficiency Overview /
+  // Employee Performance tab shows for the same worker + range.
+  //   OLD: productionMinutes / workedMinutes, where workedMinutes was ALL-dept
+  //        clock time CAPPED at the standard day (non-prod depts inflated the
+  //        denominator, the cap distorted it). Result diverged from the office.
+  //   NEW: numerator   = completed-JC production minutes + approved ADD_PROD
+  //        denominator = production-dept (departments.isProduction) working
+  //                      hours × 60, UNCAPPED. Approved NONPROD hours already
+  //                      left the prod dept via the split, so they're excluded.
+  // Implemented by reusing computeMonthlyEfficiencyByWorker over [from,to] (the
+  // single source of truth for both the Overview and the auto-paid efficiency
+  // allowance), then reading this worker's entry — guarantees the numerator
+  // FIELD (productionTimeMinutes), the prod-dept denominator and the "—" null
+  // rule all match the office byte-for-byte. A worker whose hours are all in
+  // production depts and who has no non-prod/ADD_PROD split sees ~the same
+  // number as before. Returned as a 1-decimal figure (matching the Overview's
+  // toFixed(1)); the phone renders `${efficiencyPct}%` unchanged.
+  const effByWorkerRange = await computeMonthlyEfficiencyByWorker(
+    c.var.DB,
+    fromStr,
+    toStr,
+  );
+  const myEff = effByWorkerRange.get(workerId);
+  const efficiencyPct =
+    myEff && myEff.pct !== null ? Math.round(myEff.pct * 10) / 10 : 0;
+
   const totals = {
     days: workedDates.size,
     workedMinutes,
@@ -1700,10 +1728,7 @@ app.get("/history", async (c) => {
     completedCount: completed.length,
     // Extra production time credited to the numerator this period (display).
     addProdMinutes: addProdTotalMin,
-    efficiencyPct:
-      workedMinutes > 0
-        ? Math.round((productionMinutes / workedMinutes) * 100)
-        : 0,
+    efficiencyPct,
   };
 
   return c.json({

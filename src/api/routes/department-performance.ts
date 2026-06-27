@@ -117,7 +117,11 @@ app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const snapConfig = {
     tableName: "department_performance_snapshot",
-    sourceTables: ["job_cards", "working_hour_entries"],
+    // worker_nonprod_requests added 2026-06-27: ADD_PROD approvals now feed the
+    // numerator (below), so a new/edited request must invalidate this cache.
+    // (Probe uses its created_at — no updated_at column; the Layer-3 nightly
+    // rebuild backstops any approval that reuses an existing created_at.)
+    sourceTables: ["job_cards", "working_hour_entries", "worker_nonprod_requests"],
   };
   const cacheKey = `from=${fromStr}&to=${toStr}&dept=${departmentCode ?? ""}&cat=${category ?? ""}`;
   const _snap_check = await Promise.all([
@@ -181,6 +185,30 @@ app.get("/", async (c) => {
   // and as the input to the worker-name batch lookup.
   const workerIds = new Set<string>();
 
+  // CANONICAL-denominator restriction (unified 2026-06-27). The efficiency
+  // denominator must count ONLY isProduction departments — the same set
+  // computeMonthlyEfficiencyByWorker / the Efficiency Overview use. When the
+  // operator picks an explicit single department we keep THAT department (the
+  // WHERE departmentCode = ? below already narrows it, and an explicit pick is
+  // honoured even if it is non-production). But when NO department filter is
+  // applied this endpoint previously summed ALL departments — including
+  // Warehousing / Repair / Maintenance / Shortfall / R&D — inflating the
+  // denominator and pulling efficiency below what the office Overview shows.
+  // Fix: in the unfiltered case, restrict the WHE denominator to the
+  // isProduction dept codes. Approved NONPROD hours already left the prod dept
+  // (they land in a non-prod WHE row), so they fall out naturally here too.
+  const productionDeptCodes = new Set<string>();
+  {
+    const deptRes = await c.var.DB.prepare(
+      "SELECT code, isProduction FROM departments",
+    )
+      .bind()
+      .all<{ code: string; isProduction: number | boolean | null }>();
+    for (const d of deptRes.results ?? []) {
+      if (d.isProduction) productionDeptCodes.add(d.code);
+    }
+  }
+
   // ---- Working minutes: SUM(hours * 60) from working_hour_entries.
   {
     const where: string[] = ["date >= ?", "date <= ?"];
@@ -188,6 +216,13 @@ app.get("/", async (c) => {
     if (departmentCode) {
       where.push("departmentCode = ?");
       binds.push(departmentCode);
+    } else if (productionDeptCodes.size > 0) {
+      // No explicit dept filter → canonical denominator = isProduction depts only.
+      const ph = Array.from(productionDeptCodes)
+        .map(() => "?")
+        .join(",");
+      where.push(`departmentCode IN (${ph})`);
+      binds.push(...productionDeptCodes);
     }
     if (category) {
       where.push("category = ?");
@@ -413,6 +448,80 @@ app.get("/", async (c) => {
           productionMinutes: myMins,
         });
       }
+    }
+  }
+
+  // ---- Approved EXTRA PRODUCTION TIME (kind='ADD_PROD') → NUMERATOR (unified
+  // 2026-06-27). Same credit the canonical Efficiency Overview adds via
+  // computeApprovedAddProdMinutesByWorker: an approved over-the-WIP-standard
+  // claim counts as production output, so efficiency stays fair. Previously this
+  // endpoint omitted it, reading low for any worker with approved extra time.
+  //
+  // worker_nonprod_requests.department_code on an ADD_PROD row is always a
+  // PRODUCTION dept (enforced at create/approve), so these minutes are
+  // denominator-consistent with the isProduction WHE filter above. We query the
+  // rows directly (not the helper map) because the helper is not dept-aware and
+  // this endpoint must respect an explicit single-department filter; the
+  // UNFILTERED result is identical to computeApprovedAddProdMinutesByWorker
+  // (every ADD_PROD dept is a production dept, all of them credited). The
+  // category filter has no counterpart column on the request table, so ADD_PROD
+  // is skipped when a category is selected (conservative — never cross-credits
+  // SOFA extra-time onto a BEDFRAME view).
+  if (!category) {
+    try {
+      const apWhere: string[] = [
+        "kind = 'ADD_PROD'",
+        "status = 'APPROVED'",
+        "date >= ?",
+        "date <= ?",
+      ];
+      const apBinds: unknown[] = [fromStr, toStr];
+      if (departmentCode) {
+        apWhere.push("department_code = ?");
+        apBinds.push(departmentCode);
+      }
+      const apRes = await c.var.DB.prepare(
+        `SELECT worker_id AS workerId, date, hours
+           FROM worker_nonprod_requests
+          WHERE ${apWhere.join(" AND ")}`,
+      )
+        .bind(...apBinds)
+        .all<{ workerId: string; date: string; hours: number | string | null }>();
+      for (const r of apRes.results ?? []) {
+        const wid = (r.workerId ?? "").trim();
+        const d = (r.date ?? "").slice(0, 10);
+        if (!wid || !d) continue;
+        const h = typeof r.hours === "number" ? r.hours : Number(r.hours) || 0;
+        const mins = Math.round(h * 60);
+        if (mins <= 0) continue;
+        workerIds.add(wid);
+        const day = ensure(d);
+        day.productionMinutes += mins;
+        let wc = day.workersByWorker.get(wid);
+        if (!wc) {
+          wc = {
+            workerId: wid,
+            workingMinutes: 0,
+            productionMinutes: 0,
+            jobs: [],
+          };
+          day.workersByWorker.set(wid, wc);
+        }
+        wc.productionMinutes += mins;
+        // Surface as a drilldown line so the per-worker jobs sum equals the
+        // worker's productionMinutes (parity with the JC rows above).
+        wc.jobs.push({
+          jobCardId: `addprod:${wid}:${d}`,
+          productCode: "",
+          productName: "Extra production time (approved)",
+          wipLabel: null,
+          poNo: null,
+          productionMinutes: mins,
+        });
+      }
+    } catch {
+      // Table/column not present yet (cold isolate) → no extra credit; the
+      // numbers fall back to the JC-only figure. Never 500 the KPI page.
     }
   }
 

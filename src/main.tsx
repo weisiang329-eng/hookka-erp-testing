@@ -18,6 +18,7 @@ import { initMonitoring } from './lib/monitoring'
 // and posts them to /api/fe-rum/event for the /admin/health dashboard.
 // Companion to backend observability in src/api/lib/observability.ts.
 import { initFeRum } from './lib/fe-rum'
+import { purgeServiceWorkerAndCaches } from './lib/stale-chunk-recovery'
 
 initMonitoring()
 initFeRum()
@@ -35,7 +36,10 @@ window.addEventListener('vite:preloadError', () => {
   const lastTs = Number(sessionStorage.getItem(KEY) || 0)
   if (Date.now() - lastTs < 30_000) return
   sessionStorage.setItem(KEY, String(Date.now()))
-  window.location.reload()
+  // Nuke the SW + caches FIRST so the reload pulls the current build instead of
+  // re-serving the same stale shell (which would white-screen again). See
+  // src/lib/stale-chunk-recovery.ts.
+  void purgeServiceWorkerAndCaches().finally(() => window.location.reload())
 })
 
 // Per-build id injected by Vite (vite.config.ts `define`). Used to cache-bust

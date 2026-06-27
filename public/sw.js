@@ -21,10 +21,19 @@
  * Registered from src/main.tsx in PRODUCTION builds only.
  * ============================================================ */
 
-// Bump this string on any SW logic change to force a clean cache swap.
-// The build id is appended at register time via the ?v= query (see main.tsx),
-// but we also key the cache name so old caches are dropped on activate.
-const CACHE = 'hookka-shell-v2';
+// Cache name is keyed to the PER-BUILD id (the ?v= on the registration URL,
+// see main.tsx). Each deploy → a distinct cache → activate drops every prior
+// build's shell, so a stale index.html that points at chunk hashes a newer
+// deploy already purged can never linger and white-screen an installed PWA
+// (2026-06-27). Falls back to a fixed name if the query is somehow absent.
+const BUILD_VERSION = (() => {
+  try {
+    return new URL(self.location.href).searchParams.get('v') || 'v3';
+  } catch {
+    return 'v3';
+  }
+})();
+const CACHE = `hookka-shell-${BUILD_VERSION}`;
 
 // The minimal app shell to pre-cache so a cold offline open still paints.
 // Keep this tiny: just the entry HTML + the manifest + icons. Hashed JS/CSS

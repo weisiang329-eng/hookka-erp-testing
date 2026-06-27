@@ -42,7 +42,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [rememberMe, setRememberMe] = useState(false);
+  // Default ON: an unticked "Remember me" issues a SESSION cookie (no Max-Age)
+  // + sessionStorage blob, both of which the browser drops on tab/window close
+  // (brutal in incognito) → "mysteriously logged out" (owner 2026-06-27, staging).
+  // Defaulting to a persistent 7-day session is the expected behaviour anyway.
+  const [rememberMe, setRememberMe] = useState(true);
 
   // Already signed-in? Jump straight to the dashboard.
   useEffect(() => {

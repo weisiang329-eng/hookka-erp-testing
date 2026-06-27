@@ -159,8 +159,12 @@ export default function WorkerLayout() {
       <header className="bg-[#1F1D1B] text-white sticky top-0 z-30">
         <div className="max-w-md mx-auto px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded bg-[#6B5C32] flex items-center justify-center text-sm font-bold">
-              H
+            <div className="h-9 w-9 rounded-lg bg-white flex items-center justify-center p-1">
+              <img
+                src="/hookka-logo.png"
+                alt="Hookka"
+                className="h-full w-full object-contain"
+              />
             </div>
             <span className="text-base font-semibold tracking-tight">
               {t("brand.title")}

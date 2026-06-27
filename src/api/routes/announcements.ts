@@ -1013,19 +1013,46 @@ worker.get("/", async (c) => {
   // data — the archive is purely re-readable history. The live (default) branch
   // below is untouched, so nothing about the existing worker home changes.
   if ((c.req.query("include") ?? "").toLowerCase() === "past") {
+    // This worker's acks (id → when). Owner 2026-06-27 "B": once a worker taps
+    // "Got it", the notice leaves the home banner and lives HERE in the archive
+    // (re-readable), alongside the hidden/expired ones — so the archive must
+    // also surface still-live notices this worker has acknowledged. A notice
+    // reminded AFTER the ack is un-acked again → it goes back to the home banner,
+    // not the archive (mirrors the home gate).
+    const ackRes = await c.var.DB.prepare(
+      "SELECT announcement_id, acked_at FROM announcement_acks WHERE worker_id = ?",
+    )
+      .bind(workerId)
+      .all<{
+        announcement_id?: string;
+        announcementId?: string;
+        acked_at?: string | null;
+        ackedAt?: string | null;
+      }>();
+    const ackedAtById = new Map<string, string | null>();
+    for (const a of ackRes.results ?? []) {
+      const id = a.announcementId ?? a.announcement_id;
+      if (id) ackedAtById.set(id, a.ackedAt ?? a.acked_at ?? null);
+    }
     const pastRes = await c.var.DB.prepare(
       "SELECT * FROM announcements WHERE org_id = ? ORDER BY created_at DESC",
     )
       .bind(DEFAULT_ORG_ID)
       .all<AnnouncementRow>();
-    const past = (pastRes.results ?? []).filter(
-      (r) =>
-        // Same audience gate as the live list — a worker only ever sees the
-        // archive of notices that were targeted at them.
-        workerCanSee(r, workerId, myDeptCodes) &&
-        (!isActiveFlag(r.isActive ?? r.is_active ?? null) ||
-          !notExpired(r.expiresAt ?? r.expires_at ?? null)),
-    );
+    const past = (pastRes.results ?? []).filter((r) => {
+      // Same audience gate as the live list.
+      if (!workerCanSee(r, workerId, myDeptCodes)) return false;
+      const liveNow =
+        isActiveFlag(r.isActive ?? r.is_active ?? null) &&
+        notExpired(r.expiresAt ?? r.expires_at ?? null);
+      // Dropped out of the live list (hidden / expired) → always archive.
+      if (!liveNow) return true;
+      // Still live but acknowledged by this worker (and not reminded-since) →
+      // it left the home banner, so it belongs in the archive.
+      if (!ackedAtById.has(r.id)) return false;
+      const remindedAt = r.remindedAt ?? r.reminded_at ?? null;
+      return !isRemindedSince(remindedAt, ackedAtById.get(r.id) ?? null);
+    });
     return c.json({
       success: true,
       data: past.slice(0, PAST_ANNOUNCEMENTS_LIMIT).map(toPublic),

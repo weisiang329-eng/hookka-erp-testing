@@ -268,10 +268,10 @@ const dict: Dict = {
     my: 'QR / ဘားကုဒ် စကင်န်',
   },
   'scan.aimHint': {
-    en: 'Point the camera at the QR OR the barcode — it reads both automatically.',
-    ms: 'Halakan kamera ke QR atau barkod — kedua-duanya diimbas automatik.',
-    zh: '将摄像头对准二维码或条形码，两种都会自动识别。',
-    my: 'ကင်မရာကို QR သို့မဟုတ် ဘားကုဒ်ပေါ် ချိန်ပါ — နှစ်မျိုးလုံး အလိုအလျောက် ဖတ်သည်။',
+    en: 'Point at the QR — it reads automatically, or tap the QR to scan it.',
+    ms: 'Halakan ke QR — ia diimbas automatik, atau ketik QR untuk imbas.',
+    zh: '对准二维码会自动识别；识别不到就点一下二维码来扫描。',
+    my: 'QR ပေါ်ချိန်ပါ — အလိုအလျောက်ဖတ်သည်၊ မဖတ်ပါက QR ကို တို့၍ ဖတ်ပါ။',
   },
   'scan.aimHintBarcode': {
     en: 'Aim at the barcode you want, then tap it to scan. On a stacked list, tap the exact row.',

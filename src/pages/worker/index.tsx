@@ -755,24 +755,25 @@ export default function WorkerHomePage() {
   // stat grid and report-issue stay hidden until their own rollout.
   const SHOW_SCAN = true;
 
-  // Announcements the worker hasn't opened on this device yet → unread dot.
-  const unreadAnnouncements = announcements.filter((a) => !seenAnn.has(a.id)).length;
-  // Must-acknowledge popup: every ACTIVE announcement this device hasn't tapped
-  // "Got it" on yet, PLUS any notice the office has "Remind"ed since the local
-  // ack (the one legitimate re-pop). `announcements` already only contains
-  // active (non-expired) posts — the GET applies the auto-hide/expiry filter —
-  // so an expired one never reaches here. Most recent first (mirrors the banner
-  // order). If there are several, we show them together in one popup and
-  // acknowledge them all on dismiss (kept deliberately simple — no per-item
-  // queue). Because the local ack is durable (never wiped by a lagging/failed
-  // server round-trip), returning to the page never re-pops an acked notice.
-  const popupAnnouncements = announcements.filter((a) => {
+  // Notices this worker hasn't acknowledged yet (or was "Remind"ed about since
+  // their ack — the one legitimate re-pop). `announcements` already contains only
+  // active (non-expired) posts (the GET applies the auto-hide/expiry filter).
+  // Drives BOTH the must-ack popup AND — owner 2026-06-27 "B" — the home banner:
+  // once a worker taps "Got it" the notice LEAVES the home banner and lives in
+  // Me → past announcements (the archive GET also returns acked-but-still-active
+  // notices), so the home screen only ever shows what's new. Durable local ack
+  // means returning to the page never re-surfaces an acked notice.
+  const unackedAnnouncements = announcements.filter((a) => {
     const ackedAtMs = ackAnn.get(a.id);
-    if (ackedAtMs === undefined) return true; // never acked on this device → pop
-    // Acked here — re-pop ONLY if the office reminded after this device's ack.
+    if (ackedAtMs === undefined) return true; // never acked on this device
     const remindedMs = a.remindedAt ? Date.parse(a.remindedAt) : NaN;
     return Number.isFinite(remindedMs) && remindedMs > ackedAtMs;
   });
+  const popupAnnouncements = unackedAnnouncements;
+  // Unread dot — un-acked notices the worker hasn't opened on this device yet.
+  const unreadAnnouncements = unackedAnnouncements.filter(
+    (a) => !seenAnn.has(a.id),
+  ).length;
   // Show the location nudge whenever we did NOT end up granted (denied OR the
   // device couldn't get a fix). Never shown while "unknown" (the probe is still
   // running / the worker hasn't answered the prompt yet) so it can't flash.
@@ -849,9 +850,11 @@ export default function WorkerHomePage() {
         </p>
       </div>
 
-      {/* Announcements (Feature A) — office posts, newest first. Tapping the
+      {/* Announcements (Feature A) — office posts the worker hasn't acknowledged
+          yet, newest first. Once tapped "Got it" a notice drops off here and
+          moves to Me → past announcements (owner 2026-06-27 "B"). Tapping the
           card marks everything seen (clears the unread dots). */}
-      {announcements.length > 0 && (
+      {unackedAnnouncements.length > 0 && (
         <div className="bg-white rounded-xl border border-[#D8D2CC] shadow-sm overflow-hidden">
           <div className="flex items-center gap-2 px-4 py-2.5 bg-[#6B5C32] text-white">
             <Megaphone className="h-4 w-4" />
@@ -866,7 +869,7 @@ export default function WorkerHomePage() {
             onClick={markAnnouncementsSeen}
             className="divide-y divide-[#F0ECE9]"
           >
-            {announcements.map((a) => {
+            {unackedAnnouncements.map((a) => {
               const unread = !seenAnn.has(a.id);
               const collapsed = collapsedAnn.has(a.id);
               const { title, body } = localizeAnnouncement(a, lang);

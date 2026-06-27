@@ -1749,7 +1749,12 @@ export default function WorkerScanPage() {
 
   const tapScanBarcode = useCallback(
     async (e: React.PointerEvent<HTMLVideoElement>) => {
-      if (scanMode !== "barcode") return;
+      // Works in BOTH modes (owner 2026-06-27): held-still auto-scan can't force
+      // the lens to re-focus on iPhone Safari, so tap-to-scan is the reliable
+      // path. Barcode = a band around the tapped row (stacked-list pick); QR =
+      // the full frame. Either way the tap grabs a BURST of fresh frames and
+      // decodes the sharpest, so the worker just aims and taps.
+      const isQr = scanMode === "qr";
       const video = videoRef.current;
       if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
       const rect = video.getBoundingClientRect();
@@ -1772,16 +1777,24 @@ export default function WorkerScanPage() {
         Math.max(0, (e.clientY - rect.top + offsetY) / scale),
         vh,
       );
-      const bandH = Math.max(48, Math.round(vh * 0.22));
-      const bandTop = Math.min(
-        Math.max(0, Math.round(intrinsicY - bandH / 2)),
-        Math.max(0, vh - bandH),
-      );
+      // QR: decode the FULL frame. Barcode: a band around the tapped row so a
+      // stacked list still picks the row the worker aimed at.
+      const bandH = isQr ? vh : Math.max(48, Math.round(vh * 0.22));
+      const bandTop = isQr
+        ? 0
+        : Math.min(
+            Math.max(0, Math.round(intrinsicY - bandH / 2)),
+            Math.max(0, vh - bandH),
+          );
+      // Cap the decode buffer width so a full-frame QR burst stays fast.
+      const decScale = Math.min(1, 1280 / vw);
+      const cw = Math.max(1, Math.round(vw * decScale));
+      const ch = Math.max(1, Math.round(bandH * decScale));
       // A SEPARATE canvas (not the tick loop's scanCanvasRef) so the live decode
       // loop and this tap decode never race on the same buffer.
       const canvas = document.createElement("canvas");
-      canvas.width = vw;
-      canvas.height = bandH;
+      canvas.width = cw;
+      canvas.height = ch;
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       if (!ctx) return;
       // Decode a BURST of fresh frames around the tap, not just one. A single
@@ -1827,33 +1840,50 @@ export default function WorkerScanPage() {
       let decoded: string | null = null;
       for (let attempt = 0; attempt < 32 && !decoded; attempt++) {
         if (video.videoWidth === 0) break; // camera closed mid-burst
-        ctx.drawImage(video, 0, bandTop, vw, bandH, 0, 0, vw, bandH);
-        // Native first (fast + centre-biased among stacked rows): among codes in
-        // the band pick the one nearest the band centre = the tapped row.
+        ctx.drawImage(video, 0, bandTop, vw, bandH, 0, 0, cw, ch);
+        // Native first. Barcode: among codes in the band pick the one nearest the
+        // band centre (the tapped row). QR: take the first code found.
         if (detector) {
           try {
             const codes = await detector.detect(canvas);
             let best: { v: string; d: number } | null = null;
             for (const c of codes) {
               if (!c.rawValue) continue;
+              if (isQr) {
+                best = { v: c.rawValue, d: 0 };
+                break;
+              }
               const bb = (
                 c as { boundingBox?: { y: number; height: number } }
               ).boundingBox;
-              const d = bb ? Math.abs(bb.y + bb.height / 2 - bandH / 2) : 0;
+              const d = bb ? Math.abs(bb.y + bb.height / 2 - ch / 2) : 0;
               if (!best || d < best.d) best = { v: c.rawValue, d };
             }
             if (best) decoded = best.v;
           } catch {
-            /* native flaky this frame → ZXing */
+            /* native flaky this frame → jsQR / ZXing */
           }
         }
-        // ZXing fallback — the ONLY decoder on iOS (no BarcodeDetector there), so
-        // run it every frame when native is absent; otherwise every other frame
-        // to keep the burst snappy.
+        // jsQR (QR-only, reads inverted via attemptBoth) — the strongest QR
+        // reader on iOS where there's no native detector.
+        if (!decoded && isQr) {
+          try {
+            const img = ctx.getImageData(0, 0, cw, ch);
+            const code = jsQR(img.data, cw, ch, {
+              inversionAttempts: "attemptBoth",
+            });
+            if (code && code.data) decoded = code.data;
+          } catch {
+            /* tainted canvas guard → ZXing */
+          }
+        }
+        // ZXing fallback — reads QR + Code 128. The only barcode decoder on iOS;
+        // also a second chance for QR. Every frame when native is absent, else
+        // every other frame to keep the burst snappy.
         if (!decoded && zx && (!detector || attempt % 2 === 1)) {
           let img: ImageData | null = null;
           try {
-            img = ctx.getImageData(0, 0, vw, bandH);
+            img = ctx.getImageData(0, 0, cw, ch);
           } catch {
             img = null;
           }

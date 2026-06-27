@@ -25,6 +25,8 @@ import MobileHome from "./screens/Home";
 import MobileMore from "./screens/More";
 import { ComingSoon } from "./screens/ComingSoon";
 import { ModuleListScreen } from "./screens/ModuleListScreen";
+import { DocumentDetailScreen } from "./screens/DocumentDetailScreen";
+import { LineItemDetailScreen } from "./screens/LineItemDetailScreen";
 import { MODULE_CONFIGS } from "./config/modules";
 
 export default function MobileLayout() {
@@ -53,7 +55,11 @@ export default function MobileLayout() {
           <Route path="/" element={<MobileHome />} />
           <Route path="/more" element={<MobileMore />} />
 
-          {/* Config-driven L1 module lists + their L2 detail placeholders. */}
+          {/* Config-driven L1 lists + L2 document detail (Phase 3).
+              When a module declares `detail`, /m/<slug>/:id renders the generic
+              <DocumentDetailScreen> and /m/<slug>/:id/item/:itemId the minimal
+              L3 line-item view. Modules with no per-id endpoint fall back to a
+              ComingSoon detail. */}
           {MODULE_CONFIGS.map((cfg) => (
             <Route key={cfg.slug}>
               <Route
@@ -62,8 +68,20 @@ export default function MobileLayout() {
               />
               <Route
                 path={`${cfg.slug}/:id`}
-                element={<ComingSoon title={`${cfg.title} detail`} />}
+                element={
+                  cfg.detail ? (
+                    <DocumentDetailScreen config={cfg} />
+                  ) : (
+                    <ComingSoon title={`${cfg.title} detail`} />
+                  )
+                }
               />
+              {cfg.detail ? (
+                <Route
+                  path={`${cfg.slug}/:id/item/:itemId`}
+                  element={<LineItemDetailScreen config={cfg} />}
+                />
+              ) : null}
             </Route>
           ))}
 

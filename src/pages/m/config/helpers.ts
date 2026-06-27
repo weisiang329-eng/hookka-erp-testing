@@ -235,6 +235,43 @@ export function activeFilterCount(
   return n;
 }
 
+// ---------------------------------------------------------------------------
+// L2 detail helpers (Phase 3).
+// ---------------------------------------------------------------------------
+
+/**
+ * Select the single doc object from a `{ success, data: {...} }` envelope —
+ * the shape every single-GET endpoint (SO/DO/PO/PI/GRN/Invoice) returns.
+ */
+export function selectDocData(resp: unknown, _id?: string): RawRow | null {
+  void _id;
+  if (!resp || typeof resp !== "object") return null;
+  const o = resp as { data?: unknown };
+  if (o.data && typeof o.data === "object" && !Array.isArray(o.data)) {
+    return o.data as RawRow;
+  }
+  return null;
+}
+
+/**
+ * Select a doc from a LIST endpoint by matching the route id against any of
+ * the given id keys. Used for doc types with no per-id GET (Announcements:
+ * the list already carries the full body). `extract` pulls the array from the
+ * envelope (defaults to selectData).
+ */
+export function selectFromListById(
+  idKeys: string[],
+  extract: (resp: unknown) => RawRow[] = selectData,
+) {
+  return (resp: unknown, id: string): RawRow | null => {
+    const rows = extract(resp);
+    return (
+      rows.find((r) => idKeys.some((k) => String(read(r, k) ?? "") === id)) ??
+      null
+    );
+  };
+}
+
 /** Resolve the active source for the current sub-tab key across all sources. */
 export function findSourceForTab(
   sources: DataSource[],

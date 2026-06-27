@@ -21,6 +21,11 @@ import {
   type RowVM,
 } from "./types";
 import {
+  type DetailConfig,
+  type FlowStep,
+  type RelatedDocVM,
+} from "./types";
+import {
   read,
   str,
   num,
@@ -31,7 +36,71 @@ import {
   PAYMENT_STATUS_MAP,
   selectData,
   selectNested,
+  selectDocData,
+  selectFromListById,
 } from "./helpers";
+
+// ---------------------------------------------------------------------------
+// Detail helpers — terse field-grid + line-item + flow builders shared across
+// every doc-type's DetailConfig. Status-flow steps are derived from the same
+// repo status enums the lists use (above), in lifecycle order.
+// ---------------------------------------------------------------------------
+type FieldDef = DetailConfig["fields"][number];
+type LineItemVM = NonNullable<DetailConfig["lineItems"]> extends (
+  d: RawRow,
+) => infer R
+  ? R extends Array<infer I>
+    ? I
+    : never
+  : never;
+
+const fld = (
+  label: string,
+  value: (d: RawRow) => string,
+  full = false,
+): FieldDef => ({ label, value, full });
+
+/** Build flow steps from an UPPER_SNAKE enum list (Title Case labels). */
+function flowSteps(keys: string[]): FlowStep[] {
+  return keys.map((k) => ({
+    key: k,
+    label: k
+      .split(/[_\s]+/)
+      .map((w) => w.charAt(0) + w.slice(1).toLowerCase())
+      .join(" "),
+  }));
+}
+
+/** A doc's line item read dual-keyed for product / qty / price across types. */
+function itemVM(it: RawRow, i: number): LineItemVM {
+  const qty = num(it, "quantity", "qty", "receivedQty", "orderedQty");
+  const unit = num(it, "unitPriceSen", "priceSen", "unitCostSen");
+  const line = num(it, "lineTotalSen", "amountSen", "totalSen") || unit * qty;
+  return {
+    id: str(it, "id", "lineNo") || String(i),
+    title:
+      str(it, "productName", "description", "itemDescription", "productCode") ||
+      "—",
+    subLine:
+      str(it, "productCode", "itemCode", "sku") || undefined,
+    meta1: { label: "Qty", value: qty },
+    meta2: { label: "Amount", value: money(line) },
+  };
+}
+
+/** Map a raw line-items array (under any of the given keys) → LineItemVM[]. */
+function itemsOf(doc: RawRow, ...keys: string[]): LineItemVM[] {
+  for (const k of keys) {
+    const arr = doc[k];
+    if (Array.isArray(arr)) return (arr as RawRow[]).map(itemVM);
+  }
+  return [];
+}
+
+/** Coerce an unknown envelope field into a RawRow[] (related-doc lists). */
+function asArr(v: unknown): RawRow[] {
+  return Array.isArray(v) ? (v as RawRow[]) : [];
+}
 
 // Tiny helpers for terse column declarations.
 const textCol = (key: string, label: string, get: (r: RawRow) => string) => ({
@@ -116,10 +185,78 @@ const salesSource: DataSource = {
   ],
 };
 
+// SO detail — single-GET /api/sales-orders/:id returns
+// { data: SO(+items), linkedDOs, linkedInvoices, linkedPayments, ... }.
+const salesDetail: DetailConfig = {
+  url: (id) => `/api/sales-orders/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "companySO", "companySOId") || "—",
+  title: (d) => str(d, "customerName") || "—",
+  status: (d) => resolveStatus(str(d, "status"), STATUS_MAPS.so),
+  flow: {
+    // 5-step happy path through the SO lifecycle (the spec's flow indicator).
+    steps: flowSteps([
+      "CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP", "DELIVERED", "INVOICED",
+    ]),
+    current: (d) => str(d, "status"),
+  },
+  fields: [
+    fld("Customer SO", (d) => str(d, "customerSO", "customerSOId")),
+    fld("Customer PO", (d) => str(d, "customerPO", "customerPOId")),
+    fld("Customer", (d) => str(d, "customerName")),
+    fld("State", (d) => str(d, "customerState")),
+    fld("Order Date", (d) => dateOnly(d, "companySODate")),
+    fld("Expected DD", (d) => dateOnly(d, "hookkaExpectedDD")),
+    fld("Customer Delivery", (d) => dateOnly(d, "customerDeliveryDate")),
+    fld("Reference", (d) => str(d, "reference")),
+    fld("Amount", (d) => money(num(d, "totalSen"))),
+  ],
+  lineItems: (d) => itemsOf(d, "items"),
+  relatedDocs: (_d, resp) => {
+    const r = (resp ?? {}) as Record<string, unknown>;
+    const out: RelatedDocVM[] = [];
+    for (const dd of asArr(r.linkedDOs)) {
+      out.push({
+        id: str(dd, "id"),
+        group: "Delivery Orders",
+        code: str(dd, "doNo") || "—",
+        subLine: dateOnly(dd, "scheduledDate") || undefined,
+        status: resolveStatus(str(dd, "status"), STATUS_MAPS.delivery),
+        href: `/m/delivery/${encodeURIComponent(str(dd, "id"))}`,
+      });
+    }
+    for (const iv of asArr(r.linkedInvoices)) {
+      out.push({
+        id: str(iv, "id"),
+        group: "Invoices",
+        code: str(iv, "invoiceNo") || "—",
+        subLine: money(num(iv, "totalSen")),
+        status: resolveStatus(str(iv, "status"), PAYMENT_STATUS_MAP),
+        href: `/m/invoices/${encodeURIComponent(str(iv, "id"))}`,
+      });
+    }
+    for (const py of asArr(r.linkedPayments)) {
+      out.push({
+        id: str(py, "id"),
+        group: "Payments",
+        code: str(py, "receiptNumber") || "—",
+        subLine: money(num(py, "amount")),
+        // Payments list has no per-id detail screen yet. // TODO: link when
+        // a payment detail route exists.
+        href: undefined,
+      });
+    }
+    return out;
+  },
+  primaryCta: (d) =>
+    str(d, "status") === "DRAFT" ? "Confirm" : "Status",
+};
+
 export const salesConfig: ModuleConfig = {
   slug: "sales",
   title: "Sales Orders",
   detailPath: (vm) => `/m/sales/${encodeURIComponent(vm.id)}`,
+  detail: salesDetail,
   sources: [salesSource],
 };
 
@@ -181,10 +318,57 @@ const threePlSource: DataSource = {
   subTabs: [{ key: "providers", label: "3PL Providers", match: () => true }],
 };
 
+// DO detail — single-GET /api/delivery-orders/:id returns { data: DO(+items) }.
+// The DO carries its SO link (salesOrderId / companySO) so we cross-link back to
+// the Sales Order. // TODO: the DO payload doesn't embed its invoice id — leave
+// that related link out until the endpoint exposes it.
+const deliveryDetail: DetailConfig = {
+  url: (id) => `/api/delivery-orders/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "doNo") || "—",
+  title: (d) => str(d, "customerName") || "—",
+  status: (d) => resolveStatus(str(d, "status"), STATUS_MAPS.delivery),
+  flow: {
+    steps: flowSteps(["LOADED", "DISPATCHED", "IN_TRANSIT", "SIGNED", "DELIVERED"]),
+    current: (d) => str(d, "status"),
+  },
+  fields: [
+    fld("Company SO", (d) => str(d, "companySO", "companySOId")),
+    fld("Customer", (d) => str(d, "customerName")),
+    fld("State", (d) => str(d, "hubState", "customerState")),
+    fld("Expected DD", (d) => dateOnly(d, "deliveryDate", "hookkaExpectedDD")),
+    fld("Driver", (d) => str(d, "driverName")),
+    fld("Vehicle", (d) => str(d, "vehicleNo", "vehicleType")),
+    fld("Items", (d) => String(num(d, "totalItems"))),
+    fld("Reference", (d) => str(d, "reference")),
+    fld("Delivery Address", (d) => str(d, "deliveryAddress"), true),
+  ],
+  lineItems: (d) => itemsOf(d, "items"),
+  relatedDocs: (d) => {
+    const out: RelatedDocVM[] = [];
+    const soId = str(d, "salesOrderId");
+    const soNo = str(d, "companySO", "companySOId");
+    if (soId || soNo) {
+      out.push({
+        id: soId || soNo,
+        group: "Sales Order",
+        code: soNo || "—",
+        // SO GET resolves a companySOId too, so the No is a safe route param.
+        href: `/m/sales/${encodeURIComponent(soId || soNo)}`,
+      });
+    }
+    return out;
+  },
+  primaryCta: (d) => (str(d, "status") === "DELIVERED" ? "Sign" : "Dispatch"),
+};
+
 export const deliveryConfig: ModuleConfig = {
   slug: "delivery",
   title: "Delivery",
-  detailPath: (vm) => `/m/delivery/${encodeURIComponent(vm.id)}`,
+  // 3PL provider rows (no doNo) have no document detail.
+  detailPath: (vm, row) =>
+    str(row, "doNo") ? `/m/delivery/${encodeURIComponent(vm.id)}` : null,
+  detail: deliveryDetail,
   sources: [deliveryOrdersSource, threePlSource],
 };
 
@@ -322,10 +506,67 @@ const eInvoiceSource: DataSource = {
   subTabs: [{ key: "e_invoice", label: "e-Invoice", match: () => true }],
 };
 
+// Invoice detail — single-GET /api/invoices/:id returns
+// { data: invoice(+items,+payments), lockReason }. Only the main Invoices
+// sub-tab has a per-id endpoint; Payments / Supplier Pay / Credit Notes /
+// Debit Notes / e-Invoice have no single-GET, so their rows stay non-tappable.
+const invoiceDetail: DetailConfig = {
+  url: (id) => `/api/invoices/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "invoiceNo") || "—",
+  title: (d) => str(d, "customerName") || "—",
+  status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  flow: {
+    steps: flowSteps(["UNPAID", "PARTIAL", "PAID"]),
+    current: (d) => str(d, "status"),
+  },
+  fields: [
+    fld("Customer", (d) => str(d, "customerName")),
+    fld("Customer Delivery", (d) => str(d, "doNo")),
+    fld("Company SO", (d) => str(d, "companySOId")),
+    fld("Order Date", (d) => dateOnly(d, "invoiceDate")),
+    fld("Expected DD", (d) => dateOnly(d, "dueDate")),
+    fld("Amount", (d) => money(num(d, "totalSen"))),
+    fld("Outstanding", (d) => money(num(d, "totalSen") - num(d, "paidAmount"))),
+    fld("Customer PO", (d) => str(d, "customerPOId")),
+  ],
+  lineItems: (d) => itemsOf(d, "items"),
+  relatedDocs: (d) => {
+    const out: RelatedDocVM[] = [];
+    const soId = str(d, "salesOrderId");
+    const soNo = str(d, "companySOId");
+    if (soId || soNo) {
+      out.push({
+        id: soId || soNo,
+        group: "Sales Order",
+        code: soNo || "—",
+        href: `/m/sales/${encodeURIComponent(soId || soNo)}`,
+      });
+    }
+    const doId = str(d, "deliveryOrderId");
+    if (doId || str(d, "doNo")) {
+      out.push({
+        id: doId || str(d, "doNo"),
+        group: "Delivery Order",
+        code: str(d, "doNo") || "—",
+        href: doId ? `/m/delivery/${encodeURIComponent(doId)}` : undefined,
+      });
+    }
+    return out;
+  },
+  primaryCta: (d) => (str(d, "status") === "PAID" ? "Status" : "Record Payment"),
+};
+
 export const invoicesConfig: ModuleConfig = {
   slug: "invoices",
   title: "Invoices",
-  detailPath: (vm) => `/m/invoices/${encodeURIComponent(vm.id)}`,
+  // Only main-invoice rows (id "inv-…") open the invoice detail; the other
+  // sub-tabs (payments / notes / e-invoice) have no single-GET endpoint.
+  detailPath: (vm) =>
+    vm.id.startsWith("inv-")
+      ? `/m/invoices/${encodeURIComponent(vm.id)}`
+      : null,
+  detail: invoiceDetail,
   sources: [
     invoicesSource,
     paymentsSource,
@@ -436,10 +677,140 @@ const maintenanceSource: DataSource = {
   subTabs: [{ key: "maintenance", label: "Maintenance", match: () => true }],
 };
 
+// PROCUREMENT detail — three distinct doc types share one slug, dispatched by
+// the id prefix (PO = "po-", GRN = "grn-", PI = "pi-"). Each has its own
+// single-GET endpoint; suppliers (Maintenance) have no doc detail.
+const poDetail: DetailConfig = {
+  url: (id) => `/api/purchase-orders/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "poNo") || "—",
+  title: (d) => str(d, "supplierName") || "—",
+  status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  flow: {
+    steps: flowSteps(["DRAFT", "AWAITING", "PARTIAL", "RECEIVED", "MATCHED"]),
+    current: (d) => str(d, "status"),
+  },
+  fields: [
+    fld("Supplier", (d) => str(d, "supplierName")),
+    fld("Order Date", (d) => dateOnly(d, "orderDate")),
+    fld("Expected DD", (d) => dateOnly(d, "expectedDate")),
+    fld("Amount", (d) => money(num(d, "totalSen"))),
+    fld("Notes", (d) => str(d, "notes"), true),
+  ],
+  lineItems: (d) => itemsOf(d, "items"),
+  primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Submit" : "Status"),
+};
+
+const grnDetail: DetailConfig = {
+  url: (id) => `/api/grn/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "grnNumber", "grnNo") || "—",
+  title: (d) => str(d, "supplierName") || "—",
+  status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  flow: {
+    steps: flowSteps(["DRAFT", "CONFIRMED", "POSTED"]),
+    current: (d) => str(d, "status"),
+  },
+  fields: [
+    fld("Customer PO", (d) => str(d, "poNumber", "poRef", "poNo")),
+    fld("Supplier", (d) => str(d, "supplierName")),
+    fld("Order Date", (d) => dateOnly(d, "receiveDate", "receivedDate")),
+    fld("Received By", (d) => str(d, "receivedBy")),
+    fld("QC Status", (d) => str(d, "qcStatus")),
+    fld("Notes", (d) => str(d, "notes"), true),
+  ],
+  lineItems: (d) => itemsOf(d, "items"),
+  relatedDocs: (d) => {
+    const out: RelatedDocVM[] = [];
+    const poId = str(d, "poId");
+    if (poId || str(d, "poNumber")) {
+      out.push({
+        id: poId || str(d, "poNumber"),
+        group: "Purchase Order",
+        code: str(d, "poNumber", "poNo") || "—",
+        href: poId ? `/m/procurement/${encodeURIComponent(poId)}` : undefined,
+      });
+    }
+    return out;
+  },
+  primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Post to Stock" : "Status"),
+};
+
+const piDetail: DetailConfig = {
+  url: (id) => `/api/purchase-invoices/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "piNo") || "—",
+  title: (d) => str(d, "supplier", "supplierName") || "—",
+  status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  flow: {
+    steps: flowSteps(["DRAFT", "UNPAID", "PARTIAL", "PAID"]),
+    current: (d) => str(d, "status"),
+  },
+  fields: [
+    fld("Customer PO", (d) => str(d, "poRef", "poNo")),
+    fld("Supplier", (d) => str(d, "supplier", "supplierName")),
+    fld("Supplier Invoice", (d) => str(d, "supplierInvoiceNo")),
+    fld("Order Date", (d) => dateOnly(d, "invoiceDate")),
+    fld("Expected DD", (d) => dateOnly(d, "dueDate")),
+    fld("Amount", (d) => money(num(d, "amountSen", "totalSen"))),
+    fld("Outstanding", (d) =>
+      money(num(d, "amountSen", "totalSen") - num(d, "paidAmountSen"))),
+    fld("Remarks", (d) => str(d, "remarks"), true),
+  ],
+  lineItems: (d) => itemsOf(d, "items"),
+  relatedDocs: (d) => {
+    const out: RelatedDocVM[] = [];
+    const poId = str(d, "purchaseOrderId");
+    if (poId || str(d, "poRef")) {
+      out.push({
+        id: poId || str(d, "poRef"),
+        group: "Purchase Order",
+        code: str(d, "poRef", "poNo") || "—",
+        href: poId ? `/m/procurement/${encodeURIComponent(poId)}` : undefined,
+      });
+    }
+    const grnId = str(d, "grnId");
+    if (grnId) {
+      out.push({
+        id: grnId,
+        group: "Goods Receipt",
+        code: grnId,
+        href: `/m/procurement/${encodeURIComponent(grnId)}`,
+      });
+    }
+    return out;
+  },
+  primaryCta: (d) => (str(d, "status") === "PAID" ? "Status" : "Record Payment"),
+};
+
+/** Dispatch the procurement detail by id prefix. */
+function pickProcurementDetail(id: string): DetailConfig {
+  if (id.startsWith("grn-")) return grnDetail;
+  if (id.startsWith("pi-")) return piDetail;
+  return poDetail; // "po-" (and any unknown) → Purchase Order.
+}
+
+// Dispatcher: only url + selectDoc run pre-fetch (keyed by route id prefix);
+// `resolve` swaps in the right sub-config once the doc is loaded. The base
+// code/title/fields are inert fallbacks (the screen reads the resolved config).
+const procurementDetail: DetailConfig = {
+  url: (id) => pickProcurementDetail(id).url(id),
+  selectDoc: (resp, id) => pickProcurementDetail(id).selectDoc(resp, id),
+  resolve: (_doc, id) => pickProcurementDetail(id),
+  code: (d) => str(d, "poNo", "grnNumber", "piNo") || "—",
+  title: (d) => str(d, "supplierName", "supplier") || "—",
+  fields: [],
+};
+
 export const procurementConfig: ModuleConfig = {
   slug: "procurement",
   title: "Procurement",
-  detailPath: (vm) => `/m/procurement/${encodeURIComponent(vm.id)}`,
+  // Suppliers (Maintenance) have no doc detail — only po/grn/pi ids navigate.
+  detailPath: (vm) =>
+    /^(po|grn|pi)-/.test(vm.id)
+      ? `/m/procurement/${encodeURIComponent(vm.id)}`
+      : null,
+  detail: procurementDetail,
   sources: [poSource, grnSource, piSource, maintenanceSource],
 };
 
@@ -500,10 +871,61 @@ const productionSource: DataSource = {
   ],
 };
 
+// Production detail — single-GET /api/production-orders/:id → { data: PO }.
+// Job cards (per-department progress) are the PO's "line items".
+const productionDetail: DetailConfig = {
+  url: (id) => `/api/production-orders/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "poNo") || "—",
+  title: (d) => str(d, "productName", "productCode") || "—",
+  status: (d) => resolveStatus(str(d, "status"), STATUS_MAPS.production),
+  flow: {
+    steps: flowSteps(["PENDING", "IN_PROGRESS", "COMPLETED"]),
+    current: (d) => str(d, "status"),
+  },
+  fields: [
+    fld("Product", (d) => str(d, "productName", "productCode")),
+    fld("Customer", (d) => str(d, "customerName")),
+    fld("Qty", (d) => String(num(d, "quantity"))),
+    fld("Department", (d) => str(d, "currentDepartment")),
+    fld("Order Date", (d) => dateOnly(d, "startDate")),
+    fld("Expected DD", (d) => dateOnly(d, "targetEndDate")),
+  ],
+  lineItems: (d) => {
+    const jcs = d.jobCards;
+    if (!Array.isArray(jcs)) return [];
+    return (jcs as RawRow[]).map((jc, i) => ({
+      id: str(jc, "id") || String(i),
+      title: str(jc, "departmentName", "departmentCode") || "Department",
+      subLine: str(jc, "status") || undefined,
+      meta1: { label: "Progress", value: `${num(jc, "progress")}%` },
+    }));
+  },
+  relatedDocs: (d) => {
+    const out: RelatedDocVM[] = [];
+    const soId = str(d, "salesOrderId");
+    const soNo = str(d, "companySO", "companySOId", "customerSO");
+    if (soId || soNo) {
+      out.push({
+        id: soId || soNo,
+        group: "Sales Order",
+        code: soNo || "—",
+        href: soId
+          ? `/m/sales/${encodeURIComponent(soId)}`
+          : soNo
+            ? `/m/sales/${encodeURIComponent(soNo)}`
+            : undefined,
+      });
+    }
+    return out;
+  },
+};
+
 export const productionConfig: ModuleConfig = {
   slug: "production",
   title: "Production Orders",
   detailPath: (vm) => `/m/production/${encodeURIComponent(vm.id)}`,
+  detail: productionDetail,
   sources: [productionSource],
 };
 
@@ -894,10 +1316,32 @@ const announcementsSource: DataSource = {
   ],
 };
 
+// Announcement detail — no GET /:id; the list (/api/announcements) already
+// carries the full body, so we fetch the list and find the row by id.
+const announcementsDetail: DetailConfig = {
+  url: () => "/api/announcements",
+  selectDoc: selectFromListById(["id"]),
+  code: (d) => str(d, "category") || "Notice",
+  title: (d) => str(d, "title") || "—",
+  status: (d) =>
+    read(d, "isActive") === true
+      ? resolveStatus("ACTIVE", PAYMENT_STATUS_MAP)
+      : undefined,
+  fields: [
+    fld("Category", (d) => str(d, "category")),
+    fld("Posted By", (d) => str(d, "createdBy")),
+    fld("Order Date", (d) => dateOnly(d, "createdAt")),
+    fld("Expires", (d) => dateOnly(d, "expiresAt")),
+    fld("Message", (d) => str(d, "body"), true),
+  ],
+  primaryCta: () => "Mark as Read",
+};
+
 export const announcementsConfig: ModuleConfig = {
   slug: "announcements",
   title: "Announcements",
   detailPath: (vm) => `/m/announcements/${encodeURIComponent(vm.id)}`,
+  detail: announcementsDetail,
   sources: [announcementsSource],
 };
 
@@ -929,10 +1373,55 @@ const mailSource: DataSource = {
   ],
 };
 
+// Mail detail — single-GET /api/mail-center/threads/:id → { thread, messages }.
+// The thread is the doc; each message becomes a line item (tap → read body).
+const mailDetail: DetailConfig = {
+  url: (id) => `/api/mail-center/threads/${encodeURIComponent(id)}`,
+  selectDoc: (resp) => {
+    if (!resp || typeof resp !== "object") return null;
+    const o = resp as { thread?: unknown; messages?: unknown };
+    if (!o.thread || typeof o.thread !== "object") return null;
+    // Merge the messages onto the thread so the field grid + line items read
+    // from one doc object.
+    return {
+      ...(o.thread as RawRow),
+      messages: Array.isArray(o.messages) ? o.messages : [],
+    };
+  },
+  code: (d) => (read(d, "unread") === true ? "New" : "Read"),
+  title: (d) => str(d, "subject") || "(No subject)",
+  status: (d) =>
+    read(d, "hasOutbound") === true
+      ? resolveStatus("SENT", PAYMENT_STATUS_MAP)
+      : resolveStatus("RECEIVED", PAYMENT_STATUS_MAP),
+  fields: [
+    fld("From", (d) => str(d, "counterpartyName", "counterpartyEmail")),
+    fld("Mailbox", (d) => str(d, "mailboxAddress")),
+    fld("Updated", (d) => dateOnly(d, "lastMessageAt")),
+    fld("Messages", (d) => String(num(d, "messageCount"))),
+    fld("Subject", (d) => str(d, "subject"), true),
+  ],
+  lineItems: (d) => {
+    const msgs = d.messages;
+    if (!Array.isArray(msgs)) return [];
+    return (msgs as RawRow[]).map((m, i) => ({
+      id: str(m, "id") || String(i),
+      title:
+        str(m, "fromName", "fromAddress") ||
+        (str(m, "direction") === "outbound" ? "Sent" : "Received"),
+      subLine:
+        (str(m, "textBody") || str(m, "subject")).slice(0, 80) || undefined,
+      meta1: { label: "Date", value: dateOnly(m, "sentAt", "receivedAt", "createdAt") || "—" },
+    }));
+  },
+  primaryCta: () => "Reply",
+};
+
 export const mailConfig: ModuleConfig = {
   slug: "mail-center",
   title: "Mail Center",
   detailPath: (vm) => `/m/mail-center/${encodeURIComponent(vm.id)}`,
+  detail: mailDetail,
   sources: [mailSource],
 };
 

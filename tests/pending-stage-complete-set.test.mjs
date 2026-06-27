@@ -11,6 +11,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
+// Strip comments so an explanatory comment that MENTIONS the old buildLinkedPOIds
+// pattern (e.g. "was buildLinkedPOIds(dos)…") doesn't trip the negative checks.
+const stripComments = (s) =>
+  s
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 
 test("delivery Pending Delivery sources exclusion from the complete /linked-po-ids endpoint", () => {
   const src = read("src/pages/delivery/index.tsx");
@@ -20,7 +26,7 @@ test("delivery Pending Delivery sources exclusion from the complete /linked-po-i
     "delivery page must fetch the complete linked-po-ids set",
   );
   assert.ok(
-    !/buildLinkedPOIds\s*\(/.test(src),
+    !/buildLinkedPOIds\s*\(/.test(stripComments(src)),
     "delivery page must NOT rebuild the exclusion set from the page-capped DO list",
   );
 });
@@ -33,7 +39,7 @@ test("Command Center derives Pending Delivery from the complete /linked-po-ids s
     "dashboard-b must fetch the complete linked-po-ids set",
   );
   assert.ok(
-    !/buildLinkedPOIds\s*\(/.test(src),
+    !/buildLinkedPOIds\s*\(/.test(stripComments(src)),
     "dashboard-b must NOT rebuild the exclusion set from the capped 200-DO page",
   );
 });

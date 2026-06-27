@@ -2234,27 +2234,27 @@ export default function WorkerScanPage() {
       key={`${opt.order.id}:${opt.jobCard.id}`}
       type="button"
       onClick={() => setResult({ kind: "lookup", ...opt, piece })}
-      className="w-full flex items-center justify-between gap-3 px-3.5 py-3 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white active:bg-[#FAF8F4] transition-colors"
+      className="w-full flex items-center justify-between gap-3 px-3 py-3 rounded-lg border border-[#D8D2CC] bg-white active:bg-[#F0ECE9]"
     >
       <div className="min-w-0 text-left">
-        <p className="text-xs text-[#8A7F73]">
+        <p className="text-xs text-[#8A8680]">
           {opt.order.poNo} · {opt.order.customerName}
         </p>
-        <p className="text-base font-bold leading-tight mt-0.5 truncate text-[#1F1D1B]">
+        <p className="text-base font-bold leading-tight mt-0.5 truncate">
           {wipNameFor(opt.jobCard, opt.order)}
         </p>
-        <p className="text-xs text-[#6B7280] truncate">
+        <p className="text-xs text-[#5A5550] truncate">
           {opt.jobCard.wipCode ? `${opt.jobCard.wipCode} · ` : ""}
           {opt.order.productCode} · {opt.order.sizeLabel}
         </p>
-        <p className="mt-1.5 flex items-center gap-1.5 text-[11px]">
-          <span className="px-2 py-0.5 rounded-full border-[0.5px] border-[#E7E0D4] bg-[#FAF8F4] text-[#574A28] font-semibold">
+        <p className="mt-1 text-[11px]">
+          <span className="px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#5A5550] font-semibold">
             {opt.jobCard.departmentCode}
-          </span>
-          <span className="text-[#8A7F73]">· {opt.jobCard.status}</span>
+          </span>{" "}
+          <span className="text-[#8A8680]">· {opt.jobCard.status}</span>
         </p>
       </div>
-      <ChevronRight className="h-5 w-5 text-[#8A7F73] shrink-0" />
+      <ChevronRight className="h-5 w-5 text-[#8A8680] shrink-0" />
     </button>
   );
 
@@ -2268,17 +2268,15 @@ export default function WorkerScanPage() {
 
   return (
     <div className="space-y-4 pt-2">
-      <h1 className="text-xl font-bold text-[#1F1D1B] tracking-tight">
-        {t("scan.title")}
-      </h1>
+      <h1 className="text-xl font-bold">{t("scan.title")}</h1>
 
       {/* Batch-upload progress badge */}
       {batchActive && (
-        <div className="bg-[#6B5C32]/[0.08] border-[0.5px] border-[#6B5C32]/30 text-[#574A28] rounded-xl px-3.5 py-2.5 flex items-center gap-2 text-sm">
+        <div className="bg-[#3E6570]/10 border border-[#3E6570]/30 text-[#1F4149] rounded-lg px-3 py-2 flex items-center gap-2 text-sm">
           <Images className="h-4 w-4 shrink-0" />
           <span className="font-semibold">{batchLabel}</span>
           {queue.length === 0 && result.kind === "success" && (
-            <span className="ml-auto text-xs text-[#6B5C32]">
+            <span className="ml-auto text-xs text-[#3E6570]">
               {t("scan.batchDone").replace("{n}", String(batchTotal))}
             </span>
           )}
@@ -2287,14 +2285,14 @@ export default function WorkerScanPage() {
 
       {/* Input area (always visible until success) */}
       {result.kind !== "success" && (
-        <div className="bg-white rounded-xl p-4 border-[0.5px] border-[#E7E0D4]">
+        <div className="bg-white rounded-xl p-4 border border-[#D8D2CC]">
           {/* Primary action: live scan (auto-decode). Requires HTTPS on
               non-localhost origins — see vite.config.ts basicSsl(). */}
           <button
             type="button"
             onClick={startLiveScan}
             disabled={decoding || loading || liveScanning}
-            className="w-full h-24 mb-3 rounded-xl bg-[#1F1D1B] hover:bg-[#2C2926] active:bg-[#000000] text-white flex flex-col items-center justify-center gap-1 disabled:opacity-60 transition-colors"
+            className="w-full h-24 mb-3 rounded-lg bg-[#3E6570] hover:bg-[#355863] active:bg-[#2F4E58] text-white flex flex-col items-center justify-center gap-1 disabled:opacity-60"
           >
             <Camera className="h-7 w-7" />
             <span className="text-base font-semibold">{t("scan.liveScan")}</span>
@@ -2308,10 +2306,10 @@ export default function WorkerScanPage() {
             type="button"
             onClick={() => uploadInputRef.current?.click()}
             disabled={decoding || loading || liveScanning}
-            className="w-full h-16 mb-3 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white active:bg-[#FAF8F4] flex items-center justify-center gap-2 disabled:opacity-60 transition-colors"
+            className="w-full h-16 mb-3 rounded-lg border border-[#D8D2CC] bg-white active:bg-[#F0ECE9] flex items-center justify-center gap-2 disabled:opacity-60"
           >
             <Images className="h-5 w-5 text-[#6B5C32]" />
-            <span className="text-sm font-semibold text-[#1F1D1B]">
+            <span className="text-sm font-semibold text-[#3D3832]">
               {t("scan.uploadPhoto")}
             </span>
           </button>
@@ -2329,7 +2327,7 @@ export default function WorkerScanPage() {
               {t("scan.decoding")}
             </div>
           )}
-          <div className="text-center text-sm font-semibold text-[#1F1D1B] mb-1">
+          <div className="text-center text-sm font-semibold text-[#4B5563] mb-1">
             {t("scan.manual")}
           </div>
           <div className="text-center text-xs text-[#8A7F73] mb-2">
@@ -2342,13 +2340,13 @@ export default function WorkerScanPage() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && doLookup()}
               placeholder={t("scan.manualPlaceholder")}
-              className="flex-1 h-12 px-3 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-base focus:outline-none focus:ring-2 focus:ring-[#6B5C32] focus:border-[#6B5C32]"
+              className="flex-1 h-12 px-3 rounded border border-[#D8D2CC] bg-white text-base focus:outline-none focus:ring-2 focus:ring-[#6B5C32] focus:border-[#6B5C32]"
             />
             <button
               type="button"
               onClick={() => doLookup()}
               disabled={loading || !input.trim()}
-              className="h-12 px-5 rounded-xl bg-[#6B5C32] hover:bg-[#574A28] text-white disabled:opacity-60 transition-colors"
+              className="h-12 px-5 rounded bg-[#6B5C32] hover:bg-[#5a4d2a] text-white disabled:opacity-60"
             >
               {loading ? (
                 <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" />
@@ -2364,7 +2362,7 @@ export default function WorkerScanPage() {
           scanned; the worker keeps scanning FG/packing stickers (each adds a
           line) then taps Stock In to put them all into this rack. */}
       {rackStockIn && (
-        <div className="bg-white rounded-xl p-4 border-[0.5px] border-[#C9A961] space-y-3">
+        <div className="bg-white rounded-xl p-4 border border-amber-300 space-y-3">
           <div className="flex items-center justify-between">
             <p className="text-sm font-bold text-[#1F1D1B]">
               📦 Stock in to {rackStockIn.rackId}
@@ -2409,7 +2407,7 @@ export default function WorkerScanPage() {
             type="button"
             disabled={rackStockIn.items.length === 0 || rackStockingIn}
             onClick={submitRackStockIn}
-            className="w-full h-12 rounded-full bg-[#6B5C32] text-white font-bold text-base active:bg-[#574A28] disabled:opacity-40 transition-colors"
+            className="w-full h-12 rounded-full bg-[#6B5C32] text-white font-bold text-base active:bg-[#5a4d2a] disabled:opacity-40"
           >
             {rackStockingIn
               ? "Stocking in…"
@@ -2424,7 +2422,7 @@ export default function WorkerScanPage() {
           is the only thing standing between the worker and silently
           completing the wrong piece. */}
       {result.kind === "choices" && (
-        <div className="bg-white rounded-xl p-4 border-[0.5px] border-[#E7E0D4] space-y-2">
+        <div className="bg-white rounded-xl p-4 border border-[#D8D2CC] space-y-2">
           <p className="text-sm font-semibold text-[#1F1D1B]">
             {t("scan.pickOneWip")}
           </p>
@@ -2434,7 +2432,7 @@ export default function WorkerScanPage() {
           <button
             type="button"
             onClick={reset}
-            className="w-full text-sm text-[#6B5C32] font-semibold py-1.5"
+            className="w-full text-sm text-[#5A5550] py-1"
           >
             {t("common.cancel")}
           </button>
@@ -2480,20 +2478,20 @@ export default function WorkerScanPage() {
           !!checkPic1 && !!checkPic2 && selfSlot === 0;
         const blocked = selfSlot > 0 || bothSlotsFilled;
         return (
-          <div className="bg-white rounded-xl p-4 border-[0.5px] border-[#E7E0D4] space-y-3">
+          <div className="bg-white rounded-xl p-4 border border-[#D8D2CC] space-y-3">
             <div>
-              <p className="text-xs text-[#8A7F73]">
+              <p className="text-xs text-[#8A8680]">
                 {result.order.poNo} · {result.order.customerName}
               </p>
-              <p className="text-lg font-bold leading-tight mt-0.5 text-[#1F1D1B]">
+              <p className="text-lg font-bold leading-tight mt-0.5">
                 {wipName}
               </p>
-              <p className="text-sm text-[#6B7280]">
+              <p className="text-sm text-[#5A5550]">
                 {result.jobCard.wipCode ? `${result.jobCard.wipCode} · ` : ""}
                 {result.order.productCode} · {result.order.sizeLabel}
               </p>
               {result.piece && (
-                <p className="mt-1.5 inline-block text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-[#6B5C32] text-white">
+                <p className="mt-1.5 inline-block text-[11px] font-semibold px-2 py-0.5 rounded bg-[#6B5C32] text-white">
                   {t("scan.pieceOf")
                     .replace("{i}", String(result.piece.pieceNo))
                     .replace("{n}", String(result.piece.totalPieces))}
@@ -2501,21 +2499,21 @@ export default function WorkerScanPage() {
               )}
             </div>
             <div className="grid grid-cols-3 gap-2 text-sm">
-              <div className="bg-[#FAF8F4] border-[0.5px] border-[#E7E0D4] rounded-xl px-3 py-2">
-                <p className="text-[11px] text-[#8A7F73] uppercase tracking-wide">Department</p>
-                <p className="font-semibold text-[#1F1D1B]">{result.jobCard.departmentCode}</p>
+              <div className="bg-[#F0ECE9] rounded px-3 py-2">
+                <p className="text-[11px] text-[#8A8680] uppercase">Department</p>
+                <p className="font-semibold">{result.jobCard.departmentCode}</p>
               </div>
-              <div className="bg-[#FAF8F4] border-[0.5px] border-[#E7E0D4] rounded-xl px-3 py-2">
-                <p className="text-[11px] text-[#8A7F73] uppercase tracking-wide">Status</p>
-                <p className="font-semibold text-[#1F1D1B]">{result.jobCard.status}</p>
+              <div className="bg-[#F0ECE9] rounded px-3 py-2">
+                <p className="text-[11px] text-[#8A8680] uppercase">Status</p>
+                <p className="font-semibold">{result.jobCard.status}</p>
               </div>
               {/* Planned production time for this job card — lets the worker
                   eyeball "this should take ~N min" before committing. The
                   back-end tracks actual vs. planned via the scan-complete
                   endpoint; estMinutes is what's credited on completion. */}
-              <div className="bg-[#FAF8F4] border-[0.5px] border-[#E7E0D4] rounded-xl px-3 py-2">
-                <p className="text-[11px] text-[#8A7F73] uppercase tracking-wide">Prod Time</p>
-                <p className="font-semibold text-[#1F1D1B]">
+              <div className="bg-[#F0ECE9] rounded px-3 py-2">
+                <p className="text-[11px] text-[#8A8680] uppercase">Prod Time</p>
+                <p className="font-semibold">
                   {result.jobCard.estMinutes > 0
                     ? `${result.jobCard.estMinutes} min`
                     : "—"}
@@ -2529,7 +2527,7 @@ export default function WorkerScanPage() {
               const showPic2 = pieceSlot?.pic2Name ?? result.jobCard.pic2Name;
               if (!showPic1 && !showPic2) return null;
               return (
-                <p className="text-xs text-[#6B7280]">
+                <p className="text-xs text-[#5A5550]">
                   PIC: {showPic1 || "—"}
                   {showPic2 ? ` / ${showPic2}` : ""}
                 </p>
@@ -2539,7 +2537,7 @@ export default function WorkerScanPage() {
                 the card itself isn't in a bad state; we're just preventing
                 the worker from double-crediting themselves for one piece. */}
             {blocked && (
-              <div className="flex items-start gap-2 bg-[#FBF6EC] border-[0.5px] border-[#C9A961] rounded-xl px-3 py-2.5 text-sm text-[#7A5B1A]">
+              <div className="flex items-start gap-2 bg-[#FFF8E1] border border-[#F6D672] rounded px-3 py-2 text-sm text-[#7A5B1A]">
                 <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
                 <span>
                   {selfSlot > 0
@@ -2556,12 +2554,12 @@ export default function WorkerScanPage() {
             {result.jobCard.departmentCode === "PACKING" &&
               (result.jobCard.status === "COMPLETED" ||
                 result.jobCard.status === "TRANSFERRED") && (
-                <div className="bg-[#FAF8F4] border-[0.5px] border-[#E7E0D4] rounded-xl p-3">
-                  <p className="text-xs font-semibold text-[#574A28] mb-1.5">
+                <div className="bg-[#F0ECE9] rounded-lg p-3">
+                  <p className="text-xs font-semibold text-[#5A5550] mb-1.5">
                     Rack number
                   </p>
                   {rackSaved ? (
-                    <p className="text-sm font-semibold text-[#6B5C32]">
+                    <p className="text-sm font-semibold text-[#3E6570]">
                       ✓ Rack saved: {rackChoice}
                     </p>
                   ) : (
@@ -2569,7 +2567,7 @@ export default function WorkerScanPage() {
                       <select
                         value={rackChoice}
                         onChange={(e) => setRackChoice(e.target.value)}
-                        className="flex-1 h-10 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm px-2"
+                        className="flex-1 h-10 rounded border border-[#D8D2CC] text-sm px-2"
                       >
                         <option value="">— Select rack —</option>
                         {racks.map((r) => (
@@ -2583,7 +2581,7 @@ export default function WorkerScanPage() {
                         type="button"
                         disabled={!rackChoice || savingRack}
                         onClick={() => saveRack(result.jobCard.id, rackChoice)}
-                        className="h-10 px-4 rounded-xl bg-[#6B5C32] text-white font-semibold text-sm disabled:opacity-50 transition-colors"
+                        className="h-10 px-4 rounded bg-[#3E6570] text-white font-semibold text-sm disabled:opacity-50"
                       >
                         {savingRack ? "…" : "Save"}
                       </button>
@@ -2595,14 +2593,14 @@ export default function WorkerScanPage() {
               type="button"
               onClick={() => handleConfirmScan()}
               disabled={loading || blocked}
-              className="w-full h-14 rounded-xl bg-[#1F1D1B] hover:bg-[#2C2926] text-white text-lg font-semibold disabled:opacity-60 transition-colors"
+              className="w-full h-14 rounded-lg bg-[#3E6570] hover:bg-[#355863] text-white text-lg font-semibold disabled:opacity-60 transition-colors"
             >
               {loading ? t("common.loading") : t("scan.complete")}
             </button>
             <button
               type="button"
               onClick={reset}
-              className="w-full text-sm text-[#6B5C32] font-semibold py-1.5"
+              className="w-full text-sm text-[#5A5550] py-1"
             >
               {t("common.cancel")}
             </button>
@@ -2614,7 +2612,7 @@ export default function WorkerScanPage() {
           exactly which piece they just completed. */}
       {result.kind === "success" && (
         <div
-          className={`${result.alreadyComplete ? "bg-[#574A28]" : "bg-[#1F1D1B]"} text-white rounded-xl p-6 text-center`}
+          className={`${result.alreadyComplete ? "bg-[#7A5B1A]" : "bg-[#3E6570]"} text-white rounded-xl p-6 text-center`}
         >
           <CheckCircle2 className="h-12 w-12 mx-auto mb-3" />
           <p className="text-xl font-bold mb-1">
@@ -2648,7 +2646,7 @@ export default function WorkerScanPage() {
               below. Options from the warehouse catalog; saved independently of
               the completion (also works when re-scanning a finished card). */}
           {result.jobCard.departmentCode === "PACKING" && (
-            <div className="mt-4 bg-white/10 rounded-xl p-3 text-left">
+            <div className="mt-4 bg-white/10 rounded-lg p-3 text-left">
               <p className="text-xs font-semibold opacity-90 mb-1.5">
                 Rack number
               </p>
@@ -2659,7 +2657,7 @@ export default function WorkerScanPage() {
                   <select
                     value={rackChoice}
                     onChange={(e) => setRackChoice(e.target.value)}
-                    className="flex-1 h-10 rounded-xl bg-white text-[#1F1D1B] text-sm px-2"
+                    className="flex-1 h-10 rounded bg-white text-[#1F1D1B] text-sm px-2"
                   >
                     <option value="">— Select rack —</option>
                     {racks.map((r) => (
@@ -2673,7 +2671,7 @@ export default function WorkerScanPage() {
                     type="button"
                     disabled={!rackChoice || savingRack}
                     onClick={() => saveRack(result.jobCard.id, rackChoice)}
-                    className="h-10 px-4 rounded-xl bg-white text-[#1F1D1B] font-semibold text-sm disabled:opacity-50"
+                    className="h-10 px-4 rounded bg-white text-[#1F1D1B] font-semibold text-sm disabled:opacity-50"
                   >
                     {savingRack ? "…" : "Save"}
                   </button>
@@ -2685,7 +2683,7 @@ export default function WorkerScanPage() {
           <button
             type="button"
             onClick={reset}
-            className="mt-5 h-11 px-5 rounded-full bg-white text-[#1F1D1B] font-semibold text-sm"
+            className="mt-5 h-11 px-5 rounded bg-white text-[#1F1D1B] font-semibold text-sm"
           >
             {t("scan.title")}
           </button>
@@ -2695,7 +2693,7 @@ export default function WorkerScanPage() {
       {/* Error */}
       {/* Department QR confirmation — "now working in <dept>". */}
       {result.kind === "deptscan" && (
-        <div className="bg-[#F1F7F3] border-[0.5px] border-[#BFD9C8] rounded-xl p-4 text-[#2A6B4A] flex items-start gap-2">
+        <div className="bg-[#F1F7F3] border border-[#BFD9C8] rounded-xl p-4 text-[#2A6B4A] flex items-start gap-2">
           <CheckCircle2 className="h-5 w-5 mt-0.5 shrink-0" />
           <div className="min-w-0 flex-1">
             <p className="font-semibold">
@@ -2711,7 +2709,7 @@ export default function WorkerScanPage() {
       )}
 
       {result.kind === "error" && (
-        <div className="bg-[#FDF6F4] border-[0.5px] border-[#F5C5BF] rounded-xl p-4 text-[#9A3A2D] flex items-start gap-2">
+        <div className="bg-[#FDF6F4] border border-[#F5C5BF] rounded-xl p-4 text-[#9A3A2D] flex items-start gap-2">
           <AlertTriangle className="h-5 w-5 mt-0.5 shrink-0" />
           <div className="min-w-0 flex-1">
             <p className="font-semibold">{t("common.error")}</p>
@@ -2732,7 +2730,7 @@ export default function WorkerScanPage() {
           scanned sticker belongs to a department the worker is NOT currently in
           — they must scan that department's QR first. */}
       {result.kind === "deptBlock" && (
-        <div className="bg-[#FDF6F4] border-[0.5px] border-[#F5C5BF] rounded-xl p-4 text-[#9A3A2D]">
+        <div className="bg-[#FDF6F4] border border-[#F5C5BF] rounded-xl p-4 text-[#9A3A2D]">
           <div className="flex items-start gap-2">
             <AlertTriangle className="h-5 w-5 mt-0.5 shrink-0" />
             <div className="min-w-0 flex-1">
@@ -2741,14 +2739,14 @@ export default function WorkerScanPage() {
                 You are in <strong>{result.currentDept}</strong>. This sticker is
                 for <strong>{result.stickerDept}</strong>.
               </p>
-              <div className="mt-2 rounded-xl bg-[#FBF6EC] border-[0.5px] border-[#C9A961] p-2.5 text-xs leading-relaxed text-[#854F0B]">
+              <div className="mt-2 rounded-md bg-[#FAEEDA] p-2.5 text-xs leading-relaxed text-[#854F0B]">
                 Scan the <strong>{result.stickerDept}</strong> department QR first
                 to switch, then scan this sticker again.
               </div>
               <button
                 type="button"
                 onClick={() => setResult({ kind: "idle" })}
-                className="mt-3 h-9 rounded-full border-[0.5px] border-[#E7E0D4] bg-white px-4 text-sm font-semibold text-[#574A28]"
+                className="mt-3 h-9 rounded-lg border border-[#D8D2CC] bg-white px-4 text-sm font-semibold text-[#5A5550]"
               >
                 OK
               </button>
@@ -3013,20 +3011,20 @@ export default function WorkerScanPage() {
               }
             }
             return (
-              <div className="bg-white rounded-xl border-[0.5px] border-[#E7E0D4] overflow-hidden">
-                <div className="px-3.5 py-2.5 bg-[#1F1D1B] text-white">
+              <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
+                <div className="px-3 py-2 bg-[#1B2B44] text-white">
                   <p className="text-xs font-bold uppercase tracking-wide">
                     Today's completed ({pieceRows.length})
                   </p>
                 </div>
                 <div className="px-3 pb-2">
-                  <div className="grid grid-cols-[auto_1fr_auto] gap-2 py-2 text-[10px] font-bold uppercase tracking-wide text-[#8A7F73] bg-[#FAF8F4] -mx-3 px-3">
+                  <div className="grid grid-cols-[auto_1fr_auto] gap-2 py-2 text-[10px] font-bold uppercase tracking-wide text-[#8A8680] bg-[#EAF3E5] -mx-3 px-3">
                     <span>Dept</span>
                     <span>Product</span>
                     <span className="text-right">Mins</span>
                   </div>
                   {pieceRows.length === 0 ? (
-                    <div className="py-4 text-center text-xs text-[#8A7F73]">
+                    <div className="py-4 text-center text-xs text-[#8A8680]">
                       Nothing completed yet — scan one 👆
                     </div>
                   ) : (
@@ -3042,18 +3040,18 @@ export default function WorkerScanPage() {
                       return (
                         <div
                           key={r.key}
-                          className="grid grid-cols-[auto_1fr_auto] gap-2 py-2 text-sm border-t-[0.5px] border-[#E7E0D4] items-center"
+                          className="grid grid-cols-[auto_1fr_auto] gap-2 py-2 text-sm border-t border-[#F0ECE9] items-center"
                         >
-                          <span className="text-[11px] px-2 py-0.5 rounded-full border-[0.5px] border-[#E7E0D4] bg-[#FAF8F4] text-[#574A28] font-semibold whitespace-nowrap">
+                          <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#5A5550] font-semibold whitespace-nowrap">
                             {r.departmentCode}
                           </span>
                           <span
-                            className="text-xs truncate text-[#1F1D1B]"
+                            className="text-xs truncate"
                             title={`${label} · ${r.productCode} · piece ${r.pieceIdx}/${r.totalPieces}`}
                           >
                             {label}
                             {r.totalPieces > 1 && (
-                              <span className="ml-1 text-[10px] text-[#8A7F73]">
+                              <span className="ml-1 text-[10px] text-[#8A8680]">
                                 ({r.pieceIdx}/{r.totalPieces})
                               </span>
                             )}
@@ -3094,8 +3092,8 @@ function Kpi({
           ? "text-[#9A3A2D]"
           : "text-[#1F1D1B]";
   return (
-    <div className="bg-white rounded-xl p-3 border-[0.5px] border-[#E7E0D4] text-center">
-      <p className="text-[10px] uppercase tracking-wide text-[#8A7F73] font-semibold">
+    <div className="bg-white rounded-xl p-3 border border-[#D8D2CC] text-center">
+      <p className="text-[10px] uppercase tracking-wide text-[#8A8680] font-semibold">
         {label}
       </p>
       <p className={`text-2xl font-bold mt-1 ${color}`}>{value}</p>

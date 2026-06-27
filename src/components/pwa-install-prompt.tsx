@@ -15,7 +15,7 @@
 // Self-contained: no props. Mount once inside the worker layout.
 // ============================================================
 import { useEffect, useState } from "react";
-import { Bell, Download, Share, X } from "lucide-react";
+import { Bell, Download, Home, PlusSquare, Share, X } from "lucide-react";
 import { getWorkerToken, workerFetch } from "@/layouts/WorkerLayout";
 
 const DISMISS_KEY = "hookka.pwa.install.dismissed";
@@ -215,7 +215,15 @@ export default function PwaInstallPrompt() {
     if (notifBusy) return;
     setNotifBusy(true);
     try {
-      const permission = await Notification.requestPermission();
+      // Only ASK when the permission is still undecided. If it's already
+      // 'granted', skip requestPermission() entirely and go straight to the
+      // subscribe step — calling requestPermission() on an already-granted
+      // permission is a no-op (resolves 'granted' with no prompt), but skipping
+      // it makes the "never re-ask once granted" contract explicit in code.
+      const permission =
+        Notification.permission === "granted"
+          ? "granted"
+          : await Notification.requestPermission();
       if (permission !== "granted") {
         // Denied/dismissed — don't re-prompt; the browser blocks it anyway.
         dismissNotif();
@@ -272,11 +280,62 @@ export default function PwaInstallPrompt() {
             Install Hookka app
           </p>
           {iosHint ? (
-            <p className="mt-0.5 flex flex-wrap items-center gap-1 text-xs text-[#6B655C]">
-              Tap
-              <Share className="inline h-3.5 w-3.5" aria-label="Share" />
-              Share, then "Add to Home Screen".
-            </p>
+            // iOS Safari can't one-tap install — there's no beforeinstallprompt
+            // event — so the worker must add it by hand. A single sentence was
+            // easy to miss / get stuck on, so spell it out as a compact 3-step
+            // visual guide with the actual iOS glyphs (Share / Add-to-Home).
+            <div className="mt-1.5 space-y-1.5">
+              <p className="text-xs text-[#6B655C]">
+                Add it to your home screen in 3 steps:
+              </p>
+              <ol className="space-y-1.5">
+                {[
+                  {
+                    icon: <Share className="h-4 w-4" aria-hidden="true" />,
+                    text: (
+                      <>
+                        Tap the <span className="font-semibold">Share</span>{" "}
+                        button (bottom bar).
+                      </>
+                    ),
+                  },
+                  {
+                    icon: <PlusSquare className="h-4 w-4" aria-hidden="true" />,
+                    text: (
+                      <>
+                        Scroll and tap{" "}
+                        <span className="font-semibold">
+                          "Add to Home Screen"
+                        </span>
+                        .
+                      </>
+                    ),
+                  },
+                  {
+                    icon: <Home className="h-4 w-4" aria-hidden="true" />,
+                    text: (
+                      <>
+                        Open{" "}
+                        <span className="font-semibold">Hookka</span> from your
+                        home screen.
+                      </>
+                    ),
+                  },
+                ].map((step, i) => (
+                  <li key={i} className="flex items-center gap-2">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#EFEAE3] text-[11px] font-bold text-[#6B5C32]">
+                      {i + 1}
+                    </span>
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-[#6B5C32] text-white">
+                      {step.icon}
+                    </span>
+                    <span className="min-w-0 flex-1 text-xs leading-snug text-[#3F3A33]">
+                      {step.text}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </div>
           ) : (
             <p className="mt-0.5 text-xs text-[#6B655C]">
               Add it to your home screen for faster, full-screen access.

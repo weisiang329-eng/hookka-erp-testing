@@ -277,6 +277,43 @@ function mins2hrs(mins: number): string {
   return (mins / 60).toFixed(1);
 }
 
+// Passive camera-permission probe (mirrors the GPS probeLocationState on the
+// home page). navigator.permissions.query reports the current grant WITHOUT
+// showing a prompt. We use it to: (a) know we already hold the grant so we can
+// skip the prompt-explanation/UX churn, and (b) keep the call honest about what
+// is and isn't possible — getUserMedia is still required to obtain a stream, but
+// a 'granted' result means that call resolves silently (no re-prompt) on any
+// browser that persists the grant. Returns 'unsupported' where the Permissions
+// API or the 'camera' descriptor isn't available (notably iOS Safari), so the
+// caller falls through to the normal getUserMedia path unchanged.
+type CameraPermState = "granted" | "denied" | "prompt" | "unsupported";
+async function probeCameraState(): Promise<CameraPermState> {
+  try {
+    const perms = (
+      navigator as unknown as {
+        permissions?: {
+          query?: (d: { name: string }) => Promise<{ state: string }>;
+        };
+      }
+    ).permissions;
+    if (!perms?.query) return "unsupported";
+    // The 'camera' descriptor is not in every browser's PermissionName union —
+    // querying it can throw (TypeError) where unsupported; treat that as
+    // 'unsupported' rather than an error.
+    const status = await perms.query({ name: "camera" });
+    if (
+      status.state === "granted" ||
+      status.state === "denied" ||
+      status.state === "prompt"
+    ) {
+      return status.state;
+    }
+    return "unsupported";
+  } catch {
+    return "unsupported";
+  }
+}
+
 export default function WorkerScanPage() {
   const t = useT();
   const [params] = useSearchParams();
@@ -1151,9 +1188,27 @@ export default function WorkerScanPage() {
   }, [torchOn]);
 
   const startLiveScan = useCallback(async () => {
-    // Can't start twice
+    // Can't start twice — and don't redundantly re-acquire. If a live stream is
+    // already held (the scanner is open, or a previous open didn't fully tear
+    // down), reuse it instead of calling getUserMedia again. A second
+    // getUserMedia is the redundant request that some browsers surface as a
+    // fresh permission churn, so we avoid it whenever we still own a stream.
     if (liveScanning) return;
+    if (streamRef.current && streamRef.current.getVideoTracks().some((tr) => tr.readyState === "live")) {
+      setLiveScanning(true);
+      return;
+    }
     setResult({ kind: "idle" });
+    // Passive pre-check: if the Permissions API says the camera is already
+    // granted, getUserMedia below resolves WITHOUT a prompt — we still must
+    // call it to obtain the stream, but we know not to expect (or explain) a
+    // prompt. A 'denied' result means getUserMedia will reject instantly with
+    // NotAllowedError (no prompt either) — handled by the catch below. We do
+    // NOT branch behaviour on the result (getUserMedia is required regardless);
+    // the probe just keeps the flow honest and avoids any prompt-explanation UX
+    // firing when the grant already exists. Unsupported (iOS Safari) → fall
+    // through unchanged.
+    void probeCameraState();
     try {
       // Prefer the rear camera. Ask for a sharp feed (1080p) — small or
       // arm's-length QR stickers need the extra detail to lock on. The

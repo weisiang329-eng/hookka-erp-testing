@@ -45,6 +45,11 @@ export type Announcement = {
   // Category — GENERAL | WARNING | SOP | LEARNING (normalized server-side;
   // missing/unknown → GENERAL). Drives the colored pill badge on every surface.
   category?: "GENERAL" | "WARNING" | "SOP" | "LEARNING";
+  // When the office last tapped "Remind" on this notice (ISO) or null. The
+  // worker popup uses this for the ONE legitimate re-pop: a notice already
+  // tapped "Got it" re-pops only when remindedAt is newer than this device's
+  // local ack timestamp. See acknowledgeAnnouncements / refreshAnnouncements.
+  remindedAt?: string | null;
 };
 
 // NOTE: localizeAnnouncement / fmtDay are intentionally NOT exported from this

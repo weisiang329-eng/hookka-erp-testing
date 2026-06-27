@@ -397,6 +397,14 @@ function toPublic(r: AnnouncementRow) {
     expiresAt: r.expiresAt ?? r.expires_at ?? null,
     createdAt: r.createdAt ?? r.created_at ?? null,
     createdBy: r.createdBy ?? r.created_by ?? null,
+    // When the office last tapped "Remind" on this notice (or null). The worker
+    // popup gate uses this to decide the ONE legitimate re-pop: a notice the
+    // worker already tapped "Got it" on re-pops only when remindedAt is newer
+    // than the worker's local ack timestamp. Surfacing it lets the device make
+    // that call itself, so a fire-and-forget ack POST that lags or fails can no
+    // longer cause a spurious re-pop (the device never deletes its own ack just
+    // because the server's ackedIds hasn't caught up).
+    remindedAt: r.remindedAt ?? r.reminded_at ?? null,
     // All four translations (or null). The worker FE picks the one matching
     // the worker's chosen portal language, falling back to title/body above.
     translations: readTranslations(r),

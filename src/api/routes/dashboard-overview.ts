@@ -137,13 +137,10 @@ app.get("/", async (c) => {
     }
   }
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v21:${period}`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v22:${period}`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const monthStart = fmtISO(
-      new Date(today.getFullYear(), today.getMonth(), 1),
-    );
     // The two flow KPIs (Sales + Delivered) reflect the SELECTED period:
     //   - a specific month  → that month's total (reconstructible from the
     //     SO date / DO delivered date; all source rows load unfiltered),
@@ -348,9 +345,12 @@ app.get("/", async (c) => {
         .first<{ n: number }>(),
       db
         .prepare(
-          "SELECT COALESCE(SUM(totalSen),0) AS v FROM purchase_orders WHERE orgId = ? AND status != 'CANCELLED' AND orderDate >= ?",
+          // Owner 2026-06-27: scope spend to the SELECTED period (was hardcoded
+          // to the current calendar month via monthStart, so it ignored the
+          // dashboard period selector — June's spend showed even on 2026-04/05).
+          `SELECT COALESCE(SUM(totalSen),0) AS v FROM purchase_orders WHERE orgId = ? AND status != 'CANCELLED'${kpiAllTime ? "" : ` AND substr(orderDate::text, 1, 7) = '${period}'`}`,
         )
-        .bind(orgId, monthStart)
+        .bind(orgId)
         .first<{ v: number }>(),
       db
         .prepare(
@@ -387,7 +387,7 @@ app.get("/", async (c) => {
           // Top Sellers). Double quotes make Postgres keep the exact name.
           `SELECT supplierName AS name, COALESCE(SUM(totalSen),0) AS "spendSen"
              FROM purchase_orders
-            WHERE orgId = ? AND status != 'CANCELLED'
+            WHERE orgId = ? AND status != 'CANCELLED'${kpiAllTime ? "" : ` AND substr(orderDate::text, 1, 7) = '${period}'`}
             GROUP BY supplierName
             ORDER BY COALESCE(SUM(totalSen),0) DESC
             LIMIT 5`,

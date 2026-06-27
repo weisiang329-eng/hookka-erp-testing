@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Routes, ScrollRestoration, useLocation } from "react-router-dom";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
-import PortalParticles from "@/components/portal-particles";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { Breadcrumbs } from "@/components/layout/breadcrumbs";
@@ -149,10 +148,6 @@ export default function DashboardLayout() {
     <ToastProvider>
       <NewVersionWatcher />
       <div className="h-full">
-        {/* Subtle gold "snowflake" drift behind everything — owner 2026-06-27.
-            z-0 + pointer-events-none; the content wrapper below is z-10 so the
-            flecks only show in the paper gaps between (opaque) cards. */}
-        <PortalParticles />
         <Sidebar
           collapsed={isMobile ? false : sidebarCollapsed}
           onToggleCollapsed={toggleSidebar}
@@ -160,7 +155,7 @@ export default function DashboardLayout() {
           onMobileClose={closeMobileNav}
         />
         {/* Full-width on phones (no rail); rail-padded at md+. */}
-        <div className={`relative z-10 pl-0 ${sidebarCollapsed ? "md:pl-14" : "md:pl-60"} transition-all duration-300`}>
+        <div className={`pl-0 ${sidebarCollapsed ? "md:pl-14" : "md:pl-60"} transition-all duration-300`}>
           <Topbar />
           <Breadcrumbs />
           {/* Extra bottom padding on phones so content clears the bottom nav. */}

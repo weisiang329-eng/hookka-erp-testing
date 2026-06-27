@@ -2215,9 +2215,21 @@ export default function DashboardBPage() {
                           <th className="font-medium pb-1.5">Fabric</th>
                           <th className="font-medium pb-1.5 text-right">
                             {fabMode === "next" ? "Next 30d" : "Used"}
+                            {/* Next-30d is a rolling window anchored to TODAY, not
+                                the selected month — tag it live so a past-month
+                                view isn't misread (owner 2026-06-27). "Used" IS
+                                month-scoped, so it stays untagged. */}
+                            {fabMode === "next" && (
+                              <span className="ml-1 text-[8px] uppercase tracking-wide text-[#C9A961]">
+                                live
+                              </span>
+                            )}
                           </th>
                           <th className="font-medium pb-1.5 text-right">
                             Past 30d
+                            <span className="ml-1 text-[8px] uppercase tracking-wide text-[#C9A961]">
+                              live
+                            </span>
                           </th>
                           <th className="font-medium pb-1.5 text-right">
                             Avg buy

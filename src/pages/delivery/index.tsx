@@ -1012,6 +1012,19 @@ export default function DeliveryPage() {
   useEffect(() => {
     customersDataRef.current = customersData;
   }, [customersData]);
+  // Open-DO customer email, from STATE (not the ref) so the detail "Resend
+  // invoice email" button reads it WITHOUT a ref-access-during-render (the
+  // react-hooks/refs lint). Empty when no DO is open / no email on file.
+  const detailEmail = useMemo(
+    () =>
+      detailDO
+        ? (
+            customersData.find((cu) => cu.id === detailDO.customerId)?.email ??
+            ""
+          ).trim()
+        : "",
+    [detailDO, customersData],
+  );
 
   // ----- Inline Expected DD editing -----
   // Per-cell draft + edit state now lives inside EditableExpectedDD (no naked
@@ -6326,38 +6339,33 @@ export default function DeliveryPage() {
                       file (with a "no email on file" hint), since there is
                       nowhere to send it. */}
                   {(detailDO.status === "DELIVERED" ||
-                    detailDO.status === "INVOICED") &&
-                    (() => {
-                      const email = customerEmailFor(detailDO);
-                      return (
-                        <Button
-                          variant="outline"
-                          disabled={!email || resendingId === detailDO.id}
-                          title={
-                            email
-                              ? `Re-send the invoice email to ${email}`
-                              : "No email on file — add the PIC Email on the customer"
-                          }
-                          onClick={() =>
-                            resendCustomerNotice(detailDO, "DELIVERED")
-                          }
-                        >
-                          {resendingId === detailDO.id ? (
-                            <>
-                              <RefreshCw className="h-4 w-4 animate-spin" />{" "}
-                              Sending...
-                            </>
-                          ) : (
-                            <>
-                              <Mail className="h-4 w-4" />{" "}
-                              {email
-                                ? "Resend invoice email"
-                                : "No email on file"}
-                            </>
-                          )}
-                        </Button>
-                      );
-                    })()}
+                    detailDO.status === "INVOICED") && (
+                    <Button
+                      variant="outline"
+                      disabled={!detailEmail || resendingId === detailDO.id}
+                      title={
+                        detailEmail
+                          ? `Re-send the invoice email to ${detailEmail}`
+                          : "No email on file — add the PIC Email on the customer"
+                      }
+                      onClick={() =>
+                        resendCustomerNotice(detailDO, "DELIVERED")
+                      }
+                    >
+                      {resendingId === detailDO.id ? (
+                        <>
+                          <RefreshCw className="h-4 w-4 animate-spin" /> Sending...
+                        </>
+                      ) : (
+                        <>
+                          <Mail className="h-4 w-4" />{" "}
+                          {detailEmail
+                            ? "Resend invoice email"
+                            : "No email on file"}
+                        </>
+                      )}
+                    </Button>
+                  )}
                   <Button variant="outline" onClick={() => setDetailDO(null)}>
                     Close
                   </Button>

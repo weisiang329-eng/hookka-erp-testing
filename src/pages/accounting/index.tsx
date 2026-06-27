@@ -2524,12 +2524,20 @@ function JournalsTab({
         onPrint={() => printVouchers(selectedJvs.map(buildJvVoucher))}
         exportName="journal-vouchers"
         exportAoa={() => [
-          ["Entry No", "Date", "Description", "Debit (RM)", "Credit (RM)"],
-          ...selectedJvs.map((r) => {
-            const dr = r.lines.reduce((s, l) => s + (Number(l.debitSen) || 0), 0);
-            const cr = r.lines.reduce((s, l) => s + (Number(l.creditSen) || 0), 0);
-            return [r.entryNo ?? r.id, r.date ?? "", r.description ?? "", (dr / 100).toFixed(2), (cr / 100).toFixed(2)];
-          }),
+          ["Entry No", "Date", "Description", "Status", "Account Code", "Account Name", "Line Description", "Debit (RM)", "Credit (RM)"],
+          ...selectedJvs.flatMap((r) =>
+            r.lines.map((l) => [
+              r.entryNo ?? r.id,
+              r.date ?? "",
+              r.description ?? "",
+              r.status ?? "",
+              l.accountCode,
+              l.accountName ?? "",
+              l.description ?? "",
+              l.debitSen ? (Number(l.debitSen) / 100).toFixed(2) : "",
+              l.creditSen ? (Number(l.creditSen) / 100).toFixed(2) : "",
+            ]),
+          ),
         ]}
       />
 
@@ -6585,8 +6593,21 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
         onPrint={() => printVouchers(pvSel.selectedRows.map((r) => buildPvVoucher(r, accounts)))}
         exportName="expense-vouchers"
         exportAoa={() => [
-          ["PV No", "Date", "Pay To", "Amount (RM)", "Status"],
-          ...pvSel.selectedRows.map((r) => [r.pvNo ?? r.id, r.date ?? "", r.payee ?? "", (Number(r.totalSen ?? 0) / 100).toFixed(2), r.status ?? ""]),
+          ["PV No", "Date", "Pay To", "Paid From", "Status", "Account Code", "Account Name", "Line Description", "Amount (RM)"],
+          ...pvSel.selectedRows.flatMap((r) => {
+            const bank = r.payFrom || r.accrualAccount || "";
+            return r.lines.map((l) => [
+              r.pvNo ?? r.id,
+              r.date ?? "",
+              r.payee ?? "",
+              bank ? accountLabel(accounts, bank) : "",
+              r.status ?? "",
+              l.accountCode,
+              accounts.find((a) => a.code === l.accountCode)?.name ?? "",
+              l.description ?? "",
+              (Number(l.amountSen ?? 0) / 100).toFixed(2),
+            ]);
+          }),
         ]}
       />
 
@@ -6903,8 +6924,20 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
         onPrint={() => printVouchers(orSel.selectedRows.map((r) => buildOrVoucher(r, accounts)))}
         exportName="official-receipts"
         exportAoa={() => [
-          ["OR No", "Date", "Received From", "Amount (RM)", "Status"],
-          ...orSel.selectedRows.map((r) => [r.orNo ?? r.id, r.date ?? "", r.receivedFrom ?? "", (Number(r.totalSen ?? 0) / 100).toFixed(2), r.status ?? ""]),
+          ["OR No", "Date", "Received From", "Deposited To", "Status", "Account Code", "Account Name", "Line Description", "Amount (RM)"],
+          ...orSel.selectedRows.flatMap((r) =>
+            r.lines.map((l) => [
+              r.orNo ?? r.id,
+              r.date ?? "",
+              r.receivedFrom ?? "",
+              r.payTo ? accountLabel(accounts, r.payTo) : "",
+              r.status ?? "",
+              l.accountCode,
+              accounts.find((a) => a.code === l.accountCode)?.name ?? "",
+              l.description ?? "",
+              (Number(l.amountSen ?? 0) / 100).toFixed(2),
+            ]),
+          ),
         ]}
       />
 

@@ -8,6 +8,15 @@
 //
 // The API's /login returns `needsSetup: true` (HTTP 200) when a
 // worker has no PIN on record — we flip to setup mode on that.
+//
+// 2026-06-27 (owner: "logo 100% 一样, 全套新设计"): the SHELL + LOGO
+// are now byte-identical to the ERP desktop login (src/pages/login.tsx)
+// — same #1F1D1B grid background, glass card, brightness(0) invert(1)
+// logo, gold gradient button + btn-shimmer, and the orbiting right-side
+// brand panel. We render a `fixed inset-0` overlay so this page breaks
+// out of WorkerLayout's max-w-md / black top-bar chrome and fills the
+// whole screen exactly like the desktop login. ALL worker behaviour
+// (3 modes, handlers, finalizeLogin, every t() i18n call) is unchanged.
 // ============================================================
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -226,196 +235,538 @@ export default function WorkerLoginPage() {
   }
 
   // ----- Render -----
+  // Heading + subtitle text per mode (all via t()).
+  const heading =
+    mode === "login"
+      ? t("login.title")
+      : mode === "setup"
+        ? t("login.setupTitle")
+        : t("login.resetTitle");
+  const subtitle =
+    mode === "setup"
+      ? t("login.setupDesc")
+      : mode === "reset"
+        ? t("login.phoneLast4")
+        : t("brand.title");
+
   return (
-    <div className="pt-6 pb-8">
-      <h1 className="text-lg font-bold mb-0.5">
-        {mode === "login"
-          ? t("login.title")
-          : mode === "setup"
-            ? t("login.setupTitle")
-            : t("login.resetTitle")}
-      </h1>
-      {mode === "setup" && (
-        <p className="text-sm text-[#5A5550] mb-6">{t("login.setupDesc")}</p>
-      )}
-      {mode === "reset" && (
-        <p className="text-sm text-[#5A5550] mb-6">{t("login.phoneLast4")}</p>
-      )}
-      {mode === "login" && <div className="mb-4" />}
+    <>
+      <style>{`
+        @keyframes shimmer {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
+        }
+        @keyframes orbit1 {
+          0% { transform: rotate(0deg) translateX(150px) rotate(0deg); }
+          100% { transform: rotate(360deg) translateX(150px) rotate(-360deg); }
+        }
+        @keyframes orbit2 {
+          0% { transform: rotate(0deg) translateX(225px) rotate(0deg); }
+          100% { transform: rotate(360deg) translateX(225px) rotate(-360deg); }
+        }
+        @keyframes orbit3 {
+          0% { transform: rotate(0deg) translateX(300px) rotate(0deg); }
+          100% { transform: rotate(360deg) translateX(300px) rotate(-360deg); }
+        }
+        @keyframes blink {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0; }
+        }
+        .btn-shimmer {
+          position: relative;
+          overflow: hidden;
+        }
+        .btn-shimmer::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          background: linear-gradient(
+            90deg,
+            transparent,
+            rgba(255,255,255,0.15),
+            transparent
+          );
+          transform: translateX(-100%);
+        }
+        .btn-shimmer:hover::after {
+          animation: shimmer 1.5s ease-in-out;
+        }
+        .login-input:focus {
+          border-color: #6B5C32 !important;
+          box-shadow: 0 0 0 3px rgba(107,92,50,0.2);
+          outline: none;
+        }
+        .orbit-dot {
+          width: 6px;
+          height: 6px;
+          background: #6B5C32;
+          border-radius: 50%;
+          position: absolute;
+          top: 50%;
+          left: 50%;
+        }
+        .login-cta {
+          background: linear-gradient(135deg, #6B5C32, #8B7A4E);
+          padding: 14px;
+          font-size: 15px;
+        }
+        .pin-key {
+          width: 56px;
+          height: 56px;
+          border-radius: 9999px;
+          font-size: 20px;
+          font-weight: 600;
+          color: #fff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: all .15s ease;
+          border: 1px solid rgba(107,92,50,.3);
+          background: rgba(255,255,255,.05);
+        }
+        .pin-key:active {
+          background: linear-gradient(135deg, #6B5C32, #8B7A4E);
+          transform: scale(.94);
+        }
+      `}</style>
 
-      {mode === "login" && (
-        <form onSubmit={handleLogin} className="space-y-4">
-          <Field label={t("login.empNo")}>
-            <input
-              type="text"
-              autoComplete="username"
-              value={empNo}
-              onChange={(e) => setEmpNo(e.target.value)}
-              className={inputCls}
-              placeholder="EMP-0001"
-            />
-          </Field>
-          <Field label={t("login.pin")}>
-            <input
-              type="password"
-              inputMode="numeric"
-              pattern="\d{6}"
-              maxLength={6}
-              value={pin}
-              onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-              className={inputCls}
-              placeholder="••••••"
-            />
-          </Field>
-          {error && <p className="text-sm text-[#9A3A2D]">{error}</p>}
-          <button type="submit" disabled={loading} className={btnPrimary}>
-            {loading ? t("common.loading") : t("login.submit")}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setMode("reset");
-              setPin("");
-              setPin2("");
-              setError(null);
+      {/* fixed overlay so we break out of WorkerLayout's max-w-md / black
+          top-bar chrome and fill the screen exactly like the desktop login */}
+      <div className="fixed inset-0 z-50 flex min-h-screen overflow-auto">
+        {/* Left Panel - Login Form */}
+        <div
+          className="flex w-full lg:w-1/2 items-center justify-center p-8 relative"
+          style={{
+            backgroundColor: "#1F1D1B",
+            backgroundImage:
+              "repeating-linear-gradient(0deg, rgba(107,92,50,.06) 0 1px, transparent 1px 60px), repeating-linear-gradient(90deg, rgba(107,92,50,.06) 0 1px, transparent 1px 60px)",
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl p-10"
+            style={{
+              backgroundColor: "rgba(255,255,255,.04)",
+              border: "1px solid rgba(107,92,50,.2)",
+              backdropFilter: "blur(24px)",
+              WebkitBackdropFilter: "blur(24px)",
             }}
-            className="w-full text-sm text-[#6B5C32] underline pt-2"
           >
-            {t("login.forgotPin")}
-          </button>
-        </form>
-      )}
+            {/* Logo Row */}
+            <div className="mb-10">
+              <img
+                src="/hookka-logo.png"
+                alt="Hookka 合家"
+                className="h-10 w-auto"
+                style={{ filter: "brightness(0) invert(1)" }}
+              />
+            </div>
 
-      {mode === "setup" && (
-        <form onSubmit={handleSetup} className="space-y-4">
-          <Field label={t("login.empNo")}>
-            <input
-              type="text"
-              value={empNo}
-              readOnly
-              className={`${inputCls} bg-[#F0ECE9]`}
-            />
-          </Field>
-          <Field label={t("login.newPin")}>
-            <input
-              type="password"
-              inputMode="numeric"
-              pattern="\d{6}"
-              maxLength={6}
-              value={pin}
-              onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-              className={inputCls}
-              placeholder="••••••"
-            />
-          </Field>
-          <Field label={t("login.confirmPin")}>
-            <input
-              type="password"
-              inputMode="numeric"
-              pattern="\d{6}"
-              maxLength={6}
-              value={pin2}
-              onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
-              className={inputCls}
-              placeholder="••••••"
-            />
-          </Field>
-          {error && <p className="text-sm text-[#9A3A2D]">{error}</p>}
-          <button type="submit" disabled={loading} className={btnPrimary}>
-            {loading ? t("common.loading") : t("login.submit")}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setMode("login");
-              setPin("");
-              setPin2("");
-              setError(null);
-            }}
-            className="w-full text-sm text-[#5A5550] pt-2"
-          >
-            {t("common.back")}
-          </button>
-        </form>
-      )}
+            {/* Title */}
+            <h2 className="text-2xl font-bold text-white mb-1">{heading}</h2>
+            <p
+              className="mb-8"
+              style={{ color: "rgba(255,255,255,.45)", fontSize: "13px" }}
+            >
+              {subtitle}
+            </p>
 
-      {mode === "reset" && (
-        <form onSubmit={handleReset} className="space-y-4">
-          <Field label={t("login.empNo")}>
-            <input
-              type="text"
-              value={empNo}
-              onChange={(e) => setEmpNo(e.target.value)}
-              className={inputCls}
-              placeholder="EMP-0001"
-            />
-          </Field>
-          <Field label={t("login.phoneLast4")}>
-            <input
-              type="text"
-              inputMode="numeric"
-              pattern="\d{4}"
-              maxLength={4}
-              value={phoneLast4}
-              onChange={(e) =>
-                setPhoneLast4(e.target.value.replace(/\D/g, ""))
-              }
-              className={inputCls}
-              placeholder="1234"
-            />
-          </Field>
-          <Field label={t("login.newPin")}>
-            <input
-              type="password"
-              inputMode="numeric"
-              pattern="\d{6}"
-              maxLength={6}
-              value={pin}
-              onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-              className={inputCls}
-            />
-          </Field>
-          <Field label={t("login.confirmPin")}>
-            <input
-              type="password"
-              inputMode="numeric"
-              pattern="\d{6}"
-              maxLength={6}
-              value={pin2}
-              onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
-              className={inputCls}
-            />
-          </Field>
-          {error && <p className="text-sm text-[#9A3A2D]">{error}</p>}
-          <button type="submit" disabled={loading} className={btnPrimary}>
-            {loading ? t("common.loading") : t("login.resetSubmit")}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setMode("login");
-              setPin("");
-              setPin2("");
-              setPhoneLast4("");
-              setError(null);
+            {/* ----- mode = login ----- */}
+            {mode === "login" && (
+              <form onSubmit={handleLogin} className="space-y-5">
+                <FieldLabel label={t("login.empNo")}>
+                  <input
+                    type="text"
+                    autoComplete="username"
+                    value={empNo}
+                    onChange={(e) => setEmpNo(e.target.value)}
+                    className={inputCls}
+                    style={inputStyle}
+                    placeholder="EMP-0001"
+                  />
+                </FieldLabel>
+                <FieldLabel label={t("login.pin")}>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    pattern="\d{6}"
+                    maxLength={6}
+                    value={pin}
+                    onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
+                    className={inputCls}
+                    style={inputStyle}
+                    placeholder="••••••"
+                  />
+                </FieldLabel>
+
+                {/* Numeric PIN keypad — circular gold keys feed the same
+                    `pin` state. Pure convenience on phones; the input above
+                    still works for anyone who prefers typing. */}
+                <PinPad
+                  onDigit={(d) =>
+                    setPin((p) => (p.length >= 6 ? p : p + d))
+                  }
+                  onDelete={() => setPin((p) => p.slice(0, -1))}
+                />
+
+                {error && <ErrorBanner>{error}</ErrorBanner>}
+
+                <button type="submit" disabled={loading} className={btnPrimary}>
+                  {loading ? t("common.loading") : t("login.submit")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode("reset");
+                    setPin("");
+                    setPin2("");
+                    setError(null);
+                  }}
+                  className="w-full text-sm pt-2 hover:underline bg-transparent border-0 cursor-pointer"
+                  style={{ color: "#8B7A4E" }}
+                >
+                  {t("login.forgotPin")}
+                </button>
+              </form>
+            )}
+
+            {/* ----- mode = setup ----- */}
+            {mode === "setup" && (
+              <form onSubmit={handleSetup} className="space-y-5">
+                <FieldLabel label={t("login.empNo")}>
+                  <input
+                    type="text"
+                    value={empNo}
+                    readOnly
+                    className={inputCls}
+                    style={{ ...inputStyle, opacity: 0.7 }}
+                  />
+                </FieldLabel>
+                <FieldLabel label={t("login.newPin")}>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    pattern="\d{6}"
+                    maxLength={6}
+                    value={pin}
+                    onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
+                    className={inputCls}
+                    style={inputStyle}
+                    placeholder="••••••"
+                  />
+                </FieldLabel>
+                <FieldLabel label={t("login.confirmPin")}>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    pattern="\d{6}"
+                    maxLength={6}
+                    value={pin2}
+                    onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
+                    className={inputCls}
+                    style={inputStyle}
+                    placeholder="••••••"
+                  />
+                </FieldLabel>
+                {error && <ErrorBanner>{error}</ErrorBanner>}
+                <button type="submit" disabled={loading} className={btnPrimary}>
+                  {loading ? t("common.loading") : t("login.submit")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode("login");
+                    setPin("");
+                    setPin2("");
+                    setError(null);
+                  }}
+                  className="w-full text-sm pt-2 bg-transparent border-0 cursor-pointer"
+                  style={{ color: "rgba(255,255,255,.45)" }}
+                >
+                  {t("common.back")}
+                </button>
+              </form>
+            )}
+
+            {/* ----- mode = reset ----- */}
+            {mode === "reset" && (
+              <form onSubmit={handleReset} className="space-y-5">
+                <FieldLabel label={t("login.empNo")}>
+                  <input
+                    type="text"
+                    value={empNo}
+                    onChange={(e) => setEmpNo(e.target.value)}
+                    className={inputCls}
+                    style={inputStyle}
+                    placeholder="EMP-0001"
+                  />
+                </FieldLabel>
+                <FieldLabel label={t("login.phoneLast4")}>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="\d{4}"
+                    maxLength={4}
+                    value={phoneLast4}
+                    onChange={(e) =>
+                      setPhoneLast4(e.target.value.replace(/\D/g, ""))
+                    }
+                    className={inputCls}
+                    style={inputStyle}
+                    placeholder="1234"
+                  />
+                </FieldLabel>
+                <FieldLabel label={t("login.newPin")}>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    pattern="\d{6}"
+                    maxLength={6}
+                    value={pin}
+                    onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
+                    className={inputCls}
+                    style={inputStyle}
+                    placeholder="••••••"
+                  />
+                </FieldLabel>
+                <FieldLabel label={t("login.confirmPin")}>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    pattern="\d{6}"
+                    maxLength={6}
+                    value={pin2}
+                    onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
+                    className={inputCls}
+                    style={inputStyle}
+                    placeholder="••••••"
+                  />
+                </FieldLabel>
+                {error && <ErrorBanner>{error}</ErrorBanner>}
+                <button type="submit" disabled={loading} className={btnPrimary}>
+                  {loading ? t("common.loading") : t("login.resetSubmit")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode("login");
+                    setPin("");
+                    setPin2("");
+                    setPhoneLast4("");
+                    setError(null);
+                  }}
+                  className="w-full text-sm pt-2 bg-transparent border-0 cursor-pointer"
+                  style={{ color: "rgba(255,255,255,.45)" }}
+                >
+                  {t("common.back")}
+                </button>
+              </form>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div
+            className="absolute bottom-6 left-0 right-0 text-center"
+            style={{
+              color: "rgba(255,255,255,.25)",
+              fontSize: "11px",
+              letterSpacing: "0.03em",
             }}
-            className="w-full text-sm text-[#5A5550] pt-2"
           >
-            {t("common.back")}
-          </button>
-        </form>
-      )}
-    </div>
+            HOOKKA INDUSTRIES SDN BHD &bull; 202501060540 (1661946-X)
+          </div>
+        </div>
+
+        {/* Right Panel - Brand Side */}
+        <div
+          className="hidden lg:flex lg:w-1/2 items-center justify-center relative overflow-hidden"
+          style={{
+            backgroundColor: "#1F1D1B",
+            backgroundImage:
+              "radial-gradient(ellipse at center, rgba(107,92,50,.08) 0%, transparent 70%)",
+          }}
+        >
+          {/* Orbit Rings */}
+          <div
+            className="absolute rounded-full"
+            style={{
+              width: "300px",
+              height: "300px",
+              border: "1px solid rgba(107,92,50,.08)",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+            }}
+          />
+          <div
+            className="absolute rounded-full"
+            style={{
+              width: "450px",
+              height: "450px",
+              border: "1px solid rgba(107,92,50,.08)",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+            }}
+          />
+          <div
+            className="absolute rounded-full"
+            style={{
+              width: "600px",
+              height: "600px",
+              border: "1px dashed rgba(107,92,50,.08)",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+            }}
+          />
+
+          {/* Orbit Dots */}
+          <div
+            className="absolute"
+            style={{ top: "50%", left: "50%", width: 0, height: 0 }}
+          >
+            <div
+              className="orbit-dot"
+              style={{ animation: "orbit1 12s linear infinite" }}
+            />
+            <div
+              className="orbit-dot"
+              style={{ animation: "orbit2 18s linear infinite reverse" }}
+            />
+            <div
+              className="orbit-dot"
+              style={{ animation: "orbit3 25s linear infinite" }}
+            />
+          </div>
+
+          {/* Center Content */}
+          <div className="relative z-10 flex flex-col items-center text-center">
+            <img
+              src="/hookka-logo.png"
+              alt="Hookka 合家"
+              className="mb-6"
+              style={{
+                height: "140px",
+                width: "auto",
+                filter: "brightness(0) invert(1)",
+              }}
+            />
+
+            <p
+              className="uppercase mb-6"
+              style={{ color: "#8B7A4E", fontSize: "13px", letterSpacing: "4px" }}
+            >
+              Manufacturing Intelligence Platform
+            </p>
+
+            <div
+              className="mb-6"
+              style={{
+                width: "60px",
+                height: "1px",
+                background:
+                  "linear-gradient(90deg, transparent, #6B5C32, transparent)",
+              }}
+            />
+
+            <div
+              className="px-4 py-1.5 rounded-full"
+              style={{
+                border: "1px solid rgba(107,92,50,.4)",
+                color: "#8B7A4E",
+                fontSize: "11px",
+                letterSpacing: "3px",
+              }}
+            >
+              INDUSTRY 4.0
+            </div>
+          </div>
+
+          <div
+            className="absolute"
+            style={{
+              top: "24px",
+              left: "24px",
+              color: "rgba(107,92,50,.4)",
+              fontSize: "10px",
+              fontFamily: "'Courier New', monospace",
+              letterSpacing: "0.08em",
+            }}
+          >
+            HOOKKA INDUSTRIES
+          </div>
+
+          <div
+            className="absolute flex items-center gap-2"
+            style={{
+              top: "24px",
+              right: "24px",
+              color: "rgba(107,92,50,.4)",
+              fontSize: "10px",
+              fontFamily: "'Courier New', monospace",
+              letterSpacing: "0.08em",
+            }}
+          >
+            <span
+              className="inline-block rounded-full"
+              style={{
+                width: "6px",
+                height: "6px",
+                backgroundColor: "#22c55e",
+                animation: "blink 2s ease-in-out infinite",
+              }}
+            />
+            SYSTEM ONLINE
+          </div>
+
+          <div
+            className="absolute"
+            style={{
+              bottom: "24px",
+              left: "24px",
+              color: "rgba(107,92,50,.4)",
+              fontSize: "10px",
+              fontFamily: "'Courier New', monospace",
+              letterSpacing: "0.08em",
+            }}
+          >
+            ERP v2.0 // 2026
+          </div>
+
+          <div
+            className="absolute"
+            style={{
+              bottom: "24px",
+              right: "24px",
+              color: "rgba(107,92,50,.4)",
+              fontSize: "10px",
+              fontFamily: "'Courier New', monospace",
+              letterSpacing: "0.08em",
+            }}
+          >
+            ISO 9001:2015
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
-// ----- tiny UI helpers -----
+// ----- tiny UI helpers (re-skinned to match the desktop login) -----
 const inputCls =
-  "w-full h-12 px-3 rounded border border-[#D8D2CC] bg-white text-base focus:outline-none focus:ring-2 focus:ring-[#6B5C32] focus:border-[#6B5C32]";
+  "login-input w-full rounded-lg px-4 py-3 text-white transition-all duration-200";
+const inputStyle: React.CSSProperties = {
+  backgroundColor: "rgba(255,255,255,.06)",
+  border: "1.5px solid rgba(107,92,50,.3)",
+  fontSize: "14px",
+};
 const btnPrimary =
-  "w-full h-12 rounded bg-[#6B5C32] hover:bg-[#5a4d2a] disabled:opacity-60 text-white font-semibold text-base transition-colors";
+  "login-cta btn-shimmer w-full rounded-lg font-semibold text-white transition-all duration-200 hover:opacity-90 disabled:opacity-50";
 
-function Field({
+function FieldLabel({
   label,
   children,
 }: {
@@ -423,9 +774,72 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <label className="block">
-      <div className="text-sm font-medium text-[#5A5550] mb-1.5">{label}</div>
+    <div>
+      <label
+        className="block mb-2 uppercase font-medium"
+        style={{
+          color: "rgba(255,255,255,.5)",
+          fontSize: "12px",
+          letterSpacing: "0.05em",
+        }}
+      >
+        {label}
+      </label>
       {children}
-    </label>
+    </div>
+  );
+}
+
+function ErrorBanner({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      className="rounded-lg px-4 py-3 text-sm"
+      style={{
+        backgroundColor: "rgba(220, 38, 38, 0.1)",
+        border: "1px solid rgba(220, 38, 38, 0.3)",
+        color: "#FCA5A5",
+      }}
+      role="alert"
+    >
+      {children}
+    </div>
+  );
+}
+
+// Numeric keypad for fast PIN entry on a phone. Buttons are type="button"
+// so they never submit the form; they only mutate the shared `pin` state.
+function PinPad({
+  onDigit,
+  onDelete,
+}: {
+  onDigit: (d: string) => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="grid grid-cols-3 gap-3 justify-items-center">
+      {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((d) => (
+        <button
+          key={d}
+          type="button"
+          className="pin-key"
+          onClick={() => onDigit(d)}
+        >
+          {d}
+        </button>
+      ))}
+      <span />
+      <button type="button" className="pin-key" onClick={() => onDigit("0")}>
+        0
+      </button>
+      <button
+        type="button"
+        className="pin-key"
+        onClick={onDelete}
+        aria-label="Delete"
+        style={{ fontSize: "16px" }}
+      >
+        ⌫
+      </button>
+    </div>
   );
 }

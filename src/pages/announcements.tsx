@@ -156,7 +156,7 @@ function ReadReceiptPanel({
 }: {
   announcement: Announcement;
   onFlash: (msg: string) => void;
-  onRemind: () => Promise<number | null>;
+  onRemind: (scope: "all" | "unacked") => Promise<number | null>;
 }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<AcksData | null>(null);
@@ -185,17 +185,21 @@ function ReadReceiptPanel({
     if (next) await fetchAcks();
   }
 
-  async function handleRemind() {
+  async function handleRemind(scope: "all" | "unacked") {
     setReminding(true);
     try {
-      const count = await onRemind();
+      const count = await onRemind(scope);
       if (count != null) {
         onFlash(
-          count === 0
-            ? "Everyone has acknowledged — no one to remind"
-            : `Reminder set — it will re-pop for ${count} un-acknowledged ${
+          scope === "all"
+            ? `Reminder set — it will re-pop for all ${count} ${
                 count === 1 ? "worker" : "workers"
-              }`,
+              }`
+            : count === 0
+              ? "Everyone has acknowledged — no one to remind"
+              : `Reminder set — it will re-pop for ${count} un-acknowledged ${
+                  count === 1 ? "worker" : "workers"
+                }`,
         );
       }
       // Refresh the split if the panel is open (counts are unchanged by a
@@ -280,25 +284,42 @@ function ReadReceiptPanel({
                   )}
                 </div>
               </div>
-              {data.pending.length > 0 && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={handleRemind}
-                  disabled={reminding}
-                  className="gap-1.5"
-                >
-                  <BellRing className="h-3.5 w-3.5" />
-                  {reminding
-                    ? "Reminding…"
-                    : `Remind un-acknowledged (${data.pending.length})`}
-                </Button>
-              )}
+              <div className="flex flex-wrap gap-2">
+                {data.pending.length > 0 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleRemind("unacked")}
+                    disabled={reminding}
+                    className="gap-1.5"
+                  >
+                    <BellRing className="h-3.5 w-3.5" />
+                    {reminding
+                      ? "Reminding…"
+                      : `Remind un-acknowledged (${data.pending.length})`}
+                  </Button>
+                )}
+                {total > 0 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleRemind("all")}
+                    disabled={reminding}
+                    className="gap-1.5"
+                  >
+                    <BellRing className="h-3.5 w-3.5" />
+                    {reminding ? "Reminding…" : `Remind all (${total})`}
+                  </Button>
+                )}
+              </div>
               <p className="text-[10px] leading-snug text-[#9CA3AF]">
-                The worker app has no push notification. &ldquo;Remind&rdquo;
-                re-pops this notice on each un-acknowledged worker&apos;s next app
-                open — use the list above to chase them in person too.
+                &ldquo;Remind un-acknowledged&rdquo; re-pops only for workers who
+                haven&apos;t tapped &ldquo;Got it&rdquo; yet. &ldquo;Remind
+                all&rdquo; resets every receipt so the whole team acknowledges
+                again. It shows on each worker&apos;s next app open — use the list
+                above to chase them in person too.
               </p>
             </>
           ) : (
@@ -635,16 +656,27 @@ export default function AnnouncementsPage() {
   // changes what workers see), then POSTs the remind and returns the un-acked
   // count so the panel can flash it. Returns null if the worker cancels or the
   // request fails.
-  async function remind(a: Announcement): Promise<number | null> {
+  async function remind(
+    a: Announcement,
+    scope: "all" | "unacked",
+  ): Promise<number | null> {
     const ok = await confirm({
-      title: "Remind un-acknowledged workers?",
-      message: `Re-pop "${a.title}" on the phones of everyone who hasn't tapped "Got it" yet. There is no push — it shows on their next app open.`,
-      confirmLabel: "Remind",
+      title:
+        scope === "all"
+          ? "Remind ALL workers?"
+          : "Remind un-acknowledged workers?",
+      message:
+        scope === "all"
+          ? `Re-pop "${a.title}" on EVERY worker's phone — including those who already tapped "Got it" — and reset the read receipts so everyone acknowledges again. It shows on each worker's next app open.`
+          : `Re-pop "${a.title}" on the phones of everyone who hasn't tapped "Got it" yet. It shows on their next app open.`,
+      confirmLabel: scope === "all" ? "Remind all" : "Remind",
     });
     if (!ok) return null;
     try {
       const res = await fetch(`/api/announcements/${a.id}/remind`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope }),
       });
       if (!res.ok) return null;
       const json = (await res.json()) as RemindResponse;
@@ -1009,7 +1041,7 @@ export default function AnnouncementsPage() {
                       <ReadReceiptPanel
                         announcement={a}
                         onFlash={showFlash}
-                        onRemind={() => remind(a)}
+                        onRemind={(scope) => remind(a, scope)}
                       />
                     </div>
                     <div className="flex shrink-0 items-center gap-2">

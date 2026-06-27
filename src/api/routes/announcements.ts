@@ -831,6 +831,20 @@ admin.post("/:id/remind", async (c) => {
   if (!ann) {
     return c.json({ success: false, error: "Announcement not found" }, 404);
   }
+  // Scope (owner 2026-06-27): "all" forces a fresh acknowledgment from the
+  // WHOLE roster — it wipes the read-receipts so every worker (acked included)
+  // becomes un-acked again and definitively re-pops. "unacked" (default) leaves
+  // the acked workers' receipts intact and re-pops only those who haven't tapped
+  // "Got it" yet. Body is optional → no/!json body keeps the default.
+  let scope: "all" | "unacked" = "unacked";
+  try {
+    const body = (await c.req.json().catch(() => null)) as {
+      scope?: unknown;
+    } | null;
+    if (body && body.scope === "all") scope = "all";
+  } catch {
+    /* no body / not json → default unacked */
+  }
   // Count the un-acked active roster (the same split the acks endpoint uses).
   const rosterRes = await c.var.DB.prepare(
     "SELECT id FROM workers WHERE status = 'ACTIVE'",
@@ -846,7 +860,16 @@ admin.post("/:id/remind", async (c) => {
     const wid = a.workerId ?? a.worker_id;
     if (wid) ackedSet.add(wid);
   }
-  const pendingCount = rosterIds.filter((wid) => !ackedSet.has(wid)).length;
+  const unackedCount = rosterIds.filter((wid) => !ackedSet.has(wid)).length;
+  // "Remind all" → wipe the read-receipts so EVERY worker re-pops and the office
+  // tracks the re-acknowledgment from a clean 0-of-N.
+  if (scope === "all") {
+    await c.var.DB.prepare(
+      "DELETE FROM announcement_acks WHERE announcement_id = ?",
+    )
+      .bind(id)
+      .run();
+  }
   // Bump reminded_at so the worker gate re-pops for anyone whose ack predates
   // it (and the never-acked already see it). One stamp, no per-worker fan-out.
   await c.var.DB.prepare(
@@ -854,7 +877,9 @@ admin.post("/:id/remind", async (c) => {
   )
     .bind(new Date().toISOString(), id, orgId)
     .run();
-  return c.json({ success: true, pendingCount });
+  // After "all" the whole roster is pending again; "unacked" returns the split.
+  const pendingCount = scope === "all" ? rosterIds.length : unackedCount;
+  return c.json({ success: true, pendingCount, scope });
 });
 
 // DELETE /api/announcements/:id — hard delete (row count is tiny; the soft

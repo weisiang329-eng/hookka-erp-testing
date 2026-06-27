@@ -1384,6 +1384,11 @@ export default function WorkerScanPage() {
     zoomTrackRef.current = zoomTrack;
     let zoomRange: { min: number; max: number } | null = null;
     let lastZoomAt = 0;
+    // Focus-pulse state (owner 2026-06-27): held perfectly still, the lens stops
+    // re-hunting and the frame stays soft → nothing decodes (the "只有动的时候才
+    //扫到"). We periodically nudge autofocus to mimic that movement.
+    let lastFocusPulseAt = 0;
+    let focusPulseDir = 1;
     try {
       const zc = (
         zoomTrack?.getCapabilities?.() as
@@ -1628,6 +1633,43 @@ export default function WorkerScanPage() {
           } catch {
             /* zoom is best-effort; never break the scan loop */
           }
+        }
+      }
+      // Focus pulse — BOTH modes. After ~1.1s with no decode, give autofocus a
+      // nudge so a perfectly-still phone still resolves the code (mimics the
+      // movement that currently makes it work). A tiny zoom oscillation (±2% of
+      // range around the current zoom, NOT stored so it never drifts/overshoots)
+      // forces most lenses to re-focus; we also re-assert continuous AF. All
+      // best-effort — silently no-ops where the lens exposes neither (then
+      // tap-to-scan + the moving aim line are the fallback).
+      if (now - lastDecode > 1100 && now - lastFocusPulseAt > 1100 && zoomTrack) {
+        lastFocusPulseAt = now;
+        if (zoomRange) {
+          const span = (zoomRange.max - zoomRange.min) || 1;
+          focusPulseDir = -focusPulseDir;
+          const target = Math.min(
+            zoomRange.max,
+            Math.max(
+              zoomRange.min,
+              curZoomRef.current + focusPulseDir * span * 0.02,
+            ),
+          );
+          try {
+            void zoomTrack.applyConstraints({
+              advanced: [{ zoom: target } as unknown as MediaTrackConstraintSet],
+            });
+          } catch {
+            /* zoom not exposed (iOS Safari often) — fall through to AF re-assert */
+          }
+        }
+        try {
+          void zoomTrack.applyConstraints({
+            advanced: [
+              { focusMode: "continuous" } as unknown as MediaTrackConstraintSet,
+            ],
+          });
+        } catch {
+          /* focusMode not controllable — best-effort */
         }
       }
       rafRef.current = requestAnimationFrame(() => void tick());
@@ -2849,6 +2891,21 @@ export default function WorkerScanPage() {
                     </>
                   );
                 })()}
+                {/* Moving scan line (owner 2026-06-27): a gold sweep up/down the
+                    aim frame — live-scanning feedback + a nudge to keep the phone
+                    slightly moving so autofocus keeps re-hunting. The real lever
+                    is the focus pulse in the decode loop; this line is the cue. */}
+                <style>{`@keyframes hookkaScanLine{0%{top:6%;opacity:.25}50%{top:90%;opacity:1}100%{top:6%;opacity:.25}}`}</style>
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute left-2 right-2 h-[2px] rounded-full"
+                  style={{
+                    background:
+                      "linear-gradient(90deg, transparent, rgba(201,169,97,0.95), transparent)",
+                    boxShadow: "0 0 8px 1px rgba(201,169,97,0.7)",
+                    animation: "hookkaScanLine 2s ease-in-out infinite",
+                  }}
+                />
                 {/* no centre line — barcode is tap-to-pick now. The badge says
                     "Tap to scan", and flips to a CYAN "Detected — tap to scan"
                     once a barcode is in view so the worker taps the row he wants. */}

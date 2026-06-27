@@ -41,11 +41,15 @@ test('router lazy pages are wrapped in Suspense loading fallback', () => {
   assert.match(router, /<Suspense fallback={<PageLoading \/>}>{children}<\/Suspense>/);
 });
 
-test('worker login has explicit loading phase UX on submit buttons', () => {
+test('worker login has explicit loading phase UX', () => {
   const workerLogin = read('src/pages/worker/login.tsx');
   assert.match(workerLogin, /const \[loading, setLoading\] = useState\(false\)/);
+  // Keypad-driven login mode shows a "Loading…" line while the request is
+  // in flight; the secondary setup/reset forms keep the disabled submit
+  // button. Both read off the same `loading` state + t("common.loading").
   assert.match(workerLogin, /<button type="submit" disabled={loading} className={btnPrimary}>/);
   assert.match(workerLogin, /loading \? t\("common\.loading"\)/);
+  assert.match(workerLogin, /t\("common\.loading"\)/);
 });
 
 test('worker team-stats endpoint is registered', () => {

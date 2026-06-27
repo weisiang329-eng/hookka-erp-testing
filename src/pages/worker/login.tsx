@@ -17,9 +17,19 @@
 // out of WorkerLayout's max-w-md / black top-bar chrome and fills the
 // whole screen exactly like the desktop login. ALL worker behaviour
 // (3 modes, handlers, finalizeLogin, every t() i18n call) is unchanged.
+//
+// 2026-06-27 (owner: "Dark/Light mode toggle"): purely additive theming.
+// A `theme` state ("dark" | "light"), persisted in localStorage, drives a
+// single PALETTE object — every inline style, the logo <img filter>, the
+// right brand panel and the PIN keypad colours read off it, so a single
+// circular Sun/Moon toggle (top-right, type="button") flips everything
+// cleanly. DARK = white logo on dark grid (Sun icon → go light). LIGHT =
+// dark logo on a warm-cream bg (Moon icon → go dark). Gold accents + the
+// gold "Sign In" gradient are identical in both modes. NO logic change.
 // ============================================================
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Sun, Moon } from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
 import {
   WORKER_TOKEN_KEY,
@@ -28,6 +38,132 @@ import {
 } from "@/layouts/WorkerLayout";
 
 type Mode = "login" | "setup" | "reset";
+type ThemeName = "dark" | "light";
+
+const THEME_KEY = "hookka.worker.theme";
+
+// Shared grid (same line geometry both modes — only the line tint differs).
+function gridImage(tint: string): string {
+  return (
+    `repeating-linear-gradient(0deg, ${tint} 0 1px, transparent 1px 60px), ` +
+    `repeating-linear-gradient(90deg, ${tint} 0 1px, transparent 1px 60px)`
+  );
+}
+
+// One palette per mode. Gold accents (#C9A961/#8B7A4E/#6B5C32) + the gold
+// "Sign In" gradient stay IDENTICAL in both — only the bg/card/text/input
+// surfaces flip. Every render site reads off this object.
+type Palette = {
+  screenBg: string;
+  screenGridImage: string;
+  cardBg: string;
+  cardBorder: string;
+  cardShadow: string;
+  cardBlur: string;
+  logoFilter: string; // "" = no filter (dark logo as-is)
+  titleColor: string;
+  subtitleColor: string;
+  labelColor: string;
+  footerColor: string;
+  linkMuted: string; // "back" links
+  inputBg: string;
+  inputBorder: string;
+  inputText: string;
+  inputPlaceholder: string;
+  brandPanelBg: string;
+  brandPanelGlow: string;
+  ringSolid: string;
+  ringDashed: string;
+  orbitDot: string;
+  brandDivider: string;
+  hudText: string;
+  pinKeyBg: string;
+  pinKeyBorder: string;
+  pinKeyText: string;
+  toggleBg: string;
+  toggleBorder: string;
+  toggleIcon: string;
+};
+
+const PALETTE: Record<ThemeName, Palette> = {
+  dark: {
+    screenBg: "#1F1D1B",
+    screenGridImage: gridImage("rgba(107,92,50,.06)"),
+    cardBg: "rgba(255,255,255,.04)",
+    cardBorder: "1px solid rgba(107,92,50,.2)",
+    cardShadow: "none",
+    cardBlur: "blur(24px)",
+    logoFilter: "brightness(0) invert(1)",
+    titleColor: "#ffffff",
+    subtitleColor: "rgba(255,255,255,.45)",
+    labelColor: "rgba(255,255,255,.5)",
+    footerColor: "rgba(255,255,255,.25)",
+    linkMuted: "rgba(255,255,255,.45)",
+    inputBg: "rgba(255,255,255,.06)",
+    inputBorder: "1.5px solid rgba(107,92,50,.3)",
+    inputText: "#ffffff",
+    inputPlaceholder: "rgba(255,255,255,.35)",
+    brandPanelBg: "#1F1D1B",
+    brandPanelGlow:
+      "radial-gradient(ellipse at center, rgba(107,92,50,.08) 0%, transparent 70%)",
+    ringSolid: "1px solid rgba(107,92,50,.08)",
+    ringDashed: "1px dashed rgba(107,92,50,.08)",
+    orbitDot: "#6B5C32",
+    brandDivider:
+      "linear-gradient(90deg, transparent, #6B5C32, transparent)",
+    hudText: "rgba(107,92,50,.4)",
+    pinKeyBg: "rgba(255,255,255,.05)",
+    pinKeyBorder: "1px solid rgba(107,92,50,.3)",
+    pinKeyText: "#ffffff",
+    toggleBg: "rgba(255,255,255,.08)",
+    toggleBorder: "1px solid rgba(107,92,50,.35)",
+    toggleIcon: "#C9A961",
+  },
+  light: {
+    screenBg:
+      "radial-gradient(circle at 50% 20%, #E8E1D5, #D2CABD)",
+    screenGridImage: gridImage("rgba(107,92,50,.05)"),
+    cardBg: "rgba(255,255,255,.9)",
+    cardBorder: "1px solid rgba(31,29,27,.12)",
+    cardShadow: "0 20px 50px rgba(31,29,27,.12)",
+    cardBlur: "blur(24px)",
+    logoFilter: "", // dark logo as-is
+    titleColor: "#1F1D1B",
+    subtitleColor: "rgba(31,29,27,.5)",
+    labelColor: "rgba(31,29,27,.5)",
+    footerColor: "rgba(31,29,27,.35)",
+    linkMuted: "rgba(31,29,27,.5)",
+    inputBg: "#faf9f5",
+    inputBorder: "1.5px solid #E2DDD8",
+    inputText: "#1F1D1B",
+    inputPlaceholder: "rgba(31,29,27,.35)",
+    brandPanelBg: "#E8E1D5",
+    brandPanelGlow:
+      "radial-gradient(ellipse at center, rgba(107,92,50,.1) 0%, transparent 70%)",
+    ringSolid: "1px solid rgba(107,92,50,.18)",
+    ringDashed: "1px dashed rgba(107,92,50,.18)",
+    orbitDot: "#8B7A4E",
+    brandDivider:
+      "linear-gradient(90deg, transparent, #6B5C32, transparent)",
+    hudText: "rgba(107,92,50,.6)",
+    pinKeyBg: "#F0ECE9",
+    pinKeyBorder: "1px solid #E2DDD8",
+    pinKeyText: "#1F1D1B",
+    toggleBg: "rgba(255,255,255,.7)",
+    toggleBorder: "1px solid rgba(107,92,50,.35)",
+    toggleIcon: "#8B7A4E",
+  },
+};
+
+function readTheme(): ThemeName {
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    if (v === "light" || v === "dark") return v;
+  } catch {
+    /* ignore */
+  }
+  return "dark";
+}
 
 type WorkerAuthSuccess = {
   success: true;
@@ -95,6 +231,21 @@ function asWorkerAuthResponse(v: unknown): WorkerAuthResponse | null {
 export default function WorkerLoginPage() {
   const t = useT();
   const navigate = useNavigate();
+
+  const [theme, setTheme] = useState<ThemeName>(readTheme);
+  const p = PALETTE[theme];
+
+  function toggleTheme() {
+    setTheme((prev) => {
+      const next: ThemeName = prev === "dark" ? "light" : "dark";
+      try {
+        localStorage.setItem(THEME_KEY, next);
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }
 
   const [mode, setMode] = useState<Mode>("login");
   const [empNo, setEmpNo] = useState("");
@@ -299,10 +450,13 @@ export default function WorkerLoginPage() {
           box-shadow: 0 0 0 3px rgba(107,92,50,0.2);
           outline: none;
         }
+        .login-input::placeholder {
+          color: var(--wl-input-ph);
+        }
         .orbit-dot {
           width: 6px;
           height: 6px;
-          background: #6B5C32;
+          background: var(--wl-orbit-dot);
           border-radius: 50%;
           position: absolute;
           top: 50%;
@@ -319,39 +473,90 @@ export default function WorkerLoginPage() {
           border-radius: 9999px;
           font-size: 20px;
           font-weight: 600;
-          color: #fff;
+          color: var(--wl-pin-text);
           display: flex;
           align-items: center;
           justify-content: center;
           transition: all .15s ease;
-          border: 1px solid rgba(107,92,50,.3);
-          background: rgba(255,255,255,.05);
+          border: var(--wl-pin-border);
+          background: var(--wl-pin-bg);
         }
         .pin-key:active {
           background: linear-gradient(135deg, #6B5C32, #8B7A4E);
+          color: #fff;
           transform: scale(.94);
+        }
+        .wl-theme-toggle:hover {
+          opacity: 0.85;
         }
       `}</style>
 
       {/* fixed overlay so we break out of WorkerLayout's max-w-md / black
-          top-bar chrome and fill the screen exactly like the desktop login */}
-      <div className="fixed inset-0 z-50 flex min-h-screen overflow-auto">
+          top-bar chrome and fill the screen exactly like the desktop login.
+          CSS vars feed the bits that live in the <style> block (placeholder,
+          orbit dot, PIN keys) so they flip with the theme too. */}
+      <div
+        className="fixed inset-0 z-50 flex min-h-screen overflow-auto"
+        style={
+          {
+            "--wl-input-ph": p.inputPlaceholder,
+            "--wl-orbit-dot": p.orbitDot,
+            "--wl-pin-text": p.pinKeyText,
+            "--wl-pin-border": p.pinKeyBorder,
+            "--wl-pin-bg": p.pinKeyBg,
+          } as React.CSSProperties
+        }
+      >
+        {/* Dark / Light toggle — circular, top-right (mockup placement; owner
+            typed 左上角 / top-left — to move it left, swap right:20px → left:20px).
+            type="button" so it never submits a form. */}
+        <button
+          type="button"
+          onClick={toggleTheme}
+          aria-label="Toggle theme"
+          className="wl-theme-toggle"
+          style={{
+            position: "fixed",
+            top: "20px",
+            right: "20px",
+            zIndex: 60,
+            width: "40px",
+            height: "40px",
+            borderRadius: "9999px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: p.toggleBg,
+            border: p.toggleBorder,
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+            cursor: "pointer",
+            transition: "all .2s ease",
+          }}
+        >
+          {theme === "dark" ? (
+            <Sun size={18} color={p.toggleIcon} />
+          ) : (
+            <Moon size={18} color={p.toggleIcon} />
+          )}
+        </button>
+
         {/* Left Panel - Login Form */}
         <div
           className="flex w-full lg:w-1/2 items-center justify-center p-8 relative"
           style={{
-            backgroundColor: "#1F1D1B",
-            backgroundImage:
-              "repeating-linear-gradient(0deg, rgba(107,92,50,.06) 0 1px, transparent 1px 60px), repeating-linear-gradient(90deg, rgba(107,92,50,.06) 0 1px, transparent 1px 60px)",
+            background: p.screenBg,
+            backgroundImage: p.screenGridImage,
           }}
         >
           <div
             className="w-full max-w-md rounded-2xl p-10"
             style={{
-              backgroundColor: "rgba(255,255,255,.04)",
-              border: "1px solid rgba(107,92,50,.2)",
-              backdropFilter: "blur(24px)",
-              WebkitBackdropFilter: "blur(24px)",
+              backgroundColor: p.cardBg,
+              border: p.cardBorder,
+              boxShadow: p.cardShadow,
+              backdropFilter: p.cardBlur,
+              WebkitBackdropFilter: p.cardBlur,
             }}
           >
             {/* Logo Row */}
@@ -360,15 +565,20 @@ export default function WorkerLoginPage() {
                 src="/hookka-logo.png"
                 alt="Hookka 合家"
                 className="h-10 w-auto"
-                style={{ filter: "brightness(0) invert(1)" }}
+                style={p.logoFilter ? { filter: p.logoFilter } : undefined}
               />
             </div>
 
             {/* Title */}
-            <h2 className="text-2xl font-bold text-white mb-1">{heading}</h2>
+            <h2
+              className="text-2xl font-bold mb-1"
+              style={{ color: p.titleColor }}
+            >
+              {heading}
+            </h2>
             <p
               className="mb-8"
-              style={{ color: "rgba(255,255,255,.45)", fontSize: "13px" }}
+              style={{ color: p.subtitleColor, fontSize: "13px" }}
             >
               {subtitle}
             </p>
@@ -376,18 +586,18 @@ export default function WorkerLoginPage() {
             {/* ----- mode = login ----- */}
             {mode === "login" && (
               <form onSubmit={handleLogin} className="space-y-5">
-                <FieldLabel label={t("login.empNo")}>
+                <FieldLabel label={t("login.empNo")} palette={p}>
                   <input
                     type="text"
                     autoComplete="username"
                     value={empNo}
                     onChange={(e) => setEmpNo(e.target.value)}
                     className={inputCls}
-                    style={inputStyle}
+                    style={inputStyleOf(p)}
                     placeholder="EMP-0001"
                   />
                 </FieldLabel>
-                <FieldLabel label={t("login.pin")}>
+                <FieldLabel label={t("login.pin")} palette={p}>
                   <input
                     type="password"
                     inputMode="numeric"
@@ -396,7 +606,7 @@ export default function WorkerLoginPage() {
                     value={pin}
                     onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
                     className={inputCls}
-                    style={inputStyle}
+                    style={inputStyleOf(p)}
                     placeholder="••••••"
                   />
                 </FieldLabel>
@@ -435,16 +645,16 @@ export default function WorkerLoginPage() {
             {/* ----- mode = setup ----- */}
             {mode === "setup" && (
               <form onSubmit={handleSetup} className="space-y-5">
-                <FieldLabel label={t("login.empNo")}>
+                <FieldLabel label={t("login.empNo")} palette={p}>
                   <input
                     type="text"
                     value={empNo}
                     readOnly
                     className={inputCls}
-                    style={{ ...inputStyle, opacity: 0.7 }}
+                    style={{ ...inputStyleOf(p), opacity: 0.7 }}
                   />
                 </FieldLabel>
-                <FieldLabel label={t("login.newPin")}>
+                <FieldLabel label={t("login.newPin")} palette={p}>
                   <input
                     type="password"
                     inputMode="numeric"
@@ -453,11 +663,11 @@ export default function WorkerLoginPage() {
                     value={pin}
                     onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
                     className={inputCls}
-                    style={inputStyle}
+                    style={inputStyleOf(p)}
                     placeholder="••••••"
                   />
                 </FieldLabel>
-                <FieldLabel label={t("login.confirmPin")}>
+                <FieldLabel label={t("login.confirmPin")} palette={p}>
                   <input
                     type="password"
                     inputMode="numeric"
@@ -466,7 +676,7 @@ export default function WorkerLoginPage() {
                     value={pin2}
                     onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
                     className={inputCls}
-                    style={inputStyle}
+                    style={inputStyleOf(p)}
                     placeholder="••••••"
                   />
                 </FieldLabel>
@@ -483,7 +693,7 @@ export default function WorkerLoginPage() {
                     setError(null);
                   }}
                   className="w-full text-sm pt-2 bg-transparent border-0 cursor-pointer"
-                  style={{ color: "rgba(255,255,255,.45)" }}
+                  style={{ color: p.linkMuted }}
                 >
                   {t("common.back")}
                 </button>
@@ -493,17 +703,17 @@ export default function WorkerLoginPage() {
             {/* ----- mode = reset ----- */}
             {mode === "reset" && (
               <form onSubmit={handleReset} className="space-y-5">
-                <FieldLabel label={t("login.empNo")}>
+                <FieldLabel label={t("login.empNo")} palette={p}>
                   <input
                     type="text"
                     value={empNo}
                     onChange={(e) => setEmpNo(e.target.value)}
                     className={inputCls}
-                    style={inputStyle}
+                    style={inputStyleOf(p)}
                     placeholder="EMP-0001"
                   />
                 </FieldLabel>
-                <FieldLabel label={t("login.phoneLast4")}>
+                <FieldLabel label={t("login.phoneLast4")} palette={p}>
                   <input
                     type="text"
                     inputMode="numeric"
@@ -514,11 +724,11 @@ export default function WorkerLoginPage() {
                       setPhoneLast4(e.target.value.replace(/\D/g, ""))
                     }
                     className={inputCls}
-                    style={inputStyle}
+                    style={inputStyleOf(p)}
                     placeholder="1234"
                   />
                 </FieldLabel>
-                <FieldLabel label={t("login.newPin")}>
+                <FieldLabel label={t("login.newPin")} palette={p}>
                   <input
                     type="password"
                     inputMode="numeric"
@@ -527,11 +737,11 @@ export default function WorkerLoginPage() {
                     value={pin}
                     onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
                     className={inputCls}
-                    style={inputStyle}
+                    style={inputStyleOf(p)}
                     placeholder="••••••"
                   />
                 </FieldLabel>
-                <FieldLabel label={t("login.confirmPin")}>
+                <FieldLabel label={t("login.confirmPin")} palette={p}>
                   <input
                     type="password"
                     inputMode="numeric"
@@ -540,7 +750,7 @@ export default function WorkerLoginPage() {
                     value={pin2}
                     onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
                     className={inputCls}
-                    style={inputStyle}
+                    style={inputStyleOf(p)}
                     placeholder="••••••"
                   />
                 </FieldLabel>
@@ -558,7 +768,7 @@ export default function WorkerLoginPage() {
                     setError(null);
                   }}
                   className="w-full text-sm pt-2 bg-transparent border-0 cursor-pointer"
-                  style={{ color: "rgba(255,255,255,.45)" }}
+                  style={{ color: p.linkMuted }}
                 >
                   {t("common.back")}
                 </button>
@@ -570,7 +780,7 @@ export default function WorkerLoginPage() {
           <div
             className="absolute bottom-6 left-0 right-0 text-center"
             style={{
-              color: "rgba(255,255,255,.25)",
+              color: p.footerColor,
               fontSize: "11px",
               letterSpacing: "0.03em",
             }}
@@ -583,9 +793,8 @@ export default function WorkerLoginPage() {
         <div
           className="hidden lg:flex lg:w-1/2 items-center justify-center relative overflow-hidden"
           style={{
-            backgroundColor: "#1F1D1B",
-            backgroundImage:
-              "radial-gradient(ellipse at center, rgba(107,92,50,.08) 0%, transparent 70%)",
+            background: p.brandPanelBg,
+            backgroundImage: p.brandPanelGlow,
           }}
         >
           {/* Orbit Rings */}
@@ -594,7 +803,7 @@ export default function WorkerLoginPage() {
             style={{
               width: "300px",
               height: "300px",
-              border: "1px solid rgba(107,92,50,.08)",
+              border: p.ringSolid,
               top: "50%",
               left: "50%",
               transform: "translate(-50%, -50%)",
@@ -605,7 +814,7 @@ export default function WorkerLoginPage() {
             style={{
               width: "450px",
               height: "450px",
-              border: "1px solid rgba(107,92,50,.08)",
+              border: p.ringSolid,
               top: "50%",
               left: "50%",
               transform: "translate(-50%, -50%)",
@@ -616,7 +825,7 @@ export default function WorkerLoginPage() {
             style={{
               width: "600px",
               height: "600px",
-              border: "1px dashed rgba(107,92,50,.08)",
+              border: p.ringDashed,
               top: "50%",
               left: "50%",
               transform: "translate(-50%, -50%)",
@@ -651,7 +860,7 @@ export default function WorkerLoginPage() {
               style={{
                 height: "140px",
                 width: "auto",
-                filter: "brightness(0) invert(1)",
+                ...(p.logoFilter ? { filter: p.logoFilter } : {}),
               }}
             />
 
@@ -667,8 +876,7 @@ export default function WorkerLoginPage() {
               style={{
                 width: "60px",
                 height: "1px",
-                background:
-                  "linear-gradient(90deg, transparent, #6B5C32, transparent)",
+                background: p.brandDivider,
               }}
             />
 
@@ -690,7 +898,7 @@ export default function WorkerLoginPage() {
             style={{
               top: "24px",
               left: "24px",
-              color: "rgba(107,92,50,.4)",
+              color: p.hudText,
               fontSize: "10px",
               fontFamily: "'Courier New', monospace",
               letterSpacing: "0.08em",
@@ -704,7 +912,7 @@ export default function WorkerLoginPage() {
             style={{
               top: "24px",
               right: "24px",
-              color: "rgba(107,92,50,.4)",
+              color: p.hudText,
               fontSize: "10px",
               fontFamily: "'Courier New', monospace",
               letterSpacing: "0.08em",
@@ -727,7 +935,7 @@ export default function WorkerLoginPage() {
             style={{
               bottom: "24px",
               left: "24px",
-              color: "rgba(107,92,50,.4)",
+              color: p.hudText,
               fontSize: "10px",
               fontFamily: "'Courier New', monospace",
               letterSpacing: "0.08em",
@@ -741,7 +949,7 @@ export default function WorkerLoginPage() {
             style={{
               bottom: "24px",
               right: "24px",
-              color: "rgba(107,92,50,.4)",
+              color: p.hudText,
               fontSize: "10px",
               fontFamily: "'Courier New', monospace",
               letterSpacing: "0.08em",
@@ -757,28 +965,33 @@ export default function WorkerLoginPage() {
 
 // ----- tiny UI helpers (re-skinned to match the desktop login) -----
 const inputCls =
-  "login-input w-full rounded-lg px-4 py-3 text-white transition-all duration-200";
-const inputStyle: React.CSSProperties = {
-  backgroundColor: "rgba(255,255,255,.06)",
-  border: "1.5px solid rgba(107,92,50,.3)",
-  fontSize: "14px",
-};
+  "login-input w-full rounded-lg px-4 py-3 transition-all duration-200";
+function inputStyleOf(p: Palette): React.CSSProperties {
+  return {
+    backgroundColor: p.inputBg,
+    border: p.inputBorder,
+    color: p.inputText,
+    fontSize: "14px",
+  };
+}
 const btnPrimary =
   "login-cta btn-shimmer w-full rounded-lg font-semibold text-white transition-all duration-200 hover:opacity-90 disabled:opacity-50";
 
 function FieldLabel({
   label,
   children,
+  palette,
 }: {
   label: string;
   children: React.ReactNode;
+  palette: Palette;
 }) {
   return (
     <div>
       <label
         className="block mb-2 uppercase font-medium"
         style={{
-          color: "rgba(255,255,255,.5)",
+          color: palette.labelColor,
           fontSize: "12px",
           letterSpacing: "0.05em",
         }}
@@ -808,6 +1021,7 @@ function ErrorBanner({ children }: { children: React.ReactNode }) {
 
 // Numeric keypad for fast PIN entry on a phone. Buttons are type="button"
 // so they never submit the form; they only mutate the shared `pin` state.
+// Key colours come from the theme CSS vars set on the overlay wrapper.
 function PinPad({
   onDigit,
   onDelete,

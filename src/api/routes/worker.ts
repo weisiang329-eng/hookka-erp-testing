@@ -26,9 +26,16 @@ import { computeMonthlyLabor, computeAttendanceDayDetail, absenceCutoffDay, effe
 import { jcMinutesTotal } from "../../lib/job-card-minutes";
 import { deriveBarcodeToken, deptOfBarcodeToken, isBarcodeToken } from "../../lib/job-card-id";
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
+import {
+  ensureWorkerPerfIndices,
+  ensureWorkerSnapshotTables,
+  memoizedMonthlyEfficiency,
+  withWorkerSnapshot,
+  loadActiveBomRowsMemoized,
+} from "../lib/worker-perf";
 import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
 import { applyPackingRack } from "../lib/packing-rack-write";
-import { loadActiveBomRows, aggregateWipTimes } from "../lib/wip-times-core";
+import { aggregateWipTimes } from "../lib/wip-times-core";
 import {
   recordDeptScan,
   autofillWorkingHoursFromPunch,
@@ -547,7 +554,7 @@ app.get("/wip-times", async (c) => {
       data: { department: "", departmentCodes: deptSet, rows: [] },
     });
   }
-  const bomRows = await loadActiveBomRows(c.var.DB, null, null);
+  const bomRows = await loadActiveBomRowsMemoized(c.var.DB);
   const agg = aggregateWipTimes(bomRows, { dept });
   const rows = agg.map((r) => ({
     wipLabel: r.wipLabel,
@@ -1295,6 +1302,32 @@ app.get("/history", async (c) => {
   const fromStr = (c.req.query("from") || defaultFrom).slice(0, 10);
   const toStr = (c.req.query("to") || defaultTo).slice(0, 10);
 
+  // Self-apply the perf indices + snapshot tables (migrations 0197/0199 don't
+  // auto-replay on deploy — they reach prod via these CREATE … IF NOT EXISTS,
+  // memoized per isolate so the warm path is a no-op).
+  await ensureWorkerPerfIndices(c.var.DB);
+  await ensureWorkerSnapshotTables(c.var.DB);
+
+  // Cache-aside snapshot (lazy recompute-on-READ). The freshness probe takes
+  // MAX(updated_at/created_at) across the source tables; any office/floor edit
+  // bumps one and the next read recomputes. The snapshot result is byte-
+  // identical to the live compute — pure latency win, no behaviour change.
+  const histData = await withWorkerSnapshot(
+    c.var.DB,
+    {
+      tableName: "worker_history_snapshot",
+      sourceTables: [
+        "attendance_records",
+        "working_hour_entries",
+        "job_cards",
+        "piece_pics",
+        "worker_nonprod_requests",
+      ] as const,
+      orgId: DEFAULT_ORG_ID,
+      cacheKey: `${workerId}:${fromStr}:${toStr}`,
+    },
+    async () => {
+
   // ---- attendance ----
   const attRes = await c.var.DB.prepare(
     "SELECT * FROM attendance_records WHERE employeeId = ? AND date >= ? AND date <= ? ORDER BY date DESC",
@@ -1719,7 +1752,7 @@ app.get("/history", async (c) => {
   // production depts and who has no non-prod/ADD_PROD split sees ~the same
   // number as before. Returned as a 1-decimal figure (matching the Overview's
   // toFixed(1)); the phone renders `${efficiencyPct}%` unchanged.
-  const effByWorkerRange = await computeMonthlyEfficiencyByWorker(
+  const effByWorkerRange = await memoizedMonthlyEfficiency(
     c.var.DB,
     fromStr,
     toStr,
@@ -1739,16 +1772,17 @@ app.get("/history", async (c) => {
     efficiencyPct,
   };
 
-  return c.json({
-    success: true,
-    data: {
-      range: { from: fromStr, to: toStr },
-      daily,
-      attendance,
-      completed,
-      totals,
+      return {
+        range: { from: fromStr, to: toStr },
+        daily,
+        attendance,
+        completed,
+        totals,
+      };
     },
-  });
+  );
+
+  return c.json({ success: true, data: histData });
 });
 
 // ============================================================
@@ -1783,6 +1817,37 @@ app.get("/payslips", async (c) => {
   const auth = await getWorker(c);
   if (!auth.ok) return auth.response;
   const { workerId } = auth;
+
+  // Self-apply the perf indices + snapshot tables (migrations 0197/0198 don't
+  // auto-replay on deploy — memoized per isolate so the warm path is a no-op).
+  await ensureWorkerPerfIndices(c.var.DB);
+  await ensureWorkerSnapshotTables(c.var.DB);
+
+  // Current-month key for the snapshot. Computed up front so the cache_key is
+  // stable for the whole request; the live compute below re-derives the same
+  // period from `now`.
+  const snapNow = new Date();
+  const snapPeriod = `${snapNow.getFullYear()}-${String(snapNow.getMonth() + 1).padStart(2, "0")}`;
+
+  // Cache-aside snapshot (lazy recompute-on-READ). Freshness = MAX across the
+  // labor + efficiency inputs (working_hour_entries, payroll_hour_deductions,
+  // worker_salary_history, job_cards) plus payslips (a newly-generated stored
+  // payslip must surface in `history`). Byte-identical to the live compute.
+  const payslipsData = await withWorkerSnapshot(
+    c.var.DB,
+    {
+      tableName: "worker_payslips_snapshot",
+      sourceTables: [
+        "working_hour_entries",
+        "payroll_hour_deductions",
+        "worker_salary_history",
+        "job_cards",
+        "payslips",
+      ] as const,
+      orgId: DEFAULT_ORG_ID,
+      cacheKey: `${workerId}:${snapPeriod}`,
+    },
+    async () => {
 
   const res = await c.var.DB.prepare(
     `SELECT id, employeeId, period, basicSalarySen, totalOtSen, allowancesSen,
@@ -1973,30 +2038,31 @@ app.get("/payslips", async (c) => {
     effCfg?.efficiencyThresholdPct,
   );
 
-  return c.json({
-    success: true,
-    data: {
-      current: {
-        period,
-        workedDays: labor.daysWorked,
-        absentDays: labor.payroll.absentDays,
-        otMinutes: Math.round(labor.otHours * 60),
-        fullSalarySen: labor.payroll.fullSalarySen,
-        absenceDeductionSen: labor.payroll.absenceDeductionSen,
-        shortHourDeductionSen: labor.payroll.shortHourDeductionSen,
-        basicEarnedSen: labor.payroll.basicEarnedSen,
-        otSen: labor.payroll.otPaySen,
-        efficiencyAllowanceSen,
-        estimatedGrossSen: labor.payroll.grossSen + efficiencyAllowanceSen,
-        // Per-day detail so My Pay can show WHICH days were absent / had OT /
-        // were late-or-short (each docked day + the hours docked).
-        absentDates: dayDetail.absentDates,
-        otDays: dayDetail.otDays,
-        lateDays,
-      },
-      history,
+      return {
+        current: {
+          period,
+          workedDays: labor.daysWorked,
+          absentDays: labor.payroll.absentDays,
+          otMinutes: Math.round(labor.otHours * 60),
+          fullSalarySen: labor.payroll.fullSalarySen,
+          absenceDeductionSen: labor.payroll.absenceDeductionSen,
+          shortHourDeductionSen: labor.payroll.shortHourDeductionSen,
+          basicEarnedSen: labor.payroll.basicEarnedSen,
+          otSen: labor.payroll.otPaySen,
+          efficiencyAllowanceSen,
+          estimatedGrossSen: labor.payroll.grossSen + efficiencyAllowanceSen,
+          // Per-day detail so My Pay can show WHICH days were absent / had OT /
+          // were late-or-short (each docked day + the hours docked).
+          absentDates: dayDetail.absentDates,
+          otDays: dayDetail.otDays,
+          lateDays,
+        },
+        history,
+      };
     },
-  });
+  );
+
+  return c.json({ success: true, data: payslipsData });
 });
 
 // ============================================================

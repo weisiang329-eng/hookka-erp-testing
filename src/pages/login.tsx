@@ -17,6 +17,7 @@ import { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { setAuth, isAuthenticated, type AuthUser } from "@/lib/auth";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import LoginSnow from "@/components/login-snow";
 
 type LoginResponse =
   | {
@@ -239,8 +240,11 @@ export default function LoginPage() {
               "repeating-linear-gradient(0deg, rgba(107,92,50,.06) 0 1px, transparent 1px 60px), repeating-linear-gradient(90deg, rgba(107,92,50,.06) 0 1px, transparent 1px 60px)",
           }}
         >
+          {/* Falling snow behind the card (owner 2026-06-27/28: snow on the main
+              login, desktop + mobile). */}
+          <LoginSnow />
           <div
-            className="w-full max-w-md rounded-2xl p-10"
+            className="relative z-10 w-full max-w-md rounded-2xl p-10"
             style={{
               backgroundColor: "rgba(255,255,255,.04)",
               border: "1px solid rgba(107,92,50,.2)",

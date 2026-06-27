@@ -49,7 +49,8 @@ export function BottomTabBar() {
         {TABS.map((t) => {
           const isActive = t.key === active;
           const Icon = t.icon;
-          const color = isActive ? M.taupe : M.muted;
+          // Design source: active = taupe; inactive = #A89F8D.
+          const color = isActive ? M.taupe : "#A89F8D";
           return (
             <button
               key={t.key}
@@ -63,18 +64,18 @@ export function BottomTabBar() {
                 flexDirection: "column",
                 alignItems: "center",
                 justifyContent: "center",
-                gap: 3,
+                gap: 4,
                 background: "none",
                 border: "none",
                 cursor: "pointer",
-                padding: "8px 0",
+                padding: "9px 0 0",
                 WebkitTapHighlightColor: "transparent",
               }}
             >
-              <Icon size={22} strokeWidth={isActive ? 2.2 : 1.75} color={color} />
+              <Icon size={23} strokeWidth={isActive ? 2.2 : 1.75} color={color} />
               <span
                 style={{
-                  fontSize: 11,
+                  fontSize: 10,
                   fontWeight: isActive ? 700 : 500,
                   color,
                 }}

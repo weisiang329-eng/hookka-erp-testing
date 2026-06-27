@@ -1,44 +1,42 @@
 // ===========================================================================
-// Mobile Home / Dashboard (Phase 1)
+// Mobile Home / Dashboard
 //
-// Wired to the SAME endpoints the desktop dashboard + sales list use (via the
-// shared useCachedJson stale-while-revalidate cache). No new backend.
+// Reskinned 1:1 to the design source (Hookka ERP Mobile.dc.html — HOME screen)
+// while keeping ALL existing real-data wiring. No data layer / route changes.
 //
-// KPI wiring:
+// KPI wiring (UNCHANGED — real data):
 //   • Open orders  → /api/sales-orders/stats  (byStatus: Confirmed +
 //                    In Production + Ready to Ship + Shipped — orders that are
 //                    live but not yet Delivered/Invoiced/Closed/Cancelled).
 //   • WIP units    → /api/dashboard/overview   (production.activeJobs:
 //                    bedframeUnits + sofaSets — units currently on the floor).
-//   • On-time %    → derived from the fetched SO list: of orders with an
-//                    Expected DD that aren't terminal, the share whose Expected
-//                    DD has NOT already passed (real, computed from live data;
-//                    see note — a dedicated on-time endpoint can replace this).
-//   • AR due       → /api/sales-orders/stats  (outstandingItemsSen — confirmed
-//                    sales value not yet delivered/invoiced).
+//   • On-time %    → derived from the fetched SO list: of open orders with an
+//                    Expected DD, the share whose DD has NOT already passed.
+//   • AR due       → /api/sales-orders/stats  (outstandingItemsSen).
 //
 // Lists:
-//   • Stock alerts → /api/inventory (rawMaterials below reorder / low).
+//   • Stock alerts → /api/inventory (raw materials at/below reorder / low).
 //   • Orders due   → /api/sales-orders (soonest Expected DD, non-terminal).
 //
-// Deltas: month-over-month sales delta comes from overview.monthlyRevenue
-// where available; KPIs without a readily-available prior-period figure show
-// no delta rather than a fabricated one (// TODO notes inline).
+// Design deltas: the source shows static dummy deltas (+5, +38, -1.3%, "6 late").
+// We only render a delta we can actually compute (Open-orders MoM sales %); the
+// other cards show a real "N late" count (AR) / a muted hint instead of a
+// fabricated number. See inline TODOs for KPIs lacking a real prior-period
+// source.
 // ===========================================================================
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Package,
+  ShoppingCart,
   Factory,
-  Timer,
-  Wallet,
-  ArrowUpRight,
-  ArrowDownRight,
-  Plus,
   Truck,
+  Receipt,
+  Plus,
   PackageCheck,
-  UserPlus,
-  AlertTriangle,
+  HardHat,
+  Bell,
+  CircleAlert,
+  TriangleAlert,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
@@ -46,13 +44,11 @@ import { formatCurrency } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 import {
   SO_STATUS_COLOR,
-  WARNING,
-  DANGER,
   type SemanticStyle,
 } from "@/lib/design-tokens";
 import type { SalesOrder, RawMaterial } from "@/types";
-import { MobileCard, StatusPill, ListRow, FormSheet } from "../components";
-import { M } from "../theme";
+import { MobileCard, StatusPill, FormSheet } from "../components";
+import { M, M_ACCENT, M_DELTA } from "../theme";
 import { type FormSpec } from "../config/form-types";
 import {
   newSalesOrderSpec,
@@ -99,10 +95,22 @@ function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Local time-of-day greeting (design says "Good morning,"). */
+function greeting(): string {
+  const h = new Date().getHours();
+  if (h < 12) return "Good morning,";
+  if (h < 18) return "Good afternoon,";
+  return "Good evening,";
+}
+
 export default function MobileHome() {
   const navigate = useNavigate();
   const user = getCurrentUser();
   const firstName = (user?.displayName || "there").split(" ")[0];
+  // Avatar initial = first letter of display name (fallback to email / "H").
+  const initial = (
+    (user?.displayName || user?.email || "H").trim().charAt(0) || "H"
+  ).toUpperCase();
 
   // Quick-action create form: holds the active FormSpec, or null. "Staff" has
   // no in-scope create endpoint, so it routes to the Employees directory.
@@ -136,7 +144,7 @@ export default function MobileHome() {
   // ---- KPI: AR due (confirmed sales value not yet delivered) ----
   const arDueSen = stats?.outstandingItemsSen ?? 0;
 
-  // ---- Sales month-over-month delta (for the Open-orders card subtitle) ----
+  // ---- Sales month-over-month delta (Open-orders card) ----
   const salesDeltaPct = useMemo(() => {
     const rev = overview?.monthlyRevenue ?? [];
     if (rev.length < 2) return null;
@@ -147,9 +155,10 @@ export default function MobileHome() {
   }, [overview]);
 
   // ---- Orders due + On-time % (both derived from the live SO list) ----
-  const orders = useMemo(() => (soList?.success ? soList.data ?? [] : []), [
-    soList,
-  ]);
+  const orders = useMemo(
+    () => (soList?.success ? soList.data ?? [] : []),
+    [soList],
+  );
 
   const onTimePct = useMemo(() => {
     const today = todayISO();
@@ -160,11 +169,10 @@ export default function MobileHome() {
       const dd = so.hookkaExpectedDD;
       if (!dd) continue;
       tracked++;
-      // On time = Expected DD has not already passed.
       if (dd.slice(0, 10) >= today) onTime++;
     }
-    // TODO: replace with a dedicated delivered-on-time endpoint when available;
-    // this is a live, non-fabricated proxy (open orders not yet past due).
+    // TODO(wave-x): replace with a dedicated delivered-on-time endpoint; this is
+    // a live, non-fabricated proxy (open orders not yet past due).
     if (tracked === 0) return null;
     return Math.round((onTime / tracked) * 100);
   }, [orders]);
@@ -199,125 +207,306 @@ export default function MobileHome() {
       .slice(0, 5);
   }, [inventory]);
 
+  // Count of late orders, shown as the AR-due delta badge ("N late").
+  const lateCount = useMemo(
+    () => ordersDue.filter((o) => o.overdue).length,
+    [ordersDue],
+  );
+
   return (
     <div style={{ paddingTop: "env(safe-area-inset-top)" }}>
-      {/* Greeting */}
-      <div style={{ padding: "16px 16px 8px" }}>
-        <div style={{ fontSize: 13, color: M.muted }}>Welcome back,</div>
-        <div style={{ fontSize: 22, fontWeight: 800, color: M.raisin }}>
-          {firstName}
+      {/* ===== Header — greeting + avatar + bell ===== */}
+      <div style={{ padding: "12px 18px 16px" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          {/* Avatar (gradient tile, user initial) */}
+          <div
+            style={{
+              width: 42,
+              height: 42,
+              borderRadius: 13,
+              background: `linear-gradient(135deg, ${M.logoFrom}, ${M.logoTo})`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flex: "none",
+            }}
+          >
+            <span style={{ fontWeight: 800, color: "#fff", fontSize: 19 }}>
+              {initial}
+            </span>
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, color: M.muted }}>{greeting()}</div>
+            <div
+              style={{
+                fontSize: 18,
+                fontWeight: 700,
+                color: M.raisin,
+                letterSpacing: "-0.3px",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {firstName}
+            </div>
+          </div>
+          {/* Notification bell (round white button, unread dot) */}
+          <button
+            aria-label="Notifications"
+            // TODO(wave-x): wire to a real notifications surface (none in /m yet).
+            onClick={() => navigate("/m/announcements")}
+            style={{
+              width: 42,
+              height: 42,
+              borderRadius: "50%",
+              backgroundColor: M.card,
+              border: `1px solid ${M.hairline}`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              position: "relative",
+              flex: "none",
+              cursor: "pointer",
+              WebkitTapHighlightColor: "transparent",
+            }}
+          >
+            <Bell size={20} strokeWidth={1.75} color={M.ink} />
+            <span
+              style={{
+                position: "absolute",
+                top: 8,
+                right: 9,
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: "#C0463A",
+                border: "1.5px solid #fff",
+              }}
+            />
+          </button>
         </div>
       </div>
 
-      {/* 2×2 KPI grid */}
-      <div
-        style={{
-          padding: "0 12px",
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 10,
-        }}
-      >
-        <KpiCard
-          icon={Package}
-          label="Open orders"
-          value={openOrders.toLocaleString()}
-          deltaPct={salesDeltaPct}
-          deltaLabel="vs last month sales"
-        />
-        <KpiCard
-          icon={Factory}
-          label="WIP units"
-          value={wipUnits.toLocaleString()}
-          hint="On the floor now"
-        />
-        <KpiCard
-          icon={Timer}
-          label="On-time %"
-          value={onTimePct == null ? "—" : `${onTimePct}%`}
-          hint="Open orders not past due"
-        />
-        <KpiCard
-          icon={Wallet}
-          label="AR due"
-          value={formatCurrency(arDueSen)}
-          hint="Outstanding to deliver"
-        />
-      </div>
+      <div style={{ padding: "0 18px" }}>
+        {/* ===== 2×2 KPI grid ===== */}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 11,
+          }}
+        >
+          <KpiCard
+            icon={ShoppingCart}
+            accent="gold"
+            label="Open orders"
+            value={openOrders.toLocaleString()}
+            delta={
+              salesDeltaPct == null
+                ? null
+                : {
+                    text: `${salesDeltaPct >= 0 ? "+" : ""}${salesDeltaPct}%`,
+                    good: salesDeltaPct >= 0,
+                  }
+            }
+          />
+          <KpiCard
+            icon={Factory}
+            accent="info"
+            label="WIP units"
+            value={wipUnits.toLocaleString()}
+            // TODO(wave-x): no prior-period WIP snapshot to derive a delta from.
+            delta={null}
+          />
+          <KpiCard
+            icon={Truck}
+            accent="moss"
+            label="On-time"
+            value={onTimePct == null ? "—" : `${onTimePct}%`}
+            // TODO(wave-x): no prior-period on-time figure; delta omitted.
+            delta={null}
+          />
+          <KpiCard
+            icon={Receipt}
+            accent="danger"
+            label="AR due"
+            value={formatCurrency(arDueSen)}
+            delta={
+              lateCount > 0
+                ? { text: `${lateCount} late`, good: false }
+                : null
+            }
+          />
+        </div>
 
-      {/* Quick actions */}
-      <div style={{ padding: "16px 12px 4px" }}>
-        <div style={{ display: "flex", gap: 8, overflowX: "auto" }}>
-          <QuickChip
+        {/* ===== Quick actions ===== */}
+        <div style={{ display: "flex", gap: 9, marginTop: 14 }}>
+          <QuickAction
             icon={Plus}
+            accent="gold"
             label="New SO"
             onClick={() => setFormSpec(newSalesOrderSpec())}
           />
-          <QuickChip
+          <QuickAction
             icon={Truck}
+            accent="info"
             label="Delivery"
             onClick={() => setFormSpec(newDeliveryOrderSpec())}
           />
-          <QuickChip
+          <QuickAction
             icon={PackageCheck}
+            accent="moss"
             label="Receive"
             onClick={() => setFormSpec(newPurchaseOrderSpec())}
           />
-          <QuickChip
-            icon={UserPlus}
+          <QuickAction
+            icon={HardHat}
+            accent="plum"
             label="Staff"
-            // No staff-create endpoint is in Phase-4 scope (worker onboarding is
-            // a multi-step desktop flow). Route to the Employees directory.
+            // No staff-create endpoint is in scope. Route to the directory.
             onClick={() => navigate("/m/employees")}
           />
         </div>
-      </div>
 
-      {/* Stock alerts */}
-      <Section title="Stock alerts" onSeeAll={() => navigate("/m/inventory")}>
-        <MobileCard padded={false}>
+        {/* ===== Stock alerts ===== */}
+        <SectionHeader
+          title="Stock alerts"
+          right={
+            stockAlerts.length > 0 ? (
+              <span
+                style={{
+                  background: M_ACCENT.danger.bg,
+                  color: M_ACCENT.danger.fg,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  padding: "2px 9px",
+                  borderRadius: 20,
+                  border: "1px solid #E8B2A1",
+                }}
+              >
+                {stockAlerts.length} low
+              </span>
+            ) : undefined
+          }
+        />
+        <MobileCard padded={false} radius={16}>
           {stockAlerts.length === 0 ? (
             <EmptyRow text="No low-stock materials" />
           ) : (
-            stockAlerts.map((rm) => {
+            stockAlerts.map((rm, i) => {
               const qty = Number(rm.balanceQty) || 0;
-              // Pill reflects the alert reason: out-of-stock is danger; any
-              // other alerted item is low-stock (warning). getStockSemantic
-              // returns NEUTRAL above its LOW threshold, which would wrongly
-              // grey a reorder-point alert, so resolve by reason instead.
-              const sem = qty === 0 ? DANGER : WARNING;
+              const min =
+                typeof rm.minStock === "number" ? rm.minStock : null;
+              const danger = qty === 0;
+              const accent = danger ? M_ACCENT.danger : M_ACCENT.warning;
+              const AlertIcon = danger ? CircleAlert : TriangleAlert;
+              const last = i === stockAlerts.length - 1;
               return (
-                <ListRow
+                <div
                   key={rm.id}
-                  code={rm.itemCode}
-                  title={rm.description || rm.itemCode}
-                  subLine={rm.itemGroup}
-                  meta={[
-                    {
-                      label: "On hand",
-                      value: `${qty} ${rm.baseUOM || ""}`.trim(),
-                    },
-                  ]}
-                  pill={
-                    <StatusPill
-                      style={sem}
-                      label={qty === 0 ? "OUT_OF_STOCK" : "LOW_STOCK"}
-                      size="sm"
-                    />
-                  }
                   onClick={() => navigate("/m/inventory")}
-                />
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      navigate("/m/inventory");
+                    }
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                    padding: "13px 15px",
+                    borderBottom: last
+                      ? "none"
+                      : `1px solid ${M.divider}`,
+                    cursor: "pointer",
+                    WebkitTapHighlightColor: "transparent",
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 34,
+                      height: 34,
+                      borderRadius: 10,
+                      background: accent.bg,
+                      flex: "none",
+                    }}
+                  >
+                    <AlertIcon size={17} strokeWidth={1.75} color={accent.fg} />
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: 13.5,
+                        fontWeight: 600,
+                        color: M.raisin,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {rm.description || rm.itemCode}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: M.muted }}>
+                      {rm.itemCode}
+                      {rm.itemGroup ? ` · ${rm.itemGroup}` : ""}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right", flex: "none" }}>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 700,
+                        color: M_ACCENT.danger.fg,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {`${qty} ${rm.baseUOM || ""}`.trim()}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: M.faint }}>
+                      {min != null ? `min ${min}` : "low"}
+                    </div>
+                  </div>
+                </div>
               );
             })
           )}
         </MobileCard>
-      </Section>
 
-      {/* Orders due */}
-      <Section title="Orders due" onSeeAll={() => navigate("/m/sales")}>
+        {/* ===== Orders due ===== */}
+        <SectionHeader
+          title="Orders due this week"
+          right={
+            <button
+              onClick={() => navigate("/m/sales")}
+              style={{
+                background: "none",
+                border: "none",
+                color: M.taupe,
+                fontSize: 12.5,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              See all
+            </button>
+          }
+        />
         <div style={{ display: "grid", gap: 10 }}>
           {ordersDue.length === 0 ? (
-            <MobileCard padded={false}>
+            <MobileCard padded={false} radius={16}>
               <EmptyRow text="No upcoming orders" />
             </MobileCard>
           ) : (
@@ -331,12 +520,12 @@ export default function MobileHome() {
             ))
           )}
         </div>
-      </Section>
+      </div>
 
       <div style={{ height: 8 }} />
 
-      {/* Quick-action create forms (Phase 4). On save the sheet closes and we
-          navigate to the new document's detail. */}
+      {/* Quick-action create forms. On save the sheet closes and we navigate
+          to the new document's detail. */}
       <FormSheet
         open={formSpec != null}
         onClose={() => setFormSpec(null)}
@@ -352,24 +541,24 @@ export default function MobileHome() {
 
 // --------------------------------------------------------------------------
 
+type AccentKey = keyof typeof M_ACCENT;
+
 function KpiCard({
   icon: Icon,
+  accent,
   label,
   value,
-  hint,
-  deltaPct,
-  deltaLabel,
+  delta,
 }: {
   icon: LucideIcon;
+  accent: AccentKey;
   label: string;
   value: string;
-  hint?: string;
-  deltaPct?: number | null;
-  deltaLabel?: string;
+  delta: { text: string; good: boolean } | null;
 }) {
-  const up = (deltaPct ?? 0) >= 0;
+  const c = M_ACCENT[accent];
   return (
-    <MobileCard radius={16}>
+    <MobileCard radius={16} style={{ padding: "15px 16px" }}>
       <div
         style={{
           display: "flex",
@@ -377,136 +566,119 @@ function KpiCard({
           justifyContent: "space-between",
         }}
       >
-        <span style={{ fontSize: 12, color: M.muted, fontWeight: 600 }}>
-          {label}
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 32,
+            height: 32,
+            borderRadius: 10,
+            background: c.bg,
+          }}
+        >
+          <Icon size={17} strokeWidth={1.75} color={c.fg} />
         </span>
-        <Icon size={18} strokeWidth={1.75} color={M.taupe} />
+        {delta ? (
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              color: delta.good ? M_DELTA.up : M_DELTA.down,
+            }}
+          >
+            {delta.text}
+          </span>
+        ) : null}
       </div>
       <div
         style={{
-          fontSize: 24,
+          fontSize: 25,
           fontWeight: 800,
+          letterSpacing: "-0.6px",
           color: M.raisin,
-          marginTop: 6,
+          marginTop: 13,
+          lineHeight: 1,
           fontVariantNumeric: "tabular-nums",
         }}
       >
         {value}
       </div>
-      {deltaPct != null ? (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 3,
-            marginTop: 4,
-            fontSize: 11,
-            color: up ? "#4F7C3A" : "#9A3A2D",
-            fontWeight: 600,
-          }}
-        >
-          {up ? (
-            <ArrowUpRight size={13} strokeWidth={2} />
-          ) : (
-            <ArrowDownRight size={13} strokeWidth={2} />
-          )}
-          {Math.abs(deltaPct)}%
-          <span style={{ color: M.muted, fontWeight: 400 }}>{deltaLabel}</span>
-        </div>
-      ) : hint ? (
-        <div style={{ fontSize: 11, color: M.muted, marginTop: 4 }}>{hint}</div>
-      ) : null}
+      <div style={{ fontSize: 12, color: M.muted, marginTop: 5 }}>{label}</div>
     </MobileCard>
   );
 }
 
-function QuickChip({
+function QuickAction({
   icon: Icon,
+  accent,
   label,
   onClick,
 }: {
   icon: LucideIcon;
+  accent: AccentKey;
   label: string;
   onClick: () => void;
 }) {
+  const c = M_ACCENT[accent];
   return (
     <button
       onClick={onClick}
       style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        gap: 6,
-        padding: "10px 14px",
-        minWidth: 76,
+        flex: 1,
         backgroundColor: M.card,
         border: `1px solid ${M.border}`,
         borderRadius: 14,
+        padding: "13px 8px",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 7,
         cursor: "pointer",
-        flexShrink: 0,
         WebkitTapHighlightColor: "transparent",
       }}
     >
       <span
         style={{
-          width: 36,
-          height: 36,
-          borderRadius: 10,
-          backgroundColor: M.taupe,
-          display: "flex",
+          display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
+          width: 38,
+          height: 38,
+          borderRadius: 12,
+          background: c.bg,
         }}
       >
-        <Icon size={18} strokeWidth={2} color="#fff" />
+        <Icon size={20} strokeWidth={1.75} color={c.fg} />
       </span>
-      <span style={{ fontSize: 12, fontWeight: 600, color: M.raisin }}>
+      <span style={{ fontSize: 11, fontWeight: 600, color: M.ink }}>
         {label}
       </span>
     </button>
   );
 }
 
-function Section({
+function SectionHeader({
   title,
-  onSeeAll,
-  children,
+  right,
 }: {
   title: string;
-  onSeeAll?: () => void;
-  children: React.ReactNode;
+  right?: React.ReactNode;
 }) {
   return (
-    <section style={{ padding: "18px 12px 0" }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "0 4px 8px",
-        }}
-      >
-        <h2 style={{ fontSize: 15, fontWeight: 700, color: M.raisin, margin: 0 }}>
-          {title}
-        </h2>
-        {onSeeAll ? (
-          <button
-            onClick={onSeeAll}
-            style={{
-              background: "none",
-              border: "none",
-              color: M.taupe,
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            See all
-          </button>
-        ) : null}
-      </div>
-      {children}
-    </section>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        margin: "22px 2px 11px",
+      }}
+    >
+      <span style={{ fontSize: 16, fontWeight: 700, color: M.raisin }}>
+        {title}
+      </span>
+      {right ?? null}
+    </div>
   );
 }
 
@@ -524,81 +696,71 @@ function OrderDueCard({
     SO_STATUS_COLOR.DRAFT;
   const dd = (so.hookkaExpectedDD || "").slice(0, 10);
   return (
-    <MobileCard onClick={onClick} radius={16}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          justifyContent: "space-between",
-          gap: 10,
-        }}
-      >
-        <div style={{ minWidth: 0 }}>
-          <div
-            style={{
-              color: M.taupe,
-              fontSize: 12,
-              fontWeight: 700,
-              fontFamily:
-                "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-            }}
-          >
-            {so.companySO || so.companySOId}
-          </div>
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 600,
-              color: M.raisin,
-              marginTop: 1,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {so.customerName}
-          </div>
-        </div>
-        <StatusPill style={sem} label={so.status} size="sm" />
-      </div>
+    <MobileCard onClick={onClick} radius={15} style={{ padding: "14px 15px" }}>
       <div
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          marginTop: 10,
+          gap: 10,
         }}
       >
-        <div>
-          <div style={{ fontSize: 10, color: M.muted }}>Expected DD</div>
-          <div
-            style={{
-              fontSize: 13,
-              fontWeight: 600,
-              color: overdue ? "#9A3A2D" : M.raisin,
-              fontVariantNumeric: "tabular-nums",
-              display: "flex",
-              alignItems: "center",
-              gap: 4,
-            }}
-          >
-            {overdue ? <AlertTriangle size={13} strokeWidth={2} /> : null}
-            {dd || "—"}
-          </div>
-        </div>
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 10, color: M.muted }}>Amount</div>
-          <div
-            style={{
-              fontSize: 13,
-              fontWeight: 700,
-              color: M.raisin,
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            {formatCurrency(so.totalSen || 0)}
-          </div>
-        </div>
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 700,
+            color: M.taupe,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {so.companySO || so.companySOId}
+        </span>
+        <StatusPill style={sem} label={so.status} size="sm" />
+      </div>
+      <div
+        style={{
+          fontSize: 14.5,
+          fontWeight: 600,
+          color: M.raisin,
+          marginTop: 7,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {so.customerName}
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          marginTop: 10,
+          paddingTop: 10,
+          borderTop: `1px solid ${M.divider}`,
+        }}
+      >
+        <span
+          style={{
+            fontSize: 11.5,
+            color: overdue ? M_DELTA.down : M.muted,
+            fontVariantNumeric: "tabular-nums",
+            fontWeight: overdue ? 600 : 400,
+          }}
+        >
+          Exp. DD {dd || "—"}
+        </span>
+        <span style={{ flex: 1 }} />
+        <span
+          style={{
+            fontSize: 13,
+            fontWeight: 700,
+            color: M.raisin,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {formatCurrency(so.totalSen || 0)}
+        </span>
       </div>
     </MobileCard>
   );

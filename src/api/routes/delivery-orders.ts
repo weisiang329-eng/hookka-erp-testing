@@ -1312,6 +1312,35 @@ app.get("/po-values", async (c) => {
   return c.json({ success: true, ...payload });
 });
 
+// COMPLETE set of production-order ids already carried on a non-cancelled
+// Delivery Order — the AUTHORITATIVE "already delivered" set, NOT capped by the
+// list page size. The Pending-Delivery list + Command Center MUST use this to
+// decide what is still un-delivered. A capped DO fetch (page 1, limit 200)
+// silently re-surfaced already-delivered orders (e.g. SO-2603-157, delivered on
+// March DOs) once total DOs grew past one page — BUG-2026-06-27, root fix. One
+// cheap DISTINCT, no row payload, so every consumer can hold the full set.
+app.get("/linked-po-ids", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const res = await c.var.DB
+    .prepare(
+      `SELECT DISTINCT doi.productionOrderId AS poId
+         FROM delivery_order_items doi
+         JOIN delivery_orders d ON d.id = doi.deliveryOrderId
+        WHERE doi.orgId = ?
+          AND doi.productionOrderId IS NOT NULL
+          AND doi.productionOrderId <> ''
+          AND d.status <> 'CANCELLED'`,
+    )
+    .bind(orgId)
+    .all<{ poId?: string | null }>();
+  const poIds = (res.results ?? [])
+    .map((r) => r.poId)
+    .filter((x): x is string => !!x);
+  return c.json({ success: true, poIds });
+});
+
 // ---------------------------------------------------------------------------
 // POST /api/delivery-orders/backfill-customer-po
 //

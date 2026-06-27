@@ -139,6 +139,28 @@ app.get("/", async (c) => {
   });
 });
 
+// COMPLETE set of production-order ids already on a non-cancelled Consignment
+// Note — the authoritative "already consigned" set, NOT capped by the CN list
+// page. note.tsx's "ready" list MUST use this to exclude POs already on a CN;
+// a capped CN fetch under-excluded once CN volume passed one page (the CN twin
+// of the DO BUG-2026-06-27). One cheap DISTINCT.
+app.get("/linked-po-ids", async (c) => {
+  const res = await c.var.DB
+    .prepare(
+      `SELECT DISTINCT ci.productionOrderId AS poId
+         FROM consignment_items ci
+         JOIN consignment_notes cn ON cn.id = ci.consignmentNoteId
+        WHERE ci.productionOrderId IS NOT NULL
+          AND ci.productionOrderId <> ''
+          AND cn.status <> 'CANCELLED'`,
+    )
+    .all<{ poId?: string | null }>();
+  const poIds = (res.results ?? [])
+    .map((r) => r.poId)
+    .filter((x): x is string => !!x);
+  return c.json({ success: true, poIds });
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/consignment-notes/stats — whole-dataset KPI / tab counts.
 //

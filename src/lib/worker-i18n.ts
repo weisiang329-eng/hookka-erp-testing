@@ -619,6 +619,7 @@ const dict: Dict = {
     zh: '效率 %',
     my: 'ထိရောက်မှု %',
   },
+  'home.todayChip': { en: 'Today', ms: 'Hari ini', zh: '今天', my: 'ယနေ့' },
   'home.last7d': { en: '7d', ms: '7h', zh: '7天', my: '၇ရက်' },
   'home.last30d': { en: '30d', ms: '30h', zh: '30天', my: '၃၀ရက်' },
   'home.colWorkingHrs': {

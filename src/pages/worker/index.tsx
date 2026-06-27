@@ -635,9 +635,12 @@ export default function WorkerHomePage() {
   }
 
   // Quick preset chips for the range picker
-  function setPreset(kind: "7d" | "30d" | "month" | "lastMonth") {
+  function setPreset(kind: "today" | "7d" | "30d" | "month" | "lastMonth") {
     const now = new Date();
-    if (kind === "7d") {
+    if (kind === "today") {
+      setFrom(ymd(now));
+      setTo(ymd(now));
+    } else if (kind === "7d") {
       setFrom(ymd(addDays(now, -6)));
       setTo(ymd(now));
     } else if (kind === "30d") {
@@ -1081,6 +1084,7 @@ export default function WorkerHomePage() {
         </div>
 
         <div className="flex gap-1.5 mt-2 overflow-x-auto -mx-1 px-1">
+          <Chip onClick={() => setPreset("today")}>{t("home.todayChip")}</Chip>
           <Chip onClick={() => setPreset("7d")}>{t("home.last7d")}</Chip>
           <Chip onClick={() => setPreset("30d")}>{t("home.last30d")}</Chip>
           <Chip onClick={() => setPreset("month")}>{t("pay.thisMonthChip")}</Chip>

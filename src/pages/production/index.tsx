@@ -4117,20 +4117,25 @@ export default function ProductionPage({
       render: (_v, row) => renderStatusCell(row),
     },
     {
-      // "Barcode" — a DEFAULT-HIDDEN column toggled in the Columns menu like any
-      // other (Wei Siang 2026-06-15: "应该做在 column 那边"). On screen it shows the
-      // SHORT 10-digit barcode token (Wei Siang 2026-06-16 "很多字是多余的"); the
-      // scannable QR of the same token is drawn by the Print Schedule output (see
+      // "Barcode" — toggleable in the Columns menu like any other (Wei Siang
+      // 2026-06-15: "应该做在 column 那边"). On screen it shows the SHORT 10-digit
+      // barcode token (Wei Siang 2026-06-16 "很多字是多余的"); the scannable QR of
+      // the same token is drawn by the Print Schedule output (see
       // handlePrintSchedule / jobCardQrDataUrl). The key MUST stay "scanCode"
       // (the print CSS class + the showScan check key off it); only the label
       // is "Barcode" — it propagates to the printed column header too (the print
       // header reads c.label), so this one rename covers both surfaces.
+      // Owner 2026-06-27: the schedule barcode is now scanned routinely, so this
+      // column is VISIBLE BY DEFAULT (defaultHidden:false). The Columns toggle
+      // stays — operators can still hide it. Users who already saved a personal
+      // column layout keep theirs (their saved set wins over this default); only
+      // users who never customized get the column shown.
       key: "scanCode",
       label: "Barcode",
       type: "text",
       width: "120px",
       sortable: false,
-      defaultHidden: true,
+      defaultHidden: false,
       render: (_v, row) => {
         if (!row.jobCardId) return null;
         const token = deriveBarcodeToken(row.jobCardId, activeTab);

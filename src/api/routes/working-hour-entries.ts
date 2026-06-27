@@ -1433,4 +1433,153 @@ app.post("/nonprod-requests/:id/reject", async (c) => {
   return c.json({ success: true, data: { id, status: "REJECTED" } });
 });
 
+// ---------------------------------------------------------------------------
+// POST /nonprod-requests/:id/remove
+//
+// Owner 2026-06-27: let the office DELETE a *bad APPROVED* time-adjustment
+// claim (e.g. a 20h ADD_PROD entered before the minutes fix). This REVERSES
+// whatever the approve path did, then marks the request REMOVED so it no
+// longer counts. Only an APPROVED request can be removed (reject already
+// covers PENDING). Same permission as approve (attendance:update).
+//
+//   ADD_PROD — approve only flipped the status + wiped the efficiency
+//     numerator snapshot; it wrote no working_hour_entries row. So removal
+//     just marks the request REMOVED and wipes the SAME snapshot, and the
+//     numerator recomputes without the credit.
+//
+//   NONPROD — approve INSERTED a non-prod working_hour_entries row AND
+//     DEDUCTED the same hours from that day's PRODUCTION entries (the split).
+//     To reverse, conserving the day's total hours:
+//       1. delete the inserted non-prod WHE row (by entry_id; fall back to a
+//          worker+date+dept+'(approved)' note match for legacy rows that
+//          predate entry_id being stored),
+//       2. add the request's hours BACK to the worker's largest production
+//          WHE entry for that day (best-effort restore of the split). If the
+//          worker has no production entry left, nothing is added back — the
+//          day total still nets out because the non-prod row was removed.
+// ---------------------------------------------------------------------------
+app.post("/nonprod-requests/:id/remove", async (c) => {
+  const denied = await requirePermission(c, "attendance", "update");
+  if (denied) return denied;
+  await ensureNonprodRequests(c.var.DB);
+  const id = c.req.param("id");
+  const req = await c.var.DB
+    .prepare("SELECT * FROM worker_nonprod_requests WHERE id = ?")
+    .bind(id)
+    .first<NonprodReqRow>();
+  if (!req) return c.json({ success: false, error: "Request not found" }, 404);
+  const reqJson = reqRowToJson(req as NonprodReqRow & Record<string, unknown>);
+  if (reqJson.status !== "APPROVED") {
+    return c.json(
+      { success: false, error: `Only an APPROVED request can be removed (this one is ${reqJson.status})` },
+      409,
+    );
+  }
+  const entryId = String(
+    (req as NonprodReqRow & Record<string, unknown>).entryId ?? req.entry_id ?? "",
+  );
+  const decidedBy = getUserId(c);
+
+  // ----- ADD_PROD: no WHE row was written; just un-credit the numerator. -----
+  if (reqJson.kind === "ADD_PROD") {
+    await c.var.DB.prepare(
+      `UPDATE worker_nonprod_requests
+         SET status = 'REMOVED', decided_at = ?, decided_by = ?
+       WHERE id = ?`,
+    )
+      .bind(new Date().toISOString(), decidedBy, id)
+      .run();
+    // Wipe the same snapshot the approve path invalidated so the office
+    // Efficiency Overview recomputes WITHOUT this (now removed) credit.
+    try {
+      const { getOrgId } = await import("../lib/tenant");
+      const { invalidateSnapshot } = await import("../lib/snapshot");
+      await invalidateSnapshot(
+        c.var.DB,
+        { tableName: "job_cards_summary_snapshot", sourceTables: ["job_cards"] },
+        getOrgId(c),
+      );
+    } catch (e) {
+      console.warn("[nonprod-remove] job_cards_summary_snapshot wipe failed:", e);
+    }
+    return c.json({
+      success: true,
+      data: { id, status: "REMOVED", kind: "ADD_PROD" },
+    });
+  }
+
+  // ----- NONPROD: delete the inserted non-prod row + restore the split. -----
+  try {
+    // 1. Delete the non-prod working_hour_entries row the approve path wrote.
+    if (entryId) {
+      await c.var.DB
+        .prepare("DELETE FROM working_hour_entries WHERE id = ?")
+        .bind(entryId)
+        .run();
+    } else {
+      // Legacy fallback (entry_id wasn't stored): match by the exact shape the
+      // approve path inserted — worker + date + dept + the '(approved)' note.
+      await c.var.DB
+        .prepare(
+          `DELETE FROM working_hour_entries
+            WHERE workerId = ? AND date = ? AND departmentCode = ?
+              AND notes LIKE 'Non-production (approved)%'`,
+        )
+        .bind(reqJson.workerId, reqJson.date, reqJson.departmentCode)
+        .run();
+    }
+
+    // 2. Add the hours back to the worker's largest production WHE entry that
+    //    day (best-effort restore of the deduction the approve split made).
+    const deptRows = await c.var.DB
+      .prepare("SELECT code, isProduction FROM departments")
+      .bind()
+      .all<{ code: string; isProduction: number | boolean | null }>();
+    const prodDeptCodes = new Set<string>();
+    for (const d of deptRows.results ?? []) {
+      if (d.isProduction) prodDeptCodes.add(d.code);
+    }
+    const dayRows = await c.var.DB
+      .prepare(
+        `SELECT id, departmentCode, hours FROM working_hour_entries
+          WHERE workerId = ? AND date = ?`,
+      )
+      .bind(reqJson.workerId, reqJson.date)
+      .all<{ id: string; departmentCode: string; hours: number }>();
+    const prodEntries = (dayRows.results ?? [])
+      .map((r) => ({
+        id: r.id,
+        departmentCode: r.departmentCode,
+        hours: typeof r.hours === "number" ? r.hours : Number(r.hours) || 0,
+      }))
+      .filter((r) => prodDeptCodes.has(r.departmentCode))
+      .sort((a, b) => b.hours - a.hours);
+    if (prodEntries.length > 0 && reqJson.hours > 0) {
+      const target = prodEntries[0];
+      const newHours = target.hours + reqJson.hours;
+      await c.var.DB.prepare(
+        `UPDATE working_hour_entries
+           SET hours = ?, updatedAt = datetime('now')
+         WHERE id = ?`,
+      )
+        .bind(newHours, target.id)
+        .run();
+    }
+  } catch (e) {
+    // A failure here must not block marking the request REMOVED — the office
+    // can re-balance the day manually via the Working Hours grid if needed.
+    console.warn("[nonprod-remove] reversal failed:", e);
+  }
+
+  await c.var.DB.prepare(
+    `UPDATE worker_nonprod_requests
+       SET status = 'REMOVED', decided_at = ?, decided_by = ?
+     WHERE id = ?`,
+  )
+    .bind(new Date().toISOString(), decidedBy, id)
+    .run();
+
+  return c.json({ success: true, data: { id, status: "REMOVED" } });
+});
+
 export default app;

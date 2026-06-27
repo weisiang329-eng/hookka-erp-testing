@@ -339,6 +339,11 @@ export default function WorkerScanPage() {
   // code centred in that horizontal band — so the worker aims at one barcode and
   // the other rows are ignored. "qr" mode keeps the square full-frame behaviour.
   const [scanMode, setScanMode] = useState<"qr" | "barcode">("qr");
+  // Barcode mode is tap-to-scan (owner 2026-06-27): the live loop only DETECTS a
+  // barcode in view and flips this true → the aim frame turns blue ("ready, tap
+  // it"); the actual scan happens on the worker's tap (tapScanBarcode). True only
+  // while a barcode is framed; reset on stop / mode switch so it never lingers.
+  const [barcodeSeen, setBarcodeSeen] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -1194,6 +1199,7 @@ export default function WorkerScanPage() {
     }
     setLiveScanning(false);
     setTorchOn(false);
+    setBarcodeSeen(false);
     setTorchSupported(false);
   }, []);
 
@@ -1430,7 +1436,6 @@ export default function WorkerScanPage() {
       }, 250);
     };
 
-    let barcodeNativeMiss = 0;
     // Barcode-mode diagnostic counters (drive scanDbg).
     let bcN = 0;
     let bcLast = "";
@@ -1476,53 +1481,23 @@ export default function WorkerScanPage() {
             const codes = await nativeDetector.detect(video);
             if (stopped) return;
             if (scanMode === "barcode") {
-              // FULL FRAME, NEAREST code_128 to centre wins — NO band/position
-              // rejection at decode time. We DECODE the full frame (so it never
-              // goes "扫不到") and pick the SINGLE code whose bbox centre is nearest
-              // the frame centre — a SELECTION that biases toward the row the worker
-              // aimed at but can NEVER reject all. considerHit then fires it
-              // INSTANTLY (no band, no hold) — same as QR (owner 2026-06-18).
-              const vh0 = video.videoHeight || 1;
-              const cx = video.videoWidth / 2;
-              const cyMid = video.videoHeight / 2;
-              let best: { v: string; d: number; ncy: number } | null = null;
+              // Owner 2026-06-27: DO NOT auto-fire in barcode mode. A stacked
+              // schedule shows 3-4 barcodes in one frame and auto-picking the
+              // nearest-centre code grabbed the WRONG row ("它会随便检测"). Instead
+              // we only DETECT whether a (non-QR) barcode is in view → the overlay
+              // turns its aim frame BLUE ("显蓝色") so the worker knows it's ready,
+              // and he TAPS the exact row he wants (tapScanBarcode decodes the
+              // tapped row) to actually scan it. No fire here.
+              let seen = false;
               for (const c of codes) {
                 if (!c.rawValue) continue;
                 const fmt = (c as { format?: string }).format;
-                // Accept ANY 1D symbology in barcode mode (owner 2026-06-27),
-                // not just code_128 — exclude only qr_code (QR mode owns that).
-                if (fmt && fmt === "qr_code") continue;
-                const bb = (
-                  c as {
-                    boundingBox?: {
-                      x: number;
-                      y: number;
-                      width: number;
-                      height: number;
-                    };
-                  }
-                ).boundingBox;
-                const bcy = bb ? bb.y + bb.height / 2 : cyMid;
-                const d = bb
-                  ? Math.hypot(bb.x + bb.width / 2 - cx, bcy - cyMid)
-                  : 0;
-                if (!best || d < best.d)
-                  best = { v: c.rawValue, d, ncy: bcy / vh0 };
+                if (fmt && fmt === "qr_code") continue; // QR mode owns QR
+                seen = true;
+                break;
               }
-              if (best) {
-                barcodeNativeMiss = 0;
-                considerHit(best.v, best.ncy);
-                return;
-              }
-              // Native BarcodeDetector saw nothing usable. Some phones ship one
-              // that simply can't read a dense Code 128 (returns empty, never
-              // throws) — so the loop would spin on "扫不到" forever. After ~0.8s
-              // of misses, retire it for this session (once ZXing is loaded) so
-              // the next ticks fall through to ZXing's TRY_HARDER band decode,
-              // which reads where the native one won't.
-              if (zxingRef.current && ++barcodeNativeMiss >= 12) {
-                nativeDetector = null;
-              }
+              setBarcodeSeen(seen);
+              // fall through to reschedule (no fire, no zoom in barcode mode)
             } else if (codes.length > 0 && codes[0].rawValue) {
               considerHit(codes[0].rawValue);
               return;
@@ -1575,14 +1550,12 @@ export default function WorkerScanPage() {
                     `v:${vw}×${vh} full zx:✓ n:${bcN} ${bcLast ? bcLast.slice(0, 14) : "—"}`,
                   );
                 }
-                if (zx) {
-                  // considerHit fires instantly (no band, no hold) — same as QR.
-                  // zx.cy is passed for signature parity only; it is NOT gated on
-                  // (a cy/band reject was the "扫不到" regression). ZXing has no
-                  // centre selection, so on iOS the worker confirms via the card.
-                  considerHit(zx.text, zx.cy);
-                  return;
-                }
+                // Owner 2026-06-27: detect-only, NO auto-fire (see native path).
+                // A decoded barcode in view → blue "tap to scan" cue; the worker
+                // taps the row he wants (tapScanBarcode) to scan it. iOS has no
+                // bbox/centre selection so auto-pick would be a coin-flip among a
+                // stacked list — exactly what tap-to-pick avoids.
+                setBarcodeSeen(!!zx);
               }
             } else {
               // QR mode: full frame, jsQR first then ZXing (reads QR + Code 128).
@@ -2829,18 +2802,39 @@ export default function WorkerScanPage() {
                     : { width: "min(70vw, 70vh)", aspectRatio: "1 / 1" }
                 }
               >
-                <span className="absolute left-0 top-0 h-10 w-10 border-t-4 border-l-4 border-white rounded-tl-lg" />
-                <span className="absolute right-0 top-0 h-10 w-10 border-t-4 border-r-4 border-white rounded-tr-lg" />
-                <span className="absolute left-0 bottom-0 h-10 w-10 border-b-4 border-l-4 border-white rounded-bl-lg" />
-                <span className="absolute right-0 bottom-0 h-10 w-10 border-b-4 border-r-4 border-white rounded-br-lg" />
-                {/* no centre line — barcode is tap-to-pick now. Instead a gently
-                    pulsing "Tap to scan" badge makes the tap affordance obvious
-                    (owner 2026-06-18: didn't realise the row was tappable). */}
+                {/* Aim-frame corners. In barcode mode they turn CYAN the moment a
+                    barcode is framed (owner 2026-06-27: "显蓝色") so the worker
+                    knows it's ready to tap. */}
+                {(() => {
+                  const c =
+                    scanMode === "barcode" && barcodeSeen
+                      ? "border-cyan-300"
+                      : "border-white";
+                  return (
+                    <>
+                      <span className={`absolute left-0 top-0 h-10 w-10 border-t-4 border-l-4 ${c} rounded-tl-lg`} />
+                      <span className={`absolute right-0 top-0 h-10 w-10 border-t-4 border-r-4 ${c} rounded-tr-lg`} />
+                      <span className={`absolute left-0 bottom-0 h-10 w-10 border-b-4 border-l-4 ${c} rounded-bl-lg`} />
+                      <span className={`absolute right-0 bottom-0 h-10 w-10 border-b-4 border-r-4 ${c} rounded-br-lg`} />
+                    </>
+                  );
+                })()}
+                {/* no centre line — barcode is tap-to-pick now. The badge says
+                    "Tap to scan", and flips to a CYAN "Detected — tap to scan"
+                    once a barcode is in view so the worker taps the row he wants. */}
                 {scanMode === "barcode" && (
                   <span className="absolute inset-0 flex items-center justify-center">
-                    <span className="flex items-center gap-1.5 rounded-full bg-black/55 px-3 py-1.5 text-white text-xs font-semibold animate-pulse">
+                    <span
+                      className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold animate-pulse ${
+                        barcodeSeen
+                          ? "bg-cyan-400/90 text-black"
+                          : "bg-black/55 text-white"
+                      }`}
+                    >
                       <Pointer className="h-3.5 w-3.5" />
-                      {t("scan.tapHintBarcode")}
+                      {barcodeSeen
+                        ? t("scan.tapHintBarcodeReady")
+                        : t("scan.tapHintBarcode")}
                     </span>
                   </span>
                 )}
@@ -2897,9 +2891,10 @@ export default function WorkerScanPage() {
                 (Wei Siang 2026-06-16: the top one was too high to tap). */}
             <button
               type="button"
-              onClick={() =>
-                setScanMode((m) => (m === "qr" ? "barcode" : "qr"))
-              }
+              onClick={() => {
+                setBarcodeSeen(false);
+                setScanMode((m) => (m === "qr" ? "barcode" : "qr"));
+              }}
               className="w-full max-w-xs h-12 rounded-full bg-white text-black font-bold text-base active:bg-white/80"
             >
               {scanMode === "qr"

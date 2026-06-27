@@ -274,16 +274,22 @@ const dict: Dict = {
     my: 'ကင်မရာကို QR သို့မဟုတ် ဘားကုဒ်ပေါ် ချိန်ပါ — နှစ်မျိုးလုံး အလိုအလျောက် ဖတ်သည်။',
   },
   'scan.aimHintBarcode': {
-    en: 'Aim at the barcode — it reads automatically. On a stacked list, tap the row you want.',
-    ms: 'Halakan ke barkod — ia membaca automatik. Untuk senarai bertindih, ketik baris yang anda mahu.',
-    zh: '对准条形码会自动识别；若多条叠在一起，点你要的那一行。',
-    my: 'ဘားကုဒ်ပေါ်ချိန်ပါ — အလိုအလျောက်ဖတ်သည်။ စာရင်းထပ်နေပါက လိုချင်သောလိုင်းကို တို့ပါ။',
+    en: 'Aim at the barcode you want, then tap it to scan. On a stacked list, tap the exact row.',
+    ms: 'Halakan ke barkod yang anda mahu, kemudian ketik untuk imbas. Untuk senarai bertindih, ketik baris yang tepat.',
+    zh: '对准你要的条形码，点一下扫描；若多条叠在一起，点你要的那一行。',
+    my: 'လိုချင်သော ဘားကုဒ်ကို ချိန်ပြီး တို့၍ ဖတ်ပါ။ စာရင်းထပ်နေပါက မှန်ကန်သောလိုင်းကို တို့ပါ။',
   },
   'scan.tapHintBarcode': {
     en: 'Tap to scan',
     ms: 'Ketik untuk imbas',
     zh: '点一下扫描',
     my: 'တို့၍ ဖတ်ပါ',
+  },
+  'scan.tapHintBarcodeReady': {
+    en: 'Detected — tap to scan',
+    ms: 'Dikesan — ketik untuk imbas',
+    zh: '已检测到 — 点一下扫描',
+    my: 'တွေ့ရှိ — တို့၍ ဖတ်ပါ',
   },
   'scan.modeQr': {
     en: 'QR mode',

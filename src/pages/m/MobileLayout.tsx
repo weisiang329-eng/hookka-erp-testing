@@ -13,8 +13,10 @@
 //   • renders its own nested <Routes> for the /m/* screens,
 //   • pins the 5-item BottomTabBar (Home · Sales · Production · Procure · More).
 //
-// Phase 1 ships: Home (real data) + More menu + placeholder module screens so
-// navigation works end-to-end. Phase 2 swaps placeholders for real screens.
+// Phase 1: Home + More + placeholders. Phase 2 (this): every module's L1 list
+// is wired to <ModuleListScreen> driven by its ModuleConfig (config-driven —
+// see src/pages/m/config/modules.ts). L2 detail routes (/m/<slug>/:id) land on
+// a ComingSoon detail until Phase 3 supplies the real detail screen.
 // ===========================================================================
 import { Route, Routes } from "react-router-dom";
 import { BottomTabBar } from "./components";
@@ -22,19 +24,8 @@ import { M, M_FONT, M_MAX_WIDTH } from "./theme";
 import MobileHome from "./screens/Home";
 import MobileMore from "./screens/More";
 import { ComingSoon } from "./screens/ComingSoon";
-import { MORE_GROUPS } from "./nav";
-
-// Build the placeholder route list from the nav model so every "More" link
-// resolves to a screen (Phase 2 replaces these with real screens). Paths are
-// stored absolute (/m/...) in the nav model; the nested <Routes> here is
-// mounted at /m, so we strip the leading "/m/" to get the child path.
-const PLACEHOLDER_ROUTES = Array.from(
-  new Set(
-    MORE_GROUPS.flatMap((g) => g.items.map((i) => i.path)).filter(
-      (p) => p !== "/m" && p !== "/m/sales" && p !== "/m/production",
-    ),
-  ),
-);
+import { ModuleListScreen } from "./screens/ModuleListScreen";
+import { MODULE_CONFIGS } from "./config/modules";
 
 export default function MobileLayout() {
   return (
@@ -61,22 +52,21 @@ export default function MobileLayout() {
         <Routes>
           <Route path="/" element={<MobileHome />} />
           <Route path="/more" element={<MobileMore />} />
-          {/* Phase-1 placeholders for tabs whose real screens land in Phase 2. */}
-          <Route path="/sales" element={<ComingSoon title="Sales Orders" />} />
-          <Route
-            path="/production"
-            element={<ComingSoon title="Production Orders" />}
-          />
-          {PLACEHOLDER_ROUTES.map((p) => {
-            const child = p.replace(/^\/m\//, "");
-            return (
+
+          {/* Config-driven L1 module lists + their L2 detail placeholders. */}
+          {MODULE_CONFIGS.map((cfg) => (
+            <Route key={cfg.slug}>
               <Route
-                key={p}
-                path={child}
-                element={<ComingSoon title={labelFor(p)} />}
+                path={cfg.slug}
+                element={<ModuleListScreen config={cfg} />}
               />
-            );
-          })}
+              <Route
+                path={`${cfg.slug}/:id`}
+                element={<ComingSoon title={`${cfg.title} detail`} />}
+              />
+            </Route>
+          ))}
+
           {/* Unknown /m/* → Home. */}
           <Route path="*" element={<MobileHome />} />
         </Routes>
@@ -84,12 +74,4 @@ export default function MobileLayout() {
       <BottomTabBar />
     </div>
   );
-}
-
-/** Look up a friendly title for a placeholder path from the nav model. */
-function labelFor(path: string): string {
-  for (const g of MORE_GROUPS) {
-    for (const i of g.items) if (i.path === path) return i.label;
-  }
-  return "Coming soon";
 }

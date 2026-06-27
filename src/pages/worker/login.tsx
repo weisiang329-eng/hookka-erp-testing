@@ -2,35 +2,35 @@
 // /worker/login — PIN sign-in for the mobile shop-floor portal
 //
 // Three screens share this page, swapped via local state:
-//   1. mode = "login" — enter empNo + PIN (default)
+//   1. mode = "login" — enter empNo + PIN via the gold keypad (default)
 //   2. mode = "setup" — empNo found but no PIN yet → create one
 //   3. mode = "reset" — forgot PIN → verify with phone last-4
 //
 // The API's /login returns `needsSetup: true` (HTTP 200) when a
 // worker has no PIN on record — we flip to setup mode on that.
 //
-// 2026-06-27 (owner: "logo 100% 一样, 全套新设计"): the SHELL + LOGO
-// are now byte-identical to the ERP desktop login (src/pages/login.tsx)
-// — same #1F1D1B grid background, glass card, brightness(0) invert(1)
-// logo, gold gradient button + btn-shimmer, and the orbiting right-side
-// brand panel. We render a `fixed inset-0` overlay so this page breaks
-// out of WorkerLayout's max-w-md / black top-bar chrome and fills the
-// whole screen exactly like the desktop login. ALL worker behaviour
-// (3 modes, handlers, finalizeLogin, every t() i18n call) is unchanged.
+// 2026-06-28 (owner: the REAL worker-login design): rebuilt 1:1 from the
+// owner's design source (Hookka Worker Login.dc.html). This is a single
+// centered phone-first column — NO desktop split panel, NO right brand
+// panel. Dark-default screen (#16140F) with a 64px grid, a pulsing top
+// radial glow, two-layer parallax SNOW (16 blurred "back" flakes behind
+// the frosted sheet + 5 sharp "front" flakes in front), a centered logo
+// + "— WORKER PORTAL —" hairline row, and a frosted glass sheet holding:
+// the Sign-in heading, an EMPLOYEE NO. field with a live canonicalised
+// (EMP-0088) readout, 6 PIN segment bars (NOT a text input), and a 3-col
+// gold keypad (1-9, blank, 0, backspace). Typing 6 digits auto-submits
+// the login. Setup + reset stay reachable as secondary views with the
+// same dark/light sheet styling.
 //
-// 2026-06-27 (owner: "Dark/Light mode toggle"): purely additive theming.
-// A `theme` state ("dark" | "light"), persisted in localStorage, drives a
-// single PALETTE object — every inline style, the logo <img filter>, the
-// right brand panel and the PIN keypad colours read off it, so a single
-// circular Sun/Moon toggle (top-right, type="button") flips everything
-// cleanly. DARK = white logo on dark grid (Sun icon → go light). LIGHT =
-// dark logo on a warm-cream bg (Moon icon → go dark). Gold accents + the
-// gold "Sign In" gradient are identical in both modes. NO logic change.
+// Both palettes (dark + light) are ported exactly from the source's `T`
+// theme object. A circular Sun/Moon toggle (top-right, safe-area aware)
+// flips the theme; the choice persists to localStorage. ALL worker auth
+// behaviour (3 modes, handlers, finalizeLogin, every t() i18n call) is
+// preserved.
 // ============================================================
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Sun, Moon } from "lucide-react";
-import LoginSnow from "@/components/login-snow";
+import { IdCard, Delete, Sun, Moon } from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
 import {
   WORKER_TOKEN_KEY,
@@ -43,116 +43,106 @@ type ThemeName = "dark" | "light";
 
 const THEME_KEY = "hookka.worker.theme";
 
-// Shared grid (same line geometry both modes — only the line tint differs).
-function gridImage(tint: string): string {
-  return (
-    `repeating-linear-gradient(0deg, ${tint} 0 1px, transparent 1px 60px), ` +
-    `repeating-linear-gradient(90deg, ${tint} 0 1px, transparent 1px 60px)`
-  );
-}
-
-// One palette per mode. Gold accents (#C9A961/#8B7A4E/#6B5C32) + the gold
-// "Sign In" gradient stay IDENTICAL in both — only the bg/card/text/input
-// surfaces flip. Every render site reads off this object.
+// ---- Palette: ported verbatim from the design source's `T` object ----
+// (dark + light). Gold accents are part of each palette; every render
+// site reads off this object so the Sun/Moon toggle flips everything.
 type Palette = {
   screenBg: string;
-  screenGridImage: string;
-  cardBg: string;
-  cardBorder: string;
-  cardShadow: string;
-  cardBlur: string;
+  statusFg: string;
+  glow: string;
   logoFilter: string; // "" = no filter (dark logo as-is)
-  titleColor: string;
-  subtitleColor: string;
-  labelColor: string;
-  footerColor: string;
-  linkMuted: string; // "back" links
-  inputBg: string;
-  inputBorder: string;
-  inputText: string;
-  inputPlaceholder: string;
-  brandPanelBg: string;
-  brandPanelGlow: string;
-  ringSolid: string;
-  ringDashed: string;
-  orbitDot: string;
-  brandDivider: string;
-  hudText: string;
-  pinKeyBg: string;
-  pinKeyBorder: string;
-  pinKeyText: string;
-  toggleBg: string;
-  toggleBorder: string;
-  toggleIcon: string;
+  portalColor: string;
+  hair: string;
+  sheetBg: string;
+  sheetBorder: string;
+  title: string;
+  sub: string;
+  label: string;
+  fieldBg: string;
+  fieldBorder: string;
+  accent: string;
+  input: string;
+  canon: string;
+  pinOff: string;
+  pinOn: string;
+  pinGlow: string;
+  keyBg: string;
+  keyBorder: string;
+  keyColor: string;
+  backIcon: string;
+  snowGlow: string;
+  snowMul: number;
+  snow: (op: number) => string;
+  togBg: string;
+  togBorder: string;
+  togIcon: "sun" | "moon";
+  togIconColor: string;
 };
 
 const PALETTE: Record<ThemeName, Palette> = {
   dark: {
-    screenBg: "#1F1D1B",
-    screenGridImage: gridImage("rgba(107,92,50,.06)"),
-    cardBg: "rgba(255,255,255,.04)",
-    cardBorder: "1px solid rgba(107,92,50,.2)",
-    cardShadow: "none",
-    cardBlur: "blur(24px)",
+    screenBg: "#16140F",
+    statusFg: "#F0ECE9",
+    glow: "rgba(168,138,82,.26)",
     logoFilter: "brightness(0) invert(1)",
-    titleColor: "#ffffff",
-    subtitleColor: "rgba(255,255,255,.45)",
-    labelColor: "rgba(255,255,255,.5)",
-    footerColor: "rgba(255,255,255,.25)",
-    linkMuted: "rgba(255,255,255,.45)",
-    inputBg: "rgba(255,255,255,.06)",
-    inputBorder: "1.5px solid rgba(107,92,50,.3)",
-    inputText: "#ffffff",
-    inputPlaceholder: "rgba(255,255,255,.35)",
-    brandPanelBg: "#1F1D1B",
-    brandPanelGlow:
-      "radial-gradient(ellipse at center, rgba(107,92,50,.08) 0%, transparent 70%)",
-    ringSolid: "1px solid rgba(107,92,50,.08)",
-    ringDashed: "1px dashed rgba(107,92,50,.08)",
-    orbitDot: "#6B5C32",
-    brandDivider:
-      "linear-gradient(90deg, transparent, #6B5C32, transparent)",
-    hudText: "rgba(107,92,50,.4)",
-    pinKeyBg: "rgba(255,255,255,.05)",
-    pinKeyBorder: "1px solid rgba(107,92,50,.3)",
-    pinKeyText: "#ffffff",
-    toggleBg: "rgba(255,255,255,.08)",
-    toggleBorder: "1px solid rgba(107,92,50,.35)",
-    toggleIcon: "#C9A961",
+    portalColor: "#C9A961",
+    hair: "rgba(201,169,97,.7)",
+    sheetBg: "rgba(28,24,18,.55)",
+    sheetBorder: "rgba(201,169,97,.18)",
+    title: "#fff",
+    sub: "rgba(255,255,255,.5)",
+    label: "rgba(255,255,255,.45)",
+    fieldBg: "rgba(0,0,0,.28)",
+    fieldBorder: "rgba(201,169,97,.28)",
+    accent: "#C9A961",
+    input: "#F0ECE9",
+    canon: "#857A66",
+    pinOff: "rgba(255,255,255,.12)",
+    pinOn: "#C9A961",
+    pinGlow: "rgba(201,169,97,.55)",
+    keyBg: "rgba(255,255,255,.06)",
+    keyBorder: "rgba(201,169,97,.16)",
+    keyColor: "#E8E1D2",
+    backIcon: "#E8E1D2",
+    snowGlow: "rgba(255,255,255,.8)",
+    snowMul: 1,
+    snow: (op) => `rgba(255,255,255,${op.toFixed(2)})`,
+    togBg: "rgba(255,255,255,.08)",
+    togBorder: "rgba(201,169,97,.3)",
+    togIcon: "sun",
+    togIconColor: "#E8C77A",
   },
   light: {
-    screenBg:
-      "radial-gradient(circle at 50% 20%, #E8E1D5, #D2CABD)",
-    screenGridImage: gridImage("rgba(107,92,50,.05)"),
-    cardBg: "rgba(255,255,255,.9)",
-    cardBorder: "1px solid rgba(31,29,27,.12)",
-    cardShadow: "0 20px 50px rgba(31,29,27,.12)",
-    cardBlur: "blur(24px)",
+    screenBg: "#FAF8F4",
+    statusFg: "#1F1D1B",
+    glow: "rgba(168,138,82,.16)",
     logoFilter: "", // dark logo as-is
-    titleColor: "#1F1D1B",
-    subtitleColor: "rgba(31,29,27,.5)",
-    labelColor: "rgba(31,29,27,.5)",
-    footerColor: "rgba(31,29,27,.35)",
-    linkMuted: "rgba(31,29,27,.5)",
-    inputBg: "#faf9f5",
-    inputBorder: "1.5px solid #E2DDD8",
-    inputText: "#1F1D1B",
-    inputPlaceholder: "rgba(31,29,27,.35)",
-    brandPanelBg: "#E8E1D5",
-    brandPanelGlow:
-      "radial-gradient(ellipse at center, rgba(107,92,50,.1) 0%, transparent 70%)",
-    ringSolid: "1px solid rgba(107,92,50,.18)",
-    ringDashed: "1px dashed rgba(107,92,50,.18)",
-    orbitDot: "#8B7A4E",
-    brandDivider:
-      "linear-gradient(90deg, transparent, #6B5C32, transparent)",
-    hudText: "rgba(107,92,50,.6)",
-    pinKeyBg: "#F0ECE9",
-    pinKeyBorder: "1px solid #E2DDD8",
-    pinKeyText: "#1F1D1B",
-    toggleBg: "rgba(255,255,255,.7)",
-    toggleBorder: "1px solid rgba(107,92,50,.35)",
-    toggleIcon: "#8B7A4E",
+    portalColor: "#8B7A4E",
+    hair: "rgba(139,122,78,.8)",
+    sheetBg: "rgba(255,255,255,.62)",
+    sheetBorder: "rgba(236,230,221,.9)",
+    title: "#1F1D1B",
+    sub: "#6B7280",
+    label: "#9A9082",
+    fieldBg: "rgba(255,255,255,.72)",
+    fieldBorder: "#E2DDD8",
+    accent: "#8B7A4E",
+    input: "#1F1D1B",
+    canon: "#A89F8D",
+    pinOff: "rgba(31,29,27,.12)",
+    pinOn: "#8B7A4E",
+    pinGlow: "rgba(139,122,78,.4)",
+    keyBg: "rgba(255,255,255,.6)",
+    keyBorder: "#E7E0D4",
+    keyColor: "#1F1D1B",
+    backIcon: "#4D4630",
+    snowGlow: "rgba(40,36,28,.25)",
+    snowMul: 1,
+    snow: (op) => `rgba(40,36,28,${(op * 0.5).toFixed(2)})`,
+    togBg: "rgba(31,29,27,.05)",
+    togBorder: "#E2DDD8",
+    togIcon: "moon",
+    togIconColor: "#6B5C32",
   },
 };
 
@@ -164,6 +154,94 @@ function readTheme(): ThemeName {
     /* ignore */
   }
   return "dark";
+}
+
+// canonEmp — ported verbatim from the design source. Turns whatever the
+// worker types ("88", "emp88", "EMP-0088") into a clean "EMP-0088" shown
+// to the right of the field as a confirmation readout.
+function canonEmp(raw: string): string {
+  const d = (raw || "").replace(/[^0-9a-zA-Z]/g, "").toUpperCase();
+  const m = d.match(/^EMP0*(\d+)$/) || d.match(/^0*(\d+)$/);
+  if (m) return "EMP-" + m[1].padStart(4, "0");
+  return d || "";
+}
+
+// ---- Deterministic two-layer parallax snow ----
+// The source generates flakes with Math.random over fixed ranges. Random
+// is fine in the browser, but we want stable, render-every-time flakes —
+// so we seed a small LCG once at module load and freeze the arrays. Ranges
+// (count / size / duration / delay / opacity / blur) match the source.
+type Flake = {
+  left: number;
+  sz: number;
+  dur: number;
+  delay: number;
+  op: number;
+  blur: number;
+};
+
+function makeRng(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    // mulberry32
+    s |= 0;
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const _rng = makeRng(0x4845_4f4b); // "HEOK"
+const rnd = (a: number, b: number) => a + _rng() * (b - a);
+
+// back = many, smaller, blurred, slower (depth, drifts behind frosted sheet)
+const SNOW_BACK: Flake[] = Array.from({ length: 16 }, () => {
+  const sz = rnd(1.6, 3.6);
+  return {
+    left: rnd(0, 100),
+    sz,
+    dur: rnd(13, 22),
+    delay: rnd(-22, 0),
+    op: rnd(0.35, 0.7),
+    blur: rnd(0.8, 1.8),
+  };
+});
+// front = few, larger, sharp, faster (foreground parallax)
+const SNOW_FRONT: Flake[] = Array.from({ length: 5 }, () => {
+  const sz = rnd(3.5, 5.5);
+  return {
+    left: rnd(4, 96),
+    sz,
+    dur: rnd(8, 13),
+    delay: rnd(-13, 0),
+    op: rnd(0.55, 0.9),
+    blur: 0,
+  };
+});
+
+function SnowLayer({ flakes, p }: { flakes: Flake[]; p: Palette }) {
+  return (
+    <>
+      {flakes.map((f, i) => (
+        <div
+          key={i}
+          style={{
+            position: "absolute",
+            top: 0,
+            left: `${f.left.toFixed(2)}%`,
+            width: `${f.sz.toFixed(1)}px`,
+            height: `${f.sz.toFixed(1)}px`,
+            borderRadius: "50%",
+            background: p.snow(f.op),
+            boxShadow: `0 0 ${(f.sz * 1.5 * p.snowMul).toFixed(1)}px ${p.snowGlow}`,
+            filter: `blur(${f.blur.toFixed(1)}px)`,
+            animation: `hkSnow ${f.dur.toFixed(1)}s linear ${f.delay.toFixed(1)}s infinite`,
+          }}
+        />
+      ))}
+    </>
+  );
 }
 
 type WorkerAuthSuccess = {
@@ -185,7 +263,10 @@ type WorkerAuthError = {
   needsSetup?: false;
 };
 
-type WorkerAuthResponse = WorkerAuthSuccess | WorkerAuthNeedsSetup | WorkerAuthError;
+type WorkerAuthResponse =
+  | WorkerAuthSuccess
+  | WorkerAuthNeedsSetup
+  | WorkerAuthError;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object";
@@ -257,9 +338,12 @@ export default function WorkerLoginPage() {
   const [loading, setLoading] = useState(false);
 
   // ----- Login handler -----
-  async function handleLogin(e: React.FormEvent) {
-    e.preventDefault();
+  // Accepts an explicit pin so the keypad can auto-submit the freshly
+  // typed 6th digit without waiting for a state flush.
+  async function handleLogin(e?: React.FormEvent, pinOverride?: string) {
+    if (e) e.preventDefault();
     setError(null);
+    const usePin = pinOverride ?? pin;
     if (!empNo.trim()) {
       setError(t("common.error"));
       return;
@@ -269,7 +353,7 @@ export default function WorkerLoginPage() {
       const res = await fetch("/api/worker-auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ empNo: empNo.trim(), pin }),
+        body: JSON.stringify({ empNo: empNo.trim(), pin: usePin }),
       });
       const data = asWorkerAuthResponse(await res.json());
       if (!data) {
@@ -286,11 +370,13 @@ export default function WorkerLoginPage() {
       }
       if (!data.success) {
         setError(data.error || t("common.error"));
+        setPin(""); // clear so the keypad is ready for a retry
         return;
       }
       finalizeLogin(data);
     } catch {
       setError(t("common.error"));
+      setPin("");
     } finally {
       setLoading(false);
     }
@@ -386,634 +472,677 @@ export default function WorkerLoginPage() {
     navigate("/worker", { replace: true });
   }
 
-  // ----- Render -----
-  // Heading + subtitle text per mode (all via t()).
-  const heading =
-    mode === "login"
-      ? t("login.title")
-      : mode === "setup"
-        ? t("login.setupTitle")
-        : t("login.resetTitle");
-  const subtitle =
-    mode === "setup"
-      ? t("login.setupDesc")
-      : mode === "reset"
-        ? t("login.phoneLast4")
-        : t("brand.title");
+  // ----- Keypad → PIN -----
+  // Digits fill the 6 bars; the 6th digit auto-submits the login. Guard
+  // against double-submit while a request is already in flight.
+  const submittingRef = useRef(false);
+  function pressKey(k: string) {
+    if (mode !== "login") return;
+    setError(null);
+    if (k === "back") {
+      setPin((prev) => prev.slice(0, -1));
+      return;
+    }
+    setPin((prev) => {
+      if (prev.length >= 6) return prev;
+      const next = prev + k;
+      if (next.length === 6 && !submittingRef.current) {
+        submittingRef.current = true;
+        // submit on the freshly completed 6-digit PIN
+        void handleLogin(undefined, next).finally(() => {
+          submittingRef.current = false;
+        });
+      }
+      return next;
+    });
+  }
+
+  // Hardware / soft keyboard support for the keypad (desktop testing +
+  // anyone who prefers typing) — only active in login mode.
+  useEffect(() => {
+    if (mode !== "login") return;
+    function onKey(ev: KeyboardEvent) {
+      if (ev.key >= "0" && ev.key <= "9") {
+        pressKey(ev.key);
+      } else if (ev.key === "Backspace") {
+        // don't steal Backspace while focused in the empNo input
+        const el = document.activeElement as HTMLElement | null;
+        if (el && el.tagName === "INPUT") return;
+        pressKey("back");
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, empNo, pin]);
+
+  const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "back"];
 
   return (
-    <>
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 50,
+        background: p.screenBg,
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
       <style>{`
-        @keyframes shimmer {
-          0% { transform: translateX(-100%); }
-          100% { transform: translateX(100%); }
+        @keyframes hkGlow { 0%,100% { opacity:.55; } 50% { opacity:.85; } }
+        @keyframes hkDotPop { 0% { transform:scale(.6); } 55% { transform:scale(1.12); } 100% { transform:scale(1); } }
+        @keyframes hkSnow {
+          0% { transform:translateY(-8%) translateX(0); opacity:0; }
+          8% { opacity:.85; }
+          50% { transform:translateY(46vh) translateX(16px); }
+          92% { opacity:.6; }
+          100% { transform:translateY(94vh) translateX(-12px); opacity:0; }
         }
-        @keyframes orbit1 {
-          0% { transform: rotate(0deg) translateX(150px) rotate(0deg); }
-          100% { transform: rotate(360deg) translateX(150px) rotate(-360deg); }
-        }
-        @keyframes orbit2 {
-          0% { transform: rotate(0deg) translateX(225px) rotate(0deg); }
-          100% { transform: rotate(360deg) translateX(225px) rotate(-360deg); }
-        }
-        @keyframes orbit3 {
-          0% { transform: rotate(0deg) translateX(300px) rotate(0deg); }
-          100% { transform: rotate(360deg) translateX(300px) rotate(-360deg); }
-        }
-        @keyframes blink {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0; }
-        }
-        .btn-shimmer {
-          position: relative;
-          overflow: hidden;
-        }
-        .btn-shimmer::after {
-          content: '';
-          position: absolute;
-          top: 0;
-          left: 0;
+        .hk-key { transition: transform .09s ease, background .15s ease, border-color .15s ease; }
+        .hk-key:active { transform: scale(.95); }
+        .wl-emp-input::placeholder { color: ${p.canon}; }
+        .wl-btn-primary {
           width: 100%;
-          height: 100%;
-          background: linear-gradient(
-            90deg,
-            transparent,
-            rgba(255,255,255,0.15),
-            transparent
-          );
-          transform: translateX(-100%);
-        }
-        .btn-shimmer:hover::after {
-          animation: shimmer 1.5s ease-in-out;
-        }
-        .login-input:focus {
-          border-color: #6B5C32 !important;
-          box-shadow: 0 0 0 3px rgba(107,92,50,0.2);
-          outline: none;
-        }
-        .login-input::placeholder {
-          color: var(--wl-input-ph);
-        }
-        .orbit-dot {
-          width: 6px;
-          height: 6px;
-          background: var(--wl-orbit-dot);
-          border-radius: 50%;
-          position: absolute;
-          top: 50%;
-          left: 50%;
-        }
-        .login-cta {
-          background: linear-gradient(135deg, #6B5C32, #8B7A4E);
+          border: none;
+          border-radius: 13px;
           padding: 14px;
+          font-family: inherit;
           font-size: 15px;
-        }
-        .pin-key {
-          width: 56px;
-          height: 56px;
-          border-radius: 9999px;
-          font-size: 20px;
-          font-weight: 600;
-          color: var(--wl-pin-text);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          transition: all .15s ease;
-          border: var(--wl-pin-border);
-          background: var(--wl-pin-bg);
-        }
-        .pin-key:active {
-          background: linear-gradient(135deg, #6B5C32, #8B7A4E);
+          font-weight: 700;
           color: #fff;
-          transform: scale(.94);
+          cursor: pointer;
+          background: linear-gradient(135deg, #6B5C32, #8B7A4E);
+          transition: opacity .2s ease;
         }
-        .wl-theme-toggle:hover {
-          opacity: 0.85;
-        }
+        .wl-btn-primary:hover { opacity: .92; }
+        .wl-btn-primary:disabled { opacity: .5; cursor: default; }
       `}</style>
 
-      {/* fixed overlay so we break out of WorkerLayout's max-w-md / black
-          top-bar chrome and fill the screen exactly like the desktop login.
-          CSS vars feed the bits that live in the <style> block (placeholder,
-          orbit dot, PIN keys) so they flip with the theme too. */}
+      {/* back snow — behind content + frosted sheet */}
       <div
-        className="fixed inset-0 z-50 flex min-h-screen overflow-auto"
-        style={
-          {
-            "--wl-input-ph": p.inputPlaceholder,
-            "--wl-orbit-dot": p.orbitDot,
-            "--wl-pin-text": p.pinKeyText,
-            "--wl-pin-border": p.pinKeyBorder,
-            "--wl-pin-bg": p.pinKeyBg,
-          } as React.CSSProperties
-        }
+        style={{
+          position: "absolute",
+          inset: 0,
+          overflow: "hidden",
+          pointerEvents: "none",
+          zIndex: 1,
+        }}
       >
-        {/* Dark / Light toggle — circular, top-right (mockup placement; owner
-            typed 左上角 / top-left — to move it left, swap right:20px → left:20px).
-            type="button" so it never submits a form. */}
-        <button
-          type="button"
-          onClick={toggleTheme}
-          aria-label="Toggle theme"
-          className="wl-theme-toggle"
+        <SnowLayer flakes={SNOW_BACK} p={p} />
+      </div>
+
+      {/* 64px grid */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          backgroundImage:
+            "repeating-linear-gradient(0deg, rgba(107,92,50,.05) 0 1px, transparent 1px 64px), " +
+            "repeating-linear-gradient(90deg, rgba(107,92,50,.05) 0 1px, transparent 1px 64px)",
+          pointerEvents: "none",
+          zIndex: 1,
+        }}
+      />
+
+      {/* top radial glow */}
+      <div
+        style={{
+          position: "absolute",
+          top: "-12%",
+          left: "50%",
+          width: "120%",
+          height: "58%",
+          transform: "translateX(-50%)",
+          background: `radial-gradient(closest-side, ${p.glow}, rgba(168,138,82,0) 72%)`,
+          pointerEvents: "none",
+          animation: "hkGlow 6s ease-in-out infinite",
+          zIndex: 1,
+        }}
+      />
+
+      {/* front snow — sparse, sharp, parallax depth (in front of content) */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          overflow: "hidden",
+          pointerEvents: "none",
+          zIndex: 16,
+        }}
+      >
+        <SnowLayer flakes={SNOW_FRONT} p={p} />
+      </div>
+
+      {/* theme toggle — safe-area aware (no fake bezel on a real phone) */}
+      <button
+        type="button"
+        onClick={toggleTheme}
+        aria-label="Toggle theme"
+        style={{
+          position: "absolute",
+          top: "calc(env(safe-area-inset-top, 0px) + 16px)",
+          right: "20px",
+          zIndex: 26,
+          width: "40px",
+          height: "40px",
+          borderRadius: "50%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          cursor: "pointer",
+          background: p.togBg,
+          border: `1px solid ${p.togBorder}`,
+        }}
+      >
+        {p.togIcon === "sun" ? (
+          <Sun size={17} color={p.togIconColor} />
+        ) : (
+          <Moon size={17} color={p.togIconColor} />
+        )}
+      </button>
+
+      {/* content column */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          flexDirection: "column",
+          zIndex: 2,
+          maxWidth: "440px",
+          margin: "0 auto",
+          width: "100%",
+        }}
+      >
+        {/* header */}
+        <div
           style={{
-            position: "fixed",
-            top: "20px",
-            right: "20px",
-            zIndex: 60,
-            width: "40px",
-            height: "40px",
-            borderRadius: "9999px",
+            position: "relative",
+            flex: "none",
+            padding:
+              "calc(env(safe-area-inset-top, 0px) + 68px) 28px 22px",
             display: "flex",
+            flexDirection: "column",
             alignItems: "center",
-            justifyContent: "center",
-            background: p.toggleBg,
-            border: p.toggleBorder,
-            backdropFilter: "blur(12px)",
-            WebkitBackdropFilter: "blur(12px)",
-            cursor: "pointer",
-            transition: "all .2s ease",
+            textAlign: "center",
           }}
         >
-          {theme === "dark" ? (
-            <Sun size={18} color={p.toggleIcon} />
-          ) : (
-            <Moon size={18} color={p.toggleIcon} />
-          )}
-        </button>
-
-        {/* Left Panel - Login Form */}
-        <div
-          className="flex w-full lg:w-1/2 items-center justify-center p-8 relative"
-          style={{
-            background: p.screenBg,
-            backgroundImage: p.screenGridImage,
-          }}
-        >
-          {/* Falling snow behind the card (owner 2026-06-27 "登录要加飘落的雪花").
-              White flakes on the dark theme; soft-gold so they stay visible on
-              the cream light theme. */}
-          <LoginSnow
-            flakeColor={
-              theme === "dark"
-                ? "rgba(255,250,235,0.95)"
-                : "rgba(201,169,97,0.8)"
-            }
-            glowColor={
-              theme === "dark"
-                ? "rgba(201,169,97,0.45)"
-                : "rgba(201,169,97,0.3)"
-            }
-          />
-          <div
-            className="relative z-10 w-full max-w-md rounded-2xl p-10"
+          <img
+            src="/hookka-logo.png"
+            alt="Hookka 合家"
             style={{
-              backgroundColor: p.cardBg,
-              border: p.cardBorder,
-              boxShadow: p.cardShadow,
-              backdropFilter: p.cardBlur,
-              WebkitBackdropFilter: p.cardBlur,
-            }}
-          >
-            {/* Logo Row */}
-            <div className="mb-10">
-              <img
-                src="/hookka-logo.png"
-                alt="Hookka 合家"
-                className="h-10 w-auto"
-                style={p.logoFilter ? { filter: p.logoFilter } : undefined}
-              />
-            </div>
-
-            {/* Title */}
-            <h2
-              className="text-2xl font-bold mb-1"
-              style={{ color: p.titleColor }}
-            >
-              {heading}
-            </h2>
-            <p
-              className="mb-8"
-              style={{ color: p.subtitleColor, fontSize: "13px" }}
-            >
-              {subtitle}
-            </p>
-
-            {/* ----- mode = login ----- */}
-            {mode === "login" && (
-              <form onSubmit={handleLogin} className="space-y-5">
-                <FieldLabel label={t("login.empNo")} palette={p}>
-                  <input
-                    type="text"
-                    autoComplete="username"
-                    value={empNo}
-                    onChange={(e) => setEmpNo(e.target.value)}
-                    className={inputCls}
-                    style={inputStyleOf(p)}
-                    placeholder="EMP-0001"
-                  />
-                </FieldLabel>
-                <FieldLabel label={t("login.pin")} palette={p}>
-                  <input
-                    type="password"
-                    inputMode="numeric"
-                    pattern="\d{6}"
-                    maxLength={6}
-                    value={pin}
-                    onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-                    className={inputCls}
-                    style={inputStyleOf(p)}
-                    placeholder="••••••"
-                  />
-                </FieldLabel>
-
-                {/* Numeric PIN keypad — circular gold keys feed the same
-                    `pin` state. Pure convenience on phones; the input above
-                    still works for anyone who prefers typing. */}
-                <PinPad
-                  onDigit={(d) =>
-                    setPin((p) => (p.length >= 6 ? p : p + d))
-                  }
-                  onDelete={() => setPin((p) => p.slice(0, -1))}
-                />
-
-                {error && <ErrorBanner>{error}</ErrorBanner>}
-
-                <button type="submit" disabled={loading} className={btnPrimary}>
-                  {loading ? t("common.loading") : t("login.submit")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMode("reset");
-                    setPin("");
-                    setPin2("");
-                    setError(null);
-                  }}
-                  className="w-full text-sm pt-2 hover:underline bg-transparent border-0 cursor-pointer"
-                  style={{ color: "#8B7A4E" }}
-                >
-                  {t("login.forgotPin")}
-                </button>
-              </form>
-            )}
-
-            {/* ----- mode = setup ----- */}
-            {mode === "setup" && (
-              <form onSubmit={handleSetup} className="space-y-5">
-                <FieldLabel label={t("login.empNo")} palette={p}>
-                  <input
-                    type="text"
-                    value={empNo}
-                    readOnly
-                    className={inputCls}
-                    style={{ ...inputStyleOf(p), opacity: 0.7 }}
-                  />
-                </FieldLabel>
-                <FieldLabel label={t("login.newPin")} palette={p}>
-                  <input
-                    type="password"
-                    inputMode="numeric"
-                    pattern="\d{6}"
-                    maxLength={6}
-                    value={pin}
-                    onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-                    className={inputCls}
-                    style={inputStyleOf(p)}
-                    placeholder="••••••"
-                  />
-                </FieldLabel>
-                <FieldLabel label={t("login.confirmPin")} palette={p}>
-                  <input
-                    type="password"
-                    inputMode="numeric"
-                    pattern="\d{6}"
-                    maxLength={6}
-                    value={pin2}
-                    onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
-                    className={inputCls}
-                    style={inputStyleOf(p)}
-                    placeholder="••••••"
-                  />
-                </FieldLabel>
-                {error && <ErrorBanner>{error}</ErrorBanner>}
-                <button type="submit" disabled={loading} className={btnPrimary}>
-                  {loading ? t("common.loading") : t("login.submit")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMode("login");
-                    setPin("");
-                    setPin2("");
-                    setError(null);
-                  }}
-                  className="w-full text-sm pt-2 bg-transparent border-0 cursor-pointer"
-                  style={{ color: p.linkMuted }}
-                >
-                  {t("common.back")}
-                </button>
-              </form>
-            )}
-
-            {/* ----- mode = reset ----- */}
-            {mode === "reset" && (
-              <form onSubmit={handleReset} className="space-y-5">
-                <FieldLabel label={t("login.empNo")} palette={p}>
-                  <input
-                    type="text"
-                    value={empNo}
-                    onChange={(e) => setEmpNo(e.target.value)}
-                    className={inputCls}
-                    style={inputStyleOf(p)}
-                    placeholder="EMP-0001"
-                  />
-                </FieldLabel>
-                <FieldLabel label={t("login.phoneLast4")} palette={p}>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    pattern="\d{4}"
-                    maxLength={4}
-                    value={phoneLast4}
-                    onChange={(e) =>
-                      setPhoneLast4(e.target.value.replace(/\D/g, ""))
-                    }
-                    className={inputCls}
-                    style={inputStyleOf(p)}
-                    placeholder="1234"
-                  />
-                </FieldLabel>
-                <FieldLabel label={t("login.newPin")} palette={p}>
-                  <input
-                    type="password"
-                    inputMode="numeric"
-                    pattern="\d{6}"
-                    maxLength={6}
-                    value={pin}
-                    onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-                    className={inputCls}
-                    style={inputStyleOf(p)}
-                    placeholder="••••••"
-                  />
-                </FieldLabel>
-                <FieldLabel label={t("login.confirmPin")} palette={p}>
-                  <input
-                    type="password"
-                    inputMode="numeric"
-                    pattern="\d{6}"
-                    maxLength={6}
-                    value={pin2}
-                    onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
-                    className={inputCls}
-                    style={inputStyleOf(p)}
-                    placeholder="••••••"
-                  />
-                </FieldLabel>
-                {error && <ErrorBanner>{error}</ErrorBanner>}
-                <button type="submit" disabled={loading} className={btnPrimary}>
-                  {loading ? t("common.loading") : t("login.resetSubmit")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMode("login");
-                    setPin("");
-                    setPin2("");
-                    setPhoneLast4("");
-                    setError(null);
-                  }}
-                  className="w-full text-sm pt-2 bg-transparent border-0 cursor-pointer"
-                  style={{ color: p.linkMuted }}
-                >
-                  {t("common.back")}
-                </button>
-              </form>
-            )}
-          </div>
-
-          {/* Footer */}
-          <div
-            className="absolute bottom-6 left-0 right-0 text-center"
-            style={{
-              color: p.footerColor,
-              fontSize: "11px",
-              letterSpacing: "0.03em",
-            }}
-          >
-            HOOKKA INDUSTRIES SDN BHD &bull; 202501060540 (1661946-X)
-          </div>
-        </div>
-
-        {/* Right Panel - Brand Side */}
-        <div
-          className="hidden lg:flex lg:w-1/2 items-center justify-center relative overflow-hidden"
-          style={{
-            background: p.brandPanelBg,
-            backgroundImage: p.brandPanelGlow,
-          }}
-        >
-          {/* Orbit Rings */}
-          <div
-            className="absolute rounded-full"
-            style={{
-              width: "300px",
-              height: "300px",
-              border: p.ringSolid,
-              top: "50%",
-              left: "50%",
-              transform: "translate(-50%, -50%)",
+              height: "50px",
+              width: "auto",
+              display: "block",
+              ...(p.logoFilter ? { filter: p.logoFilter } : {}),
             }}
           />
           <div
-            className="absolute rounded-full"
             style={{
-              width: "450px",
-              height: "450px",
-              border: p.ringSolid,
-              top: "50%",
-              left: "50%",
-              transform: "translate(-50%, -50%)",
-            }}
-          />
-          <div
-            className="absolute rounded-full"
-            style={{
-              width: "600px",
-              height: "600px",
-              border: p.ringDashed,
-              top: "50%",
-              left: "50%",
-              transform: "translate(-50%, -50%)",
-            }}
-          />
-
-          {/* Orbit Dots */}
-          <div
-            className="absolute"
-            style={{ top: "50%", left: "50%", width: 0, height: 0 }}
-          >
-            <div
-              className="orbit-dot"
-              style={{ animation: "orbit1 12s linear infinite" }}
-            />
-            <div
-              className="orbit-dot"
-              style={{ animation: "orbit2 18s linear infinite reverse" }}
-            />
-            <div
-              className="orbit-dot"
-              style={{ animation: "orbit3 25s linear infinite" }}
-            />
-          </div>
-
-          {/* Center Content */}
-          <div className="relative z-10 flex flex-col items-center text-center">
-            <img
-              src="/hookka-logo.png"
-              alt="Hookka 合家"
-              className="mb-6"
-              style={{
-                height: "140px",
-                width: "auto",
-                ...(p.logoFilter ? { filter: p.logoFilter } : {}),
-              }}
-            />
-
-            <p
-              className="uppercase mb-6"
-              style={{ color: "#8B7A4E", fontSize: "13px", letterSpacing: "4px" }}
-            >
-              Manufacturing Intelligence Platform
-            </p>
-
-            <div
-              className="mb-6"
-              style={{
-                width: "60px",
-                height: "1px",
-                background: p.brandDivider,
-              }}
-            />
-
-            <div
-              className="px-4 py-1.5 rounded-full"
-              style={{
-                border: "1px solid rgba(107,92,50,.4)",
-                color: "#8B7A4E",
-                fontSize: "11px",
-                letterSpacing: "3px",
-              }}
-            >
-              INDUSTRY 4.0
-            </div>
-          </div>
-
-          <div
-            className="absolute"
-            style={{
-              top: "24px",
-              left: "24px",
-              color: p.hudText,
-              fontSize: "10px",
-              fontFamily: "'Courier New', monospace",
-              letterSpacing: "0.08em",
-            }}
-          >
-            HOOKKA INDUSTRIES
-          </div>
-
-          <div
-            className="absolute flex items-center gap-2"
-            style={{
-              top: "24px",
-              right: "24px",
-              color: p.hudText,
-              fontSize: "10px",
-              fontFamily: "'Courier New', monospace",
-              letterSpacing: "0.08em",
+              display: "flex",
+              alignItems: "center",
+              gap: "10px",
+              marginTop: "18px",
             }}
           >
             <span
-              className="inline-block rounded-full"
               style={{
-                width: "6px",
-                height: "6px",
-                backgroundColor: "#22c55e",
-                animation: "blink 2s ease-in-out infinite",
+                width: "24px",
+                height: "1px",
+                background: `linear-gradient(90deg,transparent,${p.hair})`,
               }}
             />
-            SYSTEM ONLINE
-          </div>
-
-          <div
-            className="absolute"
-            style={{
-              bottom: "24px",
-              left: "24px",
-              color: p.hudText,
-              fontSize: "10px",
-              fontFamily: "'Courier New', monospace",
-              letterSpacing: "0.08em",
-            }}
-          >
-            ERP v2.0 // 2026
-          </div>
-
-          <div
-            className="absolute"
-            style={{
-              bottom: "24px",
-              right: "24px",
-              color: p.hudText,
-              fontSize: "10px",
-              fontFamily: "'Courier New', monospace",
-              letterSpacing: "0.08em",
-            }}
-          >
-            ISO 9001:2015
+            <span
+              style={{
+                fontSize: "10.5px",
+                color: p.portalColor,
+                letterSpacing: "3.5px",
+                fontWeight: 700,
+                whiteSpace: "nowrap",
+              }}
+            >
+              WORKER PORTAL
+            </span>
+            <span
+              style={{
+                width: "24px",
+                height: "1px",
+                background: `linear-gradient(90deg,${p.hair},transparent)`,
+              }}
+            />
           </div>
         </div>
+
+        {/* frosted sheet */}
+        <div
+          style={{
+            position: "relative",
+            flex: 1,
+            marginTop: "10px",
+            background: p.sheetBg,
+            backdropFilter: "blur(18px)",
+            WebkitBackdropFilter: "blur(18px)",
+            borderTop: `1px solid ${p.sheetBorder}`,
+            borderRadius: "28px 28px 0 0",
+            padding: "26px 24px 0",
+            overflowY: "auto",
+          }}
+        >
+          <h2
+            style={{
+              margin: "0 0 4px",
+              fontSize: "21px",
+              fontWeight: 800,
+              color: p.title,
+              letterSpacing: "-.3px",
+            }}
+          >
+            {mode === "login"
+              ? t("login.title")
+              : mode === "setup"
+                ? t("login.setupTitle")
+                : t("login.resetTitle")}
+          </h2>
+          <p
+            style={{
+              margin: "0 0 20px",
+              fontSize: "12.5px",
+              color: p.sub,
+              lineHeight: 1.5,
+            }}
+          >
+            {mode === "login"
+              ? t("login.setupDesc")
+              : mode === "setup"
+                ? t("login.setupDesc")
+                : t("login.phoneLast4")}
+          </p>
+
+          {/* ----- mode = login (keypad-driven) ----- */}
+          {mode === "login" && (
+            <div>
+              {/* EMPLOYEE NO. */}
+              <div style={{ marginBottom: "14px" }}>
+                <FieldLabel p={p}>{t("login.empNo")}</FieldLabel>
+                <div style={fieldStyle(p)}>
+                  <IdCard size={18} color={p.accent} />
+                  <input
+                    className="wl-emp-input"
+                    autoComplete="username"
+                    value={empNo}
+                    onChange={(e) => {
+                      setEmpNo(e.target.value);
+                      setError(null);
+                    }}
+                    placeholder="EMP-0088"
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      border: "none",
+                      background: "transparent",
+                      outline: "none",
+                      fontFamily: "inherit",
+                      fontSize: "15px",
+                      fontWeight: 600,
+                      color: p.input,
+                      letterSpacing: ".3px",
+                    }}
+                  />
+                  <span
+                    style={{
+                      fontSize: "11px",
+                      color: p.canon,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {canonEmp(empNo)}
+                  </span>
+                </div>
+              </div>
+
+              {/* PIN — 6 segment bars */}
+              <div style={{ marginBottom: "6px" }}>
+                <FieldLabel p={p}>{t("login.pin")}</FieldLabel>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "9px",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  {[0, 1, 2, 3, 4, 5].map((i) => {
+                    const on = i < pin.length;
+                    return (
+                      <div
+                        key={i}
+                        style={{
+                          flex: 1,
+                          height: "12px",
+                          borderRadius: "6px",
+                          transition: "background .2s ease",
+                          background: on ? p.pinOn : p.pinOff,
+                          ...(i === pin.length - 1
+                            ? { animation: "hkDotPop .28s ease" }
+                            : {}),
+                          ...(on
+                            ? { boxShadow: `0 0 9px ${p.pinGlow}` }
+                            : {}),
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+
+              {error && (
+                <div style={{ marginTop: "12px" }}>
+                  <ErrorBanner>{error}</ErrorBanner>
+                </div>
+              )}
+              {loading && (
+                <p
+                  style={{
+                    margin: "12px 0 0",
+                    textAlign: "center",
+                    fontSize: "12.5px",
+                    color: p.sub,
+                  }}
+                >
+                  {t("common.loading")}
+                </p>
+              )}
+
+              {/* keypad */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(3,1fr)",
+                  gap: "9px",
+                  marginTop: "16px",
+                }}
+              >
+                {keys.map((k, idx) => {
+                  if (k === "") {
+                    return <div key={idx} style={{ height: "52px" }} />;
+                  }
+                  return (
+                    <div
+                      key={idx}
+                      className="hk-key"
+                      onClick={() => pressKey(k)}
+                      role="button"
+                      aria-label={k === "back" ? "Backspace" : k}
+                      style={keyStyle(p)}
+                    >
+                      {k === "back" ? (
+                        <Delete size={22} color={p.backIcon} />
+                      ) : (
+                        k
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Forgot PIN? */}
+              <div
+                onClick={() => {
+                  setMode("reset");
+                  setPin("");
+                  setPin2("");
+                  setError(null);
+                }}
+                role="button"
+                style={{
+                  textAlign: "center",
+                  margin: "16px 0",
+                  paddingBottom:
+                    "calc(env(safe-area-inset-bottom, 0px) + 8px)",
+                  fontSize: "12.5px",
+                  color: p.accent,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                {t("login.forgotPin")}
+              </div>
+            </div>
+          )}
+
+          {/* ----- mode = setup ----- */}
+          {mode === "setup" && (
+            <form onSubmit={handleSetup} style={formStyle}>
+              <Field p={p} label={t("login.empNo")}>
+                <input
+                  type="text"
+                  value={empNo}
+                  readOnly
+                  style={{ ...textInputStyle(p), opacity: 0.7 }}
+                />
+              </Field>
+              <Field p={p} label={t("login.newPin")}>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  pattern="\d{6}"
+                  maxLength={6}
+                  value={pin}
+                  onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
+                  style={textInputStyle(p)}
+                  placeholder="••••••"
+                />
+              </Field>
+              <Field p={p} label={t("login.confirmPin")}>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  pattern="\d{6}"
+                  maxLength={6}
+                  value={pin2}
+                  onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
+                  style={textInputStyle(p)}
+                  placeholder="••••••"
+                />
+              </Field>
+              {error && <ErrorBanner>{error}</ErrorBanner>}
+              <button type="submit" disabled={loading} className={btnPrimary}>
+                {loading ? t("common.loading") : t("login.submit")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setMode("login");
+                  setPin("");
+                  setPin2("");
+                  setError(null);
+                }}
+                style={backLinkStyle(p)}
+              >
+                {t("common.back")}
+              </button>
+            </form>
+          )}
+
+          {/* ----- mode = reset ----- */}
+          {mode === "reset" && (
+            <form onSubmit={handleReset} style={formStyle}>
+              <Field p={p} label={t("login.empNo")}>
+                <input
+                  type="text"
+                  value={empNo}
+                  onChange={(e) => setEmpNo(e.target.value)}
+                  style={textInputStyle(p)}
+                  placeholder="EMP-0088"
+                />
+              </Field>
+              <Field p={p} label={t("login.phoneLast4")}>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="\d{4}"
+                  maxLength={4}
+                  value={phoneLast4}
+                  onChange={(e) =>
+                    setPhoneLast4(e.target.value.replace(/\D/g, ""))
+                  }
+                  style={textInputStyle(p)}
+                  placeholder="1234"
+                />
+              </Field>
+              <Field p={p} label={t("login.newPin")}>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  pattern="\d{6}"
+                  maxLength={6}
+                  value={pin}
+                  onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
+                  style={textInputStyle(p)}
+                  placeholder="••••••"
+                />
+              </Field>
+              <Field p={p} label={t("login.confirmPin")}>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  pattern="\d{6}"
+                  maxLength={6}
+                  value={pin2}
+                  onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
+                  style={textInputStyle(p)}
+                  placeholder="••••••"
+                />
+              </Field>
+              {error && <ErrorBanner>{error}</ErrorBanner>}
+              <button type="submit" disabled={loading} className={btnPrimary}>
+                {loading ? t("common.loading") : t("login.resetSubmit")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setMode("login");
+                  setPin("");
+                  setPin2("");
+                  setPhoneLast4("");
+                  setError(null);
+                }}
+                style={backLinkStyle(p)}
+              >
+                {t("common.back")}
+              </button>
+            </form>
+          )}
+        </div>
       </div>
-    </>
+    </div>
   );
 }
 
-// ----- tiny UI helpers (re-skinned to match the desktop login) -----
-const inputCls =
-  "login-input w-full rounded-lg px-4 py-3 transition-all duration-200";
-function inputStyleOf(p: Palette): React.CSSProperties {
+// ----- style helpers -----
+function fieldStyle(p: Palette): React.CSSProperties {
   return {
-    backgroundColor: p.inputBg,
-    border: p.inputBorder,
-    color: p.inputText,
-    fontSize: "14px",
+    background: p.fieldBg,
+    border: `1.5px solid ${p.fieldBorder}`,
+    borderRadius: "11px",
+    padding: "13px 14px",
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
   };
 }
-const btnPrimary =
-  "login-cta btn-shimmer w-full rounded-lg font-semibold text-white transition-all duration-200 hover:opacity-90 disabled:opacity-50";
+
+function keyStyle(p: Palette): React.CSSProperties {
+  return {
+    height: "52px",
+    borderRadius: "13px",
+    background: p.keyBg,
+    border: `1px solid ${p.keyBorder}`,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "22px",
+    fontWeight: 600,
+    color: p.keyColor,
+    cursor: "pointer",
+    userSelect: "none",
+  };
+}
 
 function FieldLabel({
+  children,
+  p,
+}: {
+  children: React.ReactNode;
+  p: Palette;
+}) {
+  return (
+    <div
+      style={{
+        fontSize: "10.5px",
+        fontWeight: 600,
+        color: p.label,
+        textTransform: "uppercase",
+        letterSpacing: ".08em",
+        marginBottom: "7px",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+// ----- secondary (setup / reset) form bits, styled to match the sheet -----
+const formStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "16px",
+  paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 24px)",
+};
+
+const btnPrimary = "wl-btn-primary";
+
+function textInputStyle(p: Palette): React.CSSProperties {
+  return {
+    width: "100%",
+    background: p.fieldBg,
+    border: `1.5px solid ${p.fieldBorder}`,
+    borderRadius: "11px",
+    padding: "13px 14px",
+    outline: "none",
+    fontFamily: "inherit",
+    fontSize: "15px",
+    fontWeight: 600,
+    color: p.input,
+    letterSpacing: ".3px",
+  };
+}
+
+function backLinkStyle(p: Palette): React.CSSProperties {
+  return {
+    width: "100%",
+    background: "transparent",
+    border: 0,
+    cursor: "pointer",
+    color: p.sub,
+    fontSize: "13px",
+    paddingTop: "2px",
+  };
+}
+
+function Field({
   label,
   children,
-  palette,
+  p,
 }: {
   label: string;
   children: React.ReactNode;
-  palette: Palette;
+  p: Palette;
 }) {
   return (
     <div>
-      <label
-        className="block mb-2 uppercase font-medium"
-        style={{
-          color: palette.labelColor,
-          fontSize: "12px",
-          letterSpacing: "0.05em",
-        }}
-      >
-        {label}
-      </label>
+      <FieldLabel p={p}>{label}</FieldLabel>
       {children}
     </div>
   );
@@ -1022,54 +1151,17 @@ function FieldLabel({
 function ErrorBanner({ children }: { children: React.ReactNode }) {
   return (
     <div
-      className="rounded-lg px-4 py-3 text-sm"
       style={{
-        backgroundColor: "rgba(220, 38, 38, 0.1)",
+        borderRadius: "11px",
+        padding: "12px 14px",
+        fontSize: "13px",
+        background: "rgba(220, 38, 38, 0.12)",
         border: "1px solid rgba(220, 38, 38, 0.3)",
         color: "#FCA5A5",
       }}
       role="alert"
     >
       {children}
-    </div>
-  );
-}
-
-// Numeric keypad for fast PIN entry on a phone. Buttons are type="button"
-// so they never submit the form; they only mutate the shared `pin` state.
-// Key colours come from the theme CSS vars set on the overlay wrapper.
-function PinPad({
-  onDigit,
-  onDelete,
-}: {
-  onDigit: (d: string) => void;
-  onDelete: () => void;
-}) {
-  return (
-    <div className="grid grid-cols-3 gap-3 justify-items-center">
-      {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((d) => (
-        <button
-          key={d}
-          type="button"
-          className="pin-key"
-          onClick={() => onDigit(d)}
-        >
-          {d}
-        </button>
-      ))}
-      <span />
-      <button type="button" className="pin-key" onClick={() => onDigit("0")}>
-        0
-      </button>
-      <button
-        type="button"
-        className="pin-key"
-        onClick={onDelete}
-        aria-label="Delete"
-        style={{ fontSize: "16px" }}
-      >
-        ⌫
-      </button>
     </div>
   );
 }

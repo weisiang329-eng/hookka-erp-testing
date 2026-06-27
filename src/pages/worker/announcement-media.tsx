@@ -17,7 +17,15 @@
 // and 401s on the phone). Keep using this exact URL.
 // ============================================================
 import { useCallback, useEffect, useRef, useState } from "react";
-import { X, ChevronLeft, ChevronRight, Play, FileText, Download } from "lucide-react";
+import {
+  X,
+  ChevronLeft,
+  ChevronRight,
+  Play,
+  FileText,
+  Download,
+  ImageOff,
+} from "lucide-react";
 import { getWorkerToken } from "@/layouts/WorkerLayout";
 
 // One media file attached to a notice (image/video/PDF). The bytes live in the
@@ -69,6 +77,16 @@ function fileHref(fileId: string): string {
   const wt = getWorkerToken();
   const base = `/api/worker/ann-files/${fileId}/download`;
   return wt ? `${base}?wt=${encodeURIComponent(wt)}` : base;
+}
+
+// HEIC / HEIF (iPhone's default photo format) cannot be decoded by <img> on
+// most non-Safari browsers — it just renders a broken icon. Detect it so we can
+// fall back to an "open original" chip (the OS that took the photo CAN open it,
+// and Chrome/Android increasingly decodes it too). Best-effort by mime + ext.
+function isHeic(att: AnnouncementAttachment): boolean {
+  const mime = (att.mime || "").toLowerCase();
+  if (mime === "image/heic" || mime === "image/heif") return true;
+  return /\.(heic|heif)$/i.test(att.name || "");
 }
 
 function extLabel(att: AnnouncementAttachment): string {
@@ -134,6 +152,10 @@ function PhotoLightbox({
   };
 
   const cur = photos[idx];
+  // Per-photo broken flag (keyed by index) so a failed decode in the lightbox
+  // shows a placeholder + "open original" instead of a blank dark screen.
+  const [brokenIdx, setBrokenIdx] = useState<Set<number>>(new Set());
+  const curBroken = brokenIdx.has(idx);
 
   return (
     <div
@@ -190,16 +212,42 @@ function PhotoLightbox({
         </>
       )}
 
-      {/* Image — letterboxed, never cropped */}
-      {cur && (
+      {/* Image — letterboxed, never cropped. On a load failure, a placeholder
+          with an "Open original" link (uses the same token-bearing URL) so the
+          worker is never stuck at a blank dark screen. */}
+      {cur && !curBroken && (
         <img
           src={fileHref(cur.fileId)}
           alt={cur.name || "image"}
           onClick={(e) => e.stopPropagation()}
           onTouchStart={onTouchStart}
           onTouchEnd={onTouchEnd}
+          onError={() =>
+            setBrokenIdx((prev) => {
+              const next = new Set(prev);
+              next.add(idx);
+              return next;
+            })
+          }
           className="max-h-[90vh] max-w-[92vw] object-contain"
         />
+      )}
+      {cur && curBroken && (
+        <div
+          className="flex flex-col items-center gap-3 px-8 text-center text-white/80"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ImageOff className="h-10 w-10" />
+          <p className="text-sm">This image could not be displayed.</p>
+          <a
+            href={fileHref(cur.fileId)}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-full bg-white/15 px-4 py-2 text-sm font-semibold active:bg-white/25"
+          >
+            Open original
+          </a>
+        </div>
       )}
     </div>
   );
@@ -217,8 +265,15 @@ export function AnnouncementMedia({
 
   if (!attachments || attachments.length === 0) return null;
 
-  const photos = attachments.filter((a) => (a.mime || "").startsWith("image/"));
-  const others = attachments.filter((a) => !(a.mime || "").startsWith("image/"));
+  // Renderable photos = image/* EXCEPT HEIC/HEIF (which <img> can't decode on
+  // most browsers). HEIC images fall through to the "others" chip list so the
+  // worker gets a working "open original" link instead of a broken tile.
+  const photos = attachments.filter(
+    (a) => (a.mime || "").startsWith("image/") && !isHeic(a),
+  );
+  const others = attachments.filter(
+    (a) => !(a.mime || "").startsWith("image/") || isHeic(a),
+  );
 
   // Photos: show at most 2 tiles; if >2, overlay "+N" on the second tile.
   const MAX_TILES = 2;
@@ -234,24 +289,13 @@ export function AnnouncementMedia({
             const isLast = i === visiblePhotos.length - 1;
             const showMore = isLast && hiddenCount > 0;
             return (
-              <button
+              <PhotoTile
                 key={att.fileId}
-                type="button"
-                onClick={() => setLightboxIdx(i)}
-                className="relative block aspect-square w-full overflow-hidden rounded-lg border border-[#E2DDD8] bg-[#F3EFE9]"
-              >
-                <img
-                  src={fileHref(att.fileId)}
-                  alt={att.name || "image"}
-                  loading="lazy"
-                  className="h-full w-full object-cover"
-                />
-                {showMore && (
-                  <span className="absolute inset-0 flex items-center justify-center bg-black/50 text-2xl font-bold text-white">
-                    +{hiddenCount}
-                  </span>
-                )}
-              </button>
+                att={att}
+                showMore={showMore}
+                hiddenCount={hiddenCount}
+                onOpen={() => setLightboxIdx(i)}
+              />
             );
           })}
         </div>
@@ -296,17 +340,96 @@ export function AnnouncementMedia({
   );
 }
 
+// Single photo tile (square cover). If the image fails to load — a missing
+// file_assets row (404), an undecodable format, or a network drop — it swaps to
+// a graceful "image unavailable" placeholder instead of the browser's broken
+// glyph, and stops trying to open the (also-broken) lightbox.
+function PhotoTile({
+  att,
+  showMore,
+  hiddenCount,
+  onOpen,
+}: {
+  att: AnnouncementAttachment;
+  showMore: boolean;
+  hiddenCount: number;
+  onOpen: () => void;
+}) {
+  const [broken, setBroken] = useState(false);
+  if (broken) {
+    return (
+      <div className="relative flex aspect-square w-full flex-col items-center justify-center gap-1 overflow-hidden rounded-lg border border-[#E2DDD8] bg-[#F3EFE9] text-[#9A948C]">
+        <ImageOff className="h-6 w-6" />
+        <span className="px-2 text-center text-[10px] leading-tight">
+          Image unavailable
+        </span>
+        {showMore && (
+          <span className="absolute inset-0 flex items-center justify-center bg-black/50 text-2xl font-bold text-white">
+            +{hiddenCount}
+          </span>
+        )}
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="relative block aspect-square w-full overflow-hidden rounded-lg border border-[#E2DDD8] bg-[#F3EFE9]"
+    >
+      <img
+        src={fileHref(att.fileId)}
+        alt={att.name || "image"}
+        loading="lazy"
+        onError={() => setBroken(true)}
+        className="h-full w-full object-cover"
+      />
+      {showMore && (
+        <span className="absolute inset-0 flex items-center justify-center bg-black/50 text-2xl font-bold text-white">
+          +{hiddenCount}
+        </span>
+      )}
+    </button>
+  );
+}
+
 // Video tile — a poster-less black tile with a centered play-circle overlay.
-// Tapping swaps in the native <video controls> and autoplays.
+// Tapping swaps in the native <video controls> and autoplays. If the format
+// can't be decoded by this browser (e.g. a .mov / video/quicktime on Android
+// Chrome), the <video> fires onError and we fall back to an "Open video" chip
+// that hands the file to the OS player via the same token-bearing URL — so a
+// posted clip is never a dead black box.
 function VideoTile({ src }: { src: string }) {
   const [playing, setPlaying] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return (
+      <a
+        href={src}
+        target="_blank"
+        rel="noreferrer"
+        className="flex items-center gap-2 rounded-lg border border-[#E2DDD8] bg-[#FAFAF8] px-3 py-2 text-xs font-medium text-[#5A5550] active:bg-[#F3EFE9]"
+      >
+        <Play className="h-4 w-4 shrink-0 fill-[#9A3A2D] text-[#9A3A2D]" />
+        <span className="min-w-0 flex-1 truncate">Video</span>
+        <span className="shrink-0 rounded bg-[#EDE7E0] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#8A6F3A]">
+          Open
+        </span>
+        <Download className="h-4 w-4 shrink-0 text-[#8A8680]" />
+      </a>
+    );
+  }
+
   if (playing) {
     return (
       <video
         src={src}
         controls
         autoPlay
+        playsInline
         preload="metadata"
+        onError={() => setFailed(true)}
         className="w-full rounded-lg border border-[#E2DDD8] bg-black"
       />
     );
@@ -322,6 +445,8 @@ function VideoTile({ src }: { src: string }) {
         src={src}
         preload="metadata"
         muted
+        playsInline
+        onError={() => setFailed(true)}
         className="absolute inset-0 h-full w-full object-cover opacity-70"
       />
       <span className="relative flex h-14 w-14 items-center justify-center rounded-full bg-black/55">

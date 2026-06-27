@@ -158,6 +158,17 @@ app.post("/subscribe", async (c) => {
     .bind(genId(), workerId, endpoint, p256dh, auth, new Date().toISOString())
     .run();
 
+  // Lightweight diagnostic — so a "notifications not arriving" report can be
+  // traced to whether the subscribe even reached the server. Logs the worker +
+  // the push service host only (NEVER the keys/endpoint path, which are secrets).
+  let host = "?";
+  try {
+    host = new URL(endpoint).host;
+  } catch {
+    /* leave '?' */
+  }
+  console.log(`[push/subscribe] worker=${workerId} host=${host}`);
+
   return c.json({ success: true });
 });
 
@@ -349,6 +360,13 @@ export async function sendPushToSubscribers(
       .run();
     pruned = deadEndpoints.length;
   }
+
+  // Diagnostic — make a failed fan-out observable in the Worker logs (counts
+  // only; no endpoints/keys). A run with sent=0 failed>0 points at VAPID/key
+  // mismatch; pruned>0 just means stale devices were cleaned up.
+  console.log(
+    `[push/send] candidates=${subs.length} sent=${sent} failed=${failed} pruned=${pruned}`,
+  );
 
   return { sent, failed, pruned };
 }

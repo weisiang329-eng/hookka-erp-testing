@@ -370,11 +370,33 @@ export default function WorkerScanPage() {
       .then((zx) => {
         const reader = new zx.MultiFormatReader();
         const hints = new Map<number, unknown>();
+        // Enable QR + a spread of common 1D symbologies (owner 2026-06-27: catch
+        // codes from any angle / position). CODE_128 is our schedule barcode; the
+        // rest (CODE_39 / EAN / UPC / ITF) cost little extra under TRY_HARDER and
+        // let an off-the-shelf product barcode also resolve. The downstream lookup
+        // still guards on a real WIP/PO, so an unrecognised symbology → Not Found.
         hints.set(zx.DecodeHintType.POSSIBLE_FORMATS, [
           zx.BarcodeFormat.QR_CODE,
           zx.BarcodeFormat.CODE_128,
+          zx.BarcodeFormat.CODE_39,
+          zx.BarcodeFormat.EAN_13,
+          zx.BarcodeFormat.EAN_8,
+          zx.BarcodeFormat.UPC_A,
+          zx.BarcodeFormat.UPC_E,
+          zx.BarcodeFormat.ITF,
         ]);
+        // TRY_HARDER spends more cycles per frame to catch faint / angled codes —
+        // the core sensitivity lever. ALSO_INVERTED reads light-on-dark prints.
         hints.set(zx.DecodeHintType.TRY_HARDER, true);
+        try {
+          // Not in every @zxing build's enum — guard so a missing key can't throw
+          // and kill the whole decoder setup.
+          if (zx.DecodeHintType.ALSO_INVERTED != null) {
+            hints.set(zx.DecodeHintType.ALSO_INVERTED, true);
+          }
+        } catch {
+          /* older @zxing without ALSO_INVERTED — TRY_HARDER still applies */
+        }
         reader.setHints(hints);
         zxingRef.current = (img: ImageData) => {
           // RGBA → BT.601 luma (RGBLuminanceSource wants precomputed luminance
@@ -1294,18 +1316,37 @@ export default function WorkerScanPage() {
     let nativeDetector: BarcodeDetectorLike | null = null;
     if (typeof window !== "undefined" && window.BarcodeDetector) {
       try {
-        // Read BOTH the square QR and the Code 128 printed on the Production
-        // Schedule. On Android Chrome this is the fast hardware path for both.
+        // Read the square QR plus a spread of common 1D symbologies (owner
+        // 2026-06-27 sensitivity ask). code_128 is the Production-Schedule
+        // barcode; the rest let any off-the-shelf product barcode resolve too.
+        // On Android Chrome this is the fast hardware path for all of them.
         nativeDetector = new window.BarcodeDetector({
-          formats: ["qr_code", "code_128"],
+          formats: [
+            "qr_code",
+            "code_128",
+            "code_39",
+            "ean_13",
+            "ean_8",
+            "upc_a",
+            "upc_e",
+            "itf",
+          ],
         });
       } catch {
-        // A device that rejects code_128 still gets QR via the native detector;
-        // Code 128 then falls to the ZXing path below.
+        // A device that rejects the wider list still gets QR + Code 128; failing
+        // that, QR only. Anything missing falls to the ZXing path below.
         try {
-          nativeDetector = new window.BarcodeDetector({ formats: ["qr_code"] });
+          nativeDetector = new window.BarcodeDetector({
+            formats: ["qr_code", "code_128"],
+          });
         } catch {
-          nativeDetector = null;
+          try {
+            nativeDetector = new window.BarcodeDetector({
+              formats: ["qr_code"],
+            });
+          } catch {
+            nativeDetector = null;
+          }
         }
       }
     }
@@ -1399,10 +1440,19 @@ export default function WorkerScanPage() {
     // re-tap). The loop below still decodes but considerHit ignores it in barcode
     // mode. QR mode is unchanged: one sticker in view → fire on first decode.
     // See [[project_hookka_barcode_roi]].
+    // Owner 2026-06-27: barcode scanning must be MORE sensitive — auto-fire on
+    // the full-frame decode (off-centre / angled / left-right-diagonal codes
+    // included), with the SAME cyan/red ring feedback as QR. The loop already
+    // decodes the FULL frame and, in barcode mode, picks the SINGLE code nearest
+    // the frame centre (a SELECTION that biases toward the row the worker aimed
+    // at without ever rejecting). So auto-fire now flows through for BOTH modes;
+    // tap-to-pick (tapScanBarcode) remains as a deliberate disambiguation for a
+    // dense stacked schedule. The nearest-centre selection upstream keeps a lone
+    // barcode reliably caught while still favouring the aimed row when several
+    // are visible.
     const considerHit = (data: string, _cy = 0.5) => {
       if (stopped || !data) return;
-      if (scanMode === "barcode") return; // barcode fires ONLY via tapScanBarcode
-      onHit(data); // QR: instant, full-frame
+      onHit(data); // QR + barcode: instant, full-frame, nearest-centre selected
     };
 
     const tick = async () => {
@@ -1432,7 +1482,9 @@ export default function WorkerScanPage() {
               for (const c of codes) {
                 if (!c.rawValue) continue;
                 const fmt = (c as { format?: string }).format;
-                if (fmt && fmt !== "code_128") continue;
+                // Accept ANY 1D symbology in barcode mode (owner 2026-06-27),
+                // not just code_128 — exclude only qr_code (QR mode owns that).
+                if (fmt && fmt === "qr_code") continue;
                 const bb = (
                   c as {
                     boundingBox?: {
@@ -1763,7 +1815,32 @@ export default function WorkerScanPage() {
       const zx = zxingRef.current;
       const detector =
         typeof window !== "undefined" && window.BarcodeDetector
-          ? new window.BarcodeDetector({ formats: ["code_128", "qr_code"] })
+          ? (() => {
+              // Widen to common 1D symbologies (owner 2026-06-27); fall back
+              // through narrower sets if a device rejects the full list.
+              try {
+                return new window.BarcodeDetector({
+                  formats: [
+                    "code_128",
+                    "code_39",
+                    "ean_13",
+                    "ean_8",
+                    "upc_a",
+                    "upc_e",
+                    "itf",
+                    "qr_code",
+                  ],
+                });
+              } catch {
+                try {
+                  return new window.BarcodeDetector({
+                    formats: ["code_128", "qr_code"],
+                  });
+                } catch {
+                  return null;
+                }
+              }
+            })()
           : null;
       const nextFrame = () =>
         new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));

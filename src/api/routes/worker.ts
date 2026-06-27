@@ -295,8 +295,16 @@ type ProductionOrderRow = {
 // /api/worker/announcements is a separate sub-app that would swallow that prefix.
 // ============================================================
 app.get("/ann-files/:id/download", async (c) => {
-  const auth = await getWorker(c);
-  if (!auth.ok) return auth.response;
+  // Auth: accept the worker token from the header (in-app fetch) OR a ?wt=
+  // query param. A native <img>/<video>/<a download> load CANNOT set a custom
+  // header, so without this they'd 401 ("Not authenticated") — that was why
+  // announcement photos/PDFs failed to open on the phone. Scoped to this
+  // read-only, announcement-files-only route, so the blast radius is tiny.
+  const token = c.req.header("x-worker-token") || c.req.query("wt") || undefined;
+  const workerId = await resolveWorkerToken(c.var.DB, token);
+  if (!workerId) {
+    return c.json({ success: false, error: "Not authenticated" }, 401);
+  }
   if (!c.env.SUPABASE_PROJECT_REF || !c.env.SUPABASE_SERVICE_KEY) {
     return c.json({ success: false, error: "file storage unavailable" }, 503);
   }

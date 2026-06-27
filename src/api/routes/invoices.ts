@@ -829,6 +829,19 @@ app.get("/", async (c) => {
     where.push("status = ?");
     params.push(status);
   }
+  // Date range (owner 2026-06-27): the Invoices page date filter is applied
+  // SERVER-SIDE so it spans the whole table, not just the loaded page — and so
+  // the list agrees with the (also filter-aware) KPI cards.
+  const fromDate = c.req.query("from");
+  const toDate = c.req.query("to");
+  if (fromDate) {
+    where.push("invoiceDate >= ?");
+    params.push(fromDate);
+  }
+  if (toDate) {
+    where.push("invoiceDate <= ?");
+    params.push(toDate);
+  }
   // Optional index-backed search (global Ctrl+K palette, ?search=). Partial
   // match on invoice number + customer name; fires only when present, so the
   // Invoices list page (no search param) is untouched.
@@ -902,9 +915,26 @@ app.get("/stats", async (c) => {
 
   const orgId = getOrgId(c);
 
-  // PR 4 (2026-05-20) — cache-aside snapshot. See lib/invoice-snapshot.ts.
-  // Same pattern as dashboard-snapshot (PR 1) and delivery-snapshot (PR 3).
-  {
+  // Optional filter (owner 2026-06-27): the Invoices KPI cards FOLLOW the page's
+  // status / customer / date filter. When any filter is active we compute a
+  // fresh filter-scoped aggregate and BYPASS the snapshot (which only caches the
+  // unfiltered whole-dataset totals). `period`-safe: date bounds come straight
+  // from the page's From/To inputs (YYYY-MM-DD).
+  const fCustomer = c.req.query("customerId");
+  const fStatus = c.req.query("status");
+  const fFrom = c.req.query("from");
+  const fTo = c.req.query("to");
+  const filtered = !!(fCustomer || fStatus || fFrom || fTo);
+  const fWhere: string[] = ["orgId = ?"];
+  const fParams: unknown[] = [orgId];
+  if (fCustomer) { fWhere.push("customerId = ?"); fParams.push(fCustomer); }
+  if (fStatus) { fWhere.push("status = ?"); fParams.push(fStatus); }
+  if (fFrom) { fWhere.push("invoiceDate >= ?"); fParams.push(fFrom); }
+  if (fTo) { fWhere.push("invoiceDate <= ?"); fParams.push(fTo); }
+  const fClause = `WHERE ${fWhere.join(" AND ")}`;
+
+  // PR 4 (2026-05-20) — cache-aside snapshot (UNFILTERED whole-dataset only).
+  if (!filtered) {
     const { readInvoiceStatsSnapshot, getInvoiceStatsMaxUpdatedAt, isSnapshotFresh } =
       await import("../lib/invoice-snapshot");
     const [snap, currentMax] = await Promise.all([
@@ -925,18 +955,31 @@ app.get("/stats", async (c) => {
   const currentMonthLike = `${new Date().toISOString().slice(0, 7)}%`;
   const [byStatusRes, sumsRes] = await Promise.all([
     c.var.DB
-      .prepare("SELECT status, COUNT(*) AS n FROM invoices GROUP BY status")
+      .prepare(
+        `SELECT status, COUNT(*) AS n FROM invoices ${filtered ? fClause : ""} GROUP BY status`,
+      )
+      .bind(...(filtered ? fParams : []))
       .all<{ status: string; n: number }>(),
     c.var.DB
       .prepare(
-        `SELECT
-           COALESCE(SUM(CASE WHEN status IN ('SENT','OVERDUE','PARTIAL_PAID')
-                              THEN totalSen - paidAmount ELSE 0 END), 0) AS "outstandingSen",
-           COALESCE(SUM(CASE WHEN status = 'PAID' AND invoiceDate LIKE ?
-                              THEN paidAmount ELSE 0 END), 0)              AS "paidMTDSen"
-           FROM invoices`,
+        // Filtered: outstanding + collected within the filtered set. Unfiltered:
+        // collected is month-to-date (the "Collected (MTD)" card's whole-table
+        // meaning). Outstanding is the same formula either way.
+        filtered
+          ? `SELECT
+               COALESCE(SUM(CASE WHEN status IN ('SENT','OVERDUE','PARTIAL_PAID')
+                                  THEN totalSen - paidAmount ELSE 0 END), 0) AS "outstandingSen",
+               COALESCE(SUM(CASE WHEN status = 'PAID'
+                                  THEN paidAmount ELSE 0 END), 0)            AS "paidMTDSen"
+               FROM invoices ${fClause}`
+          : `SELECT
+               COALESCE(SUM(CASE WHEN status IN ('SENT','OVERDUE','PARTIAL_PAID')
+                                  THEN totalSen - paidAmount ELSE 0 END), 0) AS "outstandingSen",
+               COALESCE(SUM(CASE WHEN status = 'PAID' AND invoiceDate LIKE ?
+                                  THEN paidAmount ELSE 0 END), 0)            AS "paidMTDSen"
+               FROM invoices`,
       )
-      .bind(currentMonthLike)
+      .bind(...(filtered ? fParams : [currentMonthLike]))
       .first<{ outstandingSen: number; paidMTDSen: number }>(),
   ]);
   const byStatus: Record<string, number> = {};
@@ -952,18 +995,22 @@ app.get("/stats", async (c) => {
     paidMTDSen: Number(sumsRes?.paidMTDSen ?? 0),
   };
 
-  try {
-    const { writeInvoiceStatsSnapshot, getInvoiceStatsMaxUpdatedAt } =
-      await import("../lib/invoice-snapshot");
-    const currentMax = await getInvoiceStatsMaxUpdatedAt(c.var.DB);
-    await writeInvoiceStatsSnapshot(
-      c.var.DB,
-      orgId,
-      payload as Record<string, unknown>,
-      currentMax ?? new Date().toISOString(),
-    );
-  } catch (e) {
-    console.warn("[invoice-stats-snapshot] write-back failed:", e);
+  // Only the UNFILTERED whole-dataset payload is cacheable; a filtered view is
+  // per-request and must never overwrite the canonical snapshot.
+  if (!filtered) {
+    try {
+      const { writeInvoiceStatsSnapshot, getInvoiceStatsMaxUpdatedAt } =
+        await import("../lib/invoice-snapshot");
+      const currentMax = await getInvoiceStatsMaxUpdatedAt(c.var.DB);
+      await writeInvoiceStatsSnapshot(
+        c.var.DB,
+        orgId,
+        payload as Record<string, unknown>,
+        currentMax ?? new Date().toISOString(),
+      );
+    } catch (e) {
+      console.warn("[invoice-stats-snapshot] write-back failed:", e);
+    }
   }
 
   return c.json({ success: true, ...payload });

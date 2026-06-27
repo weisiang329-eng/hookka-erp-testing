@@ -58,6 +58,21 @@ export default function InvoicesPage() {
   // the current 200-row page — so an invoice is findable by invoice no, DO no,
   // our SO, customer PO or customer name no matter which page it sits on.
   const [gridSearch, setGridSearch] = useState("");
+  // Filters declared HERE (before the list + KPI fetches) so both carry them
+  // server-side — owner 2026-06-27: the status/customer/date filter must span
+  // the whole table (not just the loaded page) and the top cards must follow it.
+  const [filterStatus, setFilterStatus] = useState("");
+  const [filterCustomer, setFilterCustomer] = useState("");
+  const [filterDateFrom, setFilterDateFrom] = useState("");
+  const [filterDateTo, setFilterDateTo] = useState("");
+  const filterQs = (() => {
+    const qs = new URLSearchParams();
+    if (filterStatus) qs.set("status", filterStatus);
+    if (filterCustomer) qs.set("customerId", filterCustomer);
+    if (filterDateFrom) qs.set("from", filterDateFrom);
+    if (filterDateTo) qs.set("to", filterDateTo);
+    return qs.toString();
+  })();
 
   const { data: invResp, loading, refresh: refreshInvoices } = useCachedJson<{
     success?: boolean;
@@ -68,7 +83,9 @@ export default function InvoicesPage() {
   }>(
     gridSearch.trim()
       ? `/api/invoices?search=${encodeURIComponent(gridSearch.trim())}&limit=2000`
-      : `/api/invoices?page=${page}&limit=${PAGE_SIZE}`,
+      : filterQs
+        ? `/api/invoices?${filterQs}&limit=2000`
+        : `/api/invoices?page=${page}&limit=${PAGE_SIZE}`,
   );
   // Whole-dataset KPI numbers — bucket counts AND money aggregates.
   // 2026-05-26 audit: outstandingSen / paidMTDSen were previously
@@ -81,7 +98,7 @@ export default function InvoicesPage() {
     total?: number;
     outstandingSen?: number;
     paidMTDSen?: number;
-  }>("/api/invoices/stats");
+  }>(filterQs ? `/api/invoices/stats?${filterQs}` : "/api/invoices/stats");
   const invoices: Invoice[] = useMemo(
     () => (invResp?.success ? invResp.data ?? [] : Array.isArray(invResp) ? invResp : []),
     [invResp]
@@ -97,11 +114,8 @@ export default function InvoicesPage() {
   const [selectedDOId, setSelectedDOId] = useState("");
   const [creating, setCreating] = useState(false);
 
-  // Filters
-  const [filterStatus, setFilterStatus] = useState("");
-  const [filterCustomer, setFilterCustomer] = useState("");
-  const [filterDateFrom, setFilterDateFrom] = useState("");
-  const [filterDateTo, setFilterDateTo] = useState("");
+  // Filters — state declared above (before the list/stats fetches) so both
+  // fetches carry them server-side.
 
   // Reset to page 1 when any filter changes (stale page could be empty).
   /* eslint-disable react-hooks/set-state-in-effect -- derived pagination reset triggered by filter change */

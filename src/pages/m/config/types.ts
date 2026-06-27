@@ -143,6 +143,59 @@ export type RelatedDocVM = {
 /** A single step in the document lifecycle flow indicator. */
 export type FlowStep = { key: string; label: string };
 
+/** One label/value row in a key-value section (e.g. Earnings / Deductions). */
+export type KvRow = { label: string; value: ReactNode };
+
+/**
+ * A titled key-value section rendered below the field grid (the design source's
+ * Earnings / Deductions cards on a payslip). `negative` tints the values red
+ * (deductions). Empty `rows` → the section is skipped.
+ */
+export type KvSection = {
+  title: string;
+  rows: KvRow[];
+  /** Render values in the danger colour (deductions). */
+  negative?: boolean;
+};
+
+/**
+ * A titled sub-document list rendered as a tappable card (the design source's
+ * "Payslips" list under an employee, or "In this rack now" / "Recent movements"
+ * under a rack). Each row optionally links to another /m route.
+ */
+export type SubDocRow = {
+  id: string;
+  /** Left primary (e.g. period, product description). */
+  title: string;
+  /** Left secondary (e.g. amount, SO · customer). */
+  subLine?: string;
+  /** Right-aligned meta (e.g. date). */
+  trailing?: string;
+  /** Status pill on the right. */
+  status?: { style: SemanticStyle; label: string };
+  /** lucide icon name for the leading tile (default "file-text"). */
+  icon?: "file-text" | "package" | "arrow-down" | "arrow-up";
+  /** Destination route, or undefined if not linkable. */
+  href?: string;
+};
+
+export type SubDocList = {
+  title: string;
+  rows: SubDocRow[];
+  /** Shown when `rows` is empty (omit the section if undefined). */
+  emptyText?: string;
+};
+
+/** A dark "stat" hero card (the design source's rack hero on warehouse detail). */
+export type DarkStat = {
+  /** Small uppercase eyebrow (e.g. "Rack"). */
+  eyebrow: string;
+  /** Large value (e.g. the rack label). */
+  value: string;
+  /** Optional caption line under the value. */
+  caption?: ReactNode;
+};
+
 export type DetailConfig = {
   /** Build the single-doc fetch URL from the route :id param. */
   url: (id: string) => string;
@@ -178,12 +231,45 @@ export type DetailConfig = {
   };
   /** Field grid cells (spec terminology). */
   fields: FieldDef[];
+  /**
+   * Optional dark hero "stat" card rendered between the header card and the
+   * field grid (the design source's rack hero on warehouse detail).
+   */
+  darkStat?: (doc: RawRow) => DarkStat | undefined;
+  /**
+   * Optional body paragraphs rendered in their own card below the field grid
+   * (the design source's announcement / mail message body). Empty array → no
+   * card. Newlines inside a paragraph render as line breaks (white-space:
+   * pre-line).
+   */
+  body?: (doc: RawRow) => string[];
+  /**
+   * Optional titled key-value sections below the field grid (the design
+   * source's Earnings / Deductions cards on a payslip).
+   */
+  kvSections?: (doc: RawRow) => KvSection[];
+  /**
+   * Optional dark "Net pay" summary card rendered after the kv sections (the
+   * design source's payslip net-pay band). Returns { label, value }.
+   */
+  netPay?: (doc: RawRow) => { label: string; value: string } | undefined;
+  /**
+   * Optional titled sub-document lists (the design source's payslips list under
+   * an employee, or rack contents + movements under a rack).
+   */
+  subDocLists?: (doc: RawRow, resp: unknown) => SubDocList[];
   /** Map the doc → its line-items list (empty array = no items section). */
   lineItems?: (doc: RawRow) => LineItemVM[];
   /** Map the response (doc + envelope extras) → related documents. */
   relatedDocs?: (doc: RawRow, resp: unknown) => RelatedDocVM[];
   /** Label for the bottom-bar primary CTA (e.g. "Confirm"). Defaults none. */
   primaryCta?: (doc: RawRow) => string | undefined;
+  /**
+   * Optional override for the bottom action bar. By default the bar shows
+   * Print · Edit · CTA. Set `hideActionBar` for read-only detail screens
+   * (payslip / rack) that the design shows with no action bar.
+   */
+  hideActionBar?: boolean;
 };
 
 export type ModuleConfig = {

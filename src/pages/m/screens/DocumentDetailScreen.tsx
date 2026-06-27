@@ -30,6 +30,8 @@ import {
   Check,
   Package,
   FileText,
+  ArrowDownToLine,
+  ArrowUpFromLine,
 } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, MobileCard, StatusPill, Sheet, FormSheet } from "../components";
@@ -39,6 +41,7 @@ import {
   type DetailConfig,
   type LineItemVM,
   type RelatedDocVM,
+  type SubDocRow,
 } from "../config/types";
 import { type FormSpec } from "../config/form-types";
 import { editSpecFor, newMailSpec } from "../config/forms";
@@ -122,6 +125,18 @@ function Inner({
   const lineItems = eff.lineItems?.(doc) ?? [];
   const related = eff.relatedDocs?.(doc, data) ?? [];
   const primaryCta = eff.primaryCta?.(doc);
+
+  // Optional special sections (design source: rack hero / body / payslip
+  // earnings-deductions-net / sub-doc lists). Each renders only when the config
+  // for this doc type supplies it AND it has content.
+  const darkStat = eff.darkStat?.(doc);
+  const bodyParas = (eff.body?.(doc) ?? []).filter((p) => p && p.trim());
+  const kvSections = (eff.kvSections?.(doc) ?? []).filter((s) => s.rows.length);
+  const netPay = eff.netPay?.(doc);
+  const subDocLists = (eff.subDocLists?.(doc, data) ?? []).filter(
+    (l) => l.rows.length || l.emptyText,
+  );
+  const showActionBar = !eff.hideActionBar;
 
   // Group related docs under their `group` heading, preserving first-seen
   // order. Cheap pure transform — computed inline (placed after the early
@@ -290,6 +305,9 @@ function Inner({
           ) : null}
         </MobileCard>
 
+        {/* Dark hero stat — design source: rack hero on warehouse detail. */}
+        {darkStat ? <DarkStatCard stat={darkStat} /> : null}
+
         {/* Field grid — design source: label (left) / value (right) rows with
             an inner hairline between each. */}
         {eff.fields.length ? (
@@ -329,6 +347,120 @@ function Inner({
             })}
           </MobileCard>
         ) : null}
+
+        {/* Body paragraphs — design source: announcement / mail message body. */}
+        {bodyParas.length ? (
+          <MobileCard radius={18} style={{ padding: 18 }}>
+            {bodyParas.map((p, i) => (
+              <p
+                key={i}
+                style={{
+                  fontSize: 14,
+                  lineHeight: 1.6,
+                  color: "#3A352C",
+                  margin: i === bodyParas.length - 1 ? 0 : "0 0 12px",
+                  whiteSpace: "pre-line",
+                }}
+              >
+                {p}
+              </p>
+            ))}
+          </MobileCard>
+        ) : null}
+
+        {/* Key-value sections — design source: payslip Earnings / Deductions. */}
+        {kvSections.map((s) => (
+          <div key={s.title}>
+            <SectionHeading>{s.title}</SectionHeading>
+            <MobileCard radius={18} style={{ padding: "4px 18px" }}>
+              {s.rows.map((r, i) => {
+                const last = i === s.rows.length - 1;
+                return (
+                  <div
+                    key={i}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      padding: "12px 0",
+                      borderBottom: last ? "none" : `1px solid ${M.divider}`,
+                    }}
+                  >
+                    <span style={{ color: M.muted, fontSize: 13 }}>
+                      {r.label}
+                    </span>
+                    <span
+                      style={{
+                        color: s.negative ? "#9A3A2D" : M.raisin,
+                        fontSize: 13.5,
+                        fontWeight: 600,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {r.value}
+                    </span>
+                  </div>
+                );
+              })}
+            </MobileCard>
+          </div>
+        ))}
+
+        {/* Net pay — design source: payslip dark net-pay band. */}
+        {netPay ? (
+          <div
+            style={{
+              background: M.raisin,
+              borderRadius: 18,
+              padding: "16px 18px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <span style={{ fontSize: 13, color: "#C9BD9A", fontWeight: 600 }}>
+              {netPay.label}
+            </span>
+            <span
+              style={{
+                fontSize: 20,
+                fontWeight: 800,
+                color: "#F0ECE9",
+                letterSpacing: "-0.3px",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {netPay.value}
+            </span>
+          </div>
+        ) : null}
+
+        {/* Sub-document lists — design source: payslips under an employee,
+            rack contents + recent movements under a rack. */}
+        {subDocLists.map((list) => (
+          <div key={list.title}>
+            <SectionHeading>{list.title}</SectionHeading>
+            <MobileCard padded={false} radius={18} style={{ overflow: "hidden" }}>
+              {list.rows.length === 0 ? (
+                <div style={{ padding: 16, color: M.muted, fontSize: 13 }}>
+                  {list.emptyText}
+                </div>
+              ) : (
+                list.rows.map((r, i) => (
+                  <SubDocRowView
+                    key={r.id}
+                    row={r}
+                    first={i === 0}
+                    onClick={
+                      r.href ? () => navigate(r.href as string) : undefined
+                    }
+                  />
+                ))
+              )}
+            </MobileCard>
+          </div>
+        ))}
 
         {/* Line items — design source: section heading above an overflow-hidden
             card; each row has a gold icon tile + name/spec + qty/amount. */}
@@ -413,23 +545,29 @@ function Inner({
 
       {/* Inline action feedback (no ToastProvider on /m). */}
       {toast ? (
-        <Toast toast={toast} onClose={() => setToast(null)} />
+        <Toast
+          toast={toast}
+          onClose={() => setToast(null)}
+          raised={showActionBar}
+        />
       ) : null}
 
-      {/* Bottom action bar */}
-      <ActionBar
-        primaryCta={primaryCta}
-        ctaBusy={ctaBusy}
-        editable={editSpec != null}
-        extraAction={
-          config.slug === "mail-center"
-            ? { label: "Sign", onClick: onSign }
-            : undefined
-        }
-        onPrint={() => setSheet("print")}
-        onEdit={onEdit}
-        onCta={runCta}
-      />
+      {/* Bottom action bar — hidden for read-only detail (payslip / rack). */}
+      {showActionBar ? (
+        <ActionBar
+          primaryCta={primaryCta}
+          ctaBusy={ctaBusy}
+          editable={editSpec != null}
+          extraAction={
+            config.slug === "mail-center"
+              ? { label: "Sign", onClick: onSign }
+              : undefined
+          }
+          onPrint={() => setSheet("print")}
+          onEdit={onEdit}
+          onCta={runCta}
+        />
+      ) : null}
 
       {/* Edit / reply form (real save). */}
       <FormSheet
@@ -478,9 +616,12 @@ function Inner({
 function Toast({
   toast,
   onClose,
+  raised = true,
 }: {
   toast: { kind: "ok" | "err"; text: string };
   onClose: () => void;
+  /** Sit above the bottom action bar; when false sit above the tab bar only. */
+  raised?: boolean;
 }) {
   const ok = toast.kind === "ok";
   return (
@@ -490,7 +631,9 @@ function Toast({
         position: "fixed",
         left: 0,
         right: 0,
-        bottom: "calc(120px + env(safe-area-inset-bottom))",
+        bottom: raised
+          ? "calc(120px + env(safe-area-inset-bottom))"
+          : "calc(72px + env(safe-area-inset-bottom))",
         display: "flex",
         justifyContent: "center",
         zIndex: 50,
@@ -957,6 +1100,168 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
       }}
     >
       {children}
+    </div>
+  );
+}
+
+/** Dark hero "stat" card (design source: rack hero on warehouse detail). */
+function DarkStatCard({
+  stat,
+}: {
+  stat: { eyebrow: string; value: string; caption?: React.ReactNode };
+}) {
+  return (
+    <div
+      style={{
+        background: M.raisin,
+        borderRadius: 18,
+        padding: "17px 18px",
+      }}
+    >
+      <div
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          letterSpacing: 2,
+          color: "#857A66",
+          textTransform: "uppercase",
+        }}
+      >
+        {stat.eyebrow}
+      </div>
+      <div
+        style={{
+          fontSize: 22,
+          fontWeight: 800,
+          color: "#F0ECE9",
+          marginTop: 2,
+          letterSpacing: "-0.3px",
+        }}
+      >
+        {stat.value}
+      </div>
+      {stat.caption != null ? (
+        <div style={{ fontSize: 12, color: "#9A8F6B", marginTop: 4 }}>
+          {stat.caption}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** One row in a sub-document list (design source: payslips / rack contents). */
+function SubDocRowView({
+  row,
+  first,
+  onClick,
+}: {
+  row: SubDocRow;
+  first?: boolean;
+  onClick?: () => void;
+}) {
+  const interactive = typeof onClick === "function";
+  // Movement rows use a tinted in/out tile; everything else a parchment tile.
+  const isIn = row.icon === "arrow-down";
+  const isOut = row.icon === "arrow-up";
+  const tileBg = isIn ? "#EEF3E4" : isOut ? "#F9E1DA" : "#F0EAD8";
+  const tileFg = isIn ? "#4F7C3A" : isOut ? "#9A3A2D" : M.taupe;
+  const Icon = isIn
+    ? ArrowDownToLine
+    : isOut
+      ? ArrowUpFromLine
+      : row.icon === "package"
+        ? Package
+        : FileText;
+  return (
+    <div
+      onClick={onClick}
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      onKeyDown={
+        interactive
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick?.();
+              }
+            }
+          : undefined
+      }
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "13px 16px",
+        borderTop: first ? "none" : `1px solid ${M.divider}`,
+        cursor: interactive ? "pointer" : "default",
+        WebkitTapHighlightColor: "transparent",
+      }}
+    >
+      <span
+        style={{
+          width: 38,
+          height: 38,
+          borderRadius: 10,
+          background: tileBg,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flex: "none",
+        }}
+      >
+        <Icon size={18} strokeWidth={1.75} color={tileFg} />
+      </span>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div
+          style={{
+            color: M.raisin,
+            fontSize: 13.5,
+            fontWeight: 600,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {row.title}
+        </div>
+        {row.subLine ? (
+          <div
+            style={{
+              color: M.muted,
+              fontSize: 11.5,
+              marginTop: 2,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {row.subLine}
+          </div>
+        ) : null}
+      </div>
+      {row.status ? (
+        <StatusPill style={row.status.style} label={row.status.label} size="sm" />
+      ) : null}
+      {row.trailing ? (
+        <span
+          style={{
+            fontSize: 11.5,
+            color: M.muted,
+            flex: "none",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {row.trailing}
+        </span>
+      ) : null}
+      {interactive ? (
+        <ChevronRight
+          size={17}
+          strokeWidth={1.75}
+          color="#C4BDB2"
+          style={{ flexShrink: 0 }}
+        />
+      ) : null}
     </div>
   );
 }

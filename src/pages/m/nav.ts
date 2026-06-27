@@ -50,6 +50,12 @@ export type ModuleLink = {
   icon: LucideIcon;
   /** Route under /m/*. Phase 2 replaces placeholders with real screens. */
   path: string;
+  /**
+   * Optional red count badge (design source: e.g. an unread count on Mail /
+   * Announcements). Left unset until a real count source is wired — we never
+   * fabricate a number. // TODO: populate from unread mail / new announcements.
+   */
+  badge?: string | number;
 };
 
 export type ModuleGroup = {

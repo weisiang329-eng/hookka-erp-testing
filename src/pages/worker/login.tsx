@@ -30,6 +30,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Sun, Moon } from "lucide-react";
+import LoginSnow from "@/components/login-snow";
 import { useT } from "@/lib/worker-i18n";
 import {
   WORKER_TOKEN_KEY,
@@ -549,8 +550,23 @@ export default function WorkerLoginPage() {
             backgroundImage: p.screenGridImage,
           }}
         >
+          {/* Falling snow behind the card (owner 2026-06-27 "登录要加飘落的雪花").
+              White flakes on the dark theme; soft-gold so they stay visible on
+              the cream light theme. */}
+          <LoginSnow
+            flakeColor={
+              theme === "dark"
+                ? "rgba(255,250,235,0.95)"
+                : "rgba(201,169,97,0.8)"
+            }
+            glowColor={
+              theme === "dark"
+                ? "rgba(201,169,97,0.45)"
+                : "rgba(201,169,97,0.3)"
+            }
+          />
           <div
-            className="w-full max-w-md rounded-2xl p-10"
+            className="relative z-10 w-full max-w-md rounded-2xl p-10"
             style={{
               backgroundColor: p.cardBg,
               border: p.cardBorder,

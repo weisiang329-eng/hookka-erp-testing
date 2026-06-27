@@ -8,8 +8,9 @@ import {
   Home,
   ShoppingCart,
   Factory,
+  ShoppingBag,
   Truck,
-  MoreHorizontal,
+  Menu,
   Megaphone,
   Mail,
   Users,
@@ -33,12 +34,15 @@ export type TabDef = {
   path: string;
 };
 
+// Bottom-nav icons mirror the design source exactly:
+//   Home → house · Sales → shopping-cart · Production → factory ·
+//   Procure → shopping-bag · More → menu.
 export const TABS: TabDef[] = [
   { key: "home", label: "Home", icon: Home, path: "/m" },
   { key: "sales", label: "Sales", icon: ShoppingCart, path: "/m/sales" },
   { key: "production", label: "Production", icon: Factory, path: "/m/production" },
-  { key: "procure", label: "Procure", icon: Truck, path: "/m/procurement" },
-  { key: "more", label: "More", icon: MoreHorizontal, path: "/m/more" },
+  { key: "procure", label: "Procure", icon: ShoppingBag, path: "/m/procurement" },
+  { key: "more", label: "More", icon: Menu, path: "/m/more" },
 ];
 
 export type ModuleLink = {

@@ -217,6 +217,41 @@ function todayStr(): string {
   return new Date().toISOString().split("T")[0];
 }
 
+// Local (Malaysia, UTC+8) calendar date "YYYY-MM-DD". toISOString() above is in
+// UTC, which can name "yesterday" between 00:00–08:00 MYT. The Today quick-preset
+// must land on the operator's actual local date, so build it from local parts.
+function todayLocalStr(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// Inclusive [from, to] for the last `days` calendar days ending today (local).
+// last 7 days = today−6 .. today.
+function lastNDaysRange(days: number): { from: string; to: string } {
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - (days - 1));
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return { from: fmt(from), to: fmt(to) };
+}
+
+// First/last day of the current (offset 0) or previous (offset -1) calendar
+// month, local. Used by the This-month / Last-month quick presets.
+function calendarMonthRange(offsetMonths: number): { from: string; to: string } {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth() + offsetMonths; // JS handles negative / overflow
+  const first = new Date(y, m, 1);
+  const last = new Date(y, m + 1, 0);
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return { from: fmt(first), to: fmt(last) };
+}
+
 // Full month names, module-scope so references stay stable across renders
 // (used by the Payroll month label + its Print Report filter line).
 const MONTH_NAMES = [
@@ -5423,6 +5458,31 @@ function EmployeeDetailTab({
     [wheResp]
   );
 
+  // FIFTH data source — approved EXTRA PRODUCTION TIME claims (kind='ADD_PROD').
+  // These are the SAME claims the Efficiency Overview adds to the numerator
+  // (computeApprovedAddProdMinutesByWorker): a worker's approved over-standard
+  // time on a job, credited as production output (hours × 60 minutes) and NOT
+  // as a working-hour row. The endpoint returns all APPROVED requests across
+  // workers (LIMIT 200), so filter client-side to this worker, kind=ADD_PROD,
+  // and the selected date window. Without this the tab's efficiency disagreed
+  // with the Overview (and could never exceed the JC numerator). Bug fix
+  // 2026-06-27: align Employee Performance to the canonical formula.
+  const { data: addProdResp } = useCachedJson<{ data?: NonprodReq[] }>(
+    "/api/working-hour-entries/nonprod-requests?status=APPROVED",
+  );
+  const addProdMins = useMemo(() => {
+    const rows = addProdResp?.data ?? [];
+    let mins = 0;
+    for (const r of rows) {
+      if (r.workerId !== selectedEmployeeId) continue;
+      if (r.kind !== "ADD_PROD") continue;
+      if (r.status !== "APPROVED") continue;
+      if (!r.date || r.date < dateFrom || r.date > dateTo) continue;
+      mins += Math.round((Number(r.hours) || 0) * 60);
+    }
+    return mins;
+  }, [addProdResp, selectedEmployeeId, dateFrom, dateTo]);
+
   // FOURTH data source — attendance_records scoped to this tab's date range.
   // Self-fetches the same dateFrom/dateTo window the jobs and working-hours
   // sources use, rather than reading a page-wide all-attendance prop. Still
@@ -5461,10 +5521,6 @@ function EmployeeDetailTab({
       0,
     ) * 60,
   );
-  const totalProdMinsAttendance = empRecords.reduce(
-    (s, r) => s + r.productionTimeMinutes,
-    0
-  );
   // Job-card production minutes - halve only when BOTH PIC slots are
   // filled (worker shared the JC with a partner). Solo PIC (either slot,
   // no partner) gets the full minutes. Bug fix 2026-04-28: previously
@@ -5478,17 +5534,23 @@ function EmployeeDetailTab({
       return s + (r.hasBothPics ? m / 2 : m);
     }, 0);
   }, [workerJcs]);
-  // Production Hrs stays attendance + JC: working_hour_entries records
-  // total time on a dept (incl. setup, breaks, idle), not the per-product
-  // production minutes the JC + attendance pair tracks. Mixing them would
-  // make Production Hrs > Working Hrs in the common new-grid case.
-  const totalProdMins = totalProdMinsAttendance + totalProdMinsJc;
+  // CANONICAL Efficiency numerator (matches the Efficiency Overview +
+  // computeMonthlyEfficiencyByWorker EXACTLY): completed job-card production
+  // minutes (per-JC standard minutes, halved when shared with a partner) PLUS
+  // approved EXTRA PRODUCTION TIME (kind='ADD_PROD'). Bug fix 2026-06-27: the
+  // old numerator was "attendance prod time + JC time", which (a) double-credited
+  // attendance clock-minutes on top of the JC standard and (b) never fetched the
+  // approved ADD_PROD claims — producing >100% figures (e.g. 129%) that
+  // disagreed with the Overview. Attendance minutes are dropped entirely.
+  const numeratorProdMins = totalProdMinsJc + addProdMins;
   // Avg Efficiency denominator = production-dept hours only (see
   // productionWorkMins comment above). When the worker has zero hours
   // in any production dept, ratio stays null so the KPI shows em-dash.
+  // efficiency% = numerator minutes / (prod-dept hours × 60) × 100, and since
+  // productionWorkMins is already (prod-dept hours × 60) the ratio is direct.
   const avgEff =
     productionWorkMins > 0
-      ? ((totalProdMins / productionWorkMins) * 100).toFixed(1)
+      ? ((numeratorProdMins / productionWorkMins) * 100).toFixed(1)
       : null;
   // Non-production hours = total working hours - production-dept hours.
   // Surfaced as a subtitle on the Total Working Hrs card so the operator
@@ -5722,10 +5784,11 @@ function EmployeeDetailTab({
       ? `${selectedWorker.empNo} — ${selectedWorker.name}`
       : "Employee";
     const cards: PrintCard[] = [
+      { label: "Production Hrs", value: productionWorkMins > 0 ? formatHours(productionWorkMins) : "—" },
+      { label: "Non-Production Hrs", value: nonProductionWorkMins > 0 ? formatHours(nonProductionWorkMins) : "—" },
+      { label: "Extra Production Time", value: addProdMins > 0 ? formatHours(addProdMins) : "—" },
+      { label: "Efficiency", value: avgEff !== null ? `${avgEff}%` : "—", color: avgEff !== null ? (Number(avgEff) >= 100 ? "#15803D" : Number(avgEff) >= 60 ? "#9C6F1E" : "#9A3A2D") : undefined },
       { label: "Days Present", value: String(daysPresent) },
-      { label: "Working Hrs", value: totalWorkMins > 0 ? formatHours(totalWorkMins) : "—" },
-      { label: "Production Hrs", value: totalProdMins > 0 ? formatHours(totalProdMins) : "—" },
-      { label: "Avg Efficiency", value: avgEff !== null ? `${avgEff}%` : "—", color: avgEff !== null ? (Number(avgEff) >= 100 ? "#15803D" : Number(avgEff) >= 60 ? "#9C6F1E" : "#9A3A2D") : undefined },
       { label: "Total OT", value: totalOT > 0 ? formatHours(totalOT) : "—" },
     ];
     const columns: PrintColumn[] = [
@@ -5745,7 +5808,7 @@ function EmployeeDetailTab({
       cards,
       sections: [{ columns, rows: itemRows }],
     });
-  }, [selectedWorker, daysPresent, totalWorkMins, totalProdMins, avgEff, totalOT, dateFrom, dateTo, itemRows]);
+  }, [selectedWorker, daysPresent, productionWorkMins, nonProductionWorkMins, addProdMins, avgEff, totalOT, dateFrom, dateTo, itemRows]);
 
   return (
     <div className="space-y-4">
@@ -5786,6 +5849,34 @@ function EmployeeDetailTab({
                 onChange={(e) => setDateTo(e.target.value)}
                 className="w-36 h-8 text-xs"
               />
+            </div>
+            {/* Quick-range presets. "Today" sets from=to=today (local MY date);
+                the others mirror the rest of the page's range shortcuts. */}
+            <div className="flex items-center gap-1">
+              {([
+                { label: "Today", range: () => { const t = todayLocalStr(); return { from: t, to: t }; } },
+                { label: "7d", range: () => lastNDaysRange(7) },
+                { label: "30d", range: () => lastNDaysRange(30) },
+                { label: "This month", range: () => calendarMonthRange(0) },
+                { label: "Last month", range: () => calendarMonthRange(-1) },
+              ] as const).map((p) => {
+                const r = p.range();
+                const active = dateFrom === r.from && dateTo === r.to;
+                return (
+                  <button
+                    key={p.label}
+                    type="button"
+                    onClick={() => { setDateFrom(r.from); setDateTo(r.to); }}
+                    className={`h-8 rounded-md border px-2.5 text-xs font-medium transition-colors ${
+                      active
+                        ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                        : "border-[#E2DDD8] bg-white text-[#4B5563] hover:bg-[#F0ECE9]"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
             </div>
             <Button variant="outline" size="sm" onClick={handlePrint} className="ml-auto" title="Print this employee's KPI summary and daily breakdown for the selected date range">
               <Printer className="h-4 w-4 mr-1" /> Print Report
@@ -5833,41 +5924,36 @@ function EmployeeDetailTab({
         </Card>
       )}
 
-      {/* Summary Stats */}
-      <div className="grid gap-4 grid-cols-2 sm:grid-cols-5 max-sm:grid-cols-1">
+      {/* Summary Stats — the canonical Efficiency breakdown. Numerator =
+          completed JC production minutes + approved extra production time;
+          denominator = production-dept working hours. These cards agree with
+          the Efficiency Overview tab for the same worker + range. */}
+      <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 max-sm:grid-cols-1">
         <Card>
           <CardContent className="p-4 text-center">
-            <p className="text-2xl font-bold text-[#1F1D1B]">{daysPresent}</p>
-            <p className="text-xs text-[#6B7280]">Days Present</p>
+            <p className="text-2xl font-bold text-[#4F7C3A]">
+              {productionWorkMins > 0 ? formatHours(productionWorkMins) : "-"}
+            </p>
+            <p className="text-xs text-[#6B7280]">Production Hours</p>
+            <p className="mt-0.5 text-[10px] text-[#3E6570]">Efficiency denominator</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4 text-center">
-            <p className="text-2xl font-bold">
-              {totalWorkMins > 0 ? formatHours(totalWorkMins) : "-"}
+            <p className="text-2xl font-bold text-[#6B5C32]">
+              {nonProductionWorkMins > 0 ? formatHours(nonProductionWorkMins) : "-"}
             </p>
-            <p className="text-xs text-[#6B7280]">Total Working Hrs</p>
-            {totalWorkMins > 0 && nonProductionWorkMins > 0 && (
-              <p className="mt-0.5 text-[10px] text-[#3E6570]">
-                {formatHours(productionWorkMins) === "-" ? "0h" : formatHours(productionWorkMins)} prod + {formatHours(nonProductionWorkMins)} non-prod
-              </p>
-            )}
-            {jcCount > 0 && (
-              <p className="mt-0.5 text-[10px] text-[#3E6570]">+{jcCount} JC completions</p>
-            )}
+            <p className="text-xs text-[#6B7280]">Non-Production Hours</p>
+            <p className="mt-0.5 text-[10px] text-[#3E6570]">Warehouse / repair / etc.</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4 text-center">
-            <p className="text-2xl font-bold">
-              {totalProdMins > 0 ? formatHours(totalProdMins) : "-"}
+            <p className="text-2xl font-bold text-[#3E6570]">
+              {addProdMins > 0 ? formatHours(addProdMins) : "-"}
             </p>
-            <p className="text-xs text-[#6B7280]">Total Production Hrs</p>
-            {totalProdMinsJc > 0 && (
-              <p className="mt-0.5 text-[10px] text-[#3E6570]">
-                {formatHours(totalProdMinsAttendance) === "-" ? "0h" : formatHours(totalProdMinsAttendance)} att + {formatHours(totalProdMinsJc)} jc
-              </p>
-            )}
+            <p className="text-xs text-[#6B7280]">Extra Production Time</p>
+            <p className="mt-0.5 text-[10px] text-[#3E6570]">Approved (added to output)</p>
           </CardContent>
         </Card>
         <Card>
@@ -5879,15 +5965,24 @@ function EmployeeDetailTab({
                 {avgEff}%
               </p>
             ) : (
-              <p className="text-2xl font-bold text-[#9CA3AF]" title="No working hours recorded in range — efficiency requires hours to compare against.">
+              <p className="text-2xl font-bold text-[#9CA3AF]" title="No production-dept working hours recorded in range — efficiency requires hours to compare against.">
                 —
               </p>
             )}
-            <p className="text-xs text-[#6B7280]">Avg Efficiency</p>
+            <p className="text-xs text-[#6B7280]">Efficiency</p>
             {avgEff !== null && (
               <p className="mt-0.5 text-[10px] text-[#3E6570]">
-                {formatHours(totalProdMins) === "-" ? "0h" : formatHours(totalProdMins)} ÷ {formatHours(productionWorkMins)}
+                {formatHours(numeratorProdMins) === "-" ? "0h" : formatHours(numeratorProdMins)} ÷ {formatHours(productionWorkMins)}
               </p>
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold text-[#1F1D1B]">{daysPresent}</p>
+            <p className="text-xs text-[#6B7280]">Days Present</p>
+            {jcCount > 0 && (
+              <p className="mt-0.5 text-[10px] text-[#3E6570]">{jcCount} JC completions</p>
             )}
           </CardContent>
         </Card>

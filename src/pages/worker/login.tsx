@@ -227,34 +227,22 @@ export default function WorkerLoginPage() {
 
   // ----- Render -----
   return (
-    <div className="pt-8 pb-8">
-      {/* Hero — taupe logo badge + brand-toned heading, matching the /m look. */}
-      <div className="flex flex-col items-center text-center mb-7">
-        <div className="h-16 w-16 rounded-2xl bg-[#1F1D1B] flex items-center justify-center shadow-[0_6px_20px_rgba(31,29,27,0.18)] mb-4">
-          <img
-            src="/hookka-logo.png"
-            alt="Hookka"
-            className="h-9 w-auto object-contain"
-            style={{ filter: "brightness(0) invert(1)" }}
-          />
-        </div>
-        <h1 className="text-xl font-extrabold tracking-tight text-[#1F1D1B]">
-          {mode === "login"
-            ? t("login.title")
-            : mode === "setup"
-              ? t("login.setupTitle")
-              : t("login.resetTitle")}
-        </h1>
-        {mode === "setup" && (
-          <p className="text-sm text-[#8A7F73] mt-1.5">{t("login.setupDesc")}</p>
-        )}
-        {mode === "reset" && (
-          <p className="text-sm text-[#8A7F73] mt-1.5">{t("login.phoneLast4")}</p>
-        )}
-      </div>
+    <div className="pt-6 pb-8">
+      <h1 className="text-lg font-bold mb-0.5">
+        {mode === "login"
+          ? t("login.title")
+          : mode === "setup"
+            ? t("login.setupTitle")
+            : t("login.resetTitle")}
+      </h1>
+      {mode === "setup" && (
+        <p className="text-sm text-[#5A5550] mb-6">{t("login.setupDesc")}</p>
+      )}
+      {mode === "reset" && (
+        <p className="text-sm text-[#5A5550] mb-6">{t("login.phoneLast4")}</p>
+      )}
+      {mode === "login" && <div className="mb-4" />}
 
-      {/* Card panel wrapping the active form — white surface on paper bg. */}
-      <div className="bg-white border border-[#E7E0D4] rounded-2xl shadow-[0_4px_20px_rgba(31,29,27,0.06)] p-5">
       {mode === "login" && (
         <form onSubmit={handleLogin} className="space-y-4">
           <Field label={t("login.empNo")}>
@@ -291,7 +279,7 @@ export default function WorkerLoginPage() {
               setPin2("");
               setError(null);
             }}
-            className="w-full text-sm font-semibold text-[#6B5C32] hover:text-[#574A28] pt-2 transition-colors"
+            className="w-full text-sm text-[#6B5C32] underline pt-2"
           >
             {t("login.forgotPin")}
           </button>
@@ -305,7 +293,7 @@ export default function WorkerLoginPage() {
               type="text"
               value={empNo}
               readOnly
-              className={`${inputCls} bg-[#FAF8F4]`}
+              className={`${inputCls} bg-[#F0ECE9]`}
             />
           </Field>
           <Field label={t("login.newPin")}>
@@ -344,7 +332,7 @@ export default function WorkerLoginPage() {
               setPin2("");
               setError(null);
             }}
-            className="w-full text-sm font-medium text-[#8A7F73] hover:text-[#1F1D1B] pt-2 transition-colors"
+            className="w-full text-sm text-[#5A5550] pt-2"
           >
             {t("common.back")}
           </button>
@@ -411,22 +399,21 @@ export default function WorkerLoginPage() {
               setPhoneLast4("");
               setError(null);
             }}
-            className="w-full text-sm font-medium text-[#8A7F73] hover:text-[#1F1D1B] pt-2 transition-colors"
+            className="w-full text-sm text-[#5A5550] pt-2"
           >
             {t("common.back")}
           </button>
         </form>
       )}
-      </div>
     </div>
   );
 }
 
 // ----- tiny UI helpers -----
 const inputCls =
-  "w-full h-12 px-3.5 rounded-xl border border-[#E7E0D4] bg-white text-base focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40 focus:border-[#6B5C32] transition-colors";
+  "w-full h-12 px-3 rounded border border-[#D8D2CC] bg-white text-base focus:outline-none focus:ring-2 focus:ring-[#6B5C32] focus:border-[#6B5C32]";
 const btnPrimary =
-  "w-full h-12 rounded-xl bg-[#6B5C32] hover:bg-[#574A28] disabled:opacity-60 text-white font-bold text-base shadow-[0_4px_14px_rgba(107,92,50,0.25)] transition-colors";
+  "w-full h-12 rounded bg-[#6B5C32] hover:bg-[#5a4d2a] disabled:opacity-60 text-white font-semibold text-base transition-colors";
 
 function Field({
   label,
@@ -437,7 +424,7 @@ function Field({
 }) {
   return (
     <label className="block">
-      <div className="text-sm font-semibold text-[#6B7280] mb-1.5">{label}</div>
+      <div className="text-sm font-medium text-[#5A5550] mb-1.5">{label}</div>
       {children}
     </label>
   );

@@ -154,14 +154,11 @@ export default function WorkerLayout() {
   const isLeader = (workerMe?.position ?? "") === "Operator Leader";
 
   return (
-    <div className="min-h-screen bg-[#FAF8F4] flex flex-col text-[#1F1D1B]">
+    <div className="min-h-screen bg-[#F0ECE9] flex flex-col text-[#1F1D1B]">
       {/* ----- Top bar ----- */}
-      <header
-        className="bg-[#1F1D1B] text-white sticky top-0 z-30 shadow-[0_2px_12px_rgba(31,29,27,0.10)]"
-        style={{ paddingTop: "env(safe-area-inset-top)" }}
-      >
+      <header className="bg-[#1F1D1B] text-white sticky top-0 z-30">
         <div className="max-w-md mx-auto px-4 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2">
             {/* 黑底白字 (owner 2026-06-27): the real Hookka logo straight on the
                 black bar, no white tile. The logo PNG is dark-on-transparent, so
                 brightness(0)+invert(1) flips it to pure white for the dark bar. */}
@@ -171,7 +168,7 @@ export default function WorkerLayout() {
               className="h-8 w-auto object-contain"
               style={{ filter: "brightness(0) invert(1)" }}
             />
-            <span className="text-base font-bold tracking-tight">
+            <span className="text-base font-semibold tracking-tight">
               {t("brand.title")}
             </span>
           </div>
@@ -196,10 +193,7 @@ export default function WorkerLayout() {
           worker (any dept can scan the Fab Cut / Fab Sew / Packing stickers;
           the completion endpoints enforce which sticker depts are allowed). */}
       {!isLogin && (
-        <nav
-          className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-[#E7E0D4] shadow-[0_-2px_12px_rgba(31,29,27,0.06)]"
-          style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
-        >
+        <nav className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-[#D8D2CC] shadow-[0_-2px_8px_rgba(0,0,0,0.04)]">
           <div
             className={`max-w-md mx-auto grid ${isLeader ? "grid-cols-5" : "grid-cols-4"}`}
           >
@@ -257,10 +251,10 @@ function TabButton({
   return (
     <Link
       to={to}
-      className={`flex flex-col items-center justify-center gap-1 py-2 text-[11px] min-h-[56px] transition-colors ${
+      className={`flex flex-col items-center justify-center gap-1 py-2.5 text-xs min-h-[56px] transition-colors ${
         active
-          ? "text-[#6B5C32] font-bold"
-          : "text-[#8A7F73] font-medium hover:text-[#1F1D1B]"
+          ? "text-[#6B5C32] font-semibold"
+          : "text-[#8A8680] hover:text-[#1F1D1B]"
       }`}
     >
       {icon}
@@ -291,14 +285,14 @@ function LanguageMenu() {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full hover:bg-white/10 transition-colors"
+        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded hover:bg-white/10 transition-colors"
         aria-label="Change language"
       >
         <Globe className="h-4 w-4" />
-        <span className="text-sm font-medium">{LANG_LABELS[lang]}</span>
+        <span className="text-sm">{LANG_LABELS[lang]}</span>
       </button>
       {open && (
-        <div className="absolute right-0 mt-2 w-40 bg-white text-[#1F1D1B] rounded-xl shadow-[0_8px_24px_rgba(31,29,27,0.12)] border border-[#E7E0D4] overflow-hidden">
+        <div className="absolute right-0 mt-1 w-40 bg-white text-[#1F1D1B] rounded shadow-lg border border-[#D8D2CC] overflow-hidden">
           {(Object.keys(LANG_LABELS) as WorkerLang[]).map((code) => (
             <button
               key={code}
@@ -307,7 +301,7 @@ function LanguageMenu() {
                 setLang(code);
                 setOpen(false);
               }}
-              className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[#FAF8F4] transition-colors ${
+              className={`w-full text-left px-3 py-2 text-sm hover:bg-[#F0ECE9] ${
                 code === lang ? "font-semibold text-[#6B5C32]" : ""
               }`}
             >

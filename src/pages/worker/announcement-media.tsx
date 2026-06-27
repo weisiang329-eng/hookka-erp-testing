@@ -18,6 +18,7 @@
 // ============================================================
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X, ChevronLeft, ChevronRight, Play, FileText, Download } from "lucide-react";
+import { getWorkerToken } from "@/layouts/WorkerLayout";
 
 // One media file attached to a notice (image/video/PDF). The bytes live in the
 // shared /api/files store; render inline by `mime`.
@@ -56,7 +57,13 @@ export type Announcement = {
 // Worker-token proxy (NOT /api/files — that's cookie-gated and 401s on the
 // phone, which is why announcement media never rendered before).
 function fileHref(fileId: string): string {
-  return `/api/worker/ann-files/${fileId}/download`;
+  // Append the worker token as ?wt= so native <img>/<video>/<a download> loads
+  // (which can't set the X-Worker-Token header) still authenticate against the
+  // proxy — without this they 401 "Not authenticated" and nothing opens. The
+  // proxy accepts ?wt= only on this read-only announcement-file route.
+  const wt = getWorkerToken();
+  const base = `/api/worker/ann-files/${fileId}/download`;
+  return wt ? `${base}?wt=${encodeURIComponent(wt)}` : base;
 }
 
 function extLabel(att: AnnouncementAttachment): string {

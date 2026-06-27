@@ -602,29 +602,34 @@ export default function WorkerMePage() {
   }
 
   if (!me) {
-    return <div className="pt-8 text-center text-[#5A5550]">{t("common.loading")}</div>;
+    return <div className="pt-10 text-center text-sm text-[#8A7F73]">{t("common.loading")}</div>;
   }
 
   return (
     <div className="space-y-4 pt-2">
-      <h1 className="text-xl font-bold">{t("me.title")}</h1>
+      <h1 className="text-xl font-bold tracking-tight text-[#1F1D1B]">{t("me.title")}</h1>
 
       {/* Profile card */}
-      <div className="bg-white rounded-xl p-4 border border-[#D8D2CC] space-y-3">
-        <div>
-          <p className="text-lg font-bold">{me.name}</p>
-          <p className="text-xs text-[#8A8680]">
-            {me.empNo} · {me.departmentCode}
-          </p>
-          {me.position && (
-            <p className="text-xs text-[#8A8680]">{me.position}</p>
-          )}
+      <div className="bg-white rounded-xl p-5 border-[0.5px] border-[#E7E0D4] shadow-sm space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[#1F1D1B] text-base font-bold text-white">
+            {me.name.charAt(0).toUpperCase()}
+          </div>
+          <div className="min-w-0">
+            <p className="text-lg font-bold text-[#1F1D1B] truncate">{me.name}</p>
+            <p className="text-xs text-[#8A7F73] tabular-nums">
+              {me.empNo} · {me.departmentCode}
+            </p>
+            {me.position && (
+              <p className="text-xs text-[#8A7F73]">{me.position}</p>
+            )}
+          </div>
         </div>
         <label className="block">
-          <span className="text-xs font-medium text-[#5A5550]">
+          <span className="text-xs font-semibold text-[#6B5C32]">
             {t("me.phone")}
           </span>
-          <div className="mt-1 flex gap-2">
+          <div className="mt-1.5 flex gap-2">
             <input
               type="tel"
               inputMode="tel"
@@ -633,7 +638,7 @@ export default function WorkerMePage() {
                 setPhone(e.target.value);
                 setPhoneDirty(true);
               }}
-              className="flex-1 h-10 px-3 rounded border border-[#D8D2CC] bg-white text-base focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              className="flex-1 h-10 px-3 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-base focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
               placeholder="+60 12-345 6789"
             />
             {phoneDirty && (
@@ -641,7 +646,7 @@ export default function WorkerMePage() {
                 type="button"
                 onClick={handleSavePhone}
                 disabled={phoneSaving}
-                className="h-10 px-3 rounded bg-[#6B5C32] text-white text-sm font-semibold disabled:opacity-60"
+                className="h-10 px-4 rounded-xl bg-[#6B5C32] text-white text-sm font-semibold disabled:opacity-60"
               >
                 {phoneSaving ? "…" : "Save"}
               </button>
@@ -653,13 +658,13 @@ export default function WorkerMePage() {
 
       {/* Leaves card — Wei Siang 2026-05-10: hidden until rollout. */}
       {SHOW_LEAVES && (
-      <div className="bg-white rounded-xl p-4 border border-[#D8D2CC]">
+      <div className="bg-white rounded-xl p-5 border-[0.5px] border-[#E7E0D4] shadow-sm">
         <div className="flex items-center justify-between mb-3">
-          <p className="text-sm font-semibold">{t("me.leaves")}</p>
+          <p className="text-sm font-semibold text-[#1F1D1B]">{t("me.leaves")}</p>
           <button
             type="button"
             onClick={() => setShowLeaveForm((v) => !v)}
-            className="text-xs flex items-center gap-1 px-2.5 py-1 rounded bg-[#F0ECE9] hover:bg-[#E5E0DB] font-semibold"
+            className="text-xs flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#F3EFE9] hover:bg-[#E7E0D4] font-semibold text-[#6B5C32]"
           >
             <Plus className="h-3 w-3" />
             {t("leave.apply")}
@@ -667,24 +672,24 @@ export default function WorkerMePage() {
         </div>
 
         {leavesLoading ? (
-          <p className="text-sm text-[#8A8680]">{t("common.loading")}</p>
+          <p className="text-sm text-[#8A7F73]">{t("common.loading")}</p>
         ) : (
           <>
             <div className="grid grid-cols-2 gap-2 mb-3">
-              <div className="bg-[#F0ECE9] rounded px-3 py-2 text-center">
-                <p className="text-xs text-[#8A8680]">{t("leave.annualLeft")}</p>
-                <p className="text-lg font-bold">
+              <div className="bg-[#FAF8F4] rounded-xl border-[0.5px] border-[#E7E0D4] px-3 py-2.5 text-center">
+                <p className="text-xs text-[#8A7F73]">{t("leave.annualLeft")}</p>
+                <p className="text-lg font-bold text-[#1F1D1B] tabular-nums">
                   {leaves?.balance.annualRemaining ?? 0}
-                  <span className="text-xs font-normal text-[#8A8680]">
+                  <span className="text-xs font-normal text-[#8A7F73]">
                     /{leaves?.balance.annualEntitlement ?? 0}
                   </span>
                 </p>
               </div>
-              <div className="bg-[#F0ECE9] rounded px-3 py-2 text-center">
-                <p className="text-xs text-[#8A8680]">{t("leave.medicalLeft")}</p>
-                <p className="text-lg font-bold">
+              <div className="bg-[#FAF8F4] rounded-xl border-[0.5px] border-[#E7E0D4] px-3 py-2.5 text-center">
+                <p className="text-xs text-[#8A7F73]">{t("leave.medicalLeft")}</p>
+                <p className="text-lg font-bold text-[#1F1D1B] tabular-nums">
                   {leaves?.balance.medicalRemaining ?? 0}
-                  <span className="text-xs font-normal text-[#8A8680]">
+                  <span className="text-xs font-normal text-[#8A7F73]">
                     /{leaves?.balance.medicalEntitlement ?? 0}
                   </span>
                 </p>
@@ -695,16 +700,16 @@ export default function WorkerMePage() {
             {showLeaveForm && (
               <form
                 onSubmit={handleSubmitLeave}
-                className="space-y-2 mb-3 bg-[#FAF9F7] p-3 rounded-lg"
+                className="space-y-2 mb-3 bg-[#FAF8F4] p-3 rounded-xl border-[0.5px] border-[#E7E0D4]"
               >
                 <div>
-                  <label className="text-xs text-[#5A5550] block mb-1">
+                  <label className="text-xs text-[#6B5C32] font-medium block mb-1">
                     {t("leave.type")}
                   </label>
                   <select
                     value={leaveType}
                     onChange={(e) => setLeaveType(e.target.value)}
-                    className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                    className="w-full h-10 px-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm"
                   >
                     <option value="ANNUAL">Annual</option>
                     <option value="MEDICAL">Medical</option>
@@ -714,37 +719,37 @@ export default function WorkerMePage() {
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="text-xs text-[#5A5550] block mb-1">
+                    <label className="text-xs text-[#6B5C32] font-medium block mb-1">
                       {t("leave.from")}
                     </label>
                     <input
                       type="date"
                       value={leaveStart}
                       onChange={(e) => setLeaveStart(e.target.value)}
-                      className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                      className="w-full h-10 px-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm"
                     />
                   </div>
                   <div>
-                    <label className="text-xs text-[#5A5550] block mb-1">
+                    <label className="text-xs text-[#6B5C32] font-medium block mb-1">
                       {t("leave.to")}
                     </label>
                     <input
                       type="date"
                       value={leaveEnd}
                       onChange={(e) => setLeaveEnd(e.target.value)}
-                      className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                      className="w-full h-10 px-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm"
                     />
                   </div>
                 </div>
                 <div>
-                  <label className="text-xs text-[#5A5550] block mb-1">
+                  <label className="text-xs text-[#6B5C32] font-medium block mb-1">
                     {t("leave.reason")}
                   </label>
                   <input
                     type="text"
                     value={leaveReason}
                     onChange={(e) => setLeaveReason(e.target.value)}
-                    className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                    className="w-full h-10 px-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm"
                   />
                 </div>
                 {leaveError && (
@@ -753,7 +758,7 @@ export default function WorkerMePage() {
                 <button
                   type="submit"
                   disabled={leaveSubmitting}
-                  className="w-full h-10 rounded bg-[#6B5C32] text-white text-sm font-semibold disabled:opacity-60"
+                  className="w-full h-10 rounded-xl bg-[#6B5C32] text-white text-sm font-semibold disabled:opacity-60"
                 >
                   {leaveSubmitting ? t("common.loading") : t("leave.submit")}
                 </button>
@@ -763,29 +768,29 @@ export default function WorkerMePage() {
             {/* History */}
             {leaves && leaves.history.length > 0 && (
               <div className="space-y-1.5">
-                <p className="text-xs text-[#8A8680] font-medium">
+                <p className="text-xs text-[#8A7F73] font-medium">
                   {t("leave.history")}
                 </p>
                 {leaves.history.slice(0, 6).map((r) => (
                   <div
                     key={r.id}
-                    className="flex items-center justify-between text-sm py-1.5 border-b border-[#F0ECE9] last:border-0"
+                    className="flex items-center justify-between text-sm py-2 border-b-[0.5px] border-[#F0ECE9] last:border-0"
                   >
                     <div>
-                      <p className="font-medium">
+                      <p className="font-medium text-[#1F1D1B]">
                         {r.type} · {r.days} {t("common.days")}
                       </p>
-                      <p className="text-xs text-[#8A8680]">
+                      <p className="text-xs text-[#8A7F73] tabular-nums">
                         {r.startDate} → {r.endDate}
                       </p>
                     </div>
                     <span
-                      className={`text-xs px-2 py-0.5 rounded font-semibold ${
+                      className={`text-xs px-2.5 py-0.5 rounded-full border font-semibold ${
                         r.status === "APPROVED"
-                          ? "bg-[#E0F0E8] text-[#2A6B4A]"
+                          ? "bg-[#E0F0E8] text-[#2A6B4A] border-[#2A6B4A]/30"
                           : r.status === "REJECTED"
-                            ? "bg-[#FDF6F4] text-[#9A3A2D]"
-                            : "bg-[#FDF3E0] text-[#9C6F1E]"
+                            ? "bg-[#FDF6F4] text-[#9A3A2D] border-[#9A3A2D]/30"
+                            : "bg-[#FDF3E0] text-[#9C6F1E] border-[#9C6F1E]/30"
                       }`}
                     >
                       {t(`leave.status.${r.status}`)}
@@ -800,18 +805,18 @@ export default function WorkerMePage() {
       )}
 
       {/* Language selector */}
-      <div className="bg-white rounded-xl p-4 border border-[#D8D2CC]">
-        <p className="text-sm font-semibold mb-2">{t("me.language")}</p>
+      <div className="bg-white rounded-xl p-5 border-[0.5px] border-[#E7E0D4] shadow-sm">
+        <p className="text-sm font-semibold mb-3 text-[#1F1D1B]">{t("me.language")}</p>
         <div className="grid grid-cols-2 gap-2">
           {(Object.keys(LANG_LABELS) as WorkerLang[]).map((code) => (
             <button
               key={code}
               type="button"
               onClick={() => setLang(code)}
-              className={`h-11 rounded border text-sm font-semibold ${
+              className={`h-11 rounded-xl border-[0.5px] text-sm font-semibold transition-colors ${
                 lang === code
                   ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-                  : "bg-white text-[#1F1D1B] border-[#D8D2CC]"
+                  : "bg-white text-[#1F1D1B] border-[#E7E0D4]"
               }`}
             >
               {LANG_LABELS[code]}
@@ -831,16 +836,16 @@ export default function WorkerMePage() {
           (r) => r.status === "PENDING",
         ).length;
         return (
-      <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
+      <div className="bg-white rounded-xl border-[0.5px] border-[#E7E0D4] overflow-hidden shadow-sm">
         <button
           type="button"
           onClick={() => setTaOpen((v) => !v)}
-          className="w-full px-4 py-3 flex items-center justify-between text-left"
+          className="w-full px-4 py-3.5 flex items-center justify-between text-left"
           aria-expanded={taOpen}
         >
           <span className="flex items-center gap-2">
             <Clock className="h-4 w-4 text-[#6B5C32]" />
-            <span className="text-sm font-semibold">{t("timeadj.title")}</span>
+            <span className="text-sm font-semibold text-[#1F1D1B]">{t("timeadj.title")}</span>
             {pendingCount > 0 && (
               <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-[#FDF3E0] text-[#9C6F1E] text-[10px] font-bold">
                 {pendingCount}
@@ -848,12 +853,12 @@ export default function WorkerMePage() {
             )}
           </span>
           <ChevronDown
-            className={`h-4 w-4 text-[#8A8680] transition-transform ${taOpen ? "rotate-180" : ""}`}
+            className={`h-4 w-4 text-[#8A7F73] transition-transform ${taOpen ? "rotate-180" : ""}`}
           />
         </button>
 
         {taOpen && (
-          <div className="px-4 pb-4 border-t border-[#F0ECE9] pt-3">
+          <div className="px-4 pb-4 border-t-[0.5px] border-[#F0ECE9] pt-3">
         <div className="flex items-center justify-end mb-2">
           <button
             type="button"
@@ -861,25 +866,25 @@ export default function WorkerMePage() {
               setNpShowForm((v) => !v);
               setNpError(null);
             }}
-            className="text-xs flex items-center gap-1 px-2.5 py-1 rounded bg-[#F0ECE9] hover:bg-[#E5E0DB] font-semibold"
+            className="text-xs flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#F3EFE9] hover:bg-[#E7E0D4] font-semibold text-[#6B5C32]"
           >
             <Plus className="h-3 w-3" />
             {t("nonprod.apply")}
           </button>
         </div>
-        <p className="text-xs text-[#8A8680] mb-3">
+        <p className="text-xs text-[#8A7F73] mb-3">
           {npKind === "ADD_PROD" ? t("timeadj.introAddProd") : t("nonprod.intro")}
         </p>
 
         {npShowForm && (
           <form
             onSubmit={handleSubmitNonprod}
-            className="space-y-2 mb-3 bg-[#FAF9F7] p-3 rounded-lg"
+            className="space-y-2 mb-3 bg-[#FAF8F4] p-3 rounded-xl border-[0.5px] border-[#E7E0D4]"
           >
             {/* TYPE toggle — Non-production (protects efficiency) vs Extra
                 production time (counts as production output). */}
             <div>
-              <label className="text-xs text-[#5A5550] block mb-1">
+              <label className="text-xs text-[#6B5C32] font-medium block mb-1">
                 {t("timeadj.type")}
               </label>
               <div className="grid grid-cols-2 gap-2">
@@ -892,10 +897,10 @@ export default function WorkerMePage() {
                       setNpDept("");
                       setNpError(null);
                     }}
-                    className={`h-10 rounded border text-xs font-semibold px-2 ${
+                    className={`h-10 rounded-xl border-[0.5px] text-xs font-semibold px-2 transition-colors ${
                       npKind === k
                         ? "border-[#6B5C32] bg-[#6B5C32] text-white"
-                        : "border-[#D8D2CC] bg-white text-[#5A5550]"
+                        : "border-[#E7E0D4] bg-white text-[#6B5C32]"
                     }`}
                   >
                     {k === "NONPROD"
@@ -906,13 +911,13 @@ export default function WorkerMePage() {
               </div>
             </div>
             <div>
-              <label className="text-xs text-[#5A5550] block mb-1">
+              <label className="text-xs text-[#6B5C32] font-medium block mb-1">
                 {t("nonprod.department")}
               </label>
               <select
                 value={npDept}
                 onChange={(e) => setNpDept(e.target.value)}
-                className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                className="w-full h-10 px-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm"
               >
                 <option value="">{t("nonprod.pickDept")}</option>
                 {(npKind === "ADD_PROD" ? prodDepts : npDepts).map((d) => (
@@ -924,18 +929,18 @@ export default function WorkerMePage() {
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="text-xs text-[#5A5550] block mb-1">
+                <label className="text-xs text-[#6B5C32] font-medium block mb-1">
                   {t("nonprod.date")}
                 </label>
                 <input
                   type="date"
                   value={npDate}
                   onChange={(e) => setNpDate(e.target.value)}
-                  className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                  className="w-full h-10 px-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm"
                 />
               </div>
               <div>
-                <label className="text-xs text-[#5A5550] block mb-1">
+                <label className="text-xs text-[#6B5C32] font-medium block mb-1">
                   {t("timeadj.minutesLabel")}
                 </label>
                 <input
@@ -946,48 +951,48 @@ export default function WorkerMePage() {
                   step="1"
                   value={npMinutes}
                   onChange={(e) => setNpMinutes(e.target.value)}
-                  className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                  className="w-full h-10 px-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm"
                   placeholder="20"
                 />
               </div>
             </div>
             {npKind === "ADD_PROD" && (
               <div>
-                <label className="text-xs text-[#5A5550] block mb-1">
+                <label className="text-xs text-[#6B5C32] font-medium block mb-1">
                   {t("timeadj.jobRef")}
                 </label>
                 <input
                   type="text"
                   value={npJobRef}
                   onChange={(e) => setNpJobRef(e.target.value)}
-                  className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                  className="w-full h-10 px-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm"
                   placeholder={t("timeadj.jobRefPlaceholder")}
                 />
               </div>
             )}
             <div>
-              <label className="text-xs text-[#5A5550] block mb-1">
+              <label className="text-xs text-[#6B5C32] font-medium block mb-1">
                 {npKind === "ADD_PROD" ? t("timeadj.reason") : t("nonprod.note")}
               </label>
               <input
                 type="text"
                 value={npNote}
                 onChange={(e) => setNpNote(e.target.value)}
-                className="w-full h-10 px-2 rounded border border-[#D8D2CC] bg-white text-sm"
+                className="w-full h-10 px-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm"
               />
             </div>
             {npError && <p className="text-xs text-[#9A3A2D]">{npError}</p>}
             <button
               type="submit"
               disabled={npSubmitting}
-              className="w-full h-10 rounded bg-[#6B5C32] text-white text-sm font-semibold disabled:opacity-60"
+              className="w-full h-10 rounded-xl bg-[#6B5C32] text-white text-sm font-semibold disabled:opacity-60"
             >
               {npSubmitting ? t("common.loading") : t("nonprod.submit")}
             </button>
           </form>
         )}
 
-        <p className="text-xs text-[#8A8680] font-medium mb-1.5">
+        <p className="text-xs text-[#8A7F73] font-medium mb-1.5">
           {t("nonprod.myRequests")}
         </p>
         {(() => {
@@ -1016,7 +1021,7 @@ export default function WorkerMePage() {
           const anyHidden = shown.length < npRequests.length;
           if (npRequests.length === 0) {
             return (
-              <p className="text-sm text-[#8A8680]">{t("nonprod.noRequests")}</p>
+              <p className="text-sm text-[#8A7F73]">{t("nonprod.noRequests")}</p>
             );
           }
           return (
@@ -1045,16 +1050,16 @@ export default function WorkerMePage() {
               return (
                 <div
                   key={r.id}
-                  className="flex items-center justify-between text-sm py-1.5 border-b border-[#F0ECE9] last:border-0"
+                  className="flex items-center justify-between text-sm py-2 border-b-[0.5px] border-[#F0ECE9] last:border-0"
                 >
                   <div className="min-w-0">
-                    <p className="font-medium truncate">
+                    <p className="font-medium text-[#1F1D1B] truncate">
                       {deptName} · {durLabel}
                       <span
-                        className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                        className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded-full border font-semibold ${
                           isAddProd
-                            ? "bg-[#E4ECF5] text-[#2A5A8A]"
-                            : "bg-[#F0ECE9] text-[#6B5C32]"
+                            ? "bg-[#E4ECF5] text-[#2A5A8A] border-[#2A5A8A]/30"
+                            : "bg-[#F3EFE9] text-[#6B5C32] border-[#6B5C32]/30"
                         }`}
                       >
                         {isAddProd
@@ -1062,15 +1067,15 @@ export default function WorkerMePage() {
                           : t("timeadj.typeNonprod")}
                       </span>
                     </p>
-                    <p className="text-xs text-[#8A8680]">{r.date}</p>
+                    <p className="text-xs text-[#8A7F73] tabular-nums">{r.date}</p>
                   </div>
                   <span
-                    className={`shrink-0 text-xs px-2 py-0.5 rounded font-semibold ${
+                    className={`shrink-0 text-xs px-2.5 py-0.5 rounded-full border font-semibold ${
                       r.status === "APPROVED"
-                        ? "bg-[#E0F0E8] text-[#2A6B4A]"
+                        ? "bg-[#E0F0E8] text-[#2A6B4A] border-[#2A6B4A]/30"
                         : r.status === "REJECTED"
-                          ? "bg-[#FDF6F4] text-[#9A3A2D]"
-                          : "bg-[#FDF3E0] text-[#9C6F1E]"
+                          ? "bg-[#FDF6F4] text-[#9A3A2D] border-[#9A3A2D]/30"
+                          : "bg-[#FDF3E0] text-[#9C6F1E] border-[#9C6F1E]/30"
                     }`}
                   >
                     {t(`nonprod.status.${r.status}`)}
@@ -1095,18 +1100,18 @@ export default function WorkerMePage() {
 
       {/* Standard Times — the worker's OWN department's minutes per WIP
           (owner 2026-06-26). Collapsed by default; loads on first open. */}
-      <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
+      <div className="bg-white rounded-xl border-[0.5px] border-[#E7E0D4] overflow-hidden shadow-sm">
         <button
           type="button"
           onClick={() => {
             setStdOpen((v) => !v);
             if (!stdLoaded && !stdLoading) void loadStandardTimes();
           }}
-          className="w-full px-4 py-3 flex items-center justify-between text-left"
+          className="w-full px-4 py-3.5 flex items-center justify-between text-left"
         >
           <span className="flex items-center gap-2">
             <Clock className="h-4 w-4 text-[#6B5C32]" />
-            <span className="text-sm font-semibold">
+            <span className="text-sm font-semibold text-[#1F1D1B]">
               Standard Times
               {stdDept
                 ? ` · ${stdDept}`
@@ -1116,13 +1121,13 @@ export default function WorkerMePage() {
             </span>
           </span>
           <ChevronDown
-            className={`h-4 w-4 text-[#8A8680] transition-transform ${stdOpen ? "rotate-180" : ""}`}
+            className={`h-4 w-4 text-[#8A7F73] transition-transform ${stdOpen ? "rotate-180" : ""}`}
           />
         </button>
 
         {stdOpen && (
-          <div className="px-4 pb-4">
-            <p className="text-xs text-[#8A8680] mb-2">
+          <div className="px-4 pb-4 border-t-[0.5px] border-[#F0ECE9] pt-3">
+            <p className="text-xs text-[#8A7F73] mb-2">
               {stdDepts.length > 1
                 ? "Standard minutes per WIP. Pick a department to view."
                 : "Standard minutes per WIP for your department."}
@@ -1132,7 +1137,7 @@ export default function WorkerMePage() {
                 small static chip so they can see which one this is. */}
             {stdDepts.length === 1 && (
               <div className="mb-2">
-                <span className="inline-flex h-7 items-center rounded border border-[#D8D2CC] bg-[#F3EFE9] px-2.5 text-xs font-semibold text-[#6B5C32]">
+                <span className="inline-flex h-7 items-center rounded-full border-[0.5px] border-[#E7E0D4] bg-[#F3EFE9] px-2.5 text-xs font-semibold text-[#6B5C32]">
                   {stdDepts[0]}
                 </span>
               </div>
@@ -1147,10 +1152,10 @@ export default function WorkerMePage() {
                     key={code}
                     type="button"
                     onClick={() => selectStandardDept(code)}
-                    className={`h-9 px-3 rounded border text-xs font-semibold ${
+                    className={`h-9 px-3 rounded-full border-[0.5px] text-xs font-semibold transition-colors ${
                       stdDept === code
                         ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-                        : "bg-white text-[#1F1D1B] border-[#D8D2CC]"
+                        : "bg-white text-[#1F1D1B] border-[#E7E0D4]"
                     }`}
                   >
                     {code}
@@ -1165,11 +1170,11 @@ export default function WorkerMePage() {
                 value={stdSearch}
                 onChange={(e) => setStdSearch(e.target.value)}
                 placeholder="Search product / WIP…"
-                className="w-full h-10 pl-8 pr-3 rounded border border-[#D8D2CC] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                className="w-full h-10 pl-8 pr-3 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
               />
             </div>
             {stdLoading ? (
-              <p className="text-sm text-[#8A8680] py-2">{t("common.loading")}</p>
+              <p className="text-sm text-[#8A7F73] py-2">{t("common.loading")}</p>
             ) : (
               (() => {
                 const q = stdSearch.trim().toUpperCase();
@@ -1178,14 +1183,14 @@ export default function WorkerMePage() {
                   : stdRows;
                 if (stdRows.length === 0) {
                   return (
-                    <p className="text-sm text-[#8A8680] py-2">
+                    <p className="text-sm text-[#8A7F73] py-2">
                       No standard times found for your department.
                     </p>
                   );
                 }
                 if (shown.length === 0) {
                   return (
-                    <p className="text-sm text-[#8A8680] py-2">No match.</p>
+                    <p className="text-sm text-[#8A7F73] py-2">No match.</p>
                   );
                 }
                 return (
@@ -1193,15 +1198,15 @@ export default function WorkerMePage() {
                     {shown.map((r, i) => (
                       <div
                         key={`${r.wipLabel}-${i}`}
-                        className="flex items-center justify-between gap-2 px-1 py-2 border-b border-[#F0ECE9] last:border-0"
+                        className="flex items-center justify-between gap-2 px-1 py-2.5 border-b-[0.5px] border-[#F0ECE9] last:border-0"
                       >
                         <div className="min-w-0">
-                          <p className="text-sm font-medium truncate">{r.wipLabel}</p>
+                          <p className="text-sm font-medium text-[#1F1D1B] truncate">{r.wipLabel}</p>
                           {r.itemCategory && (
-                            <p className="text-xs text-[#8A8680]">{r.itemCategory}</p>
+                            <p className="text-xs text-[#8A7F73]">{r.itemCategory}</p>
                           )}
                         </div>
-                        <span className="shrink-0 text-xs font-semibold px-2 py-1 rounded bg-[#E0F0E8] text-[#2A6B4A]">
+                        <span className="shrink-0 text-xs font-semibold px-2.5 py-1 rounded-full border border-[#2A6B4A]/30 bg-[#E0F0E8] text-[#2A6B4A] tabular-nums">
                           {r.minutes} min
                         </span>
                       </div>
@@ -1218,25 +1223,25 @@ export default function WorkerMePage() {
           2026-06-26). Collapsed by default; lazy-loads on first open. Read-only,
           WITH media (reuses the shared AnnouncementMedia). Each row is itself
           foldable, mirroring the live list on home. */}
-      <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
+      <div className="bg-white rounded-xl border-[0.5px] border-[#E7E0D4] overflow-hidden shadow-sm">
         <button
           type="button"
           onClick={togglePastOpen}
-          className="w-full px-4 py-3 flex items-center justify-between text-left"
+          className="w-full px-4 py-3.5 flex items-center justify-between text-left"
           aria-expanded={pastOpen}
         >
           <span className="flex items-center gap-2">
             <Megaphone className="h-4 w-4 text-[#6B5C32]" />
-            <span className="text-sm font-semibold">
+            <span className="text-sm font-semibold text-[#1F1D1B]">
               {t("home.pastAnnouncements")}
             </span>
           </span>
           <ChevronDown
-            className={`h-4 w-4 text-[#8A8680] transition-transform ${pastOpen ? "rotate-180" : ""}`}
+            className={`h-4 w-4 text-[#8A7F73] transition-transform ${pastOpen ? "rotate-180" : ""}`}
           />
         </button>
         {pastOpen && (
-          <div className="border-t border-[#F0ECE9]">
+          <div className="border-t-[0.5px] border-[#F0ECE9]">
             {pastLoading && pastAnn === null ? (
               <p className="px-4 py-3 text-xs text-[#9CA3AF]">
                 {t("common.loading")}
@@ -1264,10 +1269,10 @@ export default function WorkerMePage() {
                       <button
                         type="button"
                         onClick={() => setPastCatFilter(null)}
-                        className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                        className={`rounded-full border-[0.5px] px-2.5 py-1 text-[11px] font-semibold transition-colors ${
                           pastCatFilter === null
                             ? "border-[#6B5C32] bg-[#6B5C32] text-white"
-                            : "border-[#D8D2CC] bg-white text-[#5A5550]"
+                            : "border-[#E7E0D4] bg-white text-[#6B5C32]"
                         }`}
                       >
                         All ({pastAnn.length})
@@ -1282,10 +1287,10 @@ export default function WorkerMePage() {
                             key={cat}
                             type="button"
                             onClick={() => setPastCatFilter(cat)}
-                            className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                            className={`flex items-center gap-1 rounded-full border-[0.5px] px-2.5 py-1 text-[11px] font-semibold transition-colors ${
                               active
                                 ? "border-[#6B5C32] bg-[#6B5C32] text-white"
-                                : "border-[#D8D2CC] bg-white text-[#5A5550]"
+                                : "border-[#E7E0D4] bg-white text-[#6B5C32]"
                             }`}
                           >
                             <Icon className="h-3 w-3" />
@@ -1315,17 +1320,17 @@ export default function WorkerMePage() {
                                 onClick={() => togglePastCollapsed(a.id)}
                                 className="flex w-full items-start gap-2 text-left"
                               >
-                                <p className="min-w-0 flex-1 text-sm font-semibold text-[#5A5550] break-words">
+                                <p className="min-w-0 flex-1 text-sm font-semibold text-[#1F1D1B] break-words">
                                   {title}
                                 </p>
                                 <ChevronDown
-                                  className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${collapsed ? "" : "rotate-180"}`}
+                                  className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A7F73] transition-transform ${collapsed ? "" : "rotate-180"}`}
                                 />
                               </button>
                               {!collapsed && (
                                 <div className="mt-0.5 pl-0">
                                   {body && (
-                                    <p className="whitespace-pre-wrap break-words text-xs text-[#5A5550]">
+                                    <p className="whitespace-pre-wrap break-words text-xs text-[#6B7280]">
                                       {body}
                                     </p>
                                   )}
@@ -1360,7 +1365,7 @@ export default function WorkerMePage() {
       <button
         type="button"
         onClick={handleLogout}
-        className="w-full h-12 rounded-lg bg-white border border-[#D8D2CC] text-[#9A3A2D] font-semibold flex items-center justify-center gap-2 hover:bg-[#FDF6F4]"
+        className="w-full h-12 rounded-xl bg-white border-[0.5px] border-[#E7E0D4] text-[#9A3A2D] font-semibold flex items-center justify-center gap-2 hover:bg-[#FDF6F4] shadow-sm"
       >
         <LogOut className="h-4 w-4" />
         {t("me.logout")}

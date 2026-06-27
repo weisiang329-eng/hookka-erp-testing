@@ -287,12 +287,12 @@ export default function WorkerPayPage() {
 
   if (loading) {
     return (
-      <div className="pt-8 text-center text-[#5A5550]">{t("common.loading")}</div>
+      <div className="pt-10 text-center text-sm text-[#8A7F73]">{t("common.loading")}</div>
     );
   }
   if (!pay) {
     return (
-      <div className="pt-8 text-center text-[#9A3A2D]">{t("common.error")}</div>
+      <div className="pt-10 text-center text-sm text-[#9A3A2D]">{t("common.error")}</div>
     );
   }
 
@@ -310,12 +310,12 @@ export default function WorkerPayPage() {
   return (
     <div className="space-y-4 pt-2">
       <div className="flex items-center justify-between gap-3">
-        <h1 className="text-xl font-bold">{t("pay.title")}</h1>
+        <h1 className="text-xl font-bold tracking-tight text-[#1F1D1B]">{t("pay.title")}</h1>
         <select
           aria-label="Month"
           value={selected}
           onChange={(e) => setPeriod(e.target.value)}
-          className="h-9 shrink-0 rounded-lg border border-[#D8D2CC] bg-white px-3 text-sm font-semibold tabular-nums text-[#1F1D1B]"
+          className="h-9 shrink-0 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white px-3 text-sm font-semibold tabular-nums text-[#1F1D1B] shadow-sm"
         >
           {months.map((p) => (
             <option key={p} value={p}>
@@ -331,7 +331,7 @@ export default function WorkerPayPage() {
       ) : slip ? (
         <FinalisedBreakdown slip={slip} t={t} />
       ) : (
-        <div className="bg-white rounded-xl p-6 text-center text-sm text-[#8A8680] border border-[#D8D2CC]">
+        <div className="bg-white rounded-xl p-6 text-center text-sm text-[#8A7F73] border-[0.5px] border-[#E7E0D4] shadow-sm">
           —
         </div>
       )}
@@ -352,14 +352,14 @@ export default function WorkerPayPage() {
 function DailyAttendanceCard({ hist, t }: { hist: PayMonthHistory; t: Translate }) {
   const mins2hrs = (m: number) => (m / 60).toFixed(1);
   return (
-    <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
-      <div className="bg-[#1F2A3C] px-4 py-2.5">
+    <div className="bg-white rounded-xl border-[0.5px] border-[#E7E0D4] overflow-hidden shadow-sm">
+      <div className="bg-[#1F1D1B] px-4 py-3">
         <p className="text-[11px] font-bold uppercase tracking-wider text-white">
           {t("pay.dailyAttendance")}
         </p>
       </div>
       <div className="px-4 pb-2">
-        <div className="grid grid-cols-[auto_1fr_1fr_1fr] gap-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-[#8A8680] border-b border-[#E5E0DB]">
+        <div className="grid grid-cols-[auto_1fr_1fr_1fr] gap-3 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-[#8A7F73] border-b-[0.5px] border-[#E7E0D4]">
           <span>{t("pay.colDate")}</span>
           <span className="text-right">{t("home.colWorkingHrs")}</span>
           <span className="text-right">{t("home.colProductionHrs")}</span>
@@ -382,7 +382,7 @@ function DailyAttendanceCard({ hist, t }: { hist: PayMonthHistory; t: Translate 
             (a) => a.date === r.date && (a.clockIn || a.clockOut),
           );
           return (
-            <div key={r.date} className="py-2.5 border-b border-[#F0ECE9] last:border-b-0">
+            <div key={r.date} className="py-2.5 border-b-[0.5px] border-[#F0ECE9] last:border-b-0">
               <div className="grid grid-cols-[auto_1fr_1fr_1fr] gap-3 text-sm items-center">
                 <span className="font-medium text-[#1F1D1B]">{fmtDay(r.date)}</span>
                 <span className="tabular-nums text-right font-semibold">
@@ -396,7 +396,7 @@ function DailyAttendanceCard({ hist, t }: { hist: PayMonthHistory; t: Translate 
                 </span>
               </div>
               {att && (
-                <p className="mt-1 text-xs text-[#8A8680] tabular-nums">
+                <p className="mt-1 text-xs text-[#8A7F73] tabular-nums">
                   {att.clockIn ?? "—"} → {att.clockOut ?? "—"}
                   {att.overtimeMinutes > 0 && (
                     <span className="text-[#3E6570] font-medium">
@@ -447,13 +447,13 @@ function CurrentMonthBreakdown({
     }h`,
   }));
   return (
-    <div className="bg-[#1F1D1B] text-white rounded-xl p-4">
-      <p className="text-[11px] text-[#B0AAA3]">{t("pay.estimate")}</p>
+    <div className="bg-[#1F1D1B] text-white rounded-2xl p-5 shadow-sm">
+      <p className="text-[11px] uppercase tracking-wider text-[#C9A961]">{t("pay.estimate")}</p>
       <p className="text-4xl font-bold tracking-tight mt-1">
         {rm(c.estimatedGrossSen)}
       </p>
 
-      <div className="mt-4 pt-4 border-t border-white/10 space-y-2 text-sm">
+      <div className="mt-4 pt-4 border-t border-white/10 space-y-2.5 text-sm">
         <Row label={t("pay.fullSalary")} value={rm(c.fullSalarySen)} />
         {c.absentDays > 0 && (
           <DetailRow
@@ -500,13 +500,13 @@ function CurrentMonthBreakdown({
 // A finalised (generated) payslip for a past month — the locked-in figures.
 function FinalisedBreakdown({ slip, t }: { slip: PayslipRow; t: Translate }) {
   return (
-    <div className="bg-[#1F1D1B] text-white rounded-xl p-4">
-      <p className="text-[11px] text-[#B0AAA3]">Net pay</p>
+    <div className="bg-[#1F1D1B] text-white rounded-2xl p-5 shadow-sm">
+      <p className="text-[11px] uppercase tracking-wider text-[#C9A961]">Net pay</p>
       <p className="text-4xl font-bold tracking-tight mt-1">
         {rm(slip.netSen ?? slip.grossSen)}
       </p>
 
-      <div className="mt-4 pt-4 border-t border-white/10 space-y-2 text-sm">
+      <div className="mt-4 pt-4 border-t border-white/10 space-y-2.5 text-sm">
         <Row label={t("pay.basicEarned")} value={rm(slip.basicSen)} />
         {slip.allowancesSen ? (
           <Row label={t("pay.efficiencyAllowance")} value={rm(slip.allowancesSen)} />

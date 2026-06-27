@@ -81,21 +81,21 @@ export default function WorkerIssuePage() {
   if (sent) {
     return (
       <div className="pt-10">
-        <div className="bg-[#3E6570] text-white rounded-xl p-6 text-center">
-          <CheckCircle2 className="h-12 w-12 mx-auto mb-3" />
+        <div className="bg-[#1F1D1B] text-white rounded-2xl p-8 text-center shadow-sm">
+          <CheckCircle2 className="h-12 w-12 mx-auto mb-3 text-[#C9A961]" />
           <p className="text-xl font-bold">{t("issue.sent")}</p>
         </div>
         <div className="mt-4 flex gap-2">
           <button
             type="button"
             onClick={() => setSent(false)}
-            className="flex-1 h-12 rounded bg-white border border-[#D8D2CC] font-semibold text-sm"
+            className="flex-1 h-12 rounded-xl bg-white border-[0.5px] border-[#E7E0D4] font-semibold text-sm text-[#1F1D1B] shadow-sm"
           >
             {t("issue.title")}
           </button>
           <Link
             to="/worker"
-            className="flex-1 h-12 rounded bg-[#6B5C32] text-white font-semibold text-sm flex items-center justify-center"
+            className="flex-1 h-12 rounded-xl bg-[#6B5C32] text-white font-semibold text-sm flex items-center justify-center"
           >
             {t("nav.home")}
           </Link>
@@ -109,18 +109,18 @@ export default function WorkerIssuePage() {
       <div className="flex items-center gap-2">
         <Link
           to="/worker"
-          className="h-9 w-9 rounded hover:bg-white/60 flex items-center justify-center"
+          className="h-9 w-9 rounded-xl hover:bg-white/60 flex items-center justify-center"
           aria-label={t("common.back")}
         >
           <ArrowLeft className="h-5 w-5" />
         </Link>
-        <h1 className="text-xl font-bold">{t("issue.title")}</h1>
+        <h1 className="text-xl font-bold tracking-tight text-[#1F1D1B]">{t("issue.title")}</h1>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Category chips */}
         <fieldset>
-          <legend className="text-sm font-medium text-[#5A5550] mb-2">
+          <legend className="text-sm font-semibold text-[#6B5C32] mb-2">
             {t("issue.category")}
           </legend>
           <div className="grid grid-cols-2 gap-2">
@@ -129,10 +129,10 @@ export default function WorkerIssuePage() {
                 key={c.id}
                 type="button"
                 onClick={() => setCategory(c.id)}
-                className={`h-12 rounded-lg border text-sm font-semibold transition-colors ${
+                className={`h-12 rounded-xl border-[0.5px] text-sm font-semibold transition-colors ${
                   category === c.id
                     ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-                    : "bg-white text-[#1F1D1B] border-[#D8D2CC] hover:bg-[#F0ECE9]"
+                    : "bg-white text-[#1F1D1B] border-[#E7E0D4] hover:bg-[#F3EFE9]"
                 }`}
               >
                 {t(c.key)}
@@ -143,21 +143,21 @@ export default function WorkerIssuePage() {
 
         {/* Description */}
         <label className="block">
-          <span className="text-sm font-medium text-[#5A5550]">
+          <span className="text-sm font-semibold text-[#6B5C32]">
             {t("issue.description")}
           </span>
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             rows={4}
-            className="mt-1.5 w-full px-3 py-2 rounded border border-[#D8D2CC] bg-white text-base focus:outline-none focus:ring-2 focus:ring-[#6B5C32] focus:border-[#6B5C32]"
+            className="mt-1.5 w-full px-3 py-2.5 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-base focus:outline-none focus:ring-2 focus:ring-[#6B5C32] focus:border-[#6B5C32]"
             placeholder=""
           />
         </label>
 
         {/* Photo */}
         <label className="block">
-          <span className="text-sm font-medium text-[#5A5550] mb-1.5 inline-block">
+          <span className="text-sm font-semibold text-[#6B5C32] mb-1.5 inline-block">
             Photo
           </span>
           {photo ? (
@@ -165,18 +165,18 @@ export default function WorkerIssuePage() {
               <img
                 src={photo}
                 alt="issue"
-                className="w-full max-h-48 object-cover rounded-lg border border-[#D8D2CC]"
+                className="w-full max-h-48 object-cover rounded-xl border-[0.5px] border-[#E7E0D4]"
               />
               <button
                 type="button"
                 onClick={() => setPhoto(null)}
-                className="absolute top-2 right-2 h-8 px-3 rounded bg-white/90 text-xs font-semibold shadow"
+                className="absolute top-2 right-2 h-8 px-3 rounded-full bg-white/90 text-xs font-semibold shadow"
               >
                 {t("common.cancel")}
               </button>
             </div>
           ) : (
-            <div className="w-full h-28 rounded-lg border-2 border-dashed border-[#D8D2CC] bg-white flex items-center justify-center text-[#8A8680] text-sm gap-2">
+            <div className="w-full h-28 rounded-xl border-2 border-dashed border-[#E7E0D4] bg-white flex items-center justify-center text-[#8A7F73] text-sm gap-2">
               <Camera className="h-5 w-5" />
               <span>Tap to capture</span>
             </div>
@@ -192,7 +192,7 @@ export default function WorkerIssuePage() {
           {!photo && (
             <label
               htmlFor="worker-issue-photo"
-              className="block mt-2 h-11 rounded bg-white border border-[#D8D2CC] text-center leading-[44px] text-sm font-semibold text-[#1F1D1B] cursor-pointer"
+              className="block mt-2 h-11 rounded-xl bg-white border-[0.5px] border-[#E7E0D4] text-center leading-[44px] text-sm font-semibold text-[#1F1D1B] cursor-pointer"
             >
               <Camera className="inline h-4 w-4 mr-1.5 -mt-0.5" />
               Take photo
@@ -205,7 +205,7 @@ export default function WorkerIssuePage() {
         <button
           type="submit"
           disabled={submitting || !category || !description.trim()}
-          className="w-full h-14 rounded-lg bg-[#9A3A2D] hover:bg-[#832F24] disabled:opacity-60 text-white font-bold text-base transition-colors"
+          className="w-full h-14 rounded-xl bg-[#9A3A2D] hover:bg-[#832F24] disabled:opacity-60 text-white font-bold text-base transition-colors shadow-sm"
         >
           {submitting ? t("common.loading") : t("issue.submit")}
         </button>

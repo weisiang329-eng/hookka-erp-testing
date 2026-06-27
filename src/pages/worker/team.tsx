@@ -196,9 +196,9 @@ export default function WorkerTeamPage() {
   // Defense-in-depth: backend can flip isLeader:false even if the tab leaks.
   if (data && data.isLeader === false) {
     return (
-      <div className="space-y-4">
-        <h1 className="text-lg font-bold text-[#1F1D1B]">{t("team.title")}</h1>
-        <div className="rounded-lg bg-[#F0E5E1] border border-[#D5BFB7] px-4 py-3 text-sm text-[#7A4A3A]">
+      <div className="space-y-4 pt-2">
+        <h1 className="text-xl font-bold tracking-tight text-[#1F1D1B]">{t("team.title")}</h1>
+        <div className="rounded-xl bg-[#FDF6F4] border-[0.5px] border-[#9A3A2D]/30 px-4 py-3 text-sm text-[#9A3A2D]">
           {t("team.notLeader")}
         </div>
       </div>
@@ -206,8 +206,8 @@ export default function WorkerTeamPage() {
   }
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-lg font-bold text-[#1F1D1B] flex items-center gap-2">
+    <div className="space-y-4 pt-2">
+      <h1 className="text-xl font-bold tracking-tight text-[#1F1D1B] flex items-center gap-2">
         <BarChart3 className="h-5 w-5 text-[#6B5C32]" />
         {t("team.title")}
       </h1>
@@ -215,14 +215,14 @@ export default function WorkerTeamPage() {
       {/* Filter card. Dropdowns scoped to leader's depts + cats — backend
           clamps anyway, but the UI shouldn't even surface options the
           leader can't pick. */}
-      <div className="rounded-lg bg-white border border-[#D8D2CC] p-3 space-y-3">
+      <div className="rounded-xl bg-white border-[0.5px] border-[#E7E0D4] p-4 space-y-3 shadow-sm">
         <div className="grid grid-cols-2 gap-2">
-          <label className="text-[11px] font-medium text-[#5A5550] flex flex-col gap-1">
+          <label className="text-[11px] font-medium text-[#6B5C32] flex flex-col gap-1">
             {t("team.dept")}
             <select
               value={departmentCode}
               onChange={(e) => setDepartmentCode(e.target.value)}
-              className="h-9 rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+              className="h-9 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white px-2 text-xs"
             >
               <option value="">{t("team.allDepts")}</option>
               {(data?.availableDepartments ?? []).map((dc) => (
@@ -232,12 +232,12 @@ export default function WorkerTeamPage() {
               ))}
             </select>
           </label>
-          <label className="text-[11px] font-medium text-[#5A5550] flex flex-col gap-1">
+          <label className="text-[11px] font-medium text-[#6B5C32] flex flex-col gap-1">
             {t("team.category")}
             <select
               value={category}
               onChange={(e) => setCategory(e.target.value)}
-              className="h-9 rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+              className="h-9 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white px-2 text-xs"
             >
               <option value="">{t("team.allCats")}</option>
               {(data?.availableCategories ?? ["SOFA", "BEDFRAME"]).map((c) => (
@@ -249,22 +249,22 @@ export default function WorkerTeamPage() {
           </label>
         </div>
         <div className="grid grid-cols-2 gap-2">
-          <label className="text-[11px] font-medium text-[#5A5550] flex flex-col gap-1">
+          <label className="text-[11px] font-medium text-[#6B5C32] flex flex-col gap-1">
             {t("team.from")}
             <input
               type="date"
               value={from}
               onChange={(e) => setFrom(e.target.value)}
-              className="h-9 rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+              className="h-9 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white px-2 text-xs"
             />
           </label>
-          <label className="text-[11px] font-medium text-[#5A5550] flex flex-col gap-1">
+          <label className="text-[11px] font-medium text-[#6B5C32] flex flex-col gap-1">
             {t("team.to")}
             <input
               type="date"
               value={to}
               onChange={(e) => setTo(e.target.value)}
-              className="h-9 rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+              className="h-9 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white px-2 text-xs"
             />
           </label>
         </div>
@@ -313,9 +313,9 @@ export default function WorkerTeamPage() {
           The header row mirrors the same flex template; the chevron slot
           stays empty + the date slot holds "Date" so the column titles
           land at the same x-coordinate as the values below. */}
-      <div className="rounded-lg bg-white border border-[#D8D2CC] overflow-hidden">
-        <div className="px-3 py-2 bg-[#F0ECE9] border-b border-[#D8D2CC]">
-          <span className="text-xs font-bold uppercase tracking-wide text-[#1F1D1B]">
+      <div className="rounded-xl bg-white border-[0.5px] border-[#E7E0D4] overflow-hidden shadow-sm">
+        <div className="px-4 py-3 bg-[#1F1D1B]">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-white">
             {t("team.dailyBreakdown")}
           </span>
         </div>
@@ -335,7 +335,7 @@ export default function WorkerTeamPage() {
           <>
             {/* Column header — same flex / grid template as data rows so
                 the values below land directly under their label. */}
-            <div className="px-3 py-1.5 flex items-center gap-3 border-b border-[#E5DEC6] bg-[#FAF7EE] text-[10px] uppercase tracking-wide text-[#8A8680] font-semibold">
+            <div className="px-3 py-2 flex items-center gap-3 border-b-[0.5px] border-[#E7E0D4] bg-[#FAF8F4] text-[10px] uppercase tracking-wide text-[#8A7F73] font-semibold">
               <span className="w-4 flex-shrink-0" aria-hidden />
               <span className="w-16 flex-shrink-0">{t("team.colDate")}</span>
               <span className="flex-1 grid grid-cols-3 gap-1 text-right">
@@ -354,7 +354,7 @@ export default function WorkerTeamPage() {
                     <button
                       type="button"
                       onClick={() => toggleDate(row.date)}
-                      className="w-full px-3 py-2.5 flex items-center gap-3 text-left hover:bg-[#FAF7EE] active:bg-[#F0ECE9]"
+                      className="w-full px-3 py-3 flex items-center gap-3 text-left hover:bg-[#FAF8F4] active:bg-[#F3EFE9]"
                     >
                       <span className="w-4 flex-shrink-0 text-[#5A5550]">
                         {isOpen ? (
@@ -422,9 +422,9 @@ function Kpi({
           ? "text-[#9A3A2D]"
           : "text-[#1F1D1B]";
   return (
-    <div className="rounded-lg bg-white border border-[#D8D2CC] px-3 py-2.5 text-center">
+    <div className="rounded-xl bg-white border-[0.5px] border-[#E7E0D4] px-3 py-3 text-center shadow-sm">
       <p className={`text-lg font-bold tabular-nums ${valueClass}`}>{value}</p>
-      <p className="text-[10px] text-[#8A8680] mt-0.5 leading-tight">
+      <p className="text-[10px] text-[#8A7F73] mt-0.5 leading-tight">
         {label}
       </p>
       {subtitle && (
@@ -476,11 +476,11 @@ function DailyDrillDown({
   }
 
   return (
-    <div className="px-3 pb-3 pt-1 bg-[#FDFCFB] border-t border-[#F0ECE9]">
-      <p className="text-[10px] uppercase tracking-wide text-[#8A8680] mb-1.5">
+    <div className="px-3 pb-3 pt-1.5 bg-[#FAF8F4] border-t-[0.5px] border-[#F0ECE9]">
+      <p className="text-[10px] uppercase tracking-wide text-[#8A7F73] mb-1.5">
         {t("team.workerProductionShare")}
       </p>
-      <ul className="space-y-1">
+      <ul className="space-y-1.5">
         {sorted.map((w) => {
           const key = `${date}::${w.workerId}`;
           const isOpen = openKeys.has(key);
@@ -489,7 +489,7 @@ function DailyDrillDown({
           return (
             <li
               key={w.workerId}
-              className="rounded border border-[#E5DEC6] bg-white"
+              className="rounded-xl border-[0.5px] border-[#E7E0D4] bg-white"
             >
               <button
                 type="button"
@@ -516,8 +516,8 @@ function DailyDrillDown({
                 </span>
               </button>
               {isOpen && w.jobs.length > 0 && (
-                <div className="px-2.5 pb-2 pt-1 border-t border-[#F0ECE9]">
-                  <p className="text-[10px] uppercase tracking-wide text-[#8A8680] mb-1">
+                <div className="px-2.5 pb-2 pt-1.5 border-t-[0.5px] border-[#F0ECE9]">
+                  <p className="text-[10px] uppercase tracking-wide text-[#8A7F73] mb-1">
                     {t("team.jobs")}
                   </p>
                   <ul className="space-y-0.5">

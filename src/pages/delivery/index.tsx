@@ -49,7 +49,6 @@ import {
   pickRelevantUphCards,
   poInPlanning,
   poReadyForDelivery,
-  buildLinkedPOIds,
 } from "@/lib/delivery-pipeline";
 import { MALAYSIA_STATES, resolveStateCode } from "@/lib/malaysia-states";
 import { aggregateRacksFromPackingCards } from "@/lib/rack-format";
@@ -1111,6 +1110,11 @@ export default function DeliveryPage() {
   // invoice path uses) so Planning / Pending Delivery reconcile to the
   // cent instead of the page guessing price by product code.
   const { data: poValRaw, refresh: refreshPoVals } = useCachedJson<{ success?: boolean; values?: Record<string, number> }>("/api/delivery-orders/po-values");
+  // Authoritative "already on a DO" set from the WHOLE table — not just the
+  // current 200-row browse page. The paginated doRaw missed POs delivered on
+  // older off-page DOs, so they wrongly resurfaced as Pending Delivery
+  // (BUG-2026-06-27, e.g. SO-2603-157 delivered on March DOs).
+  const { data: linkedRaw } = useCachedJson<{ success?: boolean; poIds?: string[] }>("/api/delivery-orders/linked-po-ids");
   const { data: custRaw, loading: custLoading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   // Pull product master data so each Planning / Pending Delivery row can
   // surface its per-unit m³ next to the qty. Source-of-truth is the
@@ -1294,11 +1298,11 @@ export default function DeliveryPage() {
           // visible whose SO's OTHER POs were on a multi-SO DO — the DO
           // stores only one representative salesOrderId, so SO-level
           // matching missed siblings carried via the items array).
-          const linkedPOIds = buildLinkedPOIds(
-            dRes.success && Array.isArray(dRes.data)
-              ? (dRes.data as DeliveryOrder[])
-              : [],
-          );
+          // BUG-2026-06-27: source this from the COMPLETE server endpoint
+          // (/api/delivery-orders/linked-po-ids) instead of buildLinkedPOIds
+          // over the capped 200-row browse page — older off-page DOs were
+          // missed, so already-delivered POs wrongly resurfaced as pending.
+          const linkedPOIds = new Set(linkedRaw?.poIds ?? []);
 
           const allPOs = poRes.data as ProductionOrderApiShape[];
 
@@ -1443,14 +1447,19 @@ export default function DeliveryPage() {
           // Note flow, not the Delivery Order flow. Bug fix 2026-04-28
           // per user: a CO that finished production was wrongly
           // appearing in DO's "Ready for DO" list.
-          const ready = allPOs
-            .filter((po) => poReadyForDelivery(po, linkedPOIds))
-            .map(mapPO);
-          setReadyPOs(ready);
+          // Only recompute once the authoritative linked-PO set has loaded —
+          // otherwise an empty set would briefly flash EVERY complete PO as
+          // pending before the exclusion arrives (BUG-2026-06-27 guard).
+          if (linkedRaw !== undefined) {
+            const ready = allPOs
+              .filter((po) => poReadyForDelivery(po, linkedPOIds))
+              .map(mapPO);
+            setReadyPOs(ready);
+          }
         }
       }
     }
-  }, [doRaw, doSearchRaw, poRaw, soRaw, poValRaw, custRaw, doLoading, poLoading, soLoading, custLoading]);
+  }, [doRaw, doSearchRaw, poRaw, soRaw, poValRaw, custRaw, linkedRaw, doLoading, poLoading, soLoading, custLoading]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ----- 3PL Provider helpers -----

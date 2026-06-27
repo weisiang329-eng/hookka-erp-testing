@@ -1,6 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import { humanizeError } from "@/lib/humanize-error";
+import { purgeServiceWorkerAndCaches } from "@/lib/stale-chunk-recovery";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -111,18 +112,21 @@ export function ErrorFallback({ error, errorInfo, onReset, reset }: ErrorFallbac
     // bottom out.
     if (attempts >= MAX_ATTEMPTS) return;
     if (lastTs && Date.now() - lastTs < COOLDOWN_MS && attempts > 0) {
-      // Second attempt — escalate to cache-buster.
+      // Second attempt — escalate to cache-buster AND nuke the SW + caches so a
+      // stale cached shell can't keep serving the dead chunk (white-screen).
       sessionStorage.setItem(ATTEMPT_KEY, String(attempts + 1));
       sessionStorage.setItem(KEY, String(Date.now()));
       const url = new URL(window.location.href);
       url.searchParams.set("_v", String(Date.now()));
-      window.location.replace(url.toString());
+      void purgeServiceWorkerAndCaches().finally(() =>
+        window.location.replace(url.toString()),
+      );
       return;
     }
     if (lastTs && Date.now() - lastTs < COOLDOWN_MS) return;
     sessionStorage.setItem(KEY, String(Date.now()));
     sessionStorage.setItem(ATTEMPT_KEY, String(attempts + 1));
-    window.location.reload();
+    void purgeServiceWorkerAndCaches().finally(() => window.location.reload());
   }, [error]);
 
   // Once a successful render happens (no stale-chunk crash), reset the

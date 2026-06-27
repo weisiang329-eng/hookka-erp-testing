@@ -5268,6 +5268,30 @@ export async function queueDoCustomerNotice(
           );
         }
       }
+      // Contact No. resolution (owner 2026-06-27 — reverses the 2026-06-12
+      // "driver-phone-only, omit if none" stance): the 3PL still has a number
+      // even when the DO didn't capture the driver's own phone (driver was
+      // free-typed, or an older DO). Resolve in order so the customer always
+      // gets someone to call: (1) the phone stored on the DO → (2) the named
+      // 3PL driver's phone → (3) the provider's dispatcher contact (joined via
+      // the DO's providerId). Best-effort; row still omitted only if all empty.
+      let driverContact = (doRow.driverPhone ?? "").trim();
+      if (!driverContact && (doRow.driverName ?? "").trim()) {
+        const drv = await c.var.DB.prepare(
+          "SELECT phone FROM three_pl_drivers WHERE name = ? AND COALESCE(phone,'') <> '' LIMIT 1",
+        )
+          .bind((doRow.driverName ?? "").trim())
+          .first<{ phone?: string | null }>();
+        if (drv?.phone) driverContact = String(drv.phone).trim();
+      }
+      if (!driverContact) {
+        const prov = await c.var.DB.prepare(
+          "SELECT d.phone AS phone FROM delivery_orders o JOIN drivers d ON d.id = o.providerId WHERE o.id = ? AND COALESCE(d.phone,'') <> '' LIMIT 1",
+        )
+          .bind(doRow.id)
+          .first<{ phone?: string | null }>();
+        if (prov?.phone) driverContact = String(prov.phone).trim();
+      }
       subjectHtmlText = dispatchNoticeTemplate({
         doNo: doRow.doNo,
         customerName: doRow.customerName,
@@ -5276,14 +5300,10 @@ export async function queueDoCustomerNotice(
         deliverTo,
         itemsBreakdown,
         hasAttachment: !!attachments,
-        // Driver block (owner 2026-06-11; 2026-06-12 rule "2A"): name +
-        // lorry plate from the DO's 3PL assignment; Contact No. is the
-        // DRIVER's phone ONLY. When the driver has no phone on file the row
-        // is omitted entirely (the template drops blank rows) — the owner's
-        // earlier company-number fallback was dropped: a company line under
-        // "Contact No." next to a named driver is useless to the customer.
+        // Driver block: name + lorry plate from the DO's 3PL assignment;
+        // Contact No. resolved above (DO phone → 3PL driver → provider contact).
         driverName: doRow.driverName ?? null,
-        driverContact: (doRow.driverPhone ?? "").trim() || null,
+        driverContact: driverContact || null,
         lorryPlate: doRow.vehicleNo ?? null,
       });
     } else {

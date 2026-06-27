@@ -185,6 +185,28 @@ function asWorkerActionResponse(v: unknown): WorkerActionResponse | null {
   return null;
 }
 
+// Tiny client-side SWR cache for GET /api/worker/wip-times (the Standard Times
+// card). The standard minutes are effectively static between BOM edits, so a
+// worker re-opening the card or flipping between their departments shouldn't pay
+// for a fresh network round-trip each time. Keyed by department (""=default).
+// stale-while-revalidate: the cached payload renders instantly, then a
+// background fetch refreshes it. Module-scoped so it survives card collapse /
+// re-expand within the session (cleared on full reload). 60s TTL bounds how
+// stale a just-edited time can look.
+type StdTimesPayload = {
+  department: string;
+  departmentCodes: string[];
+  rows: Array<{
+    wipLabel: string;
+    wipType: string;
+    itemCategory: string;
+    minutes: number;
+    productCount: number;
+  }>;
+};
+const STD_TIMES_TTL_MS = 60_000;
+const stdTimesCache = new Map<string, { at: number; data: StdTimesPayload }>();
+
 export default function WorkerMePage() {
   const t = useT();
   const navigate = useNavigate();
@@ -360,7 +382,20 @@ export default function WorkerMePage() {
   const [stdDept, setStdDept] = useState<string | null>(null);
 
   const loadStandardTimes = useCallback(async (dept?: string) => {
-    setStdLoading(true);
+    const cacheKey = dept ?? "";
+    const applyPayload = (p: StdTimesPayload) => {
+      if (Array.isArray(p.rows)) setStdRows(p.rows);
+      if (Array.isArray(p.departmentCodes)) setStdDepts(p.departmentCodes);
+      if (typeof p.department === "string") setStdDept(p.department);
+      setStdLoaded(true);
+    };
+    // stale-while-revalidate: paint the cached payload first (no spinner), then
+    // refresh in the background. A fresh/cold key shows the spinner as before.
+    const cached = stdTimesCache.get(cacheKey);
+    const fresh = cached && Date.now() - cached.at < STD_TIMES_TTL_MS;
+    if (cached) applyPayload(cached.data);
+    if (fresh) return; // within TTL — no network hit at all
+    setStdLoading(!cached);
     try {
       const url = dept
         ? `/api/worker/wip-times?dept=${encodeURIComponent(dept)}`
@@ -374,16 +409,19 @@ export default function WorkerMePage() {
           rows?: StdTimeRow[];
         };
       };
-      if (j?.success && Array.isArray(j.data?.rows)) {
-        setStdRows(j.data.rows);
+      if (j?.success && j.data) {
+        const payload: StdTimesPayload = {
+          department: typeof j.data.department === "string" ? j.data.department : "",
+          departmentCodes: Array.isArray(j.data.departmentCodes)
+            ? j.data.departmentCodes
+            : [],
+          rows: Array.isArray(j.data.rows) ? j.data.rows : [],
+        };
+        stdTimesCache.set(cacheKey, { at: Date.now(), data: payload });
+        applyPayload(payload);
+      } else {
+        setStdLoaded(true);
       }
-      if (j?.success && Array.isArray(j.data?.departmentCodes)) {
-        setStdDepts(j.data.departmentCodes);
-      }
-      if (j?.success && typeof j.data?.department === "string") {
-        setStdDept(j.data.department);
-      }
-      setStdLoaded(true);
     } catch {
       /* leave empty — the card shows a retry-on-reopen */
     } finally {

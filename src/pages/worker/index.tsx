@@ -184,16 +184,38 @@ function fmtDay(iso: string): string {
 // Best-effort punch location for the soft geofence. Resolves to null when the
 // device has no geolocation, the worker denies permission, or it times out — the
 // punch still goes through (soft: location only flags out-of-area, never blocks).
-function getPunchLocation(): Promise<{ lat: number; lng: number } | null> {
+//
+// Permission-aware (BUG-2026-06-27): the punch used to call getCurrentPosition
+// UNCONDITIONALLY on every punch, which on some phones re-surfaces the OS
+// location prompt each time. We now consult the Permissions API FIRST:
+//   - 'denied'  → skip getCurrentPosition entirely (it would only re-prompt /
+//                 reject); punch goes through unstamped.
+//   - 'granted' / 'prompt' / unsupported → proceed to getCurrentPosition. A
+//                 granted state resolves silently on any browser that persists
+//                 the grant; 'prompt' is the one legitimate ask.
+// The home page already proactively probes location on mount and passes its
+// known state in (`hint`) so we don't even pay for a second permissions.query
+// when the answer is already settled.
+async function getPunchLocation(
+  hint?: LocationState,
+): Promise<{ lat: number; lng: number } | null> {
+  if (typeof navigator === "undefined" || !navigator.geolocation) {
+    return null;
+  }
+  // Resolve the effective permission state: trust a settled hint, otherwise
+  // probe passively (no prompt). A 'denied' state means getCurrentPosition can
+  // only re-prompt or reject — skip it so we never re-trigger the OS dialog.
+  let state: LocationState | null =
+    hint === "granted" || hint === "denied" ? hint : null;
+  if (!state) state = await queryLocationPermission();
+  if (state === "denied") return null;
   return new Promise((resolve) => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) {
-      resolve(null);
-      return;
-    }
     // enableHighAccuracy:false → uses wifi/cell, not just GPS satellites, so a
     // fix arrives INDOORS (high-accuracy GPS often times out on a factory floor
     // and left every punch with null location). ±50-100m is plenty for a 200m
     // factory fence. Longer timeout so a slow first fix still lands.
+    // maximumAge:60000 → reuse a fix from the last 60s instead of spinning a
+    // fresh GPS request on a rapid second punch.
     navigator.geolocation.getCurrentPosition(
       (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
       () => resolve(null),
@@ -233,28 +255,49 @@ function writeSeenAnnouncements(ids: Set<string>): void {
 // announcement this device has NOT yet acknowledged as a modal the worker must
 // tap to dismiss. We track acknowledgement separately from the "seen" dot above
 // so the two never interfere: tapping the banner clears the dot but should NOT
-// silently suppress the must-acknowledge popup, and vice-versa. Per-device only
-// (no server table) — a NEW announcement id is absent from this set, so it pops
-// the next time the worker opens the app; an expired one is already filtered out
-// by the GET, so it never reaches the popup.
+// silently suppress the must-acknowledge popup, and vice-versa.
+//
+// IMPORTANT (BUG-2026-06-27 re-pop fix): the ack is stored as a MAP of
+//   { [announcementId]: ackedAtMs }
+// — the millisecond timestamp this device tapped "Got it" — NOT a bare id set.
+// The timestamp is load-bearing: it lets the device decide the ONE legitimate
+// re-pop (office "Remind") entirely client-side, by comparing the notice's
+// server `remindedAt` against this local ack time. That makes a tapped "Got it"
+// DURABLE: the fire-and-forget server ack POST lagging or failing can no longer
+// wipe the local suppress (the old code deleted any local ack the server's
+// `ackedIds` didn't yet report, which re-popped the popup on the next visit).
+//
+// Backward-compatible: an OLD value (a plain JSON string array of ids, written
+// by the previous build) is read as "acked at time 0" — still suppressed (a
+// past notice is treated as acked-long-ago), and only a genuine remind re-pops.
 const ACK_ANN_KEY = "hookka.worker.ackAnnouncements";
-function readAckAnnouncements(): Set<string> {
+function readAckAnnouncements(): Map<string, number> {
+  const out = new Map<string, number>();
   try {
     const raw = localStorage.getItem(ACK_ANN_KEY);
-    if (raw) {
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr)) return new Set(arr.filter((x) => typeof x === "string"));
+    if (!raw) return out;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      // Legacy format: ["id1","id2",...] → acked at epoch 0 (acked-long-ago,
+      // so a later remind still re-pops, but a stale-server GET never wipes it).
+      for (const x of parsed) if (typeof x === "string") out.set(x, 0);
+    } else if (parsed && typeof parsed === "object") {
+      for (const [id, ts] of Object.entries(parsed)) {
+        if (typeof ts === "number" && Number.isFinite(ts)) out.set(id, ts);
+        else out.set(id, 0);
+      }
     }
   } catch {
     /* ignore */
   }
-  return new Set();
+  return out;
 }
-function writeAckAnnouncements(ids: Set<string>): void {
+function writeAckAnnouncements(m: Map<string, number>): void {
   try {
-    // Cap the stored set so it can't grow unbounded over months of posts.
-    const arr = Array.from(ids).slice(-200);
-    localStorage.setItem(ACK_ANN_KEY, JSON.stringify(arr));
+    // Cap the stored map so it can't grow unbounded over months of posts —
+    // keep the most-recently-acked 200 entries.
+    const entries = Array.from(m.entries()).slice(-200);
+    localStorage.setItem(ACK_ANN_KEY, JSON.stringify(Object.fromEntries(entries)));
   } catch {
     /* ignore */
   }
@@ -430,9 +473,10 @@ export default function WorkerHomePage() {
   const [seenAnn, setSeenAnn] = useState<Set<string>>(() =>
     readSeenAnnouncements(),
   );
-  // Which announcement ids this device has tapped "Got it" on (suppresses the
-  // must-acknowledge popup; the re-readable banner below stays regardless).
-  const [ackAnn, setAckAnn] = useState<Set<string>>(() =>
+  // Map of announcement id → the ms timestamp this device tapped "Got it"
+  // (suppresses the must-acknowledge popup; the re-readable banner below stays
+  // regardless). The timestamp drives the remind-aware re-pop (see popup gate).
+  const [ackAnn, setAckAnn] = useState<Map<string, number>>(() =>
     readAckAnnouncements(),
   );
   // Past announcements (archive) moved to /worker/me (owner 2026-06-26) — the
@@ -472,13 +516,22 @@ export default function WorkerHomePage() {
   // Active announcements — best-effort; a failure just leaves the banner empty
   // and never strands the page (same posture as /history).
   //
-  // The popup gate is now SERVER-driven: the GET also returns `ackedIds` — the
-  // active notices THIS worker has already acknowledged on the server (and
-  // hasn't been reminded about since). We seed the popup-suppress set (ackAnn)
-  // from that so a fresh device re-pops every un-acked notice until the server
-  // confirms the ack, and a "Remind" re-pops it. We MERGE rather than replace
-  // so the optimistic localStorage cache still suppresses a just-tapped notice
-  // if the server round-trip is mid-flight (no flicker on a flaky network).
+  // Popup gate = LOCAL ack map (durable) reconciled ADDITIVELY with the server.
+  // The previous build reconciled DESTRUCTIVELY — it deleted any local ack the
+  // server's `ackedIds` didn't (yet) report. Because the "Got it" POST is
+  // fire-and-forget, the very next GET on remount often returned BEFORE the ack
+  // was committed (or after a silently-failed POST), so the just-tapped notice
+  // was missing from `ackedIds`, got deleted from the local set, and the popup
+  // re-popped — the exact "Got it keeps coming back" bug. (BUG-2026-06-27.)
+  //
+  // New rule — the local ack is the source of truth for suppression and is only
+  // ever ADDED to here:
+  //   • Server `ackedIds` UNION into local (cross-device sync: an ack made on
+  //     another device suppresses here too). We stamp those at "now" — they
+  //     predate any future remind, which is what we want.
+  //   • We NEVER delete a local ack because the server is behind. The single
+  //     legitimate re-pop (office "Remind") is decided in the popup gate by
+  //     comparing each notice's server `remindedAt` against the local ack time.
   const refreshAnnouncements = useCallback(async () => {
     try {
       const res = await workerFetch("/api/worker/announcements");
@@ -489,20 +542,17 @@ export default function WorkerHomePage() {
         setAnnouncements(list);
         const serverAcked = (j as { ackedIds?: unknown }).ackedIds;
         if (Array.isArray(serverAcked)) {
-          const serverSet = new Set(
-            serverAcked.filter((x): x is string => typeof x === "string"),
+          const serverIds = serverAcked.filter(
+            (x): x is string => typeof x === "string",
           );
-          // Reconcile to the server truth for the CURRENTLY-active notices:
-          // keep a notice suppressed only if the server says acked. This is
-          // what makes "Remind" re-pop — the server drops the id from ackedIds,
-          // so we drop it from ackAnn here. Notices not in the active list keep
-          // their cached state (offline resilience for older ids).
           setAckAnn((prev) => {
-            const next = new Set(prev);
-            const activeIds = new Set(list.map((a) => a.id));
-            for (const id of activeIds) {
-              if (serverSet.has(id)) next.add(id);
-              else next.delete(id);
+            const next = new Map(prev);
+            const nowMs = Date.now();
+            // Additive merge only — fold in acks the server knows about that
+            // this device doesn't (made on another device). Keep an existing
+            // local timestamp if we already have one (it's the true tap time).
+            for (const id of serverIds) {
+              if (!next.has(id)) next.set(id, nowMs);
             }
             writeAckAnnouncements(next);
             return next;
@@ -560,7 +610,9 @@ export default function WorkerHomePage() {
       }
       // Soft geofence: attach the worker's location if we can get it. Denied /
       // unavailable / timeout → null → the punch still goes through unstamped.
-      const loc = await getPunchLocation();
+      // Pass the state we already probed on mount so a known-'denied' worker is
+      // never re-prompted and a known-'granted' worker skips a redundant probe.
+      const loc = await getPunchLocation(locState);
       const payload: Record<string, unknown> = { action, photo };
       if (loc) {
         payload.lat = loc.lat;
@@ -599,10 +651,14 @@ export default function WorkerHomePage() {
   // The re-readable banner stays in place for later reference.
   function acknowledgeAnnouncements(shown: Announcement[]) {
     const shownIds = shown.map((a) => a.id);
-    // Optimistic local suppress (offline cache) — closes the popup immediately.
+    // Durable local suppress — stamp the tap time so the popup never re-pops on
+    // return (additive-merge in refreshAnnouncements never deletes this), and a
+    // later office "Remind" (remindedAt > this time) is the only thing that can
+    // re-pop the notice. Closes the popup immediately.
     setAckAnn((prev) => {
-      const next = new Set(prev);
-      for (const id of shownIds) next.add(id);
+      const next = new Map(prev);
+      const nowMs = Date.now();
+      for (const id of shownIds) next.set(id, nowMs);
       writeAckAnnouncements(next);
       return next;
     });
@@ -635,9 +691,12 @@ export default function WorkerHomePage() {
   }
 
   // Quick preset chips for the range picker
-  function setPreset(kind: "7d" | "30d" | "month" | "lastMonth") {
+  function setPreset(kind: "today" | "7d" | "30d" | "month" | "lastMonth") {
     const now = new Date();
-    if (kind === "7d") {
+    if (kind === "today") {
+      setFrom(ymd(now));
+      setTo(ymd(now));
+    } else if (kind === "7d") {
       setFrom(ymd(addDays(now, -6)));
       setTo(ymd(now));
     } else if (kind === "30d") {
@@ -699,12 +758,21 @@ export default function WorkerHomePage() {
   // Announcements the worker hasn't opened on this device yet → unread dot.
   const unreadAnnouncements = announcements.filter((a) => !seenAnn.has(a.id)).length;
   // Must-acknowledge popup: every ACTIVE announcement this device hasn't tapped
-  // "Got it" on yet. `announcements` already only contains active (non-expired)
-  // posts — the GET applies the auto-hide/expiry filter — so an expired one
-  // never reaches here. Most recent first (mirrors the banner order). If there
-  // are several, we show them together in one popup and acknowledge them all on
-  // dismiss (kept deliberately simple — no per-item queue).
-  const popupAnnouncements = announcements.filter((a) => !ackAnn.has(a.id));
+  // "Got it" on yet, PLUS any notice the office has "Remind"ed since the local
+  // ack (the one legitimate re-pop). `announcements` already only contains
+  // active (non-expired) posts — the GET applies the auto-hide/expiry filter —
+  // so an expired one never reaches here. Most recent first (mirrors the banner
+  // order). If there are several, we show them together in one popup and
+  // acknowledge them all on dismiss (kept deliberately simple — no per-item
+  // queue). Because the local ack is durable (never wiped by a lagging/failed
+  // server round-trip), returning to the page never re-pops an acked notice.
+  const popupAnnouncements = announcements.filter((a) => {
+    const ackedAtMs = ackAnn.get(a.id);
+    if (ackedAtMs === undefined) return true; // never acked on this device → pop
+    // Acked here — re-pop ONLY if the office reminded after this device's ack.
+    const remindedMs = a.remindedAt ? Date.parse(a.remindedAt) : NaN;
+    return Number.isFinite(remindedMs) && remindedMs > ackedAtMs;
+  });
   // Show the location nudge whenever we did NOT end up granted (denied OR the
   // device couldn't get a fix). Never shown while "unknown" (the probe is still
   // running / the worker hasn't answered the prompt yet) so it can't flash.
@@ -1081,6 +1149,7 @@ export default function WorkerHomePage() {
         </div>
 
         <div className="flex gap-1.5 mt-2 overflow-x-auto -mx-1 px-1">
+          <Chip onClick={() => setPreset("today")}>{t("home.todayChip")}</Chip>
           <Chip onClick={() => setPreset("7d")}>{t("home.last7d")}</Chip>
           <Chip onClick={() => setPreset("30d")}>{t("home.last30d")}</Chip>
           <Chip onClick={() => setPreset("month")}>{t("pay.thisMonthChip")}</Chip>

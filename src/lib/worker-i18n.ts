@@ -274,10 +274,10 @@ const dict: Dict = {
     my: 'ကင်မရာကို QR သို့မဟုတ် ဘားကုဒ်ပေါ် ချိန်ပါ — နှစ်မျိုးလုံး အလိုအလျောက် ဖတ်သည်။',
   },
   'scan.aimHintBarcode': {
-    en: 'Tap the barcode row you want — only that row is read.',
-    ms: 'Ketik baris barkod yang anda mahu — hanya baris itu dibaca.',
-    zh: '点你要扫的那一行 —— 只读你点的那一条。',
-    my: 'သင်လိုချင်သော ဘားကုဒ်လိုင်းကို တို့ပါ — ထိုလိုင်းကိုသာ ဖတ်သည်။',
+    en: 'Aim at the barcode — it reads automatically. On a stacked list, tap the row you want.',
+    ms: 'Halakan ke barkod — ia membaca automatik. Untuk senarai bertindih, ketik baris yang anda mahu.',
+    zh: '对准条形码会自动识别；若多条叠在一起，点你要的那一行。',
+    my: 'ဘားကုဒ်ပေါ်ချိန်ပါ — အလိုအလျောက်ဖတ်သည်။ စာရင်းထပ်နေပါက လိုချင်သောလိုင်းကို တို့ပါ။',
   },
   'scan.tapHintBarcode': {
     en: 'Tap to scan',
@@ -619,6 +619,7 @@ const dict: Dict = {
     zh: '效率 %',
     my: 'ထိရောက်မှု %',
   },
+  'home.todayChip': { en: 'Today', ms: 'Hari ini', zh: '今天', my: 'ယနေ့' },
   'home.last7d': { en: '7d', ms: '7h', zh: '7天', my: '၇ရက်' },
   'home.last30d': { en: '30d', ms: '30h', zh: '30天', my: '၃၀ရက်' },
   'home.colWorkingHrs': {

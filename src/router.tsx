@@ -36,6 +36,11 @@ const InviteAccept = lazy(() => import('./pages/InviteAccept'))
 const ForgotPassword = lazy(() => import('./pages/forgot-password'))
 const ResetPassword = lazy(() => import('./pages/reset-password'))
 
+// Mobile (phone) app — NEW additive UI shell mounted at /m. Reuses the SAME
+// cookie session as the dashboard (gated by RequireAuth below); renders its own
+// phone shell + nested routes. Does not touch the desktop dashboard routes.
+const MobileLayout = lazy(() => import('./pages/m/MobileLayout'))
+
 // Worker Portal (mobile, shop floor — uses its own PIN token, not hookka_auth)
 const WorkerLogin = lazy(() => import('./pages/worker/login'))
 const WorkerHome = lazy(() => import('./pages/worker'))
@@ -99,6 +104,22 @@ export const router = createBrowserRouter([
   // mobile-friendly — a storekeeper scans a Packing sticker's QR to open
   // /p/:token and set the rack for THAT piece; the token is the credential)
   { path: '/p/:token', element: <S><StickerRack /></S> },
+
+  // Mobile (phone) app — additive shell at /m/*. Gated by the SAME RequireAuth
+  // cookie session as the dashboard. MobileLayout renders its own nested
+  // <Routes>, so a single splat child is used here (same pattern as the
+  // dashboard route below). The "/m" base is more specific than the dashboard
+  // catch-all, so React Router matches it first.
+  {
+    path: '/m',
+    element: (
+      <RequireAuth>
+        <S><MobileLayout /></S>
+      </RequireAuth>
+    ),
+    errorElement: <ErrorFallback error={null} />,
+    children: [{ path: '*', element: null }],
+  },
 
   // Dashboard layout — gated behind RequireAuth. All dashboard routes share
   // the one `TabbedOutlet` inside DashboardLayout, which renders its own

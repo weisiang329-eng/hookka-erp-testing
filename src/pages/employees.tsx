@@ -669,7 +669,7 @@ type NonprodReq = {
   departmentCode: string;
   hours: number;
   note: string;
-  status: "PENDING" | "APPROVED" | "REJECTED";
+  status: "PENDING" | "APPROVED" | "REJECTED" | "REMOVED";
   // Time-adjustment kind (owner 2026-06-26):
   //   NONPROD  — non-production hours; approving writes a non-prod hours row
   //              (excluded from the efficiency denominator).
@@ -687,7 +687,9 @@ function NonprodApprovalsCard({
   onApproved: () => void;
 }) {
   const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
   const [reqs, setReqs] = useState<NonprodReq[]>([]);
+  const [approvedReqs, setApprovedReqs] = useState<NonprodReq[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const deptName = useCallback(
@@ -701,13 +703,19 @@ function NonprodApprovalsCard({
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(
-        "/api/working-hour-entries/nonprod-requests?status=PENDING",
-      );
-      const j = (await res.json()) as { success?: boolean; data?: NonprodReq[] };
-      setReqs(Array.isArray(j?.data) ? j.data : []);
+      // PENDING (Approve/Reject) + APPROVED (Remove) in one refresh so the
+      // office can both decide new claims and delete a bad approved one.
+      const [pRes, aRes] = await Promise.all([
+        fetch("/api/working-hour-entries/nonprod-requests?status=PENDING"),
+        fetch("/api/working-hour-entries/nonprod-requests?status=APPROVED"),
+      ]);
+      const pj = (await pRes.json()) as { success?: boolean; data?: NonprodReq[] };
+      const aj = (await aRes.json()) as { success?: boolean; data?: NonprodReq[] };
+      setReqs(Array.isArray(pj?.data) ? pj.data : []);
+      setApprovedReqs(Array.isArray(aj?.data) ? aj.data : []);
     } catch {
       setReqs([]);
+      setApprovedReqs([]);
     } finally {
       setLoading(false);
     }
@@ -720,7 +728,7 @@ function NonprodApprovalsCard({
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const decide = useCallback(
-    async (id: string, action: "approve" | "reject") => {
+    async (id: string, action: "approve" | "reject" | "remove") => {
       setBusyId(id);
       try {
         const res = await fetch(
@@ -733,10 +741,15 @@ function NonprodApprovalsCard({
           return;
         }
         toast.success(
-          action === "approve" ? "Approved — hours added" : "Rejected",
+          action === "approve"
+            ? "Approved — hours added"
+            : action === "remove"
+              ? "Removed — adjustment reversed"
+              : "Rejected",
         );
         await refresh();
-        if (action === "approve") onApproved();
+        // Both approve and remove change the efficiency figures → recompute.
+        if (action === "approve" || action === "remove") onApproved();
       } catch {
         toast.error("Could not update the request");
       } finally {
@@ -746,8 +759,29 @@ function NonprodApprovalsCard({
     [refresh, onApproved, toast],
   );
 
-  // Hide the card entirely when there's nothing pending (keeps the tab clean).
-  if (!loading && reqs.length === 0) return null;
+  // Owner 2026-06-27: delete a bad APPROVED adjustment (confirm first). The
+  // backend reverses the split / un-credits the numerator before marking it
+  // REMOVED.
+  const removeApproved = useCallback(
+    async (r: NonprodReq) => {
+      const ok = await confirm({
+        title: "Remove this approved adjustment?",
+        message:
+          r.kind === "ADD_PROD"
+            ? "This un-credits the extra production time from efficiency. This cannot be undone."
+            : "This deletes the approved non-production hours and adds the time back to that day's production hours. This cannot be undone.",
+        confirmLabel: "Remove",
+        tone: "danger",
+      });
+      if (!ok) return;
+      await decide(r.id, "remove");
+    },
+    [confirm, decide],
+  );
+
+  // Hide the card entirely when there's nothing pending AND nothing approved
+  // to manage (keeps the tab clean).
+  if (!loading && reqs.length === 0 && approvedReqs.length === 0) return null;
 
   return (
     <Card>
@@ -763,6 +797,7 @@ function NonprodApprovalsCard({
         </CardTitle>
       </CardHeader>
       <CardContent>
+        {confirmDialog}
         {loading ? (
           <p className="text-sm text-[#8A8680]">Loading…</p>
         ) : (
@@ -835,6 +870,69 @@ function NonprodApprovalsCard({
               </div>
               );
             })}
+
+            {/* Approved adjustments — the office can REMOVE a bad one
+                (e.g. a 20h ADD_PROD entered before the minutes fix). */}
+            {approvedReqs.length > 0 && (
+              <>
+                <p className="pt-2 text-[11px] font-semibold uppercase tracking-wide text-[#8A8680]">
+                  Approved adjustments
+                </p>
+                {approvedReqs.map((r) => {
+                  const totalMin = Math.round((r.hours ?? 0) * 60);
+                  const hh = Math.floor(totalMin / 60);
+                  const mm = totalMin % 60;
+                  const durLabel =
+                    totalMin < 60
+                      ? `${totalMin} min`
+                      : mm === 0
+                        ? `${hh}h`
+                        : `${hh}h ${mm}min`;
+                  return (
+                    <div
+                      key={r.id}
+                      className="flex items-center justify-between gap-3 rounded-lg border border-[#E2DDD8] bg-white px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">
+                          {r.workerName} · {durLabel} · {deptName(r.departmentCode)}
+                          <span
+                            className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                              r.kind === "ADD_PROD"
+                                ? "bg-[#E4ECF5] text-[#2A5A8A]"
+                                : "bg-[#F0ECE9] text-[#6B5C32]"
+                            }`}
+                          >
+                            {r.kind === "ADD_PROD"
+                              ? "Extra production time"
+                              : "Non-production"}
+                          </span>
+                        </p>
+                        <p className="text-xs text-[#8A8680]">
+                          {r.date}
+                          {r.kind === "ADD_PROD" && r.jobCardId
+                            ? ` · Job: ${r.jobCardId}`
+                            : ""}
+                          {r.note ? ` — ${r.note}` : ""}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void removeApproved(r)}
+                          disabled={busyId === r.id}
+                          title="Remove this approved adjustment (reverses it)"
+                        >
+                          <XCircle className="h-4 w-4 mr-1" />
+                          {busyId === r.id ? "…" : "Remove"}
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
           </div>
         )}
       </CardContent>

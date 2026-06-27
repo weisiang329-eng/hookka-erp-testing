@@ -6560,7 +6560,8 @@ app.post("/:id/scan-complete", async (c) => {
     // Count pieces THIS scan fills: zero ⇒ the row was already done (re-scan,
     // or a second worker after the first already finished it) → the ✓ card
     // shows "already complete · by <first worker>", matching QR.
-    let filledNow = 0;
+    let filledPic1 = 0;
+    let filledPic2 = 0;
     for (const s of slots) {
       if (!s.pic1Id) {
         await db
@@ -6569,12 +6570,27 @@ app.post("/:id/scan-complete", async (c) => {
           )
           .bind(worker.id, worker.name, nowIso, nowIso, s.id)
           .run();
-        filledNow++;
+        filledPic1++;
+      } else if (s.pic1Id !== worker.id && !s.pic2Id) {
+        // 2-PIC co-sign on the WHOLE-ROW barcode: a SECOND, different worker
+        // who scans the row's barcode is registered as PIC2 on every piece —
+        // owner 2026-06-27 "two people scan the barcode = two PICs". Mirrors the
+        // per-piece QR co-sign. A 3rd worker is a no-op (both PIC slots full).
+        await db
+          .prepare(
+            `UPDATE piece_pics SET pic2Id = ?, pic2Name = ?, lastScanAt = ? WHERE id = ?`,
+          )
+          .bind(worker.id, worker.name, nowIso, s.id)
+          .run();
+        filledPic2++;
       }
     }
+    const filledNow = filledPic1 + filledPic2;
     wholeCardAlreadyComplete = filledNow === 0;
     newCompletedAt = nowIso;
-    assignedSlot = 1;
+    // This scan filled PIC2-only ⇒ it was the second worker (show slot 2);
+    // otherwise it opened/filled PIC1 (slot 1).
+    assignedSlot = filledPic2 > 0 && filledPic1 === 0 ? 2 : 1;
   } else {
     // Per-piece (QR sticker) fill — one slot per scan, 2-PIC co-sign.
     let newPic1Id = target.slot.pic1Id;

@@ -3341,14 +3341,6 @@ export default function ProductionPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orders, filteredOrders, mode, mode === "full" ? null : activeTab]);
 
-  // Schedule "Barcode" column → QR (owner 2026-06-26: drop the 1D barcode, scan
-  // by phone). getQRCodeDataURL is async + the schedule print is a sync
-  // window.open, so we pre-render each row's QR (of the same 10-digit
-  // deriveBarcodeToken — scanner unchanged) into this ref in the background and
-  // the print reads from it synchronously. Cached per job-card id (the token is
-  // deterministic), so it generates each QR once.
-  const scheduleQrRef = useRef<Map<string, string>>(new Map());
-
   const deptRows = useMemo<DeptRow[]>(() => {
     if (activeTab === "ALL") return [];
     // Live editable-field overlay (owner 2026-06-26 "填进去会一瞬间不见"). The
@@ -3415,30 +3407,6 @@ export default function ProductionPage({
     // other dept — one row per matching JobCard, no merge.
     return rows;
   }, [baseRows, activeTab, filteredOrders, workers]);
-
-  // Pre-render the schedule "Barcode" QR for the visible dept rows so the sync
-  // print can read a data URL without awaiting (see scheduleQrRef). Generates
-  // each (jobCardId → QR-of-token) once and caches it; cheap + idempotent.
-  useEffect(() => {
-    if (activeTab === "ALL") return;
-    let cancelled = false;
-    (async () => {
-      for (const r of deptRows) {
-        if (!r.jobCardId || scheduleQrRef.current.has(r.jobCardId)) continue;
-        try {
-          const token = deriveBarcodeToken(r.jobCardId, activeTab);
-          const url = await getQRCodeDataURL(token, 240);
-          if (cancelled) return;
-          scheduleQrRef.current.set(r.jobCardId, url);
-        } catch {
-          /* skip — the print falls back to the Code 128 safety net */
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [deptRows, activeTab]);
 
   // Force-show allowlist passed to the dept <DataGrid>. Two sources unioned:
   //   1. forceShowCompletedIds — rows the operator just flipped to COMPLETED
@@ -6274,14 +6242,7 @@ export default function ProductionPage({
             // alike, no id migration. (Owner 2026-06-25: the floor scans the
             // schedule with a barcode GUN, so 1D Code 128, not a QR.)
             const token = deriveBarcodeToken(r.jobCardId, activeTab);
-            // Owner 2026-06-26: render a QR (pre-rendered in scheduleQrRef), not
-            // the 1D Code 128. Fall back to the Code 128 only if the QR wasn't
-            // ready yet — so a row is never blank.
-            barcodeByJc.set(
-              r.jobCardId,
-              scheduleQrRef.current.get(r.jobCardId) ||
-                jobCardBarcodeDataUrl(token),
-            );
+            barcodeByJc.set(r.jobCardId, jobCardBarcodeDataUrl(token));
           }
         }
       }

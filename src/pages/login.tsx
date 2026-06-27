@@ -15,9 +15,194 @@
 // ---------------------------------------------------------------------------
 import { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { Mail, Lock, Eye, EyeOff, ArrowRight, Sun, Moon, Check } from "lucide-react";
 import { setAuth, isAuthenticated, type AuthUser } from "@/lib/auth";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import LoginSnow from "@/components/login-snow";
+
+// ============================================================
+// MOBILE login design — ported 1:1 from the owner's design source
+// (Hookka Main Login.dc.html). Desktop (>= lg / 1024px) keeps the
+// premium split-panel below, UNCHANGED. The < 1024px branch renders
+// this single-column dark-default screen instead: 64px grid, pulsing
+// top radial glow, two-layer parallax SNOW (16 blurred back + 5 sharp
+// front), a centered logo + "ERP · INDUSTRIES" hairline row, a
+// circular Sun/Moon theme toggle (persisted to localStorage), and a
+// frosted glass sheet holding the email + password fields, "Remember
+// me" + "Forgot Password?" row, and the gold "Sign In" button.
+//
+// Both palettes (dark + light) are ported verbatim from the source's
+// `T` theme object. The phone bezel / "9:41" status bar / notch from
+// the source are dropped (the real phone provides them).
+// ============================================================
+type ThemeName = "dark" | "light";
+
+const LOGIN_THEME_KEY = "hookka.erp.loginTheme";
+
+type Palette = {
+  screenBg: string;
+  glow: string;
+  logoFilter: string; // "" = no filter (dark logo as-is)
+  portalColor: string;
+  hair: string;
+  sheetBg: string;
+  sheetBorder: string;
+  title: string;
+  sub: string;
+  label: string;
+  fieldBg: string;
+  fieldBorder: string;
+  accent: string;
+  input: string;
+  canon: string; // muted icon (eye toggle)
+  snowGlow: string;
+  snowMul: number;
+  snow: (op: number) => string;
+  togBg: string;
+  togBorder: string;
+  togIcon: "sun" | "moon";
+  togIconColor: string;
+};
+
+const LOGIN_PALETTE: Record<ThemeName, Palette> = {
+  dark: {
+    screenBg: "#16140F",
+    glow: "rgba(168,138,82,.26)",
+    logoFilter: "brightness(0) invert(1)",
+    portalColor: "#C9A961",
+    hair: "rgba(201,169,97,.7)",
+    sheetBg: "rgba(28,24,18,.55)",
+    sheetBorder: "rgba(201,169,97,.18)",
+    title: "#fff",
+    sub: "rgba(255,255,255,.5)",
+    label: "rgba(255,255,255,.45)",
+    fieldBg: "rgba(0,0,0,.28)",
+    fieldBorder: "rgba(201,169,97,.28)",
+    accent: "#C9A961",
+    input: "#F0ECE9",
+    canon: "#857A66",
+    snowGlow: "rgba(255,255,255,.8)",
+    snowMul: 1,
+    snow: (op) => `rgba(255,255,255,${op.toFixed(2)})`,
+    togBg: "rgba(255,255,255,.08)",
+    togBorder: "rgba(201,169,97,.3)",
+    togIcon: "sun",
+    togIconColor: "#E8C77A",
+  },
+  light: {
+    screenBg: "#FAF8F4",
+    glow: "rgba(168,138,82,.16)",
+    logoFilter: "", // dark logo as-is
+    portalColor: "#8B7A4E",
+    hair: "rgba(139,122,78,.8)",
+    sheetBg: "rgba(255,255,255,.62)",
+    sheetBorder: "rgba(236,230,221,.9)",
+    title: "#1F1D1B",
+    sub: "#6B7280",
+    label: "#9A9082",
+    fieldBg: "rgba(255,255,255,.72)",
+    fieldBorder: "#E2DDD8",
+    accent: "#8B7A4E",
+    input: "#1F1D1B",
+    canon: "#A89F8D",
+    snowGlow: "rgba(40,36,28,.25)",
+    snowMul: 1,
+    snow: (op) => `rgba(40,36,28,${(op * 0.5).toFixed(2)})`,
+    togBg: "rgba(31,29,27,.05)",
+    togBorder: "#E2DDD8",
+    togIcon: "moon",
+    togIconColor: "#6B5C32",
+  },
+};
+
+function readLoginTheme(): ThemeName {
+  try {
+    const v = localStorage.getItem(LOGIN_THEME_KEY);
+    if (v === "light" || v === "dark") return v;
+  } catch {
+    /* ignore */
+  }
+  return "dark";
+}
+
+// ---- Deterministic two-layer parallax snow ----
+// The source uses Math.random over fixed ranges. We seed a small LCG
+// once at module load and freeze the arrays so the flakes are stable
+// across renders. Ranges (count / size / duration / delay / opacity /
+// blur) match the source exactly.
+type Flake = {
+  left: number;
+  sz: number;
+  dur: number;
+  delay: number;
+  op: number;
+  blur: number;
+};
+
+function makeRng(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    // mulberry32
+    s |= 0;
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const _rng = makeRng(0x4d41_494e); // "MAIN"
+const rnd = (a: number, b: number) => a + _rng() * (b - a);
+
+// back = many, smaller, blurred, slower (depth, drifts behind sheet)
+const SNOW_BACK: Flake[] = Array.from({ length: 16 }, () => {
+  const sz = rnd(1.6, 3.6);
+  return {
+    left: rnd(0, 100),
+    sz,
+    dur: rnd(13, 22),
+    delay: rnd(-22, 0),
+    op: rnd(0.35, 0.7),
+    blur: rnd(0.8, 1.8),
+  };
+});
+// front = few, larger, sharp, faster (foreground parallax)
+const SNOW_FRONT: Flake[] = Array.from({ length: 5 }, () => {
+  const sz = rnd(3.5, 5.5);
+  return {
+    left: rnd(4, 96),
+    sz,
+    dur: rnd(8, 13),
+    delay: rnd(-13, 0),
+    op: rnd(0.55, 0.9),
+    blur: 0,
+  };
+});
+
+function SnowLayer({ flakes, p }: { flakes: Flake[]; p: Palette }) {
+  return (
+    <>
+      {flakes.map((f, i) => (
+        <div
+          key={i}
+          style={{
+            position: "absolute",
+            top: 0,
+            left: `${f.left.toFixed(2)}%`,
+            width: `${f.sz.toFixed(1)}px`,
+            height: `${f.sz.toFixed(1)}px`,
+            borderRadius: "50%",
+            background: p.snow(f.op),
+            boxShadow: `0 0 ${(f.sz * 1.5 * p.snowMul).toFixed(1)}px ${p.snowGlow}`,
+            filter: `blur(${f.blur.toFixed(1)}px)`,
+            animation: `hkSnow ${f.dur.toFixed(1)}s linear ${f.delay.toFixed(1)}s infinite`,
+          }}
+        />
+      ))}
+    </>
+  );
+}
 
 type LoginResponse =
   | {
@@ -48,6 +233,26 @@ export default function LoginPage() {
   // (brutal in incognito) → "mysteriously logged out" (owner 2026-06-27, staging).
   // Defaulting to a persistent 7-day session is the expected behaviour anyway.
   const [rememberMe, setRememberMe] = useState(true);
+
+  // Mobile (< lg / 1024px) renders the owner's phone-first design; desktop
+  // keeps the existing premium split-panel. Both share the SAME form state +
+  // submit handler below — only the presentation differs.
+  const isMobile = useMediaQuery("(max-width: 1023px)");
+  const [theme, setTheme] = useState<ThemeName>(readLoginTheme);
+  const [showPassword, setShowPassword] = useState(false);
+  const p = LOGIN_PALETTE[theme];
+
+  function toggleTheme() {
+    setTheme((prev) => {
+      const next: ThemeName = prev === "dark" ? "light" : "dark";
+      try {
+        localStorage.setItem(LOGIN_THEME_KEY, next);
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }
 
   // Already signed-in? Jump straight to the dashboard.
   useEffect(() => {
@@ -169,6 +374,446 @@ export default function LoginPage() {
     }
   };
 
+  // ----- MOBILE branch (< lg) — owner's phone-first design -----
+  if (isMobile) {
+    return (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 50,
+          background: p.screenBg,
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <style>{`
+          @keyframes hkGlow { 0%,100% { opacity:.55; } 50% { opacity:.85; } }
+          @keyframes hkSnow {
+            0% { transform:translateY(-8%) translateX(0); opacity:0; }
+            8% { opacity:.85; }
+            50% { transform:translateY(46vh) translateX(16px); }
+            92% { opacity:.6; }
+            100% { transform:translateY(94vh) translateX(-12px); opacity:0; }
+          }
+          .ml-input::placeholder { color: ${p.canon}; }
+          .ml-btn-primary {
+            height: 50px;
+            width: 100%;
+            border: none;
+            border-radius: 12px;
+            font-family: inherit;
+            font-size: 15px;
+            font-weight: 700;
+            color: #fff;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 9px;
+            background: linear-gradient(135deg, #6B5C32, #8B7A4E);
+            box-shadow: 0 6px 16px rgba(107,92,50,.32);
+            transition: opacity .2s ease;
+          }
+          .ml-btn-primary:hover { opacity: .92; }
+          .ml-btn-primary:disabled { opacity: .5; cursor: default; }
+        `}</style>
+
+        {/* back snow — behind content + frosted sheet */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            overflow: "hidden",
+            pointerEvents: "none",
+            zIndex: 1,
+          }}
+        >
+          <SnowLayer flakes={SNOW_BACK} p={p} />
+        </div>
+
+        {/* 64px grid */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            backgroundImage:
+              "repeating-linear-gradient(0deg, rgba(107,92,50,.05) 0 1px, transparent 1px 64px), " +
+              "repeating-linear-gradient(90deg, rgba(107,92,50,.05) 0 1px, transparent 1px 64px)",
+            pointerEvents: "none",
+            zIndex: 1,
+          }}
+        />
+
+        {/* top radial glow */}
+        <div
+          style={{
+            position: "absolute",
+            top: "-12%",
+            left: "50%",
+            width: "120%",
+            height: "58%",
+            transform: "translateX(-50%)",
+            background: `radial-gradient(closest-side, ${p.glow}, rgba(168,138,82,0) 72%)`,
+            pointerEvents: "none",
+            animation: "hkGlow 6s ease-in-out infinite",
+            zIndex: 1,
+          }}
+        />
+
+        {/* front snow — sparse, sharp, parallax depth (in front of content) */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            overflow: "hidden",
+            pointerEvents: "none",
+            zIndex: 16,
+          }}
+        >
+          <SnowLayer flakes={SNOW_FRONT} p={p} />
+        </div>
+
+        {/* theme toggle — safe-area aware (no fake bezel on a real phone) */}
+        <button
+          type="button"
+          onClick={toggleTheme}
+          aria-label="Toggle theme"
+          style={{
+            position: "absolute",
+            top: "calc(env(safe-area-inset-top, 0px) + 16px)",
+            right: "20px",
+            zIndex: 26,
+            width: "40px",
+            height: "40px",
+            borderRadius: "50%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+            background: p.togBg,
+            border: `1px solid ${p.togBorder}`,
+          }}
+        >
+          {p.togIcon === "sun" ? (
+            <Sun size={17} color={p.togIconColor} />
+          ) : (
+            <Moon size={17} color={p.togIconColor} />
+          )}
+        </button>
+
+        {/* content column */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            zIndex: 2,
+            maxWidth: "440px",
+            margin: "0 auto",
+            width: "100%",
+          }}
+        >
+          {/* header */}
+          <div
+            style={{
+              position: "relative",
+              flex: "none",
+              padding: "calc(env(safe-area-inset-top, 0px) + 68px) 28px 22px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              textAlign: "center",
+            }}
+          >
+            <img
+              src="/hookka-logo.png"
+              alt="Hookka 合家"
+              style={{
+                height: "50px",
+                width: "auto",
+                display: "block",
+                ...(p.logoFilter ? { filter: p.logoFilter } : {}),
+              }}
+            />
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+                marginTop: "18px",
+              }}
+            >
+              <span
+                style={{
+                  width: "24px",
+                  height: "1px",
+                  background: `linear-gradient(90deg,transparent,${p.hair})`,
+                }}
+              />
+              <span
+                style={{
+                  fontSize: "10.5px",
+                  color: p.portalColor,
+                  letterSpacing: "3px",
+                  fontWeight: 700,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                ERP · INDUSTRIES
+              </span>
+              <span
+                style={{
+                  width: "24px",
+                  height: "1px",
+                  background: `linear-gradient(90deg,${p.hair},transparent)`,
+                }}
+              />
+            </div>
+          </div>
+
+          {/* frosted sheet */}
+          <form
+            onSubmit={handleSubmit}
+            style={{
+              position: "relative",
+              flex: 1,
+              marginTop: "10px",
+              background: p.sheetBg,
+              backdropFilter: "blur(18px)",
+              WebkitBackdropFilter: "blur(18px)",
+              borderTop: `1px solid ${p.sheetBorder}`,
+              borderRadius: "28px 28px 0 0",
+              padding: "26px 24px 0",
+              overflowY: "auto",
+            }}
+          >
+            <h2
+              style={{
+                margin: "0 0 4px",
+                fontSize: "22px",
+                fontWeight: 800,
+                color: p.title,
+                letterSpacing: "-.3px",
+              }}
+            >
+              Welcome back
+            </h2>
+            <p
+              style={{
+                margin: "0 0 22px",
+                fontSize: "12.5px",
+                color: p.sub,
+                lineHeight: 1.5,
+              }}
+            >
+              Sign in to your manufacturing intelligence platform
+            </p>
+
+            {/* Email Address */}
+            <div style={{ marginBottom: "15px" }}>
+              <div
+                style={{
+                  fontSize: "10.5px",
+                  fontWeight: 600,
+                  color: p.label,
+                  textTransform: "uppercase",
+                  letterSpacing: ".08em",
+                  marginBottom: "7px",
+                }}
+              >
+                Email Address
+              </div>
+              <div style={mlFieldStyle(p)}>
+                <Mail size={18} color={p.accent} />
+                <input
+                  type="email"
+                  autoComplete="email"
+                  placeholder="you@hookka.com.my"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="ml-input"
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    border: "none",
+                    background: "transparent",
+                    outline: "none",
+                    fontFamily: "inherit",
+                    fontSize: "14px",
+                    fontWeight: 500,
+                    color: p.input,
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* Password */}
+            <div style={{ marginBottom: "18px" }}>
+              <div
+                style={{
+                  fontSize: "10.5px",
+                  fontWeight: 600,
+                  color: p.label,
+                  textTransform: "uppercase",
+                  letterSpacing: ".08em",
+                  marginBottom: "7px",
+                }}
+              >
+                Password
+              </div>
+              <div style={mlFieldStyle(p)}>
+                <Lock size={18} color={p.accent} />
+                <input
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="current-password"
+                  placeholder="Enter your password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="ml-input"
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    border: "none",
+                    background: "transparent",
+                    outline: "none",
+                    fontFamily: "inherit",
+                    fontSize: "14px",
+                    color: p.input,
+                    letterSpacing: showPassword ? "normal" : "2px",
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    padding: 0,
+                    margin: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    cursor: "pointer",
+                  }}
+                >
+                  {showPassword ? (
+                    <Eye size={18} color={p.canon} />
+                  ) : (
+                    <EyeOff size={18} color={p.canon} />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Error banner */}
+            {error && (
+              <div
+                style={{
+                  borderRadius: "11px",
+                  padding: "12px 14px",
+                  fontSize: "13px",
+                  marginBottom: "18px",
+                  background: "rgba(220, 38, 38, 0.12)",
+                  border: "1px solid rgba(220, 38, 38, 0.3)",
+                  color: "#FCA5A5",
+                }}
+                role="alert"
+              >
+                {error}
+              </div>
+            )}
+
+            {/* Remember me + Forgot password */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: "22px",
+              }}
+            >
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  style={{
+                    position: "absolute",
+                    opacity: 0,
+                    width: 0,
+                    height: 0,
+                  }}
+                />
+                <span
+                  style={{
+                    width: "17px",
+                    height: "17px",
+                    borderRadius: "5px",
+                    flex: "none",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: rememberMe ? p.accent : "transparent",
+                    border: rememberMe
+                      ? `1px solid ${p.accent}`
+                      : `1.5px solid ${p.fieldBorder}`,
+                  }}
+                >
+                  {rememberMe && <Check size={12} color="#fff" />}
+                </span>
+                <span style={{ fontSize: "13px", color: p.sub }}>
+                  Remember me
+                </span>
+              </label>
+              <button
+                type="button"
+                onClick={() => navigate("/forgot-password")}
+                style={{
+                  background: "transparent",
+                  border: 0,
+                  padding: 0,
+                  cursor: "pointer",
+                  fontSize: "13px",
+                  color: p.accent,
+                  fontWeight: 600,
+                }}
+              >
+                Forgot Password?
+              </button>
+            </div>
+
+            {/* Sign In */}
+            <button
+              type="submit"
+              disabled={loading}
+              className="ml-btn-primary"
+            >
+              {loading ? "Signing in..." : "Sign In"}
+              {!loading && <ArrowRight size={19} color="#fff" />}
+            </button>
+
+            <div
+              style={{
+                height: "calc(env(safe-area-inset-bottom, 0px) + 28px)",
+              }}
+            />
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // ----- DESKTOP branch (>= lg) — existing premium split-panel, unchanged -----
   return (
     <>
       <style>{`
@@ -585,4 +1230,17 @@ export default function LoginPage() {
       </div>
     </>
   );
+}
+
+// ----- mobile field wrapper (icon + input row), styled to the sheet -----
+function mlFieldStyle(p: Palette): React.CSSProperties {
+  return {
+    background: p.fieldBg,
+    border: `1.5px solid ${p.fieldBorder}`,
+    borderRadius: "11px",
+    padding: "13px 14px",
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+  };
 }

@@ -518,6 +518,10 @@ export default function ConsignmentNotePage() {
 
   // ----- Data state (mirrors DO) -----
   const [cnList, setCnList] = useState<ConsignmentNoteRow[]>([]);
+  // Server-side search results (separate from the browse-page cnList so the
+  // browse-derived counts/readyPOs stay correct). Populated from the dedicated
+  // ?search= fetch; empty when not searching. Mirrors DO's searchResults.
+  const [cnSearchResults, setCnSearchResults] = useState<ConsignmentNoteRow[]>([]);
   const [planningPOs, setPlanningPOs] = useState<ReadyPORow[]>([]);
   const [readyPOs, setReadyPOs] = useState<ReadyPORow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -698,6 +702,31 @@ export default function ConsignmentNotePage() {
     success?: boolean;
     data?: ConsignmentNote[];
   }>(`/api/consignment-notes?page=${page}&limit=${PAGE_SIZE}`);
+
+  // Search load — SEPARATE from the browse load above so it never disturbs the
+  // derivations (readyPOs / counts) the browse page feeds. When the operator is
+  // searching the grid, hit the server with the term (high limit) so matches
+  // come from the WHOLE table across every status, not just the current 200-row
+  // browse page. Skipped entirely when not searching (null URL → no fetch).
+  // Feeds only the grid + cross-tab jump. Mirrors DO's doSearchRaw split.
+  const cnServerSearch = cnGridSearch.trim();
+  const { data: cnSearchRaw } = useCachedJson<{
+    success?: boolean;
+    data?: ConsignmentNote[];
+  }>(
+    cnServerSearch
+      ? `/api/consignment-notes?search=${encodeURIComponent(cnServerSearch)}&limit=2000`
+      : null,
+  );
+
+  // Authoritative "already on a non-cancelled CN" PO-id set — the COMPLETE set
+  // from the server, NOT capped by the 200-CN browse page. The readyPOs
+  // computation MUST exclude POs in this set; building it from the loaded
+  // (capped) CN list under-excluded once CN volume passed one page (the CN twin
+  // of the DO BUG-2026-06-27). See GET /api/consignment-notes/linked-po-ids.
+  const { data: cnLinkedRaw } = useCachedJson<{ poIds?: string[] }>(
+    "/api/consignment-notes/linked-po-ids",
+  );
 
   // Pull POs to build Planning + Pending CN tabs. Same endpoint DO uses,
   // but we filter for `consignmentOrderId` set instead of `salesOrderId`.
@@ -1078,6 +1107,25 @@ export default function ConsignmentNotePage() {
       );
     }
 
+    // Map the separate ?search= payload with the SAME row mapper so the grid
+    // and the cross-tab jump see fully-formed rows. Empty when not searching.
+    if (cnSearchRaw?.success && Array.isArray(cnSearchRaw.data)) {
+      setCnSearchResults(
+        (cnSearchRaw.data as ConsignmentNote[]).map((cn) =>
+          mapCNToRow(
+            cn,
+            productSizeMap,
+            productM3Map,
+            poToCoNoMap,
+            poToFabricMap,
+            poToRackMap,
+          ),
+        ),
+      );
+    } else {
+      setCnSearchResults([]);
+    }
+
     // Build PO-based tab data (Planning + Pending CN)
     if (poRaw?.success && Array.isArray(poRaw.data)) {
       // CO lookup map for hookkaExpectedDD + companyCOId join.
@@ -1092,27 +1140,22 @@ export default function ConsignmentNotePage() {
         }
       }
 
-      // CN dedup (precise as of migration 0066): walk every CN's items
-      // array and collect productionOrderId for any CN that's not
-      // CANCELLED. Mirrors DO's exact pattern (linkedPOIds set built from
-      // delivery_order_items.productionOrderId). Excludes CLOSED so a
-      // PO that already shipped + acknowledged doesn't permanently
-      // hide. Falls back to per-customer dedup on legacy CNs that
-      // pre-date 0066 (productionOrderId is null on those rows).
-      const cnLinkedPOIds = new Set<string>();
+      // CN dedup — AUTHORITATIVE source: the COMPLETE production-order-id set
+      // already on a non-cancelled CN, from GET /linked-po-ids (cnLinkedRaw).
+      // This is NOT capped by the 200-CN browse page, so it correctly hides POs
+      // already consigned even once CN volume passes one page (the old set was
+      // built from the loaded cnRaw.data, which under-excluded — CN twin of the
+      // DO BUG-2026-06-27). The endpoint excludes only CANCELLED CNs.
+      const cnLinkedPOIds = new Set<string>(cnLinkedRaw?.poIds ?? []);
+      // Legacy fallback (pre-0066 CNs whose items have no productionOrderId, so
+      // they never appear in the linked-po-ids set): fall back to per-customer
+      // dedup so their POs still hide. Walks the loaded CN page; legacy rows are
+      // few and old, so the browse page covers them.
       const cnLinkedCustomersLegacy = new Set<string>();
       if (cnRaw?.success && Array.isArray(cnRaw.data)) {
         for (const cn of cnRaw.data as ConsignmentNote[]) {
           if (cn.status === "CLOSED") continue;
-          let foundPoLink = false;
-          for (const item of cn.items) {
-            if (item.productionOrderId) {
-              cnLinkedPOIds.add(item.productionOrderId);
-              foundPoLink = true;
-            }
-          }
-          // Legacy CN (pre-0066) — items have no productionOrderId, so
-          // fall back to per-customer dedup so its POs still hide.
+          const foundPoLink = cn.items.some((item) => !!item.productionOrderId);
           if (
             !foundPoLink &&
             (cn.status === "ACTIVE" || cn.status === "PARTIALLY_SOLD")
@@ -1187,7 +1230,7 @@ export default function ConsignmentNotePage() {
         .map(mapPO);
       setReadyPOs(ready);
     }
-  }, [cnRaw, poRaw, coOrdersRaw, cnLoading, poLoading, coOrdersLoading, prodLoading, productM3Map, productSizeMap, poToCoNoMap, poToFabricMap, poToRackMap]);
+  }, [cnRaw, cnSearchRaw, cnLinkedRaw, poRaw, coOrdersRaw, cnLoading, poLoading, coOrdersLoading, prodLoading, productM3Map, productSizeMap, poToCoNoMap, poToFabricMap, poToRackMap]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ---------- One-shot ?focus=<cnId> deep link (global Ctrl+K palette) ----------
@@ -1230,10 +1273,12 @@ export default function ConsignmentNotePage() {
     // surface the row even if it sits on another tab. The DataGrid then
     // narrows these by the search term; the auto-jump below follows the
     // matches to their tab. Empty search keeps the normal tab-scoped view.
-    // (Covers the loaded page — newest 200 CNs across all statuses.)
-    if (cnGridSearch.trim()) return cnList;
+    // While searching, show the server's whole-table matches across every
+    // status (cnSearchResults is a separate set so the browse-derived
+    // counts/lists stay correct) — NOT just the loaded 200-CN browse page.
+    if (cnGridSearch.trim()) return cnSearchResults;
     return cnList.filter((c) => statuses.includes(c.status));
-  }, [cnList, activeTab, cnGridSearch]);
+  }, [cnList, cnSearchResults, activeTab, cnGridSearch]);
 
   // Unified search index (DO parity, 2026-06-12): the CN twin of the DO
   // page's searchJumpIndex — one index so the auto-jump below works across
@@ -1244,7 +1289,10 @@ export default function ConsignmentNotePage() {
   // values are the CN twin of DO's row-level salesOrderNos field.
   const searchJumpIndex = useMemo(() => {
     const entries: { tab: string; haystack: string }[] = [];
-    for (const cn of cnList) {
+    // While searching, the CNs that matter live in cnSearchResults (whole-table
+    // matches); the browse-page cnList may not contain the hit at all.
+    const cnSource = cnGridSearch.trim() ? cnSearchResults : cnList;
+    for (const cn of cnSource) {
       const tab = TAB_FOR_CN_STATUS[cn.status];
       if (!tab) continue; // status with no tab — never a jump target
       entries.push({
@@ -1262,7 +1310,7 @@ export default function ConsignmentNotePage() {
       });
     }
     return entries;
-  }, [cnList]);
+  }, [cnList, cnSearchResults, cnGridSearch]);
 
   // Follow the record to its tab (mirrors the DO page's auto-jump 1:1): a
   // matching CN is surfaced no matter which tab it sits on, but the tab

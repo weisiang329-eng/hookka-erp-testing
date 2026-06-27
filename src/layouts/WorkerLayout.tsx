@@ -153,6 +153,15 @@ export default function WorkerLayout() {
   // anyway as defense in depth — this just hides the entry point.
   const isLeader = (workerMe?.position ?? "") === "Operator Leader";
 
+  // The login screen is its own full-bleed, dark/light-themed design — render it
+  // WITHOUT the portal chrome (the #1F1D1B top bar + the max-w-md body wrapper).
+  // Otherwise that bar pokes through the full-screen overlay (it showed as a
+  // black "Worker Portal" strip over the LIGHT login — owner 2026-06-27). The
+  // version watcher + token guard above already ran (they're unconditional).
+  if (isLogin) {
+    return <Outlet />;
+  }
+
   return (
     <div className="min-h-screen bg-[#F0ECE9] flex flex-col text-[#1F1D1B]">
       {/* ----- Top bar ----- */}

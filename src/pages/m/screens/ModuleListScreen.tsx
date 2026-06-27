@@ -31,6 +31,12 @@ import {
 
 type Sort = { key: string; dir: "asc" | "desc" } | null;
 
+// Perf cap — the raw list can hold 1,800+ rows (Inventory). Painting that many
+// cards freezes a phone, so we render in pages and reveal more on demand. This
+// changes ONLY how many of the already-fetched rows are painted; the fetch and
+// the filtered/sorted set are untouched (counts, search, etc. still see all).
+const PAGE_SIZE = 40;
+
 export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   const navigate = useNavigate();
 
@@ -81,6 +87,23 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
     const filtered = applyFilters(byTab, source.columns, filters, search);
     return applySort(filtered, source.columns, sort);
   }, [sourceRows, source, tab, filters, search, sort]);
+
+  // How many rows are painted. Reset to the first page whenever the visible set
+  // changes (tab / source / filters / search / sort) so "Show more" never
+  // strands the list mid-scroll on a different dataset. Render-time state reset
+  // (the codebase's endorsed alternative to setState-in-effect).
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const resetKey = `${source.url}|${activeTab}|${search}|${JSON.stringify(
+    filters,
+  )}|${sort ? sort.key + sort.dir : ""}`;
+  const [lastResetKey, setLastResetKey] = useState(resetKey);
+  if (resetKey !== lastResetKey) {
+    setLastResetKey(resetKey);
+    setVisibleCount(PAGE_SIZE);
+  }
+
+  const visibleRows = rows.slice(0, visibleCount);
+  const hiddenCount = rows.length - visibleRows.length;
 
   // Per-tab count badges (design source shows a count on each segment pill).
   // Only the active source's tabs get real counts — tabs from other sources
@@ -210,7 +233,7 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
             }
           />
         ) : (
-          rows.map((row) => {
+          visibleRows.map((row) => {
             const vm = source.toVM(row);
             const dest = config.detailPath?.(vm, row) ?? null;
             return (
@@ -234,6 +257,27 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
             );
           })
         )}
+
+        {/* Show more — reveals the next page of the already-fetched rows. */}
+        {hiddenCount > 0 ? (
+          <button
+            onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}
+            style={{
+              marginTop: 3,
+              padding: "12px 0",
+              borderRadius: 12,
+              border: `1px solid ${M.hairline}`,
+              backgroundColor: M.card,
+              color: M.ink,
+              fontSize: 14,
+              fontWeight: 700,
+              cursor: "pointer",
+              WebkitTapHighlightColor: "transparent",
+            }}
+          >
+            Show more ({hiddenCount} more)
+          </button>
+        ) : null}
       </div>
 
       <div style={{ height: 12 }} />

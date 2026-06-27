@@ -15,7 +15,7 @@
 // ADDITIVE: consumes existing endpoints + the Phase-1 Sheet primitive only.
 // ===========================================================================
 import { useMemo, useState } from "react";
-import { Plus, Trash2, AlertCircle } from "lucide-react";
+import { Plus, Trash2, AlertCircle, Check } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { formatCurrency, roundSen } from "@/lib/utils";
 import { Sheet } from "./Sheet";
@@ -88,8 +88,48 @@ export function FormSheet({ open, onClose, spec, onSaved }: Props) {
   };
 
   return (
-    <Sheet open={open} onClose={onClose} title={spec.title}>
-      <div style={{ display: "grid", gap: 14 }}>
+    // No Sheet title — the editor renders its own header (title + red "Cancel"
+    // text link) to match the design source 1:1. Sheet still supplies the drag
+    // handle + backdrop-tap / Esc close.
+    <Sheet open={open} onClose={onClose}>
+      <div style={{ display: "grid", gap: 13 }}>
+        {/* Header — design source: title 18/800, "Cancel" red text link. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 3,
+          }}
+        >
+          <span
+            style={{
+              fontSize: 18,
+              fontWeight: 800,
+              color: M.raisin,
+              letterSpacing: "-0.3px",
+            }}
+          >
+            {spec.title}
+          </span>
+          <button
+            onClick={onClose}
+            disabled={saving}
+            style={{
+              background: "none",
+              border: "none",
+              padding: 4,
+              fontSize: 13,
+              fontWeight: 600,
+              color: "#9A3A2D",
+              cursor: "pointer",
+              WebkitTapHighlightColor: "transparent",
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+
         {spec.note ? (
           <div
             style={{
@@ -106,19 +146,10 @@ export function FormSheet({ open, onClose, spec, onSaved }: Props) {
           </div>
         ) : null}
 
-        {/* Field grid */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: "12px 10px",
-          }}
-        >
+        {/* Fields — design source: single column, full-width inputs. */}
+        <div style={{ display: "grid", gap: 13 }}>
           {spec.fields.map((f) => (
-            <div
-              key={f.name}
-              style={{ gridColumn: f.full ? "1 / -1" : undefined, minWidth: 0 }}
-            >
+            <div key={f.name} style={{ minWidth: 0 }}>
               <FieldControl
                 field={f}
                 value={values[f.name]}
@@ -157,15 +188,38 @@ export function FormSheet({ open, onClose, spec, onSaved }: Props) {
           </div>
         ) : null}
 
-        {/* Footer */}
-        <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
-          <button onClick={onClose} disabled={saving} style={btnStyle(false)}>
-            Cancel
-          </button>
-          <button onClick={handleSubmit} disabled={saving} style={btnStyle(true)}>
-            {saving ? "Saving…" : spec.submitLabel || "Save"}
-          </button>
-        </div>
+        {/* Footer — design source: full-width taupe Save with a check glyph. */}
+        <button
+          onClick={handleSubmit}
+          disabled={saving}
+          style={{
+            width: "100%",
+            height: 52,
+            marginTop: 3,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            borderRadius: 15,
+            border: "none",
+            backgroundColor: M.taupe,
+            color: "#fff",
+            fontSize: 15,
+            fontWeight: 700,
+            cursor: saving ? "default" : "pointer",
+            opacity: saving ? 0.7 : 1,
+            WebkitTapHighlightColor: "transparent",
+          }}
+        >
+          {saving ? (
+            "Saving…"
+          ) : (
+            <>
+              <Check size={19} strokeWidth={2.2} />
+              {spec.submitLabel || "Save"}
+            </>
+          )}
+        </button>
       </div>
     </Sheet>
   );
@@ -286,9 +340,15 @@ function Control({
       <textarea
         value={typeof value === "string" ? value : ""}
         placeholder={placeholder}
-        rows={3}
+        rows={4}
         onChange={(e) => onChange(e.target.value)}
-        style={{ ...style, resize: "vertical", minHeight: 64 }}
+        style={{
+          ...style,
+          height: "auto",
+          padding: "12px 14px",
+          resize: "vertical",
+          minHeight: 92,
+        }}
       />
     );
   }
@@ -358,6 +418,52 @@ function SelectControl({
 
   const opts = options ?? fetched;
 
+  // Design source: selects render as a wrap of pill chips, the active one
+  // filled taupe. When the option list is long (fetched catalogs, e.g. a
+  // customer/supplier picker) chips would overflow the sheet — fall back to a
+  // native select for those. The threshold keeps short status/scope enums as
+  // chips (the design's intent) while staying usable for big lists.
+  const asChips = !optionsUrl && opts.length > 0 && opts.length <= 6;
+
+  if (asChips) {
+    return (
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {opts.map((o) => {
+          const active = value === o.value;
+          return (
+            <span
+              key={o.value}
+              role="button"
+              tabIndex={0}
+              onClick={() => onChange(o.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onChange(o.value);
+                }
+              }}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "8px 13px",
+                borderRadius: 10,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+                border: `1px solid ${active ? M.taupe : M.hairline}`,
+                backgroundColor: active ? M.taupe : M.card,
+                color: active ? "#fff" : M.body,
+                WebkitTapHighlightColor: "transparent",
+              }}
+            >
+              {o.label}
+            </span>
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
     <select
       value={value}
@@ -414,26 +520,42 @@ function LineItemEditor({
   const removeItem = (i: number) => onChange(items.filter((_, idx) => idx !== i));
   const addItem = () => onChange([...items, spec.blank()]);
 
+  // Design source layout: the first text field is the "name" (full-width input
+  // + trash on the same row); every remaining field sits in a labelled column
+  // on a second flex row. This keeps the editor config-driven while matching
+  // the design's name / QTY / UNIT PRICE shape exactly.
+  const nameField = spec.fields.find((f) => f.kind === "text") ?? spec.fields[0];
+  const restFields = spec.fields.filter((f) => f !== nameField);
+
   return (
     <div>
+      {/* Header — design source: uppercase label + taupe "Add item" link. */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          marginBottom: 8,
+          margin: "5px 0 9px",
         }}
       >
-        <div style={{ fontSize: 12, fontWeight: 700, color: M.raisin }}>
-          {spec.label} ({items.length})
-        </div>
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 700,
+            color: "#A89F8D",
+            textTransform: "uppercase",
+            letterSpacing: "0.4px",
+          }}
+        >
+          {spec.label}
+        </span>
         <button onClick={addItem} style={addBtnStyle}>
-          <Plus size={14} strokeWidth={2.2} />
-          Add
+          <Plus size={16} strokeWidth={2.2} />
+          Add item
         </button>
       </div>
 
-      <div style={{ display: "grid", gap: 10 }}>
+      <div style={{ display: "grid", gap: 9 }}>
         {items.length === 0 ? (
           <div
             style={{
@@ -445,7 +567,7 @@ function LineItemEditor({
               textAlign: "center",
             }}
           >
-            No line items yet — tap Add.
+            No line items yet — tap Add item.
           </div>
         ) : (
           items.map((it, i) => (
@@ -454,66 +576,90 @@ function LineItemEditor({
               style={{
                 border: `1px solid ${M.border}`,
                 borderRadius: 12,
-                padding: 10,
+                padding: "11px 12px",
                 backgroundColor: M.card,
               }}
             >
-              <div style={{ display: "grid", gap: 8 }}>
-                {spec.fields.map((lf) => (
-                  <div key={lf.name}>
-                    <Label text={lf.label} required={lf.required} small />
+              {/* Name row + trash (design source). */}
+              {nameField ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
                     <Control
-                      kind={lf.kind}
-                      value={it[lf.name]}
-                      onChange={(v) => updateItem(i, lf.name, v)}
-                      placeholder={lf.placeholder}
-                      options={lf.options}
-                      optionsUrl={lf.optionsUrl}
-                      optionsSelect={lf.optionsSelect}
-                      optionsMap={lf.optionsMap}
+                      kind={nameField.kind}
+                      value={it[nameField.name]}
+                      onChange={(v) => updateItem(i, nameField.name, v)}
+                      placeholder={nameField.placeholder ?? "Item name"}
+                      options={nameField.options}
+                      optionsUrl={nameField.optionsUrl}
+                      optionsSelect={nameField.optionsSelect}
+                      optionsMap={nameField.optionsMap}
                       compact
                     />
                   </div>
-                ))}
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "flex-end",
-                  marginTop: 8,
-                }}
-              >
-                <button onClick={() => removeItem(i)} style={removeBtnStyle}>
-                  <Trash2 size={13} strokeWidth={2} />
-                  Remove
-                </button>
-              </div>
+                  <button
+                    onClick={() => removeItem(i)}
+                    aria-label="Remove item"
+                    style={trashBtnStyle}
+                  >
+                    <Trash2 size={18} strokeWidth={2} />
+                  </button>
+                </div>
+              ) : null}
+
+              {/* Remaining fields (QTY, UNIT PRICE, …) on a labelled flex row. */}
+              {restFields.length ? (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-end",
+                    gap: 8,
+                    marginTop: 8,
+                  }}
+                >
+                  {restFields.map((lf) => (
+                    <div key={lf.name} style={{ flex: lf.grow ?? 1, minWidth: 0 }}>
+                      <Label text={lf.label} required={lf.required} small />
+                      <Control
+                        kind={lf.kind}
+                        value={it[lf.name]}
+                        onChange={(v) => updateItem(i, lf.name, v)}
+                        placeholder={lf.placeholder}
+                        options={lf.options}
+                        optionsUrl={lf.optionsUrl}
+                        optionsSelect={lf.optionsSelect}
+                        optionsMap={lf.optionsMap}
+                        compact
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ))
         )}
       </div>
 
+      {/* Total — design source: plain row (no card), "Total" left, big amount
+          right. Wording kept as "Amount" per the spec when no qty/price total
+          is computable; the live qty×price sum reads "Total" like the design. */}
       {total != null ? (
         <div
           style={{
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
-            marginTop: 12,
-            padding: "10px 12px",
-            backgroundColor: M.card,
-            border: `1px solid ${M.border}`,
-            borderRadius: 12,
+            padding: "8px 4px 4px",
           }}
         >
-          <span style={{ fontSize: 13, fontWeight: 600, color: M.body }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: M.muted }}>
             Amount
           </span>
           <span
             style={{
-              fontSize: 16,
+              fontSize: 18,
               fontWeight: 800,
               color: M.raisin,
+              letterSpacing: "-0.3px",
               fontVariantNumeric: "tabular-nums",
             }}
           >
@@ -536,13 +682,17 @@ function Label({
   required?: boolean;
   small?: boolean;
 }) {
+  // Design source: uppercase label, 11/700, letter-spacing .4, taupe-grey ink.
+  // Line-item cell labels (small) drop to 10px without uppercase emphasis.
   return (
     <div
       style={{
         fontSize: small ? 10 : 11,
-        color: M.muted,
-        marginBottom: 3,
-        fontWeight: 600,
+        color: "#A89F8D",
+        marginBottom: small ? 3 : 7,
+        fontWeight: small ? 600 : 700,
+        textTransform: small ? "none" : "uppercase",
+        letterSpacing: small ? undefined : "0.4px",
       }}
     >
       {text}
@@ -551,67 +701,57 @@ function Label({
   );
 }
 
+// Design source: full-width input, 46px tall, radius 12, #E2DDD8 hairline,
+// white fill, 15px raisin ink.
 const inputStyle: React.CSSProperties = {
   width: "100%",
   minWidth: 0,
-  padding: "9px 12px",
+  height: 46,
+  padding: "0 14px",
   borderRadius: 12,
-  border: `1px solid ${M.border}`,
+  border: `1px solid ${M.hairline}`,
   backgroundColor: M.card,
-  fontSize: 14,
+  fontSize: 15,
   color: M.raisin,
   outline: "none",
   fontVariantNumeric: "tabular-nums",
   boxSizing: "border-box",
 };
 
+// Line-item cell input — design source: 38px tall, radius 9, 14px.
 const inputStyleCompact: React.CSSProperties = {
   ...inputStyle,
-  padding: "8px 10px",
-  fontSize: 13,
+  height: 38,
+  padding: "0 11px",
+  borderRadius: 9,
+  fontSize: 14,
 };
 
-function btnStyle(primary: boolean): React.CSSProperties {
-  return {
-    flex: 1,
-    padding: "12px 0",
-    borderRadius: 12,
-    border: `1px solid ${primary ? M.taupe : M.border}`,
-    backgroundColor: primary ? M.taupe : M.card,
-    color: primary ? "#fff" : M.body,
-    fontSize: 14,
-    fontWeight: 700,
-    cursor: "pointer",
-    WebkitTapHighlightColor: "transparent",
-  };
-}
-
+// Design source: "Add item" is a taupe text link (icon + label), not a pill.
 const addBtnStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  gap: 4,
-  padding: "6px 12px",
-  borderRadius: 9999,
-  border: `1px solid ${M.taupe}`,
-  backgroundColor: M.taupe,
-  color: "#fff",
-  fontSize: 12,
-  fontWeight: 700,
+  gap: 5,
+  padding: 0,
+  border: "none",
+  background: "none",
+  color: M.taupe,
+  fontSize: 13,
+  fontWeight: 600,
   cursor: "pointer",
   WebkitTapHighlightColor: "transparent",
 };
 
-const removeBtnStyle: React.CSSProperties = {
-  display: "inline-flex",
+// Design source: bare red trash glyph beside the item name.
+const trashBtnStyle: React.CSSProperties = {
+  display: "flex",
   alignItems: "center",
-  gap: 4,
-  padding: "5px 10px",
-  borderRadius: 9999,
-  border: `1px solid ${M.border}`,
-  backgroundColor: M.card,
+  justifyContent: "center",
+  flex: "none",
+  padding: 4,
+  border: "none",
+  background: "none",
   color: "#9A3A2D",
-  fontSize: 11,
-  fontWeight: 600,
   cursor: "pointer",
   WebkitTapHighlightColor: "transparent",
 };

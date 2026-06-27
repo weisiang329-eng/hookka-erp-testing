@@ -770,8 +770,9 @@ export default function WorkerHomePage() {
     return Number.isFinite(remindedMs) && remindedMs > ackedAtMs;
   });
   const popupAnnouncements = unackedAnnouncements;
-  // Unread dot — un-acked notices the worker hasn't opened on this device yet.
-  const unreadAnnouncements = unackedAnnouncements.filter(
+  // Unread dot — any active notice the worker hasn't opened on this device yet.
+  // (The home banner shows ALL active notices; acked ones just fold to title.)
+  const unreadAnnouncements = announcements.filter(
     (a) => !seenAnn.has(a.id),
   ).length;
   // Show the location nudge whenever we did NOT end up granted (denied OR the
@@ -853,8 +854,11 @@ export default function WorkerHomePage() {
       {/* Announcements (Feature A) — office posts the worker hasn't acknowledged
           yet, newest first. Once tapped "Got it" a notice drops off here and
           moves to Me → past announcements (owner 2026-06-27 "B"). Tapping the
-          card marks everything seen (clears the unread dots). */}
-      {unackedAnnouncements.length > 0 && (
+          card marks everything seen (clears the unread dots). Owner 2026-06-27:
+          ALL active notices stay on home; tapping "Got it" just FOLDS the notice
+          to its title here (it doesn't leave home). It only drops into Me → past
+          announcements once it EXPIRES. */}
+      {announcements.length > 0 && (
         <div className="bg-white rounded-xl border border-[#D8D2CC] shadow-sm overflow-hidden">
           <div className="flex items-center gap-2 px-4 py-2.5 bg-[#6B5C32] text-white">
             <Megaphone className="h-4 w-4" />
@@ -869,9 +873,16 @@ export default function WorkerHomePage() {
             onClick={markAnnouncementsSeen}
             className="divide-y divide-[#F0ECE9]"
           >
-            {unackedAnnouncements.map((a) => {
+            {announcements.map((a) => {
               const unread = !seenAnn.has(a.id);
-              const collapsed = collapsedAnn.has(a.id);
+              // Acked notices DEFAULT to folded (title only); un-acked default
+              // open. collapsedAnn is a manual OVERRIDE: present = flipped from
+              // the default. So Got-it folds it here, but the worker can still
+              // tap to re-open, and a new notice shows open until acked.
+              const defaultCollapsed = ackAnn.has(a.id);
+              const collapsed = collapsedAnn.has(a.id)
+                ? !defaultCollapsed
+                : defaultCollapsed;
               const { title, body } = localizeAnnouncement(a, lang);
               return (
                 <li key={a.id} className="px-4 py-3">

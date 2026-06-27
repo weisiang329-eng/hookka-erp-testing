@@ -93,10 +93,10 @@ const dict: Dict = {
     my: 'ပထမဆုံးအကြိမ် ပြင်ဆင်ခြင်း',
   },
   'login.setupDesc': {
-    en: 'Create a 4-digit PIN for this employee number. You\'ll use it every time.',
-    ms: 'Buat PIN 4 digit untuk nombor pekerja ini. Anda akan gunakannya setiap kali.',
-    zh: '为此工号创建一个 4 位 PIN 密码，以后每次登录都会用到。',
-    my: 'ဤဝန်ထမ်းနံပါတ်အတွက် ၄လုံးပါ PIN တစ်ခု ဖန်တီးပါ။ အဆင်အမြဲ သုံးပါမည်။',
+    en: 'Create a 6-digit PIN for this employee number. You\'ll use it every time.',
+    ms: 'Buat PIN 6 digit untuk nombor pekerja ini. Anda akan gunakannya setiap kali.',
+    zh: '为此工号创建一个 6 位 PIN 密码，以后每次登录都会用到。',
+    my: 'ဤဝန်ထမ်းနံပါတ်အတွက် ၆လုံးပါ PIN တစ်ခု ဖန်တီးပါ။ အဆင်အမြဲ သုံးပါမည်။',
   },
   'login.newPin': { en: 'New PIN', ms: 'PIN Baru', zh: '新 PIN', my: 'PIN အသစ်' },
   'login.confirmPin': {

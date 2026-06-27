@@ -727,12 +727,12 @@ export default function WorkerHomePage() {
 
   if (loading) {
     return (
-      <div className="pt-10 text-center text-sm font-medium text-[#8A7F73]">{t("common.loading")}</div>
+      <div className="pt-8 text-center text-[#5A5550]">{t("common.loading")}</div>
     );
   }
   if (!data) {
     return (
-      <div className="pt-10 text-center text-sm font-medium text-[#9A3A2D]">{t("common.error")}</div>
+      <div className="pt-8 text-center text-[#9A3A2D]">{t("common.error")}</div>
     );
   }
 
@@ -781,7 +781,7 @@ export default function WorkerHomePage() {
   const showLocNudge = locState === "denied" || locState === "unavailable";
 
   return (
-    <div className="space-y-5 pt-1">
+    <div className="space-y-4 pt-2">
       {/* Must-acknowledge announcement popup. A passive banner is too easy to
           miss, so any ACTIVE announcement this device hasn't tapped "Got it" on
           pops as a centered modal the moment the worker lands on the home screen
@@ -792,38 +792,36 @@ export default function WorkerHomePage() {
           absent from the ack set, so it pops on the next open. */}
       {popupAnnouncements.length > 0 && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-[#1F1D1B]/55 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
           role="dialog"
           aria-modal="true"
         >
-          <div className="w-full max-w-sm overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-[#1F1D1B]/10">
-            <div className="flex items-center gap-2.5 bg-[#1F1D1B] px-5 py-4 text-white">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#6B5C32]">
-                <Megaphone className="h-5 w-5" />
-              </span>
-              <span className="text-base font-bold tracking-tight">
+          <div className="w-full max-w-sm overflow-hidden rounded-2xl bg-white shadow-xl">
+            <div className="flex items-center gap-2 bg-[#6B5C32] px-4 py-3 text-white">
+              <Megaphone className="h-5 w-5 shrink-0" />
+              <span className="text-base font-bold">
                 {t("home.announcementPopupTitle")}
               </span>
             </div>
-            <div className="max-h-[60vh] divide-y divide-[#EFEAE0] overflow-y-auto px-5 py-1">
+            <div className="max-h-[60vh] divide-y divide-[#F0ECE9] overflow-y-auto px-4 py-1">
               {popupAnnouncements.map((a) => {
                 const { title, body } = localizeAnnouncement(a, lang);
                 return (
-                  <div key={a.id} className="py-4">
-                    <div className="mb-1.5">
+                  <div key={a.id} className="py-3">
+                    <div className="mb-1">
                       <AnnouncementCategoryBadge category={a.category} />
                     </div>
-                    <p className="text-base font-bold leading-snug text-[#1F1D1B] break-words">
+                    <p className="text-base font-bold text-[#1F1D1B] break-words">
                       {title}
                     </p>
                     {body && (
-                      <p className="mt-1.5 whitespace-pre-wrap break-words text-sm leading-relaxed text-[#6B7280]">
+                      <p className="mt-1 whitespace-pre-wrap break-words text-sm text-[#5A5550]">
                         {body}
                       </p>
                     )}
                     <AnnouncementMedia attachments={a.attachments} />
                     {a.createdAt && (
-                      <p className="mt-2 text-[11px] text-[#A89F92]">
+                      <p className="mt-1.5 text-[11px] text-[#9CA3AF]">
                         {fmtDay(a.createdAt)}
                       </p>
                     )}
@@ -831,11 +829,11 @@ export default function WorkerHomePage() {
                 );
               })}
             </div>
-            <div className="px-5 pb-5 pt-3">
+            <div className="px-4 pb-4 pt-2">
               <button
                 type="button"
                 onClick={() => acknowledgeAnnouncements(popupAnnouncements)}
-                className="h-12 w-full rounded-xl bg-[#6B5C32] text-base font-bold text-white shadow-sm transition-all hover:bg-[#574A28] active:translate-y-[1px] active:shadow-none"
+                className="h-12 w-full rounded-xl bg-[#6B5C32] text-base font-bold text-white transition-colors hover:bg-[#5a4d2a] active:translate-y-[1px]"
               >
                 {t("home.announcementGotIt")}
               </button>
@@ -845,12 +843,10 @@ export default function WorkerHomePage() {
       )}
 
       {/* Greeting */}
-      <div className="px-0.5 pt-1">
-        <p className="text-sm font-medium text-[#8A7F73]">{t("home.hello")},</p>
-        <h1 className="text-2xl font-extrabold leading-tight tracking-tight text-[#1F1D1B]">
-          {displayName}
-        </h1>
-        <p className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-[#6B5C32] ring-1 ring-[#E7E0D4]">
+      <div>
+        <p className="text-sm text-[#5A5550]">{t("home.hello")},</p>
+        <h1 className="text-xl font-bold leading-tight">{displayName}</h1>
+        <p className="text-xs text-[#8A8680]">
           {data.worker.empNo} · {data.worker.departmentCode}
         </p>
       </div>
@@ -863,21 +859,19 @@ export default function WorkerHomePage() {
           to its title here (it doesn't leave home). It only drops into Me → past
           announcements once it EXPIRES. */}
       {announcements.length > 0 && (
-        <div className="overflow-hidden rounded-xl border-[0.5px] border-[#E7E0D4] bg-white shadow-[0_1px_3px_rgba(31,29,27,0.05)]">
-          <div className="flex items-center gap-2.5 border-b-[0.5px] border-[#E7E0D4] bg-[#FAF8F4] px-4 py-3">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#6B5C32] text-white">
-              <Megaphone className="h-4 w-4" />
-            </span>
-            <span className="text-sm font-bold tracking-tight text-[#1F1D1B]">{t("home.announcements")}</span>
+        <div className="bg-white rounded-xl border border-[#D8D2CC] shadow-sm overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-[#6B5C32] text-white">
+            <Megaphone className="h-4 w-4" />
+            <span className="text-sm font-semibold">{t("home.announcements")}</span>
             {unreadAnnouncements > 0 && (
-              <span className="ml-auto inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-[#9A3A2D] px-1.5 text-[11px] font-bold text-white">
+              <span className="ml-auto inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-[#9A3A2D] px-1.5 text-[11px] font-bold">
                 {unreadAnnouncements}
               </span>
             )}
           </div>
           <ul
             onClick={markAnnouncementsSeen}
-            className="divide-y divide-[#EFEAE0]"
+            className="divide-y divide-[#F0ECE9]"
           >
             {announcements.map((a) => {
               const unread = !seenAnn.has(a.id);
@@ -891,10 +885,10 @@ export default function WorkerHomePage() {
                 : defaultCollapsed;
               const { title, body } = localizeAnnouncement(a, lang);
               return (
-                <li key={a.id} className="px-4 py-3.5">
+                <li key={a.id} className="px-4 py-3">
                   {/* Category badge — always visible (even when collapsed) so
                       the worker can scan notice types at a glance. */}
-                  <div className="mb-1.5">
+                  <div className="mb-1">
                     <AnnouncementCategoryBadge category={a.category} />
                   </div>
                   {/* Header row — tap to fold/unfold (owner 2026-06-26). The
@@ -910,7 +904,7 @@ export default function WorkerHomePage() {
                         className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-[#9A3A2D]"
                       />
                     )}
-                    <p className="min-w-0 flex-1 text-sm font-bold leading-snug text-[#1F1D1B] break-words">
+                    <p className="min-w-0 flex-1 text-sm font-semibold text-[#1F1D1B] break-words">
                       {title}
                       {unread && (
                         <span className="ml-1.5 align-middle text-[10px] font-bold uppercase tracking-wide text-[#9A3A2D]">
@@ -919,19 +913,19 @@ export default function WorkerHomePage() {
                       )}
                     </p>
                     <ChevronDown
-                      className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A7F73] transition-transform ${collapsed ? "" : "rotate-180"}`}
+                      className={`mt-0.5 h-4 w-4 shrink-0 text-[#8A8680] transition-transform ${collapsed ? "" : "rotate-180"}`}
                     />
                   </button>
                   {!collapsed && (
-                    <div className="mt-1 pl-0">
+                    <div className="mt-0.5 pl-0">
                       {body && (
-                        <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-[#6B7280]">
+                        <p className="whitespace-pre-wrap break-words text-xs text-[#5A5550]">
                           {body}
                         </p>
                       )}
                       <AnnouncementMedia attachments={a.attachments} />
                       {a.createdAt && (
-                        <p className="mt-1.5 text-[10px] text-[#A89F92]">
+                        <p className="mt-1 text-[10px] text-[#9CA3AF]">
                           {fmtDay(a.createdAt)}
                         </p>
                       )}
@@ -947,16 +941,14 @@ export default function WorkerHomePage() {
       {/* Location nudge (Feature B) — shown when location is denied/unavailable
           so the worker's punch can stamp "At factory". Never blocks clock-in. */}
       {showLocNudge && (
-        <div className="rounded-xl border-[0.5px] border-[#E5C98A] bg-[#FBF4E4] p-4">
-          <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#9C6F1E]/12 text-[#9C6F1E]">
-              <MapPin className="h-5 w-5" />
-            </span>
+        <div className="bg-[#FFF6E9] border border-[#E5C98A] rounded-xl p-3.5">
+          <div className="flex items-start gap-2.5">
+            <MapPin className="h-5 w-5 shrink-0 text-[#9C6F1E]" />
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-bold text-[#7A5512]">
+              <p className="text-sm font-semibold text-[#7A5512]">
                 {t("home.locationNeededTitle")}
               </p>
-              <p className="mt-0.5 text-xs leading-relaxed text-[#7A5512]">
+              <p className="mt-0.5 text-xs text-[#7A5512]">
                 {t("home.locationNeededBody")}
               </p>
               <p className="mt-1 text-[11px] text-[#9C6F1E]">
@@ -965,7 +957,7 @@ export default function WorkerHomePage() {
               <button
                 type="button"
                 onClick={retryLocation}
-                className="mt-3 h-9 rounded-lg bg-[#9C6F1E] px-4 text-sm font-semibold text-white shadow-sm transition-all hover:bg-[#86601a] active:translate-y-[1px]"
+                className="mt-2 h-9 rounded-lg bg-[#9C6F1E] px-4 text-sm font-semibold text-white hover:bg-[#86601a] transition-colors"
               >
                 {t("home.locationRetry")}
               </button>
@@ -980,13 +972,13 @@ export default function WorkerHomePage() {
           full-width CLOCK OUT button. */}
       {/* Clock card */}
       {SHOW_CLOCK && (
-      <div className="space-y-2.5">
+      <div className="space-y-2">
         {!clockedIn ? (
           <button
             type="button"
             onClick={() => handleClock("CLOCK_IN")}
             disabled={clocking}
-            className="block w-full h-[68px] rounded-xl bg-[#3E6570] hover:bg-[#355863] text-white text-xl font-bold tracking-wide shadow-[0_2px_8px_rgba(62,101,112,0.28)] active:shadow-sm active:translate-y-[1px] transition-all disabled:opacity-60"
+            className="block w-full h-20 rounded-xl bg-[#3E6570] hover:bg-[#355863] text-white text-xl font-bold tracking-wide shadow-md active:shadow-sm active:translate-y-[1px] transition-all disabled:opacity-60"
           >
             <span className="h-full w-full flex items-center justify-center gap-3">
               {clocking ? (
@@ -1004,22 +996,22 @@ export default function WorkerHomePage() {
           </button>
         ) : (
           <>
-            {/* Time / worked summary — white card with hairline border. */}
-            <div className="flex items-center justify-between rounded-xl border-[0.5px] border-[#E7E0D4] bg-white px-4 py-3.5 shadow-[0_1px_3px_rgba(31,29,27,0.05)]">
+            {/* Time / worked summary — light strip, not a framed card. */}
+            <div className="flex items-center justify-between rounded-lg bg-[#F3EFE9] px-4 py-2.5">
               <div>
-                <p className="text-[11px] font-medium uppercase tracking-wide text-[#8A7F73]">
+                <p className="text-xs text-[#8A8680]">
                   {clockedOut ? t("home.clockedOutAt") : t("home.clockedInAt")}
                 </p>
-                <p className="mt-0.5 text-xl font-extrabold tabular-nums text-[#1F1D1B]">
+                <p className="text-lg font-bold">
                   {clockedOut ? data.attendance!.clockOut : data.attendance!.clockIn}
                 </p>
               </div>
               {data.attendance!.workingMinutes > 0 && (
                 <div className="text-right">
-                  <p className="text-[11px] font-medium uppercase tracking-wide text-[#8A7F73]">
+                  <p className="text-xs text-[#8A8680]">
                     {t("home.workedHours")}
                   </p>
-                  <p className="mt-0.5 text-xl font-extrabold tabular-nums text-[#6B5C32]">
+                  <p className="text-lg font-bold">
                     {fmtHM(data.attendance!.workingMinutes)}
                   </p>
                 </div>
@@ -1030,7 +1022,7 @@ export default function WorkerHomePage() {
                 type="button"
                 onClick={() => handleClock("CLOCK_OUT")}
                 disabled={clocking}
-                className="block w-full h-[68px] rounded-xl bg-[#3E6570] hover:bg-[#355863] text-white text-xl font-bold tracking-wide shadow-[0_2px_8px_rgba(62,101,112,0.28)] active:shadow-sm active:translate-y-[1px] transition-all disabled:opacity-60"
+                className="block w-full h-20 rounded-xl bg-[#3E6570] hover:bg-[#355863] text-white text-xl font-bold tracking-wide shadow-md active:shadow-sm active:translate-y-[1px] transition-all disabled:opacity-60"
               >
                 <span className="h-full w-full flex items-center justify-center gap-3">
                   {clocking ? (
@@ -1050,13 +1042,13 @@ export default function WorkerHomePage() {
           </>
         )}
         {clockErr && (
-          <div className="mt-2 rounded-xl border-[0.5px] border-[#E8C4BD] bg-[#FBF1EF] px-4 py-3 text-center">
-            <p className="text-sm font-semibold text-[#9A3A2D]">{clockErr}</p>
+          <div className="mt-2 text-center">
+            <p className="text-sm font-medium text-[#9A3A2D]">{clockErr}</p>
             {/* The selfie uses the phone's native camera: if the OS has camera
                 blocked for the browser app, the picker opens with no camera and
                 the worker only sees "photo required" forever. Tell them the fix
                 — every new tap retries, so once allowed it just works. */}
-            <p className="mt-1 text-xs text-[#8A7F73]">
+            <p className="mt-1 text-xs text-[#8A8680]">
               {t("home.cameraBlockedHint")}
             </p>
           </div>
@@ -1091,15 +1083,11 @@ export default function WorkerHomePage() {
       {SHOW_SCAN && (
       <Link
         to="/worker/scan"
-        className="block w-full h-[88px] rounded-xl bg-[#1F1D1B] hover:bg-[#2C2925] text-white shadow-[0_2px_10px_rgba(31,29,27,0.25)] active:shadow-sm active:translate-y-[1px] transition-all"
+        className="block w-full h-20 rounded-xl bg-[#6B5C32] hover:bg-[#5a4d2a] text-white text-xl font-bold tracking-wide shadow-md active:shadow-sm active:translate-y-[1px] transition-all"
       >
-        <span className="h-full w-full flex items-center justify-center gap-3.5">
-          <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#6B5C32]">
-            <ScanLine className="h-7 w-7" />
-          </span>
-          <span className="text-2xl font-extrabold tracking-wide">
-            {t("home.scanBig")}
-          </span>
+        <span className="h-full w-full flex items-center justify-center gap-3">
+          <ScanLine className="h-7 w-7" />
+          {t("home.scanBig")}
         </span>
       </Link>
       )}
@@ -1108,7 +1096,7 @@ export default function WorkerHomePage() {
       {SHOW_CLOCK_AND_SCAN && (
       <Link
         to="/worker/issue"
-        className="block w-full h-12 rounded-xl border-[0.5px] border-[#E7E0D4] bg-white text-sm font-semibold text-[#9A3A2D] shadow-[0_1px_3px_rgba(31,29,27,0.05)] transition-colors hover:bg-[#FDF6F4]"
+        className="block w-full h-12 rounded-lg bg-white border border-[#D8D2CC] text-[#9A3A2D] font-semibold text-sm hover:bg-[#FDF6F4] transition-colors"
       >
         <span className="h-full w-full flex items-center justify-center gap-2">
           <AlertTriangle className="h-4 w-4" />
@@ -1119,21 +1107,21 @@ export default function WorkerHomePage() {
 
       {/* Breakdown by dept (only if any work done today) */}
       {Object.keys(data.doneByDept).length > 0 && (
-        <div className="rounded-xl border-[0.5px] border-[#E7E0D4] bg-white p-4 shadow-[0_1px_3px_rgba(31,29,27,0.05)]">
-          <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A7F73]">
+        <div className="bg-white rounded-xl p-4 border border-[#D8D2CC]">
+          <p className="text-xs text-[#8A8680] mb-2 font-medium">
             {t("home.piecesDone")}
           </p>
-          <div className="space-y-2.5">
+          <div className="space-y-1.5">
             {Object.entries(data.doneByDept).map(([code, n]) => (
               <div
                 key={code}
                 className="flex items-center justify-between text-sm"
               >
-                <span className="flex items-center gap-2 font-medium text-[#1F1D1B]">
+                <span className="flex items-center gap-1.5 text-[#1F1D1B]">
                   <CheckCircle2 className="h-4 w-4 text-[#3E6570]" />
                   {code}
                 </span>
-                <span className="text-base font-bold tabular-nums text-[#1F1D1B]">{n}</span>
+                <span className="font-semibold">{n}</span>
               </div>
             ))}
           </div>
@@ -1146,35 +1134,35 @@ export default function WorkerHomePage() {
       {/* Matches the Google Sheet "Employee Detail Dashboard" layout.
           From/To pickers drive both the KPI tiles and the per-day /
           per-product tables. */}
-      <div className="mt-5 rounded-xl bg-[#1F1D1B] p-4 text-white shadow-[0_2px_10px_rgba(31,29,27,0.18)]">
-        <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#C9A961]">
+      <div className="bg-[#1B2B44] text-white rounded-xl p-4 mt-4">
+        <p className="text-[11px] font-bold uppercase tracking-[0.15em] text-white/70">
           {t("home.dashboardTitle")}
         </p>
 
-        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
           <label className="block">
-            <span className="text-[11px] font-medium text-white/55">{t("pay.from")}</span>
+            <span className="text-[11px] text-white/60">{t("pay.from")}</span>
             <input
               type="date"
               value={from}
               onChange={(e) => setFrom(e.target.value)}
-              className="mt-1 h-11 w-full appearance-none rounded-lg border border-white/15 bg-white/10 px-3 pr-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#C9A961]"
+              className="w-full h-11 px-3 pr-2 rounded bg-white/10 text-white text-sm border border-white/20 focus:outline-none focus:ring-2 focus:ring-[#6B5C32] appearance-none"
               style={{ colorScheme: "dark" }}
             />
           </label>
           <label className="block">
-            <span className="text-[11px] font-medium text-white/55">{t("pay.to")}</span>
+            <span className="text-[11px] text-white/60">{t("pay.to")}</span>
             <input
               type="date"
               value={to}
               onChange={(e) => setTo(e.target.value)}
-              className="mt-1 h-11 w-full appearance-none rounded-lg border border-white/15 bg-white/10 px-3 pr-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#C9A961]"
+              className="w-full h-11 px-3 pr-2 rounded bg-white/10 text-white text-sm border border-white/20 focus:outline-none focus:ring-2 focus:ring-[#6B5C32] appearance-none"
               style={{ colorScheme: "dark" }}
             />
           </label>
         </div>
 
-        <div className="-mx-1 mt-3 flex gap-2 overflow-x-auto px-1">
+        <div className="flex gap-1.5 mt-2 overflow-x-auto -mx-1 px-1">
           <Chip onClick={() => setPreset("today")}>{t("home.todayChip")}</Chip>
           <Chip onClick={() => setPreset("7d")}>{t("home.last7d")}</Chip>
           <Chip onClick={() => setPreset("30d")}>{t("home.last30d")}</Chip>
@@ -1217,7 +1205,7 @@ export default function WorkerHomePage() {
           shown when the worker has approved extra-time claims — otherwise the
           row is absent and the KPI strip looks exactly as before. */}
       {hist && (hist.totals.addProdMinutes ?? 0) > 0 && (
-        <div className="-mt-1.5 px-0.5 text-xs font-medium text-[#2A5A8A]">
+        <div className="-mt-1 text-xs text-[#2A5A8A]">
           + {mins2hrs(hist.totals.addProdMinutes ?? 0)} {t("timeadj.extraApproved")}
         </div>
       )}
@@ -1257,24 +1245,24 @@ export default function WorkerHomePage() {
               return (
                 <div
                   key={c.jobCardId}
-                  className="border-t border-[#EFEAE0] py-3 text-sm"
+                  className="py-2.5 text-sm border-t border-[#F0ECE9]"
                 >
                   <div className="flex items-center gap-2">
-                    <span className="whitespace-nowrap text-xs tabular-nums text-[#8A7F73]">
+                    <span className="tabular-nums text-xs text-[#5A5550] whitespace-nowrap">
                       {fmtDay(c.completedDate || "")}
                     </span>
-                    <span className="whitespace-nowrap rounded-md bg-[#F4F0E8] px-1.5 py-0.5 text-[11px] font-semibold text-[#6B5C32]">
+                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#5A5550] font-semibold whitespace-nowrap">
                       {c.departmentCode}
                     </span>
                     <span className="flex-1" />
-                    <span className="text-right font-bold tabular-nums text-[#1F1D1B]">
+                    <span className="tabular-nums text-right font-semibold">
                       {c.myMinutes} min
                     </span>
                   </div>
-                  <div className="mt-1 break-words text-xs font-medium text-[#1F1D1B]">
+                  <div className="mt-1 text-xs text-[#1F1D1B] break-words">
                     {label}
                     {c.totalPieces > 1 && (
-                      <span className="ml-1 text-[10px] text-[#8A7F73]">
+                      <span className="ml-1 text-[10px] text-[#8A8680]">
                         ({c.piecesWorked}/{c.totalPieces})
                       </span>
                     )}
@@ -1286,21 +1274,21 @@ export default function WorkerHomePage() {
                             prev === c.jobCardId ? null : c.jobCardId,
                           )
                         }
-                        className="ml-1 text-[10px] text-[#6B5C32] underline decoration-dotted underline-offset-2 hover:text-[#574A28]"
+                        className="ml-1 text-[10px] text-[#6B5C32] underline decoration-dotted underline-offset-2 hover:text-[#5a4d2a]"
                       >
                         · share
                       </button>
                     )}
                   </div>
                   {(c.addProdMinutes ?? 0) > 0 && (
-                    <div className="mt-1.5">
-                      <span className="inline-flex items-center rounded-md bg-[#E4ECF5] px-1.5 py-0.5 text-[10px] font-semibold text-[#2A5A8A]">
+                    <div className="mt-1">
+                      <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-[#E4ECF5] text-[#2A5A8A] font-semibold">
                         +{c.addProdMinutes} min {t("timeadj.extraApproved")}
                       </span>
                     </div>
                   )}
                   {openShare === c.jobCardId && c.piecesShared > 0 && (
-                    <div className="ml-0 mt-2 rounded-lg border-[0.5px] border-[#E5DEC6] bg-[#FAF7EE] px-2.5 py-1.5 text-[11px] text-[#6B7280]">
+                    <div className="mt-1.5 ml-0 px-2.5 py-1.5 rounded bg-[#FAF7EE] border border-[#E5DEC6] text-[11px] text-[#5A5550]">
                       {c.sharedWith && c.sharedWith.length > 0
                         ? `${t("home.shareWith")}: ${c.sharedWith.map((w) => w.name).join(", ")}`
                         : t("home.shareWith")}
@@ -1331,11 +1319,11 @@ function StatCard({
       ? "text-[#3E6570]"
       : tone === "active"
         ? "text-[#9C6F1E]"
-        : "text-[#1F1D1B]";
+        : "text-[#5A5550]";
   return (
-    <div className="rounded-xl border-[0.5px] border-[#E7E0D4] bg-white p-3.5 text-center shadow-[0_1px_3px_rgba(31,29,27,0.05)]">
-      <p className={`text-3xl font-extrabold leading-tight tabular-nums ${color}`}>{value}</p>
-      <p className="mt-1 text-[11px] font-medium leading-tight text-[#8A7F73]">
+    <div className="bg-white rounded-xl p-3 border border-[#D8D2CC] text-center">
+      <p className={`text-3xl font-bold leading-tight ${color}`}>{value}</p>
+      <p className="text-[11px] text-[#8A8680] mt-0.5 leading-tight">
         {label}
       </p>
     </div>
@@ -1353,7 +1341,7 @@ function Chip({
     <button
       type="button"
       onClick={onClick}
-      className="shrink-0 whitespace-nowrap rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-white/90 transition-colors hover:bg-white/20"
+      className="shrink-0 text-xs px-2.5 py-1 rounded-full bg-white/10 border border-white/20 hover:bg-white/20 font-medium"
     >
       {children}
     </button>
@@ -1378,11 +1366,11 @@ function Kpi({
           ? "text-[#9A3A2D]"
           : "text-[#1F1D1B]";
   return (
-    <div className="rounded-xl border-[0.5px] border-[#E7E0D4] bg-white p-3.5 text-center shadow-[0_1px_3px_rgba(31,29,27,0.05)]">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-[#8A7F73]">
+    <div className="bg-white rounded-xl p-3 border border-[#D8D2CC] text-center">
+      <p className="text-[10px] uppercase tracking-wide text-[#8A8680] font-semibold">
         {label}
       </p>
-      <p className={`mt-1.5 text-2xl font-extrabold tabular-nums ${color}`}>{value}</p>
+      <p className={`text-2xl font-bold mt-1 ${color}`}>{value}</p>
     </div>
   );
 }
@@ -1395,11 +1383,11 @@ function TableSection({
   children: React.ReactNode;
 }) {
   return (
-    <div className="overflow-hidden rounded-xl border-[0.5px] border-[#E7E0D4] bg-white shadow-[0_1px_3px_rgba(31,29,27,0.05)]">
-      <div className="border-b-[0.5px] border-[#E7E0D4] bg-[#FAF8F4] px-4 py-3">
-        <p className="text-xs font-bold uppercase tracking-wide text-[#1F1D1B]">{title}</p>
+    <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
+      <div className="px-3 py-2 bg-[#1B2B44] text-white">
+        <p className="text-xs font-bold uppercase tracking-wide">{title}</p>
       </div>
-      <div className="px-4 pb-2">{children}</div>
+      <div className="px-3 pb-2">{children}</div>
     </div>
   );
 }
@@ -1423,7 +1411,7 @@ function TableHeader({
         : `grid-cols-${cols.length}`;
   return (
     <div
-      className={`grid ${gridCols} -mx-4 gap-3 bg-[#F4F0E8] px-4 py-2 text-[10px] font-bold uppercase tracking-wide text-[#8A7F73]`}
+      className={`grid ${gridCols} gap-3 py-2 text-[10px] font-bold uppercase tracking-wide text-[#8A8680] bg-[#EAF3E5] -mx-3 px-3`}
     >
       {cols.map((c, i) => (
         <span
@@ -1438,6 +1426,6 @@ function TableHeader({
 }
 
 function EmptyRow() {
-  return <div className="py-5 text-center text-xs text-[#8A7F73]">—</div>;
+  return <div className="py-4 text-center text-xs text-[#8A8680]">—</div>;
 }
 

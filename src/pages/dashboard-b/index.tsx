@@ -15,7 +15,6 @@ import { formatCurrency } from "@/lib/utils";
 import { Skeleton, SkeletonDashboard } from "@/components/ui/skeleton";
 import { useCachedJson } from "@/lib/cached-fetch";
 import {
-  buildLinkedPOIds,
   poReadyForDelivery,
   type PipelinePO,
 } from "@/lib/delivery-pipeline";
@@ -688,9 +687,27 @@ export default function DashboardBPage() {
   const { data: poRaw, loading: poL } = useCachedJson<POResp>(
     "/api/production-orders?fields=minimal&include=jobCards",
   );
-  const { data: doRaw, loading: doL } = useCachedJson<DOResp>(
+  // Kept only as a loading gate for the Pending Delivery tile (doL). The DO
+  // page payload is no longer READ for any KPI: Pending Delivery now uses the
+  // whole-dataset linked-PO set (linkedRaw) and the dispatch-chain KPIs use
+  // the whole-dataset /stats valueByStatus (doStatsRaw) — both below — so the
+  // capped 200-row page is never summed.
+  const { loading: doL } = useCachedJson<DOResp>(
     "/api/delivery-orders?page=1&limit=200",
   );
+  // Authoritative whole-dataset "already on a DO/CN" PO-id set. Replaces
+  // buildLinkedPOIds(dos), which was derived from the capped 200-row page and
+  // went wrong once total DOs exceed 200 (Pending Delivery then counted POs
+  // that were actually already shipped on a DO beyond row 200).
+  const { data: linkedRaw } = useCachedJson<{ poIds?: string[] }>(
+    "/api/delivery-orders/linked-po-ids",
+  );
+  // Whole-dataset per-status value sums (valueByStatus) — the SAME aggregate
+  // the Delivery list page reads. The dispatch-chain KPIs (pending-dispatch /
+  // in-transit) sum from this so they reflect ALL DOs, not the 200-row page.
+  const { data: doStatsRaw } = useCachedJson<{
+    valueByStatus?: Record<string, number>;
+  }>("/api/delivery-orders/stats");
   const { data: poValRaw, loading: poValL } = useCachedJson<POValuesResp>(
     "/api/delivery-orders/po-values",
   );
@@ -739,8 +756,11 @@ export default function DashboardBPage() {
   // Pending Delivery — identical computation to /dashboard.
   const pendingDeliveryValueSen = useMemo(() => {
     const pos = poRaw?.success ? poRaw.data ?? [] : [];
-    const dos = doRaw?.success ? doRaw.data ?? [] : [];
-    const linkedPOIds = buildLinkedPOIds(dos);
+    // Whole-dataset linked-PO set (authoritative). Guard the loading flash:
+    // until linkedRaw lands, treat the set as empty would WRONGLY count every
+    // PO as still-pending, so bail to 0 until the set is defined.
+    if (!linkedRaw) return 0;
+    const linkedPOIds = new Set(linkedRaw.poIds ?? []);
     const poValMap = new Map<string, number>();
     for (const [k, v] of Object.entries(poValRaw?.values ?? {}))
       poValMap.set(k, Number(v) || 0);
@@ -762,24 +782,21 @@ export default function DashboardBPage() {
         ) ?? 0) * (po.quantity || 0);
     }
     return total;
-  }, [poRaw, doRaw, poValRaw, soItemsRaw]);
+  }, [poRaw, linkedRaw, poValRaw, soItemsRaw]);
 
   // Dispatch-chain fold (owner 2026-06-11: "Pending Dispatch 放入 Pending
   // Delivery,Dispatch 放进 Delivered"): value of DOs created but not yet
   // dispatched joins the PENDING DELIVERY card; value on the truck
-  // (LOADED / IN_TRANSIT) joins the DELIVERED card. Summed from the same
-  // per-DO valueSen the Delivery page tab strip uses, so both screens tie.
+  // (LOADED / IN_TRANSIT) joins the DELIVERED card. Read from the whole-
+  // dataset /stats valueByStatus aggregate (same per-DO value resolver the
+  // Delivery page tab strip uses), so both screens tie AND the values are
+  // complete — the old 200-row page sum undercounted once DOs exceed 200.
   const dispatchChain = useMemo(() => {
-    const dos = doRaw?.success ? doRaw.data ?? [] : [];
-    let pendingDispatchSen = 0;
-    let inTransitSen = 0;
-    for (const d of dos) {
-      if (d.status === "DRAFT") pendingDispatchSen += d.valueSen ?? 0;
-      else if (d.status === "LOADED" || d.status === "IN_TRANSIT")
-        inTransitSen += d.valueSen ?? 0;
-    }
+    const v = doStatsRaw?.valueByStatus ?? {};
+    const pendingDispatchSen = v.DRAFT ?? 0;
+    const inTransitSen = (v.LOADED ?? 0) + (v.IN_TRANSIT ?? 0);
     return { pendingDispatchSen, inTransitSen };
-  }, [doRaw]);
+  }, [doStatsRaw]);
 
   // Worker efficiency — identical computation to /dashboard.
   const efficiency = useMemo(() => {

@@ -159,13 +159,15 @@ export default function WorkerLayout() {
       <header className="bg-[#1F1D1B] text-white sticky top-0 z-30">
         <div className="max-w-md mx-auto px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="h-9 w-9 rounded-lg bg-white flex items-center justify-center p-1">
-              <img
-                src="/hookka-logo.png"
-                alt="Hookka"
-                className="h-full w-full object-contain"
-              />
-            </div>
+            {/* 黑底白字 (owner 2026-06-27): the real Hookka logo straight on the
+                black bar, no white tile. The logo PNG is dark-on-transparent, so
+                brightness(0)+invert(1) flips it to pure white for the dark bar. */}
+            <img
+              src="/hookka-logo.png"
+              alt="Hookka"
+              className="h-8 w-auto object-contain"
+              style={{ filter: "brightness(0) invert(1)" }}
+            />
             <span className="text-base font-semibold tracking-tight">
               {t("brand.title")}
             </span>

@@ -13,13 +13,15 @@
 // ===========================================================================
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, SlidersHorizontal } from "lucide-react";
+import { Search, SlidersHorizontal, Plus } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
-import { MobileHeader, MobileCard, ListRow, StatusPill } from "../components";
+import { MobileHeader, MobileCard, ListRow, StatusPill, FormSheet } from "../components";
 import { SubTabs } from "../components/SubTabs";
 import { FilterSheet } from "../components/FilterSheet";
 import { M } from "../theme";
 import { type ModuleConfig, type ActiveFilter } from "../config/types";
+import { type FormSpec } from "../config/form-types";
+import { createSpecFor } from "../config/forms";
 import {
   applyFilters,
   applySort,
@@ -40,6 +42,10 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   const [activeTab, setActiveTab] = useState(allTabs[0]?.key ?? "");
   const [search, setSearch] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
+  // "+" create form for modules that have one (SO / Delivery / Procure /
+  // Invoice / Announcements / Mail). null = this module has no mobile create.
+  const [createSpec, setCreateSpec] = useState<FormSpec | null>(null);
+  const canCreate = createSpecFor(config.slug) != null;
 
   // Per-source filter + sort state (keyed by source url so switching tab groups
   // keeps each group's own filters).
@@ -74,7 +80,33 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
 
   return (
     <>
-      <MobileHeader title={config.title} onBack={() => navigate(-1)} />
+      <MobileHeader
+        title={config.title}
+        onBack={() => navigate(-1)}
+        trailing={
+          canCreate ? (
+            <button
+              onClick={() => setCreateSpec(createSpecFor(config.slug))}
+              aria-label={`New ${config.title}`}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 34,
+                height: 34,
+                borderRadius: 10,
+                border: "none",
+                backgroundColor: M.taupe,
+                color: "#fff",
+                cursor: "pointer",
+                WebkitTapHighlightColor: "transparent",
+              }}
+            >
+              <Plus size={20} strokeWidth={2.2} />
+            </button>
+          ) : undefined
+        }
+      />
 
       <SubTabs tabs={allTabs} active={activeTab} onChange={setActiveTab} />
 
@@ -184,6 +216,17 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
         onApply={(nextFilters, nextSort) => {
           setFiltersByUrl((p) => ({ ...p, [source.url]: nextFilters }));
           setSortByUrl((p) => ({ ...p, [source.url]: nextSort }));
+        }}
+      />
+
+      {/* "+" create form. On save, navigate to the new doc's L2 detail. */}
+      <FormSheet
+        open={createSpec != null}
+        onClose={() => setCreateSpec(null)}
+        spec={createSpec}
+        onSaved={(to) => {
+          setCreateSpec(null);
+          if (to) navigate(to);
         }}
       />
     </>

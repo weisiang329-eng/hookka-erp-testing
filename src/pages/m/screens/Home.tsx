@@ -51,8 +51,14 @@ import {
   type SemanticStyle,
 } from "@/lib/design-tokens";
 import type { SalesOrder, RawMaterial } from "@/types";
-import { MobileCard, StatusPill, ListRow, Sheet } from "../components";
+import { MobileCard, StatusPill, ListRow, FormSheet } from "../components";
 import { M } from "../theme";
+import { type FormSpec } from "../config/form-types";
+import {
+  newSalesOrderSpec,
+  newDeliveryOrderSpec,
+  newPurchaseOrderSpec,
+} from "../config/forms";
 
 // ---------- API response shapes (subset of the desktop dashboard's) ----------
 type StatsResp = {
@@ -98,7 +104,9 @@ export default function MobileHome() {
   const user = getCurrentUser();
   const firstName = (user?.displayName || "there").split(" ")[0];
 
-  const [quickAction, setQuickAction] = useState<string | null>(null);
+  // Quick-action create form: holds the active FormSpec, or null. "Staff" has
+  // no in-scope create endpoint, so it routes to the Employees directory.
+  const [formSpec, setFormSpec] = useState<FormSpec | null>(null);
 
   const { data: stats } = useCachedJson<StatsResp>("/api/sales-orders/stats");
   const { data: overview } = useCachedJson<OverviewResp>(
@@ -243,22 +251,24 @@ export default function MobileHome() {
           <QuickChip
             icon={Plus}
             label="New SO"
-            onClick={() => setQuickAction("New Sales Order")}
+            onClick={() => setFormSpec(newSalesOrderSpec())}
           />
           <QuickChip
             icon={Truck}
             label="Delivery"
-            onClick={() => setQuickAction("New Delivery")}
+            onClick={() => setFormSpec(newDeliveryOrderSpec())}
           />
           <QuickChip
             icon={PackageCheck}
             label="Receive"
-            onClick={() => setQuickAction("Receive Goods")}
+            onClick={() => setFormSpec(newPurchaseOrderSpec())}
           />
           <QuickChip
             icon={UserPlus}
             label="Staff"
-            onClick={() => setQuickAction("Staff")}
+            // No staff-create endpoint is in Phase-4 scope (worker onboarding is
+            // a multi-step desktop flow). Route to the Employees directory.
+            onClick={() => navigate("/m/employees")}
           />
         </div>
       </div>
@@ -325,17 +335,17 @@ export default function MobileHome() {
 
       <div style={{ height: 8 }} />
 
-      {/* Quick-action placeholder sheet (Phase 2 wires the real forms). */}
-      <Sheet
-        open={quickAction != null}
-        onClose={() => setQuickAction(null)}
-        title={quickAction ?? ""}
-      >
-        <div style={{ padding: "12px 4px", color: M.body, fontSize: 14 }}>
-          The {quickAction?.toLowerCase()} form arrives in the next phase. For
-          now, use the full desktop app to create records.
-        </div>
-      </Sheet>
+      {/* Quick-action create forms (Phase 4). On save the sheet closes and we
+          navigate to the new document's detail. */}
+      <FormSheet
+        open={formSpec != null}
+        onClose={() => setFormSpec(null)}
+        spec={formSpec}
+        onSaved={(to) => {
+          setFormSpec(null);
+          if (to) navigate(to);
+        }}
+      />
     </div>
   );
 }

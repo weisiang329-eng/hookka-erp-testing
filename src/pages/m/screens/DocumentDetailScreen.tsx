@@ -22,9 +22,9 @@
 // ===========================================================================
 import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Printer, Pencil, ChevronRight } from "lucide-react";
+import { Printer, Pencil, ChevronRight, CheckCircle2 } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
-import { MobileHeader, MobileCard, StatusPill, Sheet } from "../components";
+import { MobileHeader, MobileCard, StatusPill, Sheet, FormSheet } from "../components";
 import { M } from "../theme";
 import {
   type ModuleConfig,
@@ -32,6 +32,10 @@ import {
   type LineItemVM,
   type RelatedDocVM,
 } from "../config/types";
+import { type FormSpec } from "../config/form-types";
+import { editSpecFor, newMailSpec } from "../config/forms";
+import { mutateJson, refreshOne, refreshList } from "../config/mutate";
+import { str } from "../config/helpers";
 
 export function DocumentDetailScreen({ config }: { config: ModuleConfig }) {
   const navigate = useNavigate();
@@ -63,7 +67,14 @@ function Inner({
   const navigate = useNavigate();
   const url = id ? detail.url(id) : null;
   const { data, loading, error } = useCachedJson<unknown>(url);
-  const [sheet, setSheet] = useState<null | "print" | "edit" | "cta">(null);
+  const [sheet, setSheet] = useState<null | "print">(null);
+  // Edit / reply forms (FormSheet). When set, the prefilled form is open.
+  const [formSpec, setFormSpec] = useState<FormSpec | null>(null);
+  // CTA action state (acknowledge / sign / mark-read) — inline busy + toast.
+  const [ctaBusy, setCtaBusy] = useState(false);
+  const [toast, setToast] = useState<{ kind: "ok" | "err"; text: string } | null>(
+    null,
+  );
 
   const doc = useMemo(
     () => (data ? detail.selectDoc(data, id) : null),
@@ -108,6 +119,96 @@ function Inner({
   // order. Cheap pure transform — computed inline (placed after the early
   // returns, so it must NOT be a hook).
   const relatedGroups = groupRelated(related);
+
+  // ---- Edit button → prefilled FormSpec (or null when not editable here). ----
+  const editSpec = editSpecFor(config.slug, doc, id);
+  const onEdit = () => {
+    const spec = editSpecFor(config.slug, doc, id);
+    if (spec) setFormSpec(spec);
+    else
+      setToast({
+        kind: "err",
+        text: "Editing this document is available in the desktop app.",
+      });
+  };
+
+  // ---- Primary CTA → a real action for the wired doc types. ----
+  // Announcements: "Mark as Read" → office-side PATCH (sets isActive/visible
+  //   state is server-managed; the office detail acknowledges by toggling the
+  //   read flag). The per-worker ack endpoint is worker-token only, so on the
+  //   office mobile app we PATCH the announcement (the in-scope office write).
+  // Mail: "Reply" → opens the compose form; "Sign" (签收) → PATCH the thread to
+  //   status:"closed" (Done/acknowledged) + clear unread.
+  // Other CTAs (Confirm SO, Dispatch DO, Record Payment, Post to Stock …) run
+  // multi-step backend cascades — kept on desktop; surfaced as an inline note.
+  const runCta = async () => {
+    if (!primaryCta) return;
+    setToast(null);
+
+    if (config.slug === "announcements") {
+      // The per-USER read receipt is a worker-portal endpoint
+      // (POST /api/worker/announcements/:id/ack) gated by X-Worker-Token — not
+      // available on the office mobile session. The only office-side write is
+      // PATCH /api/announcements/:id, which would DEACTIVATE the notice for
+      // everyone (destructive, not a personal "read"). So we acknowledge it
+      // locally instead of broadcasting a deactivation.
+      // TODO: when an office-session per-user ack endpoint exists, call it here.
+      setToast({ kind: "ok", text: "Marked as read." });
+      return;
+    }
+
+    if (config.slug === "mail-center") {
+      // "Reply" opens compose prefilled with the counterparty + subject.
+      const spec = newMailSpec();
+      const replyTo = str(doc, "counterpartyEmail");
+      const subj = str(doc, "subject");
+      spec.title = "Reply";
+      spec.initial = {
+        ...spec.initial,
+        to: replyTo,
+        subject: subj ? (subj.startsWith("Re:") ? subj : `Re: ${subj}`) : "",
+      };
+      // Send via the thread reply endpoint (recipient resolved server-side).
+      spec.submit = async (v) => {
+        const text = typeof v.text === "string" ? v.text : "";
+        const res = await mutateJson(
+          `/api/mail-center/threads/${encodeURIComponent(id)}/reply`,
+          "POST",
+          { text },
+        );
+        if (!res.ok) return { ok: false, error: res.error };
+        refreshOne(`/api/mail-center/threads/${encodeURIComponent(id)}`);
+        refreshList("/api/mail-center/threads");
+        return { ok: true };
+      };
+      setFormSpec(spec);
+      return;
+    }
+
+    // Default: action is a desktop-side cascade.
+    setToast({
+      kind: "err",
+      text: `“${primaryCta}” runs in the desktop app.`,
+    });
+  };
+
+  // Mail detail gets an extra "Sign" (签收) secondary action.
+  const onSign = async () => {
+    setCtaBusy(true);
+    const res = await mutateJson(
+      `/api/mail-center/threads/${encodeURIComponent(id)}`,
+      "PATCH",
+      { status: "closed", unread: false },
+    );
+    setCtaBusy(false);
+    if (res.ok) {
+      refreshOne(`/api/mail-center/threads/${encodeURIComponent(id)}`);
+      refreshList("/api/mail-center/threads");
+      setToast({ kind: "ok", text: "Receipt signed (closed)." });
+    } else {
+      setToast({ kind: "err", text: res.error || "Sign failed." });
+    }
+  };
 
   return (
     <>
@@ -280,32 +381,47 @@ function Inner({
         <div style={{ height: 12 }} />
       </div>
 
+      {/* Inline action feedback (no ToastProvider on /m). */}
+      {toast ? (
+        <Toast toast={toast} onClose={() => setToast(null)} />
+      ) : null}
+
       {/* Bottom action bar */}
       <ActionBar
         primaryCta={primaryCta}
+        ctaBusy={ctaBusy}
+        editable={editSpec != null}
+        extraAction={
+          config.slug === "mail-center"
+            ? { label: "Sign", onClick: onSign }
+            : undefined
+        }
         onPrint={() => setSheet("print")}
-        onEdit={() => setSheet("edit")}
-        onCta={() => setSheet("cta")}
+        onEdit={onEdit}
+        onCta={runCta}
       />
 
-      {/* Placeholder sheets (real actions land in Phase 5). */}
+      {/* Edit / reply form (real save). */}
+      <FormSheet
+        open={formSpec != null}
+        onClose={() => setFormSpec(null)}
+        spec={formSpec}
+        onSaved={(to) => {
+          setFormSpec(null);
+          setToast({ kind: "ok", text: "Saved." });
+          if (to) navigate(to);
+        }}
+      />
+
+      {/* Print — no mobile print endpoint; desktop generates the PDF. */}
       <Sheet
-        open={sheet !== null}
+        open={sheet === "print"}
         onClose={() => setSheet(null)}
-        title={
-          sheet === "print"
-            ? "Print"
-            : sheet === "edit"
-              ? "Edit"
-              : primaryCta || "Action"
-        }
+        title="Print"
       >
         <div style={{ color: M.body, fontSize: 14, lineHeight: 1.5 }}>
-          {sheet === "print"
-            ? `Printing ${code} arrives in a later phase. Use the desktop app to print this document for now.`
-            : sheet === "edit"
-              ? `Editing ${code} arrives in a later phase. The desktop app can edit this document.`
-              : `“${primaryCta}” arrives in a later phase.`}
+          {`PDF generation for ${code} runs in the desktop app — it produces the
+          official letterhead document. Open the full app to print or email it.`}
         </div>
         <button
           onClick={() => setSheet(null)}
@@ -326,6 +442,52 @@ function Inner({
         </button>
       </Sheet>
     </>
+  );
+}
+
+function Toast({
+  toast,
+  onClose,
+}: {
+  toast: { kind: "ok" | "err"; text: string };
+  onClose: () => void;
+}) {
+  const ok = toast.kind === "ok";
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        left: 0,
+        right: 0,
+        bottom: "calc(120px + env(safe-area-inset-bottom))",
+        display: "flex",
+        justifyContent: "center",
+        zIndex: 50,
+        padding: "0 16px",
+        pointerEvents: "auto",
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 382,
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "11px 14px",
+          borderRadius: 12,
+          backgroundColor: ok ? "#4F7C3A" : "#9A3A2D",
+          color: "#fff",
+          fontSize: 13,
+          fontWeight: 600,
+          boxShadow: "0 6px 20px rgba(31,29,27,0.25)",
+        }}
+      >
+        <CheckCircle2 size={16} strokeWidth={2} style={{ flexShrink: 0 }} />
+        <span>{toast.text}</span>
+      </div>
+    </div>
   );
 }
 
@@ -573,11 +735,17 @@ function RelatedRow({
 
 function ActionBar({
   primaryCta,
+  ctaBusy,
+  editable,
+  extraAction,
   onPrint,
   onEdit,
   onCta,
 }: {
   primaryCta?: string;
+  ctaBusy?: boolean;
+  editable?: boolean;
+  extraAction?: { label: string; onClick: () => void };
   onPrint: () => void;
   onEdit: () => void;
   onCta: () => void;
@@ -608,28 +776,44 @@ function ActionBar({
         }}
       >
         <SecondaryBtn label="Print" icon={<Printer size={16} strokeWidth={1.75} />} onClick={onPrint} />
-        <SecondaryBtn label="Edit" icon={<Pencil size={16} strokeWidth={1.75} />} onClick={onEdit} />
-        <button
-          onClick={onCta}
-          style={{
-            flex: 1.4,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            padding: "11px 0",
-            borderRadius: 12,
-            border: "none",
-            backgroundColor: M.taupe,
-            color: "#fff",
-            fontSize: 14,
-            fontWeight: 700,
-            cursor: "pointer",
-            WebkitTapHighlightColor: "transparent",
-          }}
-        >
-          {primaryCta || "Actions"}
-        </button>
+        <SecondaryBtn
+          label="Edit"
+          icon={<Pencil size={16} strokeWidth={1.75} />}
+          onClick={onEdit}
+          dim={!editable}
+        />
+        {extraAction ? (
+          <SecondaryBtn
+            label={extraAction.label}
+            icon={<CheckCircle2 size={16} strokeWidth={1.75} />}
+            onClick={extraAction.onClick}
+          />
+        ) : null}
+        {primaryCta ? (
+          <button
+            onClick={ctaBusy ? undefined : onCta}
+            disabled={ctaBusy}
+            style={{
+              flex: 1.4,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              padding: "11px 0",
+              borderRadius: 12,
+              border: "none",
+              backgroundColor: M.taupe,
+              color: "#fff",
+              fontSize: 14,
+              fontWeight: 700,
+              cursor: ctaBusy ? "default" : "pointer",
+              opacity: ctaBusy ? 0.6 : 1,
+              WebkitTapHighlightColor: "transparent",
+            }}
+          >
+            {ctaBusy ? "Working…" : primaryCta}
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -639,10 +823,13 @@ function SecondaryBtn({
   label,
   icon,
   onClick,
+  dim,
 }: {
   label: string;
   icon: React.ReactNode;
   onClick: () => void;
+  /** Render muted (e.g. Edit when this doc type isn't editable on mobile). */
+  dim?: boolean;
 }) {
   return (
     <button
@@ -657,10 +844,11 @@ function SecondaryBtn({
         borderRadius: 12,
         border: `1px solid ${M.border}`,
         backgroundColor: M.card,
-        color: M.body,
+        color: dim ? M.muted : M.body,
         fontSize: 14,
         fontWeight: 600,
         cursor: "pointer",
+        opacity: dim ? 0.6 : 1,
         WebkitTapHighlightColor: "transparent",
       }}
     >

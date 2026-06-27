@@ -315,16 +315,16 @@ export function AnnouncementMedia({
             href={href}
             target="_blank"
             rel="noreferrer"
-            className="flex items-center gap-2 rounded-lg border border-[#E2DDD8] bg-[#FAFAF8] px-3 py-2 text-xs font-medium text-[#5A5550] active:bg-[#F3EFE9]"
+            className="flex items-center gap-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-[#FAF8F4] px-3 py-2.5 text-xs font-medium text-[#6B7280] transition-colors active:bg-[#F4F0E8]"
           >
             <FileText className="h-4 w-4 shrink-0 text-[#9A3A2D]" />
             <span className="min-w-0 flex-1 truncate">
               {att.name || "Attachment"}
             </span>
-            <span className="shrink-0 rounded bg-[#EDE7E0] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#8A6F3A]">
+            <span className="shrink-0 rounded-md bg-[#EDE7E0] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#8A6F3A]">
               {extLabel(att)}
             </span>
-            <Download className="h-4 w-4 shrink-0 text-[#8A8680]" />
+            <Download className="h-4 w-4 shrink-0 text-[#8A7F73]" />
           </a>
         );
       })}
@@ -358,7 +358,7 @@ function PhotoTile({
   const [broken, setBroken] = useState(false);
   if (broken) {
     return (
-      <div className="relative flex aspect-square w-full flex-col items-center justify-center gap-1 overflow-hidden rounded-lg border border-[#E2DDD8] bg-[#F3EFE9] text-[#9A948C]">
+      <div className="relative flex aspect-square w-full flex-col items-center justify-center gap-1 overflow-hidden rounded-xl border-[0.5px] border-[#E7E0D4] bg-[#F4F0E8] text-[#9A948C]">
         <ImageOff className="h-6 w-6" />
         <span className="px-2 text-center text-[10px] leading-tight">
           Image unavailable
@@ -375,7 +375,7 @@ function PhotoTile({
     <button
       type="button"
       onClick={onOpen}
-      className="relative block aspect-square w-full overflow-hidden rounded-lg border border-[#E2DDD8] bg-[#F3EFE9]"
+      className="relative block aspect-square w-full overflow-hidden rounded-xl border-[0.5px] border-[#E7E0D4] bg-[#F4F0E8]"
     >
       <img
         src={fileHref(att.fileId)}
@@ -409,14 +409,14 @@ function VideoTile({ src }: { src: string }) {
         href={src}
         target="_blank"
         rel="noreferrer"
-        className="flex items-center gap-2 rounded-lg border border-[#E2DDD8] bg-[#FAFAF8] px-3 py-2 text-xs font-medium text-[#5A5550] active:bg-[#F3EFE9]"
+        className="flex items-center gap-2 rounded-xl border-[0.5px] border-[#E7E0D4] bg-[#FAF8F4] px-3 py-2.5 text-xs font-medium text-[#6B7280] transition-colors active:bg-[#F4F0E8]"
       >
         <Play className="h-4 w-4 shrink-0 fill-[#9A3A2D] text-[#9A3A2D]" />
         <span className="min-w-0 flex-1 truncate">Video</span>
-        <span className="shrink-0 rounded bg-[#EDE7E0] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#8A6F3A]">
+        <span className="shrink-0 rounded-md bg-[#EDE7E0] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#8A6F3A]">
           Open
         </span>
-        <Download className="h-4 w-4 shrink-0 text-[#8A8680]" />
+        <Download className="h-4 w-4 shrink-0 text-[#8A7F73]" />
       </a>
     );
   }
@@ -430,7 +430,7 @@ function VideoTile({ src }: { src: string }) {
         playsInline
         preload="metadata"
         onError={() => setFailed(true)}
-        className="w-full rounded-lg border border-[#E2DDD8] bg-black"
+        className="w-full rounded-xl border-[0.5px] border-[#E7E0D4] bg-black"
       />
     );
   }
@@ -439,7 +439,7 @@ function VideoTile({ src }: { src: string }) {
       type="button"
       onClick={() => setPlaying(true)}
       aria-label="Play video"
-      className="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-lg border border-[#E2DDD8] bg-black"
+      className="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-xl border-[0.5px] border-[#E7E0D4] bg-black"
     >
       <video
         src={src}

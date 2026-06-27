@@ -389,10 +389,17 @@ export default function WorkerScanPage() {
         // the core sensitivity lever. ALSO_INVERTED reads light-on-dark prints.
         hints.set(zx.DecodeHintType.TRY_HARDER, true);
         try {
-          // Not in every @zxing build's enum — guard so a missing key can't throw
-          // and kill the whole decoder setup.
-          if (zx.DecodeHintType.ALSO_INVERTED != null) {
-            hints.set(zx.DecodeHintType.ALSO_INVERTED, true);
+          // ALSO_INVERTED isn't in every @zxing build's enum TYPINGS — reading
+          // it as a direct member was a TS2339 compile error on CI's pinned
+          // @zxing (local had it, so it slipped through) and FAILED THE DEPLOY.
+          // Read via an index cast so it compiles on any version, and skip at
+          // runtime when the value is absent.
+          const dhtAny = zx.DecodeHintType as unknown as Record<string, number>;
+          if (dhtAny.ALSO_INVERTED != null) {
+            (hints as unknown as Map<number, boolean>).set(
+              dhtAny.ALSO_INVERTED,
+              true,
+            );
           }
         } catch {
           /* older @zxing without ALSO_INVERTED — TRY_HARDER still applies */

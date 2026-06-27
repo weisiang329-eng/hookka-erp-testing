@@ -81,8 +81,8 @@ test("gap1: tab-for-status map is DERIVED from TAB_CN_STATUSES (no second map to
 test("gap1: grid search spans every status so cross-tab records are findable", () => {
   assert.match(
     PAGE_SRC,
-    /if \(cnGridSearch\.trim\(\)\) return cnList;/,
-    "filteredCNs must return the full list while a search term is active (mirrors DO's filteredOrders)",
+    /if \(cnGridSearch\.trim\(\)\) return cnSearchResults;/,
+    "while a search term is active, filteredCNs must return the SERVER search results (cnSearchResults), not the loaded page — so a CN on any page is findable (mirrors DO's server-side search; BUG-2026-06-27)",
   );
 });
 
@@ -90,12 +90,12 @@ test("gap1: jump index covers CN rows only — PO-side tabs stay out of the jump
   const body = sliceBetween(
     PAGE_SRC,
     "const searchJumpIndex = useMemo(",
-    "}, [cnList]);",
+    "}, [cnList, cnSearchResults, cnGridSearch]);",
   );
   assert.match(
     body,
-    /for \(const cn of cnList\)/,
-    "index must walk the CN list",
+    /for \(const cn of cnSource\)/,
+    "index must walk the active CN source (server results while searching, else the loaded list)",
   );
   assert.match(
     body,

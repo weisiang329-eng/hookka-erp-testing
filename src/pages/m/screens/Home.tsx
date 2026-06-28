@@ -34,7 +34,7 @@
 // Delivery + Outstanding are point-in-time "live" figures (no prior-period
 // source on the dashboard either), so no delta — matching the dashboard.
 // ===========================================================================
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   DollarSign,
@@ -143,6 +143,33 @@ export default function MobileHome() {
   // no in-scope create endpoint, so it routes to the Employees directory.
   const [formSpec, setFormSpec] = useState<FormSpec | null>(null);
 
+  // ---- Pending Delivery is the ONLY expensive section of this Home: it needs
+  // five heavy fetches (production-orders + linked-po-ids + po-values +
+  // price-index + delivery stats). To keep first paint instant, we defer those
+  // five fetches until AFTER the Home is interactive: `pdEnabled` starts false
+  // (so the gated useCachedJson calls receive a null URL = skip-fetch) and
+  // flips true on the first idle callback (setTimeout fallback for browsers
+  // without requestIdleCallback). The cheap KPI cards + Stock alerts + Orders
+  // due fetch immediately and paint right away. ----
+  const [pdEnabled, setPdEnabled] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    type RIC = (cb: () => void, opts?: { timeout?: number }) => number;
+    const ric = (window as unknown as { requestIdleCallback?: RIC })
+      .requestIdleCallback;
+    if (typeof ric === "function") {
+      const id = ric(() => setPdEnabled(true), { timeout: 1500 });
+      const cic = (
+        window as unknown as { cancelIdleCallback?: (h: number) => void }
+      ).cancelIdleCallback;
+      return () => {
+        if (typeof cic === "function") cic(id);
+      };
+    }
+    const t = window.setTimeout(() => setPdEnabled(true), 200);
+    return () => window.clearTimeout(t);
+  }, []);
+
   const { data: stats } = useCachedJson<StatsResp>("/api/sales-orders/stats");
   // Current-month overview = the dashboard's default Command Center period, so
   // salesThisMonthSen / invoicesThisMonthSen match the desktop KPI rail.
@@ -155,21 +182,26 @@ export default function MobileHome() {
   const { data: inventory } = useCachedJson<InventoryResp>("/api/inventory");
 
   // ---- Pending Delivery — SAME fetches + computation as the dashboard's
-  // consolidated "Pending Delivery" KTile (src/lib/delivery-pipeline.ts). ----
+  // consolidated "Pending Delivery" KTile (src/lib/delivery-pipeline.ts).
+  // Lazy-loaded: each URL is gated on `pdEnabled` — until the Home is
+  // interactive we pass null, which useCachedJson treats as skip-fetch (see
+  // cached-fetch.ts: a null URL returns data:null/loading:false and the effect
+  // early-returns without firing a request). The hooks are ALWAYS called
+  // (never conditionally), only the URL flips from null to the real endpoint. ----
   const { data: poRaw } = useCachedJson<POResp>(
-    "/api/production-orders?fields=minimal&include=jobCards",
+    pdEnabled ? "/api/production-orders?fields=minimal&include=jobCards" : null,
   );
   const { data: linkedRaw } = useCachedJson<{ poIds?: string[] }>(
-    "/api/delivery-orders/linked-po-ids",
+    pdEnabled ? "/api/delivery-orders/linked-po-ids" : null,
   );
   const { data: poValRaw } = useCachedJson<POValuesResp>(
-    "/api/delivery-orders/po-values",
+    pdEnabled ? "/api/delivery-orders/po-values" : null,
   );
   const { data: soItemsRaw } = useCachedJson<SOItemsResp>(
-    "/api/sales-orders?fields=price-index",
+    pdEnabled ? "/api/sales-orders?fields=price-index" : null,
   );
   const { data: doStatsRaw } = useCachedJson<DoStatsResp>(
-    "/api/delivery-orders/stats",
+    pdEnabled ? "/api/delivery-orders/stats" : null,
   );
 
   // ---- KPI: This Month Sales (confirmed-SO value, current month) ----
@@ -214,6 +246,17 @@ export default function MobileHome() {
       (v.DRAFT ?? 0) + (v.LOADED ?? 0) + (v.IN_TRANSIT ?? 0);
     return readySen + dispatchChain;
   }, [poRaw, linkedRaw, poValRaw, soItemsRaw, doStatsRaw]);
+
+  // Pending Delivery shows a placeholder until its lazy fetches resolve: true
+  // while deferred (pdEnabled false) and while any of the five datasets is
+  // still in flight. Once all land, the real value renders (same computation).
+  const pendingDeliveryLoading =
+    !pdEnabled ||
+    !poRaw ||
+    !linkedRaw ||
+    !poValRaw ||
+    !soItemsRaw ||
+    !doStatsRaw;
 
   // ---- Sales month-over-month delta (This Month Sales card) ----
   const salesDeltaPct = useMemo(() => {
@@ -398,7 +441,9 @@ export default function MobileHome() {
             icon={Package}
             accent="moss"
             label="Pending Delivery"
-            value={formatCurrency(pendingDeliverySen)}
+            // Lazy-loaded after first paint — show a placeholder until its five
+            // deferred fetches resolve, then the real (dashboard-identical) value.
+            value={pendingDeliveryLoading ? "…" : formatCurrency(pendingDeliverySen)}
             // Live point-in-time figure — no prior-period delta (as on desktop).
             delta={null}
           />

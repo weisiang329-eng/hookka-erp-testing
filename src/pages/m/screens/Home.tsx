@@ -49,6 +49,8 @@ import {
   CircleAlert,
   TriangleAlert,
   ClipboardCheck,
+  Calendar,
+  CircleCheck,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
@@ -81,6 +83,7 @@ type StatsResp = {
   deliveredItemsSen?: number;
   outstandingItemsSen?: number;
 };
+type JobsBreakdown = { bedframeUnits: number; sofaSets: number };
 type OverviewResp = {
   success?: boolean;
   salesThisMonthSen?: number;
@@ -89,17 +92,49 @@ type OverviewResp = {
     month: string;
     salesOrderSen: number;
     invoiceSen?: number;
+    productionSen?: number;
   }[];
-  // ---- Command Center analytics (owner 2026-06-28 design v10) ----
+  // Per-DAY (period=YYYY-MM) revenue buckets — x-axis for the Revenue chart.
+  weeklyRevenue?: {
+    week: string; // "YYYY-MM-DD" — day-start for a month period
+    salesOrderSen: number;
+    invoiceSen: number;
+    productionSen: number;
+  }[];
+  // ---- Command Center analytics (owner 2026-06-28 design v11) ----
   // The SAME fields the desktop dashboard-b consumes. Optional everywhere —
   // each analytics section guards its own data and renders nothing if absent
   // (we never fabricate a chart).
-  aovByCustomer?: { customerName: string; totalSen: number }[];
+  aovByCustomer?: {
+    customerName: string;
+    totalSen: number;
+    bedframeAvgSen: number;
+    bedframeUnits: number;
+    sofaAvgSen: number;
+    sofaSets: number;
+  }[];
+  aovCompany?: { totalSen: number };
   topSellers?: {
-    BEDFRAME?: { productCode: string; qtySold: number }[];
-    SOFA?: { model: string; setsSold: number }[];
+    BEDFRAME?: { productCode: string; productName?: string; qtySold: number; valueSen: number }[];
+    SOFA?: { model: string; setsSold: number; valueSen: number }[];
+  };
+  fabricCostPerMeterSen?: { bedframe: number; sofa: number };
+  fabric?: {
+    BEDFRAME?: { list?: { fabCode: string; fabName?: string; meters: number; costSen?: number; buyAvgSen: number }[] };
+    SOFA?: { list?: { fabCode: string; fabName?: string; meters: number; costSen?: number; buyAvgSen: number }[] };
+  };
+  employee?: { activeHeadcount: number };
+  purchasing?: {
+    openPOCount: number;
+    spendThisMonthSen: number;
+    topSuppliers: { name: string; spendSen: number }[];
   };
   production?: {
+    dailyCapacityMin?: number;
+    backlogDays?: number;
+    backlogGrandMin?: number;
+    activeJobs?: JobsBreakdown;
+    completedYesterday?: JobsBreakdown;
     backlogByDept?: {
       dept: string;
       totalMin: number;
@@ -107,6 +142,21 @@ type OverviewResp = {
       backlogDays: number;
     }[];
   };
+};
+// Worker-Efficiency support shapes — mirror the desktop dashboard-b fetches.
+type JcSummaryResp = {
+  data?: { workerId: string; productionMinutes: number }[];
+};
+type WheSummaryResp = {
+  data?: {
+    workerId: string;
+    totalHours: number;
+    byDept: Record<string, number>;
+    daysWithEntries?: number;
+  }[];
+};
+type WorkersResp = {
+  data?: { id: string; name: string; departmentCode?: string }[];
 };
 type SOListResp = { success?: boolean; data?: SalesOrder[] };
 type InventoryResp = {
@@ -145,23 +195,63 @@ function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-/** "YYYY-MM" → short month label ("2026-06" → "Jun"). */
-const MONTHS_SHORT = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-function monthShort(ym: string): string {
-  const m = Number((ym || "").slice(5, 7));
-  return m >= 1 && m <= 12 ? MONTHS_SHORT[m - 1] : ym;
+// ---- Worker Efficiency (ported 1:1 from src/pages/dashboard-b/index.tsx) ----
+// eff% = production minutes ÷ (production-dept clocked hours × 60). Only the
+// eight production departments count toward the denominator.
+const PROD_DEPTS = new Set([
+  "FAB_CUT", "FAB_SEW", "WOOD_CUT", "FOAM",
+  "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING",
+]);
+const DEPT_LABEL: Record<string, string> = {
+  FAB_CUT: "Fabric Cutting",
+  FAB_SEW: "Fabric Sewing",
+  WOOD_CUT: "Wood Cutting",
+  FOAM: "Foam Bonding",
+  FRAMING: "Framing",
+  WEBBING: "Webbing",
+  UPHOLSTERY: "Upholstery",
+  PACKING: "Packing",
+};
+
+/**
+ * Date range for the selected "YYYY-MM" worker-efficiency window:
+ * [1st .. month end], capped at today for the current month. Same logic as
+ * dashboard-b's monthWindow().
+ */
+function monthWindow(ym: string): { from: string; to: string } {
+  const iso = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+      d.getDate(),
+    ).padStart(2, "0")}`;
+  const yr = Number(ym.slice(0, 4));
+  const mo = Number(ym.slice(5, 7)); // 1-12
+  const from = iso(new Date(yr, mo - 1, 1));
+  const lastDay = new Date(yr, mo, 0);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const to = ym === CUR_YM && today < lastDay ? iso(today) : iso(lastDay);
+  return { from, to };
 }
 
-/** Compact "RM 283K" / "RM 1.2M" for chart headline figures (sen → RM). */
-function kFormat(sen: number): string {
-  const rm = (sen || 0) / 100;
-  if (rm >= 1_000_000) return `RM ${(rm / 1_000_000).toFixed(1)}M`;
-  if (rm >= 1_000) return `RM ${Math.round(rm / 1_000)}K`;
-  return `RM ${Math.round(rm)}`;
+/** min → "Nh" (rounded hours), thousands-separated. */
+function hrs(min: number): string {
+  return `${Math.round((min || 0) / 60).toLocaleString()}h`;
 }
+
+/** Compact "RM 12.03" for per-metre fabric cost (sen → RM, 2dp). */
+function rm2(sen: number): string {
+  return `RM ${((sen || 0) / 100).toLocaleString("en-MY", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+/**
+ * Donut palette for Sales-by-Customer — module scope so the useMemo's deps
+ * don't re-trigger on every render. Professional financial-report scheme
+ * (navy → teal → steel).
+ */
+const SBC_COLORS = ["#16425B", "#1F6E8C", "#2E8FA3", "#4FA8B8", "#7FB9C6", "#A9C7D0"];
 
 /** Local time-of-day greeting (design says "Good morning,"). */
 function greeting(): string {
@@ -239,6 +329,23 @@ export default function MobileHome() {
   );
   const { data: doStatsRaw } = useCachedJson<DoStatsResp>(
     pdEnabled ? "/api/delivery-orders/stats" : null,
+  );
+
+  // ---- Worker Efficiency — 3 extra fetches (job-card prod mins + clocked
+  // hours + worker directory), merged exactly like the desktop dashboard-b.
+  // Gated behind the same `pdEnabled` idle flag so first paint stays the KPI
+  // rail. Window = current month [1st..today]. ----
+  const effWin = useMemo(() => monthWindow(CUR_YM), []);
+  const { data: jcSumRaw } = useCachedJson<JcSummaryResp>(
+    pdEnabled ? `/api/job-cards/summary?from=${effWin.from}&to=${effWin.to}` : null,
+  );
+  const { data: wheSumRaw } = useCachedJson<WheSummaryResp>(
+    pdEnabled
+      ? `/api/working-hour-entries/summary?from=${effWin.from}&to=${effWin.to}`
+      : null,
+  );
+  const { data: workersRaw } = useCachedJson<WorkersResp>(
+    pdEnabled ? "/api/workers" : null,
   );
 
   // ---- KPI: This Month Sales (confirmed-SO value, current month) ----
@@ -359,110 +466,265 @@ export default function MobileHome() {
   // Real figures off /api/sales-orders/stats (the SAME totals the desktop
   // Command Center uses): Confirmed = csRevenueSen, Outstanding =
   // outstandingItemsSen, Delivered = deliveredItemsSen. Bars are scaled to the
-  // largest of the three.
+  // largest of the three. Delivered RATE = delivered ÷ confirmed.
   const pipeline = useMemo(() => {
     const confirmed = stats?.csRevenueSen ?? 0;
     const outstanding = stats?.outstandingItemsSen ?? 0;
     const delivered = stats?.deliveredItemsSen ?? 0;
     const max = Math.max(confirmed, outstanding, delivered, 1);
-    return [
+    const bars = [
       { label: "Confirmed", sen: confirmed, color: M.taupe },
       { label: "Outstanding", sen: outstanding, color: M.gold },
       { label: "Delivered", sen: delivered, color: M_DELTA.up },
     ].map((p) => ({ ...p, pct: Math.round((p.sen / max) * 100) }));
+    const ratePct = confirmed > 0 ? (delivered / confirmed) * 100 : null;
+    return {
+      bars,
+      ratePct,
+      note:
+        confirmed > 0
+          ? `${formatCurrency(outstanding)} still to ship of ${formatCurrency(
+              confirmed,
+            )} confirmed · ${CUR_YM}`
+          : null,
+    };
   }, [stats]);
 
-  // ---- Command Center analytics (owner 2026-06-28 design v10) ----
-  // Sales trend / Sales by customer / Top seller / Plant load. All four read
-  // from the SAME /api/dashboard/overview payload already fetched for the KPI
-  // rail (no extra request), mirroring the desktop dashboard-b figures. The
-  // heavy bar DOM is gated behind `pdEnabled` (the post-first-paint idle flag)
-  // so the first paint stays the KPI cards only — `analyticsReady` flips true
-  // once the Home is interactive AND the overview has landed.
-  const analyticsReady = pdEnabled && overview != null;
+  // ---- Command Center analytics (owner 2026-06-28 design v12) ----
+  // Revenue / Plant Load / Worker Efficiency / Sales by Customer / Top Sellers
+  // / Fabric Usage / Department Backlog / Purchasing. Read from the SAME
+  // /api/dashboard/overview payload already fetched for the KPI rail (+ the
+  // three worker-efficiency fetches), mirroring the desktop dashboard-b
+  // figures. The heavy fetches are gated behind `pdEnabled` (the
+  // post-first-paint idle flag) so the first paint stays the KPI cards only;
+  // each card's JSX guards its own null state (no extra ready flag needed).
 
-  // Sales trend — last 6 months of confirmed-SO revenue (monthlyRevenue series,
-  // the dashboard's all-time view). Peak label + latest value match desktop.
-  const salesTrend = useMemo(() => {
-    const rev = overview?.monthlyRevenue ?? [];
-    const last6 = rev.slice(-6);
-    if (last6.length === 0) return null;
-    const max = Math.max(...last6.map((m) => m.salesOrderSen), 1);
-    const last = last6[last6.length - 1]?.salesOrderSen ?? 0;
+  // ---- Revenue — 3-line area chart (Sales Orders / Invoices / Production).
+  // Per-DAY x-axis off overview.weeklyRevenue (the backend buckets per day
+  // when period=YYYY-MM). Each series is an SVG polyline; the first VISIBLE
+  // series gets an area fill. Legend toggles are local state (revHide). ----
+  const REV_W = 320, REV_H = 132;
+  const revenue = useMemo(() => {
+    const pts = overview?.weeklyRevenue ?? [];
+    if (pts.length === 0) return null;
+    const n = pts.length;
+    const series = [
+      { key: "so" as const, label: "Sales Orders", color: "#5E5129", dash: "", vals: pts.map((p) => p.salesOrderSen) },
+      { key: "prod" as const, label: "Production", color: "#C9A961", dash: "", vals: pts.map((p) => p.productionSen) },
+      { key: "inv" as const, label: "Invoices", color: "#BBB2A4", dash: "4 3", vals: pts.map((p) => p.invoiceSen) },
+    ];
+    const max = Math.max(1, ...series.flatMap((s) => s.vals));
+    const x = (i: number) => (n <= 1 ? 0 : (i / (n - 1)) * REV_W);
+    const y = (v: number) => REV_H - (v / max) * REV_H;
+    const lines = series.map((s) => ({
+      key: s.key,
+      label: s.label,
+      color: s.color,
+      dash: s.dash,
+      points: s.vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" "),
+    }));
+    // x-axis day labels (DD), thinned to ~10 ticks so they don't crowd.
+    const step = Math.max(1, Math.ceil(n / 10));
+    const days = pts
+      .map((p, i) => ({ d: (p.week || "").slice(8, 10), i }))
+      .filter((_, i) => i % step === 0);
+    const grid = [0, 0.25, 0.5, 0.75, 1].map((f) => ({ y: (REV_H * f).toFixed(1) }));
+    return { lines, series, x, y, days, grid, last: pts[n - 1] };
+  }, [overview]);
+  // Local legend toggle — hide a revenue series by key.
+  const [revHide, setRevHide] = useState<Record<string, boolean>>({});
+
+  // ---- Plant Load (gauge + 4 rows) — all from overview.production. ----
+  // QUEUE-LOAD % is a DERIVED ratio of real numbers (NOT a stored field):
+  //   load% = clamp(0..100, backlogGrandMin ÷ dailyCapacityMin × 10)
+  // i.e. the total queued minutes expressed against ~10 days of capacity
+  // (10 working days = a sensible "full" plant horizon), clamped to 100.
+  const plant = useMemo(() => {
+    const p = overview?.production;
+    if (!p) return null;
+    const dailyCap = p.dailyCapacityMin ?? 0;
+    const backlogMin = p.backlogGrandMin ?? 0;
+    const loadPct =
+      dailyCap > 0
+        ? Math.max(0, Math.min(100, Math.round((backlogMin / (dailyCap * 10)) * 100)))
+        : null;
     return {
-      last,
-      peak: max,
-      bars: last6.map((m) => ({
-        // "YYYY-MM" → short month label ("Jun").
-        label: monthShort(m.month),
-        sen: m.salesOrderSen,
-        pct: Math.round((m.salesOrderSen / max) * 100),
-      })),
+      queue: p.backlogDays != null ? `${p.backlogDays.toFixed(1)}d` : "—",
+      loadPct,
+      workforce: overview?.employee?.activeHeadcount ?? null,
+      rows: [
+        { label: "Daily Capacity", sub: `${CUR_YM} avg`, value: dailyCap ? hrs(dailyCap) : "—", icon: Calendar },
+        {
+          label: "Total Backlog",
+          sub: "per dept",
+          value:
+            p.backlogDays != null
+              ? `${p.backlogDays.toFixed(1)}d · ${hrs(backlogMin)}`
+              : "—",
+          icon: CircleAlert,
+        },
+        {
+          label: "Active Jobs",
+          sub: "pending",
+          value: p.activeJobs
+            ? `${p.activeJobs.bedframeUnits} / ${p.activeJobs.sofaSets}`
+            : "—",
+          icon: Package,
+        },
+        {
+          label: "Completed",
+          sub: `${CUR_YM}`,
+          value: p.completedYesterday
+            ? `${p.completedYesterday.bedframeUnits} / ${p.completedYesterday.sofaSets}`
+            : "—",
+          icon: CircleCheck,
+        },
+      ],
     };
   }, [overview]);
 
-  // Plant load — per-department backlog (days waiting), bars scaled to the
-  // busiest department. Same source + scaling as the desktop Plant-Load panel
-  // (production.backlogByDept). >= ~capacity-day threshold tints danger.
-  const plantLoad = useMemo(() => {
-    const depts = overview?.production?.backlogByDept ?? [];
-    if (depts.length === 0) return null;
-    const max = Math.max(...depts.map((d) => d.backlogDays), 1);
-    const rows = depts
-      .slice()
-      .sort((a, b) => b.backlogDays - a.backlogDays)
-      .slice(0, 8)
-      .map((d) => {
-        // "Overloaded" = more than a working week of queued work (desktop tints
-        // long queues red). Threshold kept conservative at 5 backlog-days.
-        const over = d.backlogDays >= 5;
-        return {
-          dept: d.dept,
-          days: d.backlogDays,
-          pct: Math.round((d.backlogDays / max) * 100),
-          color: over ? M_ACCENT.danger.fg : d.backlogDays > 2 ? M.gold : M_DELTA.up,
-          over,
-        };
+  // ---- Worker Efficiency (TOP 5 + LOWEST 5) — ported 1:1 from dashboard-b:
+  // eff% = production minutes ÷ (production-dept clocked hours × 60). Excludes
+  // non-production depts from the denominator. ----
+  const workerEff = useMemo(() => {
+    const prodMin = new Map<string, number>();
+    for (const r of jcSumRaw?.data ?? [])
+      prodMin.set(r.workerId, Number(r.productionMinutes) || 0);
+    const name = new Map<string, string>();
+    const dept = new Map<string, string>();
+    for (const w of workersRaw?.data ?? []) {
+      name.set(w.id, w.name || w.id);
+      dept.set(w.id, DEPT_LABEL[w.departmentCode || ""] ?? w.departmentCode ?? "");
+    }
+    const rows: { name: string; dept: string; pct: number }[] = [];
+    for (const e of wheSumRaw?.data ?? []) {
+      if ((e.daysWithEntries ?? 0) === 0) continue;
+      let prodHours = 0;
+      for (const [d, h] of Object.entries(e.byDept ?? {}))
+        if (PROD_DEPTS.has(d)) prodHours += Number(h) || 0;
+      if (prodHours <= 0) continue;
+      rows.push({
+        name: name.get(e.workerId) ?? e.workerId,
+        dept: dept.get(e.workerId) ?? "",
+        pct: ((prodMin.get(e.workerId) ?? 0) / (prodHours * 60)) * 100,
       });
-    return { rows, overloaded: rows.filter((r) => r.over).length };
-  }, [overview]);
+    }
+    if (rows.length === 0) return null;
+    rows.sort((a, b) => b.pct - a.pct);
+    return { top: rows.slice(0, 5), low: rows.slice(-5).reverse() };
+  }, [jcSumRaw, wheSumRaw, workersRaw]);
 
-  // Sales by customer — top 5 by total confirmed-SO value this scope
-  // (aovByCustomer.totalSen), bars scaled to the largest customer.
+  // ---- Sales by Customer (avg order value, donut top-3, category tabs). ----
+  const [sbcCat, setSbcCat] = useState<"all" | "bedframe" | "sofa">("all");
   const salesByCustomer = useMemo(() => {
     const list = overview?.aovByCustomer ?? [];
     if (list.length === 0) return null;
-    const top = list
-      .slice()
-      .sort((a, b) => b.totalSen - a.totalSen)
+    // Category filter is FE-side: pick which total field ranks the rows.
+    const totalOf = (c: NonNullable<OverviewResp["aovByCustomer"]>[number]) =>
+      sbcCat === "bedframe"
+        ? c.bedframeAvgSen * c.bedframeUnits
+        : sbcCat === "sofa"
+          ? c.sofaAvgSen * c.sofaSets
+          : c.totalSen;
+    const rows = list
+      .map((c) => ({ c, t: totalOf(c) }))
+      .filter((r) => r.t > 0)
+      .sort((a, b) => b.t - a.t)
       .slice(0, 5);
-    const max = Math.max(...top.map((c) => c.totalSen), 1);
-    return top.map((c) => ({
-      name: c.customerName || "—",
-      sen: c.totalSen,
-      pct: Math.round((c.totalSen / max) * 100),
+    if (rows.length === 0) return null;
+    const sum = rows.reduce((a, r) => a + r.t, 0) || 1;
+    const enriched = rows.map((r, i) => ({
+      name: r.c.customerName || "—",
+      total: r.t,
+      pct: Math.round((r.t / sum) * 100),
+      color: SBC_COLORS[i % SBC_COLORS.length],
+      sub: `Bedframe ${rm2(r.c.bedframeAvgSen)} · Sofa ${
+        r.c.sofaSets > 0 ? rm2(r.c.sofaAvgSen) : "—"
+      }`,
+    }));
+    // Donut conic-gradient over the top rows; top-3 share = first three pcts.
+    let acc = 0;
+    const donut = enriched
+      .map((r) => {
+        const seg = `${r.color} ${acc}% ${acc + r.pct}%`;
+        acc += r.pct;
+        return seg;
+      })
+      .join(", ");
+    const top3 = enriched.slice(0, 3).reduce((a, r) => a + r.pct, 0);
+    const company = overview?.aovCompany?.totalSen ?? sum;
+    return { rows: enriched, donut: `conic-gradient(${donut})`, top3, total: company };
+  }, [overview, sbcCat]);
+
+  // ---- Top Sellers — BEDFRAME by units, SOFA by sets (code + qty + amount). ----
+  const topSellers = useMemo(() => {
+    const bed = (overview?.topSellers?.BEDFRAME ?? []).slice(0, 5).map((b) => ({
+      code: b.productCode,
+      qty: `×${b.qtySold}`,
+      amt: formatCurrency(b.valueSen || 0),
+    }));
+    const sofa = (overview?.topSellers?.SOFA ?? []).slice(0, 5).map((s) => ({
+      code: s.model,
+      qty: `×${s.setsSold} sets`,
+      amt: formatCurrency(s.valueSen || 0),
+    }));
+    if (bed.length === 0 && sofa.length === 0) return null;
+    return { bed, sofa };
+  }, [overview]);
+
+  // ---- Fabric Usage — BEDFRAME + SOFA (code, metres used, avg cost/m). ----
+  const fabricUsage = useMemo(() => {
+    const f = overview?.fabric;
+    const fc = overview?.fabricCostPerMeterSen;
+    if (!f) return null;
+    const mapRow = (r: { fabCode: string; meters: number; costSen?: number; buyAvgSen: number }) => ({
+      code: r.fabCode,
+      used: `${Math.round(r.meters || 0).toLocaleString()} m`,
+      // avg cost/m = buyAvgSen, falling back to costSen/meters when present.
+      avg: rm2(
+        r.buyAvgSen ||
+          (r.meters > 0 && r.costSen ? Math.round(r.costSen / r.meters) : 0),
+      ),
+    });
+    const bed = (f.BEDFRAME?.list ?? []).slice(0, 5).map(mapRow);
+    const sofa = (f.SOFA?.list ?? []).slice(0, 5).map(mapRow);
+    if (bed.length === 0 && sofa.length === 0) return null;
+    return {
+      bed,
+      sofa,
+      bedAvg: fc?.bedframe ? rm2(fc.bedframe) : "—",
+      sofaAvg: fc?.sofa ? rm2(fc.sofa) : "—",
+    };
+  }, [overview]);
+
+  // ---- Department Backlog — per-dept days, bottleneck first. ----
+  const deptBacklog = useMemo(() => {
+    const depts = overview?.production?.backlogByDept ?? [];
+    if (depts.length === 0) return null;
+    const sorted = depts.slice().sort((a, b) => b.backlogDays - a.backlogDays);
+    const max = Math.max(...sorted.map((d) => d.backlogDays), 1);
+    return sorted.map((d, i) => ({
+      dept: d.dept,
+      days: `${d.backlogDays.toFixed(1)}d`,
+      pct: Math.round((d.backlogDays / max) * 100),
+      // Bottleneck (#1) red; hot (>20d) gold; rest brown — matches the design.
+      color: i === 0 ? "#9A3A2D" : d.backlogDays > 20 ? "#C9A961" : "#5E5129",
+      dColor: i === 0 ? "#9A3A2D" : M.ink,
     }));
   }, [overview]);
 
-  // Top seller — best-selling products by units (Sofa sets + Bedframe units),
-  // merged across both categories, top 5 by quantity. Mirrors desktop Top
-  // Sellers (topSellers.SOFA / .BEDFRAME).
-  const topSeller = useMemo(() => {
-    const sofa = overview?.topSellers?.SOFA ?? [];
-    const bed = overview?.topSellers?.BEDFRAME ?? [];
-    const merged = [
-      ...sofa.map((s) => ({ name: s.model, units: s.setsSold })),
-      ...bed.map((b) => ({ name: b.productCode, units: b.qtySold })),
-    ];
-    if (merged.length === 0) return null;
-    const top = merged.sort((a, b) => b.units - a.units).slice(0, 5);
-    const max = Math.max(...top.map((t) => t.units), 1);
-    return top.map((t, i) => ({
-      rank: i + 1,
-      name: t.name || "—",
-      units: t.units,
-      pct: Math.round((t.units / max) * 100),
-    }));
+  // ---- Purchasing — open POs, spend/month, top suppliers. ----
+  const purchasing = useMemo(() => {
+    const p = overview?.purchasing;
+    if (!p) return null;
+    return {
+      openPOs: p.openPOCount ?? 0,
+      spend: formatCurrency(p.spendThisMonthSen ?? 0),
+      suppliers: (p.topSuppliers ?? []).slice(0, 5).map((s) => ({
+        name: s.name,
+        amt: formatCurrency(s.spendSen || 0),
+      })),
+    };
   }, [overview]);
 
   // ---- Stock alerts (raw materials at or below reorder / low threshold) ----
@@ -727,213 +989,313 @@ export default function MobileHome() {
           ) : null}
         </MobileCard>
 
-        {/* ===== Order Pipeline (this month) ===== */}
-        <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 700,
-              color: M.raisin,
-              marginBottom: 13,
-            }}
-          >
-            Order Pipeline · this month
-          </div>
-          {pipeline.map((p) => (
-            <div key={p.label} style={{ marginBottom: 11 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  marginBottom: 5,
-                }}
-              >
-                <span style={{ fontSize: 12.5, color: M.body }}>
-                  {p.label} · {p.pct}%
-                </span>
-                <span
-                  style={{
-                    fontSize: 12.5,
-                    fontWeight: 700,
-                    color: M.raisin,
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {formatCurrency(p.sen)}
-                </span>
-              </div>
-              <div
-                style={{
-                  height: 8,
-                  background: "#F0EBE0",
-                  borderRadius: 5,
-                  overflow: "hidden",
-                }}
-              >
-                <div
-                  style={{
-                    width: `${p.pct}%`,
-                    height: "100%",
-                    background: p.color,
-                    borderRadius: 5,
-                  }}
-                />
-              </div>
-            </div>
-          ))}
-        </MobileCard>
-
-        {/* ===== Command Center analytics (design v10) =====
-            Sales trend · Plant load · Sales by customer · Top seller. The bar
-            DOM is gated behind `analyticsReady` (post-first-paint idle + the
-            overview payload landed) so the first paint stays the KPI rail. */}
-        {analyticsReady && salesTrend ? (
+        {/* ===== Revenue — 3-line area chart (per-day x-axis) ===== */}
+        {revenue ? (
           <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "flex-end",
-                justifyContent: "space-between",
-                marginBottom: 14,
-              }}
-            >
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: M.raisin }}>
-                  Sales trend
-                </div>
-                <div style={{ fontSize: 11.5, color: M.muted, marginTop: 2 }}>
-                  last 6 months
-                </div>
-              </div>
-              <div style={{ textAlign: "right" }}>
-                <div
-                  style={{
-                    fontSize: 17,
-                    fontWeight: 800,
-                    color: M.taupe,
-                    letterSpacing: "-0.3px",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {kFormat(salesTrend.last)}
-                </div>
-                <div style={{ fontSize: 10.5, color: M.muted }}>
-                  peak {kFormat(salesTrend.peak)}
-                </div>
-              </div>
+            <div style={{ fontSize: 14.5, fontWeight: 700, color: M.raisin }}>
+              Revenue · {CUR_YM}
             </div>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "flex-end",
-                gap: 8,
-                height: 96,
-              }}
-            >
-              {salesTrend.bars.map((b, i) => (
-                <div
-                  key={`${b.label}-${i}`}
-                  style={{
-                    flex: 1,
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    height: "100%",
-                    justifyContent: "flex-end",
-                  }}
-                >
-                  <div
+            <div style={{ fontSize: 11, color: M.muted, marginTop: 2 }}>
+              Sales Orders · Invoices · Production · tap a legend to toggle
+            </div>
+            <div style={{ display: "flex", gap: 14, margin: "12px 0 8px" }}>
+              {revenue.lines.map((l) => {
+                const hidden = !!revHide[l.key];
+                return (
+                  <span
+                    key={l.key}
+                    onClick={() =>
+                      setRevHide((p) => ({ ...p, [l.key]: !p[l.key] }))
+                    }
                     style={{
-                      width: "100%",
-                      flex: 1,
-                      display: "flex",
-                      alignItems: "flex-end",
+                      cursor: "pointer",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      fontSize: 11,
+                      color: hidden ? M.faint : M.body,
+                      fontWeight: 600,
+                      WebkitTapHighlightColor: "transparent",
                     }}
                   >
-                    <div
+                    <span
                       style={{
-                        width: "100%",
-                        height: `${Math.max(b.pct, 4)}%`,
-                        minHeight: 6,
-                        background: "linear-gradient(180deg,#8B7A4E,#6B5C32)",
-                        borderRadius: "5px 5px 0 0",
+                        width: 8,
+                        height: 8,
+                        borderRadius: 2,
+                        background: hidden ? "#E2DDD8" : l.color,
                       }}
                     />
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 10,
-                      color: M.muted,
-                      marginTop: 6,
-                      fontWeight: 600,
-                    }}
-                  >
-                    {b.label}
-                  </div>
-                </div>
+                    {l.label}
+                  </span>
+                );
+              })}
+            </div>
+            <svg
+              viewBox={`0 0 ${REV_W} ${REV_H}`}
+              width="100%"
+              height="148"
+              preserveAspectRatio="none"
+            >
+              {revenue.grid.map((g, i) => (
+                <line
+                  key={`g${i}`}
+                  x1="0"
+                  y1={g.y}
+                  x2={REV_W}
+                  y2={g.y}
+                  stroke="#F2EEE6"
+                  strokeWidth="1"
+                />
+              ))}
+              {revenue.lines
+                .filter((l) => !revHide[l.key])
+                .map((l) => (
+                  <polyline
+                    key={l.key}
+                    points={l.points}
+                    fill="none"
+                    stroke={l.color}
+                    strokeWidth="2"
+                    strokeDasharray={l.dash || undefined}
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                ))}
+            </svg>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                marginTop: 4,
+              }}
+            >
+              {revenue.days.map((d, i) => (
+                <span
+                  key={`d${i}`}
+                  style={{ fontSize: 8.5, color: "#A89F8D" }}
+                >
+                  {d.d}
+                </span>
               ))}
             </div>
           </MobileCard>
         ) : null}
 
-        {analyticsReady && plantLoad ? (
-          <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+        {/* ===== Plant Load — gauge + workforce/queue-load + 4 rows ===== */}
+        {plant ? (
+          <MobileCard radius={16} style={{ padding: 16, marginTop: 14 }}>
+            <div
+              style={{
+                textAlign: "center",
+                fontSize: 14.5,
+                fontWeight: 700,
+                color: M.raisin,
+              }}
+            >
+              Plant Load
+            </div>
+            <div
+              style={{
+                textAlign: "center",
+                fontSize: 11,
+                color: M.muted,
+                marginTop: 2,
+              }}
+            >
+              backlog vs daily capacity
+            </div>
             <div
               style={{
                 display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: 13,
+                justifyContent: "center",
+                margin: "16px 0",
               }}
             >
-              <span style={{ fontSize: 14, fontWeight: 700, color: M.raisin }}>
-                Plant load
-              </span>
-              {plantLoad.overloaded > 0 ? (
-                <span
+              <div style={{ position: "relative", width: 140, height: 140 }}>
+                <div
                   style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    color: M_ACCENT.danger.fg,
-                    background: M_ACCENT.danger.bg,
-                    border: "1px solid #E8B2A1",
-                    padding: "2px 9px",
-                    borderRadius: 20,
+                    width: 140,
+                    height: 140,
+                    borderRadius: "50%",
+                    transform: "rotate(135deg)",
+                    background: `conic-gradient(#9A3A2D 0% ${
+                      plant.loadPct ?? 0
+                    }%, #F0EBE0 ${plant.loadPct ?? 0}% 100%)`,
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 18,
+                    left: 18,
+                    width: 104,
+                    height: 104,
+                    borderRadius: "50%",
+                    background: "#fff",
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
                   }}
                 >
-                  {plantLoad.overloaded} overloaded
-                </span>
-              ) : null}
+                  <span
+                    style={{
+                      fontSize: 28,
+                      fontWeight: 800,
+                      color: M.raisin,
+                      letterSpacing: -1,
+                    }}
+                  >
+                    {plant.queue}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 700,
+                      letterSpacing: 1,
+                      color: "#A89F8D",
+                    }}
+                  >
+                    QUEUE
+                  </span>
+                </div>
+              </div>
             </div>
-            {plantLoad.rows.map((p) => (
+            <div style={{ display: "flex", gap: 10, marginBottom: 6 }}>
+              <PlantStat
+                label="WORKFORCE"
+                value={plant.workforce != null ? String(plant.workforce) : "—"}
+              />
+              <PlantStat
+                label="QUEUE LOAD"
+                value={plant.loadPct != null ? `${plant.loadPct}%` : "—"}
+                color="#9A3A2D"
+              />
+            </div>
+            {plant.rows.map((r, i) => {
+              const Icon = r.icon;
+              return (
+                <div
+                  key={`pr${i}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "10px 2px",
+                    borderTop: `1px solid ${M.divider}`,
+                  }}
+                >
+                  <Icon size={16} strokeWidth={1.75} color="#9A9082" />
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: 12.5,
+                      color: M.body,
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {r.label}{" "}
+                    <span style={{ color: "#A89F8D", fontWeight: 500 }}>
+                      · {r.sub}
+                    </span>
+                  </span>
+                  <span
+                    style={{
+                      flex: "none",
+                      fontSize: 12.5,
+                      fontWeight: 800,
+                      color: M.raisin,
+                      whiteSpace: "nowrap",
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {r.value}
+                  </span>
+                </div>
+              );
+            })}
+          </MobileCard>
+        ) : null}
+
+        {/* ===== Order Pipeline — header + rate badge + bars + note ===== */}
+        <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "space-between",
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 14.5, fontWeight: 700, color: M.raisin }}>
+                Order Pipeline · {CUR_YM}
+              </div>
+              <div style={{ fontSize: 11, color: M.muted, marginTop: 2 }}>
+                shipped vs still to ship
+              </div>
+            </div>
+            {pipeline.ratePct != null ? (
+              <div style={{ textAlign: "right" }}>
+                <div
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    letterSpacing: 0.5,
+                    color: "#A89F8D",
+                  }}
+                >
+                  DELIVERED RATE
+                </div>
+                <div
+                  style={{
+                    fontSize: 17,
+                    fontWeight: 800,
+                    color: M_DELTA.up,
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {Math.round(pipeline.ratePct)}%
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <div style={{ marginTop: 14 }}>
+            {pipeline.bars.map((p) => (
               <div
-                key={p.dept}
+                key={p.label}
                 style={{
                   display: "flex",
                   alignItems: "center",
                   gap: 10,
-                  marginBottom: 9,
+                  marginBottom: 10,
                 }}
               >
                 <span
                   style={{
-                    width: 78,
+                    width: 74,
                     flex: "none",
-                    fontSize: 11.5,
+                    fontSize: 12,
                     color: M.body,
                     fontWeight: 600,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
                   }}
                 >
-                  {p.dept}
+                  {p.label}
                 </span>
                 <span
                   style={{
                     flex: 1,
-                    height: 9,
+                    height: 14,
                     background: "#F0EBE0",
                     borderRadius: 5,
                     overflow: "hidden",
@@ -951,182 +1313,437 @@ export default function MobileHome() {
                 </span>
                 <span
                   style={{
-                    width: 42,
+                    width: 108,
                     flex: "none",
                     textAlign: "right",
-                    fontSize: 11.5,
+                    fontSize: 12,
                     fontWeight: 700,
-                    color: p.over ? M_ACCENT.danger.fg : M.ink,
+                    color: M.raisin,
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {p.days.toFixed(1)}d
+                  {formatCurrency(p.sen)}
                 </span>
               </div>
             ))}
-          </MobileCard>
-        ) : null}
+          </div>
+          {pipeline.note ? (
+            <div style={{ fontSize: 11, color: M.muted, marginTop: 6 }}>
+              {pipeline.note}
+            </div>
+          ) : null}
+        </MobileCard>
 
-        {analyticsReady && salesByCustomer ? (
+        {/* ===== Worker Efficiency — TOP 5 + LOWEST 5 ===== */}
+        {workerEff ? (
           <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 700, color: M.raisin }}>
+              Worker Efficiency
+            </div>
+            <div style={{ fontSize: 11, color: M.muted, marginTop: 2 }}>
+              production mins ÷ clocked hours · {CUR_YM}
+            </div>
             <div
               style={{
-                fontSize: 14,
+                fontSize: 11,
                 fontWeight: 700,
-                color: M.raisin,
-                marginBottom: 13,
+                color: M_DELTA.up,
+                margin: "13px 0 3px",
+                letterSpacing: 0.5,
               }}
             >
-              Sales by customer
+              TOP 5
             </div>
-            {salesByCustomer.map((c) => (
-              <div key={c.name} style={{ marginBottom: 11 }}>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    marginBottom: 5,
-                  }}
-                >
-                  <span
-                    style={{
-                      fontSize: 12,
-                      color: M.ink,
-                      fontWeight: 600,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      maxWidth: "65%",
-                    }}
-                  >
-                    {c.name}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 700,
-                      color: M.raisin,
-                      fontVariantNumeric: "tabular-nums",
-                    }}
-                  >
-                    {kFormat(c.sen)}
-                  </span>
-                </div>
-                <div
-                  style={{
-                    height: 8,
-                    background: "#F0EBE0",
-                    borderRadius: 5,
-                    overflow: "hidden",
-                  }}
-                >
-                  <div
-                    style={{
-                      width: `${c.pct}%`,
-                      height: "100%",
-                      background: M.taupe,
-                      borderRadius: 5,
-                    }}
-                  />
-                </div>
-              </div>
+            {workerEff.top.map((w, i) => (
+              <WorkerRow key={`wt${i}`} w={w} first={i === 0} />
+            ))}
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: M_DELTA.down,
+                margin: "14px 0 3px",
+                letterSpacing: 0.5,
+              }}
+            >
+              LOWEST 5
+            </div>
+            {workerEff.low.map((w, i) => (
+              <WorkerRow key={`wl${i}`} w={w} first={i === 0} />
             ))}
           </MobileCard>
         ) : null}
 
-        {analyticsReady && topSeller ? (
+        {/* ===== Sales by Customer — category tabs + donut + rows ===== */}
+        {salesByCustomer ? (
           <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 700, color: M.raisin }}>
+              Sales by Customer
+            </div>
+            <div style={{ fontSize: 11, color: M.muted, marginTop: 2 }}>
+              avg order value · bedframe/unit vs sofa/set
+            </div>
+            <div style={{ display: "flex", gap: 6, marginTop: 11 }}>
+              {(["all", "bedframe", "sofa"] as const).map((k) => {
+                const active = sbcCat === k;
+                return (
+                  <span
+                    key={k}
+                    onClick={() => setSbcCat(k)}
+                    style={{
+                      padding: "5px 12px",
+                      borderRadius: 8,
+                      fontSize: 11.5,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      border: `1px solid ${active ? "#5E5129" : M.hairline}`,
+                      background: active ? "#5E5129" : "#fff",
+                      color: active ? "#fff" : M.body,
+                      WebkitTapHighlightColor: "transparent",
+                    }}
+                  >
+                    {k === "all" ? "All" : k === "bedframe" ? "Bedframe" : "Sofa"}
+                  </span>
+                );
+              })}
+            </div>
             <div
               style={{
-                fontSize: 14,
-                fontWeight: 700,
-                color: M.raisin,
-                marginBottom: 13,
+                display: "flex",
+                alignItems: "center",
+                gap: 14,
+                margin: "15px 0",
               }}
             >
-              Top seller
-            </div>
-            {topSeller.map((t) => (
               <div
-                key={`${t.rank}-${t.name}`}
+                style={{
+                  position: "relative",
+                  width: 104,
+                  height: 104,
+                  flex: "none",
+                }}
+              >
+                <div
+                  style={{
+                    width: 104,
+                    height: 104,
+                    borderRadius: "50%",
+                    background: salesByCustomer.donut,
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 22,
+                    left: 22,
+                    width: 60,
+                    height: 60,
+                    borderRadius: "50%",
+                    background: "#fff",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 9,
+                      color: "#A89F8D",
+                      fontWeight: 700,
+                    }}
+                  >
+                    TOP 3
+                  </span>
+                  <span
+                    style={{
+                      fontSize: 16,
+                      fontWeight: 800,
+                      color: M.raisin,
+                    }}
+                  >
+                    {salesByCustomer.top3}%
+                  </span>
+                </div>
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, color: M.muted }}>Total</div>
+                <div
+                  style={{
+                    fontSize: 18,
+                    fontWeight: 800,
+                    color: M.raisin,
+                    letterSpacing: -0.4,
+                  }}
+                >
+                  {formatCurrency(salesByCustomer.total)}
+                </div>
+              </div>
+            </div>
+            {salesByCustomer.rows.map((r, i) => (
+              <div
+                key={`sbc${i}`}
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  gap: 10,
-                  marginBottom: 11,
+                  gap: 9,
+                  padding: "9px 0",
+                  borderTop: i === 0 ? "none" : `1px solid ${M.divider}`,
                 }}
               >
                 <span
                   style={{
-                    width: 22,
-                    height: 22,
-                    borderRadius: 7,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
+                    width: 9,
+                    height: 9,
+                    borderRadius: 2,
+                    background: r.color,
                     flex: "none",
-                    fontSize: 11,
-                    fontWeight: 800,
-                    background: t.rank === 1 ? M.taupe : "#F0EAD8",
-                    color: t.rank === 1 ? "#fff" : M.taupe,
                   }}
-                >
-                  {t.rank}
-                </span>
+                />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div
                     style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      marginBottom: 4,
+                      fontSize: 12.5,
+                      fontWeight: 700,
+                      color: M.raisin,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
                     }}
                   >
-                    <span
-                      style={{
-                        fontSize: 12,
-                        color: M.ink,
-                        fontWeight: 600,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        maxWidth: "62%",
-                      }}
-                    >
-                      {t.name}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 11.5,
-                        fontWeight: 700,
-                        color: M.taupe,
-                        fontVariantNumeric: "tabular-nums",
-                      }}
-                    >
-                      {t.units} units
+                    {r.name}{" "}
+                    <span style={{ color: "#A89F8D", fontWeight: 600 }}>
+                      · {r.pct}%
                     </span>
                   </div>
                   <div
                     style={{
-                      height: 7,
+                      fontSize: 10.5,
+                      color: M.muted,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {r.sub}
+                  </div>
+                </div>
+                <span
+                  style={{
+                    fontSize: 12.5,
+                    fontWeight: 800,
+                    color: M.raisin,
+                    flex: "none",
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {formatCurrency(r.total)}
+                </span>
+              </div>
+            ))}
+          </MobileCard>
+        ) : null}
+
+        {/* ===== Top Sellers — BEDFRAME by units · SOFA by sets ===== */}
+        {topSellers ? (
+          <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 700, color: M.raisin }}>
+              Top Sellers
+            </div>
+            <div style={{ fontSize: 11, color: M.muted, marginTop: 2 }}>
+              bedframe by units · sofa by sets
+            </div>
+            {topSellers.bed.length > 0 ? (
+              <>
+                <SubHead label="BEDFRAME" />
+                {topSellers.bed.map((t, i) => (
+                  <SellerRow key={`tb${i}`} t={t} first={i === 0} />
+                ))}
+              </>
+            ) : null}
+            {topSellers.sofa.length > 0 ? (
+              <>
+                <SubHead label="SOFA" />
+                {topSellers.sofa.map((t, i) => (
+                  <SellerRow key={`ts${i}`} t={t} first={i === 0} />
+                ))}
+              </>
+            ) : null}
+          </MobileCard>
+        ) : null}
+
+        {/* ===== Fabric Usage — BEDFRAME + SOFA (code, metres, avg/m) ===== */}
+        {fabricUsage ? (
+          <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <div style={{ fontSize: 14.5, fontWeight: 700, color: M.raisin }}>
+                Fabric Usage
+              </div>
+              <div style={{ fontSize: 11, color: M.muted }}>avg cost /m</div>
+            </div>
+            {fabricUsage.bed.length > 0 ? (
+              <>
+                <SubHead label={`BEDFRAME · ${fabricUsage.bedAvg}`} />
+                {fabricUsage.bed.map((f, i) => (
+                  <FabricRow key={`fb${i}`} f={f} first={i === 0} />
+                ))}
+              </>
+            ) : null}
+            {fabricUsage.sofa.length > 0 ? (
+              <>
+                <SubHead label={`SOFA · ${fabricUsage.sofaAvg}`} />
+                {fabricUsage.sofa.map((f, i) => (
+                  <FabricRow key={`fs${i}`} f={f} first={i === 0} />
+                ))}
+              </>
+            ) : null}
+          </MobileCard>
+        ) : null}
+
+        {/* ===== Department Backlog — bottleneck first ===== */}
+        {deptBacklog ? (
+          <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 700, color: M.raisin }}>
+              Department Backlog
+            </div>
+            <div style={{ fontSize: 11, color: M.muted, marginTop: 2 }}>
+              active work vs daily capacity · bottleneck first
+            </div>
+            <div style={{ marginTop: 13 }}>
+              {deptBacklog.map((d, i) => (
+                <div
+                  key={`db${i}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    marginBottom: 9,
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 84,
+                      flex: "none",
+                      fontSize: 11.5,
+                      color: M.body,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {d.dept}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      height: 10,
                       background: "#F0EBE0",
                       borderRadius: 5,
                       overflow: "hidden",
                     }}
                   >
-                    <div
+                    <span
                       style={{
-                        width: `${t.pct}%`,
+                        display: "block",
+                        width: `${d.pct}%`,
                         height: "100%",
-                        background: "linear-gradient(90deg,#C9A961,#8B7A4E)",
-                        borderRadius: 5,
+                        background: d.color,
+                        borderRadius: 4,
                       }}
                     />
-                  </div>
+                  </span>
+                  <span
+                    style={{
+                      width: 42,
+                      flex: "none",
+                      textAlign: "right",
+                      fontSize: 11.5,
+                      fontWeight: 800,
+                      color: d.dColor,
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {d.days}
+                  </span>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
+          </MobileCard>
+        ) : null}
+
+        {/* ===== Purchasing — open POs + month spend + top suppliers ===== */}
+        {purchasing ? (
+          <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 700, color: M.raisin }}>
+              Purchasing
+            </div>
+            <div style={{ fontSize: 11, color: M.muted, marginTop: 2 }}>
+              open POs · spend
+            </div>
+            <div style={{ display: "flex", gap: 10, margin: "13px 0" }}>
+              <PlantStat label="OPEN POS" value={String(purchasing.openPOs)} />
+              <PlantStat
+                label="SPEND / MONTH"
+                value={purchasing.spend}
+                size="sm"
+              />
+            </div>
+            {purchasing.suppliers.length > 0 ? (
+              <>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: "#A89F8D",
+                    letterSpacing: 0.5,
+                    marginBottom: 2,
+                  }}
+                >
+                  TOP SUPPLIERS
+                </div>
+                {purchasing.suppliers.map((s, i) => (
+                  <div
+                    key={`sup${i}`}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "7px 0",
+                      borderTop: i === 0 ? "none" : `1px solid ${M.divider}`,
+                    }}
+                  >
+                    <span
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        color: M.raisin,
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {s.name}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 800,
+                        color: M.raisin,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {s.amt}
+                    </span>
+                  </div>
+                ))}
+              </>
+            ) : null}
           </MobileCard>
         ) : null}
 
@@ -1532,6 +2149,208 @@ function EmptyRow({ text }: { text: string }) {
       }}
     >
       {text}
+    </div>
+  );
+}
+
+// ---- v12 dashboard card helpers ----------------------------------------------
+
+/** Small stat tile used inside Plant Load + Purchasing cards. */
+function PlantStat({
+  label,
+  value,
+  color,
+  size,
+}: {
+  label: string;
+  value: string;
+  color?: string;
+  size?: "sm";
+}) {
+  return (
+    <div
+      style={{
+        flex: 1,
+        background: M.paper,
+        border: `1px solid #EFE9DF`,
+        borderRadius: 12,
+        padding: 11,
+        textAlign: "center",
+      }}
+    >
+      <div
+        style={{
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: 0.5,
+          color: "#A89F8D",
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontSize: size === "sm" ? 15.5 : 18,
+          fontWeight: 800,
+          color: color ?? M.raisin,
+          marginTop: 3,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+/** Tiny section subhead used inside Top Sellers + Fabric Usage cards. */
+function SubHead({ label }: { label: string }) {
+  return (
+    <div
+      style={{
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: 0.5,
+        color: "#A89F8D",
+        margin: "13px 0 2px",
+      }}
+    >
+      {label}
+    </div>
+  );
+}
+
+/** Row in Worker Efficiency card (TOP / LOWEST 5). Colour by efficiency band. */
+function WorkerRow({
+  w,
+  first,
+}: {
+  w: { name: string; dept: string; pct: number };
+  first: boolean;
+}) {
+  const pctColor =
+    w.pct >= 100 ? M_DELTA.up : w.pct >= 70 ? M.gold : M_DELTA.down;
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "7px 0",
+        borderTop: first ? "none" : `1px solid ${M.divider}`,
+      }}
+    >
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: 12.5,
+          fontWeight: 600,
+          color: M.raisin,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {w.name}{" "}
+        <span style={{ color: "#A89F8D", fontWeight: 500 }}>· {w.dept}</span>
+      </span>
+      <span
+        style={{
+          fontSize: 12.5,
+          fontWeight: 800,
+          color: pctColor,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {Math.round(w.pct)}%
+      </span>
+    </div>
+  );
+}
+
+/** Row in Top Sellers card. */
+function SellerRow({
+  t,
+  first,
+}: {
+  t: { code: string; qty: string; amt: string };
+  first: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "7px 0",
+        borderTop: first ? "none" : `1px solid ${M.divider}`,
+      }}
+    >
+      <span style={{ fontSize: 12.5, fontWeight: 700, color: M.raisin }}>
+        {t.code}
+      </span>
+      <span style={{ fontSize: 11, color: "#A89F8D" }}>{t.qty}</span>
+      <span style={{ flex: 1 }} />
+      <span
+        style={{
+          fontSize: 12.5,
+          fontWeight: 800,
+          color: M.raisin,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {t.amt}
+      </span>
+    </div>
+  );
+}
+
+/** Row in Fabric Usage card. */
+function FabricRow({
+  f,
+  first,
+}: {
+  f: { code: string; used: string; avg: string };
+  first: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "6px 0",
+        borderTop: first ? "none" : `1px solid ${M.divider}`,
+      }}
+    >
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: 12.5,
+          fontWeight: 600,
+          color: M.raisin,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {f.code}
+      </span>
+      <span style={{ fontSize: 11.5, color: "#9A9082" }}>{f.used}</span>
+      <span
+        style={{
+          width: 74,
+          textAlign: "right",
+          fontSize: 12,
+          fontWeight: 700,
+          color: M.raisin,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {f.avg}
+      </span>
     </div>
   );
 }

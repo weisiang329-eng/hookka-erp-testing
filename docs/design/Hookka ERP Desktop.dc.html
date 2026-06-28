@@ -722,6 +722,535 @@
         </div>
       </sc-if>
 
+      <!-- ================================================================
+           DELIVERY ORDERS
+      ================================================================ -->
+      <sc-if value="{{ isDelivery }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0; letter-spacing:-.4px;">Delivery Orders</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Auto-generated from ready-to-ship POs · 3PL or own fleet</div>
+            </div>
+            <div style="display:flex; gap:10px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">PL-First Auto-Split</button>
+              <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New DO</button>
+            </div>
+          </div>
+          <!-- KPI row -->
+          <div style="display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:18px;">
+            <sc-for list="{{ doKpis }}" as="k" hint-placeholder-count="5">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;">
+                <div style="font-size:11px; font-weight:700; color:#A89F8D; letter-spacing:.4px;">{{ k.label }}</div>
+                <div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:5px; letter-spacing:-.3px;">{{ k.value }}</div>
+              </div>
+            </sc-for>
+          </div>
+          <!-- Status tabs -->
+          <div style="display:flex; gap:6px; border-bottom:1px solid #E2DDD8; margin-bottom:14px;">
+            <sc-for list="{{ doTabs }}" as="t" hint-placeholder-count="6">
+              <span style="{{ t.style }}">{{ t.label }} <span style="font-size:10.5px; font-weight:700; color:{{ t.countColor }};">{{ t.count }}</span></span>
+            </sc-for>
+          </div>
+          <!-- Table -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>DO No</th><th>Company SO</th><th>Customer</th><th>State</th><th>Hub</th><th>Driver / Vehicle</th><th>Expected DD</th><th style="text-align:right;">Items</th><th style="text-align:right;">Value</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ doRows }}" as="r" hint-placeholder-count="8">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.doNo }}</td><td>{{ r.so }}</td><td>{{ r.customer }}</td><td>{{ r.state }}</td><td>{{ r.hub }}</td><td>{{ r.driver }}</td><td>{{ r.dd }}</td><td style="text-align:right;">{{ r.items }}</td><td style="text-align:right; font-weight:700;">{{ r.value }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           INVOICES
+      ================================================================ -->
+      <sc-if value="{{ isInvoices }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Invoices</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">AR · Payments · Credit/Debit Notes · e-Invoice submissions</div>
+            </div>
+            <div style="display:flex; gap:10px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Record Payment</button>
+              <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New Invoice</button>
+            </div>
+          </div>
+          <!-- KPI row -->
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:18px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">TOTAL OUTSTANDING</div><div style="font-size:20px; font-weight:800; color:#9A3A2D; margin-top:4px;">RM 209,400</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">OVERDUE</div><div style="font-size:20px; font-weight:800; color:#9A3A2D; margin-top:4px;">RM 47,820</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">RECEIVED THIS MONTH</div><div style="font-size:20px; font-weight:800; color:#4F7C3A; margin-top:4px;">RM 152,900</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">e-INVOICE SUBMITTED</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:4px;">42 / 52</div></div>
+          </div>
+          <!-- Tabs -->
+          <div style="display:flex; gap:6px; border-bottom:1px solid #E2DDD8; margin-bottom:14px;">
+            <span style="padding:11px 16px; font-size:13px; font-weight:700; color:#1F1D1B; border-bottom:2px solid #6B5C32; cursor:pointer;">Invoices</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Payments</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Credit Notes</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Debit Notes</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Supplier Pay</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">e-Invoice</span>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Invoice No</th><th>Customer</th><th>DO Ref</th><th>Invoice Date</th><th>Due Date</th><th style="text-align:right;">Amount</th><th style="text-align:right;">Paid</th><th style="text-align:right;">Outstanding</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ invoiceRows }}" as="r" hint-placeholder-count="8">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.no }}</td><td>{{ r.customer }}</td><td>{{ r.doRef }}</td><td>{{ r.date }}</td><td>{{ r.due }}</td><td style="text-align:right;">{{ r.amount }}</td><td style="text-align:right;">{{ r.paid }}</td><td style="text-align:right; font-weight:700; color:{{ r.outColor }};">{{ r.outstanding }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           PROCUREMENT — Purchase Orders / GRN / PI
+      ================================================================ -->
+      <sc-if value="{{ isProcurement }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Procurement</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Purchase Orders · Goods Receipt · Purchase Invoice</div>
+            </div>
+            <div style="display:flex; gap:10px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Scan Supplier PO</button>
+              <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New PO</button>
+            </div>
+          </div>
+          <!-- KPI row -->
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:18px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">OPEN POS</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:4px;">23</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">SPEND THIS MONTH</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 87,200</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">OVERDUE RECEIPT</div><div style="font-size:20px; font-weight:800; color:#9A3A2D; margin-top:4px;">5</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">3-WAY MATCHED</div><div style="font-size:20px; font-weight:800; color:#4F7C3A; margin-top:4px;">18 / 23</div></div>
+          </div>
+          <!-- Tabs -->
+          <div style="display:flex; gap:6px; border-bottom:1px solid #E2DDD8; margin-bottom:14px;">
+            <span style="padding:11px 16px; font-size:13px; font-weight:700; color:#1F1D1B; border-bottom:2px solid #6B5C32; cursor:pointer;">Purchase Orders</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Goods Receipt</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Purchase Invoice</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Maintenance</span>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>PO No</th><th>Supplier</th><th>Order Date</th><th>Expected Receipt</th><th style="text-align:right;">Items</th><th style="text-align:right;">Total</th><th>GRN</th><th>PI</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ poRows }}" as="r" hint-placeholder-count="8">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.poNo }}</td><td>{{ r.supplier }}</td><td>{{ r.orderDate }}</td><td>{{ r.expected }}</td><td style="text-align:right;">{{ r.items }}</td><td style="text-align:right; font-weight:700;">{{ r.total }}</td><td>{{ r.grn }}</td><td>{{ r.pi }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           PLANNING — Schedule
+      ================================================================ -->
+      <sc-if value="{{ isPlanning }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Planning</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Capacity · MRP · Department Schedule</div>
+            </div>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Recalculate Schedule</button>
+          </div>
+          <div style="display:flex; gap:6px; border-bottom:1px solid #E2DDD8; margin-bottom:14px;">
+            <span style="padding:11px 16px; font-size:13px; font-weight:700; color:#1F1D1B; border-bottom:2px solid #6B5C32; cursor:pointer;">Capacity</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">MRP</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Schedule</span>
+          </div>
+          <!-- 8-dept capacity matrix (Gantt-ish) -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:18px 22px;">
+            <div style="font-size:14px; font-weight:700; color:#1F1D1B; margin-bottom:14px;">Department Capacity · Next 14 days</div>
+            <sc-for list="{{ planRows }}" as="r" hint-placeholder-count="8">
+              <div style="display:flex; align-items:center; gap:14px; padding:10px 0; border-top:1px solid #F2EEE6;">
+                <span style="width:120px; flex:none; font-size:13px; font-weight:600; color:#1F1D1B;">{{ r.dept }}</span>
+                <span style="font-size:11.5px; color:#9A9082; width:90px;">{{ r.capacity }}</span>
+                <span style="flex:1; height:24px; background:#F0EBE0; border-radius:4px; overflow:hidden; position:relative;">
+                  <span style="display:block; width:{{ r.pct }}%; height:100%; background:{{ r.color }};"></span>
+                  <span style="position:absolute; top:50%; left:8px; transform:translateY(-50%); font-size:11px; font-weight:700; color:#fff;">{{ r.load }}</span>
+                </span>
+                <span style="width:80px; flex:none; text-align:right; font-size:12px; font-weight:700; color:{{ r.color }};">{{ r.days }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           BOM (Bill of Materials) Master Templates
+      ================================================================ -->
+      <sc-if value="{{ isBom }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">BOM Master Templates</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Default component lists by category · auto-attached on Product create</div>
+            </div>
+            <div style="display:flex; gap:10px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Audit Contamination</button>
+              <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New Template</button>
+            </div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Label</th><th>Category</th><th>Sub-Category</th><th style="text-align:right;">Components</th><th>Last Updated</th><th>Default</th><th></th></tr></thead>
+              <tbody>
+                <sc-for list="{{ bomRows }}" as="r" hint-placeholder-count="6">
+                  <tr><td style="font-weight:700;">{{ r.label }}</td><td><span style="{{ r.catStyle }}">{{ r.cat }}</span></td><td>{{ r.sub }}</td><td style="text-align:right; font-weight:700;">{{ r.components }}</td><td>{{ r.updated }}</td><td><sc-if value="{{ r.isDefault }}" hint-placeholder-val=""><lucide-icon name="check" size="14" color="#4F7C3A"></lucide-icon></sc-if></td><td><lucide-icon name="more-horizontal" size="16" color="#9CA3AF"></lucide-icon></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           CONSIGNMENT NOTES (CN) — like DOs but no invoice
+      ================================================================ -->
+      <sc-if value="{{ isConsignment }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Consignment Notes</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Stock-on-loan · no invoice generated</div>
+            </div>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New CN</button>
+          </div>
+          <div style="display:flex; gap:6px; border-bottom:1px solid #E2DDD8; margin-bottom:14px;">
+            <span style="padding:11px 16px; font-size:13px; font-weight:700; color:#1F1D1B; border-bottom:2px solid #6B5C32; cursor:pointer;">Consignment Notes</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Consignment Orders</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Returns</span>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>CN No</th><th>Customer</th><th>State</th><th>Hub</th><th>Created</th><th style="text-align:right;">Items</th><th style="text-align:right;">Amount</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ cnRows }}" as="r" hint-placeholder-count="6">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.no }}</td><td>{{ r.customer }}</td><td>{{ r.state }}</td><td>{{ r.hub }}</td><td>{{ r.created }}</td><td style="text-align:right;">{{ r.items }}</td><td style="text-align:right; font-weight:700;">{{ r.amount }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           SERVICE CASES
+      ================================================================ -->
+      <sc-if value="{{ isServiceCases }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Service Cases</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Warranty / repair / replacement workflow</div>
+            </div>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New Case</button>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:18px;">
+            <sc-for list="{{ svcKpis }}" as="k" hint-placeholder-count="5">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">{{ k.label }}</div><div style="font-size:20px; font-weight:800; color:{{ k.color }}; margin-top:5px;">{{ k.value }}</div></div>
+            </sc-for>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Case No</th><th>Customer</th><th>Source</th><th>Root Cause</th><th>Responsible</th><th>Opened</th><th>Service Order</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ svcRows }}" as="r" hint-placeholder-count="7">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.no }}</td><td>{{ r.customer }}</td><td>{{ r.source }}</td><td>{{ r.cause }}</td><td>{{ r.responsible }}</td><td>{{ r.opened }}</td><td>{{ r.svOrder }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           MAIL CENTER — Gmail-style 3-pane
+      ================================================================ -->
+      <sc-if value="{{ isMail }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Mail Center</h1>
+            <div style="display:flex; gap:10px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Sync</button>
+              <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Compose</button>
+            </div>
+          </div>
+          <!-- 3-pane: folders | thread list | reading pane -->
+          <div style="display:grid; grid-template-columns:200px 1fr 1.5fr; gap:14px; min-height:600px;">
+            <!-- Folders -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:12px 8px;">
+              <sc-for list="{{ mailFolders }}" as="f" hint-placeholder-count="6">
+                <div style="display:flex; align-items:center; gap:10px; padding:8px 11px; border-radius:8px; cursor:pointer; background:{{ f.bg }};">
+                  <lucide-icon name="{{ f.icon }}" size="15" color="{{ f.color }}"></lucide-icon>
+                  <span style="flex:1; font-size:13px; font-weight:{{ f.weight }}; color:{{ f.color }};">{{ f.label }}</span>
+                  <sc-if value="{{ f.count }}" hint-placeholder-val=""><span style="font-size:11px; color:#9A9082;">{{ f.count }}</span></sc-if>
+                </div>
+              </sc-for>
+            </div>
+            <!-- Thread list -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+              <sc-for list="{{ mailThreads }}" as="t" hint-placeholder-count="7">
+                <div style="padding:13px 16px; border-bottom:1px solid #F2EEE6; cursor:pointer; background:{{ t.bg }};">
+                  <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                    <span style="font-size:13px; font-weight:{{ t.weight }}; color:#1F1D1B; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ t.from }}</span>
+                    <span style="font-size:11px; color:#9A9082; flex:none;">{{ t.time }}</span>
+                  </div>
+                  <div style="font-size:12.5px; font-weight:{{ t.weight }}; color:#1F1D1B; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ t.subject }}</div>
+                  <div style="font-size:11.5px; color:#9A9082; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ t.snippet }}</div>
+                </div>
+              </sc-for>
+            </div>
+            <!-- Reading pane -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:24px 28px;">
+              <div style="font-size:18px; font-weight:800; color:#1F1D1B;">Re: PO-008711 Delivery Schedule</div>
+              <div style="display:flex; align-items:center; gap:10px; margin:14px 0; padding:11px 0; border-bottom:1px solid #F2EEE6;">
+                <span style="width:38px; height:38px; border-radius:50%; background:#6B5C32; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700;">JT</span>
+                <div style="flex:1;">
+                  <div style="font-size:13.5px; font-weight:700; color:#1F1D1B;">James Tan &lt;james@heritage.com&gt;</div>
+                  <div style="font-size:11.5px; color:#9A9082;">to: orders@hookka.com · Today 14:32</div>
+                </div>
+                <button style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 14px; font-family:inherit; font-size:12.5px; font-weight:600; color:#4D4630;">Reply</button>
+              </div>
+              <div style="font-size:14px; line-height:1.6; color:#3A352C;">
+                <p style="margin:0 0 12px;">Hi Hookka team,</p>
+                <p style="margin:0 0 12px;">Confirming receipt of your delivery schedule for PO-008711. The dates work for us — please proceed.</p>
+                <p style="margin:0 0 12px;">Note that we'll need the King-size units (12 pcs) at our KL hub by Jul 5 latest, as they're for an opening event on Jul 8.</p>
+                <p style="margin:0 0 12px;">Thanks,<br>James</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           ANNOUNCEMENTS
+      ================================================================ -->
+      <sc-if value="{{ isAnnouncements }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Announcements</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Org-wide notices · Per-worker read tracking</div>
+            </div>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New Announcement</button>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px;">
+            <sc-for list="{{ annRows }}" as="a" hint-placeholder-count="6">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:16px 18px;">
+                <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:6px;">
+                  <span style="{{ a.catStyle }}">{{ a.category }}</span>
+                  <span style="{{ a.activeStyle }}">{{ a.activeLabel }}</span>
+                </div>
+                <h3 style="margin:8px 0 6px; font-size:15px; font-weight:700; color:#1F1D1B;">{{ a.title }}</h3>
+                <div style="font-size:12.5px; color:#9A9082; line-height:1.5; height:36px; overflow:hidden;">{{ a.preview }}</div>
+                <div style="display:flex; align-items:center; gap:12px; margin-top:14px; padding-top:11px; border-top:1px solid #F2EEE6;">
+                  <span style="font-size:11px; color:#9A9082;">{{ a.posted }}</span>
+                  <span style="flex:1;"></span>
+                  <span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:700; color:#4F7C3A;"><lucide-icon name="users" size="13" color="#4F7C3A"></lucide-icon>Read {{ a.read }}/{{ a.total }}</span>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           ACCOUNTING — Chart of Accounts + Journal
+      ================================================================ -->
+      <sc-if value="{{ isAccounting }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Accounting</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">GL · Journal · Reports · Reconciliation</div>
+            </div>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Journal Entry</button>
+          </div>
+          <div style="display:flex; gap:6px; border-bottom:1px solid #E2DDD8; margin-bottom:14px;">
+            <span style="padding:11px 16px; font-size:13px; font-weight:700; color:#1F1D1B; border-bottom:2px solid #6B5C32; cursor:pointer;">Trial Balance</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Journal</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">P&amp;L</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Balance Sheet</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">AR Aging</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">AP Aging</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Bank Recon</span>
+          </div>
+          <!-- Period picker -->
+          <div style="display:flex; gap:10px; margin-bottom:14px; align-items:center;">
+            <input type="date" style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; font-size:13px; font-family:inherit;" value="2026-06-01" />
+            <span style="color:#9A9082;">to</span>
+            <input type="date" style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; font-size:13px; font-family:inherit;" value="2026-06-30" />
+            <span style="margin-left:auto; display:flex; gap:8px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 14px; font-family:inherit; font-size:12.5px; font-weight:600; color:#4D4630;">Export CSV</button>
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 14px; font-family:inherit; font-size:12.5px; font-weight:600; color:#4D4630;">Export PDF</button>
+            </span>
+          </div>
+          <!-- Trial Balance table -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Account Code</th><th>Account Name</th><th>Type</th><th style="text-align:right;">Debit</th><th style="text-align:right;">Credit</th><th style="text-align:right;">Balance</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ acctRows }}" as="r" hint-placeholder-count="10">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.code }}</td><td>{{ r.name }}</td><td><span style="font-size:11px; color:#6B7280;">{{ r.type }}</span></td><td style="text-align:right;">{{ r.debit }}</td><td style="text-align:right;">{{ r.credit }}</td><td style="text-align:right; font-weight:700; color:{{ r.balColor }};">{{ r.balance }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           SUPPLIERS
+      ================================================================ -->
+      <sc-if value="{{ isSuppliers }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Suppliers</h1>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ Add Supplier</button>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Code</th><th>Name</th><th>Contact</th><th>Phone</th><th>State</th><th style="text-align:right;">YTD Spend</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ supRows }}" as="r" hint-placeholder-count="8">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.code }}</td><td>{{ r.name }}</td><td>{{ r.contact }}</td><td>{{ r.phone }}</td><td>{{ r.state }}</td><td style="text-align:right; font-weight:700;">{{ r.ytd }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           PRODUCTS (Catalog)
+      ================================================================ -->
+      <sc-if value="{{ isProducts }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Products</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Catalog · Modular · Sofa Combos</div>
+            </div>
+            <div style="display:flex; gap:10px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Batch Import</button>
+              <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ Add Product</button>
+            </div>
+          </div>
+          <!-- Category filter -->
+          <div style="display:flex; gap:7px; margin-bottom:14px;">
+            <span style="padding:7px 14px; border-radius:8px; font-size:12.5px; font-weight:700; background:#6B5C32; color:#fff;">All</span>
+            <span style="padding:7px 14px; border-radius:8px; font-size:12.5px; font-weight:600; background:#fff; border:1px solid #E2DDD8; color:#6B7280;">Bedframe</span>
+            <span style="padding:7px 14px; border-radius:8px; font-size:12.5px; font-weight:600; background:#fff; border:1px solid #E2DDD8; color:#6B7280;">Sofa</span>
+            <span style="padding:7px 14px; border-radius:8px; font-size:12.5px; font-weight:600; background:#fff; border:1px solid #E2DDD8; color:#6B7280;">Accessory</span>
+            <span style="margin-left:auto; display:flex; gap:7px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:6px 11px; font-family:inherit; font-size:12px; font-weight:700; color:#4D4630;">Table</button>
+              <button style="background:#6B5C32; border:none; border-radius:8px; padding:6px 11px; font-family:inherit; font-size:12px; font-weight:700; color:#fff;">Photo Tiles</button>
+            </span>
+          </div>
+          <!-- Photo tiles grid -->
+          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:14px;">
+            <sc-for list="{{ prodTiles }}" as="p" hint-placeholder-count="10">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden; cursor:pointer;">
+                <div style="aspect-ratio:1; background:linear-gradient(135deg,{{ p.bg1 }},{{ p.bg2 }}); display:flex; align-items:center; justify-content:center;">
+                  <lucide-icon name="{{ p.icon }}" size="32" color="rgba(255,255,255,.6)"></lucide-icon>
+                </div>
+                <div style="padding:11px 13px;">
+                  <div style="font-size:12.5px; font-weight:700; color:#6B5C32;">{{ p.code }}</div>
+                  <div style="font-size:13px; font-weight:600; color:#1F1D1B; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ p.name }}</div>
+                  <div style="font-size:11px; color:#9A9082; margin-top:2px;">{{ p.size }} · {{ p.cat }}</div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           CNC TEMPLATES — 2-level drill (Model → Size/Seat → Files)
+      ================================================================ -->
+      <sc-if value="{{ isCnc }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">CNC Templates</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Cutting templates per Model · Size/Seat combination</div>
+            </div>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ Upload Template</button>
+          </div>
+          <div style="display:grid; grid-template-columns:280px 1fr; gap:14px;">
+            <!-- Left: Models -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:12px 8px; max-height:600px; overflow-y:auto;">
+              <div style="font-size:11px; font-weight:700; color:#A89F8D; padding:8px 11px 4px;">MODELS</div>
+              <sc-for list="{{ cncModels }}" as="m" hint-placeholder-count="10">
+                <div style="display:flex; align-items:center; gap:10px; padding:9px 11px; border-radius:8px; cursor:pointer; background:{{ m.bg }};">
+                  <span style="font-size:13px; font-weight:{{ m.weight }}; color:{{ m.color }};">{{ m.label }}</span>
+                  <span style="margin-left:auto; font-size:11px; color:#9A9082;">{{ m.variants }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <!-- Right: Sizes + Files -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:18px 22px;">
+              <h2 style="margin:0 0 6px; font-size:18px; font-weight:700; color:#1F1D1B;">Trion 2009(A)</h2>
+              <div style="font-size:12.5px; color:#9A9082; margin-bottom:14px;">4 size variants</div>
+              <sc-for list="{{ cncSizes }}" as="s" hint-placeholder-count="4">
+                <div style="border:1px solid #E7E0D4; border-radius:10px; padding:13px 16px; margin-bottom:10px;">
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <div>
+                      <div style="font-size:14px; font-weight:700; color:#1F1D1B;">{{ s.label }}</div>
+                      <div style="font-size:11.5px; color:#9A9082; margin-top:3px;">{{ s.subtitle }}</div>
+                    </div>
+                    <span style="font-size:11px; font-weight:700; color:#6B5C32; background:#F0EAD8; padding:3px 9px; border-radius:9999px;">{{ s.fileCount }} files</span>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           e-INVOICE Submissions
+      ================================================================ -->
+      <sc-if value="{{ isEinvoice }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">e-Invoice (MyInvois)</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">LHDN submissions · 72-hour validation window</div>
+            </div>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Submit Pending</button>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:18px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">SUBMITTED THIS MONTH</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:4px;">42</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">VALIDATED</div><div style="font-size:20px; font-weight:800; color:#4F7C3A; margin-top:4px;">39</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">PENDING</div><div style="font-size:20px; font-weight:800; color:#C9A961; margin-top:4px;">2</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">REJECTED</div><div style="font-size:20px; font-weight:800; color:#9A3A2D; margin-top:4px;">1</div></div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Invoice No</th><th>UUID</th><th>Customer</th><th>Submitted</th><th>Validated</th><th style="text-align:right;">Amount</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ einvRows }}" as="r" hint-placeholder-count="7">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.no }}</td><td><span style="font-size:11px; color:#9A9082;">{{ r.uuid }}</span></td><td>{{ r.customer }}</td><td>{{ r.submitted }}</td><td>{{ r.validated }}</td><td style="text-align:right; font-weight:700;">{{ r.amount }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
     </main>
   </div>
 </div>
@@ -761,7 +1290,16 @@ class App {
       ["HR & OPERATIONS", [["employees", "Employees", "users"]]],
       ["SYSTEM", [["settings", "User Management", "settings"]]],
     ];
-    const activeKey = ({"dashboard":"dashboard","sales":"sales","sales-detail":"sales","production":"production","inventory":"inventory","customers":"customers","warehouse":"warehouse","employees":"employees","settings":"settings"})[v] || "";
+    const activeKey = ({
+      "dashboard":"dashboard","sales":"sales","sales-detail":"sales",
+      "delivery":"delivery","invoices":"invoices","procurement":"po","grn":"po","pi":"po",
+      "production":"production","planning":"planning","bom":"bom",
+      "inventory":"inventory","warehouse":"warehouse","customers":"customers","suppliers":"suppliers",
+      "products":"products","cnc":"cnc","consignment":"consignment",
+      "employees":"employees","servicecases":"servicecases",
+      "mail":"mailcenter","announcements":"announcements","accounting":"monthly","einvoice":"einvoice",
+      "settings":"settings",
+    })[v] || "";
     const sideNav = navGroups.map(g => ({
       label: g[0],
       items: g[1].map(it => {
@@ -782,11 +1320,25 @@ class App {
       "dashboard": [["Dashboard", 1]],
       "sales": [["Sales", 0], ["Sales Orders", 1]],
       "sales-detail": [["Sales", 0], ["Sales Orders", 0], ["SO-2606-0142", 1]],
+      "delivery": [["Sales", 0], ["Delivery Orders", 1]],
+      "invoices": [["Sales", 0], ["Invoices", 1]],
+      "procurement": [["Procurement", 0], ["Purchase Orders", 1]],
       "production": [["Production", 1]],
+      "planning": [["Production", 0], ["Planning", 1]],
+      "bom": [["Products & BOM", 0], ["BOM Master", 1]],
       "inventory": [["Warehouse", 0], ["Inventory", 1]],
       "customers": [["Sales", 0], ["Customers", 1]],
+      "suppliers": [["Procurement", 0], ["Suppliers", 1]],
       "warehouse": [["Warehouse", 1]],
+      "products": [["Products & BOM", 0], ["Products", 1]],
+      "cnc": [["Products & BOM", 0], ["CNC Templates", 1]],
+      "consignment": [["Sales", 0], ["Consignment Notes", 1]],
       "employees": [["HR & Operations", 0], ["Employees", 1]],
+      "servicecases": [["Quality & Service", 0], ["Service Cases", 1]],
+      "mail": [["Overview", 0], ["Mail Center", 1]],
+      "announcements": [["Overview", 0], ["Announcements", 1]],
+      "accounting": [["Finance", 0], ["Trial Balance", 1]],
+      "einvoice": [["Finance", 0], ["e-Invoice", 1]],
       "settings": [["System", 0], ["User Management", 1]],
     };
     const breadcrumbs = (crumbMap[v] || []).map(c => ({
@@ -794,8 +1346,24 @@ class App {
     }));
 
     // ---- Scene switcher ----
-    const sceneList = ["dashboard", "sales", "sales-detail", "production", "inventory", "customers", "warehouse", "employees", "settings"];
-    const sceneLabels = { "dashboard":"Dashboard", "sales":"Sales", "sales-detail":"SO Detail", "production":"Production", "inventory":"Inventory", "customers":"Customers", "warehouse":"Warehouse", "employees":"Employees", "settings":"Users" };
+    const sceneList = [
+      "dashboard", "sales", "sales-detail", "delivery", "invoices", "procurement",
+      "production", "planning", "bom",
+      "inventory", "warehouse", "customers", "suppliers", "products", "cnc",
+      "consignment", "servicecases", "mail", "announcements",
+      "accounting", "einvoice", "employees", "settings",
+    ];
+    const sceneLabels = {
+      "dashboard":"Dashboard", "sales":"Sales", "sales-detail":"SO Detail",
+      "delivery":"Delivery", "invoices":"Invoices", "procurement":"Procure",
+      "production":"Production", "planning":"Planning", "bom":"BOM",
+      "inventory":"Inventory", "warehouse":"Warehouse", "customers":"Customers",
+      "suppliers":"Suppliers", "products":"Products", "cnc":"CNC",
+      "consignment":"Consignment", "servicecases":"Service",
+      "mail":"Mail", "announcements":"Announce",
+      "accounting":"Accounting", "einvoice":"e-Invoice",
+      "employees":"Employees", "settings":"Users",
+    };
     const scenes = sceneList.map(s => ({
       label: sceneLabels[s], onClick: () => this.setView(s),
       style: `background:${v === s ? "#6B5C32" : "transparent"}; border:1px solid ${v === s ? "#6B5C32" : "rgba(255,255,255,.12)"}; color:#fff; padding:6px 10px; border-radius:8px; font-family:inherit; font-size:11px; font-weight:700; cursor:pointer;`,
@@ -948,26 +1516,285 @@ class App {
     const userRoleBg = (r) => `display:inline-flex; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:700; background:${r==="SUPER_ADMIN"?"#F9E1DA":r==="ADMIN"?"#F0EAD8":"#F0ECE9"}; color:${r==="SUPER_ADMIN"?"#9A3A2D":r==="ADMIN"?"#6B5C32":"#6B7280"};`;
     const users = userSeed.map(u => ({ name: u[0], email: u[1], role: u[2], roleStyle: userRoleBg(u[2]), dept: u[3], position: u[4], lastLogin: u[5], status: u[6], badgeStyle: empBadge(u[6]) }));
 
+    // ---- Delivery Orders data ----
+    const doKpis = [["Total DOs", "168"], ["Pending Dispatch", "12"], ["In Transit", "7"], ["Delivered Today", "23"], ["3PL · Own", "98 · 70"]].map(k => ({ label: k[0], value: k[1] }));
+    const DOBG = { DRAFT: ["#FAEFCB", "#9C6F1E"], LOADED: ["#FFF4D6", "#7A5A00"], DISPATCHED: ["#E0EDF0", "#3E6570"], IN_TRANSIT: ["#EFEAFA", "#5E4B8C"], SIGNED: ["#EEF3E4", "#4F7C3A"], DELIVERED: ["#EEF3E4", "#4F7C3A"], INVOICED: ["#F0ECE9", "#6B7280"] };
+    const doBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${(DOBG[s]||DOBG.INVOICED)[0]}; color:${(DOBG[s]||DOBG.INVOICED)[1]};`;
+    const doTabs = ["All 168", "Draft 12", "Dispatched 19", "In Transit 7", "Delivered 117", "Invoiced 13"].map((l, i) => {
+      const a = i === 0;
+      return { label: l.split(' ')[0], count: l.split(' ').slice(1).join(' '), style: `padding:11px 16px; font-size:13px; font-weight:${a?"700":"600"}; color:${a?"#1F1D1B":"#6B7280"}; ${a?"border-bottom:2px solid #6B5C32;":""} cursor:pointer; display:inline-flex; align-items:center; gap:6px;`, countColor: a ? "#6B5C32" : "#9CA3AF" };
+    });
+    const doSeed = [
+      ["DO-2606-088", "SO-2606-0142", "The Heritage Hotel", "KL", "KL-Klang Hub", "Driver Lim · WA-1234", "2026-07-05", 12, "RM 23,400", "DISPATCHED"],
+      ["DO-2606-087", "SO-2606-0141", "Atlas Hospitality", "PG", "PG-Butterworth", "3PL · Lalamove", "2026-06-30", 14, "RM 28,600", "IN_TRANSIT"],
+      ["DO-2606-086", "SO-2606-0140", "Damai Resort Group", "SG", "SG-Subang", "Driver Tan · WB-5678", "2026-07-08", 8, "RM 14,200", "DRAFT"],
+      ["DO-2606-085", "SO-2606-0139", "Casa Furnishings KL", "KL", "KL-PJ", "3PL · GoGet", "2026-06-26", 2, "RM 3,200", "DELIVERED"],
+      ["DO-2606-084", "SO-2606-0138", "Nordic Home Penang", "PG", "PG-Penang Hub", "Driver Aishah · WB-9012", "2026-07-15", 8, "RM 19,400", "LOADED"],
+      ["DO-2606-083", "SO-2606-0136", "The Heritage Hotel", "KL", "KL-Klang Hub", "Own fleet", "2026-07-01", 5, "RM 9,800", "SIGNED"],
+      ["DO-2606-082", "SO-2606-0134", "Atlas Hospitality", "PG", "PG-Butterworth", "3PL · Lalamove", "2026-06-25", 4, "RM 7,600", "INVOICED"],
+    ];
+    const doRows = doSeed.map(r => ({ doNo: r[0], so: r[1], customer: r[2], state: r[3], hub: r[4], driver: r[5], dd: r[6], items: r[7], value: r[8], status: r[9], badgeStyle: doBadge(r[9]) }));
+
+    // ---- Invoices data ----
+    const INVBG = { PAID: ["#EEF3E4", "#4F7C3A"], PARTIAL: ["#FFF4D6", "#7A5A00"], UNPAID: ["#F9E1DA", "#9A3A2D"], OVERDUE: ["#F9E1DA", "#9A3A2D"] };
+    const invBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${(INVBG[s]||INVBG.UNPAID)[0]}; color:${(INVBG[s]||INVBG.UNPAID)[1]};`;
+    const invSeed2 = [
+      ["INV-2606-052", "The Heritage Hotel", "DO-2606-088", "2026-06-20", "2026-07-20", "RM 47,820", "RM 24,000", "RM 23,820", "PARTIAL"],
+      ["INV-2606-051", "Atlas Hospitality", "DO-2606-087", "2026-06-19", "2026-07-19", "RM 62,400", "RM 62,400", "RM 0", "PAID"],
+      ["INV-2606-050", "Casa Furnishings KL", "DO-2606-085", "2026-06-18", "2026-07-18", "RM 18,250", "RM 0", "RM 18,250", "UNPAID"],
+      ["INV-2606-049", "Nordic Home Penang", "DO-2606-084", "2026-06-15", "2026-06-25", "RM 27,800", "RM 0", "RM 27,800", "OVERDUE"],
+      ["INV-2606-048", "Damai Resort Group", "DO-2606-080", "2026-06-12", "2026-07-12", "RM 31,500", "RM 31,500", "RM 0", "PAID"],
+      ["INV-2606-047", "The Heritage Hotel", "DO-2606-079", "2026-06-10", "2026-07-10", "RM 12,400", "RM 6,000", "RM 6,400", "PARTIAL"],
+    ];
+    const invoiceRows = invSeed2.map(r => ({ no: r[0], customer: r[1], doRef: r[2], date: r[3], due: r[4], amount: r[5], paid: r[6], outstanding: r[7], status: r[8], badgeStyle: invBadge(r[8]), outColor: r[8] === "PAID" ? "#4F7C3A" : "#9A3A2D" }));
+
+    // ---- Procurement (PO) data ----
+    const POBG = { DRAFT: ["#FAEFCB", "#9C6F1E"], AWAITING: ["#FFF4D6", "#7A5A00"], PARTIAL: ["#E0EDF0", "#3E6570"], RECEIVED: ["#EEF3E4", "#4F7C3A"], MATCHED: ["#EEF3E4", "#4F7C3A"], CANCELLED: ["#F0ECE9", "#6B7280"] };
+    const poBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${(POBG[s]||POBG.CANCELLED)[0]}; color:${(POBG[s]||POBG.CANCELLED)[1]};`;
+    const poSeed = [
+      ["PO-006712", "Fabric World Sdn Bhd", "2026-06-15", "2026-06-30", 4, "RM 12,400", "GRN-1834", "PI-2104", "MATCHED"],
+      ["PO-006711", "Foam Tech Holdings", "2026-06-14", "2026-06-28", 2, "RM 8,700", "GRN-1833", "—", "RECEIVED"],
+      ["PO-006710", "Wood Supply Co", "2026-06-12", "2026-06-25", 8, "RM 22,300", "Partial", "—", "PARTIAL"],
+      ["PO-006709", "Metal Frames KL", "2026-06-10", "2026-06-22", 3, "RM 6,400", "—", "—", "AWAITING"],
+      ["PO-006708", "Springs & Coils", "2026-06-08", "2026-06-20", 1, "RM 4,200", "—", "—", "DRAFT"],
+      ["PO-006707", "Pillow Foam Ltd", "2026-06-05", "2026-06-15", 12, "RM 18,900", "GRN-1831", "PI-2102", "MATCHED"],
+    ];
+    const poRows = poSeed.map(r => ({ poNo: r[0], supplier: r[1], orderDate: r[2], expected: r[3], items: r[4], total: r[5], grn: r[6], pi: r[7], status: r[8], badgeStyle: poBadge(r[8]) }));
+
+    // ---- Planning data (dept capacity bars) ----
+    const planSeed = [
+      ["Fab Cutting", "32h/day", 22, "#5E5129", "22% load", "1.4d backlog"],
+      ["Fab Sewing", "48h/day", 45, "#5E5129", "45% load", "2.8d backlog"],
+      ["Wood Cutting", "24h/day", 38, "#5E5129", "38% load", "1.9d backlog"],
+      ["Foam Bonding", "16h/day", 98, "#9A3A2D", "98% load", "9.8d backlog"],
+      ["Framing", "32h/day", 95, "#9A3A2D", "95% load", "8.2d backlog"],
+      ["Webbing", "24h/day", 72, "#C9A961", "72% load", "6.4d backlog"],
+      ["Upholstery", "40h/day", 55, "#5E5129", "55% load", "3.2d backlog"],
+      ["Packing", "16h/day", 78, "#C9A961", "78% load", "5.1d backlog"],
+    ];
+    const planRows = planSeed.map(r => ({ dept: r[0], capacity: r[1], pct: r[2], color: r[3], load: r[4], days: r[5] }));
+
+    // ---- BOM templates data ----
+    const bomCat = (c) => `display:inline-flex; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600; background:${c==="BEDFRAME"?"#F0EAD8":c==="SOFA"?"#E0EDF0":"#FAEFCB"}; color:${c==="BEDFRAME"?"#6B5C32":c==="SOFA"?"#3E6570":"#9C6F1E"};`;
+    const bomSeed = [
+      ["Bedframe King Default", "BEDFRAME", "King", 24, "2026-06-15 by Wei Siang", 1],
+      ["Bedframe Queen Default", "BEDFRAME", "Queen", 22, "2026-06-15 by Wei Siang", 1],
+      ["Bedframe Single Default", "BEDFRAME", "Single", 18, "2026-05-22 by Wei Siang", 1],
+      ["Sofa 2S Default", "SOFA", "2-Seater", 31, "2026-06-10 by Wei Siang", 1],
+      ["Sofa 3S L-shape", "SOFA", "3-Seater L", 38, "2026-06-08 by Wei Siang", 1],
+      ["Trion 2009 Custom", "BEDFRAME", "King (custom)", 28, "2026-06-20 by Lim", 0],
+    ];
+    const bomRows = bomSeed.map(r => ({ label: r[0], cat: r[1], catStyle: bomCat(r[1]), sub: r[2], components: r[3], updated: r[4], isDefault: r[5] }));
+
+    // ---- Consignment Notes data ----
+    const CNBG = { PENDING: ["#FFF4D6", "#7A5A00"], DISPATCHED: ["#E0EDF0", "#3E6570"], SIGNED: ["#EEF3E4", "#4F7C3A"], RETURNED: ["#F0ECE9", "#6B7280"] };
+    const cnBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${(CNBG[s]||CNBG.RETURNED)[0]}; color:${(CNBG[s]||CNBG.RETURNED)[1]};`;
+    const cnSeed = [
+      ["CN-2606-018", "Atlas Hospitality (Showroom)", "PG", "PG-Butterworth", "2026-06-18", 4, "RM 12,800", "DISPATCHED"],
+      ["CN-2606-017", "Damai Resort (Trial)", "SG", "SG-Subang", "2026-06-15", 2, "RM 6,400", "SIGNED"],
+      ["CN-2606-016", "Heritage Hotel (Loan)", "KL", "KL-Klang", "2026-06-10", 8, "RM 24,300", "SIGNED"],
+      ["CN-2606-015", "Casa Furnishings (Demo)", "KL", "KL-PJ", "2026-06-08", 1, "RM 2,400", "RETURNED"],
+      ["CN-2606-014", "Nordic Home (Trial)", "PG", "PG-Penang", "2026-06-05", 3, "RM 8,700", "PENDING"],
+    ];
+    const cnRows = cnSeed.map(r => ({ no: r[0], customer: r[1], state: r[2], hub: r[3], created: r[4], items: r[5], amount: r[6], status: r[7], badgeStyle: cnBadge(r[7]) }));
+
+    // ---- Service Cases data ----
+    const SVCBG = { OPEN: ["#FFF4D6", "#7A5A00"], IN_PROGRESS: ["#E0EDF0", "#3E6570"], CLOSED: ["#EEF3E4", "#4F7C3A"], CANCELLED: ["#F0ECE9", "#6B7280"] };
+    const svcBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${(SVCBG[s]||SVCBG.CANCELLED)[0]}; color:${(SVCBG[s]||SVCBG.CANCELLED)[1]};`;
+    const svcKpis = [
+      { label: "OPEN", value: "8", color: "#9A3A2D" },
+      { label: "IN PROGRESS", value: "14", color: "#3E6570" },
+      { label: "CLOSED MTD", value: "23", color: "#4F7C3A" },
+      { label: "AVG RESOLUTION", value: "4.2d", color: "#1F1D1B" },
+      { label: "PREVENTION RATE", value: "82%", color: "#4F7C3A" },
+    ];
+    const svcSeed = [
+      ["SVC-2606-024", "The Heritage Hotel", "SO-2602-098", "Fabric tear", "Production - Sewing", "2026-06-22", "SV-2606-018", "IN_PROGRESS"],
+      ["SVC-2606-023", "Atlas Hospitality", "SO-2604-112", "Loose joint", "Production - Framing", "2026-06-20", "SV-2606-017", "IN_PROGRESS"],
+      ["SVC-2606-022", "Damai Resort", "SO-2605-145", "Wrong size delivered", "Logistics - Dispatch", "2026-06-18", "—", "OPEN"],
+      ["SVC-2606-021", "Casa Furnishings", "SO-2603-088", "Foam compression", "Materials - Foam", "2026-06-15", "SV-2606-015", "CLOSED"],
+      ["SVC-2606-020", "Nordic Home", "SO-2605-156", "Color mismatch", "Sales - Catalogue", "2026-06-12", "SV-2606-014", "CLOSED"],
+      ["SVC-2606-019", "Heritage Hotel", "SO-2604-101", "Squeaking", "Production - Webbing", "2026-06-08", "SV-2606-013", "CLOSED"],
+    ];
+    const svcRows = svcSeed.map(r => ({ no: r[0], customer: r[1], source: r[2], cause: r[3], responsible: r[4], opened: r[5], svOrder: r[6], status: r[7], badgeStyle: svcBadge(r[7]) }));
+
+    // ---- Mail Center data ----
+    const mailFolderSeed = [
+      ["Inbox", "inbox", 12, true],
+      ["Sent", "send", null, false],
+      ["Drafts", "file-text", 3, false],
+      ["Spam", "shield-alert", null, false],
+      ["Trash", "trash-2", null, false],
+      ["Auto-sent (System)", "bot", null, false],
+    ];
+    const mailFolders = mailFolderSeed.map(f => ({
+      label: f[0], icon: f[1], count: f[2] || "",
+      bg: f[3] ? "#F0EAD8" : "transparent",
+      color: f[3] ? "#6B5C32" : "#4D4630",
+      weight: f[3] ? "700" : "500",
+    }));
+    const mailThreadSeed = [
+      ["James Tan", "Re: PO-008711 Delivery Schedule", "Confirming receipt of your delivery schedule…", "14:32", true],
+      ["Sara Lim (Atlas)", "Invoice INV-2606-051 received", "Thank you for the invoice. Payment scheduled…", "11:18", false],
+      ["Aishah (Damai)", "PO #008712 — New Order", "Please find attached our new PO for…", "Yesterday", true],
+      ["Wei Lim (Casa)", "Question on Bedframe Size", "Hi, can you confirm the K size dimensions…", "Yesterday", false],
+      ["Hookka System", "Daily Sales Summary 2026-06-28", "Today's sales: RM 47,820 across 3 orders…", "08:00", false],
+      ["Rajesh (Nordic)", "Re: Late Delivery", "Understood, please update us on the new ETA…", "Jun 27", false],
+      ["Fabric World", "Quotation FW-2606-018", "Please find attached our quotation for…", "Jun 26", false],
+    ];
+    const mailThreads = mailThreadSeed.map(t => ({
+      from: t[0], subject: t[1], snippet: t[2], time: t[3],
+      weight: t[4] ? "700" : "500",
+      bg: t[4] ? "#FAF8F4" : "#fff",
+    }));
+
+    // ---- Announcements data ----
+    const annSeed = [
+      ["URGENT", "Public Holiday Sept 1 — Plant Closed", "Reminder that the plant will be closed on Sept 1 (Merdeka Day). No production work scheduled.", "Wei Siang · 2 days ago", 28, 34, "ACTIVE"],
+      ["HR", "EPF rate change effective July 1", "The EPF employee contribution rate is changing from 11% to 9% as per Budget 2026 announcement.", "Sarah Tan · 1 week ago", 31, 34, "ACTIVE"],
+      ["PRODUCTION", "New BOM template for Trion 2009 (King)", "We've updated the BOM for Trion 2009 King-size. Please use the new template for any new SOs.", "Wei Siang · 2 weeks ago", 18, 34, "EXPIRED"],
+      ["SAFETY", "Mandatory Safety Training Sept 5", "All production staff must attend the safety training on Sept 5, 10AM at the canteen.", "Lim Office · 3 weeks ago", 22, 34, "ACTIVE"],
+      ["GENERAL", "Office WiFi maintenance Saturday 10PM", "WiFi will be down for ~2 hours on Saturday night for router upgrade. ERP cloud access unaffected.", "Wei Siang · 1 month ago", 34, 34, "EXPIRED"],
+      ["HR", "Annual Leave 2026 Now Open", "Please submit your 2026 annual leave requests by Sept 30. Use the Leave tab under Employees.", "Sarah Tan · 1 month ago", 33, 34, "EXPIRED"],
+    ];
+    const annCat = (c) => `display:inline-flex; padding:2px 8px; border-radius:6px; font-size:10.5px; font-weight:700; background:${c==="URGENT"?"#F9E1DA":c==="HR"?"#EFEAFA":c==="PRODUCTION"?"#F0EAD8":c==="SAFETY"?"#FFF4D6":"#F0ECE9"}; color:${c==="URGENT"?"#9A3A2D":c==="HR"?"#5E4B8C":c==="PRODUCTION"?"#6B5C32":c==="SAFETY"?"#7A5A00":"#6B7280"};`;
+    const annActive = (s) => `display:inline-flex; padding:2px 7px; border-radius:6px; font-size:10px; font-weight:700; background:${s==="ACTIVE"?"#EEF3E4":"#F0ECE9"}; color:${s==="ACTIVE"?"#4F7C3A":"#6B7280"};`;
+    const annRows = annSeed.map(a => ({ category: a[0], catStyle: annCat(a[0]), title: a[1], preview: a[2], posted: a[3], read: a[4], total: a[5], activeLabel: a[6], activeStyle: annActive(a[6]) }));
+
+    // ---- Accounting (Trial Balance) data ----
+    const acctSeed = [
+      ["1000", "Cash on Hand", "Asset", "RM 12,400", "RM 0", "RM 12,400", "#1F1D1B"],
+      ["1100", "Bank — Maybank Current", "Asset", "RM 245,800", "RM 0", "RM 245,800", "#1F1D1B"],
+      ["1200", "Accounts Receivable", "Asset", "RM 209,400", "RM 0", "RM 209,400", "#1F1D1B"],
+      ["1300", "Inventory — Finished Goods", "Asset", "RM 187,200", "RM 0", "RM 187,200", "#1F1D1B"],
+      ["1310", "Inventory — Raw Materials", "Asset", "RM 64,800", "RM 0", "RM 64,800", "#1F1D1B"],
+      ["2000", "Accounts Payable", "Liability", "RM 0", "RM 38,200", "RM (38,200)", "#9A3A2D"],
+      ["2100", "EPF Payable", "Liability", "RM 0", "RM 8,400", "RM (8,400)", "#9A3A2D"],
+      ["3000", "Owner's Equity", "Equity", "RM 0", "RM 500,000", "RM (500,000)", "#9A3A2D"],
+      ["4000", "Sales Revenue", "Income", "RM 0", "RM 283,000", "RM (283,000)", "#9A3A2D"],
+      ["5000", "COGS", "Expense", "RM 142,000", "RM 0", "RM 142,000", "#1F1D1B"],
+    ];
+    const acctRows = acctSeed.map(r => ({ code: r[0], name: r[1], type: r[2], debit: r[3], credit: r[4], balance: r[5], balColor: r[6] }));
+
+    // ---- Suppliers data ----
+    const supSeed = [
+      ["SUP001", "Fabric World Sdn Bhd", "Kelvin Lim", "+60 12-345 6789", "Selangor", "RM 124,800", "ACTIVE"],
+      ["SUP002", "Foam Tech Holdings", "Mary Chong", "+60 13-234 5678", "Selangor", "RM 87,200", "ACTIVE"],
+      ["SUP003", "Wood Supply Co", "Ahmad Razak", "+60 11-987 6543", "Pahang", "RM 156,400", "ACTIVE"],
+      ["SUP004", "Metal Frames KL", "James Wong", "+60 17-876 5432", "Kuala Lumpur", "RM 42,600", "ACTIVE"],
+      ["SUP005", "Springs & Coils Inc", "Tan Wei Lim", "+60 14-567 8901", "Johor", "RM 34,800", "ACTIVE"],
+      ["SUP006", "Pillow Foam Ltd", "Aishah Hassan", "+60 16-234 5678", "Selangor", "RM 28,900", "ACTIVE"],
+      ["SUP007", "Old Vendor Co", "—", "—", "Penang", "RM 0", "INACTIVE"],
+    ];
+    const supRows = supSeed.map(r => ({ code: r[0], name: r[1], contact: r[2], phone: r[3], state: r[4], ytd: r[5], status: r[6], badgeStyle: empBadge(r[6]) }));
+
+    // ---- Products data (tile view) ----
+    const prodCols = [["#1F2937","#374151","sofa"],["#1F1D1B","#3A352C","bed"],["#16425B","#1F6E8C","sofa"],["#6B5C32","#8B7A4E","bed"],["#3E6570","#5A8395","sofa"],["#5E4B8C","#7A6BAA","bed"],["#9A3A2D","#B85648","sofa"],["#4F7C3A","#6B9852","bed"],["#7A5A00","#A07800","sofa"],["#6B7280","#9CA3AF","accessory"]];
+    const prodSeed = [
+      ["2009(A)-(K)", "Trion 2009(A) King", "King", "BEDFRAME"],
+      ["2009(A)-(Q)", "Trion 2009(A) Queen", "Queen", "BEDFRAME"],
+      ["1013-(K)", "Jager 1013 King", "King", "BEDFRAME"],
+      ["1013-(Q)", "Jager 1013 Queen", "Queen", "BEDFRAME"],
+      ["HOK-1007-(K)", "HOK 1007 King", "King", "BEDFRAME"],
+      ["NORD-2S", "Nordic 2-Seater", "—", "SOFA"],
+      ["CASA-3S-L", "Casa 3-Seater L", "—", "SOFA"],
+      ["MOD-RECL", "Modular Recliner", "—", "SOFA"],
+      ["ACC-PILLOW-K", "Bedframe Pillow K", "—", "ACCESSORY"],
+      ["ACC-LEG-12", "Leg 12-inch", "—", "ACCESSORY"],
+    ];
+    const prodTiles = prodSeed.map((p, i) => {
+      const col = prodCols[i % prodCols.length];
+      return { code: p[0], name: p[1], size: p[2], cat: p[3], bg1: col[0], bg2: col[1], icon: col[2] === "sofa" ? "armchair" : col[2] === "bed" ? "bed" : "package" };
+    });
+
+    // ---- CNC Templates data ----
+    const cncModelSeed = [
+      ["Trion 2009(A)", 4, true],
+      ["Jager 1013", 3, false],
+      ["HOK 1007", 4, false],
+      ["Nordic 2S/3S", 6, false],
+      ["Casa L-shape", 4, false],
+      ["Modular Recliner", 3, false],
+      ["Heritage Classic", 2, false],
+      ["Atlas Premium", 3, false],
+      ["Budget Single", 2, false],
+      ["Custom Bespoke", 1, false],
+    ];
+    const cncModels = cncModelSeed.map(m => ({
+      label: m[0], variants: `${m[1]} variants`,
+      bg: m[2] ? "#F0EAD8" : "transparent",
+      color: m[2] ? "#6B5C32" : "#4D4630",
+      weight: m[2] ? "700" : "500",
+    }));
+    const cncSizes = [
+      { label: "King (K)", subtitle: "Standard 6′×6.5′ · LED-ready", fileCount: 8 },
+      { label: "Queen (Q)", subtitle: "Standard 5′×6.5′ · LED-ready", fileCount: 7 },
+      { label: "Single (S)", subtitle: "Standard 3′×6.5′ · LED-ready", fileCount: 6 },
+      { label: "Super King (SK)", subtitle: "Custom 7′×7′ · LED-ready", fileCount: 5 },
+    ];
+
+    // ---- e-Invoice data ----
+    const EINVBG = { VALIDATED: ["#EEF3E4", "#4F7C3A"], PENDING: ["#FFF4D6", "#7A5A00"], SUBMITTED: ["#E0EDF0", "#3E6570"], REJECTED: ["#F9E1DA", "#9A3A2D"] };
+    const einvBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${(EINVBG[s]||EINVBG.PENDING)[0]}; color:${(EINVBG[s]||EINVBG.PENDING)[1]};`;
+    const einvSeed = [
+      ["INV-2606-052", "e7b2a8f0-1234-5678-90ab-cdef12345678", "The Heritage Hotel", "2026-06-21 08:30", "2026-06-21 09:45", "RM 47,820", "VALIDATED"],
+      ["INV-2606-051", "f8c3b9e1-2345-6789-01bc-def023456789", "Atlas Hospitality", "2026-06-20 14:10", "2026-06-20 15:22", "RM 62,400", "VALIDATED"],
+      ["INV-2606-050", "a9d4cae2-3456-7890-12cd-ef0134567890", "Casa Furnishings", "2026-06-19 11:05", "2026-06-19 11:58", "RM 18,250", "VALIDATED"],
+      ["INV-2606-049", "b0e5dbf3-4567-8901-23de-f01245678901", "Nordic Home", "2026-06-18 16:22", "—", "RM 27,800", "PENDING"],
+      ["INV-2606-048", "c1f6ecg4-5678-9012-34ef-012356789012", "Damai Resort", "2026-06-15 09:18", "2026-06-15 10:05", "RM 31,500", "VALIDATED"],
+      ["INV-2606-047", "d2g7fdh5-6789-0123-45f0-123467890123", "Heritage Hotel", "2026-06-12 13:40", "—", "RM 12,400", "REJECTED"],
+      ["INV-2606-046", "e3h8gei6-7890-1234-56g1-234578901234", "Atlas Hospitality", "2026-06-10 10:55", "—", "RM 8,200", "SUBMITTED"],
+    ];
+    const einvRows = einvSeed.map(r => ({ no: r[0], uuid: r[1].slice(0, 13) + "…", customer: r[2], submitted: r[3], validated: r[4], amount: r[5], status: r[6], badgeStyle: einvBadge(r[6]) }));
+
     return {
       isDashboard: v === "dashboard" ? 1 : 0,
       isSalesList: v === "sales" ? 1 : 0,
       isSalesDetail: v === "sales-detail" ? 1 : 0,
+      isDelivery: v === "delivery" ? 1 : 0,
+      isInvoices: v === "invoices" ? 1 : 0,
+      isProcurement: v === "procurement" ? 1 : 0,
       isProduction: v === "production" ? 1 : 0,
+      isPlanning: v === "planning" ? 1 : 0,
+      isBom: v === "bom" ? 1 : 0,
       isInventory: v === "inventory" ? 1 : 0,
       isCustomers: v === "customers" ? 1 : 0,
+      isSuppliers: v === "suppliers" ? 1 : 0,
       isWarehouse: v === "warehouse" ? 1 : 0,
+      isProducts: v === "products" ? 1 : 0,
+      isCnc: v === "cnc" ? 1 : 0,
+      isConsignment: v === "consignment" ? 1 : 0,
       isEmployees: v === "employees" ? 1 : 0,
+      isServiceCases: v === "servicecases" ? 1 : 0,
+      isMail: v === "mail" ? 1 : 0,
+      isAnnouncements: v === "announcements" ? 1 : 0,
+      isAccounting: v === "accounting" ? 1 : 0,
+      isEinvoice: v === "einvoice" ? 1 : 0,
       isSettings: v === "settings" ? 1 : 0,
       navGroups: sideNav, breadcrumbs, scenes,
+      // Dashboard
       kpis, dailyChips, revGrid, revLines, deptBacklog, topBed,
+      // Sales
       salesKpis, salesRows,
       statusFlow, linkedPOs, lineItems, summary, relatedDocs,
+      // Operations (existing)
       prodTabs, matrixRows,
-      invRows,
-      custRows,
-      racks,
-      empTabs, empRows,
-      users,
+      invRows, custRows, racks, empTabs, empRows, users,
+      // Operations (new)
+      doKpis, doTabs, doRows,
+      invoiceRows,
+      poRows,
+      planRows,
+      bomRows,
+      cnRows,
+      svcKpis, svcRows,
+      mailFolders, mailThreads,
+      annRows,
+      acctRows,
+      supRows,
+      prodTiles,
+      cncModels, cncSizes,
+      einvRows,
     };
   }
 }

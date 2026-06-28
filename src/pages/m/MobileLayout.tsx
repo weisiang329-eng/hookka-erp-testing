@@ -21,7 +21,7 @@
 import { type ComponentType } from "react";
 import { Route, Routes } from "react-router-dom";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
-import { BottomTabBar } from "./components";
+import { BottomTabBar, LeftRail } from "./components";
 import { M, M_FONT, M_MAX_WIDTH } from "./theme";
 import MobileHome from "./screens/Home";
 import MobileMore from "./screens/More";
@@ -60,16 +60,23 @@ export default function MobileLayout() {
         fontFamily: M_FONT,
         color: M.raisin,
         display: "flex",
-        justifyContent: "center",
+        // On fold, lay the left rail + content side-by-side; on phone, just
+        // center the content column (rail isn't rendered).
+        justifyContent: fold ? "flex-start" : "center",
       }}
     >
+      {fold ? <LeftRail /> : null}
       <div
         style={{
           width: "100%",
           maxWidth: fold ? 880 : M_MAX_WIDTH,
           minHeight: "100dvh",
-          // Clear the fixed bottom tab bar (56px + safe area).
-          paddingBottom: "calc(72px + env(safe-area-inset-bottom))",
+          // Phone: clear the fixed bottom tab bar (56px + safe area).
+          // Fold: no bottom bar (LeftRail replaces it) — small bottom margin
+          // for breathing room only.
+          paddingBottom: fold
+            ? "24px"
+            : "calc(72px + env(safe-area-inset-bottom))",
           position: "relative",
         }}
       >
@@ -116,7 +123,7 @@ export default function MobileLayout() {
           <Route path="*" element={<MobileHome />} />
         </Routes>
       </div>
-      <BottomTabBar />
+      {fold ? null : <BottomTabBar />}
     </div>
   );
 }

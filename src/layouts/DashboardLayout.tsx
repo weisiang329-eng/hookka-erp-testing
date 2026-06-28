@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Routes, ScrollRestoration, useLocation } from "react-router-dom";
+import { Navigate, Routes, ScrollRestoration, useLocation } from "react-router-dom";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
@@ -143,6 +143,16 @@ export default function DashboardLayout() {
       globalThis.clearTimeout(t);
     };
   }, [pathname]);
+
+  // Phones get the dedicated /m mobile app, not this desktop shell. On a real
+  // mobile device, redirect any desktop route to /m (owner 2026-06-28: "手机开
+  //却是电脑版本"). UA-based so a small *desktop* window stays on desktop; the
+  // worker portal (/worker) is a separate layout and never reaches here. The
+  // early return is AFTER all hooks above (rules-of-hooks safe).
+  const isMobileDevice =
+    typeof navigator !== "undefined" &&
+    /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  if (isMobileDevice) return <Navigate to="/m" replace />;
 
   return (
     <ToastProvider>

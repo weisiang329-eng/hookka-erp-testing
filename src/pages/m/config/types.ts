@@ -288,9 +288,26 @@ export type DetailConfig = {
   netPay?: (doc: RawRow) => { label: string; value: string } | undefined;
   /**
    * Optional titled sub-document lists (the design source's payslips list under
-   * an employee, or rack contents + movements under a rack).
+   * an employee, or rack contents + movements under a rack). Third arg is the
+   * map of `extraFetches` results when the config declared them (e.g. an
+   * employee detail joining attendance + payslips into the same screen).
    */
-  subDocLists?: (doc: RawRow, resp: unknown) => SubDocList[];
+  subDocLists?: (
+    doc: RawRow,
+    resp: unknown,
+    extras?: Record<string, unknown>,
+  ) => SubDocList[];
+  /**
+   * Optional extra single-shot fetches the screen fires alongside the main
+   * `url`. Two named slots maximum (so the screen's hook count stays fixed —
+   * rules-of-hooks). Each is a `(id) => url | null` — return null to skip.
+   * Results land in subDocLists' `extras` arg keyed by slot name.
+   * Example (employee detail, dc12): `{ attendance: id => '/api/attendance?employeeId=' + id + '&from=...&to=...', payslips: id => '/api/payslips?employeeId=' + id }`.
+   */
+  extraFetches?: {
+    a?: { key: string; url: (id: string) => string | null };
+    b?: { key: string; url: (id: string) => string | null };
+  };
   /**
    * Optional "Convert document" action row (owner 2026-06-28 design v10) —
    * rendered as a titled pair of buttons below the field grid. Each action

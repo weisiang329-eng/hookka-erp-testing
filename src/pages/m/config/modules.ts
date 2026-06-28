@@ -27,6 +27,7 @@ import {
   type FlowStep,
   type RelatedDocVM,
   type KvSection,
+  type SubDocList,
 } from "./types";
 import {
   read,
@@ -1600,9 +1601,81 @@ const employeeDetail: DetailConfig = {
       return on.length > 0 ? on.join(" · ") : "—";
     }),
   ],
+  // dc12 employee detail composites attendance + payslips into the same
+  // screen via DocumentDetailScreen's extraFetches infra. Each slot is a
+  // (id) => url builder; results land in subDocLists' `extras` arg.
+  extraFetches: {
+    a: {
+      key: "attendance",
+      url: (id) => {
+        const now = new Date();
+        const yr = now.getFullYear();
+        const mo = now.getMonth(); // 0–11
+        const pad = (n: number) => String(n).padStart(2, "0");
+        const from = `${yr}-${pad(mo + 1)}-01`;
+        const lastDay = new Date(yr, mo + 1, 0).getDate();
+        const to = `${yr}-${pad(mo + 1)}-${pad(lastDay)}`;
+        return `/api/attendance?employeeId=${encodeURIComponent(id)}&from=${from}&to=${to}`;
+      },
+    },
+    b: {
+      key: "payslips",
+      url: (id) => `/api/payslips?employeeId=${encodeURIComponent(id)}`,
+    },
+  },
+  // dc12: under the HR field grid we render two sub-doc lists — Attendance ·
+  // <month> (one row per day with status + clock-in/out times) and Payslips
+  // (recent stored payslips, tap → /m/payslips/:id).
+  subDocLists: (_d, _resp, extras) => {
+    const out: SubDocList[] = [];
+    const att = (extras?.attendance as { success?: boolean; data?: RawRow[] } | undefined)?.data ?? [];
+    const pay = (extras?.payslips as { success?: boolean; data?: RawRow[] } | undefined)?.data ?? [];
+    if (att.length > 0) {
+      const recent = att.slice(0, 10);
+      out.push({
+        title: `Attendance · ${monthTitle()}`,
+        rows: recent.map((a) => {
+          const status = str(a, "status") || "—";
+          const inOut = `${str(a, "clockIn") || "—"} / ${str(a, "clockOut") || "—"}`;
+          return {
+            id: str(a, "id") || dateOnly(a, "date"),
+            title: dateOnly(a, "date") || "—",
+            subLine: `${status} · ${inOut}`,
+            icon: "file-text" as const,
+          };
+        }),
+      });
+    }
+    if (pay.length > 0) {
+      const recent = pay.slice(0, 12);
+      out.push({
+        title: "Payslips",
+        rows: recent.map((p) => {
+          const period = str(p, "period") || "—";
+          const net = num(p, "netPay", "netPaySen");
+          const pid = str(p, "id");
+          return {
+            id: pid || period,
+            title: period,
+            subLine: `Net ${money(net)}`,
+            trailing: str(p, "status") || undefined,
+            icon: "file-text" as const,
+            href: pid ? `/m/payslips/${encodeURIComponent(pid)}` : undefined,
+          };
+        }),
+      });
+    }
+    return out;
+  },
   // Read-only — no mobile edit form yet, no status transitions to expose.
   hideActionBar: true,
 };
+
+/** Current-month title used by the Attendance sub-doc list header. */
+function monthTitle(): string {
+  const now = new Date();
+  return now.toLocaleString("en-US", { month: "long", year: "numeric" });
+}
 
 export const employeesConfig: ModuleConfig = {
   slug: "employees",

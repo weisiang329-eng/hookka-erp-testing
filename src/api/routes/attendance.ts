@@ -123,21 +123,26 @@ app.get("/", async (c) => {
   const date = c.req.query("date");
   const from = c.req.query("from");
   const to = c.req.query("to");
-  let stmt;
+  // Mobile employee-detail card (dc12) needs per-employee attendance for the
+  // current month — without this filter the phone would pull every worker's
+  // month, then drop 49/50ths client-side. Composes with date/from-to filters.
+  const employeeId = c.req.query("employeeId");
+  const clauses: string[] = ["orgId = ?"];
+  const binds: (string | number)[] = [orgId];
   if (from && to) {
-    stmt = c.var.DB.prepare(
-      "SELECT * FROM attendance_records WHERE orgId = ? AND date >= ? AND date <= ? ORDER BY date DESC, employeeId",
-    ).bind(orgId, from, to);
+    clauses.push("date >= ?", "date <= ?");
+    binds.push(from, to);
   } else if (date) {
-    stmt = c.var.DB.prepare(
-      "SELECT * FROM attendance_records WHERE orgId = ? AND date = ? ORDER BY employeeId",
-    ).bind(orgId, date);
-  } else {
-    stmt = c.var.DB.prepare(
-      "SELECT * FROM attendance_records WHERE orgId = ? ORDER BY date DESC, employeeId",
-    ).bind(orgId);
+    clauses.push("date = ?");
+    binds.push(date);
   }
-  const res = await stmt.all<AttendanceRow>();
+  if (employeeId) {
+    clauses.push("employeeId = ?");
+    binds.push(employeeId);
+  }
+  const orderBy = date && !employeeId ? "employeeId" : "date DESC, employeeId";
+  const sql = `SELECT * FROM attendance_records WHERE ${clauses.join(" AND ")} ORDER BY ${orderBy}`;
+  const res = await c.var.DB.prepare(sql).bind(...binds).all<AttendanceRow>();
   const data = (res.results ?? []).map(rowToAttendance);
   return c.json({ success: true, data, total: data.length });
 });

@@ -89,6 +89,14 @@ function Inner({
   const navigate = useNavigate();
   const url = id ? detail.url(id) : null;
   const { data, loading, error } = useCachedJson<unknown>(url);
+  // Optional extra fetches (dc12: employee detail joins attendance + payslip
+  // into the same screen). Fixed at TWO named slots so hook count is constant
+  // across renders (rules-of-hooks). Each slot's URL is `null` when the
+  // config didn't declare it or the slot's url-builder returned null.
+  const extraAUrl = id && detail.extraFetches?.a ? detail.extraFetches.a.url(id) : null;
+  const extraBUrl = id && detail.extraFetches?.b ? detail.extraFetches.b.url(id) : null;
+  const { data: extraAData } = useCachedJson<unknown>(extraAUrl);
+  const { data: extraBData } = useCachedJson<unknown>(extraBUrl);
   const [sheet, setSheet] = useState<null | "print">(null);
   // Edit / reply forms (FormSheet). When set, the prefilled form is open.
   const [formSpec, setFormSpec] = useState<FormSpec | null>(null);
@@ -195,11 +203,18 @@ function Inner({
       bodyParas: (eff.body?.(doc) ?? []).filter((p) => p && p.trim()),
       kvSections: (eff.kvSections?.(doc) ?? []).filter((s) => s.rows.length),
       netPay: eff.netPay?.(doc),
-      subDocLists: (eff.subDocLists?.(doc, data) ?? []).filter(
-        (l) => l.rows.length || l.emptyText,
-      ),
+      subDocLists: (
+        eff.subDocLists?.(doc, data, {
+          ...(eff.extraFetches?.a
+            ? { [eff.extraFetches.a.key]: extraAData }
+            : {}),
+          ...(eff.extraFetches?.b
+            ? { [eff.extraFetches.b.key]: extraBData }
+            : {}),
+        }) ?? []
+      ).filter((l) => l.rows.length || l.emptyText),
     };
-  }, [eff, doc, data, id]);
+  }, [eff, doc, data, id, extraAData, extraBData]);
 
   if (loading && !doc) {
     return (

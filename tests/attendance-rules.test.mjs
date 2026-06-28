@@ -139,3 +139,23 @@ test("OT smaller than the shortfall -> only the remainder is docked (08:30 -> 18
   assert.equal(d.otMin, 15);
   assert.equal(d.shortfallMin, 15);
 });
+
+// ── Lunch (12:00–13:00) is deducted only for the overlap with the worked
+//    window — owner 2026-06-28: arrive after 1pm and you missed the break, so
+//    it isn't docked; you just came a half day. ──────────────────────────────
+test("arrive AFTER lunch (13:58 -> 18:00) -> NO lunch deducted (owner 2026-06-28)", () => {
+  // 13:58 ceils to 14:00; lunch window is entirely before the shift, 0 overlap
+  // -> 18:00-14:00 = 4h (was 3h when the hour was always cut).
+  const d = day("13:58", "18:00");
+  assert.equal(d.regularWorkMin, 4 * 60);
+});
+
+test("arrive DURING lunch (12:30 -> 18:00) -> only the remaining 30 min drops", () => {
+  const d = day("12:30", "18:00");
+  assert.equal(d.regularWorkMin, 5 * 60); // 5.5h on shift - 30 min lunch overlap
+});
+
+test("leave BEFORE lunch (08:00 -> 11:00) -> no lunch deducted (none taken)", () => {
+  const d = day("08:00", "11:00");
+  assert.equal(d.regularWorkMin, 3 * 60);
+});

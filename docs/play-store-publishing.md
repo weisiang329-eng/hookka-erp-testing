@@ -11,7 +11,7 @@ Cost: **one-time USD $25** Google Play developer account. Publishing free apps a
 
 ## What's already prepared in the repo
 - `public/.well-known/assetlinks.json` — Digital Asset Links for both packages (fingerprints are placeholders — fill after Play App Signing, see Step 4).
-- `public/privacy.html` — privacy policy, lives at `https://erp.hookka.com/privacy.html` (required for the listing + Data Safety).
+- `public/privacy` — privacy policy, lives at `https://erp.hookka.com/privacy` (required for the listing + Data Safety).
 - Manifests + icons already TWA-ready (`manifest-erp.webmanifest`, `manifest.webmanifest`, the pwa-icon PNGs).
 
 ## Steps (owner — account, payment, submission are yours; I can't do those)
@@ -27,7 +27,7 @@ Cost: **one-time USD $25** Google Play developer account. Publishing free apps a
 
 **4. Wire Digital Asset Links** — in Play Console → your app → **Setup → App integrity → App signing** → copy the **SHA-256 certificate fingerprint**. Paste it into BOTH entries of `public/.well-known/assetlinks.json` (each app uses its own app's fingerprint). Tell me and I'll deploy to prod so `https://erp.hookka.com/.well-known/assetlinks.json` serves the real value → the app then opens full-screen with no browser bar.
 
-**5. Fill the store listing** (copy below) → set **Privacy policy URL** = `https://erp.hookka.com/privacy.html` → complete **Data safety**, **Content rating** (Everyone / business), **Target audience** (adults).
+**5. Fill the store listing** (copy below) → set **Privacy policy URL** = `https://erp.hookka.com/privacy` → complete **Data safety**, **Content rating** (Everyone / business), **Target audience** (adults).
 
 **6. Submit for review** (first review can take a few days).
 

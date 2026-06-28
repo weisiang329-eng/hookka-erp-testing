@@ -5,13 +5,27 @@
     <link rel="icon" type="image/png" href="/hookka-logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hookka Manufacturing ERP</title>
-    <!-- PWA Phase 1 — installable shell. Manifest + Apple touch icon let the
-         worker portal "Add to Home Screen" as a standalone app. theme-color
-         tints the Android status bar to the brand olive. The service worker
-         is registered from src/main.tsx (production builds only). -->
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <meta name="theme-color" content="#6B5C32" />
-    <link rel="apple-touch-icon" href="/pwa-icon-192.png" />
+    <!-- PWA — TWO installable apps share this shell:
+           • Office ERP (default): black-bg / white-logo icon, theme raisin.
+           • Worker portal (/worker): white-bg / black-logo icon, theme olive.
+         Default tags below are the office ERP; the inline script swaps them to
+         the worker set when the page is under /worker, so each "Add to Home
+         Screen" gets its own icon. Service worker registers from src/main.tsx. -->
+    <link rel="manifest" href="/manifest-erp.webmanifest" />
+    <meta name="theme-color" content="#1F1D1B" />
+    <link rel="apple-touch-icon" href="/pwa-icon-erp-192.png" />
+    <script>
+      (function () {
+        if (location.pathname.indexOf("/worker") === 0) {
+          var m = document.querySelector('link[rel="manifest"]');
+          if (m) m.href = "/manifest.webmanifest";
+          var a = document.querySelector('link[rel="apple-touch-icon"]');
+          if (a) a.href = "/pwa-icon-192.png";
+          var t = document.querySelector('meta[name="theme-color"]');
+          if (t) t.setAttribute("content", "#6B5C32");
+        }
+      })();
+    </script>
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Hookka" />

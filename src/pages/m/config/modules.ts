@@ -1836,6 +1836,62 @@ const announcementsDetail: DetailConfig = {
       .split(/\n{2,}/)
       .map((p) => p.trim())
       .filter(Boolean),
+  // dc12: announcement detail shows a "Read X of Y" tracker + the workers
+  // who acknowledged + who haven't. Backend already has GET /api/announcements/:id/acks
+  // (the desktop admin uses it) — we just fetch it as the detail's extraFetches
+  // slot and render two sub-doc lists below the body.
+  extraFetches: {
+    a: {
+      key: "acks",
+      url: (id) => `/api/announcements/${encodeURIComponent(id)}/acks`,
+    },
+  },
+  subDocLists: (_d, _resp, extras) => {
+    const ackResp = extras?.acks as
+      | {
+          success?: boolean;
+          data?: {
+            total?: number;
+            ackedCount?: number;
+            acked?: { id: string; name: string; empNo: string; ackedAt?: string | null }[];
+            pending?: { id: string; name: string; empNo: string }[];
+          };
+        }
+      | undefined;
+    const ackData = ackResp?.data;
+    if (!ackData) return [];
+    const out: SubDocList[] = [];
+    const total = Number(ackData.total ?? 0);
+    const ackedCount = Number(ackData.ackedCount ?? 0);
+    const acked = ackData.acked ?? [];
+    const pending = ackData.pending ?? [];
+    if (acked.length > 0) {
+      out.push({
+        title: `Acknowledged · ${ackedCount} / ${total}`,
+        rows: acked.slice(0, 20).map((w) => ({
+          id: w.id,
+          title: w.name || w.empNo || w.id,
+          subLine:
+            [w.empNo, w.ackedAt ? new Date(w.ackedAt).toLocaleString() : ""]
+              .filter(Boolean)
+              .join(" · ") || undefined,
+          icon: "file-text" as const,
+        })),
+      });
+    }
+    if (pending.length > 0) {
+      out.push({
+        title: `Not yet · ${pending.length}`,
+        rows: pending.slice(0, 50).map((w) => ({
+          id: w.id,
+          title: w.name || w.empNo || w.id,
+          subLine: w.empNo || undefined,
+          icon: "file-text" as const,
+        })),
+      });
+    }
+    return out;
+  },
   primaryCta: () => "Mark as Read",
 };
 

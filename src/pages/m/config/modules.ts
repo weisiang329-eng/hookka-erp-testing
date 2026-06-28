@@ -1814,10 +1814,70 @@ export const mailConfig: ModuleConfig = {
 // CUSTOMERS / SUPPLIERS / RECEIVABLES / PRODUCTS — simple single-source lists
 // (reachable from the More menu).
 // ---------------------------------------------------------------------------
+// Customer detail — single-GET /api/customers/:id → { data: customer +
+// deliveryHubs[] }. Per dc12 design, the detail surfaces the customer's
+// header fields + the Delivery Hubs list (each hub = short-name + state +
+// contact + phone, code as the right-aligned trailing meta). Add-Hub +
+// Exports buttons from the design are deferred — they need an edit form +
+// statement-PDF endpoints respectively (TODO: wire when those land).
+const customerDetail: DetailConfig = {
+  url: (id) => `/api/customers/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "code") || "—",
+  title: (d) => str(d, "name") || "—",
+  status: (d) =>
+    read(d, "isActive") === true
+      ? resolveStatus("ACTIVE", PAYMENT_STATUS_MAP)
+      : resolveStatus("INACTIVE", PAYMENT_STATUS_MAP),
+  fields: [
+    fld("Code", (d) => str(d, "code")),
+    fld("Contact", (d) => str(d, "contactName")),
+    fld("Phone", (d) => str(d, "phone")),
+    fld("Email", (d) => str(d, "email")),
+    fld("SSM No", (d) => str(d, "ssmNo")),
+    fld("Credit Terms", (d) => str(d, "creditTerms")),
+    fld("Credit Limit", (d) => money(num(d, "creditLimitSen"))),
+    fld("Outstanding", (d) => money(num(d, "outstandingSen"))),
+    fld("Address", (d) => str(d, "companyAddress"), true),
+  ],
+  // Delivery Hubs as a sub-doc list (the design source's "Delivery Hubs · N"
+  // section). Each row condenses the hub: short-name + state + contact + phone
+  // in the sub-line, code right-aligned. Empty array = section omitted.
+  subDocLists: (d) => {
+    const hubs = asArr(d.deliveryHubs);
+    if (hubs.length === 0) return [];
+    return [
+      {
+        title: `Delivery Hubs · ${hubs.length}`,
+        rows: hubs.map((h) => {
+          const parts = [
+            str(h, "state"),
+            str(h, "contactName"),
+            str(h, "phone"),
+          ].filter(Boolean);
+          return {
+            id: str(h, "id"),
+            title: str(h, "shortName") || str(h, "code") || "Hub",
+            subLine: parts.length > 0 ? parts.join(" · ") : undefined,
+            trailing: str(h, "code") || undefined,
+            icon: "package" as const,
+          };
+        }),
+      },
+    ];
+  },
+  // No status transitions on customers (no Confirm/Close on the desktop
+  // record), so no CTA. Hide the action bar since mobile customer edit isn't
+  // built yet — avoids a half-working Edit button. TODO: wire when /m/
+  // customer-edit form lands.
+  hideActionBar: true,
+};
+
 export const customersConfig: ModuleConfig = {
   slug: "customers",
   title: "Customers",
-  detailPath: () => null,
+  detailPath: (vm) => `/m/customers/${encodeURIComponent(vm.id)}`,
+  detail: customerDetail,
   sources: [
     {
       url: "/api/customers",
@@ -2122,6 +2182,56 @@ export const serviceCasesConfig: ModuleConfig = {
 };
 
 // ---------------------------------------------------------------------------
+// USER MANAGEMENT — owner 2026-06-28 design v12 "System" group. Read-only
+// list of system users (publicUser shape from /api/users). Mutations
+// (create / reset-password / role change) stay on the desktop /settings/users
+// page — they're SUPER_ADMIN-only and the mobile detail-edit form isn't
+// built. Tapping a row stays non-tappable for the same reason.
+// ---------------------------------------------------------------------------
+export const usermgmtConfig: ModuleConfig = {
+  slug: "usermgmt",
+  title: "User Management",
+  detailPath: () => null,
+  sources: [
+    {
+      url: "/api/users",
+      select: selectData,
+      toVM: (r): RowVM => ({
+        id: str(r, "id"),
+        code: str(r, "role") || "USER",
+        title: str(r, "displayName") || str(r, "email") || "—",
+        subLine:
+          [str(r, "email"), str(r, "department")].filter(Boolean).join(" · ") ||
+          undefined,
+        meta1: { label: "Position", value: str(r, "position") || "—" },
+        meta2: { label: "Order Date", value: dateOnly(r, "lastLoginAt", "createdAt") || "—" },
+        status: resolveStatus(
+          read(r, "isActive") === true ? "ACTIVE" : "INACTIVE",
+          PAYMENT_STATUS_MAP,
+        ),
+      }),
+      columns: [
+        textCol("displayName", "Customer", (r) => str(r, "displayName")),
+        textCol("email", "Reference", (r) => str(r, "email")),
+        textCol("role", "State", (r) => str(r, "role")),
+        textCol("department", "Reference", (r) => str(r, "department")),
+        dateCol("lastLoginAt", "Order Date", (r) =>
+          dateOnly(r, "lastLoginAt", "createdAt"),
+        ),
+        enumCol(
+          "status",
+          "Status",
+          (r) => (read(r, "isActive") === true ? "ACTIVE" : "INACTIVE"),
+          ["ACTIVE", "INACTIVE"],
+        ),
+      ],
+      defaultSort: { key: "displayName", dir: "asc" },
+      subTabs: [{ key: "all", label: "Users", match: () => true }],
+    },
+  ],
+};
+
+// ---------------------------------------------------------------------------
 // Registry — slug → config, consumed by MobileLayout's route wiring.
 // ---------------------------------------------------------------------------
 export const MODULE_CONFIGS: ModuleConfig[] = [
@@ -2142,4 +2252,5 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   receivablesConfig,
   productsConfig,
   serviceCasesConfig,
+  usermgmtConfig,
 ];

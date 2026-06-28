@@ -15,13 +15,15 @@ import {
   Mail,
   Users,
   CalendarRange,
-  Boxes,
   Warehouse,
   Package,
-  FileText,
   Receipt,
   UserSquare,
   Wrench,
+  UserPlus,
+  Shapes,
+  HardHat,
+  Wallet,
   type LucideIcon,
 } from "lucide-react";
 
@@ -70,6 +72,13 @@ export type ModuleGroup = {
   items: ModuleLink[];
 };
 
+// Group order + items per dc12 design v12 More menu:
+//   Overview → Sales & Customers → Service & Support → Production →
+//   Warehouse & Procurement → People & Finance → System.
+// Order is owner-exacting (the design source's grouping); icons match the
+// dc12 lucide names (megaphone / mail / shopping-cart / users / truck /
+// receipt / wrench / factory / calendar-days / shapes / warehouse / package
+// / shopping-bag / building-2 / hard-hat / wallet / user-plus).
 export const MORE_GROUPS: ModuleGroup[] = [
   {
     title: "Overview",
@@ -82,26 +91,9 @@ export const MORE_GROUPS: ModuleGroup[] = [
     title: "Sales & Customers",
     items: [
       { label: "Sales Orders", icon: ShoppingCart, path: "/m/sales" },
-      { label: "Customers", icon: Users, path: "/m/customers" },
-      { label: "Delivery", icon: Truck, path: "/m/delivery" },
+      { label: "Delivery Orders", icon: Truck, path: "/m/delivery" },
       { label: "Invoices", icon: Receipt, path: "/m/invoices" },
-    ],
-  },
-  {
-    title: "Production",
-    items: [
-      { label: "Production Orders", icon: Factory, path: "/m/production" },
-      { label: "Planning", icon: CalendarRange, path: "/m/planning" },
-      { label: "Products", icon: Package, path: "/m/products" },
-      { label: "Warehouse", icon: Warehouse, path: "/m/warehouse" },
-    ],
-  },
-  {
-    title: "Warehouse & Procurement",
-    items: [
-      { label: "Inventory", icon: Boxes, path: "/m/inventory" },
-      { label: "Purchase Orders", icon: FileText, path: "/m/procurement" },
-      { label: "Suppliers", icon: UserSquare, path: "/m/suppliers" },
+      { label: "Customers", icon: Users, path: "/m/customers" },
     ],
   },
   {
@@ -111,10 +103,38 @@ export const MORE_GROUPS: ModuleGroup[] = [
     ],
   },
   {
+    title: "Production",
+    items: [
+      { label: "Production Orders", icon: Factory, path: "/m/production" },
+      { label: "Planning", icon: CalendarRange, path: "/m/planning" },
+      { label: "Products", icon: Shapes, path: "/m/products" },
+      { label: "Warehouse", icon: Warehouse, path: "/m/warehouse" },
+    ],
+  },
+  {
+    title: "Warehouse & Procurement",
+    items: [
+      { label: "Inventory", icon: Package, path: "/m/inventory" },
+      { label: "Purchase Orders", icon: ShoppingBag, path: "/m/procurement" },
+      { label: "Suppliers", icon: UserSquare, path: "/m/suppliers" },
+    ],
+  },
+  {
     title: "People & Finance",
     items: [
-      { label: "Employees", icon: Users, path: "/m/employees" },
-      { label: "Receivables", icon: Receipt, path: "/m/receivables" },
+      { label: "Employees", icon: HardHat, path: "/m/employees" },
+      { label: "Receivables", icon: Wallet, path: "/m/receivables" },
+    ],
+  },
+  // System — owner 2026-06-28 design v12: User Management is a SUPER_ADMIN
+  // tool but the link belongs here for parity with the desktop /settings/users.
+  // The mobile list is read-only (mutations live on the desktop page); see
+  // usermgmtConfig in src/pages/m/config/modules.ts.
+  {
+    title: "System",
+    items: [
+      { label: "User Management", icon: UserPlus, path: "/m/usermgmt" },
     ],
   },
 ];
+

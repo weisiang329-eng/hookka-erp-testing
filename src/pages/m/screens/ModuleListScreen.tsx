@@ -13,9 +13,9 @@
 // ===========================================================================
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, SlidersHorizontal, Plus } from "lucide-react";
+import { Search, SlidersHorizontal, Plus, ScanLine } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
-import { MobileHeader, DocCard, StatusPill, FormSheet } from "../components";
+import { MobileHeader, DocCard, StatusPill, FormSheet, ScanSheet } from "../components";
 import { SubTabs } from "../components/SubTabs";
 import { FilterSheet } from "../components/FilterSheet";
 import { M } from "../theme";
@@ -48,6 +48,9 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   const [activeTab, setActiveTab] = useState(allTabs[0]?.key ?? "");
   const [search, setSearch] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
+  const [scanOpen, setScanOpen] = useState(false);
+  // Sticky one-shot scan-result toast — clears after 2.5s.
+  const [scanToast, setScanToast] = useState<string | null>(null);
   // "+" create form for modules that have one (SO / Delivery / Procure /
   // Invoice / Announcements / Mail). null = this module has no mobile create.
   const [createSpec, setCreateSpec] = useState<FormSpec | null>(null);
@@ -186,6 +189,28 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
             }}
           />
         </div>
+        {/* Scan QR — dc12 design v12: button next to the filter, opens a
+            full-screen camera scanner. Decoded /m/<slug>/<id> URLs auto-
+            navigate; anything else shows a toast so the operator can act. */}
+        <button
+          onClick={() => setScanOpen(true)}
+          aria-label="Scan QR code"
+          style={{
+            width: 44,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: M.card,
+            border: `1px solid ${M.hairline}`,
+            borderRadius: 12,
+            color: M.ink,
+            cursor: "pointer",
+            flexShrink: 0,
+            WebkitTapHighlightColor: "transparent",
+          }}
+        >
+          <ScanLine size={19} strokeWidth={1.75} />
+        </button>
         <button
           onClick={() => setFilterOpen(true)}
           aria-label="Filter and sort"
@@ -310,6 +335,64 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
           if (to) navigate(to);
         }}
       />
+
+      {/* QR scanner overlay (dc12 design v12). On a decoded `${origin}/m/...`
+          URL, parse the path and navigate inside the app; anything else (a
+          plain code, or a URL on a different origin) shows a toast so the
+          operator can see what scanned and act manually. */}
+      <ScanSheet
+        open={scanOpen}
+        onClose={() => setScanOpen(false)}
+        onResult={(value) => {
+          setScanOpen(false);
+          // Same-origin /m/* deep-link → in-app navigate.
+          try {
+            const url = new URL(
+              value,
+              typeof window !== "undefined" ? window.location.origin : "",
+            );
+            const sameOrigin =
+              typeof window === "undefined" ||
+              url.origin === window.location.origin;
+            if (sameOrigin && url.pathname.startsWith("/m/")) {
+              navigate(url.pathname + url.search);
+              return;
+            }
+            if (sameOrigin && url.pathname.startsWith("/")) {
+              // Desktop deep-link (e.g. a non-/m route printed on a sticker
+              // from desktop) — go anyway; the redirect layer bounces phones
+              // back to /m if applicable.
+              navigate(url.pathname + url.search);
+              return;
+            }
+          } catch {
+            // not a URL — fall through to toast
+          }
+          setScanToast(value.length > 60 ? `${value.slice(0, 60)}…` : value);
+          // eslint-disable-next-line no-restricted-syntax -- one-shot toast clear outside any React effect; useTimeout would over-engineer this
+          window.setTimeout(() => setScanToast(null), 2500);
+        }}
+      />
+      {scanToast ? (
+        <div
+          style={{
+            position: "fixed",
+            left: 18,
+            right: 18,
+            bottom: "calc(80px + env(safe-area-inset-bottom))",
+            zIndex: 90,
+            background: M.raisin,
+            color: "#fff",
+            borderRadius: 13,
+            padding: "12px 16px",
+            fontSize: 13,
+            fontWeight: 600,
+            boxShadow: "0 12px 30px rgba(31,29,27,.35)",
+          }}
+        >
+          Scanned: {scanToast}
+        </div>
+      ) : null}
     </>
   );
 }

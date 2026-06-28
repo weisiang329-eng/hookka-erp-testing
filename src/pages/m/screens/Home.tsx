@@ -931,67 +931,7 @@ export default function MobileHome() {
       </div>
 
       <div style={{ padding: "0 18px" }}>
-        {/* ===== KPI grid — 2×2 on phone, 1×4 on fold (dc12 Fold variant). ===== */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: fold ? "repeat(4, 1fr)" : "1fr 1fr",
-            gap: 11,
-          }}
-        >
-          {/* Mirrors dashboard KTile "This Month Sales" (overview.salesThisMonthSen). */}
-          <KpiCard
-            icon={DollarSign}
-            accent="gold"
-            label="This Month Sales"
-            value={formatCurrency(salesThisMonthSen)}
-            delta={
-              salesDeltaPct == null
-                ? null
-                : {
-                    text: `${salesDeltaPct >= 0 ? "+" : ""}${salesDeltaPct}%`,
-                    good: salesDeltaPct >= 0,
-                  }
-            }
-          />
-          {/* Mirrors dashboard KTile "This Month Invoices" (overview.invoicesThisMonthSen). */}
-          <KpiCard
-            icon={FileText}
-            accent="info"
-            label="This Month Invoices"
-            value={formatCurrency(invoicesThisMonthSen)}
-            delta={
-              invoiceDeltaPct == null
-                ? null
-                : {
-                    text: `${invoiceDeltaPct >= 0 ? "+" : ""}${invoiceDeltaPct}%`,
-                    good: invoiceDeltaPct >= 0,
-                  }
-            }
-          />
-          {/* Mirrors dashboard KTile "Pending Delivery" (consolidated live). */}
-          <KpiCard
-            icon={Package}
-            accent="moss"
-            label="Pending Delivery"
-            // Lazy-loaded after first paint — show a placeholder until its five
-            // deferred fetches resolve, then the real (dashboard-identical) value.
-            value={pendingDeliveryLoading ? "…" : formatCurrency(pendingDeliverySen)}
-            // Live point-in-time figure — no prior-period delta (as on desktop).
-            delta={null}
-          />
-          {/* Mirrors dashboard KTile "Outstanding" (stats.outstandingItemsSen). */}
-          <KpiCard
-            icon={Clock}
-            accent="danger"
-            label="Outstanding"
-            value={formatCurrency(outstandingSen)}
-            // Live point-in-time figure — no prior-period delta (as on desktop).
-            delta={null}
-          />
-        </div>
-
-        {/* ===== Quick actions ===== */}
+        {/* ===== Quick actions (FIRST per dc13 order) ===== */}
         <div style={{ display: "flex", gap: 9, marginTop: 14 }}>
           <QuickAction
             icon={Plus}
@@ -1017,6 +957,68 @@ export default function MobileHome() {
             label="Staff"
             // No staff-create endpoint is in scope. Route to the directory.
             onClick={() => navigate("/m/employees")}
+          />
+        </div>
+
+        {/* ===== KPI grid — 2×2 on phone, 1×4 on fold (dc13 sizing — was
+            too loose at 25px font, dc13 uses 18px + tighter padding). ===== */}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: fold ? "repeat(4, 1fr)" : "1fr 1fr",
+            gap: 9,
+            marginTop: 11,
+          }}
+        >
+          {/* Mirrors dashboard KTile "This Month Sales" (overview.salesThisMonthSen). */}
+          <KpiCard
+            icon={DollarSign}
+            accent="gold"
+            label="This Month Sales"
+            value={formatCurrency(salesThisMonthSen)}
+            delta={
+              salesDeltaPct == null
+                ? null
+                : {
+                    text: `${salesDeltaPct >= 0 ? "+" : ""}${salesDeltaPct}% MoM`,
+                    good: salesDeltaPct >= 0,
+                  }
+            }
+          />
+          {/* Mirrors dashboard KTile "This Month Invoices" (overview.invoicesThisMonthSen). */}
+          <KpiCard
+            icon={FileText}
+            accent="info"
+            label="This Month Invoices"
+            value={formatCurrency(invoicesThisMonthSen)}
+            delta={
+              invoiceDeltaPct == null
+                ? null
+                : {
+                    text: `${invoiceDeltaPct >= 0 ? "+" : ""}${invoiceDeltaPct}% MoM`,
+                    good: invoiceDeltaPct >= 0,
+                  }
+            }
+          />
+          {/* Mirrors dashboard KTile "Pending Delivery" (consolidated live). */}
+          <KpiCard
+            icon={Package}
+            accent="moss"
+            label="Pending Delivery"
+            // Lazy-loaded after first paint — show a placeholder until its five
+            // deferred fetches resolve, then the real (dashboard-identical) value.
+            value={pendingDeliveryLoading ? "…" : formatCurrency(pendingDeliverySen)}
+            // Live point-in-time figure — no prior-period delta (as on desktop).
+            delta={null}
+          />
+          {/* Mirrors dashboard KTile "Outstanding" (stats.outstandingItemsSen). */}
+          <KpiCard
+            icon={Clock}
+            accent="danger"
+            label="Outstanding"
+            value={formatCurrency(outstandingSen)}
+            // Live point-in-time figure — no prior-period delta (as on desktop).
+            delta={null}
           />
         </div>
 
@@ -2098,55 +2100,66 @@ function KpiCard({
   value: string;
   delta: { text: string; good: boolean } | null;
 }) {
+  // dc13 mobile tightening: 13×14 padding · 18px value · 11.5px label ·
+  // delta on its own line under the label. Was 15×16 / 25px / 12px / delta
+  // in the header row — owner flagged it as "松垮" (too loose).
   const c = M_ACCENT[accent];
   return (
-    <MobileCard radius={16} style={{ padding: "15px 16px" }}>
-      <div
+    <MobileCard radius={14} style={{ padding: "13px 14px", minWidth: 0 }}>
+      <span
         style={{
-          display: "flex",
+          display: "inline-flex",
           alignItems: "center",
-          justifyContent: "space-between",
+          justifyContent: "center",
+          width: 30,
+          height: 30,
+          borderRadius: 9,
+          background: c.bg,
         }}
       >
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: 32,
-            height: 32,
-            borderRadius: 10,
-            background: c.bg,
-          }}
-        >
-          <Icon size={17} strokeWidth={1.75} color={c.fg} />
-        </span>
-        {delta ? (
-          <span
-            style={{
-              fontSize: 11,
-              fontWeight: 700,
-              color: delta.good ? M_DELTA.up : M_DELTA.down,
-            }}
-          >
-            {delta.text}
-          </span>
-        ) : null}
-      </div>
+        <Icon size={16} strokeWidth={1.75} color={c.fg} />
+      </span>
       <div
         style={{
-          fontSize: 25,
+          fontSize: 18,
           fontWeight: 800,
-          letterSpacing: "-0.6px",
+          letterSpacing: "-0.4px",
           color: M.raisin,
-          marginTop: 13,
-          lineHeight: 1,
+          marginTop: 9,
+          lineHeight: 1.1,
           fontVariantNumeric: "tabular-nums",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
         }}
       >
         {value}
       </div>
-      <div style={{ fontSize: 12, color: M.muted, marginTop: 5 }}>{label}</div>
+      <div
+        style={{
+          fontSize: 11.5,
+          color: M.ink,
+          fontWeight: 600,
+          marginTop: 3,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {label}
+      </div>
+      {delta ? (
+        <div
+          style={{
+            fontSize: 10.5,
+            fontWeight: 600,
+            color: delta.good ? M_DELTA.up : M_DELTA.down,
+            marginTop: 1,
+          }}
+        >
+          {delta.text}
+        </div>
+      ) : null}
     </MobileCard>
   );
 }

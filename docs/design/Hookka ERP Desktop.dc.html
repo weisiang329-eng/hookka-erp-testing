@@ -1251,6 +1251,802 @@
         </div>
       </sc-if>
 
+      <!-- =========================================================================
+           DAILY REPORT (Hookka Report)
+      ========================================================================= -->
+      <sc-if value="{{ isDailyReport }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Hookka Report</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Daily exception summary · process &amp; SOP infractions</div>
+            </div>
+            <input type="date" style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-size:13px; font-family:inherit;" value="2026-06-29" />
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:20px 22px; margin-bottom:18px;">
+            <div style="display:flex; align-items:center; gap:18px;">
+              <div style="width:64px; height:64px; border-radius:16px; background:#F0EAD8; display:flex; align-items:center; justify-content:center;"><lucide-icon name="clipboard-check" size="32" color="#6B5C32"></lucide-icon></div>
+              <div style="flex:1;">
+                <div style="font-size:12px; font-weight:700; color:#A89F8D; letter-spacing:.5px;">TOTAL EXCEPTIONS TODAY</div>
+                <div style="font-size:36px; font-weight:800; color:#1F1D1B; letter-spacing:-.5px;">443</div>
+              </div>
+              <div style="text-align:right;">
+                <div style="font-size:11px; color:#9A9082;">vs yesterday</div>
+                <div style="font-size:17px; font-weight:800; color:#9A3A2D;">+18</div>
+              </div>
+            </div>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:18px;">
+            <sc-for list="{{ reportChips }}" as="c" hint-placeholder-count="4">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;">
+                <div style="font-size:11px; font-weight:700; color:#A89F8D;">{{ c.label }}</div>
+                <div style="font-size:22px; font-weight:800; color:#9A3A2D; margin-top:4px;">{{ c.count }}</div>
+                <div style="font-size:11.5px; color:#9A9082; margin-top:2px;">{{ c.note }}</div>
+              </div>
+            </sc-for>
+          </div>
+          <h3 style="font-size:14px; font-weight:700; color:#1F1D1B; margin:18px 0 10px;">Exception detail</h3>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Type</th><th>Ref</th><th>Customer / Vendor</th><th>Issue</th><th>Age</th><th>Owner</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ reportDetail }}" as="r" hint-placeholder-count="8">
+                  <tr><td><span style="{{ r.typeStyle }}">{{ r.type }}</span></td><td style="font-weight:700; color:#6B5C32;">{{ r.ref }}</td><td>{{ r.party }}</td><td>{{ r.issue }}</td><td>{{ r.age }}</td><td>{{ r.owner }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           NOTIFICATIONS
+      ========================================================================= -->
+      <sc-if value="{{ isNotifications }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Notifications</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">7 unread · system events &amp; alerts</div>
+            </div>
+            <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Mark all read</button>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <sc-for list="{{ notifRows }}" as="n" hint-placeholder-count="8">
+              <div style="display:flex; align-items:flex-start; gap:14px; padding:14px 18px; border-bottom:1px solid #F2EEE6; background:{{ n.bg }}; cursor:pointer;">
+                <span style="width:36px; height:36px; border-radius:10px; background:{{ n.iconBg }}; display:inline-flex; align-items:center; justify-content:center; flex:none;"><lucide-icon name="{{ n.icon }}" size="17" color="{{ n.iconColor }}"></lucide-icon></span>
+                <div style="flex:1; min-width:0;">
+                  <div style="display:flex; align-items:center; gap:8px;"><span style="font-size:13.5px; font-weight:{{ n.weight }}; color:#1F1D1B;">{{ n.title }}</span><sc-if value="{{ n.unread }}" hint-placeholder-val=""><span style="width:7px; height:7px; border-radius:50%; background:#EC4899;"></span></sc-if></div>
+                  <div style="font-size:12.5px; color:#6B7280; margin-top:3px;">{{ n.body }}</div>
+                </div>
+                <span style="font-size:11.5px; color:#9A9082; white-space:nowrap;">{{ n.time }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           FORECASTING / ANALYTICS
+      ========================================================================= -->
+      <sc-if value="{{ isForecast }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Forecasting</h1>
+            <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Sales · Production · Cash flow projection</div>
+          </div>
+          <div style="display:flex; gap:6px; border-bottom:1px solid #E2DDD8; margin-bottom:14px;">
+            <span style="padding:11px 16px; font-size:13px; font-weight:700; color:#1F1D1B; border-bottom:2px solid #6B5C32; cursor:pointer;">Sales Forecast</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Production Forecast</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Cash Flow Forecast</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Demand by Customer</span>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:18px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">NEXT 30 DAYS</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 312K</div><div style="font-size:11.5px; color:#4F7C3A; margin-top:2px;">+10% confidence</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">NEXT 90 DAYS</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 894K</div><div style="font-size:11.5px; color:#4F7C3A; margin-top:2px;">+7% trend</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">YEAR END</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 3.4M</div><div style="font-size:11.5px; color:#9A3A2D; margin-top:2px;">-3% vs target</div></div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:20px;">
+            <div style="font-size:14px; font-weight:700; color:#1F1D1B; margin-bottom:12px;">Sales projection · next 12 weeks (Holt-Winters)</div>
+            <svg viewBox="0 0 800 220" width="100%" height="240">
+              <line x1="0" y1="55" x2="800" y2="55" stroke="#F2EEE6" /><line x1="0" y1="110" x2="800" y2="110" stroke="#F2EEE6" /><line x1="0" y1="165" x2="800" y2="165" stroke="#F2EEE6" />
+              <polyline points="0,160 70,140 140,120 210,100 280,90 350,80 420,75" fill="none" stroke="#5E5129" stroke-width="2.5" />
+              <polyline points="420,75 490,68 560,62 630,58 700,55 770,52" fill="none" stroke="#C9A961" stroke-width="2.5" stroke-dasharray="6 3" />
+              <polygon points="420,75 490,55 560,40 630,32 700,28 770,25 770,82 700,88 630,92 560,96 490,95 420,90" fill="rgba(201,169,97,0.12)" />
+            </svg>
+            <div style="display:flex; gap:18px; margin-top:10px; font-size:11.5px; color:#6B7280;">
+              <span style="display:inline-flex; align-items:center; gap:5px;"><span style="width:14px; height:2px; background:#5E5129;"></span>Actual</span>
+              <span style="display:inline-flex; align-items:center; gap:5px;"><span style="width:14px; height:2px; background:#C9A961; border-top:1px dashed #C9A961;"></span>Forecast</span>
+              <span style="display:inline-flex; align-items:center; gap:5px;"><span style="width:14px; height:8px; background:rgba(201,169,97,0.2);"></span>Confidence band</span>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           SALES CREATE FORM
+      ========================================================================= -->
+      <sc-if value="{{ isSalesCreate }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both; max-width:920px;">
+          <div style="margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Create Sales Order</h1>
+            <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Draft → confirm to run the BOM + PO cascade</div>
+          </div>
+          <!-- Header card -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:20px 22px; margin-bottom:14px;">
+            <h3 style="font-size:14px; font-weight:700; color:#1F1D1B; margin:0 0 14px;">Header</h3>
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px;">
+              <sc-for list="{{ soFormFields }}" as="f" hint-placeholder-count="9">
+                <div>
+                  <label style="font-size:11.5px; font-weight:600; color:#4D4630; display:block; margin-bottom:5px;">{{ f.label }}<sc-if value="{{ f.req }}" hint-placeholder-val=""><span style="color:#9A3A2D;"> *</span></sc-if></label>
+                  <sc-if value="{{ f.isSelect }}" hint-placeholder-val=""><div style="display:flex; align-items:center; gap:6px; background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:9px 11px; font-size:13px; color:{{ f.color }};">{{ f.placeholder }}<lucide-icon name="chevron-down" size="13" color="#9CA3AF" style="margin-left:auto;"></lucide-icon></div></sc-if>
+                  <sc-if value="{{ f.isDate }}" hint-placeholder-val=""><div style="display:flex; align-items:center; gap:6px; background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:9px 11px; font-size:13px; color:{{ f.color }};">{{ f.placeholder }}<lucide-icon name="calendar" size="13" color="#9CA3AF" style="margin-left:auto;"></lucide-icon></div></sc-if>
+                  <sc-if value="{{ f.isText }}" hint-placeholder-val=""><div style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:9px 11px; font-size:13px; color:{{ f.color }};">{{ f.placeholder }}</div></sc-if>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+          <!-- Line items -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:20px 22px; margin-bottom:14px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+              <h3 style="font-size:14px; font-weight:700; color:#1F1D1B; margin:0;">Line Items · 3</h3>
+              <button style="background:#fff; border:1px dashed #6B5C32; border-radius:8px; padding:7px 14px; font-family:inherit; font-size:13px; font-weight:700; color:#6B5C32;">+ Add Item</button>
+            </div>
+            <table>
+              <thead><tr><th>Product</th><th>Size</th><th>Fabric</th><th style="text-align:right;">Qty</th><th>Customizations</th><th style="text-align:right;">Unit</th><th style="text-align:right;">Line Total</th><th></th></tr></thead>
+              <tbody>
+                <sc-for list="{{ soFormLines }}" as="l" hint-placeholder-count="3">
+                  <tr><td><span style="font-weight:700; color:#6B5C32;">{{ l.code }}</span><div style="font-size:11px; color:#9A9082;">{{ l.name }}</div></td><td>{{ l.size }}</td><td>{{ l.fabric }}</td><td style="text-align:right; font-weight:700;">{{ l.qty }}</td><td><span style="font-size:11px; color:#6B7280;">{{ l.specs }}</span></td><td style="text-align:right;">{{ l.unit }}</td><td style="text-align:right; font-weight:700;">{{ l.total }}</td><td><lucide-icon name="trash-2" size="15" color="#9A3A2D"></lucide-icon></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+            <div style="display:flex; justify-content:flex-end; gap:24px; padding:14px 0 4px; border-top:1px solid #F2EEE6; margin-top:8px;">
+              <div style="text-align:right;"><div style="font-size:11.5px; color:#6B7280;">Subtotal</div><div style="font-size:14px; font-weight:700;">RM 47,820</div></div>
+              <div style="text-align:right;"><div style="font-size:11.5px; color:#6B7280;">Discount</div><div style="font-size:14px; font-weight:700;">RM 0</div></div>
+              <div style="text-align:right;"><div style="font-size:11.5px; color:#A89F8D; letter-spacing:.4px;">TOTAL</div><div style="font-size:20px; font-weight:800; color:#1F1D1B;">RM 47,820</div></div>
+            </div>
+          </div>
+          <!-- Actions -->
+          <div style="display:flex; gap:10px; justify-content:flex-end;">
+            <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:10px 18px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Cancel</button>
+            <button style="background:#fff; border:1px solid #6B5C32; border-radius:10px; padding:10px 18px; font-family:inherit; font-size:13px; font-weight:700; color:#6B5C32;">Save Draft</button>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:10px 18px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Create &amp; Confirm</button>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           DELIVERY ORDER DETAIL
+      ========================================================================= -->
+      <sc-if value="{{ isDeliveryDetail }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both; display:grid; grid-template-columns:2fr 1fr; gap:16px;">
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:20px 22px;">
+              <div style="display:flex; align-items:flex-start; justify-content:space-between;">
+                <div>
+                  <div style="font-size:12px; font-weight:700; color:#6B5C32;">DO-2606-088</div>
+                  <h1 style="font-size:22px; font-weight:800; color:#1F1D1B; margin:6px 0 0;">The Heritage Hotel · KL Klang Hub</h1>
+                  <div style="font-size:13px; color:#9A9082; margin-top:4px;">Driver Lim · WA-1234 · 3PL: Own fleet · Linked SO-2606-0142</div>
+                </div>
+                <span style="display:inline-flex; padding:5px 11px; border-radius:9999px; font-size:11.5px; font-weight:700; background:#E0EDF0; color:#3E6570;">DISPATCHED</span>
+              </div>
+            </div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 22px;">
+              <h3 style="margin:0 0 12px; font-size:14px; font-weight:700;">Items · 12</h3>
+              <table>
+                <thead><tr><th>Code</th><th>Product</th><th>Size</th><th>Fabric</th><th style="text-align:right;">Qty</th><th>Loaded</th></tr></thead>
+                <tbody>
+                  <sc-for list="{{ doDetailItems }}" as="i" hint-placeholder-count="4">
+                    <tr><td style="font-weight:700; color:#6B5C32;">{{ i.code }}</td><td>{{ i.name }}</td><td>{{ i.size }}</td><td>{{ i.fabric }}</td><td style="text-align:right;">{{ i.qty }}</td><td><lucide-icon name="check" size="14" color="#4F7C3A"></lucide-icon></td></tr>
+                  </sc-for>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 22px;">
+              <h3 style="margin:0 0 12px; font-size:14px; font-weight:700;">Dispatch Timeline</h3>
+              <sc-for list="{{ doTimeline }}" as="t" hint-placeholder-count="5">
+                <div style="display:flex; gap:11px; padding:9px 0; border-top:1px solid #F2EEE6;">
+                  <span style="{{ t.dotStyle }}"></span>
+                  <div style="flex:1;"><div style="font-size:13px; font-weight:600; color:{{ t.color }};">{{ t.label }}</div><div style="font-size:11.5px; color:#9A9082;">{{ t.time }}</div></div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 22px;">
+              <h3 style="margin:0 0 8px; font-size:14px; font-weight:700;">Hub Address</h3>
+              <div style="font-size:13px; color:#1F1D1B; line-height:1.5;">Heritage Hotel KL · Klang Hub<br>Jalan Klang, Selangor 41100<br>Contact: James Tan +60 12-345 6789</div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           CUSTOMER DETAIL
+      ========================================================================= -->
+      <sc-if value="{{ isCustomerDetail }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both; display:grid; grid-template-columns:2fr 1fr; gap:16px;">
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:20px 22px;">
+              <div style="display:flex; align-items:flex-start; justify-content:space-between;">
+                <div>
+                  <div style="font-size:12px; font-weight:700; color:#6B5C32;">HER001</div>
+                  <h1 style="font-size:22px; font-weight:800; color:#1F1D1B; margin:6px 0 0;">The Heritage Hotel</h1>
+                  <div style="font-size:13px; color:#9A9082; margin-top:4px;">Kuala Lumpur · SSM 199301027889</div>
+                </div>
+                <span style="display:inline-flex; padding:5px 11px; border-radius:9999px; font-size:11.5px; font-weight:700; background:#EEF3E4; color:#4F7C3A;">ACTIVE</span>
+              </div>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:18px;">
+                <sc-for list="{{ custFields }}" as="f" hint-placeholder-count="8">
+                  <div style="display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px solid #F2EEE6;"><span style="font-size:12.5px; color:#6B7280;">{{ f.label }}</span><span style="font-size:13px; font-weight:600; color:#1F1D1B;">{{ f.value }}</span></div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 22px;">
+              <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;"><h3 style="margin:0; font-size:14px; font-weight:700;">Delivery Hubs · 3</h3><button style="background:#fff; border:1px dashed #6B5C32; border-radius:8px; padding:6px 12px; font-family:inherit; font-size:12.5px; font-weight:700; color:#6B5C32;">+ Add Hub</button></div>
+              <sc-for list="{{ custHubs }}" as="h" hint-placeholder-count="3">
+                <div style="display:flex; gap:14px; padding:12px 0; border-top:1px solid #F2EEE6;">
+                  <div style="flex:1;"><div style="font-size:13.5px; font-weight:700; color:#1F1D1B;">{{ h.name }} <span style="font-size:11px; color:#6B5C32; margin-left:6px;">{{ h.code }}</span></div><div style="font-size:12px; color:#9A9082; margin-top:3px;">{{ h.address }}</div><div style="font-size:12px; color:#4D4630; margin-top:2px;">{{ h.contact }} · {{ h.phone }}</div></div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 22px;">
+              <h3 style="margin:0 0 12px; font-size:14px; font-weight:700;">AR Outstanding</h3>
+              <div style="font-size:32px; font-weight:800; color:#9A3A2D;">RM 47,820</div>
+              <div style="font-size:12px; color:#9A9082; margin-top:4px;">Across 1 unpaid + 1 partial invoice</div>
+            </div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 22px;">
+              <h3 style="margin:0 0 12px; font-size:14px; font-weight:700;">Exports</h3>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <button style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:9px 12px; font-family:inherit; font-size:12.5px; font-weight:600; color:#4D4630; text-align:left;"><lucide-icon name="file-down" size="14" style="margin-right:8px;"></lucide-icon>Statement of Account</button>
+                <button style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:9px 12px; font-family:inherit; font-size:12.5px; font-weight:600; color:#4D4630; text-align:left;"><lucide-icon name="file-down" size="14" style="margin-right:8px;"></lucide-icon>Sales History PDF</button>
+                <button style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:9px 12px; font-family:inherit; font-size:12.5px; font-weight:600; color:#4D4630; text-align:left;"><lucide-icon name="file-down" size="14" style="margin-right:8px;"></lucide-icon>Catalogue (customer-specific)</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           CONSIGNMENT NOTE (CN) detail variant
+      ========================================================================= -->
+      <sc-if value="{{ isCnNote }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Consignment Notes</h1>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ Create CN from SO/CO</button>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>CN No</th><th>Source SO/CO</th><th>Customer</th><th>Created</th><th style="text-align:right;">Items</th><th style="text-align:right;">Amount</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ cnNoteRows }}" as="r" hint-placeholder-count="6">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.no }}</td><td>{{ r.source }}</td><td>{{ r.customer }}</td><td>{{ r.created }}</td><td style="text-align:right;">{{ r.items }}</td><td style="text-align:right; font-weight:700;">{{ r.amount }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           CONSIGNMENT RETURN
+      ========================================================================= -->
+      <sc-if value="{{ isCnReturn }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Consignment Returns</h1>
+            <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Print CR</button>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>CR No</th><th>From CN</th><th>Customer</th><th>Return Date</th><th>Reason</th><th style="text-align:right;">Items</th><th>Restock Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ cnRetRows }}" as="r" hint-placeholder-count="5">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.no }}</td><td>{{ r.fromCN }}</td><td>{{ r.customer }}</td><td>{{ r.date }}</td><td>{{ r.reason }}</td><td style="text-align:right;">{{ r.items }}</td><td><span style="{{ r.badgeStyle }}">{{ r.restock }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           PRODUCTION DEPT SHEET (one representative — Fab Cut active)
+      ========================================================================= -->
+      <sc-if value="{{ isProdDept }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Production · Fab Cut</h1>
+            <div style="display:flex; gap:8px;"><button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:8px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Bulk Mark Complete</button><button style="background:#6B5C32; border:none; border-radius:10px; padding:8px 14px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Apply Due Date</button></div>
+          </div>
+          <div class="scrollarea" style="display:flex; gap:7px; overflow-x:auto; padding-bottom:14px;">
+            <span style="padding:9px 14px; border-radius:10px; font-size:13px; font-weight:600; background:#fff; border:1px solid #E2DDD8; color:#4D4630;">Overview <span style="margin-left:6px; font-size:10.5px; color:#9CA3AF;">247</span></span>
+            <span style="padding:9px 14px; border-radius:10px; font-size:13px; font-weight:700; background:#6B5C32; color:#fff;">Fab Cut <span style="margin-left:6px; font-size:10.5px; color:rgba(255,255,255,.7);">32</span></span>
+            <sc-for list="{{ deptTabsOther }}" as="t" hint-placeholder-count="7">
+              <span style="padding:9px 14px; border-radius:10px; font-size:13px; font-weight:600; background:#fff; border:1px solid #E2DDD8; color:#4D4630;">{{ t.label }} <span style="margin-left:6px; font-size:10.5px; color:#9CA3AF;">{{ t.count }}</span></span>
+            </sc-for>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:14px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">PENDING</div><div style="font-size:22px; font-weight:800; color:#7A5A00; margin-top:4px;">21</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">OVERDUE</div><div style="font-size:22px; font-weight:800; color:#9A3A2D; margin-top:4px;">4</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">COMPLETED TODAY</div><div style="font-size:22px; font-weight:800; color:#4F7C3A; margin-top:4px;">7</div></div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th style="width:36px;"></th><th>PO #</th><th>Product</th><th>Customer</th><th style="text-align:right;">Qty</th><th>Fabric</th><th>Status</th><th>Completion Date</th><th>Rack</th><th>PIC</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ deptSheetRows }}" as="r" hint-placeholder-count="8">
+                  <tr><td><input type="checkbox" /></td><td style="font-weight:700; color:#6B5C32;">{{ r.po }}</td><td>{{ r.product }}</td><td>{{ r.customer }}</td><td style="text-align:right;">{{ r.qty }}</td><td>{{ r.fabric }}</td><td><span style="{{ r.cellStyle }}">{{ r.status }}</span></td><td>{{ r.completed }}</td><td>{{ r.rack }}</td><td>{{ r.pic }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           PRODUCTION SCAN (worker portal QR scan stand-in)
+      ========================================================================= -->
+      <sc-if value="{{ isProdScan }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0 0 18px;">Production Scan</h1>
+          <div style="background:#1F1D1B; border-radius:14px; padding:40px; display:flex; flex-direction:column; align-items:center; gap:18px;">
+            <div style="width:280px; aspect-ratio:1; border:2px dashed rgba(201,169,97,.5); border-radius:14px; display:flex; align-items:center; justify-content:center;"><lucide-icon name="scan-line" size="72" color="#C9A961"></lucide-icon></div>
+            <div style="color:#fff; font-size:16px; font-weight:700;">Scan a Job Card or FG Sticker QR</div>
+            <div style="color:rgba(255,255,255,.6); font-size:13px;">Worker portal opens automatically on scan</div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           PRODUCTION FOLDERS (saved PO bundles)
+      ========================================================================= -->
+      <sc-if value="{{ isProdFolders }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Production Folders</h1>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New Folder</button>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:14px;">
+            <sc-for list="{{ folders }}" as="f" hint-placeholder-count="6">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:16px 18px;">
+                <div style="display:flex; align-items:center; gap:11px; margin-bottom:10px;"><lucide-icon name="folder-open" size="20" color="#6B5C32"></lucide-icon><span style="font-size:14.5px; font-weight:700; color:#1F1D1B;">{{ f.name }}</span></div>
+                <div style="font-size:12px; color:#9A9082;">{{ f.pos }} POs · created {{ f.date }}</div>
+                <div style="font-size:11.5px; color:#6B7280; margin-top:8px;">{{ f.note }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           PLANNING DEPT SCHEDULE (one representative — Fabric Cutting)
+      ========================================================================= -->
+      <sc-if value="{{ isPlanDept }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0 0 14px;">Planning · Fabric Cutting Schedule</h1>
+          <div class="scrollarea" style="display:flex; gap:7px; overflow-x:auto; padding-bottom:14px;">
+            <span style="padding:9px 14px; border-radius:10px; font-size:13px; font-weight:700; background:#6B5C32; color:#fff;">Fabric Cutting</span>
+            <sc-for list="{{ planDeptTabs }}" as="t" hint-placeholder-count="7">
+              <span style="padding:9px 14px; border-radius:10px; font-size:13px; font-weight:600; background:#fff; border:1px solid #E2DDD8; color:#4D4630;">{{ t }}</span>
+            </sc-for>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:18px 22px; margin-bottom:14px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;"><span style="font-size:14px; font-weight:700;">Snapshot · 2026-06-29 09:00</span><button style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 14px; font-family:inherit; font-size:12.5px; font-weight:600;">Recalculate</button></div>
+            <table>
+              <thead><tr><th>Date</th><th>Capacity (h)</th><th>Planned (h)</th><th>Load %</th><th>POs Scheduled</th><th>Spare (h)</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ planSchedRows }}" as="r" hint-placeholder-count="7">
+                  <tr><td>{{ r.date }}</td><td>{{ r.cap }}</td><td>{{ r.planned }}</td><td><span style="display:inline-flex; align-items:center; gap:8px;"><span style="width:100px; height:8px; background:#F0EBE0; border-radius:4px; overflow:hidden;"><span style="display:block; width:{{ r.pct }}%; height:100%; background:{{ r.color }}; border-radius:4px;"></span></span><span style="font-size:11.5px; font-weight:700; color:{{ r.color }};">{{ r.pct }}%</span></span></td><td>{{ r.pos }}</td><td>{{ r.spare }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           MRP
+      ========================================================================= -->
+      <sc-if value="{{ isMrp }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Material Requirements Planning</h1>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Run MRP</button>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:18px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">SHORT (need to buy)</div><div style="font-size:22px; font-weight:800; color:#9A3A2D; margin-top:4px;">17</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">BELOW REORDER</div><div style="font-size:22px; font-weight:800; color:#C9A961; margin-top:4px;">24</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">SUGGESTED PO VALUE</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 42K</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">SAFE</div><div style="font-size:22px; font-weight:800; color:#4F7C3A; margin-top:4px;">198</div></div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Item</th><th>On Hand</th><th>Reserved</th><th>Available</th><th>Reorder</th><th>Need</th><th>Suggested PO</th><th>Supplier</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ mrpRows }}" as="r" hint-placeholder-count="8">
+                  <tr><td><span style="font-weight:700; color:#6B5C32;">{{ r.code }}</span><div style="font-size:11px; color:#9A9082;">{{ r.name }}</div></td><td>{{ r.onhand }}</td><td>{{ r.reserved }}</td><td style="font-weight:700; color:{{ r.availColor }};">{{ r.avail }}</td><td>{{ r.reorder }}</td><td style="font-weight:700; color:#9A3A2D;">{{ r.need }}</td><td>{{ r.suggested }}</td><td>{{ r.supplier }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           WIP TIMES
+      ========================================================================= -->
+      <sc-if value="{{ isWipTimes }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">WIP Times</h1>
+            <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Production minutes standard · per Product × Department</div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <div class="scrollarea" style="overflow-x:auto;">
+              <table style="min-width:1100px;">
+                <thead><tr><th>Product</th><th style="text-align:right;">Fab Cut</th><th style="text-align:right;">Fab Sew</th><th style="text-align:right;">Wood Cut</th><th style="text-align:right;">Foam</th><th style="text-align:right;">Framing</th><th style="text-align:right;">Webbing</th><th style="text-align:right;">Upholstery</th><th style="text-align:right;">Packing</th><th style="text-align:right;">Total (min)</th></tr></thead>
+                <tbody>
+                  <sc-for list="{{ wipRows }}" as="r" hint-placeholder-count="6">
+                    <tr><td><span style="font-weight:700; color:#6B5C32;">{{ r.code }}</span><div style="font-size:11px; color:#9A9082;">{{ r.name }}</div></td><td style="text-align:right;">{{ r.fc }}</td><td style="text-align:right;">{{ r.fs }}</td><td style="text-align:right;">{{ r.wc }}</td><td style="text-align:right;">{{ r.fm }}</td><td style="text-align:right;">{{ r.fr }}</td><td style="text-align:right;">{{ r.wb }}</td><td style="text-align:right;">{{ r.up }}</td><td style="text-align:right;">{{ r.pk }}</td><td style="text-align:right; font-weight:700;">{{ r.total }}</td></tr>
+                  </sc-for>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           SOFA COMBOS
+      ========================================================================= -->
+      <sc-if value="{{ isSofaCombos }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div><h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Sofa Combos</h1><div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Module bundle pricing · backend-unified</div></div>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ Add Combo</button>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Combo</th><th>Seat Code</th><th>Modules</th><th style="text-align:right;">Pieces</th><th style="text-align:right;">Combo Price</th><th style="text-align:right;">Sum of Parts</th><th style="text-align:right;">Savings</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ comboRows }}" as="r" hint-placeholder-count="6">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.code }}</td><td>{{ r.seat }}</td><td><span style="font-size:11.5px; color:#6B7280;">{{ r.modules }}</span></td><td style="text-align:right;">{{ r.pieces }}</td><td style="text-align:right; font-weight:700;">{{ r.combo }}</td><td style="text-align:right; color:#9A9082;">{{ r.sum }}</td><td style="text-align:right; font-weight:700; color:#4F7C3A;">{{ r.save }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           FABRICS
+      ========================================================================= -->
+      <sc-if value="{{ isFabrics }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div><h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Fabrics</h1><div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Fabric SKU inventory · meters on hand</div></div>
+            <div style="display:flex; gap:8px;"><button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-family:inherit; font-size:13px; font-weight:600;">Batch Import</button><button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ Add Fabric</button></div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Code</th><th>Name</th><th>Category</th><th>Supplier</th><th style="text-align:right;">On Hand (m)</th><th style="text-align:right;">Avg Cost /m</th><th style="text-align:right;">Stock Value</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ fabricRows }}" as="r" hint-placeholder-count="7">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.code }}</td><td>{{ r.name }}</td><td><span style="font-size:11px; color:#6B7280;">{{ r.cat }}</span></td><td>{{ r.supplier }}</td><td style="text-align:right; font-weight:700;">{{ r.meters }}</td><td style="text-align:right;">{{ r.cost }}</td><td style="text-align:right; font-weight:700;">{{ r.value }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           STOCK VALUE
+      ========================================================================= -->
+      <sc-if value="{{ isStockValue }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Stock Value</h1>
+            <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Value snapshot — FG / WIP / RM / Fabric</div>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:18px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">TOTAL VALUE</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 487K</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">FINISHED GOODS</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 187K</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">WIP</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 124K</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">RAW MAT</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 95K</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">FABRIC</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 81K</div></div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Category</th><th>SKU</th><th>Description</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Unit Cost</th><th style="text-align:right;">Value</th><th style="text-align:right;">% of Total</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ stockValueRows }}" as="r" hint-placeholder-count="8">
+                  <tr><td><span style="font-size:11px; color:#6B7280;">{{ r.cat }}</span></td><td style="font-weight:700; color:#6B5C32;">{{ r.sku }}</td><td>{{ r.desc }}</td><td style="text-align:right;">{{ r.qty }}</td><td style="text-align:right;">{{ r.unit }}</td><td style="text-align:right; font-weight:700;">{{ r.value }}</td><td style="text-align:right; color:#9A9082;">{{ r.pct }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           STOCK ADJUSTMENTS
+      ========================================================================= -->
+      <sc-if value="{{ isStockAdj }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Stock Adjustments</h1>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New Adjustment</button>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Adj No</th><th>Date</th><th>Item</th><th>Reason</th><th style="text-align:right;">Qty Δ</th><th style="text-align:right;">Value Δ</th><th>Posted By</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ adjRows }}" as="r" hint-placeholder-count="7">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.no }}</td><td>{{ r.date }}</td><td>{{ r.item }}</td><td><span style="font-size:11.5px; color:#6B7280;">{{ r.reason }}</span></td><td style="text-align:right; font-weight:700; color:{{ r.qColor }};">{{ r.qty }}</td><td style="text-align:right; color:{{ r.qColor }};">{{ r.value }}</td><td>{{ r.by }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           GRN (Goods Receipt Note) list
+      ========================================================================= -->
+      <sc-if value="{{ isGrn }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Goods Receipt</h1>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New GRN</button>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>GRN No</th><th>From PO</th><th>Supplier</th><th>Received Date</th><th>Received By</th><th>QC</th><th style="text-align:right;">Items</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ grnRows }}" as="r" hint-placeholder-count="7">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.no }}</td><td>{{ r.po }}</td><td>{{ r.supplier }}</td><td>{{ r.date }}</td><td>{{ r.by }}</td><td><span style="{{ r.qcStyle }}">{{ r.qc }}</span></td><td style="text-align:right;">{{ r.items }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           GRN CREATE form (convert from PO)
+      ========================================================================= -->
+      <sc-if value="{{ isGrnCreate }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both; max-width:920px;">
+          <div style="margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Create Goods Receipt</h1>
+            <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">From PO-006712 · Fabric World Sdn Bhd</div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:20px 22px; margin-bottom:14px;">
+            <h3 style="margin:0 0 14px; font-size:14px; font-weight:700;">Receive Items</h3>
+            <table>
+              <thead><tr><th>Item</th><th style="text-align:right;">Ordered</th><th style="text-align:right;">Received Before</th><th style="text-align:right;">Receive Now</th><th>QC</th><th>Rack</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ grnFormRows }}" as="r" hint-placeholder-count="4">
+                  <tr><td>{{ r.item }}</td><td style="text-align:right;">{{ r.ordered }}</td><td style="text-align:right;">{{ r.prevRecv }}</td><td style="text-align:right;"><input type="number" value="{{ r.nowRecv }}" style="width:80px; border:1px solid #E2DDD8; border-radius:6px; padding:4px 8px; font-family:inherit; text-align:right;" /></td><td><select style="border:1px solid #E2DDD8; border-radius:6px; padding:4px 8px; font-family:inherit; font-size:12px;"><option>PASS</option><option>FAIL</option></select></td><td><input type="text" placeholder="A-3" style="width:70px; border:1px solid #E2DDD8; border-radius:6px; padding:4px 8px; font-family:inherit; font-size:12px;" /></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+          <div style="display:flex; gap:10px; justify-content:flex-end;">
+            <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:10px 18px; font-family:inherit; font-size:13px; font-weight:600;">Cancel</button>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:10px 18px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Post to Stock</button>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           PURCHASE INVOICE (PI) list
+      ========================================================================= -->
+      <sc-if value="{{ isPi }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Purchase Invoice</h1>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ Match to GRN</button>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>PI No</th><th>Supplier Invoice</th><th>Supplier</th><th>Invoice Date</th><th>Due Date</th><th style="text-align:right;">Amount</th><th style="text-align:right;">Paid</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ piRows }}" as="r" hint-placeholder-count="6">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.no }}</td><td>{{ r.supInv }}</td><td>{{ r.supplier }}</td><td>{{ r.date }}</td><td>{{ r.due }}</td><td style="text-align:right;">{{ r.amount }}</td><td style="text-align:right;">{{ r.paid }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           R&D PROJECTS
+      ========================================================================= -->
+      <sc-if value="{{ isRd }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div><h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">R&amp;D Projects</h1><div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Product / process innovation pipeline</div></div>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ New Project</button>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:14px;">
+            <sc-for list="{{ rdProjects }}" as="p" hint-placeholder-count="6">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:16px 18px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;"><span style="font-size:11px; font-weight:700; color:#6B5C32; background:#F0EAD8; padding:2px 8px; border-radius:6px;">{{ p.code }}</span><span style="{{ p.statusStyle }}">{{ p.status }}</span></div>
+                <h3 style="margin:8px 0 6px; font-size:15px; font-weight:700; color:#1F1D1B;">{{ p.name }}</h3>
+                <div style="font-size:12.5px; color:#9A9082; line-height:1.5;">{{ p.description }}</div>
+                <div style="display:flex; gap:14px; margin-top:12px; padding-top:11px; border-top:1px solid #F2EEE6;"><span style="font-size:11px; color:#9A9082;">Lead: <b style="color:#4D4630;">{{ p.lead }}</b></span><span style="font-size:11px; color:#9A9082;">Budget: <b style="color:#4D4630;">{{ p.budget }}</b></span></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           R&D MAINTENANCE (categories / tooling / equipment)
+      ========================================================================= -->
+      <sc-if value="{{ isRdMaint }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0 0 18px;">R&amp;D Maintenance</h1>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:20px 22px;">
+              <h3 style="margin:0 0 12px; font-size:14px; font-weight:700;">Project Categories</h3>
+              <sc-for list="{{ rdCats }}" as="c" hint-placeholder-count="5">
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #F2EEE6;"><span style="font-size:13px; color:#1F1D1B;">{{ c.name }}</span><span style="font-size:12px; color:#9A9082;">{{ c.count }} projects</span></div>
+              </sc-for>
+            </div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:20px 22px;">
+              <h3 style="margin:0 0 12px; font-size:14px; font-weight:700;">Equipment Status</h3>
+              <sc-for list="{{ rdEquip }}" as="e" hint-placeholder-count="5">
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid #F2EEE6;"><span style="font-size:13px; color:#1F1D1B;">{{ e.name }}</span><span style="{{ e.statusStyle }}">{{ e.status }}</span></div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           QC / QUALITY
+      ========================================================================= -->
+      <sc-if value="{{ isQuality }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div><h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Quality Control</h1><div style="font-size:12.5px; color:#9A9082; margin-top:3px;">QC checks · failure tracking · prevention</div></div>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:18px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">CHECKED MTD</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">147</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">PASS RATE</div><div style="font-size:22px; font-weight:800; color:#4F7C3A; margin-top:4px;">94.6%</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">FAILED</div><div style="font-size:22px; font-weight:800; color:#9A3A2D; margin-top:4px;">8</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">REWORK QUEUE</div><div style="font-size:22px; font-weight:800; color:#C9A961; margin-top:4px;">3</div></div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>QC Ref</th><th>Source</th><th>Product</th><th>Inspector</th><th>Check Date</th><th>Defects</th><th>Outcome</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ qcRows }}" as="r" hint-placeholder-count="7">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.ref }}</td><td>{{ r.source }}</td><td>{{ r.product }}</td><td>{{ r.inspector }}</td><td>{{ r.date }}</td><td>{{ r.defects }}</td><td><span style="{{ r.outcomeStyle }}">{{ r.outcome }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           CASH FLOW (Accounting child)
+      ========================================================================= -->
+      <sc-if value="{{ isCashFlow }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Cash Flow</h1>
+            <input type="date" style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-size:13px; font-family:inherit;" />
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:18px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">CASH IN (MTD)</div><div style="font-size:22px; font-weight:800; color:#4F7C3A; margin-top:4px;">RM 152,900</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">CASH OUT (MTD)</div><div style="font-size:22px; font-weight:800; color:#9A3A2D; margin-top:4px;">RM 87,400</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">NET</div><div style="font-size:22px; font-weight:800; color:#1F1D1B; margin-top:4px;">RM 65,500</div></div>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Date</th><th>Description</th><th>Account</th><th style="text-align:right;">In</th><th style="text-align:right;">Out</th><th style="text-align:right;">Balance</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ cashFlowRows }}" as="r" hint-placeholder-count="8">
+                  <tr><td>{{ r.date }}</td><td>{{ r.desc }}</td><td><span style="font-size:11px; color:#6B7280;">{{ r.account }}</span></td><td style="text-align:right; color:#4F7C3A;">{{ r.in }}</td><td style="text-align:right; color:#9A3A2D;">{{ r.out }}</td><td style="text-align:right; font-weight:700;">{{ r.bal }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           REPORTS (general)
+      ========================================================================= -->
+      <sc-if value="{{ isReports }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0 0 18px;">Reports</h1>
+          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:14px;">
+            <sc-for list="{{ reportTiles }}" as="t" hint-placeholder-count="9">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:18px 20px; cursor:pointer;">
+                <div style="width:42px; height:42px; border-radius:11px; background:{{ t.bg }}; display:flex; align-items:center; justify-content:center; margin-bottom:11px;"><lucide-icon name="{{ t.icon }}" size="20" color="{{ t.iconColor }}"></lucide-icon></div>
+                <h3 style="margin:0 0 4px; font-size:14px; font-weight:700; color:#1F1D1B;">{{ t.title }}</h3>
+                <div style="font-size:12px; color:#9A9082;">{{ t.desc }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           ORGANISATIONS (Settings)
+      ========================================================================= -->
+      <sc-if value="{{ isOrgs }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Organisations</h1>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ Add Organisation</button>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Code</th><th>Name</th><th>Reg No</th><th>Tax ID (TIN)</th><th>Currency</th><th>Members</th><th>Created</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ orgRows }}" as="r" hint-placeholder-count="3">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.code }}</td><td>{{ r.name }}</td><td>{{ r.reg }}</td><td>{{ r.tin }}</td><td>{{ r.ccy }}</td><td>{{ r.members }}</td><td>{{ r.created }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           SYSTEM HEALTH
+      ========================================================================= -->
+      <sc-if value="{{ isHealth }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0 0 18px;">System Health</h1>
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:18px;">
+            <sc-for list="{{ healthKpis }}" as="k" hint-placeholder-count="4">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">{{ k.label }}</div><div style="font-size:22px; font-weight:800; color:{{ k.color }}; margin-top:4px;">{{ k.value }}</div></div>
+            </sc-for>
+          </div>
+          <h3 style="font-size:14px; font-weight:700; margin:0 0 10px;">Component status</h3>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <sc-for list="{{ healthRows }}" as="r" hint-placeholder-count="9">
+              <div style="display:flex; align-items:center; gap:14px; padding:14px 18px; border-bottom:1px solid #F2EEE6;">
+                <span style="width:9px; height:9px; border-radius:50%; background:{{ r.dotColor }}; flex:none;"></span>
+                <span style="flex:1; font-size:13.5px; font-weight:600; color:#1F1D1B;">{{ r.name }}</span>
+                <span style="font-size:11.5px; color:#9A9082;">{{ r.detail }}</span>
+                <span style="{{ r.statusStyle }}">{{ r.status }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- =========================================================================
+           MAINTENANCE (general — option lists / codes)
+      ========================================================================= -->
+      <sc-if value="{{ isMaintenance }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0 0 18px;">Maintenance</h1>
+          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:12px;">
+            <sc-for list="{{ maintTiles }}" as="t" hint-placeholder-count="8">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:18px 20px; cursor:pointer;">
+                <div style="display:flex; align-items:center; gap:10px;"><lucide-icon name="{{ t.icon }}" size="18" color="#6B5C32"></lucide-icon><span style="font-size:14px; font-weight:700; color:#1F1D1B;">{{ t.label }}</span></div>
+                <div style="font-size:12px; color:#9A9082; margin-top:6px;">{{ t.count }} entries</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
     </main>
   </div>
 </div>
@@ -1291,14 +2087,22 @@ class App {
       ["SYSTEM", [["settings", "User Management", "settings"]]],
     ];
     const activeKey = ({
-      "dashboard":"dashboard","sales":"sales","sales-detail":"sales",
-      "delivery":"delivery","invoices":"invoices","procurement":"po","grn":"po","pi":"po",
-      "production":"production","planning":"planning","bom":"bom",
-      "inventory":"inventory","warehouse":"warehouse","customers":"customers","suppliers":"suppliers",
-      "products":"products","cnc":"cnc","consignment":"consignment",
+      "dashboard":"dashboard","daily-report":"report","notifications":"notifications","forecast":"forecasting",
+      "sales":"sales","sales-detail":"sales","sales-create":"sales",
+      "delivery":"delivery","delivery-detail":"delivery",
+      "invoices":"invoices","procurement":"po","grn":"grn","pi":"pi","grn-create":"grn",
+      "production":"production","prod-dept":"production","prod-scan":"production","prod-folders":"folders",
+      "planning":"planning","plan-dept":"planning","mrp":"mrp",
+      "bom":"bom","wip-times":"wip-times",
+      "inventory":"inventory","fabrics":"fabrics","stock-value":"stockvalue","stock-adj":"stockadj",
+      "warehouse":"warehouse","customers":"customers","customer-detail":"customers","suppliers":"suppliers",
+      "products":"products","cnc":"cnc","sofa-combos":"combos",
+      "consignment":"consignment","cn-note":"consignment","cn-return":"consignment",
       "employees":"employees","servicecases":"servicecases",
-      "mail":"mailcenter","announcements":"announcements","accounting":"monthly","einvoice":"einvoice",
-      "settings":"settings",
+      "mail":"mailcenter","announcements":"announcements",
+      "accounting":"monthly","cashflow":"daily","einvoice":"einvoice","reports":"reports",
+      "rd":"rd","rd-maint":"rd","quality":"qc",
+      "settings":"settings","orgs":"organisations","health":"health","maintenance":"maintenance",
     })[v] || "";
     const sideNav = navGroups.map(g => ({
       label: g[0],
@@ -1318,28 +2122,57 @@ class App {
     // ---- Breadcrumbs per view ----
     const crumbMap = {
       "dashboard": [["Dashboard", 1]],
+      "daily-report": [["Overview", 0], ["Hookka Report", 1]],
+      "notifications": [["Overview", 0], ["Notifications", 1]],
+      "forecast": [["Overview", 0], ["Forecasting", 1]],
       "sales": [["Sales", 0], ["Sales Orders", 1]],
       "sales-detail": [["Sales", 0], ["Sales Orders", 0], ["SO-2606-0142", 1]],
+      "sales-create": [["Sales", 0], ["Sales Orders", 0], ["Create", 1]],
       "delivery": [["Sales", 0], ["Delivery Orders", 1]],
+      "delivery-detail": [["Sales", 0], ["Delivery Orders", 0], ["DO-2606-088", 1]],
       "invoices": [["Sales", 0], ["Invoices", 1]],
+      "consignment": [["Sales", 0], ["Consignment Notes", 1]],
+      "cn-note": [["Sales", 0], ["Consignment", 0], ["Note", 1]],
+      "cn-return": [["Sales", 0], ["Consignment", 0], ["Return", 1]],
       "procurement": [["Procurement", 0], ["Purchase Orders", 1]],
+      "grn": [["Procurement", 0], ["Goods Receipt", 1]],
+      "grn-create": [["Procurement", 0], ["Goods Receipt", 0], ["Create", 1]],
+      "pi": [["Procurement", 0], ["Purchase Invoice", 1]],
       "production": [["Production", 1]],
-      "planning": [["Production", 0], ["Planning", 1]],
+      "prod-dept": [["Production", 0], ["Fab Cut", 1]],
+      "prod-scan": [["Production", 0], ["Scan", 1]],
+      "prod-folders": [["Production", 0], ["Folders", 1]],
+      "planning": [["Production", 0], ["Planning · Capacity", 1]],
+      "plan-dept": [["Production", 0], ["Planning", 0], ["Fabric Cutting", 1]],
+      "mrp": [["Production", 0], ["Planning", 0], ["MRP", 1]],
       "bom": [["Products & BOM", 0], ["BOM Master", 1]],
+      "wip-times": [["Products & BOM", 0], ["WIP Times", 1]],
       "inventory": [["Warehouse", 0], ["Inventory", 1]],
+      "fabrics": [["Warehouse", 0], ["Fabrics", 1]],
+      "stock-value": [["Warehouse", 0], ["Stock Value", 1]],
+      "stock-adj": [["Warehouse", 0], ["Stock Adjustments", 1]],
       "customers": [["Sales", 0], ["Customers", 1]],
+      "customer-detail": [["Sales", 0], ["Customers", 0], ["Heritage Hotel", 1]],
       "suppliers": [["Procurement", 0], ["Suppliers", 1]],
       "warehouse": [["Warehouse", 1]],
       "products": [["Products & BOM", 0], ["Products", 1]],
       "cnc": [["Products & BOM", 0], ["CNC Templates", 1]],
-      "consignment": [["Sales", 0], ["Consignment Notes", 1]],
-      "employees": [["HR & Operations", 0], ["Employees", 1]],
+      "sofa-combos": [["Products & BOM", 0], ["Sofa Combos", 1]],
+      "rd": [["R&D", 0], ["Projects", 1]],
+      "rd-maint": [["R&D", 0], ["Maintenance", 1]],
+      "quality": [["Quality & Service", 0], ["QC", 1]],
       "servicecases": [["Quality & Service", 0], ["Service Cases", 1]],
+      "employees": [["HR & Operations", 0], ["Employees", 1]],
       "mail": [["Overview", 0], ["Mail Center", 1]],
       "announcements": [["Overview", 0], ["Announcements", 1]],
       "accounting": [["Finance", 0], ["Trial Balance", 1]],
+      "cashflow": [["Finance", 0], ["Cash Flow", 1]],
       "einvoice": [["Finance", 0], ["e-Invoice", 1]],
+      "reports": [["Finance", 0], ["Reports", 1]],
       "settings": [["System", 0], ["User Management", 1]],
+      "orgs": [["System", 0], ["Organisations", 1]],
+      "health": [["System", 0], ["System Health", 1]],
+      "maintenance": [["System", 0], ["Maintenance", 1]],
     };
     const breadcrumbs = (crumbMap[v] || []).map(c => ({
       label: c[0], weight: c[1] ? "700" : "500", color: c[1] ? "#1F1D1B" : "#6B7280",
@@ -1347,22 +2180,47 @@ class App {
 
     // ---- Scene switcher ----
     const sceneList = [
-      "dashboard", "sales", "sales-detail", "delivery", "invoices", "procurement",
-      "production", "planning", "bom",
-      "inventory", "warehouse", "customers", "suppliers", "products", "cnc",
-      "consignment", "servicecases", "mail", "announcements",
-      "accounting", "einvoice", "employees", "settings",
+      // Overview
+      "dashboard", "daily-report", "notifications", "forecast",
+      // Sales
+      "sales", "sales-detail", "sales-create",
+      "delivery", "delivery-detail",
+      "invoices", "consignment", "cn-note", "cn-return",
+      "customers", "customer-detail",
+      // Production
+      "production", "prod-dept", "prod-scan", "prod-folders",
+      "planning", "plan-dept", "mrp",
+      // Products & BOM
+      "bom", "wip-times", "products", "cnc", "sofa-combos",
+      // Warehouse
+      "inventory", "fabrics", "stock-value", "stock-adj", "warehouse",
+      // Procurement
+      "procurement", "grn", "grn-create", "pi", "suppliers",
+      // R&D + Quality + Service
+      "rd", "rd-maint", "quality", "servicecases",
+      // Comms
+      "mail", "announcements",
+      // Finance
+      "accounting", "cashflow", "einvoice", "reports",
+      // HR / System
+      "employees", "settings", "orgs", "health", "maintenance",
     ];
     const sceneLabels = {
-      "dashboard":"Dashboard", "sales":"Sales", "sales-detail":"SO Detail",
-      "delivery":"Delivery", "invoices":"Invoices", "procurement":"Procure",
-      "production":"Production", "planning":"Planning", "bom":"BOM",
-      "inventory":"Inventory", "warehouse":"Warehouse", "customers":"Customers",
-      "suppliers":"Suppliers", "products":"Products", "cnc":"CNC",
-      "consignment":"Consignment", "servicecases":"Service",
+      "dashboard":"Dashboard", "daily-report":"Daily Report", "notifications":"Notif", "forecast":"Forecast",
+      "sales":"Sales", "sales-detail":"SO Detail", "sales-create":"SO Create",
+      "delivery":"Delivery", "delivery-detail":"DO Detail",
+      "invoices":"Invoices", "consignment":"CN", "cn-note":"CN Note", "cn-return":"CN Return",
+      "customers":"Customers", "customer-detail":"Cust Detail",
+      "production":"Production", "prod-dept":"Dept Sheet", "prod-scan":"Scan", "prod-folders":"Folders",
+      "planning":"Planning", "plan-dept":"Plan Dept", "mrp":"MRP",
+      "bom":"BOM", "wip-times":"WIP Times", "products":"Products", "cnc":"CNC", "sofa-combos":"Sofa Combos",
+      "inventory":"Inventory", "fabrics":"Fabrics", "stock-value":"Stock Value", "stock-adj":"Stock Adj",
+      "warehouse":"Warehouse",
+      "procurement":"PO", "grn":"GRN", "grn-create":"GRN+", "pi":"PI", "suppliers":"Suppliers",
+      "rd":"R&D", "rd-maint":"R&D Maint", "quality":"QC", "servicecases":"Service Cases",
       "mail":"Mail", "announcements":"Announce",
-      "accounting":"Accounting", "einvoice":"e-Invoice",
-      "employees":"Employees", "settings":"Users",
+      "accounting":"Accounting", "cashflow":"Cash Flow", "einvoice":"e-Invoice", "reports":"Reports",
+      "employees":"Employees", "settings":"Users", "orgs":"Orgs", "health":"Health", "maintenance":"Maint",
     };
     const scenes = sceneList.map(s => ({
       label: sceneLabels[s], onClick: () => this.setView(s),
@@ -1747,30 +2605,393 @@ class App {
     ];
     const einvRows = einvSeed.map(r => ({ no: r[0], uuid: r[1].slice(0, 13) + "…", customer: r[2], submitted: r[3], validated: r[4], amount: r[5], status: r[6], badgeStyle: einvBadge(r[6]) }));
 
+    // ---- Daily Report ----
+    const typeStyle = (t) => `display:inline-flex; padding:2px 8px; border-radius:5px; font-size:10.5px; font-weight:700; background:${t==="SO"?"#F0EAD8":t==="DO"?"#E0EDF0":t==="PO"?"#EFEAFA":t==="PROD"?"#FFF4D6":"#F9E1DA"}; color:${t==="SO"?"#6B5C32":t==="DO"?"#3E6570":t==="PO"?"#5E4B8C":t==="PROD"?"#7A5A00":"#9A3A2D"};`;
+    const reportChips = [["Overdue", 235, "non-terminal SOs past DD"], ["SO no DO", 200, "ready SOs not on a DO"], ["PO not received", 3, "POs past expected receipt"], ["Low efficiency", 5, "workers eff% < 70"]].map(c => ({ label: c[0], count: c[1], note: c[2] }));
+    const reportDetail = [
+      ["SO", "SO-2606-0142", "Heritage Hotel", "Past DD 4 days", "4d", "Sales"],
+      ["SO", "SO-2606-0140", "Damai Resort", "Past DD 2 days", "2d", "Sales"],
+      ["DO", "DO-2606-082", "Atlas Hospitality", "Loaded > 24h, not dispatched", "26h", "Dispatch"],
+      ["PO", "PO-006711", "Foam Tech", "Receipt overdue 3d", "3d", "Procurement"],
+      ["PROD", "PRD-2606-077", "Trion 2009 K x12", "Foam dept overdue", "5d", "Foam"],
+      ["WORK", "EMP-006 Tan W.L.", "Eff 58% (< 70 threshold)", "Foam · MTD", "—", "HR"],
+      ["SO", "SO-2606-0136", "Heritage Hotel", "On Hold > 7 days", "9d", "Sales"],
+      ["INV", "INV-2606-049", "Nordic Home", "Overdue 4d (RM 27.8K)", "4d", "Finance"],
+    ].map(r => ({ type: r[0], typeStyle: typeStyle(r[0]), ref: r[1], party: r[2], issue: r[3], age: r[4], owner: r[5] }));
+
+    // ---- Notifications ----
+    const notifSeed = [
+      ["alert-triangle", "#F9E1DA", "#9A3A2D", "Overdue SO past DD", "SO-2606-0142 expected 2026-07-05 — now 4 days late", "5m ago", true],
+      ["bell", "#F0EAD8", "#6B5C32", "New customer PO scanned", "PO from Damai Resort (RM 28,700) auto-imported via OCR", "1h ago", true],
+      ["check-circle", "#EEF3E4", "#4F7C3A", "Invoice INV-2606-051 paid", "Atlas Hospitality paid RM 62,400 in full", "2h ago", true],
+      ["package", "#E0EDF0", "#3E6570", "PO-006712 received", "GRN-1834 posted to stock (Fabric World, 4 items)", "3h ago", false],
+      ["megaphone", "#EFEAFA", "#5E4B8C", "Announcement read 28/34", "Public Holiday Sept 1 — 6 workers haven't acked", "5h ago", false],
+      ["users", "#FFF4D6", "#7A5A00", "Leave request pending", "Siti N. requested 3 days AL (2026-07-10 to 12)", "Yesterday", false],
+      ["alert-circle", "#F9E1DA", "#9A3A2D", "Low stock alert", "F-301 Navy fabric below reorder (12m left, min 40m)", "Yesterday", false],
+      ["zap", "#F0EAD8", "#6B5C32", "Daily backup complete", "Supabase backup 2026-06-28 23:00 succeeded (487 MB)", "Yesterday", false],
+    ];
+    const notifRows = notifSeed.map(n => ({ icon: n[0], iconBg: n[1], iconColor: n[2], title: n[3], body: n[4], time: n[5], unread: n[6] ? 1 : 0, weight: n[6] ? "700" : "500", bg: n[6] ? "#FAF8F4" : "#fff" }));
+
+    // ---- Sales Create form fields ----
+    const soFormFields = [
+      ["Customer", true, true, 0, 0, "Select customer…", "#9CA3AF"],
+      ["Delivery Hub", false, true, 0, 0, "Select hub", "#9CA3AF"],
+      ["Reference", false, 0, 0, true, "Internal ref (optional)", "#9CA3AF"],
+      ["Customer PO No.", false, 0, 0, true, "e.g. PO-008711", "#9CA3AF"],
+      ["Customer SO No.", false, 0, 0, true, "Customer's own SO #", "#9CA3AF"],
+      ["Order Date", true, 0, true, 0, "2026-06-29", "#1F1D1B"],
+      ["Customer Delivery Date", false, 0, true, 0, "—", "#9CA3AF"],
+      ["Hookka Expected DD", false, 0, true, 0, "—", "#9CA3AF"],
+      ["Notes", false, 0, 0, true, "Optional notes…", "#9CA3AF"],
+    ].map(f => ({ label: f[0], req: f[1] ? 1 : 0, isSelect: f[2] ? 1 : 0, isDate: f[3] ? 1 : 0, isText: f[4] ? 1 : 0, placeholder: f[5], color: f[6] }));
+    const soFormLines = [
+      ["2009(A)-(K)", "Trion 2009 King", "King", "F-301 Navy", 12, "Gap 6\" · Divan 10\"", "RM 1,950", "RM 23,400"],
+      ["1013-(Q)", "Jager 1013 Queen", "Queen", "F-205 Beige", 14, "Gap 5\"", "RM 1,420", "RM 19,880"],
+      ["HOK-1007-(K)", "HOK 1007 King", "King", "F-405 Grey", 12, "Divan 12\"", "RM 1,680", "RM 20,160"],
+    ].map(l => ({ code: l[0], name: l[1], size: l[2], fabric: l[3], qty: l[4], specs: l[5], unit: l[6], total: l[7] }));
+
+    // ---- DO Detail ----
+    const doDetailItems = [
+      ["2009(A)-(K)", "Trion 2009 King", "K", "F-301 Navy", 6],
+      ["1013-(Q)", "Jager 1013 Queen", "Q", "F-205 Beige", 4],
+      ["HOK-1007-(K)", "HOK 1007 King", "K", "F-405 Grey", 2],
+    ].map(i => ({ code: i[0], name: i[1], size: i[2], fabric: i[3], qty: i[4] }));
+    const doTimeline = [
+      ["Created", "2026-06-25 14:00 · system", "#1F1D1B", 1],
+      ["Loaded", "2026-06-29 08:30 · Lim", "#1F1D1B", 1],
+      ["Dispatched", "2026-06-29 09:15 · Lim", "#6B5C32", 1],
+      ["In Transit", "—", "#9CA3AF", 0],
+      ["Signed", "—", "#9CA3AF", 0],
+    ].map(t => ({ label: t[0], time: t[1], color: t[2], dotStyle: `width:14px; height:14px; border-radius:50%; background:${t[3]?"#6B5C32":"#fff"}; border:2px solid ${t[3]?"#6B5C32":"#E2DDD8"}; flex:none; margin-top:3px;` }));
+
+    // ---- Customer Detail ----
+    const custFields = [
+      ["Contact", "James Tan"], ["Phone", "+60 12-345 6789"], ["Email", "james@heritage.com"],
+      ["Credit Terms", "NET30"], ["Credit Limit", "RM 100,000"], ["Outstanding", "RM 47,820"],
+      ["Hubs", "3 delivery hubs"], ["YTD Sales", "RM 287,400"],
+    ].map(f => ({ label: f[0], value: f[1] }));
+    const custHubs = [
+      ["KL Klang Hub", "HER-KL-01", "Jalan Klang, Selangor 41100", "James Tan", "+60 12-345 6789"],
+      ["KL City Hub", "HER-KL-02", "Bukit Bintang, KL 50100", "Sarah Wong", "+60 11-234 5678"],
+      ["Penang Branch", "HER-PG-01", "Jalan Penang, Georgetown 10000", "Aishah Hassan", "+60 13-987 6543"],
+    ].map(h => ({ name: h[0], code: h[1], address: h[2], contact: h[3], phone: h[4] }));
+
+    // ---- CN Note + Return ----
+    const cnNoteRows = [
+      ["CN-2606-018", "CO-2606-005", "Atlas Hospitality (Showroom)", "2026-06-18", 4, "RM 12,800", "DISPATCHED"],
+      ["CN-2606-017", "SO-2606-0140", "Damai Resort (Trial)", "2026-06-15", 2, "RM 6,400", "SIGNED"],
+      ["CN-2606-016", "CO-2606-004", "Heritage Hotel (Loan)", "2026-06-10", 8, "RM 24,300", "SIGNED"],
+      ["CN-2606-015", "SO-2606-0125", "Casa Furnishings (Demo)", "2026-06-08", 1, "RM 2,400", "RETURNED"],
+      ["CN-2606-014", "CO-2606-003", "Nordic Home (Trial)", "2026-06-05", 3, "RM 8,700", "PENDING"],
+    ].map(r => ({ no: r[0], source: r[1], customer: r[2], created: r[3], items: r[4], amount: r[5], status: r[6], badgeStyle: cnBadge(r[6]) }));
+    const cnRetSeed = [
+      ["CR-2606-006", "CN-2606-015", "Casa Furnishings", "2026-06-22", "Demo complete", 1, "RESTOCKED"],
+      ["CR-2606-005", "CN-2606-012", "Nordic Home", "2026-06-18", "Customer no buy", 2, "RESTOCKED"],
+      ["CR-2606-004", "CN-2606-011", "Damai Resort", "2026-06-14", "Wrong size", 1, "DAMAGED"],
+      ["CR-2606-003", "CN-2606-009", "Atlas Hospitality", "2026-06-10", "Trial ended", 3, "RESTOCKED"],
+      ["CR-2606-002", "CN-2606-007", "Heritage Hotel", "2026-06-05", "Replace with new", 2, "PENDING_INSPECT"],
+    ];
+    const cnRetBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${s==="RESTOCKED"?"#EEF3E4":s==="DAMAGED"?"#F9E1DA":"#FFF4D6"}; color:${s==="RESTOCKED"?"#4F7C3A":s==="DAMAGED"?"#9A3A2D":"#7A5A00"};`;
+    const cnRetRows = cnRetSeed.map(r => ({ no: r[0], fromCN: r[1], customer: r[2], date: r[3], reason: r[4], items: r[5], restock: r[6], badgeStyle: cnRetBadge(r[6]) }));
+
+    // ---- Production Dept Sheet (Fab Cut rep) ----
+    const deptTabsOther = [["Fab Sew", 38], ["Wood Cut", 22], ["Foam", 18], ["Framing", 26], ["Webbing", 17], ["Upholstery", 41], ["Packing", 53]].map(t => ({ label: t[0], count: t[1] }));
+    const cellStyle = (s) => s === "Done" ? "padding:3px 8px; border-radius:5px; font-size:10.5px; font-weight:700; background:#EEF3E4; color:#4F7C3A;"
+      : s === "Overdue" ? "padding:3px 8px; border-radius:5px; font-size:10.5px; font-weight:700; background:#F9E1DA; color:#9A3A2D;"
+      : "padding:3px 8px; border-radius:5px; font-size:10.5px; font-weight:700; background:#FFF4D6; color:#7A5A00;";
+    const deptSheetSeed = [
+      ["PRD-001234", "Trion 2009 K (Heritage)", "Heritage Hotel", 12, "F-301 Navy", "Pending", "—", "—", "—"],
+      ["PRD-001235", "Jager 1013 Q (Atlas)", "Atlas Hospitality", 14, "F-205 Beige", "Done", "2026-06-28 16:20", "A-3", "Ahmad"],
+      ["PRD-001236", "HOK-1007 K (Damai)", "Damai Resort", 8, "F-405 Grey", "Overdue", "—", "—", "Ahmad"],
+      ["PRD-001237", "Trion 2009 K (Nordic)", "Nordic Home", 6, "F-308 Sage", "Done", "2026-06-28 11:05", "A-1", "Siti"],
+      ["PRD-001238", "Casa 3S L-Sofa", "Casa Furnishings", 2, "—", "Pending", "—", "—", "—"],
+      ["PRD-001239", "Jager 1013 K (Heritage)", "Heritage Hotel", 4, "F-205 Beige", "Done", "2026-06-27 14:40", "A-2", "Ahmad"],
+      ["PRD-001240", "HOK 1007 Q", "Atlas Hospitality", 10, "F-405 Grey", "Pending", "—", "—", "—"],
+    ];
+    const deptSheetRows = deptSheetSeed.map(r => ({ po: r[0], product: r[1], customer: r[2], qty: r[3], fabric: r[4], status: r[5], cellStyle: cellStyle(r[5]), completed: r[6], rack: r[7], pic: r[8] }));
+
+    // ---- Folders ----
+    const folders = [
+      ["June Heritage Bundle", 18, "2026-06-22", "Heritage Hotel · KL Klang Hub"],
+      ["Atlas July Order", 12, "2026-06-25", "Atlas Hospitality · PG Butterworth"],
+      ["Damai Trial Set", 6, "2026-06-20", "Damai Resort Group · trials"],
+      ["Bulk Production Q3", 47, "2026-06-15", "Multi-customer stocking run"],
+      ["Service Replacement", 3, "2026-06-28", "SVC-2606-024 et al."],
+      ["R&D Prototypes", 4, "2026-06-10", "RD-2026-002 Sofa Recliner"],
+    ].map(f => ({ name: f[0], pos: f[1], date: f[2], note: f[3] }));
+
+    // ---- Planning Dept Schedule ----
+    const planDeptTabs = ["Fabric Sewing", "Wood Cutting", "Framing", "Foam Bonding", "Upholstery", "Packing", "Webbing"];
+    const planSchedSeed = [
+      ["2026-06-29", "32h", "26h", 81, "#C9A961", 12, "6h"],
+      ["2026-06-30", "32h", "30h", 94, "#9A3A2D", 14, "2h"],
+      ["2026-07-01", "32h", "18h", 56, "#5E5129", 8, "14h"],
+      ["2026-07-02", "32h", "22h", 69, "#C9A961", 10, "10h"],
+      ["2026-07-03", "32h", "28h", 88, "#C9A961", 13, "4h"],
+      ["2026-07-04", "16h", "8h", 50, "#5E5129", 4, "8h"],
+      ["2026-07-05", "0h", "0h", 0, "#9CA3AF", 0, "—"],
+    ];
+    const planSchedRows = planSchedSeed.map(r => ({ date: r[0], cap: r[1], planned: r[2], pct: r[3], color: r[4], pos: r[5], spare: r[6] }));
+
+    // ---- MRP ----
+    const mrpSeed = [
+      ["F-301", "Navy fabric · 1.4m wide", 12, 0, 12, 40, 28, "30m", "Fabric World", "#9A3A2D"],
+      ["F-205", "Beige fabric · 1.4m wide", 18, 4, 14, 30, 16, "20m", "Fabric World", "#9A3A2D"],
+      ["FOAM-25", "Density 25 foam slab", 8, 0, 8, 20, 12, "15 slabs", "Foam Tech", "#C9A961"],
+      ["WD-MDF-18", "MDF board 18mm", 24, 6, 18, 50, 32, "40 sheets", "Wood Supply Co", "#9A3A2D"],
+      ["LEG-12", "Wooden leg 12in", 84, 12, 72, 100, 28, "100 pcs", "Metal Frames KL", "#C9A961"],
+      ["SPR-K", "Pocket spring King", 6, 0, 6, 12, 6, "12 units", "Springs & Coils", "#9A3A2D"],
+      ["PIL-FOAM", "Pillow foam fill", 142, 0, 142, 80, 0, "—", "Pillow Foam Ltd", "#4F7C3A"],
+      ["GLUE-A1", "Industrial glue A1", 18, 0, 18, 30, 12, "12 cans", "Wood Supply Co", "#C9A961"],
+    ];
+    const mrpRows = mrpSeed.map(r => ({ code: r[0], name: r[1], onhand: r[2], reserved: r[3], avail: r[4], reorder: r[5], need: r[6], suggested: r[7], supplier: r[8], availColor: r[9] }));
+
+    // ---- WIP Times ----
+    const wipSeed = [
+      ["2009(A)-(K)", "Trion 2009 King", 45, 80, 30, 25, 35, 20, 60, 15, 310],
+      ["2009(A)-(Q)", "Trion 2009 Queen", 40, 75, 28, 22, 32, 18, 55, 14, 284],
+      ["1013-(K)", "Jager 1013 King", 38, 70, 25, 20, 30, 17, 50, 13, 263],
+      ["HOK-1007-(K)", "HOK 1007 King", 42, 78, 28, 24, 33, 19, 58, 14, 296],
+      ["NORD-2S", "Nordic 2-Seater", 35, 60, 22, 18, 28, 0, 70, 18, 251],
+      ["CASA-3S-L", "Casa 3-Seater L", 50, 85, 30, 25, 38, 0, 90, 22, 340],
+    ];
+    const wipRows = wipSeed.map(r => ({ code: r[0], name: r[1], fc: r[2], fs: r[3], wc: r[4], fm: r[5], fr: r[6], wb: r[7], up: r[8], pk: r[9], total: r[10] }));
+
+    // ---- Sofa Combos ----
+    const comboSeed = [
+      ["NORD-2S-COMBO", "S2 (2-Seater)", "1× base · 2× arm · 2× cushion", 5, "RM 2,180", "RM 2,420", "RM 240"],
+      ["CASA-3SL-COMBO", "S3L (3-Seater L)", "1× corner · 2× seat · 3× cushion · 1× ottoman", 7, "RM 3,250", "RM 3,640", "RM 390"],
+      ["MOD-RECL-COMBO", "S2-R (Recliner 2)", "2× recliner-seat · 2× cushion · 1× console", 5, "RM 3,800", "RM 4,200", "RM 400"],
+      ["NORD-3S-COMBO", "S3 (3-Seater)", "1× base · 2× arm · 3× cushion", 6, "RM 2,680", "RM 2,920", "RM 240"],
+      ["CASA-4SL-COMBO", "S4L (4-Seater L)", "1× corner · 3× seat · 4× cushion · 1× ottoman", 9, "RM 4,100", "RM 4,580", "RM 480"],
+      ["LOVE-2S-COMBO", "S2-L (Loveseat)", "1× base · 2× arm · 2× cushion (compact)", 5, "RM 1,800", "RM 1,980", "RM 180"],
+    ];
+    const comboRows = comboSeed.map(r => ({ code: r[0], seat: r[1], modules: r[2], pieces: r[3], combo: r[4], sum: r[5], save: r[6] }));
+
+    // ---- Fabrics ----
+    const fabricSeed = [
+      ["F-301", "Navy", "Linen", "Fabric World", 124, "RM 28", "RM 3,472"],
+      ["F-205", "Beige", "Cotton", "Fabric World", 86, "RM 22", "RM 1,892"],
+      ["F-405", "Grey", "Velvet", "Fabric World", 156, "RM 42", "RM 6,552"],
+      ["F-308", "Sage Green", "Linen", "Premium Tex", 64, "RM 35", "RM 2,240"],
+      ["F-112", "Cream", "Cotton", "Fabric World", 198, "RM 18", "RM 3,564"],
+      ["F-501", "Burgundy", "Velvet", "Premium Tex", 42, "RM 48", "RM 2,016"],
+      ["F-200", "White", "Cotton", "Fabric World", 12, "RM 16", "RM 192"],
+    ];
+    const fabricRows = fabricSeed.map(r => ({ code: r[0], name: r[1], cat: r[2], supplier: r[3], meters: r[4], cost: r[5], value: r[6] }));
+
+    // ---- Stock Value ----
+    const stockValueSeed = [
+      ["FG", "2009(A)-(K)", "Trion 2009 King", "24 pcs", "RM 1,150", "RM 27,600", "5.7%"],
+      ["FG", "HOK-1007-(K)", "HOK 1007 King", "32 pcs", "RM 1,290", "RM 41,280", "8.5%"],
+      ["FG", "NORD-2S", "Nordic 2-Seater", "8 pcs", "RM 2,180", "RM 17,440", "3.6%"],
+      ["WIP", "WIP-PRD-1234", "Trion 2009 K (cut+sewn)", "12 pcs", "RM 580", "RM 6,960", "1.4%"],
+      ["WIP", "WIP-PRD-1240", "HOK 1007 Q (in foam)", "10 pcs", "RM 720", "RM 7,200", "1.5%"],
+      ["RM", "F-301", "Navy fabric", "124 m", "RM 28", "RM 3,472", "0.7%"],
+      ["RM", "FOAM-25", "Density 25 foam", "84 slabs", "RM 180", "RM 15,120", "3.1%"],
+      ["RM", "WD-MDF-18", "MDF board 18mm", "76 sheets", "RM 95", "RM 7,220", "1.5%"],
+    ];
+    const stockValueRows = stockValueSeed.map(r => ({ cat: r[0], sku: r[1], desc: r[2], qty: r[3], unit: r[4], value: r[5], pct: r[6] }));
+
+    // ---- Stock Adjustments ----
+    const adjBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${s==="POSTED"?"#EEF3E4":s==="DRAFT"?"#FAEFCB":"#F9E1DA"}; color:${s==="POSTED"?"#4F7C3A":s==="DRAFT"?"#9C6F1E":"#9A3A2D"};`;
+    const adjSeed = [
+      ["ADJ-2606-014", "2026-06-28", "F-301 Navy", "Damaged in transit (water)", -8, "-RM 224", "Lim Office", "POSTED", "#9A3A2D"],
+      ["ADJ-2606-013", "2026-06-27", "2009(A)-(K)", "Stock count correction", +2, "+RM 2,300", "Wei Siang", "POSTED", "#4F7C3A"],
+      ["ADJ-2606-012", "2026-06-26", "FOAM-25", "QC reject — bad batch", -4, "-RM 720", "QC Team", "POSTED", "#9A3A2D"],
+      ["ADJ-2606-011", "2026-06-25", "HOK-1007-(K)", "Return restocked (CR-2606-005)", +2, "+RM 2,580", "Lim Office", "POSTED", "#4F7C3A"],
+      ["ADJ-2606-010", "2026-06-24", "LEG-12", "Inventory reconciliation", -6, "-RM 96", "Wei Siang", "POSTED", "#9A3A2D"],
+      ["ADJ-2606-009", "2026-06-22", "F-205 Beige", "Pending — receiving discrepancy", -4, "-RM 88", "Lim Office", "DRAFT", "#9A3A2D"],
+      ["ADJ-2606-008", "2026-06-20", "GLUE-A1", "Expired stock disposal", -3, "-RM 45", "QC Team", "POSTED", "#9A3A2D"],
+    ];
+    const adjRows = adjSeed.map(r => ({ no: r[0], date: r[1], item: r[2], reason: r[3], qty: (r[4] > 0 ? "+" : "") + r[4], value: r[5], by: r[6], status: r[7], badgeStyle: adjBadge(r[7]), qColor: r[8] }));
+
+    // ---- GRN ----
+    const grnBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${s==="POSTED"?"#EEF3E4":s==="DRAFT"?"#FAEFCB":s==="MATCHED"?"#EEF3E4":"#FFF4D6"}; color:${s==="POSTED"?"#4F7C3A":s==="DRAFT"?"#9C6F1E":s==="MATCHED"?"#4F7C3A":"#7A5A00"};`;
+    const qcStyle = (q) => `display:inline-flex; padding:2px 7px; border-radius:5px; font-size:10.5px; font-weight:700; background:${q==="PASS"?"#EEF3E4":q==="FAIL"?"#F9E1DA":"#FFF4D6"}; color:${q==="PASS"?"#4F7C3A":q==="FAIL"?"#9A3A2D":"#7A5A00"};`;
+    const grnSeed = [
+      ["GRN-1834", "PO-006712", "Fabric World", "2026-06-20", "Lim", "PASS", 4, "MATCHED"],
+      ["GRN-1833", "PO-006711", "Foam Tech", "2026-06-19", "Lim", "PASS", 2, "POSTED"],
+      ["GRN-1832", "PO-006710", "Wood Supply Co", "2026-06-18", "Ahmad", "PARTIAL", 5, "POSTED"],
+      ["GRN-1831", "PO-006707", "Pillow Foam Ltd", "2026-06-15", "Lim", "PASS", 12, "MATCHED"],
+      ["GRN-1830", "PO-006705", "Springs & Coils", "2026-06-12", "Ahmad", "PASS", 1, "POSTED"],
+      ["GRN-1829", "PO-006703", "Metal Frames KL", "2026-06-10", "Lim", "FAIL", 0, "DRAFT"],
+      ["GRN-1828", "PO-006701", "Fabric World", "2026-06-08", "Lim", "PASS", 3, "MATCHED"],
+    ];
+    const grnRows = grnSeed.map(r => ({ no: r[0], po: r[1], supplier: r[2], date: r[3], by: r[4], qc: r[5], qcStyle: qcStyle(r[5]), items: r[6], status: r[7], badgeStyle: grnBadge(r[7]) }));
+
+    // ---- GRN Create form rows ----
+    const grnFormRows = [
+      ["F-301 Navy fabric · 1.4m", 30, 0, 30],
+      ["F-205 Beige fabric · 1.4m", 20, 0, 20],
+      ["FOAM-25 density 25 slabs", 15, 0, 12],
+      ["GLUE-A1 industrial 5L", 12, 0, 12],
+    ].map(r => ({ item: r[0], ordered: r[1], prevRecv: r[2], nowRecv: r[3] }));
+
+    // ---- PI ----
+    const piBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${s==="PAID"?"#EEF3E4":s==="PARTIAL"?"#FFF4D6":s==="UNPAID"?"#F9E1DA":s==="OVERDUE"?"#F9E1DA":"#FAEFCB"}; color:${s==="PAID"?"#4F7C3A":s==="PARTIAL"?"#7A5A00":s==="UNPAID"?"#9A3A2D":s==="OVERDUE"?"#9A3A2D":"#9C6F1E"};`;
+    const piSeed = [
+      ["PI-2104", "INV-FW-8842", "Fabric World", "2026-06-20", "2026-07-20", "RM 12,400", "RM 0", "UNPAID"],
+      ["PI-2103", "INV-FT-1183", "Foam Tech", "2026-06-19", "2026-07-19", "RM 8,700", "RM 8,700", "PAID"],
+      ["PI-2102", "INV-PF-0934", "Pillow Foam Ltd", "2026-06-15", "2026-07-15", "RM 18,900", "RM 18,900", "PAID"],
+      ["PI-2101", "INV-WS-2871", "Wood Supply Co", "2026-06-12", "2026-06-20", "RM 22,300", "RM 11,000", "OVERDUE"],
+      ["PI-2100", "INV-SC-0042", "Springs & Coils", "2026-06-10", "2026-07-10", "RM 4,200", "RM 4,200", "PAID"],
+      ["PI-2099", "INV-MF-1098", "Metal Frames KL", "2026-06-08", "2026-07-08", "RM 6,400", "RM 0", "UNPAID"],
+    ];
+    const piRows = piSeed.map(r => ({ no: r[0], supInv: r[1], supplier: r[2], date: r[3], due: r[4], amount: r[5], paid: r[6], status: r[7], badgeStyle: piBadge(r[7]) }));
+
+    // ---- R&D Projects ----
+    const rdProjStatus = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${s==="ACTIVE"?"#EEF3E4":s==="HOLD"?"#FFF4D6":s==="DONE"?"#E0EDF0":"#F0ECE9"}; color:${s==="ACTIVE"?"#4F7C3A":s==="HOLD"?"#7A5A00":s==="DONE"?"#3E6570":"#6B7280"};`;
+    const rdProjSeed = [
+      ["RD-2026-001", "Modular Recliner v2", "Smaller footprint with same comfort. Aims for 30% material reduction.", "Wei Siang", "RM 12,000", "ACTIVE"],
+      ["RD-2026-002", "Sofa-bed Convertible", "King-size sofa that converts to single bed. Targeting hotel market.", "Wei Siang", "RM 18,000", "ACTIVE"],
+      ["RD-2026-003", "Eco Fabric Sourcing", "Find 3 sustainable fabric suppliers at ≤RM 30/m.", "Sarah Tan", "RM 4,000", "ACTIVE"],
+      ["RD-2025-008", "LED Headboard Module", "Drop-in LED strip for any bedframe. Now in pilot production.", "Wei Siang", "RM 8,200", "DONE"],
+      ["RD-2026-004", "Powder-Coated Frame", "Replace MDF with powder-coated steel. On hold pending supplier quotes.", "—", "RM 6,000", "HOLD"],
+      ["RD-2025-012", "Foam Density Test Rig", "QC tool for incoming foam batches. Completed Q4 2025.", "QC Team", "RM 2,400", "DONE"],
+    ];
+    const rdProjects = rdProjSeed.map(r => ({ code: r[0], name: r[1], description: r[2], lead: r[3], budget: r[4], status: r[5], statusStyle: rdProjStatus(r[5]) }));
+
+    // ---- R&D Maintenance ----
+    const rdCats = [["Frame Design", 4], ["Fabric Sourcing", 3], ["Tooling", 2], ["Process Optimization", 5], ["Market Research", 1]].map(c => ({ name: c[0], count: c[1] }));
+    const rdEqStat = (s) => `display:inline-flex; padding:2px 8px; border-radius:6px; font-size:10.5px; font-weight:700; background:${s==="OK"?"#EEF3E4":s==="SERVICE_DUE"?"#FFF4D6":"#F9E1DA"}; color:${s==="OK"?"#4F7C3A":s==="SERVICE_DUE"?"#7A5A00":"#9A3A2D"};`;
+    const rdEquip = [["CNC Prototype Mill", "OK"], ["Foam Cutter — RND lab", "SERVICE_DUE"], ["Tensile Tester", "OK"], ["3D Printer (Bambu X1)", "OK"], ["Sewing Mock-up Machine", "OUT"]].map(e => ({ name: e[0], status: e[1], statusStyle: rdEqStat(e[1]) }));
+
+    // ---- Quality ----
+    const qcOutcome = (o) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${o==="PASS"?"#EEF3E4":o==="FAIL"?"#F9E1DA":"#FFF4D6"}; color:${o==="PASS"?"#4F7C3A":o==="FAIL"?"#9A3A2D":"#7A5A00"};`;
+    const qcSeed = [
+      ["QC-2606-024", "PRD-001234", "Trion 2009 K", "Lim", "2026-06-28", "—", "PASS"],
+      ["QC-2606-023", "PRD-001236", "HOK-1007 K", "Lim", "2026-06-28", "Loose joint at frame corner", "REWORK"],
+      ["QC-2606-022", "GRN-1832", "Wood batch MDF-18", "Ahmad", "2026-06-27", "3 sheets warped", "FAIL"],
+      ["QC-2606-021", "PRD-001230", "Casa 3S L", "Lim", "2026-06-26", "—", "PASS"],
+      ["QC-2606-020", "PRD-001228", "Nordic 2S", "Lim", "2026-06-25", "Stitching uneven on left arm", "REWORK"],
+      ["QC-2606-019", "PRD-001226", "Jager 1013 Q", "Lim", "2026-06-24", "—", "PASS"],
+      ["QC-2606-018", "GRN-1830", "Spring K batch", "Ahmad", "2026-06-23", "—", "PASS"],
+    ];
+    const qcRows = qcSeed.map(r => ({ ref: r[0], source: r[1], product: r[2], inspector: r[3], date: r[4], defects: r[5], outcome: r[6], outcomeStyle: qcOutcome(r[6]) }));
+
+    // ---- Cash Flow ----
+    const cashFlowSeed = [
+      ["2026-06-29", "Payment from Atlas Hospitality", "AR · Bank Maybank", "RM 62,400", "—", "RM 308,200"],
+      ["2026-06-28", "Supplier payment — Pillow Foam Ltd", "AP · Bank Maybank", "—", "RM 18,900", "RM 245,800"],
+      ["2026-06-28", "Payment from Damai Resort", "AR · Bank Maybank", "RM 31,500", "—", "RM 264,700"],
+      ["2026-06-27", "Payroll June (45 staff)", "Payroll · Bank Maybank", "—", "RM 142,300", "RM 233,200"],
+      ["2026-06-26", "Payment from Heritage Hotel", "AR · Bank Maybank", "RM 24,000", "—", "RM 375,500"],
+      ["2026-06-25", "Supplier payment — Foam Tech", "AP · Bank Maybank", "—", "RM 8,700", "RM 351,500"],
+      ["2026-06-24", "Cash sale walk-in", "AR · Cash", "RM 3,400", "—", "RM 360,200"],
+      ["2026-06-22", "Utility — TNB electricity", "Expense · Bank Maybank", "—", "RM 4,200", "RM 356,800"],
+    ];
+    const cashFlowRows = cashFlowSeed.map(r => ({ date: r[0], desc: r[1], account: r[2], in: r[3], out: r[4], bal: r[5] }));
+
+    // ---- Reports ----
+    const reportTilesSeed = [
+      ["Sales Report (Monthly)", "bar-chart-3", "Sales by customer / product / hub", "#F0EAD8", "#6B5C32"],
+      ["Production Output", "factory", "Per-dept output + efficiency", "#E0EDF0", "#3E6570"],
+      ["Inventory Aging", "package", "FIFO age + stock value rollup", "#EEF3E4", "#4F7C3A"],
+      ["AR Aging", "wallet", "Customer outstanding by bucket", "#F9E1DA", "#9A3A2D"],
+      ["AP Aging", "credit-card", "Supplier payables by bucket", "#FFF4D6", "#7A5A00"],
+      ["Profit & Loss", "trending-up", "P&L for any period", "#EFEAFA", "#5E4B8C"],
+      ["Material Cost Analysis", "layers", "Avg cost/m, per-product COGS", "#F0EAD8", "#6B5C32"],
+      ["Worker Performance", "user", "Eff%, hours, output per worker", "#E0EDF0", "#3E6570"],
+      ["Customer Sales History", "users", "Per-customer 12-month trend", "#EEF3E4", "#4F7C3A"],
+    ];
+    const reportTiles = reportTilesSeed.map(t => ({ title: t[0], icon: t[1], desc: t[2], bg: t[3], iconColor: t[4] }));
+
+    // ---- Organisations ----
+    const orgSeed = [
+      ["HI", "Hookka Industries Sdn Bhd", "199301027889", "C12345678-09", "MYR", 23, "2018-03-15"],
+      ["HE", "Hookka Export Pte Ltd", "201912345A", "S12345678-01", "SGD", 4, "2019-11-22"],
+      ["HW", "Hookka Workshops Sdn Bhd", "202301098766", "C98765432-01", "MYR", 8, "2023-05-10"],
+    ];
+    const orgRows = orgSeed.map(r => ({ code: r[0], name: r[1], reg: r[2], tin: r[3], ccy: r[4], members: r[5], created: r[6] }));
+
+    // ---- System Health ----
+    const healthKpis = [
+      { label: "UPTIME 7D", value: "99.98%", color: "#4F7C3A" },
+      { label: "API P95 LATENCY", value: "184ms", color: "#1F1D1B" },
+      { label: "DB POOL UTIL", value: "32%", color: "#1F1D1B" },
+      { label: "ERROR RATE", value: "0.02%", color: "#4F7C3A" },
+    ];
+    const healthStat = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${s==="OK"?"#EEF3E4":s==="DEGRADED"?"#FFF4D6":"#F9E1DA"}; color:${s==="OK"?"#4F7C3A":s==="DEGRADED"?"#7A5A00":"#9A3A2D"};`;
+    const healthSeed = [
+      ["Cloudflare Pages (FE)", "Last deploy 12 min ago · build 9.6 MB", "OK", "#4F7C3A"],
+      ["Hono API (Workers)", "Avg 184ms p95 · 0 errors last hr", "OK", "#4F7C3A"],
+      ["D1 Database", "32/200 connections · 4.2 GB", "OK", "#4F7C3A"],
+      ["Supabase (Files storage)", "1.2 GB of 8 GB · last sync 5 min", "OK", "#4F7C3A"],
+      ["Anthropic API (OCR)", "Last call 18 min ago · quota 64%", "OK", "#4F7C3A"],
+      ["Brevo Email", "12 sent today · queue 0", "OK", "#4F7C3A"],
+      ["Resend Email", "Fallback · 0 sent today", "OK", "#4F7C3A"],
+      ["Hostinger IMAP", "Last sync 3 min · 47 fetched today", "OK", "#4F7C3A"],
+      ["Daily backup cron", "Last 2026-06-29 02:00 · 487 MB", "DEGRADED", "#7A5A00"],
+    ];
+    const healthRows = healthSeed.map(r => ({ name: r[0], detail: r[1], status: r[2], statusStyle: healthStat(r[2]), dotColor: r[3] }));
+
+    // ---- Maintenance tiles (option lists / codes) ----
+    const maintSeed = [
+      ["Customers", "users", 47],
+      ["Suppliers", "building-2", 18],
+      ["Products", "boxes", 347],
+      ["Fabrics", "shirt", 42],
+      ["Departments", "factory", 8],
+      ["Payment Methods", "credit-card", 6],
+      ["Tax Rates", "percent", 4],
+      ["Delivery Hubs", "warehouse", 23],
+    ];
+    const maintTiles = maintSeed.map(t => ({ label: t[0], icon: t[1], count: t[2] }));
+
     return {
       isDashboard: v === "dashboard" ? 1 : 0,
+      isDailyReport: v === "daily-report" ? 1 : 0,
+      isNotifications: v === "notifications" ? 1 : 0,
+      isForecast: v === "forecast" ? 1 : 0,
       isSalesList: v === "sales" ? 1 : 0,
       isSalesDetail: v === "sales-detail" ? 1 : 0,
+      isSalesCreate: v === "sales-create" ? 1 : 0,
       isDelivery: v === "delivery" ? 1 : 0,
+      isDeliveryDetail: v === "delivery-detail" ? 1 : 0,
       isInvoices: v === "invoices" ? 1 : 0,
+      isConsignment: v === "consignment" ? 1 : 0,
+      isCnNote: v === "cn-note" ? 1 : 0,
+      isCnReturn: v === "cn-return" ? 1 : 0,
       isProcurement: v === "procurement" ? 1 : 0,
+      isGrn: v === "grn" ? 1 : 0,
+      isGrnCreate: v === "grn-create" ? 1 : 0,
+      isPi: v === "pi" ? 1 : 0,
       isProduction: v === "production" ? 1 : 0,
+      isProdDept: v === "prod-dept" ? 1 : 0,
+      isProdScan: v === "prod-scan" ? 1 : 0,
+      isProdFolders: v === "prod-folders" ? 1 : 0,
       isPlanning: v === "planning" ? 1 : 0,
+      isPlanDept: v === "plan-dept" ? 1 : 0,
+      isMrp: v === "mrp" ? 1 : 0,
       isBom: v === "bom" ? 1 : 0,
+      isWipTimes: v === "wip-times" ? 1 : 0,
       isInventory: v === "inventory" ? 1 : 0,
+      isFabrics: v === "fabrics" ? 1 : 0,
+      isStockValue: v === "stock-value" ? 1 : 0,
+      isStockAdj: v === "stock-adj" ? 1 : 0,
       isCustomers: v === "customers" ? 1 : 0,
+      isCustomerDetail: v === "customer-detail" ? 1 : 0,
       isSuppliers: v === "suppliers" ? 1 : 0,
       isWarehouse: v === "warehouse" ? 1 : 0,
       isProducts: v === "products" ? 1 : 0,
       isCnc: v === "cnc" ? 1 : 0,
-      isConsignment: v === "consignment" ? 1 : 0,
+      isSofaCombos: v === "sofa-combos" ? 1 : 0,
+      isRd: v === "rd" ? 1 : 0,
+      isRdMaint: v === "rd-maint" ? 1 : 0,
+      isQuality: v === "quality" ? 1 : 0,
       isEmployees: v === "employees" ? 1 : 0,
       isServiceCases: v === "servicecases" ? 1 : 0,
       isMail: v === "mail" ? 1 : 0,
       isAnnouncements: v === "announcements" ? 1 : 0,
       isAccounting: v === "accounting" ? 1 : 0,
+      isCashFlow: v === "cashflow" ? 1 : 0,
       isEinvoice: v === "einvoice" ? 1 : 0,
+      isReports: v === "reports" ? 1 : 0,
       isSettings: v === "settings" ? 1 : 0,
+      isOrgs: v === "orgs" ? 1 : 0,
+      isHealth: v === "health" ? 1 : 0,
+      isMaintenance: v === "maintenance" ? 1 : 0,
       navGroups: sideNav, breadcrumbs, scenes,
       // Dashboard
       kpis, dailyChips, revGrid, revLines, deptBacklog, topBed,
@@ -1780,7 +3001,7 @@ class App {
       // Operations (existing)
       prodTabs, matrixRows,
       invRows, custRows, racks, empTabs, empRows, users,
-      // Operations (new)
+      // Operations (existing + first wave of additions)
       doKpis, doTabs, doRows,
       invoiceRows,
       poRows,
@@ -1795,6 +3016,32 @@ class App {
       prodTiles,
       cncModels, cncSizes,
       einvRows,
+      // Round 2 — all new scenes (Overview / Sales / Production / Planning /
+      // Inventory / Procurement / R&D / Quality / Finance / System):
+      reportChips, reportDetail,
+      notifRows,
+      soFormFields, soFormLines,
+      doDetailItems, doTimeline,
+      custFields, custHubs,
+      cnNoteRows, cnRetRows,
+      deptTabsOther, deptSheetRows,
+      folders,
+      planDeptTabs, planSchedRows,
+      mrpRows,
+      wipRows,
+      comboRows,
+      fabricRows,
+      stockValueRows,
+      adjRows,
+      grnRows, grnFormRows,
+      piRows,
+      rdProjects, rdCats, rdEquip,
+      qcRows,
+      cashFlowRows,
+      reportTiles,
+      orgRows,
+      healthKpis, healthRows,
+      maintTiles,
     };
   }
 }

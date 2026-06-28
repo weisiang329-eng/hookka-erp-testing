@@ -17,7 +17,7 @@ import { TABS, type TabKey } from "../nav";
 function activeTab(pathname: string): TabKey {
   if (pathname === "/m" || pathname === "/m/") return "home";
   if (pathname.startsWith("/m/sales")) return "sales";
-  if (pathname.startsWith("/m/production")) return "production";
+  if (pathname.startsWith("/m/delivery")) return "delivery";
   if (
     pathname.startsWith("/m/procurement") ||
     pathname.startsWith("/m/suppliers")

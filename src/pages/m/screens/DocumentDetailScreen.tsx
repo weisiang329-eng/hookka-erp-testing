@@ -34,10 +34,11 @@ import {
   ArrowUpFromLine,
   PackageCheck,
   Receipt,
+  QrCode,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
-import { MobileHeader, MobileCard, StatusPill, Sheet, FormSheet } from "../components";
+import { MobileHeader, MobileCard, StatusPill, Sheet, FormSheet, QrModal } from "../components";
 import { M, M_ACCENT } from "../theme";
 import {
   type ModuleConfig,
@@ -96,6 +97,8 @@ function Inner({
   const [toast, setToast] = useState<{ kind: "ok" | "err"; text: string } | null>(
     null,
   );
+  // QR modal open state (dc12: doc detail has a Barcode + Open QR card).
+  const [qrOpen, setQrOpen] = useState(false);
 
   const doc = useMemo(
     () => (data ? detail.selectDoc(data, id) : null),
@@ -108,6 +111,43 @@ function Inner({
     () => (doc ? (detail.resolve?.(doc, id) ?? detail) : detail),
     [detail, doc, id],
   );
+
+  // ---- Barcode + QR card (dc12) — order-type docs only. ----
+  // The "barcode" is a decorative bar pattern derived deterministically from
+  // the doc code (NOT a real CODE128 — that would need a barcode lib + space
+  // for the encoded data; the dc12 design source itself uses 40 styled spans).
+  // The real scannable target is the QR (Open QR button), which encodes the
+  // mobile detail URL so a phone-camera scan opens this page on another
+  // device. These hooks MUST run before the early returns below (rules-of-
+  // hooks), so we read `code` from the eff/doc pair instead of the post-early-
+  // return destructured `code`. Inline-evaluating eff.code(doc) keeps the
+  // value identical across the two reads.
+  const docCode = doc ? eff.code(doc) || "—" : "—";
+  const isOrderDoc = ["sales", "delivery", "procurement", "invoices"].includes(
+    config.slug,
+  );
+  const bars = useMemo(() => {
+    const seed = docCode || "X";
+    const out: { w: number; dark: boolean }[] = [];
+    for (let i = 0; i < 40; i++) {
+      const cc = seed.charCodeAt(i % seed.length) || 7;
+      const w = ((cc + i * 13) % 6) + 1; // 1–6 px wide
+      const dark = (cc + i) % 3 !== 0;
+      out.push({ w, dark });
+    }
+    return out;
+  }, [docCode]);
+  const docQrChoices = useMemo(() => {
+    const origin =
+      typeof window !== "undefined" ? window.location.origin : "";
+    return [
+      {
+        label: docCode,
+        code: docCode,
+        value: `${origin}/m/${config.slug}/${encodeURIComponent(id)}`,
+      },
+    ];
+  }, [docCode, config.slug, id]);
 
   // ---- Derive ALL view data in ONE memo (perf — the L2 freeze fix). ----
   // PREVIOUSLY every config mapper (lineItems / relatedDocs / subDocLists /
@@ -431,6 +471,107 @@ function Inner({
           </MobileCard>
         ) : null}
 
+        {/* Barcode + Open-QR card — dc12 design v12: order-type docs (SO/DO/
+            PO/GRN/PI/Invoice) carry a scannable QR linking to this mobile
+            detail page; bars are decorative (40 spans, deterministic widths
+            from the doc code). Skipped for non-order docs. */}
+        {isOrderDoc ? (
+          <MobileCard radius={16} style={{ padding: "14px 16px" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: "#A89F8D",
+                    textTransform: "uppercase",
+                    letterSpacing: 0.4,
+                    marginBottom: 8,
+                  }}
+                >
+                  Barcode
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "stretch",
+                    gap: 1,
+                    height: 46,
+                    overflow: "hidden",
+                  }}
+                >
+                  {bars.map((b, i) => (
+                    <span
+                      key={i}
+                      style={{
+                        width: b.w,
+                        background: b.dark ? "#1F1D1B" : "#fff",
+                        flex: "none",
+                      }}
+                    />
+                  ))}
+                </div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 700,
+                    color: "#4D4630",
+                    letterSpacing: 2,
+                    marginTop: 6,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {code}
+                </div>
+              </div>
+              <div
+                onClick={() => setQrOpen(true)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setQrOpen(true);
+                  }
+                }}
+                style={{
+                  flex: "none",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 6,
+                  cursor: "pointer",
+                  padding: "6px 10px",
+                  borderRadius: 12,
+                  border: "1px solid #E2DDD8",
+                  background: "#FAF8F4",
+                  WebkitTapHighlightColor: "transparent",
+                }}
+              >
+                <QrCode size={34} strokeWidth={1.75} color="#6B5C32" />
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: "#6B5C32",
+                  }}
+                >
+                  Open QR
+                </span>
+              </div>
+            </div>
+          </MobileCard>
+        ) : null}
+
         {/* Body paragraphs — design source: announcement / mail message body. */}
         {bodyParas.length ? (
           <MobileCard radius={18} style={{ padding: 18 }}>
@@ -730,6 +871,17 @@ function Inner({
           Got it
         </button>
       </Sheet>
+
+      {/* QR for this doc — opens from the Barcode card. Encodes the mobile
+          detail URL so a phone-camera scan from another device opens this
+          page. Order-type docs only (gated by the Open QR button render). */}
+      <QrModal
+        open={qrOpen}
+        onClose={() => setQrOpen(false)}
+        title={`${config.title} · ${code}`}
+        choices={docQrChoices}
+        downloadName={`${config.slug}-${code}`}
+      />
     </>
   );
 }

@@ -27,7 +27,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-export type TabKey = "home" | "sales" | "production" | "procure" | "more";
+export type TabKey = "home" | "sales" | "delivery" | "procure" | "more";
 
 export type TabDef = {
   key: TabKey;
@@ -40,19 +40,20 @@ export type TabDef = {
 };
 
 // Bottom-nav: 5 slots with More as the CENTER raised button (owner 2026-06-28,
-// reference: a colored circular grid button popping above the bar). Order:
-//   Home · Sales · [More — center raised button] · Production · Procure.
-// Icons: Home → house · Sales → shopping-cart · More → layout-grid (the raised
-// taupe circle) · Production → factory · Procure → shopping-bag.
-// The `raised` flag tells BottomTabBar to render that slot as the floating
-// circular action button instead of a flat icon+label.
+// reference: a colored circular grid button popping above the bar). Order per
+// dc12 design v12:
+//   Home · Sales · [More — center raised button] · Delivery · Procure.
+// Production moved to the More menu — for office staff Delivery is a more
+// common one-tap target than Production. The `raised` flag tells BottomTabBar
+// to render that slot as the floating circular action button.
 export const TABS: TabDef[] = [
   { key: "home", label: "Home", icon: Home, path: "/m" },
   { key: "sales", label: "Sales", icon: ShoppingCart, path: "/m/sales" },
   { key: "more", label: "More", icon: LayoutGrid, path: "/m/more", raised: true },
-  { key: "production", label: "Production", icon: Factory, path: "/m/production" },
+  { key: "delivery", label: "Delivery", icon: Truck, path: "/m/delivery" },
   { key: "procure", label: "Procure", icon: ShoppingBag, path: "/m/procurement" },
 ];
+
 
 export type ModuleLink = {
   label: string;

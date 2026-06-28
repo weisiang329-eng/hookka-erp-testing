@@ -9,3 +9,5 @@ export { MobileHeader } from "./MobileHeader";
 export { SubTabs } from "./SubTabs";
 export { FilterSheet } from "./FilterSheet";
 export { FormSheet } from "./FormSheet";
+export { QrModal } from "./QrModal";
+export type { QrChoice } from "./QrModal";

@@ -1526,6 +1526,18 @@ function todayISO(): string {
 function thisPeriod(): string {
   return new Date().toISOString().slice(0, 7); // YYYY-MM
 }
+/** Current month window [1st .. month end] in YYYY-MM-DD — used by the
+ * working-hour-entries + attendance summary sources. */
+function thisMonthWindow(): { from: string; to: string } {
+  const now = new Date();
+  const yr = now.getFullYear();
+  const mo = now.getMonth();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const from = `${yr}-${pad(mo + 1)}-01`;
+  const lastDay = new Date(yr, mo + 1, 0).getDate();
+  const to = `${yr}-${pad(mo + 1)}-${pad(lastDay)}`;
+  return { from, to };
+}
 
 const directorySource: DataSource = {
   url: "/api/workers",
@@ -1572,6 +1584,76 @@ const attendanceSource: DataSource = {
   ],
   defaultSort: { key: "name", dir: "asc" },
   subTabs: [{ key: "attendance", label: "Attendance", match: () => true }],
+};
+
+// Working Hours sub-tab — per-worker monthly totals from the working-hour-
+// entries summary endpoint (the same one Home's Worker Efficiency uses).
+// Each row = one worker for the current month, total hours + days with
+// entries.
+const workingHoursSource: DataSource = {
+  url: (() => {
+    const w = thisMonthWindow();
+    return `/api/working-hour-entries/summary?from=${w.from}&to=${w.to}`;
+  })(),
+  // /summary returns { data: [{workerId, totalHours, byDept, daysWithEntries}] }
+  select: selectData,
+  toVM: (r): RowVM => {
+    const hrs = num(r, "totalHours");
+    const days = num(r, "daysWithEntries");
+    return {
+      id: str(r, "workerId"),
+      code: `${days}d`,
+      title: str(r, "workerName") || str(r, "workerId") || "—",
+      subLine: str(r, "workerEmpNo") || undefined,
+      meta1: { label: "Hours", value: `${hrs.toFixed(1)}h` },
+      meta2: { label: "Days", value: days },
+    };
+  },
+  columns: [
+    textCol("name", "Customer", (r) => str(r, "workerName")),
+    textCol("empNo", "Reference", (r) => str(r, "workerEmpNo")),
+    numCol("hours", "Qty", (r) => num(r, "totalHours")),
+    numCol("days", "Items", (r) => num(r, "daysWithEntries")),
+  ],
+  defaultSort: { key: "hours", dir: "desc" },
+  subTabs: [{ key: "hours", label: "Working Hours", match: () => true }],
+};
+
+// Dept Labor sub-tab — per-(dept × category) hours for the current month
+// from /api/working-hour-entries/dept-category-summary. Each row = one
+// department/category bucket.
+const deptLaborSource: DataSource = {
+  url: (() => {
+    const w = thisMonthWindow();
+    return `/api/working-hour-entries/dept-category-summary?from=${w.from}&to=${w.to}`;
+  })(),
+  // Response wraps the rows under `buckets` (the route shape):
+  // { success, buckets: [{departmentCode, category, hours}] }.
+  select: (resp) => {
+    if (!resp || typeof resp !== "object") return [];
+    const o = resp as { buckets?: unknown; data?: { buckets?: unknown } };
+    const buckets = (o.buckets ?? o.data?.buckets) as unknown;
+    return Array.isArray(buckets) ? (buckets as RawRow[]) : [];
+  },
+  toVM: (r): RowVM => {
+    const hrs = num(r, "hours");
+    const dept = str(r, "departmentCode") || "—";
+    const cat = str(r, "category");
+    return {
+      id: `${dept}-${cat || "all"}`,
+      code: dept,
+      title: cat || dept,
+      subLine: cat ? dept : undefined,
+      meta1: { label: "Hours", value: `${hrs.toFixed(1)}h` },
+    };
+  },
+  columns: [
+    textCol("dept", "Reference", (r) => str(r, "departmentCode")),
+    textCol("category", "State", (r) => str(r, "category")),
+    numCol("hours", "Qty", (r) => num(r, "hours")),
+  ],
+  defaultSort: { key: "hours", dir: "desc" },
+  subTabs: [{ key: "deptlabor", label: "Dept Labor", match: () => true }],
 };
 
 const leaveSource: DataSource = {
@@ -1761,7 +1843,18 @@ export const employeesConfig: ModuleConfig = {
     return null;
   },
   detail: employeeDetail,
-  sources: [directorySource, attendanceSource, leaveSource, payrollSource],
+  // dc12 design v12 lists 9 sub-tabs for Employees. We ship the 6 with real
+  // existing endpoints (Directory / Attendance / Leave / Working Hours /
+  // Dept Labor / Payroll). The other 3 (Labor Cost · Employee Perf · Dept
+  // Perf) need new aggregation backends — deferred.
+  sources: [
+    directorySource,
+    attendanceSource,
+    workingHoursSource,
+    deptLaborSource,
+    leaveSource,
+    payrollSource,
+  ],
   // Design source: a "Pending requests" approve/reject card above the list on
   // the Leave tab. Real leave-approval flow (GET/PUT /api/leaves).
   topPanel: (activeTab) =>

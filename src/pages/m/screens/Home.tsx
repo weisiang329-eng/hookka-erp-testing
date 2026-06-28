@@ -107,10 +107,6 @@ export default function MobileHome() {
   const navigate = useNavigate();
   const user = getCurrentUser();
   const firstName = (user?.displayName || "there").split(" ")[0];
-  // Avatar initial = first letter of display name (fallback to email / "H").
-  const initial = (
-    (user?.displayName || user?.email || "H").trim().charAt(0) || "H"
-  ).toUpperCase();
 
   // Quick-action create form: holds the active FormSpec, or null. "Staff" has
   // no in-scope create endpoint, so it routes to the Employees directory.
@@ -224,13 +220,15 @@ export default function MobileHome() {
             gap: 12,
           }}
         >
-          {/* Avatar (gradient tile, user initial) */}
+          {/* Brand tile — matches the ERP-mobile app icon (black bg, white "H",
+              squircle corner). Owner 2026-06-28: use the erp-mobile logo, same
+              rounding as the white-bg app icon. */}
           <div
             style={{
               width: 42,
               height: 42,
-              borderRadius: 13,
-              background: `linear-gradient(135deg, ${M.logoFrom}, ${M.logoTo})`,
+              borderRadius: 11,
+              background: "#1F1D1B",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -238,7 +236,7 @@ export default function MobileHome() {
             }}
           >
             <span style={{ fontWeight: 800, color: "#fff", fontSize: 19 }}>
-              {initial}
+              H
             </span>
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>

@@ -1216,14 +1216,54 @@ app.post("/extract", async (c) => {
   }
   const mime = file.type || "";
   const name = file.name || "";
+  const lowerName = name.toLowerCase();
   const isPdf =
-    mime === "application/pdf" || name.toLowerCase().endsWith(".pdf");
-  if (!isPdf) {
-    return c.json({ success: false, error: "Only PDF files are accepted." }, 400);
+    mime === "application/pdf" || lowerName.endsWith(".pdf");
+  // Mobile dc12 lets the operator scan a paper PO with the phone camera —
+  // accept JPEG/PNG/WebP in addition to PDF. The Claude messages API takes
+  // both `document` (PDF) and `image` blocks, so the rest of the pipeline
+  // just needs to know which block to build.
+  const isImage =
+    mime === "image/jpeg" ||
+    mime === "image/png" ||
+    mime === "image/webp" ||
+    lowerName.endsWith(".jpg") ||
+    lowerName.endsWith(".jpeg") ||
+    lowerName.endsWith(".png") ||
+    lowerName.endsWith(".webp");
+  if (!isPdf && !isImage) {
+    return c.json(
+      { success: false, error: "Only PDF or image (JPEG/PNG/WebP) files are accepted." },
+      400,
+    );
   }
 
   const arrayBuffer = await file.arrayBuffer();
-  const pdfBase64 = toBase64(arrayBuffer);
+  const fileBase64 = toBase64(arrayBuffer);
+  // Pick the right Claude media block + media_type. Default for unknown image
+  // ext to image/jpeg (Claude is forgiving).
+  const claudeBlock = isPdf
+    ? {
+        type: "document" as const,
+        source: {
+          type: "base64" as const,
+          media_type: "application/pdf",
+          data: fileBase64,
+        },
+      }
+    : {
+        type: "image" as const,
+        source: {
+          type: "base64" as const,
+          media_type:
+            mime === "image/png" || lowerName.endsWith(".png")
+              ? "image/png"
+              : mime === "image/webp" || lowerName.endsWith(".webp")
+                ? "image/webp"
+                : "image/jpeg",
+          data: fileBase64,
+        },
+      };
 
   const orgId = getOrgId(c);
 
@@ -1326,18 +1366,11 @@ app.post("/extract", async (c) => {
               ...(fewShotText
                 ? [{ type: "text", text: fewShotText }]
                 : []),
-              {
-                type: "document",
-                source: {
-                  type: "base64",
-                  media_type: "application/pdf",
-                  data: pdfBase64,
-                },
-              },
+              claudeBlock,
               {
                 type: "text",
                 text:
-                  "Extract all POs from the PDF above using the rules + catalog. " +
+                  `Extract all POs from the ${isPdf ? "PDF" : "image"} above using the rules + catalog. ` +
                   "OUTPUT FORMAT: Your response must be VALID JSON ONLY. Do NOT write any preamble, explanation, analysis, or chain-of-thought. Do NOT start with phrases like 'Looking at the PDF…', 'I can see…', 'Let me analyze…'. Do NOT wrap in markdown fences. The very first character of your response must be '{' and the very last must be '}'. Anything else will break our JSON parser.",
               },
             ],

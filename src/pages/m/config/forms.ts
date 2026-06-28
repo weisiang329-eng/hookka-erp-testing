@@ -137,24 +137,61 @@ const SO_LINE = {
   ],
 };
 
-export function newSalesOrderSpec(): FormSpec {
+/**
+ * Optional prefill the OCR scan flow (ScanPOSheet → /api/scan-po/extract)
+ * hands in. Subset of FormValues — every field is optional and merges over
+ * the empty-draft defaults below. Items are mapped onto the SO line shape.
+ */
+export type SOCreatePrefill = {
+  customerId?: string;
+  customerPOId?: string;
+  customerSOId?: string;
+  reference?: string;
+  customerDeliveryDate?: string;
+  hookkaExpectedDD?: string;
+  notes?: string;
+  items?: Array<{
+    productCode?: string;
+    productName?: string;
+    itemCategory?: string;
+    sizeLabel?: string;
+    fabricCode?: string;
+    quantity?: number;
+    basePriceSen?: number;
+    unitPriceSen?: number;
+  }>;
+};
+
+export function newSalesOrderSpec(prefill?: SOCreatePrefill): FormSpec {
+  // Map OCR-extracted item shape onto the SO line shape FormSheet expects.
+  // Empty array if no prefill items — Quick Action create flow stays unchanged.
+  const items = (prefill?.items ?? []).map((it) => ({
+    productId: "",
+    productCode: s(it.productCode),
+    productName: s(it.productName),
+    itemCategory: s(it.itemCategory) || "BEDFRAME",
+    sizeLabel: s(it.sizeLabel),
+    fabricCode: s(it.fabricCode),
+    quantity: n(it.quantity) || 1,
+    basePriceSen: n(it.basePriceSen) || n(it.unitPriceSen),
+  }));
   return {
-    title: "New Sales Order",
+    title: prefill ? "New Sales Order · from scan" : "New Sales Order",
     submitLabel: "Create (Draft)",
     note:
       "Creates a Draft Sales Order. Confirm it (which runs the BOM + PO cascade) from the desktop app.",
     fields: SO_FIELDS,
     lineItems: SO_LINE,
     initial: {
-      customerId: "",
-      customerPOId: "",
-      customerSOId: "",
-      reference: "",
+      customerId: s(prefill?.customerId),
+      customerPOId: s(prefill?.customerPOId),
+      customerSOId: s(prefill?.customerSOId),
+      reference: s(prefill?.reference),
       companySODate: todayISO(),
-      customerDeliveryDate: "",
-      hookkaExpectedDD: "",
-      notes: "",
-      items: [],
+      customerDeliveryDate: s(prefill?.customerDeliveryDate),
+      hookkaExpectedDD: s(prefill?.hookkaExpectedDD),
+      notes: s(prefill?.notes),
+      items,
     },
     submit: async (v) => {
       const body = {

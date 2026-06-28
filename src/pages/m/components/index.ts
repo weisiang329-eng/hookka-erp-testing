@@ -12,3 +12,5 @@ export { FormSheet } from "./FormSheet";
 export { QrModal } from "./QrModal";
 export type { QrChoice } from "./QrModal";
 export { ScanSheet } from "./ScanSheet";
+export { ScanPOSheet } from "./ScanPOSheet";
+export type { ScanPOExtracted } from "./ScanPOSheet";

@@ -13,9 +13,10 @@
 // ===========================================================================
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, SlidersHorizontal, Plus, ScanLine } from "lucide-react";
+import { Search, SlidersHorizontal, Plus, ScanLine, FileSearch } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
-import { MobileHeader, DocCard, StatusPill, FormSheet, ScanSheet } from "../components";
+import { MobileHeader, DocCard, StatusPill, FormSheet, ScanSheet, ScanPOSheet } from "../components";
+import { newSalesOrderSpec, type SOCreatePrefill } from "../config/forms";
 import { SubTabs } from "../components/SubTabs";
 import { FilterSheet } from "../components/FilterSheet";
 import { M } from "../theme";
@@ -51,6 +52,10 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   const [scanOpen, setScanOpen] = useState(false);
   // Sticky one-shot scan-result toast — clears after 2.5s.
   const [scanToast, setScanToast] = useState<string | null>(null);
+  // OCR Scan-PO (dc12 — sales module only): captures a customer PO photo,
+  // extracts via /api/scan-po/extract, opens a prefilled new-SO form.
+  const [scanPOOpen, setScanPOOpen] = useState(false);
+  const canScanPO = config.slug === "sales";
   // "+" create form for modules that have one (SO / Delivery / Procure /
   // Invoice / Announcements / Mail). null = this module has no mobile create.
   const [createSpec, setCreateSpec] = useState<FormSpec | null>(null);
@@ -211,6 +216,29 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
         >
           <ScanLine size={19} strokeWidth={1.75} />
         </button>
+        {/* Scan PO (sales only) — OCR a customer PO photo / PDF into a
+            prefilled new-SO form. dc12 design v12. */}
+        {canScanPO ? (
+          <button
+            onClick={() => setScanPOOpen(true)}
+            aria-label="Scan customer PO"
+            style={{
+              width: 44,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: M.taupe,
+              border: `1px solid ${M.taupe}`,
+              borderRadius: 12,
+              color: "#fff",
+              cursor: "pointer",
+              flexShrink: 0,
+              WebkitTapHighlightColor: "transparent",
+            }}
+          >
+            <FileSearch size={19} strokeWidth={1.75} />
+          </button>
+        ) : null}
         <button
           onClick={() => setFilterOpen(true)}
           aria-label="Filter and sort"
@@ -373,6 +401,26 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
           window.setTimeout(() => setScanToast(null), 2500);
         }}
       />
+      {/* OCR — capture a customer PO; on a tapped result, open the new-SO
+          form prefilled with the extracted values. Sales module only. */}
+      {canScanPO ? (
+        <ScanPOSheet
+          open={scanPOOpen}
+          onClose={() => setScanPOOpen(false)}
+          onResult={(extracted) => {
+            setScanPOOpen(false);
+            const prefill: SOCreatePrefill = {
+              customerId: extracted.customerId ?? "",
+              customerPOId: extracted.customerPO ?? "",
+              customerSOId: extracted.customerSO ?? extracted.yourRefNo ?? "",
+              customerDeliveryDate: (extracted.deliveryDate ?? "").slice(0, 10),
+              hookkaExpectedDD: (extracted.deliveryDate ?? "").slice(0, 10),
+              items: extracted.items,
+            };
+            setCreateSpec(newSalesOrderSpec(prefill));
+          }}
+        />
+      ) : null}
       {scanToast ? (
         <div
           style={{

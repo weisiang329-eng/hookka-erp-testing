@@ -51,3 +51,27 @@ Cost: **one-time USD $25** Google Play developer account. Publishing free apps a
 
 ## Alternative (no store, $0, works today)
 For an internal tool, "Add to Home Screen" already installs both apps with the correct icons (black for ERP, white for Worker) — no account, no fee, instant. The Play listing only adds public discoverability. Keep that in mind before paying the $25.
+
+---
+
+## Ready-to-fill Console values (copy these in)
+
+**Pricing:** the $25 is a **one-time developer-account fee** — it covers BOTH apps (and any future ones). Not per-app.
+
+**App access (CRITICAL — login-gated app, reviewer must sign in or it's rejected):**
+- Provide these test credentials in Play Console → *App access* → "All or some functionality is restricted":
+  - **Username / Employee No:** `Test-001`
+  - **Password / PIN:** `123456`
+- Note to reviewer: "Internal business tool. Sign in with the test account above. Worker app: enter the employee number + PIN on the keypad."
+
+**Data safety (declare honestly):**
+- Data collected: **Email address** (account); **Photos** (worker punch selfie, Worker app only); **Approximate location** (worker geofence, Worker app only — used in-app, not shared, not for tracking); **App activity / other** (work records you enter).
+- All: encrypted in transit ✔; users can request deletion (support@hookka.com) ✔; not sold/shared with third parties for ads ✔.
+
+**Content rating:** category **Business / Productivity**; no violence/sexual/gambling content → rating comes out **Everyone**.
+
+**Target audience:** adults (18+) — internal staff tool, not directed at children.
+
+**Privacy policy URL:** `https://erp.hookka.com/privacy`  ·  **Contact:** `support@hookka.com`
+
+**Listing assets prepared** (in `docs/play-assets/`): 512 icon, feature graphic 1024×500, phone screenshots.

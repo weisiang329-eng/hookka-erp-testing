@@ -216,6 +216,19 @@ export type DarkStat = {
   caption?: ReactNode;
 };
 
+/**
+ * One "Convert document" action button. `to` is a route the app navigates to
+ * (absolute, e.g. "/procurement/grn/create?poId=..."). `primary` tints the
+ * button taupe (the design's filled button); others render outlined.
+ */
+export type DetailAction = {
+  label: string;
+  to: string;
+  /** lucide icon name for the leading glyph. */
+  icon?: "package-check" | "receipt" | "file-text";
+  primary?: boolean;
+};
+
 export type DetailConfig = {
   /** Build the single-doc fetch URL from the route :id param. */
   url: (id: string) => string;
@@ -278,6 +291,13 @@ export type DetailConfig = {
    * an employee, or rack contents + movements under a rack).
    */
   subDocLists?: (doc: RawRow, resp: unknown) => SubDocList[];
+  /**
+   * Optional "Convert document" action row (owner 2026-06-28 design v10) —
+   * rendered as a titled pair of buttons below the field grid. Each action
+   * navigates to a route (typically a desktop convert flow deep-linked with the
+   * doc id, e.g. PO → GRN / PO → Purchase Invoice). Empty array → no section.
+   */
+  extraActions?: (doc: RawRow, id: string) => DetailAction[];
   /** Map the doc → its line-items list (empty array = no items section). */
   lineItems?: (doc: RawRow) => LineItemVM[];
   /** Map the response (doc + envelope extras) → related documents. */
@@ -311,6 +331,13 @@ export type ModuleConfig = {
   detail?: DetailConfig;
   /** One or more data sources (see DataSource). */
   sources: DataSource[];
+  /**
+   * Optional panel rendered ABOVE the list on specific sub-tabs (design source:
+   * the Employees "Pending requests" approve/reject card on the Attendance
+   * tab). Receives the active tab key; return null to render nothing. Keeps the
+   * generic list engine while letting one module inject a bespoke section.
+   */
+  topPanel?: (activeTab: string) => ReactNode;
 };
 
 /** Active filter state for one column. */

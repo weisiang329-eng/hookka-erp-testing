@@ -48,6 +48,7 @@ import {
   Bell,
   CircleAlert,
   TriangleAlert,
+  ClipboardCheck,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
@@ -75,6 +76,7 @@ import {
 type StatsResp = {
   success?: boolean;
   byStatus?: Record<string, number>;
+  revenueByStatus?: Record<string, number>;
   csRevenueSen?: number;
   deliveredItemsSen?: number;
   outstandingItemsSen?: number;
@@ -88,6 +90,23 @@ type OverviewResp = {
     salesOrderSen: number;
     invoiceSen?: number;
   }[];
+  // ---- Command Center analytics (owner 2026-06-28 design v10) ----
+  // The SAME fields the desktop dashboard-b consumes. Optional everywhere —
+  // each analytics section guards its own data and renders nothing if absent
+  // (we never fabricate a chart).
+  aovByCustomer?: { customerName: string; totalSen: number }[];
+  topSellers?: {
+    BEDFRAME?: { productCode: string; qtySold: number }[];
+    SOFA?: { model: string; setsSold: number }[];
+  };
+  production?: {
+    backlogByDept?: {
+      dept: string;
+      totalMin: number;
+      dailyCapMin: number;
+      backlogDays: number;
+    }[];
+  };
 };
 type SOListResp = { success?: boolean; data?: SalesOrder[] };
 type InventoryResp = {
@@ -124,6 +143,24 @@ const CUR_YM = new Date().toISOString().slice(0, 7);
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+/** "YYYY-MM" → short month label ("2026-06" → "Jun"). */
+const MONTHS_SHORT = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+function monthShort(ym: string): string {
+  const m = Number((ym || "").slice(5, 7));
+  return m >= 1 && m <= 12 ? MONTHS_SHORT[m - 1] : ym;
+}
+
+/** Compact "RM 283K" / "RM 1.2M" for chart headline figures (sen → RM). */
+function kFormat(sen: number): string {
+  const rm = (sen || 0) / 100;
+  if (rm >= 1_000_000) return `RM ${(rm / 1_000_000).toFixed(1)}M`;
+  if (rm >= 1_000) return `RM ${Math.round(rm / 1_000)}K`;
+  return `RM ${Math.round(rm)}`;
 }
 
 /** Local time-of-day greeting (design says "Good morning,"). */
@@ -299,6 +336,134 @@ export default function MobileHome() {
         overdue: (so.hookkaExpectedDD || "").slice(0, 10) < today,
       }));
   }, [orders]);
+
+  // ---- Daily Report (process exceptions to action today) ----
+  // Owner 2026-06-28 design adds a "DAILY REPORT" card. We surface ONLY the
+  // exception that is genuinely derivable from this Home's live data: overdue
+  // sales orders (non-terminal, Expected DD in the past). The design's other
+  // chips (SO-no-DO / PO-not-received / Low-efficiency) need cross-module joins
+  // not fetched here — left out rather than fabricated.
+  // TODO(api): a consolidated /api/dashboard/daily-report would let us show the
+  // full chip set (SO no DO, PO not received, low efficiency) with real counts.
+  const overdueCount = useMemo(() => {
+    const today = todayISO();
+    return orders.filter(
+      (so) =>
+        !TERMINAL_STATUSES.has(so.status) &&
+        !!so.hookkaExpectedDD &&
+        (so.hookkaExpectedDD || "").slice(0, 10) < today,
+    ).length;
+  }, [orders]);
+
+  // ---- Order Pipeline (this month) — Confirmed / Outstanding / Delivered. ----
+  // Real figures off /api/sales-orders/stats (the SAME totals the desktop
+  // Command Center uses): Confirmed = csRevenueSen, Outstanding =
+  // outstandingItemsSen, Delivered = deliveredItemsSen. Bars are scaled to the
+  // largest of the three.
+  const pipeline = useMemo(() => {
+    const confirmed = stats?.csRevenueSen ?? 0;
+    const outstanding = stats?.outstandingItemsSen ?? 0;
+    const delivered = stats?.deliveredItemsSen ?? 0;
+    const max = Math.max(confirmed, outstanding, delivered, 1);
+    return [
+      { label: "Confirmed", sen: confirmed, color: M.taupe },
+      { label: "Outstanding", sen: outstanding, color: M.gold },
+      { label: "Delivered", sen: delivered, color: M_DELTA.up },
+    ].map((p) => ({ ...p, pct: Math.round((p.sen / max) * 100) }));
+  }, [stats]);
+
+  // ---- Command Center analytics (owner 2026-06-28 design v10) ----
+  // Sales trend / Sales by customer / Top seller / Plant load. All four read
+  // from the SAME /api/dashboard/overview payload already fetched for the KPI
+  // rail (no extra request), mirroring the desktop dashboard-b figures. The
+  // heavy bar DOM is gated behind `pdEnabled` (the post-first-paint idle flag)
+  // so the first paint stays the KPI cards only — `analyticsReady` flips true
+  // once the Home is interactive AND the overview has landed.
+  const analyticsReady = pdEnabled && overview != null;
+
+  // Sales trend — last 6 months of confirmed-SO revenue (monthlyRevenue series,
+  // the dashboard's all-time view). Peak label + latest value match desktop.
+  const salesTrend = useMemo(() => {
+    const rev = overview?.monthlyRevenue ?? [];
+    const last6 = rev.slice(-6);
+    if (last6.length === 0) return null;
+    const max = Math.max(...last6.map((m) => m.salesOrderSen), 1);
+    const last = last6[last6.length - 1]?.salesOrderSen ?? 0;
+    return {
+      last,
+      peak: max,
+      bars: last6.map((m) => ({
+        // "YYYY-MM" → short month label ("Jun").
+        label: monthShort(m.month),
+        sen: m.salesOrderSen,
+        pct: Math.round((m.salesOrderSen / max) * 100),
+      })),
+    };
+  }, [overview]);
+
+  // Plant load — per-department backlog (days waiting), bars scaled to the
+  // busiest department. Same source + scaling as the desktop Plant-Load panel
+  // (production.backlogByDept). >= ~capacity-day threshold tints danger.
+  const plantLoad = useMemo(() => {
+    const depts = overview?.production?.backlogByDept ?? [];
+    if (depts.length === 0) return null;
+    const max = Math.max(...depts.map((d) => d.backlogDays), 1);
+    const rows = depts
+      .slice()
+      .sort((a, b) => b.backlogDays - a.backlogDays)
+      .slice(0, 8)
+      .map((d) => {
+        // "Overloaded" = more than a working week of queued work (desktop tints
+        // long queues red). Threshold kept conservative at 5 backlog-days.
+        const over = d.backlogDays >= 5;
+        return {
+          dept: d.dept,
+          days: d.backlogDays,
+          pct: Math.round((d.backlogDays / max) * 100),
+          color: over ? M_ACCENT.danger.fg : d.backlogDays > 2 ? M.gold : M_DELTA.up,
+          over,
+        };
+      });
+    return { rows, overloaded: rows.filter((r) => r.over).length };
+  }, [overview]);
+
+  // Sales by customer — top 5 by total confirmed-SO value this scope
+  // (aovByCustomer.totalSen), bars scaled to the largest customer.
+  const salesByCustomer = useMemo(() => {
+    const list = overview?.aovByCustomer ?? [];
+    if (list.length === 0) return null;
+    const top = list
+      .slice()
+      .sort((a, b) => b.totalSen - a.totalSen)
+      .slice(0, 5);
+    const max = Math.max(...top.map((c) => c.totalSen), 1);
+    return top.map((c) => ({
+      name: c.customerName || "—",
+      sen: c.totalSen,
+      pct: Math.round((c.totalSen / max) * 100),
+    }));
+  }, [overview]);
+
+  // Top seller — best-selling products by units (Sofa sets + Bedframe units),
+  // merged across both categories, top 5 by quantity. Mirrors desktop Top
+  // Sellers (topSellers.SOFA / .BEDFRAME).
+  const topSeller = useMemo(() => {
+    const sofa = overview?.topSellers?.SOFA ?? [];
+    const bed = overview?.topSellers?.BEDFRAME ?? [];
+    const merged = [
+      ...sofa.map((s) => ({ name: s.model, units: s.setsSold })),
+      ...bed.map((b) => ({ name: b.productCode, units: b.qtySold })),
+    ];
+    if (merged.length === 0) return null;
+    const top = merged.sort((a, b) => b.units - a.units).slice(0, 5);
+    const max = Math.max(...top.map((t) => t.units), 1);
+    return top.map((t, i) => ({
+      rank: i + 1,
+      name: t.name || "—",
+      units: t.units,
+      pct: Math.round((t.units / max) * 100),
+    }));
+  }, [overview]);
 
   // ---- Stock alerts (raw materials at or below reorder / low threshold) ----
   const stockAlerts = useMemo(() => {
@@ -486,6 +651,484 @@ export default function MobileHome() {
             onClick={() => navigate("/m/employees")}
           />
         </div>
+
+        {/* ===== Daily Report (exceptions to action today) ===== */}
+        <MobileCard
+          radius={16}
+          onClick={() => navigate("/m/sales")}
+          style={{ padding: "15px 16px", marginTop: 14 }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+            <div
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 11,
+                background: M_ACCENT.gold.bg,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flex: "none",
+              }}
+            >
+              <ClipboardCheck size={20} strokeWidth={1.75} color={M.taupe} />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  letterSpacing: 1,
+                  color: "#A89F8D",
+                }}
+              >
+                DAILY REPORT
+              </div>
+              <div
+                style={{
+                  fontSize: 22,
+                  fontWeight: 800,
+                  color: M.raisin,
+                  letterSpacing: "-0.4px",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {overdueCount}
+              </div>
+            </div>
+            <span style={{ fontSize: 11.5, color: M.taupe, fontWeight: 600 }}>
+              View ›
+            </span>
+          </div>
+          <div style={{ fontSize: 11.5, color: M.muted, marginTop: 3 }}>
+            overdue sales orders to action today
+          </div>
+          {overdueCount > 0 ? (
+            <div
+              style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 11 }}
+            >
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  color: M_ACCENT.danger.fg,
+                  background: M_ACCENT.danger.bg,
+                  border: "1px solid #E8B2A1",
+                  padding: "3px 9px",
+                  borderRadius: 20,
+                }}
+              >
+                Overdue <b>{overdueCount}</b>
+              </span>
+            </div>
+          ) : null}
+        </MobileCard>
+
+        {/* ===== Order Pipeline (this month) ===== */}
+        <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+          <div
+            style={{
+              fontSize: 14,
+              fontWeight: 700,
+              color: M.raisin,
+              marginBottom: 13,
+            }}
+          >
+            Order Pipeline · this month
+          </div>
+          {pipeline.map((p) => (
+            <div key={p.label} style={{ marginBottom: 11 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginBottom: 5,
+                }}
+              >
+                <span style={{ fontSize: 12.5, color: M.body }}>
+                  {p.label} · {p.pct}%
+                </span>
+                <span
+                  style={{
+                    fontSize: 12.5,
+                    fontWeight: 700,
+                    color: M.raisin,
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {formatCurrency(p.sen)}
+                </span>
+              </div>
+              <div
+                style={{
+                  height: 8,
+                  background: "#F0EBE0",
+                  borderRadius: 5,
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    width: `${p.pct}%`,
+                    height: "100%",
+                    background: p.color,
+                    borderRadius: 5,
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+        </MobileCard>
+
+        {/* ===== Command Center analytics (design v10) =====
+            Sales trend · Plant load · Sales by customer · Top seller. The bar
+            DOM is gated behind `analyticsReady` (post-first-paint idle + the
+            overview payload landed) so the first paint stays the KPI rail. */}
+        {analyticsReady && salesTrend ? (
+          <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "flex-end",
+                justifyContent: "space-between",
+                marginBottom: 14,
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: M.raisin }}>
+                  Sales trend
+                </div>
+                <div style={{ fontSize: 11.5, color: M.muted, marginTop: 2 }}>
+                  last 6 months
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div
+                  style={{
+                    fontSize: 17,
+                    fontWeight: 800,
+                    color: M.taupe,
+                    letterSpacing: "-0.3px",
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {kFormat(salesTrend.last)}
+                </div>
+                <div style={{ fontSize: 10.5, color: M.muted }}>
+                  peak {kFormat(salesTrend.peak)}
+                </div>
+              </div>
+            </div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "flex-end",
+                gap: 8,
+                height: 96,
+              }}
+            >
+              {salesTrend.bars.map((b, i) => (
+                <div
+                  key={`${b.label}-${i}`}
+                  style={{
+                    flex: 1,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    height: "100%",
+                    justifyContent: "flex-end",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: "100%",
+                      flex: 1,
+                      display: "flex",
+                      alignItems: "flex-end",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: "100%",
+                        height: `${Math.max(b.pct, 4)}%`,
+                        minHeight: 6,
+                        background: "linear-gradient(180deg,#8B7A4E,#6B5C32)",
+                        borderRadius: "5px 5px 0 0",
+                      }}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: M.muted,
+                      marginTop: 6,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {b.label}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </MobileCard>
+        ) : null}
+
+        {analyticsReady && plantLoad ? (
+          <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: 13,
+              }}
+            >
+              <span style={{ fontSize: 14, fontWeight: 700, color: M.raisin }}>
+                Plant load
+              </span>
+              {plantLoad.overloaded > 0 ? (
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: M_ACCENT.danger.fg,
+                    background: M_ACCENT.danger.bg,
+                    border: "1px solid #E8B2A1",
+                    padding: "2px 9px",
+                    borderRadius: 20,
+                  }}
+                >
+                  {plantLoad.overloaded} overloaded
+                </span>
+              ) : null}
+            </div>
+            {plantLoad.rows.map((p) => (
+              <div
+                key={p.dept}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  marginBottom: 9,
+                }}
+              >
+                <span
+                  style={{
+                    width: 78,
+                    flex: "none",
+                    fontSize: 11.5,
+                    color: M.body,
+                    fontWeight: 600,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {p.dept}
+                </span>
+                <span
+                  style={{
+                    flex: 1,
+                    height: 9,
+                    background: "#F0EBE0",
+                    borderRadius: 5,
+                    overflow: "hidden",
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "block",
+                      width: `${p.pct}%`,
+                      height: "100%",
+                      background: p.color,
+                      borderRadius: 5,
+                    }}
+                  />
+                </span>
+                <span
+                  style={{
+                    width: 42,
+                    flex: "none",
+                    textAlign: "right",
+                    fontSize: 11.5,
+                    fontWeight: 700,
+                    color: p.over ? M_ACCENT.danger.fg : M.ink,
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {p.days.toFixed(1)}d
+                </span>
+              </div>
+            ))}
+          </MobileCard>
+        ) : null}
+
+        {analyticsReady && salesByCustomer ? (
+          <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 700,
+                color: M.raisin,
+                marginBottom: 13,
+              }}
+            >
+              Sales by customer
+            </div>
+            {salesByCustomer.map((c) => (
+              <div key={c.name} style={{ marginBottom: 11 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginBottom: 5,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 12,
+                      color: M.ink,
+                      fontWeight: 600,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      maxWidth: "65%",
+                    }}
+                  >
+                    {c.name}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: M.raisin,
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {kFormat(c.sen)}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    height: 8,
+                    background: "#F0EBE0",
+                    borderRadius: 5,
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${c.pct}%`,
+                      height: "100%",
+                      background: M.taupe,
+                      borderRadius: 5,
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+          </MobileCard>
+        ) : null}
+
+        {analyticsReady && topSeller ? (
+          <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 700,
+                color: M.raisin,
+                marginBottom: 13,
+              }}
+            >
+              Top seller
+            </div>
+            {topSeller.map((t) => (
+              <div
+                key={`${t.rank}-${t.name}`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  marginBottom: 11,
+                }}
+              >
+                <span
+                  style={{
+                    width: 22,
+                    height: 22,
+                    borderRadius: 7,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flex: "none",
+                    fontSize: 11,
+                    fontWeight: 800,
+                    background: t.rank === 1 ? M.taupe : "#F0EAD8",
+                    color: t.rank === 1 ? "#fff" : M.taupe,
+                  }}
+                >
+                  {t.rank}
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      marginBottom: 4,
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 12,
+                        color: M.ink,
+                        fontWeight: 600,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        maxWidth: "62%",
+                      }}
+                    >
+                      {t.name}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 11.5,
+                        fontWeight: 700,
+                        color: M.taupe,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {t.units} units
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      height: 7,
+                      background: "#F0EBE0",
+                      borderRadius: 5,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${t.pct}%`,
+                        height: "100%",
+                        background: "linear-gradient(90deg,#C9A961,#8B7A4E)",
+                        borderRadius: 5,
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </MobileCard>
+        ) : null}
 
         {/* ===== Stock alerts ===== */}
         <SectionHeader

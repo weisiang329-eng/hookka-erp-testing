@@ -213,6 +213,12 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
         </button>
       </div>
 
+      {/* Optional bespoke panel above the list (e.g. Employees → Pending
+          requests on the Attendance tab). */}
+      {config.topPanel ? (
+        <div style={{ padding: "6px 18px 0" }}>{config.topPanel(activeTab)}</div>
+      ) : null}
+
       {/* List — card per document (design source: card-based list). */}
       <div
         style={{

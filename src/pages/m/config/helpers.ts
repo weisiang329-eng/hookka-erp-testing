@@ -116,6 +116,18 @@ export const PAYMENT_STATUS_MAP: StyleMap = {
   INACTIVE: NEUTRAL,
 };
 
+/**
+ * Service-case lifecycle colours (route /api/service-cases status enum:
+ * OPEN / IN_PROGRESS / CLOSED / CANCELLED). Open = work to do (info),
+ * In Progress = active (warning), Closed = done (success), Cancelled = danger.
+ */
+export const SERVICE_CASE_STATUS_MAP: StyleMap = {
+  OPEN: INFO,
+  IN_PROGRESS: WARNING,
+  CLOSED: SUCCESS,
+  CANCELLED: DANGER,
+};
+
 // ---------------------------------------------------------------------------
 // Envelope selectors — most endpoints return { success, data: [...] }.
 // ---------------------------------------------------------------------------

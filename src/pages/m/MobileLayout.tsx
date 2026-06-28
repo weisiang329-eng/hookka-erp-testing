@@ -18,6 +18,7 @@
 // see src/pages/m/config/modules.ts). L2 detail routes (/m/<slug>/:id) land on
 // a ComingSoon detail until Phase 3 supplies the real detail screen.
 // ===========================================================================
+import { type ComponentType } from "react";
 import { Route, Routes } from "react-router-dom";
 import { BottomTabBar } from "./components";
 import { M, M_FONT, M_MAX_WIDTH } from "./theme";
@@ -27,7 +28,14 @@ import { ComingSoon } from "./screens/ComingSoon";
 import { ModuleListScreen } from "./screens/ModuleListScreen";
 import { DocumentDetailScreen } from "./screens/DocumentDetailScreen";
 import { LineItemDetailScreen } from "./screens/LineItemDetailScreen";
+import { WarehouseScreen } from "./screens/WarehouseScreen";
 import { MODULE_CONFIGS } from "./config/modules";
+
+// Modules whose L1 list is a bespoke screen (not the generic ModuleListScreen).
+// Their L2 detail route still uses the config-driven DocumentDetailScreen.
+const CUSTOM_L1: Record<string, ComponentType> = {
+  warehouse: WarehouseScreen,
+};
 
 export default function MobileLayout() {
   return (
@@ -60,11 +68,15 @@ export default function MobileLayout() {
               <DocumentDetailScreen> and /m/<slug>/:id/item/:itemId the minimal
               L3 line-item view. Modules with no per-id endpoint fall back to a
               ComingSoon detail. */}
-          {MODULE_CONFIGS.map((cfg) => (
+          {MODULE_CONFIGS.map((cfg) => {
+            const CustomL1 = CUSTOM_L1[cfg.slug];
+            return (
             <Route key={cfg.slug}>
               <Route
                 path={cfg.slug}
-                element={<ModuleListScreen config={cfg} />}
+                element={
+                  CustomL1 ? <CustomL1 /> : <ModuleListScreen config={cfg} />
+                }
               />
               <Route
                 path={`${cfg.slug}/:id`}
@@ -83,7 +95,8 @@ export default function MobileLayout() {
                 />
               ) : null}
             </Route>
-          ))}
+            );
+          })}
 
           {/* Unknown /m/* → Home. */}
           <Route path="*" element={<MobileHome />} />

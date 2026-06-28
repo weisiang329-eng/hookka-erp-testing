@@ -32,7 +32,10 @@ import {
   FileText,
   ArrowDownToLine,
   ArrowUpFromLine,
+  PackageCheck,
+  Receipt,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, MobileCard, StatusPill, Sheet, FormSheet } from "../components";
 import { M, M_ACCENT } from "../theme";
@@ -47,6 +50,13 @@ import { type FormSpec } from "../config/form-types";
 import { editSpecFor, newMailSpec } from "../config/forms";
 import { mutateJson, refreshOne, refreshList } from "../config/mutate";
 import { str } from "../config/helpers";
+
+/** Leading-glyph map for the "Convert document" action buttons. */
+const EXTRA_ACTION_ICONS: Record<string, LucideIcon> = {
+  "package-check": PackageCheck,
+  receipt: Receipt,
+  "file-text": FileText,
+};
 
 export function DocumentDetailScreen({ config }: { config: ModuleConfig }) {
   const navigate = useNavigate();
@@ -92,6 +102,65 @@ function Inner({
     [data, detail, id],
   );
 
+  // Effective config — a slug hosting multiple doc types (e.g. Procurement
+  // PO/GRN/PI) resolves the right sub-config once the doc is fetched.
+  const eff = useMemo(
+    () => (doc ? (detail.resolve?.(doc, id) ?? detail) : detail),
+    [detail, doc, id],
+  );
+
+  // ---- Derive ALL view data in ONE memo (perf — the L2 freeze fix). ----
+  // PREVIOUSLY every config mapper (lineItems / relatedDocs / subDocLists /
+  // kvSections / body / darkStat …) ran inline on EVERY render. They each
+  // allocate fresh arrays of objects, so each of the many re-renders this
+  // screen sees — useCachedJson seeds cached data then swaps in the network
+  // result; plus toast / sheet / formSpec / ctaBusy state changes — re-ran the
+  // whole heavy derivation tree AND handed every child a new array identity,
+  // forcing the entire subtree to re-render. On a heavy doc (an SO/DO/PI with
+  // dozens of line items, each carrying specs + customization chips) that work
+  // compounds into a visible hang/freeze. Memoising on [eff, doc, data] does it
+  // once per fetch instead of once per keystroke/state-change, and keeps array
+  // identities stable so React can skip untouched rows.
+  //
+  // NOTE: this hook MUST run before the early returns below (rules-of-hooks),
+  // so it guards `!doc` internally and returns empty placeholders in that case.
+  const derived = useMemo(() => {
+    if (!doc) {
+      return {
+        code: "—",
+        title: "—",
+        status: undefined as ReturnType<NonNullable<DetailConfig["status"]>>,
+        lineItems: [] as LineItemVM[],
+        relatedGroups: [] as { group: string; items: RelatedDocVM[] }[],
+        primaryCta: undefined as string | undefined,
+        darkStat: undefined as ReturnType<NonNullable<DetailConfig["darkStat"]>>,
+        bodyParas: [] as string[],
+        kvSections: [] as NonNullable<ReturnType<NonNullable<DetailConfig["kvSections"]>>>,
+        netPay: undefined as ReturnType<NonNullable<DetailConfig["netPay"]>>,
+        subDocLists: [] as NonNullable<ReturnType<NonNullable<DetailConfig["subDocLists"]>>>,
+        extraActions: [] as NonNullable<ReturnType<NonNullable<DetailConfig["extraActions"]>>>,
+      };
+    }
+    return {
+      code: eff.code(doc) || "—",
+      title: eff.title(doc) || "—",
+      status: eff.status?.(doc),
+      lineItems: eff.lineItems?.(doc) ?? [],
+      relatedGroups: groupRelated(eff.relatedDocs?.(doc, data) ?? []),
+      primaryCta: eff.primaryCta?.(doc),
+      extraActions: eff.extraActions?.(doc, id) ?? [],
+      // Optional special sections (rack hero / body / payslip / sub-doc lists)
+      // — each computed only when the config supplies it AND it has content.
+      darkStat: eff.darkStat?.(doc),
+      bodyParas: (eff.body?.(doc) ?? []).filter((p) => p && p.trim()),
+      kvSections: (eff.kvSections?.(doc) ?? []).filter((s) => s.rows.length),
+      netPay: eff.netPay?.(doc),
+      subDocLists: (eff.subDocLists?.(doc, data) ?? []).filter(
+        (l) => l.rows.length || l.emptyText,
+      ),
+    };
+  }, [eff, doc, data, id]);
+
   if (loading && !doc) {
     return (
       <>
@@ -115,39 +184,27 @@ function Inner({
     );
   }
 
-  // Effective config — a slug hosting multiple doc types (e.g. Procurement
-  // PO/GRN/PI) resolves the right sub-config once the doc is fetched.
-  const eff = detail.resolve?.(doc, id) ?? detail;
-
-  const code = eff.code(doc) || "—";
-  const title = eff.title(doc) || "—";
-  const status = eff.status?.(doc);
-  const lineItems = eff.lineItems?.(doc) ?? [];
-  const related = eff.relatedDocs?.(doc, data) ?? [];
-  const primaryCta = eff.primaryCta?.(doc);
-
-  // Optional special sections (design source: rack hero / body / payslip
-  // earnings-deductions-net / sub-doc lists). Each renders only when the config
-  // for this doc type supplies it AND it has content.
-  const darkStat = eff.darkStat?.(doc);
-  const bodyParas = (eff.body?.(doc) ?? []).filter((p) => p && p.trim());
-  const kvSections = (eff.kvSections?.(doc) ?? []).filter((s) => s.rows.length);
-  const netPay = eff.netPay?.(doc);
-  const subDocLists = (eff.subDocLists?.(doc, data) ?? []).filter(
-    (l) => l.rows.length || l.emptyText,
-  );
+  const {
+    code,
+    title,
+    status,
+    lineItems,
+    relatedGroups,
+    primaryCta,
+    darkStat,
+    bodyParas,
+    kvSections,
+    netPay,
+    subDocLists,
+    extraActions,
+  } = derived;
   const showActionBar = !eff.hideActionBar;
 
-  // Group related docs under their `group` heading, preserving first-seen
-  // order. Cheap pure transform — computed inline (placed after the early
-  // returns, so it must NOT be a hook).
-  const relatedGroups = groupRelated(related);
-
   // ---- Edit button → prefilled FormSpec (or null when not editable here). ----
+  // Built once per render and reused by onEdit (avoid a second build on tap).
   const editSpec = editSpecFor(config.slug, doc, id);
   const onEdit = () => {
-    const spec = editSpecFor(config.slug, doc, id);
-    if (spec) setFormSpec(spec);
+    if (editSpec) setFormSpec(editSpec);
     else
       setToast({
         kind: "err",
@@ -205,6 +262,32 @@ function Inner({
         return { ok: true };
       };
       setFormSpec(spec);
+      return;
+    }
+
+    if (config.slug === "servicecases") {
+      // Case lifecycle advance — a clean single endpoint (PUT
+      // /api/service-cases/:id/status). "Start Work" → IN_PROGRESS, "Close
+      // Case" → CLOSED. The backend enforces the allowed transitions, so a
+      // bad jump surfaces its error rather than us guessing.
+      const next = primaryCta === "Start Work" ? "IN_PROGRESS" : "CLOSED";
+      setCtaBusy(true);
+      const res = await mutateJson(
+        `/api/service-cases/${encodeURIComponent(id)}/status`,
+        "PUT",
+        { status: next },
+      );
+      setCtaBusy(false);
+      if (res.ok) {
+        refreshOne(`/api/service-cases/${encodeURIComponent(id)}`);
+        refreshList("/api/service-cases");
+        setToast({
+          kind: "ok",
+          text: next === "CLOSED" ? "Case closed." : "Case marked in progress.",
+        });
+      } else {
+        setToast({ kind: "err", text: res.error || "Status update failed." });
+      }
       return;
     }
 
@@ -406,6 +489,44 @@ function Inner({
             </MobileCard>
           </div>
         ))}
+
+        {/* Convert document — design source v10: PO → GRN / PO → Invoice. The
+            buttons deep-link to the desktop convert flows (real conversions). */}
+        {extraActions.length > 0 ? (
+          <div>
+            <SectionHeading>Convert document</SectionHeading>
+            <div style={{ display: "flex", gap: 8 }}>
+              {extraActions.map((a) => {
+                const Icon = EXTRA_ACTION_ICONS[a.icon ?? "file-text"];
+                return (
+                  <button
+                    key={a.label}
+                    onClick={() => navigate(a.to)}
+                    style={{
+                      flex: 1,
+                      height: 44,
+                      borderRadius: 12,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 7,
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      WebkitTapHighlightColor: "transparent",
+                      border: a.primary ? "none" : `1px solid ${M.hairline}`,
+                      background: a.primary ? M.taupe : M.card,
+                      color: a.primary ? "#fff" : M.ink,
+                    }}
+                  >
+                    <Icon size={16} strokeWidth={1.9} />
+                    {a.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
 
         {/* Net pay — design source: payslip dark net-pay band. */}
         {netPay ? (

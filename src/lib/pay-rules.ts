@@ -210,14 +210,22 @@ export function toAttendanceRules(cfg: PayRulesConfig): {
   startMin: number;
   endMin: number;
   lunchMin: number;
+  lunchStartMin: number;
+  lunchEndMin: number;
   standardWorkMin: number;
   lateGraceMin: number;
   lateBlockMin: number;
 } {
+  // Lunch window: Hookka's break is 12:00–13:00 (owner 2026-06-28). The engine
+  // deducts only the overlap of the worked window with this, so arriving after
+  // 1pm drops no lunch. Window length follows the configured lunchMin.
+  const lunchStartMin = 12 * 60; // 720 (12:00)
   return {
     startMin: cfg.shiftStartMin,
     endMin: cfg.shiftEndMin,
     lunchMin: cfg.lunchMin,
+    lunchStartMin,
+    lunchEndMin: lunchStartMin + cfg.lunchMin,
     standardWorkMin: Math.max(0, cfg.shiftEndMin - cfg.shiftStartMin - cfg.lunchMin),
     lateGraceMin: cfg.lateGraceMin,
     lateBlockMin: cfg.lateBlockMin,

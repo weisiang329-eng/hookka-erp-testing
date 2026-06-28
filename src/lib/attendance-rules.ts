@@ -22,8 +22,12 @@ export type AttendanceRules = {
   startMin: number;
   /** Shift end / OT boundary, minutes since midnight (18:00 = 1080). */
   endMin: number;
-  /** Unpaid lunch, minutes (60). */
+  /** Unpaid lunch, minutes (60) — the full break length / overlap cap. */
   lunchMin: number;
+  /** Lunch window start, minutes since midnight (12:00 = 720). */
+  lunchStartMin: number;
+  /** Lunch window end, minutes since midnight (13:00 = 780). */
+  lunchEndMin: number;
   /** Payable work target, minutes (9 h = 540). */
   standardWorkMin: number;
   /** Lateness forgiven up to this many minutes (10). */
@@ -36,6 +40,8 @@ export const HOOKKA_ATTENDANCE: AttendanceRules = {
   startMin: 8 * 60, // 480
   endMin: 18 * 60, // 1080
   lunchMin: 60,
+  lunchStartMin: 12 * 60, // 720 (12:00)
+  lunchEndMin: 13 * 60, // 780 (13:00)
   standardWorkMin: 9 * 60, // 540
   lateGraceMin: 10,
   lateBlockMin: 15,
@@ -99,12 +105,22 @@ export function computeAttendanceDay(
     : 0;
   const effectiveIn = rules.startMin + penalLateMin;
 
-  // Regular (non-OT) work ends at the shift end; lunch is always unpaid.
+  // Regular (non-OT) work ends at the shift end. Lunch (12:00–13:00) is unpaid
+  // ONLY for the part of it the worker is actually on shift: we deduct the
+  // overlap of [effectiveIn, regularEnd] with the lunch window, capped at the
+  // lunch length. Arrive AFTER 1pm → zero overlap → no lunch deducted (owner
+  // 2026-06-28: they came after lunch, so it's just a half day — don't also
+  // dock the break). Arrive mid-lunch → only the remaining break minutes drop.
   const regularEnd = Math.min(clockOutMin, rules.endMin);
-  const regularWorkMin = Math.max(
-    0,
-    regularEnd - effectiveIn - rules.lunchMin,
+  const lunchOverlap = Math.min(
+    rules.lunchMin,
+    Math.max(
+      0,
+      Math.min(regularEnd, rules.lunchEndMin) -
+        Math.max(effectiveIn, rules.lunchStartMin),
+    ),
   );
+  const regularWorkMin = Math.max(0, regularEnd - effectiveIn - lunchOverlap);
 
   // Overtime past the shift end — clock-out minute floored to a quarter.
   let otMin = 0;

@@ -309,6 +309,15 @@ export type DetailConfig = {
     b?: { key: string; url: (id: string) => string | null };
   };
   /**
+   * Optional file-attachments resource for this doc. When set, the detail
+   * screen fires GET /api/files?resourceType=<type>&resourceId=<id> + renders
+   * a "Files" section with an upload button (POST /api/files multipart). Same
+   * scheme the desktop products catalog + procurement attachments use.
+   * Backend gates the actual upload behind Supabase storage config; the
+   * mobile UI gracefully shows an empty state if /api/files returns 503.
+   */
+  attachmentsResource?: (id: string) => { type: string; id: string };
+  /**
    * Optional "Convert document" action row (owner 2026-06-28 design v10) —
    * rendered as a titled pair of buttons below the field grid. Each action
    * navigates to a route (typically a desktop convert flow deep-linked with the

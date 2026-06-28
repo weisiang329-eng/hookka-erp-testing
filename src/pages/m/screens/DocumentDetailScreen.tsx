@@ -20,7 +20,7 @@
 // ADDITIVE: pure consumer of existing single-GET endpoints + Phase-1/2
 // primitives. No backend, no desktop import, no fabricated data.
 // ===========================================================================
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   Printer,
@@ -97,6 +97,16 @@ function Inner({
   const extraBUrl = id && detail.extraFetches?.b ? detail.extraFetches.b.url(id) : null;
   const { data: extraAData } = useCachedJson<unknown>(extraAUrl);
   const { data: extraBData } = useCachedJson<unknown>(extraBUrl);
+  // Doc-level file attachments — when the config declares an
+  // attachmentsResource, fetch its files list + render an upload section.
+  const attResource = id && detail.attachmentsResource ? detail.attachmentsResource(id) : null;
+  const filesUrl = attResource
+    ? `/api/files?resourceType=${encodeURIComponent(attResource.type)}&resourceId=${encodeURIComponent(attResource.id)}`
+    : null;
+  const { data: filesData } = useCachedJson<{
+    success?: boolean;
+    data?: { id: string; filename: string; contentType?: string; sizeBytes?: number; uploadedAt?: string }[];
+  }>(filesUrl);
   const [sheet, setSheet] = useState<null | "print">(null);
   // Edit / reply forms (FormSheet). When set, the prefilled form is open.
   const [formSpec, setFormSpec] = useState<FormSpec | null>(null);
@@ -107,6 +117,10 @@ function Inner({
   );
   // QR modal open state (dc12: doc detail has a Barcode + Open QR card).
   const [qrOpen, setQrOpen] = useState(false);
+  // File-upload state (when the config declares an attachmentsResource).
+  const [uploading, setUploading] = useState(false);
+  const [uploadErr, setUploadErr] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const doc = useMemo(
     () => (data ? detail.selectDoc(data, id) : null),
@@ -710,6 +724,142 @@ function Inner({
             >
               {netPay.value}
             </span>
+          </div>
+        ) : null}
+
+        {/* Files — doc-level attachments (dc12 design v12 paperclip). Only
+            shown when the config declares an attachmentsResource (SO / DO /
+            PO / GRN / PI / Invoice today). Upload via the hidden file input;
+            the list re-fetches after the POST resolves. Backend gates the
+            actual storage behind Supabase config — a 503 just leaves the
+            list empty + the upload toast surfaces the error message. */}
+        {attResource ? (
+          <div>
+            <SectionHeading>Files</SectionHeading>
+            <MobileCard padded={false} radius={18} style={{ overflow: "hidden" }}>
+              {/* Upload button row */}
+              <div
+                style={{
+                  padding: "12px 16px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  borderBottom: `1px solid ${M.divider}`,
+                }}
+              >
+                <span style={{ fontSize: 13, color: M.body }}>
+                  {(filesData?.data ?? []).length} attached
+                </span>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading}
+                  style={{
+                    fontFamily: "inherit",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: uploading ? M.muted : "#fff",
+                    background: uploading ? M.hairline : M.taupe,
+                    border: "none",
+                    borderRadius: 10,
+                    padding: "8px 14px",
+                    cursor: uploading ? "default" : "pointer",
+                    WebkitTapHighlightColor: "transparent",
+                  }}
+                >
+                  {uploading ? "Uploading…" : "Upload"}
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  // Accept photos + PDFs + common doc types (matches the
+                  // desktop /api/files ALLOWED_MIME set).
+                  accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  capture="environment"
+                  style={{ display: "none" }}
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    if (!f) return;
+                    setUploadErr(null);
+                    setUploading(true);
+                    try {
+                      const fd = new FormData();
+                      fd.append("file", f);
+                      fd.append("resourceType", attResource.type);
+                      fd.append("resourceId", attResource.id);
+                      const resp = await fetch("/api/files", {
+                        method: "POST",
+                        body: fd,
+                        credentials: "include",
+                      });
+                      const json = (await resp.json()) as { success?: boolean; error?: string };
+                      if (!resp.ok || !json.success) {
+                        setUploadErr(json.error || `Upload failed (${resp.status})`);
+                        setToast({ kind: "err", text: json.error || "Upload failed" });
+                      } else {
+                        setToast({ kind: "ok", text: "Uploaded." });
+                        // Refresh the files list cache so the new file appears.
+                        refreshOne(filesUrl as string);
+                      }
+                    } catch (err) {
+                      const msg = (err as Error).message || "Upload failed";
+                      setUploadErr(msg);
+                      setToast({ kind: "err", text: msg });
+                    } finally {
+                      setUploading(false);
+                      if (fileInputRef.current) fileInputRef.current.value = "";
+                    }
+                  }}
+                />
+              </div>
+              {/* Files list */}
+              {(filesData?.data ?? []).length === 0 ? (
+                <div style={{ padding: 16, color: M.muted, fontSize: 13 }}>
+                  {uploadErr || "No files yet."}
+                </div>
+              ) : (
+                (filesData?.data ?? []).map((f, i) => (
+                  <a
+                    key={f.id}
+                    href={`/api/files/${encodeURIComponent(f.id)}/download`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 12,
+                      padding: "12px 16px",
+                      borderTop: i === 0 ? "none" : `1px solid ${M.divider}`,
+                      color: M.raisin,
+                      textDecoration: "none",
+                      WebkitTapHighlightColor: "transparent",
+                    }}
+                  >
+                    <FileText size={18} color={M.taupe} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div
+                        style={{
+                          fontSize: 13.5,
+                          fontWeight: 600,
+                          color: M.raisin,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {f.filename}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: M.muted }}>
+                        {f.sizeBytes ? `${Math.round(f.sizeBytes / 1024)} KB · ` : ""}
+                        {f.uploadedAt
+                          ? new Date(f.uploadedAt).toLocaleDateString()
+                          : ""}
+                      </div>
+                    </div>
+                    <ChevronRight size={17} color="#C4BDB2" />
+                  </a>
+                ))
+              )}
+            </MobileCard>
           </div>
         ) : null}
 

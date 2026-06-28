@@ -384,6 +384,10 @@ const salesDetail: DetailConfig = {
   },
   primaryCta: (d) =>
     str(d, "status") === "DRAFT" ? "Confirm" : "Status",
+  // dc12 design v12: doc detail has file attachments. Resource type "SO"
+  // matches the desktop convention (so files uploaded from mobile show up on
+  // the desktop attachment list, and vice versa).
+  attachmentsResource: (id) => ({ type: "SO", id }),
 };
 
 export const salesConfig: ModuleConfig = {
@@ -495,6 +499,7 @@ const deliveryDetail: DetailConfig = {
     return out;
   },
   primaryCta: (d) => (str(d, "status") === "DELIVERED" ? "Sign" : "Dispatch"),
+  attachmentsResource: (id) => ({ type: "DO", id }),
 };
 
 export const deliveryConfig: ModuleConfig = {
@@ -692,6 +697,7 @@ const invoiceDetail: DetailConfig = {
     return out;
   },
   primaryCta: (d) => (str(d, "status") === "PAID" ? "Status" : "Record Payment"),
+  attachmentsResource: (id) => ({ type: "INVOICE", id }),
 };
 
 export const invoicesConfig: ModuleConfig = {
@@ -856,6 +862,7 @@ const poDetail: DetailConfig = {
     },
   ],
   primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Submit" : "Status"),
+  attachmentsResource: (id) => ({ type: "PO", id }),
 };
 
 const grnDetail: DetailConfig = {
@@ -891,6 +898,7 @@ const grnDetail: DetailConfig = {
     return out;
   },
   primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Post to Stock" : "Status"),
+  attachmentsResource: (id) => ({ type: "GRN", id }),
 };
 
 const piDetail: DetailConfig = {
@@ -938,6 +946,7 @@ const piDetail: DetailConfig = {
     return out;
   },
   primaryCta: (d) => (str(d, "status") === "PAID" ? "Status" : "Record Payment"),
+  attachmentsResource: (id) => ({ type: "PI", id }),
 };
 
 /** Dispatch the procurement detail by id prefix. */

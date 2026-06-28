@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #F0ECE9;
+    color: #1F1D1B;
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+  }
+  ::selection { background: #6B5C32; color: #fff; }
+  lucide-icon { display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+  lucide-icon svg { display: block; }
+  .scrollarea::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollarea::-webkit-scrollbar-track { background: transparent; }
+  .scrollarea::-webkit-scrollbar-thumb { background: rgba(0,0,0,.08); border-radius: 3px; }
+  .scrollarea { scrollbar-width: thin; scrollbar-color: rgba(0,0,0,.08) transparent; }
+  @keyframes hkUp { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 10px 14px; font-size: 13px; }
+  th { color: #6B7280; font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.3px; background: #F7F4F0; border-bottom: 1px solid #E2DDD8; }
+  td { border-bottom: 1px solid #F2EEE6; color: #1F1D1B; }
+  tr:hover td { background: #FAF8F4; cursor: pointer; }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script>
+(function () {
+  var NS = "http://www.w3.org/2000/svg";
+  function toPascal(n){ return (n||"").replace(/(^|-)([a-z0-9])/g,function(_,__,c){return c.toUpperCase();}); }
+  function build(node,size,color,stroke){
+    var svg=document.createElementNS(NS,"svg");
+    svg.setAttribute("xmlns",NS); svg.setAttribute("width",size); svg.setAttribute("height",size);
+    svg.setAttribute("viewBox","0 0 24 24"); svg.setAttribute("fill","none"); svg.setAttribute("stroke",color);
+    svg.setAttribute("stroke-width",stroke); svg.setAttribute("stroke-linecap","round"); svg.setAttribute("stroke-linejoin","round");
+    svg.style.display="block";
+    node.forEach(function(c){ var el=document.createElementNS(NS,c[0]); var a=c[1]||{}; for(var k in a) el.setAttribute(k,a[k]); svg.appendChild(el); });
+    return svg;
+  }
+  function def(){
+    if (customElements.get("lucide-icon")) return;
+    class LI extends HTMLElement {
+      static get observedAttributes(){ return ["name","size","color","stroke"]; }
+      constructor(){ super(); this._root=this.attachShadow({mode:"open"}); }
+      connectedCallback(){ this._r(); }
+      attributeChangedCallback(){ this._r(); }
+      _r(){
+        if(!this._root) return; var L=window.lucide; if(!L) return;
+        var nm=toPascal(this.getAttribute("name")); var node=L[nm]||(L.icons&&L.icons[nm]);
+        if(!node){ this._root.innerHTML=""; return; }
+        var svg=build(node,this.getAttribute("size")||"18",this.getAttribute("color")||"currentColor",this.getAttribute("stroke")||"1.75");
+        this._root.innerHTML=""; this._root.appendChild(svg);
+      }
+    }
+    customElements.define("lucide-icon",LI);
+  }
+  if (window.lucide) def();
+  else { var t=setInterval(function(){ if(window.lucide){ clearInterval(t); def(); document.querySelectorAll("lucide-icon").forEach(function(e){ if(e._r) e._r(); }); } },40); }
+})();
+</script>
+</helmet>
+
+<template id="__bundler_thumbnail">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+    <rect width="100" height="100" fill="#1F1D1B"/>
+    <rect x="30" y="30" width="40" height="40" rx="8" fill="#6B5C32"/>
+    <text x="50" y="65" font-family="system-ui,sans-serif" font-size="34" font-weight="800" fill="#fff" text-anchor="middle">H</text>
+  </svg>
+</template>
+
+<!-- =========================================================================
+     DESKTOP SHELL — sidebar (240px) + topbar (64px) + content
+========================================================================== -->
+<div style="display:flex; min-height:100vh; width:100%;">
+
+  <!-- =====================================================================
+       SIDEBAR — dark raisin (#1F1D1B), 240px wide, sectioned nav
+  ====================================================================== -->
+  <aside style="width:240px; flex:none; background:#1F1D1B; color:#fff; height:100vh; position:sticky; top:0; display:flex; flex-direction:column;">
+
+    <!-- Brand / org -->
+    <div style="display:flex; align-items:center; gap:11px; padding:18px 18px 14px; border-bottom:1px solid rgba(255,255,255,.08);">
+      <div style="width:36px; height:36px; border-radius:10px; background:#6B5C32; display:flex; align-items:center; justify-content:center; flex:none;">
+        <span style="color:#fff; font-weight:800; font-size:17px;">H</span>
+      </div>
+      <div style="flex:1; min-width:0;">
+        <div style="font-size:14px; font-weight:700; color:#fff;">Hookka ERP</div>
+        <div style="font-size:11px; color:#9A8F6B;">HOOKKA INDUSTRIES</div>
+      </div>
+    </div>
+
+    <!-- Scrollable nav -->
+    <div class="scrollarea" style="flex:1; overflow-y:auto; padding:10px 8px 14px;">
+      <sc-for list="{{ navGroups }}" as="g" hint-placeholder-count="11">
+        <div style="margin-bottom:6px;">
+          <div style="font-size:10px; font-weight:700; color:#857A66; text-transform:uppercase; letter-spacing:.6px; padding:11px 12px 5px;">{{ g.label }}</div>
+          <sc-for list="{{ g.items }}" as="it" hint-placeholder-count="5">
+            <div onClick="{{ it.onClick }}" style="{{ it.rowStyle }}">
+              <lucide-icon name="{{ it.icon }}" size="17" color="{{ it.iconColor }}"></lucide-icon>
+              <span style="font-size:13px; font-weight:{{ it.weight }}; color:{{ it.txtColor }};">{{ it.label }}</span>
+              <sc-if value="{{ it.badge }}" hint-placeholder-val=""><span style="margin-left:auto; font-size:10px; font-weight:700; color:#fff; background:#EC4899; padding:1px 7px; border-radius:9999px;">{{ it.badge }}</span></sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </sc-for>
+    </div>
+
+    <!-- User footer -->
+    <div style="display:flex; align-items:center; gap:10px; padding:13px 16px; border-top:1px solid rgba(255,255,255,.08);">
+      <div style="width:34px; height:34px; border-radius:50%; background:#6B5C32; color:#fff; display:flex; align-items:center; justify-content:center; flex:none; font-weight:700; font-size:13px;">WS</div>
+      <div style="flex:1; min-width:0;">
+        <div style="font-size:12.5px; font-weight:700; color:#fff;">Wei Siang</div>
+        <div style="font-size:10.5px; color:#9A8F6B;">SUPER ADMIN</div>
+      </div>
+      <lucide-icon name="chevron-left" size="16" color="#9A8F6B"></lucide-icon>
+    </div>
+  </aside>
+
+  <!-- =====================================================================
+       CONTENT COLUMN
+  ====================================================================== -->
+  <div style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- TOPBAR — sticky white, 64px -->
+    <header style="height:64px; background:#fff; border-bottom:1px solid #E2DDD8; display:flex; align-items:center; padding:0 24px; gap:14px; position:sticky; top:0; z-index:5;">
+      <!-- Breadcrumb -->
+      <div style="flex:1; display:flex; align-items:center; gap:8px; min-width:0;">
+        <lucide-icon name="home" size="15" color="#9CA3AF"></lucide-icon>
+        <sc-for list="{{ breadcrumbs }}" as="b" hint-placeholder-count="3">
+          <lucide-icon name="chevron-right" size="14" color="#C4BDB2"></lucide-icon>
+          <span style="font-size:13px; font-weight:{{ b.weight }}; color:{{ b.color }};">{{ b.label }}</span>
+        </sc-for>
+      </div>
+      <!-- Global search -->
+      <div style="display:flex; align-items:center; gap:8px; background:#F7F4F0; border:1px solid #E2DDD8; border-radius:10px; padding:8px 12px; width:280px; flex:none;">
+        <lucide-icon name="search" size="16" color="#9CA3AF"></lucide-icon>
+        <span style="font-size:13px; color:#9CA3AF;">Search anything…</span>
+        <span style="margin-left:auto; font-size:11px; color:#9CA3AF; background:#EFEAE3; padding:1px 6px; border-radius:6px;">⌘K</span>
+      </div>
+      <!-- Org switcher -->
+      <button style="display:flex; align-items:center; gap:7px; background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:8px 12px; font-family:inherit; cursor:pointer;">
+        <lucide-icon name="building-2" size="15" color="#6B7280"></lucide-icon>
+        <span style="font-size:12.5px; font-weight:700; color:#1F1D1B;">HI</span>
+        <lucide-icon name="chevron-down" size="13" color="#9CA3AF"></lucide-icon>
+      </button>
+      <!-- Notifications -->
+      <button style="position:relative; width:38px; height:38px; border-radius:10px; background:#fff; border:1px solid #E2DDD8; display:flex; align-items:center; justify-content:center; cursor:pointer; flex:none;">
+        <lucide-icon name="bell" size="17" color="#6B7280"></lucide-icon>
+        <span style="position:absolute; top:7px; right:8px; width:8px; height:8px; border-radius:50%; background:#EC4899; border:2px solid #fff;"></span>
+      </button>
+      <!-- User menu -->
+      <button style="display:flex; align-items:center; gap:8px; background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:6px 10px 6px 6px; cursor:pointer; font-family:inherit;">
+        <span style="width:28px; height:28px; border-radius:50%; background:#6B5C32; color:#fff; display:inline-flex; align-items:center; justify-content:center; font-weight:700; font-size:12px;">WS</span>
+        <span style="font-size:12.5px; font-weight:600; color:#1F1D1B;">Wei Siang</span>
+        <lucide-icon name="chevron-down" size="13" color="#9CA3AF"></lucide-icon>
+      </button>
+    </header>
+
+    <!-- MAIN CONTENT AREA — switches by state.view -->
+    <main class="scrollarea" style="flex:1; overflow-y:auto; padding:24px 28px;">
+
+      <!-- ================================================================
+           DASHBOARD / COMMAND CENTER
+      ================================================================ -->
+      <sc-if value="{{ isDashboard }}" hint-placeholder-val="{{ true }}">
+        <div style="animation:hkUp .35s ease both;">
+          <!-- Page header -->
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <div style="font-size:11px; font-weight:700; letter-spacing:.5px; color:#A89F8D; text-transform:uppercase;">Operations Intelligence</div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:4px 0 0; letter-spacing:-.4px;">Command Center</h1>
+            </div>
+            <!-- Period picker -->
+            <div style="display:flex; gap:7px; align-items:center; background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:6px 11px;">
+              <lucide-icon name="calendar" size="14" color="#6B7280"></lucide-icon>
+              <span style="font-size:13px; font-weight:600; color:#1F1D1B;">Jun 2026</span>
+              <lucide-icon name="chevron-down" size="13" color="#9CA3AF"></lucide-icon>
+            </div>
+          </div>
+
+          <!-- KPI rail — 4 tiles -->
+          <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; margin-bottom:18px;">
+            <sc-for list="{{ kpis }}" as="k" hint-placeholder-count="4">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 20px;">
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                  <span style="{{ k.iconWrap }}"><lucide-icon name="{{ k.icon }}" size="18" color="{{ k.iconColor }}"></lucide-icon></span>
+                  <span style="font-size:11.5px; font-weight:600; color:{{ k.deltaColor }};">{{ k.delta }}</span>
+                </div>
+                <div style="font-size:24px; font-weight:800; color:#1F1D1B; margin-top:14px; letter-spacing:-.5px;">{{ k.value }}</div>
+                <div style="font-size:12px; color:#9A9082; margin-top:4px;">{{ k.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <!-- Daily Report -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:16px 20px; margin-bottom:18px;">
+            <div style="display:flex; align-items:center; gap:14px;">
+              <div style="width:42px; height:42px; border-radius:11px; background:#F0EAD8; display:flex; align-items:center; justify-content:center; flex:none;">
+                <lucide-icon name="clipboard-check" size="20" color="#6B5C32"></lucide-icon>
+              </div>
+              <div style="flex:1;">
+                <div style="font-size:11px; font-weight:700; letter-spacing:1px; color:#A89F8D;">DAILY REPORT</div>
+                <div style="font-size:22px; font-weight:800; color:#1F1D1B; letter-spacing:-.4px;">47</div>
+                <div style="font-size:11.5px; color:#9A9082;">process &amp; SOP exceptions to action today</div>
+              </div>
+              <div style="display:flex; flex-wrap:wrap; gap:7px;">
+                <sc-for list="{{ dailyChips }}" as="c" hint-placeholder-count="4">
+                  <span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; color:#9A3A2D; background:#F9E1DA; border:1px solid #E8B2A1; padding:4px 10px; border-radius:20px;">{{ c.label }} <b>{{ c.count }}</b></span>
+                </sc-for>
+              </div>
+              <span style="font-size:12.5px; color:#6B5C32; font-weight:600; cursor:pointer;">View Daily Report ›</span>
+            </div>
+          </div>
+
+          <!-- Analytics grid: 3 cols -->
+          <div style="display:grid; grid-template-columns:2fr 1fr 1fr; gap:14px; align-items:start;">
+            <!-- Revenue chart (big) -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 20px;">
+              <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:14px;">
+                <div>
+                  <div style="font-size:15px; font-weight:700; color:#1F1D1B;">Revenue · Last 12 weeks</div>
+                  <div style="font-size:11.5px; color:#9A9082; margin-top:2px;">Sales Orders · Invoices · Production</div>
+                </div>
+                <div style="display:flex; gap:14px;">
+                  <sc-for list="{{ revLines }}" as="l" hint-placeholder-count="3">
+                    <span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:#6B7280; font-weight:600; cursor:pointer;">
+                      <span style="width:9px; height:9px; border-radius:2px; background:{{ l.color }};"></span>{{ l.label }}
+                    </span>
+                  </sc-for>
+                </div>
+              </div>
+              <svg viewBox="0 0 600 180" width="100%" height="200" preserveAspectRatio="none">
+                <sc-for list="{{ revGrid }}" as="g" hint-placeholder-count="5"><line x1="0" y1="{{ g.y }}" x2="600" y2="{{ g.y }}" stroke="#F2EEE6" stroke-width="1"></line></sc-for>
+                <sc-for list="{{ revLines }}" as="l" hint-placeholder-count="3"><polyline points="{{ l.points }}" fill="none" stroke="{{ l.color }}" stroke-width="2" stroke-dasharray="{{ l.dash }}" stroke-linejoin="round" stroke-linecap="round"></polyline></sc-for>
+              </svg>
+            </div>
+
+            <!-- Plant Load -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 20px;">
+              <div style="text-align:center; font-size:15px; font-weight:700; color:#1F1D1B;">Plant Load</div>
+              <div style="text-align:center; font-size:11.5px; color:#9A9082; margin-top:2px;">backlog vs daily capacity</div>
+              <div style="display:flex; justify-content:center; margin:18px 0 12px;">
+                <div style="position:relative; width:140px; height:140px;">
+                  <div style="width:140px; height:140px; border-radius:50%; transform:rotate(135deg); background:conic-gradient(#9A3A2D 0% 75%, #F0EBE0 75% 100%);"></div>
+                  <div style="position:absolute; top:18px; left:18px; width:104px; height:104px; border-radius:50%; background:#fff;"></div>
+                  <div style="position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;">
+                    <span style="font-size:28px; font-weight:800; color:#1F1D1B; letter-spacing:-1px;">5.2d</span>
+                    <span style="font-size:10px; font-weight:700; letter-spacing:1px; color:#A89F8D;">QUEUE</span>
+                  </div>
+                </div>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <div style="flex:1; background:#FAF8F4; border:1px solid #EFE9DF; border-radius:10px; padding:10px; text-align:center;"><div style="font-size:10px; font-weight:700; color:#A89F8D;">WORKFORCE</div><div style="font-size:18px; font-weight:800; color:#1F1D1B; margin-top:3px;">34</div></div>
+                <div style="flex:1; background:#FAF8F4; border:1px solid #EFE9DF; border-radius:10px; padding:10px; text-align:center;"><div style="font-size:10px; font-weight:700; color:#A89F8D;">LOAD</div><div style="font-size:18px; font-weight:800; color:#9A3A2D; margin-top:3px;">75%</div></div>
+              </div>
+            </div>
+
+            <!-- Department Backlog -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 20px;">
+              <div style="font-size:15px; font-weight:700; color:#1F1D1B;">Department Backlog</div>
+              <div style="font-size:11.5px; color:#9A9082; margin-top:2px;">bottleneck first</div>
+              <div style="margin-top:14px;">
+                <sc-for list="{{ deptBacklog }}" as="d" hint-placeholder-count="8">
+                  <div style="display:flex; align-items:center; gap:10px; margin-bottom:9px;">
+                    <span style="width:80px; flex:none; font-size:11.5px; color:#6B7280; font-weight:600;">{{ d.dept }}</span>
+                    <span style="flex:1; height:10px; background:#F0EBE0; border-radius:5px; overflow:hidden;"><span style="display:block; width:{{ d.pct }}%; height:100%; background:{{ d.color }}; border-radius:4px;"></span></span>
+                    <span style="width:40px; flex:none; text-align:right; font-size:11.5px; font-weight:800; color:{{ d.color }};">{{ d.days }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <!-- Sales by Customer -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 20px;">
+              <div style="font-size:15px; font-weight:700; color:#1F1D1B;">Sales by Customer</div>
+              <div style="font-size:11.5px; color:#9A9082; margin-top:2px;">top 5 + share %</div>
+              <div style="display:flex; gap:6px; margin-top:11px;">
+                <span style="padding:5px 12px; border-radius:8px; font-size:12px; font-weight:700; background:#5E5129; color:#fff;">All</span>
+                <span style="padding:5px 12px; border-radius:8px; font-size:12px; font-weight:700; background:#fff; border:1px solid #E2DDD8; color:#6B7280;">Bedframe</span>
+                <span style="padding:5px 12px; border-radius:8px; font-size:12px; font-weight:700; background:#fff; border:1px solid #E2DDD8; color:#6B7280;">Sofa</span>
+              </div>
+              <div style="display:flex; align-items:center; gap:14px; margin:15px 0 6px;">
+                <div style="position:relative; width:104px; height:104px; flex:none;">
+                  <div style="width:104px; height:104px; border-radius:50%; background:conic-gradient(#16425B 0% 33%, #1F6E8C 33% 56%, #2E8FA3 56% 72%, #4FA8B8 72% 86%, #7FB9C6 86% 100%);"></div>
+                  <div style="position:absolute; top:22px; left:22px; width:60px; height:60px; border-radius:50%; background:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center;">
+                    <span style="font-size:9px; color:#A89F8D; font-weight:700;">TOP 3</span>
+                    <span style="font-size:16px; font-weight:800; color:#1F1D1B;">72%</span>
+                  </div>
+                </div>
+                <div style="flex:1;"><div style="font-size:11px; color:#9A9082;">Total</div><div style="font-size:18px; font-weight:800; color:#1F1D1B;">RM 283K</div></div>
+              </div>
+            </div>
+
+            <!-- Top Sellers -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 20px;">
+              <div style="font-size:15px; font-weight:700; color:#1F1D1B;">Top Sellers</div>
+              <div style="font-size:11.5px; color:#9A9082; margin-top:2px;">bedframe units · sofa sets</div>
+              <div style="font-size:10.5px; font-weight:700; color:#A89F8D; letter-spacing:.5px; margin:13px 0 2px;">BEDFRAME</div>
+              <sc-for list="{{ topBed }}" as="t" hint-placeholder-count="3">
+                <div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid #F2EEE6;">
+                  <span style="font-size:12.5px; font-weight:700; color:#1F1D1B;">{{ t.code }}</span>
+                  <span style="font-size:11px; color:#A89F8D;">{{ t.qty }}</span>
+                  <span style="flex:1;"></span>
+                  <span style="font-size:12.5px; font-weight:800; color:#1F1D1B;">{{ t.amt }}</span>
+                </div>
+              </sc-for>
+            </div>
+
+            <!-- Purchasing -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 20px;">
+              <div style="font-size:15px; font-weight:700; color:#1F1D1B;">Purchasing</div>
+              <div style="font-size:11.5px; color:#9A9082; margin-top:2px;">open POs · spend</div>
+              <div style="display:flex; gap:10px; margin:13px 0;">
+                <div style="flex:1; background:#FAF8F4; border:1px solid #EFE9DF; border-radius:10px; padding:11px;"><div style="font-size:10px; font-weight:700; color:#A89F8D;">OPEN POS</div><div style="font-size:18px; font-weight:800; color:#1F1D1B; margin-top:3px;">23</div></div>
+                <div style="flex:1; background:#FAF8F4; border:1px solid #EFE9DF; border-radius:10px; padding:11px;"><div style="font-size:10px; font-weight:700; color:#A89F8D;">SPEND</div><div style="font-size:15.5px; font-weight:800; color:#1F1D1B; margin-top:3px;">RM 87K</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           SALES ORDERS — LIST
+      ================================================================ -->
+      <sc-if value="{{ isSalesList }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <!-- Page header -->
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <div>
+              <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0; letter-spacing:-.4px;">Sales Orders</h1>
+              <div style="font-size:12.5px; color:#9A9082; margin-top:3px;">Service Orders included · Org-scoped</div>
+            </div>
+            <div style="display:flex; gap:10px;">
+              <button style="display:flex; align-items:center; gap:7px; background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:9px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630; cursor:pointer;"><lucide-icon name="file-search" size="15" color="#6B5C32"></lucide-icon>Scan PO</button>
+              <button style="display:flex; align-items:center; gap:7px; background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff; cursor:pointer;"><lucide-icon name="plus" size="15" color="#fff"></lucide-icon>Create New SO</button>
+            </div>
+          </div>
+
+          <!-- KPI row -->
+          <div style="display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:18px;">
+            <sc-for list="{{ salesKpis }}" as="k" hint-placeholder-count="5">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;">
+                <div style="font-size:11px; font-weight:700; color:#A89F8D; letter-spacing:.4px;">{{ k.label }}</div>
+                <div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:5px; letter-spacing:-.3px;">{{ k.value }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <!-- Filters strip -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:13px 16px; margin-bottom:14px; display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
+            <div style="display:flex; align-items:center; gap:7px; background:#F7F4F0; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; min-width:220px;"><lucide-icon name="search" size="15" color="#9CA3AF"></lucide-icon><span style="font-size:13px; color:#9CA3AF;">Search SO / Customer / PO…</span></div>
+            <select style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; font-size:13px; color:#1F1D1B; font-family:inherit;"><option>All Statuses</option></select>
+            <select style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; font-size:13px; color:#1F1D1B; font-family:inherit;"><option>All Customers</option></select>
+            <input type="date" style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; font-size:13px; color:#1F1D1B; font-family:inherit;" />
+            <input type="date" style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; font-size:13px; color:#1F1D1B; font-family:inherit;" />
+            <div style="margin-left:auto; display:flex; gap:7px;">
+              <span style="padding:6px 11px; border:1px solid #E2DDD8; border-radius:8px; font-size:12px; font-weight:600; color:#4D4630; background:#fff; cursor:pointer;">This Month</span>
+              <span style="padding:6px 11px; border:1px solid #E2DDD8; border-radius:8px; font-size:12px; font-weight:600; color:#4D4630; background:#fff; cursor:pointer;">Sofa</span>
+              <span style="padding:6px 11px; border:1px solid #E2DDD8; border-radius:8px; font-size:12px; font-weight:600; color:#4D4630; background:#fff; cursor:pointer;">Bedframe</span>
+            </div>
+          </div>
+
+          <!-- Data grid -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead>
+                <tr><th>Company SO</th><th>Customer PO</th><th>Customer</th><th>State</th><th>Order Date</th><th>Expected DD</th><th>Items</th><th style="text-align:right;">Qty</th><th>Outstanding</th><th style="text-align:right;">Total</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                <sc-for list="{{ salesRows }}" as="r" hint-placeholder-count="10">
+                  <tr>
+                    <td style="font-weight:700; color:#6B5C32;">{{ r.companySO }}</td>
+                    <td>{{ r.customerPO }}</td>
+                    <td>{{ r.customer }}</td>
+                    <td>{{ r.state }}</td>
+                    <td>{{ r.orderDate }}</td>
+                    <td>{{ r.expectedDD }}</td>
+                    <td>{{ r.items }}</td>
+                    <td style="text-align:right; font-weight:600;">{{ r.qty }}</td>
+                    <td><span style="font-size:11.5px; color:#9A9082;">{{ r.outstanding }}</span></td>
+                    <td style="text-align:right; font-weight:700;">{{ r.total }}</td>
+                    <td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           SALES ORDER — DETAIL
+      ================================================================ -->
+      <sc-if value="{{ isSalesDetail }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both; display:grid; grid-template-columns:2fr 1fr; gap:16px;">
+          <!-- Left col -->
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <!-- Header -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:20px 22px;">
+              <div style="display:flex; align-items:flex-start; justify-content:space-between;">
+                <div>
+                  <div style="font-size:12px; font-weight:700; color:#6B5C32;">SO-2606-0142</div>
+                  <h1 style="font-size:22px; font-weight:800; color:#1F1D1B; margin:6px 0 0; letter-spacing:-.3px;">The Heritage Hotel</h1>
+                  <div style="font-size:13px; color:#9A9082; margin-top:4px;">Kuala Lumpur · Customer PO #PO-008711</div>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                  <span style="display:inline-flex; padding:5px 11px; border-radius:9999px; font-size:11.5px; font-weight:700; background:#FFF4D6; color:#7A5A00; border:1px solid #F4DCA1;">IN PRODUCTION</span>
+                  <button style="display:flex; align-items:center; gap:5px; background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; font-family:inherit; font-size:12.5px; font-weight:600; color:#4D4630; cursor:pointer;"><lucide-icon name="file-text" size="14"></lucide-icon>PDF</button>
+                  <button style="display:flex; align-items:center; gap:5px; background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; font-family:inherit; font-size:12.5px; font-weight:600; color:#4D4630; cursor:pointer;"><lucide-icon name="copy" size="14"></lucide-icon>Clone</button>
+                  <button style="display:flex; align-items:center; gap:5px; background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; font-family:inherit; font-size:12.5px; font-weight:600; color:#4D4630; cursor:pointer;"><lucide-icon name="pencil" size="14"></lucide-icon>Edit</button>
+                </div>
+              </div>
+              <!-- Status flow -->
+              <div style="display:flex; align-items:center; gap:7px; margin-top:18px;">
+                <sc-for list="{{ statusFlow }}" as="s" hint-placeholder-count="5">
+                  <div style="display:flex; align-items:center; gap:7px; flex:1;">
+                    <div style="{{ s.dotStyle }}">
+                      <sc-if value="{{ s.done }}" hint-placeholder-val=""><lucide-icon name="check" size="12" color="#fff"></lucide-icon></sc-if>
+                    </div>
+                    <span style="font-size:12px; font-weight:{{ s.weight }}; color:{{ s.color }}; flex:1;">{{ s.label }}</span>
+                    <sc-if value="{{ s.connector }}" hint-placeholder-val=""><span style="flex:1; height:2px; background:{{ s.connColor }};"></span></sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <!-- Order Progress (linked POs + DOs) -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 22px;">
+              <h3 style="margin:0 0 14px; font-size:15px; font-weight:700; color:#1F1D1B;">Order Progress</h3>
+              <div style="font-size:11px; font-weight:700; letter-spacing:.4px; color:#A89F8D; margin-bottom:8px;">PRODUCTION ORDERS · 3</div>
+              <table>
+                <thead><tr><th>PO No</th><th>Product</th><th>Qty</th><th>Department</th><th>Status</th><th>Progress</th></tr></thead>
+                <tbody>
+                  <sc-for list="{{ linkedPOs }}" as="p" hint-placeholder-count="3">
+                    <tr><td style="font-weight:700; color:#6B5C32;">{{ p.poNo }}</td><td>{{ p.product }}</td><td>{{ p.qty }}</td><td>{{ p.dept }}</td><td><span style="{{ p.badgeStyle }}">{{ p.status }}</span></td><td><div style="display:flex; align-items:center; gap:8px;"><span style="flex:1; height:6px; background:#F0EBE0; border-radius:3px;"><span style="display:block; width:{{ p.pct }}%; height:100%; background:#6B5C32; border-radius:3px;"></span></span><span style="font-size:11.5px; font-weight:700; color:#4D4630;">{{ p.pct }}%</span></div></td></tr>
+                  </sc-for>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Line items -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 22px;">
+              <h3 style="margin:0 0 14px; font-size:15px; font-weight:700; color:#1F1D1B;">Line Items · 4</h3>
+              <table>
+                <thead><tr><th>Code</th><th>Product</th><th>Size</th><th>Fabric</th><th style="text-align:right;">Qty</th><th>Specs</th><th style="text-align:right;">Unit</th><th style="text-align:right;">Total</th></tr></thead>
+                <tbody>
+                  <sc-for list="{{ lineItems }}" as="i" hint-placeholder-count="4">
+                    <tr><td style="font-weight:700; color:#6B5C32;">{{ i.code }}</td><td>{{ i.name }}</td><td>{{ i.size }}</td><td>{{ i.fabric }}</td><td style="text-align:right;">{{ i.qty }}</td><td><span style="font-size:11px; color:#6B7280;">{{ i.specs }}</span></td><td style="text-align:right;">{{ i.unit }}</td><td style="text-align:right; font-weight:700;">{{ i.total }}</td></tr>
+                  </sc-for>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Right col -->
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <!-- Summary -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 22px;">
+              <h3 style="margin:0 0 14px; font-size:15px; font-weight:700; color:#1F1D1B;">Order Summary</h3>
+              <sc-for list="{{ summary }}" as="s" hint-placeholder-count="7">
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #F2EEE6; font-size:13px;">
+                  <span style="color:#6B7280;">{{ s.label }}</span>
+                  <span style="font-weight:600; color:#1F1D1B;">{{ s.value }}</span>
+                </div>
+              </sc-for>
+              <div style="display:flex; justify-content:space-between; padding:13px 0 0; font-size:15px; font-weight:800; color:#1F1D1B;">
+                <span>Total</span><span>RM 47,820</span>
+              </div>
+            </div>
+
+            <!-- Related docs -->
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:14px; padding:18px 22px;">
+              <h3 style="margin:0 0 12px; font-size:15px; font-weight:700; color:#1F1D1B;">Related Documents</h3>
+              <sc-for list="{{ relatedDocs }}" as="d" hint-placeholder-count="3">
+                <div style="display:flex; align-items:center; gap:10px; padding:9px 0; border-top:1px solid #F2EEE6; cursor:pointer;">
+                  <lucide-icon name="{{ d.icon }}" size="16" color="#6B5C32"></lucide-icon>
+                  <div style="flex:1;"><div style="font-size:12.5px; font-weight:600; color:#1F1D1B;">{{ d.code }}</div><div style="font-size:11px; color:#9A9082;">{{ d.label }}</div></div>
+                  <span style="{{ d.badgeStyle }}">{{ d.status }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           PRODUCTION — OVERVIEW MATRIX
+      ================================================================ -->
+      <sc-if value="{{ isProduction }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0; letter-spacing:-.4px;">Production</h1>
+            <div style="display:flex; gap:8px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:8px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Bulk PIC</button>
+              <button style="background:#6B5C32; border:none; border-radius:10px; padding:8px 14px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Apply Due Date</button>
+            </div>
+          </div>
+
+          <!-- Dept tabs -->
+          <div class="scrollarea" style="display:flex; gap:7px; overflow-x:auto; padding-bottom:14px;">
+            <sc-for list="{{ prodTabs }}" as="t" hint-placeholder-count="9">
+              <span style="{{ t.style }}">{{ t.label }} <span style="font-size:10.5px; font-weight:700; padding:1px 6px; border-radius:9999px; background:{{ t.countBg }}; color:{{ t.countColor }}; margin-left:5px;">{{ t.count }}</span></span>
+            </sc-for>
+          </div>
+
+          <!-- Matrix grid -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <div class="scrollarea" style="overflow-x:auto;">
+              <table style="min-width:1400px;">
+                <thead>
+                  <tr><th>SO ID</th><th>Product</th><th>Customer</th><th>Customer PO</th><th>Qty</th><th>Cust. DD</th><th>Our DD</th>
+                  <th>Fab Cut</th><th>Fab Sew</th><th>Wood Cut</th><th>Foam</th><th>Framing</th><th>Webbing</th><th>Upholstery</th><th>Packing</th></tr>
+                </thead>
+                <tbody>
+                  <sc-for list="{{ matrixRows }}" as="r" hint-placeholder-count="8">
+                    <tr>
+                      <td style="font-weight:700; color:#6B5C32;">{{ r.so }}</td>
+                      <td>{{ r.product }}</td>
+                      <td>{{ r.customer }}</td>
+                      <td>{{ r.po }}</td>
+                      <td style="font-weight:700;">{{ r.qty }}</td>
+                      <td>{{ r.custDD }}</td>
+                      <td>{{ r.ourDD }}</td>
+                      <sc-for list="{{ r.depts }}" as="d" hint-placeholder-count="8"><td><span style="{{ d.cellStyle }}">{{ d.label }}</span></td></sc-for>
+                    </tr>
+                  </sc-for>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           INVENTORY (3 tabs: FG / WIP / RM)
+      ================================================================ -->
+      <sc-if value="{{ isInventory }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="margin-bottom:16px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0; letter-spacing:-.4px;">Inventory</h1>
+            <div style="font-size:13px; color:#9A9082; margin-top:4px;">Finished products, work-in-progress &amp; raw materials</div>
+          </div>
+
+          <!-- KPI row -->
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:18px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">TOTAL SKUS</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:4px;">347</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">AVAILABLE · RESERVED</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:4px;">2,148 · 312</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">BEDFRAME SKUS</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:4px;">198</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px 16px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">SOFA SKUS</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:4px;">122</div></div>
+          </div>
+
+          <!-- Tabs -->
+          <div style="display:flex; gap:6px; border-bottom:1px solid #E2DDD8; margin-bottom:14px;">
+            <span style="padding:11px 16px; font-size:13px; font-weight:700; color:#1F1D1B; border-bottom:2px solid #6B5C32; cursor:pointer;">Finished Products</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">WIP</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Raw Materials</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Fabrics</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Stock Value</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280; cursor:pointer;">Adjustments</span>
+          </div>
+
+          <!-- Filter bar -->
+          <div style="display:flex; gap:10px; margin-bottom:12px;">
+            <div style="display:flex; align-items:center; gap:7px; background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 11px; flex:1; max-width:300px;"><lucide-icon name="search" size="15" color="#9CA3AF"></lucide-icon><span style="font-size:13px; color:#9CA3AF;">Search code or name…</span></div>
+            <span style="padding:7px 12px; border-radius:8px; font-size:12.5px; font-weight:700; background:#6B5C32; color:#fff; cursor:pointer;">All</span>
+            <span style="padding:7px 12px; border-radius:8px; font-size:12.5px; font-weight:600; background:#fff; border:1px solid #E2DDD8; color:#6B7280; cursor:pointer;">Bedframe</span>
+            <span style="padding:7px 12px; border-radius:8px; font-size:12.5px; font-weight:600; background:#fff; border:1px solid #E2DDD8; color:#6B7280; cursor:pointer;">Sofa</span>
+            <span style="padding:7px 12px; border-radius:8px; font-size:12.5px; font-weight:600; background:#fff; border:1px solid #E2DDD8; color:#6B7280; cursor:pointer;">Accessory</span>
+            <span style="margin-left:auto;"></span>
+            <button style="background:#fff; border:1px solid #E2DDD8; border-radius:8px; padding:7px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Batch Import</button>
+            <button style="background:#6B5C32; border:none; border-radius:8px; padding:7px 14px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Add FG</button>
+          </div>
+
+          <!-- Table -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Code</th><th>Name</th><th>Category</th><th>Size</th><th style="text-align:right;">Available</th><th style="text-align:right;">Reserved</th><th style="text-align:right;">Unit Cost</th><th style="text-align:right;">Stock Value</th><th>Age</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ invRows }}" as="r" hint-placeholder-count="10">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.code }}</td><td>{{ r.name }}</td><td><span style="{{ r.catStyle }}">{{ r.cat }}</span></td><td>{{ r.size }}</td><td style="text-align:right; font-weight:700;">{{ r.avail }}</td><td style="text-align:right;">{{ r.reserved }}</td><td style="text-align:right;">{{ r.unitCost }}</td><td style="text-align:right; font-weight:700;">{{ r.value }}</td><td>{{ r.age }}</td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           CUSTOMERS
+      ================================================================ -->
+      <sc-if value="{{ isCustomers }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Customers</h1>
+            <button style="background:#6B5C32; border:none; border-radius:10px; padding:9px 16px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ Add Customer</button>
+          </div>
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Code</th><th>Name</th><th>State</th><th>Contact</th><th>Phone</th><th style="text-align:right;">Outstanding</th><th>Hubs</th><th>Status</th></tr></thead>
+              <tbody>
+                <sc-for list="{{ custRows }}" as="r" hint-placeholder-count="8">
+                  <tr><td style="font-weight:700; color:#6B5C32;">{{ r.code }}</td><td>{{ r.name }}</td><td>{{ r.state }}</td><td>{{ r.contact }}</td><td>{{ r.phone }}</td><td style="text-align:right; font-weight:700;">{{ r.outstanding }}</td><td>{{ r.hubs }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           WAREHOUSE — Rack Overview
+      ================================================================ -->
+      <sc-if value="{{ isWarehouse }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Warehouse</h1>
+            <div style="display:flex; gap:8px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:8px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Item QR</button>
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:8px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">All Rack QR</button>
+              <button style="background:#6B5C32; border:none; border-radius:10px; padding:8px 14px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">Stock In</button>
+            </div>
+          </div>
+
+          <!-- Tabs -->
+          <div style="display:flex; gap:6px; border-bottom:1px solid #E2DDD8; margin-bottom:14px;">
+            <span style="padding:11px 16px; font-size:13px; font-weight:700; color:#1F1D1B; border-bottom:2px solid #6B5C32;">Rack Overview</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280;">Stock In / Out</span>
+            <span style="padding:11px 16px; font-size:13px; font-weight:600; color:#6B7280;">Movement History</span>
+          </div>
+
+          <!-- Summary -->
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:18px;">
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">TOTAL RACKS</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:3px;">20</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">OCCUPIED</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:3px;">14</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">EMPTY</div><div style="font-size:20px; font-weight:800; color:#4F7C3A; margin-top:3px;">6</div></div>
+            <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px;"><div style="font-size:11px; font-weight:700; color:#A89F8D;">OCCUPANCY</div><div style="font-size:20px; font-weight:800; color:#1F1D1B; margin-top:3px;">70%</div></div>
+          </div>
+
+          <!-- Racks grid -->
+          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:12px;">
+            <sc-for list="{{ racks }}" as="r" hint-placeholder-count="20">
+              <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; padding:14px; cursor:pointer;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                  <span style="font-size:14px; font-weight:800; color:#1F1D1B;">{{ r.code }}</span>
+                  <span style="{{ r.statusStyle }}">{{ r.status }}</span>
+                </div>
+                <div style="font-size:11.5px; color:#9A9082;">{{ r.contents }}</div>
+                <div style="height:6px; background:#F0EBE0; border-radius:3px; margin-top:10px; overflow:hidden;"><span style="display:block; width:{{ r.fill }}%; height:100%; background:{{ r.fillColor }};"></span></div>
+                <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:10.5px; color:#9A9082;"><span>{{ r.items }} items</span><span>{{ r.slots }}</span></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           EMPLOYEES — Master grid
+      ================================================================ -->
+      <sc-if value="{{ isEmployees }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">Employees</h1>
+            <div style="display:flex; gap:8px;">
+              <button style="background:#fff; border:1px solid #E2DDD8; border-radius:10px; padding:8px 14px; font-family:inherit; font-size:13px; font-weight:600; color:#4D4630;">Generate PINs</button>
+              <button style="background:#6B5C32; border:none; border-radius:10px; padding:8px 14px; font-family:inherit; font-size:13px; font-weight:700; color:#fff;">+ Add Employee</button>
+            </div>
+          </div>
+
+          <!-- 9 tabs -->
+          <div class="scrollarea" style="display:flex; gap:6px; border-bottom:1px solid #E2DDD8; margin-bottom:14px; overflow-x:auto;">
+            <sc-for list="{{ empTabs }}" as="t" hint-placeholder-count="9">
+              <span style="{{ t.style }}">{{ t.label }}</span>
+            </sc-for>
+          </div>
+
+          <!-- Employee Master table -->
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <div class="scrollarea" style="overflow-x:auto;">
+              <table style="min-width:1300px;">
+                <thead><tr><th>Emp No</th><th>Name</th><th>Department</th><th>Position</th><th>Phone</th><th style="text-align:right;">Basic Salary</th><th>Hrs/Day</th><th>OT ×</th><th>Statutory</th><th>Join Date</th><th>Status</th></tr></thead>
+                <tbody>
+                  <sc-for list="{{ empRows }}" as="r" hint-placeholder-count="10">
+                    <tr><td style="font-weight:700; color:#6B5C32;">{{ r.empNo }}</td><td>{{ r.name }}</td><td>{{ r.dept }}</td><td>{{ r.position }}</td><td>{{ r.phone }}</td><td style="text-align:right; font-weight:700;">{{ r.salary }}</td><td>{{ r.hrs }}h</td><td>{{ r.ot }}×</td><td><span style="font-size:11px; color:#6B7280;">{{ r.statutory }}</span></td><td>{{ r.joinDate }}</td><td><span style="{{ r.badgeStyle }}">{{ r.status }}</span></td></tr>
+                  </sc-for>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ================================================================
+           SETTINGS — User Management
+      ================================================================ -->
+      <sc-if value="{{ isSettings }}" hint-placeholder-val="">
+        <div style="animation:hkUp .35s ease both;">
+          <div style="margin-bottom:18px;">
+            <h1 style="font-size:24px; font-weight:800; color:#1F1D1B; margin:0;">User Management</h1>
+            <div style="font-size:13px; color:#9A9082; margin-top:4px;">Office user accounts &amp; roles · SUPER_ADMIN only</div>
+          </div>
+
+          <div style="background:#fff; border:1px solid #E7E0D4; border-radius:12px; overflow:hidden;">
+            <table>
+              <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Department</th><th>Position</th><th>Last Login</th><th>Status</th><th></th></tr></thead>
+              <tbody>
+                <sc-for list="{{ users }}" as="u" hint-placeholder-count="6">
+                  <tr><td style="font-weight:600;">{{ u.name }}</td><td>{{ u.email }}</td><td><span style="{{ u.roleStyle }}">{{ u.role }}</span></td><td>{{ u.dept }}</td><td>{{ u.position }}</td><td>{{ u.lastLogin }}</td><td><span style="{{ u.badgeStyle }}">{{ u.status }}</span></td><td><lucide-icon name="more-horizontal" size="16" color="#9CA3AF"></lucide-icon></td></tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </sc-if>
+
+    </main>
+  </div>
+</div>
+
+<!-- =========================================================================
+     SCENE SWITCHER — floating panel (designer-only, removable for production)
+========================================================================== -->
+<div style="position:fixed; bottom:18px; right:18px; background:#1F1D1B; color:#fff; border-radius:14px; padding:10px 12px; display:flex; gap:6px; box-shadow:0 8px 28px rgba(0,0,0,.25); z-index:50; font-size:11.5px; font-weight:700;">
+  <span style="color:#9A8F6B; align-self:center; padding-right:4px;">SCENE:</span>
+  <sc-for list="{{ scenes }}" as="s" hint-placeholder-count="7">
+    <button onClick="{{ s.onClick }}" style="{{ s.style }}">{{ s.label }}</button>
+  </sc-for>
+</div>
+
+</x-dc>
+
+<script>
+class App {
+  constructor() {
+    this.state = { view: "dashboard" };
+  }
+  setView(v) { this.state.view = v; this._update(); }
+  _update() { if (this._cb) this._cb(this.render()); }
+  mount(cb) { this._cb = cb; this._cb(this.render()); }
+  render() {
+    const v = this.state.view;
+    // ---- Sidebar nav groups (mirrors src/components/layout/sidebar.tsx) ----
+    const navGroups = [
+      ["OVERVIEW", [["dashboard", "Dashboard", "layout-dashboard", "3"], ["report", "Hookka Report", "clipboard-check"], ["notifications", "Notifications", "bell", "7"], ["announcements", "Announcements", "megaphone"], ["mailcenter", "Mail Center", "mail"]]],
+      ["SALES & CUSTOMERS", [["sales", "Sales Orders", "shopping-cart"], ["delivery", "Delivery Orders", "truck"], ["invoices", "Invoices", "receipt"], ["consignment", "Consignment", "package"], ["customers", "Customers", "users"]]],
+      ["PRODUCTION", [["production", "Production", "factory"], ["planning", "Planning", "calendar"], ["folders", "Folders", "folder-open"]]],
+      ["PRODUCTS & BOM", [["products", "Products", "boxes"], ["cnc", "CNC Templates", "scissors"], ["bom", "BOM", "layers"], ["combos", "Sofa Combos", "tag"]]],
+      ["WAREHOUSE", [["inventory", "Inventory", "package"], ["fabrics", "Fabrics", "shirt"], ["stockvalue", "Stock Value", "calculator"], ["warehouse", "Warehouse", "warehouse"]]],
+      ["PROCUREMENT", [["po", "Purchase Order", "shopping-cart"], ["grn", "Goods Receipt", "clipboard-list"], ["pi", "Purchase Invoice", "credit-card"], ["suppliers", "Suppliers", "building-2"]]],
+      ["QUALITY & SERVICE", [["qc", "QC / Quality", "shield-check"], ["servicecases", "Service Cases", "wrench"]]],
+      ["FINANCE", [["monthly", "Monthly Report", "bar-chart-3"], ["daily", "Daily Operation", "wallet"], ["debtor", "Debtors", "users"], ["creditor", "Creditors", "building-2"], ["einvoice", "e-Invoice", "file-check"]]],
+      ["HR & OPERATIONS", [["employees", "Employees", "users"]]],
+      ["SYSTEM", [["settings", "User Management", "settings"]]],
+    ];
+    const activeKey = ({"dashboard":"dashboard","sales":"sales","sales-detail":"sales","production":"production","inventory":"inventory","customers":"customers","warehouse":"warehouse","employees":"employees","settings":"settings"})[v] || "";
+    const sideNav = navGroups.map(g => ({
+      label: g[0],
+      items: g[1].map(it => {
+        const act = it[0] === activeKey;
+        return {
+          label: it[1], icon: it[2], badge: it[3] || "",
+          rowStyle: `display:flex; align-items:center; gap:11px; padding:7px 11px; border-radius:8px; cursor:pointer; margin:0 4px 1px; ${act ? "background:rgba(107,92,50,.22); border-left:3px solid #6B5C32; padding-left:8px;" : ""}`,
+          iconColor: act ? "#fff" : "#9CA3AF",
+          txtColor: act ? "#fff" : "#C7C0AF",
+          weight: act ? "700" : "500",
+          onClick: () => this.setView(it[0]),
+        };
+      })
+    }));
+
+    // ---- Breadcrumbs per view ----
+    const crumbMap = {
+      "dashboard": [["Dashboard", 1]],
+      "sales": [["Sales", 0], ["Sales Orders", 1]],
+      "sales-detail": [["Sales", 0], ["Sales Orders", 0], ["SO-2606-0142", 1]],
+      "production": [["Production", 1]],
+      "inventory": [["Warehouse", 0], ["Inventory", 1]],
+      "customers": [["Sales", 0], ["Customers", 1]],
+      "warehouse": [["Warehouse", 1]],
+      "employees": [["HR & Operations", 0], ["Employees", 1]],
+      "settings": [["System", 0], ["User Management", 1]],
+    };
+    const breadcrumbs = (crumbMap[v] || []).map(c => ({
+      label: c[0], weight: c[1] ? "700" : "500", color: c[1] ? "#1F1D1B" : "#6B7280",
+    }));
+
+    // ---- Scene switcher ----
+    const sceneList = ["dashboard", "sales", "sales-detail", "production", "inventory", "customers", "warehouse", "employees", "settings"];
+    const sceneLabels = { "dashboard":"Dashboard", "sales":"Sales", "sales-detail":"SO Detail", "production":"Production", "inventory":"Inventory", "customers":"Customers", "warehouse":"Warehouse", "employees":"Employees", "settings":"Users" };
+    const scenes = sceneList.map(s => ({
+      label: sceneLabels[s], onClick: () => this.setView(s),
+      style: `background:${v === s ? "#6B5C32" : "transparent"}; border:1px solid ${v === s ? "#6B5C32" : "rgba(255,255,255,.12)"}; color:#fff; padding:6px 10px; border-radius:8px; font-family:inherit; font-size:11px; font-weight:700; cursor:pointer;`,
+    }));
+
+    // ---- Dashboard data ----
+    const kpis = [
+      { label: "This Month Sales", value: "RM 283K", icon: "banknote", delta: "+12% MoM", deltaColor: "#4F7C3A", iconWrap: "display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; border-radius:10px; background:#F0EAD8;", iconColor: "#6B5C32" },
+      { label: "This Month Invoices", value: "RM 362K", icon: "receipt", delta: "+8% MoM", deltaColor: "#4F7C3A", iconWrap: "display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; border-radius:10px; background:#E0EDF0;", iconColor: "#3E6570" },
+      { label: "Pending Delivery", value: "RM 178K", icon: "package", delta: "live", deltaColor: "#9A9082", iconWrap: "display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; border-radius:10px; background:#EEF3E4;", iconColor: "#4F7C3A" },
+      { label: "Outstanding", value: "RM 209K", icon: "circle-alert", delta: "live", deltaColor: "#9A9082", iconWrap: "display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; border-radius:10px; background:#F9E1DA;", iconColor: "#9A3A2D" },
+    ];
+    const dailyChips = [["Overdue", 27], ["SO no DO", 3], ["PO not received", 5], ["Low efficiency", 12]].map(c => ({ label: c[0], count: c[1] }));
+    const revGrid = [0, 0.25, 0.5, 0.75, 1].map(f => ({ y: (180 * f).toFixed(0) }));
+    const revLines = [
+      { label: "Sales Orders", color: "#5E5129", dash: "", points: "0,140 50,120 100,108 150,95 200,80 250,72 300,68 350,60 400,52 450,48 500,40 550,32 600,28" },
+      { label: "Production", color: "#C9A961", dash: "", points: "0,150 50,140 100,130 150,118 200,108 250,98 300,90 350,82 400,76 450,68 500,60 550,52 600,45" },
+      { label: "Invoices", color: "#BBB2A4", dash: "4 3", points: "0,160 50,148 100,138 150,128 200,118 250,108 300,98 350,90 400,82 450,75 500,68 550,60 600,52" },
+    ];
+    const deptBacklog = [["Foam", 9.8, "#9A3A2D", "9.8d"], ["Framing", 8.2, "#9A3A2D", "8.2d"], ["Webbing", 6.4, "#C9A961", "6.4d"], ["Packing", 5.1, "#C9A961", "5.1d"], ["Upholstery", 3.2, "#5E5129", "3.2d"], ["Fab Sew", 2.8, "#5E5129", "2.8d"], ["Wood Cut", 1.9, "#5E5129", "1.9d"], ["Fab Cut", 1.4, "#5E5129", "1.4d"]].map(d => ({ dept: d[0], pct: Math.round(d[1] / 10 * 100), color: d[2], days: d[3] }));
+    const topBed = [["2009(A)-(K)", "×42 units", "RM 87,200"], ["1013-(Q)", "×31 units", "RM 56,300"], ["HOK-1007-(K)", "×24 units", "RM 48,700"]].map(t => ({ code: t[0], qty: t[1], amt: t[2] }));
+
+    // ---- Sales list data ----
+    const salesKpis = [["Total Orders", "247"], ["Revenue", "RM 283K"], ["Outstanding", "42"], ["Pending Delivery", "19"], ["Completed", "186"]].map(k => ({ label: k[0], value: k[1] }));
+    const STBG = { DRAFT: ["#FAEFCB", "#9C6F1E"], CONFIRMED: ["#E0EDF0", "#3E6570"], IN_PRODUCTION: ["#FFF4D6", "#7A5A00"], READY_TO_SHIP: ["#EEF3E4", "#4F7C3A"], DELIVERED: ["#EEF3E4", "#4F7C3A"], INVOICED: ["#EFEAFA", "#5E4B8C"], CLOSED: ["#F0ECE9", "#6B7280"], ON_HOLD: ["#F9E1DA", "#9A3A2D"] };
+    const badge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${(STBG[s]||STBG.CLOSED)[0]}; color:${(STBG[s]||STBG.CLOSED)[1]};`;
+    const salesRowsRaw = [
+      ["SO-2606-0142", "PO-008711", "The Heritage Hotel", "KL", "2026-06-15", "2026-07-05", 4, 38, "2/4 POs", "RM 47,820", "IN_PRODUCTION"],
+      ["SO-2606-0141", "PO-008710", "Atlas Hospitality", "PG", "2026-06-15", "2026-06-30", 6, 52, "5/6 done", "RM 62,400", "READY_TO_SHIP"],
+      ["SO-2606-0140", "PO-PA-2604", "Damai Resort Group", "SG", "2026-06-14", "2026-07-10", 3, 24, "Draft", "RM 28,700", "CONFIRMED"],
+      ["SO-2606-0139", "PO-CF-1819", "Casa Furnishings KL", "KL", "2026-06-14", "2026-06-28", 2, 14, "Delivered", "RM 18,250", "DELIVERED"],
+      ["SO-2606-0138", "PO-NH-2099", "Nordic Home Penang", "PG", "2026-06-13", "2026-07-15", 8, 64, "0/8 POs", "RM 78,900", "CONFIRMED"],
+      ["SO-2606-0137", "—", "Walk-in (Cash)", "KL", "2026-06-13", "2026-06-20", 1, 2, "Invoiced", "RM 3,400", "INVOICED"],
+      ["SO-2606-0136", "PO-008702", "The Heritage Hotel", "KL", "2026-06-12", "2026-07-01", 5, 42, "On hold", "RM 51,200", "ON_HOLD"],
+    ];
+    const salesRows = salesRowsRaw.map(r => ({ companySO: r[0], customerPO: r[1], customer: r[2], state: r[3], orderDate: r[4], expectedDD: r[5], items: r[6], qty: r[7], outstanding: r[8], total: r[9], status: r[10], badgeStyle: badge(r[10]) }));
+
+    // ---- Sales detail data ----
+    const statusFlow = [
+      ["Confirmed", true, "#1F1D1B", "700"], ["In Production", true, "#1F1D1B", "700"], ["Ready", false, "#6B7280", "500"], ["Delivered", false, "#6B7280", "500"], ["Invoiced", false, "#6B7280", "500"],
+    ].map((s, i, arr) => ({
+      label: s[0], done: s[1] ? 1 : 0, color: s[2], weight: s[3],
+      dotStyle: `width:22px; height:22px; border-radius:50%; background:${s[1] ? "#6B5C32" : "#fff"}; border:2px solid ${s[1] ? "#6B5C32" : "#E2DDD8"}; display:flex; align-items:center; justify-content:center; flex:none;`,
+      connector: i < arr.length - 1 ? 1 : 0,
+      connColor: i < arr.length - 1 && arr[i+1][1] ? "#6B5C32" : "#E2DDD8",
+    }));
+    const linkedPOs = [
+      ["PO-001234", "Trion 2009(A) King", 12, "Upholstery", "IN_PROGRESS", 67],
+      ["PO-001235", "Jager 1013 Queen", 14, "Foam", "IN_PROGRESS", 42],
+      ["PO-001236", "HOK-1007 King", 12, "Packing", "COMPLETED", 100],
+    ].map(p => ({ poNo: p[0], product: p[1], qty: p[2], dept: p[3], status: p[4], pct: p[5], badgeStyle: badge(p[4]) }));
+    const lineItems = [
+      ["2009(A)-(K)", "Trion 2009 King", "K", "F-301 Navy", 12, "Gap 6\" · Divan 10\"", "RM 1,950", "RM 23,400"],
+      ["1013-(Q)", "Jager 1013 Queen", "Q", "F-205 Beige", 14, "Gap 5\"", "RM 1,420", "RM 19,880"],
+      ["HOK-1007-(K)", "HOK 1007 King", "K", "F-405 Grey", 12, "Divan 12\"", "RM 1,680", "RM 20,160"],
+    ].map(i => ({ code: i[0], name: i[1], size: i[2], fabric: i[3], qty: i[4], specs: i[5], unit: i[6], total: i[7] }));
+    const summary = [["Customer", "The Heritage Hotel"], ["State", "Kuala Lumpur"], ["Customer PO", "PO-008711"], ["Customer SO", "—"], ["Order Date", "2026-06-15"], ["Expected DD", "2026-07-05"], ["Total Qty", "38"]].map(s => ({ label: s[0], value: s[1] }));
+    const relatedDocs = [
+      ["DO-2606-088", "Dispatched 2026-07-02", "DISPATCHED", "truck"],
+      ["INV-2606-052", "Issued 2026-07-03 · RM 47,820", "PARTIAL", "receipt"],
+      ["PAY-2606-009", "RM 24,000 · 2026-07-08", "RECEIVED", "wallet"],
+    ].map(d => ({ code: d[0], label: d[1], status: d[2], icon: d[3], badgeStyle: badge(d[2]) }));
+
+    // ---- Production matrix data ----
+    const prodTabs = [["Overview", 247, 1], ["Fab Cut", 32, 0], ["Fab Sew", 38, 0], ["Foam", 18, 0], ["Wood Cut", 22, 0], ["Framing", 26, 0], ["Webbing", 17, 0], ["Upholstery", 41, 0], ["Packing", 53, 0]].map(t => {
+      const a = t[2] === 1;
+      return { label: t[0], count: t[1], style: `display:inline-flex; align-items:center; gap:5px; padding:9px 14px; border-radius:10px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid ${a ? "#6B5C32" : "#E2DDD8"}; background:${a ? "#6B5C32" : "#fff"}; color:${a ? "#fff" : "#4D4630"}; flex:none;`, countBg: a ? "rgba(255,255,255,.22)" : "#F0ECE9", countColor: a ? "#fff" : "#9CA3AF" };
+    });
+    const depts = ["FC", "FS", "WC", "FM", "FR", "WB", "UP", "PK"];
+    const cellState = (s) => {
+      if (s === "D") return "padding:3px 8px; border-radius:5px; font-size:10.5px; font-weight:700; background:#EEF3E4; color:#4F7C3A;";
+      if (s === "O") return "padding:3px 8px; border-radius:5px; font-size:10.5px; font-weight:700; background:#F9E1DA; color:#9A3A2D;";
+      if (s === "P") return "padding:3px 8px; border-radius:5px; font-size:10.5px; font-weight:700; background:#FFF4D6; color:#7A5A00;";
+      return "color:#C4BDB2; font-size:11px;";
+    };
+    const cellLabel = (s) => s === "D" ? "Done" : s === "O" ? "Overdue" : s === "P" ? "Pending" : "—";
+    const matrixSeed = [
+      ["SO-2606-0142", "Trion 2009 K", "The Heritage Hotel", "PO-008711", 12, "2026-07-05", "2026-07-03", ["D","D","D","P","O","-","-","-"]],
+      ["SO-2606-0141", "Jager 1013 Q", "Atlas Hospitality", "PO-008710", 14, "2026-06-30", "2026-06-28", ["D","D","D","D","D","D","P","-"]],
+      ["SO-2606-0140", "HOK-1007 K", "Damai Resort", "PO-PA-2604", 8, "2026-07-10", "2026-07-08", ["D","D","P","-","-","-","-","-"]],
+      ["SO-2606-0139", "Casa-3S Sofa", "Casa Furnishings KL", "PO-CF-1819", 2, "2026-06-28", "2026-06-26", ["D","D","D","D","D","D","D","D"]],
+      ["SO-2606-0138", "Nordic-2S", "Nordic Home", "PO-NH-2099", 8, "2026-07-15", "2026-07-13", ["P","-","-","-","-","-","-","-"]],
+    ];
+    const matrixRows = matrixSeed.map(r => ({ so: r[0], product: r[1], customer: r[2], po: r[3], qty: r[4], custDD: r[5], ourDD: r[6], depts: r[7].map((s, i) => ({ label: cellLabel(s), cellStyle: cellState(s), code: depts[i] })) }));
+
+    // ---- Inventory data ----
+    const invCat = (c) => `display:inline-flex; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600; background:${c==="BEDFRAME"?"#F0EAD8":c==="SOFA"?"#E0EDF0":"#FAEFCB"}; color:${c==="BEDFRAME"?"#6B5C32":c==="SOFA"?"#3E6570":"#9C6F1E"};`;
+    const invSeed = [
+      ["2009(A)-(K)", "Trion 2009 (A) King", "BEDFRAME", "King", 24, 8, "RM 1,150", "RM 27,600", "12d"],
+      ["2009(A)-(Q)", "Trion 2009 (A) Queen", "BEDFRAME", "Queen", 18, 6, "RM 980", "RM 17,640", "8d"],
+      ["1013-(K)", "Jager 1013 King", "BEDFRAME", "King", 12, 4, "RM 1,080", "RM 12,960", "5d"],
+      ["HOK-1007-(K)", "HOK 1007 King", "BEDFRAME", "King", 32, 14, "RM 1,290", "RM 41,280", "23d"],
+      ["NORD-2S", "Nordic 2-Seater Sofa", "SOFA", "—", 8, 2, "RM 2,180", "RM 17,440", "4d"],
+      ["CASA-3S-L", "Casa 3-Seater L-shape", "SOFA", "—", 6, 1, "RM 3,250", "RM 19,500", "2d"],
+      ["ACC-PILLOW-K", "Bedframe Pillow King", "ACCESSORY", "—", 142, 0, "RM 45", "RM 6,390", "—"],
+    ];
+    const invRows = invSeed.map(r => ({ code: r[0], name: r[1], cat: r[2], catStyle: invCat(r[2]), size: r[3], avail: r[4], reserved: r[5], unitCost: r[6], value: r[7], age: r[8] }));
+
+    // ---- Customers data ----
+    const custSeed = [
+      ["HER001", "The Heritage Hotel", "Kuala Lumpur", "James Tan", "+60 12-345 6789", "RM 47,820", "3 hubs", "ACTIVE"],
+      ["ATL002", "Atlas Hospitality", "Penang", "Sara Lim", "+60 16-234 5678", "RM 0", "2 hubs", "ACTIVE"],
+      ["DAM003", "Damai Resort Group", "Selangor", "Aishah Hassan", "+60 13-987 6543", "RM 28,700", "5 hubs", "ACTIVE"],
+      ["CAS004", "Casa Furnishings KL", "Kuala Lumpur", "Wei Lim", "+60 11-234 5678", "RM 0", "1 hub", "ACTIVE"],
+      ["NOR005", "Nordic Home Penang", "Penang", "Rajesh Kumar", "+60 17-876 5432", "RM 78,900", "2 hubs", "ACTIVE"],
+      ["WAL000", "Walk-in (Cash)", "—", "—", "—", "RM 0", "—", "ACTIVE"],
+    ];
+    const custBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${s==="ACTIVE"?"#EEF3E4":"#F0ECE9"}; color:${s==="ACTIVE"?"#4F7C3A":"#6B7280"};`;
+    const custRows = custSeed.map(r => ({ code: r[0], name: r[1], state: r[2], contact: r[3], phone: r[4], outstanding: r[5], hubs: r[6], status: r[7], badgeStyle: custBadge(r[7]) }));
+
+    // ---- Warehouse racks ----
+    const racks = Array.from({length: 20}, (_, i) => {
+      const occupied = i < 14;
+      const items = occupied ? Math.max(1, Math.floor(((i * 13) % 8) + 1)) : 0;
+      return {
+        code: `RACK-${String(i+1).padStart(2,'0')}`,
+        contents: occupied ? `Trion 2009 / Jager / HOK · ${items} item${items===1?"":"s"}` : "Empty",
+        items, slots: `${items} / 8`,
+        statusStyle: `display:inline-flex; padding:2px 8px; border-radius:6px; font-size:10.5px; font-weight:700; background:${occupied?"#F0EAD8":"#EEF3E4"}; color:${occupied?"#6B5C32":"#4F7C3A"};`,
+        status: occupied ? "OCCUPIED" : "EMPTY",
+        fill: occupied ? Math.round(items/8*100) : 0,
+        fillColor: occupied ? "#6B5C32" : "#E2DDD8",
+      };
+    });
+
+    // ---- Employees ----
+    const empTabs = ["Employee Master", "Working Hours", "Attendance", "Labor Cost", "Efficiency", "Dept Labor", "Dept Performance", "Payroll", "Leave"].map((l, i) => ({
+      label: l,
+      style: `padding:11px 14px; font-size:13px; font-weight:${i===0?"700":"600"}; color:${i===0?"#1F1D1B":"#6B7280"}; ${i===0?"border-bottom:2px solid #6B5C32;":""} cursor:pointer; white-space:nowrap;`,
+    }));
+    const empSeed = [
+      ["EMP-001", "Ahmad Bin Hassan", "FRAMING · WEBBING", "Production Lead", "+60 12-345 6789", "RM 3,200", 9, "1.5", "EPF · SOCSO · EIS · PCB", "2018-03-15", "ACTIVE"],
+      ["EMP-002", "Siti Nurhaliza", "FAB_SEW", "Senior Sewer", "+60 13-234 5678", "RM 2,800", 9, "1.5", "EPF · SOCSO · EIS", "2019-07-22", "ACTIVE"],
+      ["EMP-003", "Lim Wei Ming", "UPHOLSTERY", "Upholsterer", "+60 11-987 6543", "RM 2,600", 9, "1.5", "EPF · SOCSO · EIS · PCB", "2020-01-10", "ACTIVE"],
+      ["EMP-004", "Rajesh Kumar", "WOOD_CUT", "Operator", "+60 17-876 5432", "RM 2,500", 9, "1.5", "EPF · SOCSO · EIS", "2021-05-18", "ACTIVE"],
+      ["EMP-005", "Aishah Binti Othman", "PACKING", "Packer", "+60 16-234 5678", "RM 2,300", 9, "1.5", "EPF · SOCSO · EIS", "2022-09-03", "ACTIVE"],
+      ["EMP-006", "Tan Wei Lim", "FOAM", "Bonder", "+60 14-567 8901", "RM 2,400", 9, "1.5", "EPF · SOCSO · EIS", "2023-02-14", "ACTIVE"],
+    ];
+    const empBadge = (s) => `display:inline-flex; padding:3px 9px; border-radius:9999px; font-size:11px; font-weight:700; background:${s==="ACTIVE"?"#EEF3E4":"#F0ECE9"}; color:${s==="ACTIVE"?"#4F7C3A":"#6B7280"};`;
+    const empRows = empSeed.map(r => ({ empNo: r[0], name: r[1], dept: r[2], position: r[3], phone: r[4], salary: r[5], hrs: r[6], ot: r[7], statutory: r[8], joinDate: r[9], status: r[10], badgeStyle: empBadge(r[10]) }));
+
+    // ---- Users (Settings) ----
+    const userSeed = [
+      ["Wei Siang", "weisiang@hookka.com", "SUPER_ADMIN", "Management", "Owner", "2 mins ago", "ACTIVE"],
+      ["Lim Office", "lim@hookka.com", "ADMIN", "Finance", "Manager", "1 hour ago", "ACTIVE"],
+      ["Sarah Tan", "sarah@hookka.com", "ADMIN", "Sales", "Sales Manager", "Today, 9:15am", "ACTIVE"],
+      ["Operations Read", "ops@hookka.com", "READ_ONLY", "Operations", "—", "Yesterday", "ACTIVE"],
+      ["Test Account", "test@hookka.com", "READ_ONLY", "—", "—", "Never", "INACTIVE"],
+    ];
+    const userRoleBg = (r) => `display:inline-flex; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:700; background:${r==="SUPER_ADMIN"?"#F9E1DA":r==="ADMIN"?"#F0EAD8":"#F0ECE9"}; color:${r==="SUPER_ADMIN"?"#9A3A2D":r==="ADMIN"?"#6B5C32":"#6B7280"};`;
+    const users = userSeed.map(u => ({ name: u[0], email: u[1], role: u[2], roleStyle: userRoleBg(u[2]), dept: u[3], position: u[4], lastLogin: u[5], status: u[6], badgeStyle: empBadge(u[6]) }));
+
+    return {
+      isDashboard: v === "dashboard" ? 1 : 0,
+      isSalesList: v === "sales" ? 1 : 0,
+      isSalesDetail: v === "sales-detail" ? 1 : 0,
+      isProduction: v === "production" ? 1 : 0,
+      isInventory: v === "inventory" ? 1 : 0,
+      isCustomers: v === "customers" ? 1 : 0,
+      isWarehouse: v === "warehouse" ? 1 : 0,
+      isEmployees: v === "employees" ? 1 : 0,
+      isSettings: v === "settings" ? 1 : 0,
+      navGroups: sideNav, breadcrumbs, scenes,
+      kpis, dailyChips, revGrid, revLines, deptBacklog, topBed,
+      salesKpis, salesRows,
+      statusFlow, linkedPOs, lineItems, summary, relatedDocs,
+      prodTabs, matrixRows,
+      invRows,
+      custRows,
+      racks,
+      empTabs, empRows,
+      users,
+    };
+  }
+}
+window.__app = new App();
+</script>
+</body>
+</html>

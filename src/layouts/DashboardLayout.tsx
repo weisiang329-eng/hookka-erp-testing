@@ -144,14 +144,18 @@ export default function DashboardLayout() {
     };
   }, [pathname]);
 
-  // Phones get the dedicated /m mobile app, not this desktop shell. On a real
-  // mobile device, redirect any desktop route to /m (owner 2026-06-28: "手机开
-  //却是电脑版本"). UA-based so a small *desktop* window stays on desktop; the
+  // Phones (incl. foldables) get the dedicated /m mobile app; iPad + desktop
+  // keep this desktop shell (owner 2026-06-28: phones/folds → /m, "iPad 用电脑
+  // 版本"). So the redirect matches phone-class UAs only — iPhone, iPod, and
+  // Android (a folded foldable is phone-width and /m has a fold layout). iPad
+  // is deliberately EXCLUDED: old iPads send "iPad" (no longer matched) and
+  // iPadOS 13+ already reports a "Macintosh" desktop UA — both stay on desktop.
+  // A small *desktop* window also stays on desktop (no mobile UA token). The
   // worker portal (/worker) is a separate layout and never reaches here. The
   // early return is AFTER all hooks above (rules-of-hooks safe).
   const isMobileDevice =
     typeof navigator !== "undefined" &&
-    /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+    /Android|iPhone|iPod|Mobile/i.test(navigator.userAgent);
   if (isMobileDevice) return <Navigate to="/m" replace />;
 
   return (

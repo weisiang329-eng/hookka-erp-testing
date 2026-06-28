@@ -29,12 +29,17 @@ import { ModuleListScreen } from "./screens/ModuleListScreen";
 import { DocumentDetailScreen } from "./screens/DocumentDetailScreen";
 import { LineItemDetailScreen } from "./screens/LineItemDetailScreen";
 import { WarehouseScreen } from "./screens/WarehouseScreen";
+import { ProductionScreen } from "./screens/ProductionScreen";
 import { MODULE_CONFIGS } from "./config/modules";
 
 // Modules whose L1 list is a bespoke screen (not the generic ModuleListScreen).
 // Their L2 detail route still uses the config-driven DocumentDetailScreen.
 const CUSTOM_L1: Record<string, ComponentType> = {
   warehouse: WarehouseScreen,
+  // Production is a Kanban-style board grouped by current department (dc12
+  // design v12) — the generic list flattens that signal. Detail route stays
+  // generic via productionConfig.detail.
+  production: ProductionScreen,
 };
 
 export default function MobileLayout() {

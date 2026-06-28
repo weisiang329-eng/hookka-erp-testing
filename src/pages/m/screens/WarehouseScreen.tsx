@@ -113,10 +113,19 @@ export function WarehouseScreen() {
   const [tab, setTab] = useState("rack");
 
   const { data: whResp, refresh } = useCachedJson<WarehouseResp>("/api/warehouse");
-  const racks = useMemo(
-    () => (whResp?.success ? whResp.data ?? [] : whResp?.data ?? []),
-    [whResp],
-  );
+  const racks = useMemo(() => {
+    const list = whResp?.data ?? [];
+    // Natural/numeric sort so Rack 2 comes before Rack 10 (owner 2026-06-28:
+    // racks were showing lexically 1, 10, 11, 2…). Sorts whether the field is
+    // "rack" ("1"/"10") or a "Rack 1" name — numeric localeCompare handles both.
+    return [...list].sort((a, b) =>
+      str(a, "rack", "name", "rackName", "code", "label").localeCompare(
+        str(b, "rack", "name", "rackName", "code", "label"),
+        undefined,
+        { numeric: true, sensitivity: "base" },
+      ),
+    );
+  }, [whResp]);
   const summary = whResp?.summary;
   const total = summary?.total ?? racks.length;
   const occupied =

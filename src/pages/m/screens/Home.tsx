@@ -51,6 +51,8 @@ import {
   ClipboardCheck,
   Calendar,
   CircleCheck,
+  ChevronDown,
+  Check,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
@@ -65,7 +67,7 @@ import {
   type PipelinePO,
 } from "@/lib/delivery-pipeline";
 import type { SalesOrder, RawMaterial } from "@/types";
-import { MobileCard, StatusPill, FormSheet } from "../components";
+import { MobileCard, StatusPill, FormSheet, Sheet } from "../components";
 import { M, M_ACCENT, M_DELTA } from "../theme";
 import { type FormSpec } from "../config/form-types";
 import {
@@ -188,8 +190,31 @@ const TERMINAL_STATUSES = new Set([
   "CANCELLED",
 ]);
 
-/** Current "YYYY-MM" — the dashboard's default Command Center period. */
+/** Current "YYYY-MM" — the period selector's default + the dashboard's
+ * Command Center period. */
 const CUR_YM = new Date().toISOString().slice(0, 7);
+
+/** Short month labels used by the period-selector chip and picker. */
+const MONTHS_SHORT = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+function periodLabel(ym: string): string {
+  const yr = ym.slice(0, 4);
+  const m = Number(ym.slice(5, 7));
+  return m >= 1 && m <= 12 ? `${MONTHS_SHORT[m - 1]} ${yr}` : ym;
+}
+/** Build the last 12 months (descending) for the period-picker sheet. */
+function buildPeriodOptions(): { ym: string; label: string }[] {
+  const opts: { ym: string; label: string }[] = [];
+  const now = new Date();
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    opts.push({ ym, label: periodLabel(ym) });
+  }
+  return opts;
+}
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
@@ -279,6 +304,12 @@ export default function MobileHome() {
   // without requestIdleCallback). The cheap KPI cards + Stock alerts + Orders
   // due fetch immediately and paint right away. ----
   const [pdEnabled, setPdEnabled] = useState(false);
+  // ---- Analytics period (dc12 design v12: header chip "Jun 2026 ▾"). Drives
+  // /api/dashboard/overview + the worker-efficiency window. Defaults to the
+  // current month so first paint matches the desktop Command Center. ----
+  const [period, setPeriod] = useState(CUR_YM);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const periodOptions = useMemo(() => buildPeriodOptions(), []);
   useEffect(() => {
     if (typeof window === "undefined") return;
     type RIC = (cb: () => void, opts?: { timeout?: number }) => number;
@@ -301,7 +332,7 @@ export default function MobileHome() {
   // Current-month overview = the dashboard's default Command Center period, so
   // salesThisMonthSen / invoicesThisMonthSen match the desktop KPI rail.
   const { data: overview } = useCachedJson<OverviewResp>(
-    `/api/dashboard/overview?period=${CUR_YM}`,
+    `/api/dashboard/overview?period=${period}`,
   );
   // Whole-table SO list (server caps at 5000; current ~350 SOs). Used for the
   // Orders-due list.
@@ -335,7 +366,7 @@ export default function MobileHome() {
   // hours + worker directory), merged exactly like the desktop dashboard-b.
   // Gated behind the same `pdEnabled` idle flag so first paint stays the KPI
   // rail. Window = current month [1st..today]. ----
-  const effWin = useMemo(() => monthWindow(CUR_YM), []);
+  const effWin = useMemo(() => monthWindow(period), [period]);
   const { data: jcSumRaw } = useCachedJson<JcSummaryResp>(
     pdEnabled ? `/api/job-cards/summary?from=${effWin.from}&to=${effWin.to}` : null,
   );
@@ -485,10 +516,10 @@ export default function MobileHome() {
         confirmed > 0
           ? `${formatCurrency(outstanding)} still to ship of ${formatCurrency(
               confirmed,
-            )} confirmed · ${CUR_YM}`
+            )} confirmed · ${period}`
           : null,
     };
-  }, [stats]);
+  }, [stats, period]);
 
   // ---- Command Center analytics (owner 2026-06-28 design v12) ----
   // Revenue / Plant Load / Worker Efficiency / Sales by Customer / Top Sellers
@@ -553,7 +584,7 @@ export default function MobileHome() {
       loadPct,
       workforce: overview?.employee?.activeHeadcount ?? null,
       rows: [
-        { label: "Daily Capacity", sub: `${CUR_YM} avg`, value: dailyCap ? hrs(dailyCap) : "—", icon: Calendar },
+        { label: "Daily Capacity", sub: `${period} avg`, value: dailyCap ? hrs(dailyCap) : "—", icon: Calendar },
         {
           label: "Total Backlog",
           sub: "per dept",
@@ -573,7 +604,7 @@ export default function MobileHome() {
         },
         {
           label: "Completed",
-          sub: `${CUR_YM}`,
+          sub: `${period}`,
           value: p.completedYesterday
             ? `${p.completedYesterday.bedframeUnits} / ${p.completedYesterday.sofaSets}`
             : "—",
@@ -581,7 +612,7 @@ export default function MobileHome() {
         },
       ],
     };
-  }, [overview]);
+  }, [overview, period]);
 
   // ---- Worker Efficiency (TOP 5 + LOWEST 5) — ported 1:1 from dashboard-b:
   // eff% = production minutes ÷ (production-dept clocked hours × 60). Excludes
@@ -787,6 +818,32 @@ export default function MobileHome() {
               {firstName}
             </div>
           </div>
+          {/* Period chip — dc12 design v12: tap to pick last 12 months,
+              re-fetches every analytics card under it. Defaults to current
+              month so first paint matches the desktop Command Center. */}
+          <button
+            aria-label="Pick analytics period"
+            onClick={() => setPickerOpen(true)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              flex: "none",
+              height: 34,
+              padding: "0 11px",
+              borderRadius: 11,
+              backgroundColor: M.card,
+              border: `1px solid ${M.hairline}`,
+              fontSize: 12,
+              fontWeight: 700,
+              color: M.taupe,
+              cursor: "pointer",
+              WebkitTapHighlightColor: "transparent",
+            }}
+          >
+            {periodLabel(period)}
+            <ChevronDown size={14} strokeWidth={1.75} color={M.taupe} />
+          </button>
           {/* Notification bell (round white button, unread dot) */}
           <button
             aria-label="Notifications"
@@ -993,7 +1050,7 @@ export default function MobileHome() {
         {revenue ? (
           <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
             <div style={{ fontSize: 14.5, fontWeight: 700, color: M.raisin }}>
-              Revenue · {CUR_YM}
+              Revenue · {periodLabel(period)}
             </div>
             <div style={{ fontSize: 11, color: M.muted, marginTop: 2 }}>
               Sales Orders · Invoices · Production · tap a legend to toggle
@@ -1239,7 +1296,7 @@ export default function MobileHome() {
           >
             <div>
               <div style={{ fontSize: 14.5, fontWeight: 700, color: M.raisin }}>
-                Order Pipeline · {CUR_YM}
+                Order Pipeline · {periodLabel(period)}
               </div>
               <div style={{ fontSize: 11, color: M.muted, marginTop: 2 }}>
                 shipped vs still to ship
@@ -1341,7 +1398,7 @@ export default function MobileHome() {
               Worker Efficiency
             </div>
             <div style={{ fontSize: 11, color: M.muted, marginTop: 2 }}>
-              production mins ÷ clocked hours · {CUR_YM}
+              production mins ÷ clocked hours · {periodLabel(period)}
             </div>
             <div
               style={{
@@ -1907,6 +1964,54 @@ export default function MobileHome() {
           if (to) navigate(to);
         }}
       />
+
+      {/* Period picker — dc12: pick from the last 12 months. Tapping a row
+          updates `period`, refetches the 9 analytics cards, closes the sheet. */}
+      <Sheet
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        title="Period"
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {periodOptions.map((opt) => {
+            const active = opt.ym === period;
+            return (
+              <button
+                key={opt.ym}
+                onClick={() => {
+                  setPeriod(opt.ym);
+                  setPickerOpen(false);
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "13px 14px",
+                  border: "none",
+                  background: active ? M_ACCENT.gold.bg : "transparent",
+                  borderRadius: 11,
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                  WebkitTapHighlightColor: "transparent",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 14,
+                    fontWeight: active ? 700 : 500,
+                    color: active ? M.taupe : M.raisin,
+                  }}
+                >
+                  {opt.label}
+                </span>
+                {active ? (
+                  <Check size={17} strokeWidth={2} color={M.taupe} />
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      </Sheet>
     </div>
   );
 }

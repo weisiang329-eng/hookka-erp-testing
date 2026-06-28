@@ -3046,6 +3046,111 @@ class App {
   }
 }
 window.__app = new App();
+
+// ===========================================================================
+// Click-feedback safety net + sub-tab toggling.
+//
+// Designer baseline: EVERY visible button/tab/row should respond. Some
+// buttons in scenes (Create / Print / Export / row clicks) intentionally
+// have no explicit handler — owner cares about LOOK, not real behaviour.
+// This delegated listener catches them all and fires a toast so a designer
+// clicking around sees that every control is reachable.
+//
+// Also: tab strips (e.g. Invoices' "Invoices/Payments/CN/DN/Supplier Pay/
+// e-Invoice") visually mark the clicked tab active, even when the page
+// content doesn't switch — so the designer can SEE the tab is functional.
+// ===========================================================================
+window.addEventListener("DOMContentLoaded", () => {
+  // Toast container — fixed bottom-center, auto-hide after 1.6s.
+  const toast = document.createElement("div");
+  toast.style.cssText =
+    "position:fixed;bottom:80px;left:50%;transform:translateX(-50%);" +
+    "background:#1F1D1B;color:#fff;padding:10px 22px;border-radius:10px;" +
+    "font-size:13px;font-weight:600;box-shadow:0 8px 28px rgba(0,0,0,.35);" +
+    "opacity:0;transition:opacity .18s;z-index:60;pointer-events:none;" +
+    "font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;" +
+    "max-width:80vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+  document.body.appendChild(toast);
+  let toastTimer = null;
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.style.opacity = "1";
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => (toast.style.opacity = "0"), 1600);
+  }
+
+  // Visually mark a clicked tab active (the pill-style or underline-style).
+  function markTabActive(el) {
+    const strip = el.parentElement;
+    if (!strip) return;
+    Array.from(strip.children).forEach((sib) => {
+      if (sib.tagName !== "SPAN") return;
+      const s = sib.style;
+      // Reset underline-tab style
+      if (s.borderBottom && s.borderBottom.includes("2px solid")) {
+        s.borderBottom = "";
+        s.color = "#6B7280";
+        s.fontWeight = "600";
+      }
+      // Reset pill-tab style (taupe-filled)
+      const bgComputed = getComputedStyle(sib).backgroundColor;
+      if (bgComputed === "rgb(107, 92, 50)" || s.background.includes("#6B5C32") || s.background.includes("6B5C32")) {
+        s.background = "#fff";
+        s.borderColor = "#E2DDD8";
+        s.color = "#6B7280";
+        s.fontWeight = "600";
+      }
+    });
+    // Set clicked one active
+    const cs = getComputedStyle(el);
+    if (cs.borderBottomWidth === "2px" || el.style.borderBottom.includes("2px")) {
+      el.style.borderBottom = "2px solid #6B5C32";
+      el.style.color = "#1F1D1B";
+      el.style.fontWeight = "700";
+    } else {
+      el.style.background = "#6B5C32";
+      el.style.borderColor = "#6B5C32";
+      el.style.color = "#fff";
+      el.style.fontWeight = "700";
+    }
+  }
+
+  document.body.addEventListener(
+    "click",
+    (e) => {
+      const t = e.target.closest("button, [role='button'], span[style*='cursor'], tr, a");
+      if (!t) return;
+      if (t === toast || toast.contains(t)) return;
+      // Don't interfere with already-wired clicks (sidebar nav / scene switcher)
+      if (t.hasAttribute("onclick") || t.onclick) return;
+      if (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA") return;
+      if (t.closest("input, select, textarea")) return;
+      const label =
+        (t.getAttribute("aria-label") || t.textContent || "")
+          .trim()
+          .replace(/\s+/g, " ")
+          .slice(0, 60);
+      if (!label) return;
+      // Tab-like spans get an active-toggle treatment
+      const cs = getComputedStyle(t);
+      const isTabLike =
+        t.tagName === "SPAN" &&
+        cs.cursor === "pointer" &&
+        (cs.padding || "").length > 0 &&
+        t.parentElement &&
+        Array.from(t.parentElement.children).filter(
+          (c) => c.tagName === "SPAN" && getComputedStyle(c).cursor === "pointer",
+        ).length > 1;
+      if (isTabLike) {
+        try {
+          markTabActive(t);
+        } catch {}
+      }
+      showToast("✓ " + label);
+    },
+    true,
+  );
+});
 </script>
 </body>
 </html>

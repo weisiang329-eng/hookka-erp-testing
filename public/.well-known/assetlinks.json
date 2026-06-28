@@ -1,0 +1,24 @@
+[
+  {
+    "_comment": "Hookka ERP (office mobile) TWA. Replace the fingerprint below with the SHA-256 from Google Play Console → your app → Setup → App integrity → App signing key certificate (SHA-256). Then redeploy so https://erp.hookka.com/.well-known/assetlinks.json serves the real value and the app opens full-screen.",
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.hookka.erp",
+      "sha256_cert_fingerprints": [
+        "FILL_FROM_PLAY_CONSOLE_APP_SIGNING_SHA256"
+      ]
+    }
+  },
+  {
+    "_comment": "Hookka Worker (shop-floor portal) TWA. Same: paste this app's Play App Signing SHA-256 here.",
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.hookka.worker",
+      "sha256_cert_fingerprints": [
+        "FILL_FROM_PLAY_CONSOLE_APP_SIGNING_SHA256"
+      ]
+    }
+  }
+]

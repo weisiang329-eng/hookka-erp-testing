@@ -2251,10 +2251,61 @@ export const customersConfig: ModuleConfig = {
   ],
 };
 
+// Supplier detail — single-GET /api/suppliers/:id → { data: supplier + materials[] }.
+// dc13: detail mirrors customer detail (fields grid + materials sub-doc).
+const supplierDetail: DetailConfig = {
+  url: (id) => `/api/suppliers/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "code") || "—",
+  title: (d) => str(d, "name") || "—",
+  status: (d) =>
+    read(d, "isActive") === true
+      ? resolveStatus("ACTIVE", PAYMENT_STATUS_MAP)
+      : resolveStatus("INACTIVE", PAYMENT_STATUS_MAP),
+  fields: [
+    fld("Code", (d) => str(d, "code")),
+    fld("Contact", (d) => str(d, "contactPerson")),
+    fld("Phone", (d) => str(d, "phone")),
+    fld("Email", (d) => str(d, "email")),
+    fld("State", (d) => str(d, "state")),
+    fld("Currency", (d) => str(d, "currency")),
+    fld("Payment Terms", (d) => str(d, "paymentTerms")),
+    fld("Tax ID", (d) => str(d, "taxId")),
+    fld("Bank Account", (d) => str(d, "bankAccount")),
+    fld("Address", (d) => str(d, "address"), true),
+  ],
+  subDocLists: (d) => {
+    const mats = asArr(d.materials);
+    if (mats.length === 0) return [];
+    return [
+      {
+        title: `Materials supplied · ${mats.length}`,
+        rows: mats.slice(0, 50).map((m) => ({
+          id: str(m, "id"),
+          title: str(m, "materialName") || str(m, "itemCode") || "Material",
+          subLine:
+            [
+              str(m, "itemCode"),
+              num(m, "leadTimeDays") > 0 ? `${num(m, "leadTimeDays")}d lead` : "",
+            ]
+              .filter(Boolean)
+              .join(" · ") || undefined,
+          trailing:
+            num(m, "lastPriceSen") > 0 ? money(num(m, "lastPriceSen")) : undefined,
+          icon: "package" as const,
+        })),
+      },
+    ];
+  },
+  hideActionBar: true,
+};
+
 export const suppliersConfig: ModuleConfig = {
   slug: "suppliers",
   title: "Suppliers",
-  detailPath: () => null,
+  detailPath: (vm) =>
+    /^sup-/.test(vm.id) ? `/m/suppliers/${encodeURIComponent(vm.id)}` : null,
+  detail: supplierDetail,
   sources: [
     {
       url: "/api/suppliers",
@@ -2305,10 +2356,50 @@ export const receivablesConfig: ModuleConfig = {
   ],
 };
 
+// Product detail — single-GET /api/products/:id → { data: product + children }.
+// dc13: product detail shows SKU header + price + production time + dept
+// breakdown.
+const productDetail: DetailConfig = {
+  url: (id) => `/api/products/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "code") || "—",
+  title: (d) => str(d, "name") || "—",
+  fields: [
+    fld("Code", (d) => str(d, "code")),
+    fld("Category", (d) => str(d, "category")),
+    fld("Size", (d) => str(d, "sizeLabel") || str(d, "sizeCode")),
+    fld("Base Price", (d) => money(num(d, "basePriceSen", "price1Sen"))),
+    fld("Production Time", (d) => {
+      const m = num(d, "productionTimeMinutes");
+      return m > 0 ? `${m} min (${Math.round(m / 60)}h)` : "—";
+    }),
+    fld("Description", (d) => str(d, "description"), true),
+  ],
+  subDocLists: (d) => {
+    const dwts = asArr(d.deptWorkingTimes);
+    if (dwts.length === 0) return [];
+    return [
+      {
+        title: `Dept Working Times · ${dwts.length}`,
+        rows: dwts.map((w) => ({
+          id: str(w, "id") || str(w, "departmentCode"),
+          title: str(w, "departmentCode") || "Department",
+          subLine: str(w, "category") || undefined,
+          trailing: `${num(w, "minutes")} min`,
+          icon: "file-text" as const,
+        })),
+      },
+    ];
+  },
+  hideActionBar: true,
+};
+
 export const productsConfig: ModuleConfig = {
   slug: "products",
   title: "Products",
-  detailPath: () => null,
+  detailPath: (vm) =>
+    /^prod-/.test(vm.id) ? `/m/products/${encodeURIComponent(vm.id)}` : null,
+  detail: productDetail,
   sources: [
     {
       url: "/api/products",

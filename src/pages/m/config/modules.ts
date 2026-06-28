@@ -14,12 +14,14 @@
 // L2 detail routes resolve to /m/<slug>/:id — Phase 3 supplies the detail
 // screen; today they land on a ComingSoon detail (see MobileLayout).
 // ===========================================================================
+import { createElement } from "react";
 import {
   type ModuleConfig,
   type DataSource,
   type RawRow,
   type RowVM,
 } from "./types";
+import { PendingLeaveRequests } from "../components/PendingLeaveRequests";
 import {
   type DetailConfig,
   type FlowStep,
@@ -291,6 +293,56 @@ const salesDetail: DetailConfig = {
     fld("Notes", (d) => str(d, "notes"), true),
   ],
   lineItems: (d) => richItemsOf(d, "items"),
+  // Summary card (design source: Total Qty / Line Items / Subtotal). Derived
+  // from the SO's own items + total — no extra fetch.
+  kvSections: (d) => {
+    const items = Array.isArray(d.items) ? (d.items as RawRow[]) : [];
+    if (items.length === 0) return [];
+    const totalQty = items.reduce((s, it) => s + num(it, "quantity", "qty"), 0);
+    return [
+      {
+        title: "Summary",
+        rows: [
+          { label: "Total Qty", value: String(totalQty) },
+          { label: "Line Items", value: String(items.length) },
+          { label: "Subtotal", value: money(num(d, "totalSen")) },
+        ],
+      },
+    ];
+  },
+  // Linked Production Orders (design source: a card per PO with status + qty +
+  // dept + delivery). Real data — the SO GET returns linkedPOs.
+  subDocLists: (d, resp) => {
+    const r = (resp ?? {}) as Record<string, unknown>;
+    const pos = asArr(r.linkedPOs);
+    if (pos.length === 0) return [];
+    return [
+      {
+        title: "Linked Production Orders",
+        rows: pos.map((p) => {
+          const dept = str(p, "currentDepartment");
+          const qty = num(p, "quantity");
+          const doNo = str(p, "deliveryDoNo");
+          return {
+            id: str(p, "id") || str(p, "poNo"),
+            title: str(p, "productName", "productCode") || "—",
+            subLine:
+              [
+                qty ? `Qty ${qty}` : "",
+                dept,
+                doNo ? `DO ${doNo}` : "Not on a DO",
+              ]
+                .filter(Boolean)
+                .join(" · ") || undefined,
+            trailing: str(p, "poNo") || undefined,
+            status: resolveStatus(str(p, "status"), STATUS_MAPS.production),
+            icon: "package" as const,
+            href: undefined, // production-order mobile detail route TBD
+          };
+        }),
+      },
+    ];
+  },
   relatedDocs: (_d, resp) => {
     const r = (resp ?? {}) as Record<string, unknown>;
     const out: RelatedDocVM[] = [];
@@ -1489,6 +1541,10 @@ export const employeesConfig: ModuleConfig = {
       ? `/m/payslips/${encodeURIComponent(vm.id)}`
       : null,
   sources: [directorySource, attendanceSource, leaveSource, payrollSource],
+  // Design source: a "Pending requests" approve/reject card above the list on
+  // the Leave tab. Real leave-approval flow (GET/PUT /api/leaves).
+  topPanel: (activeTab) =>
+    activeTab === "leave" ? createElement(PendingLeaveRequests) : null,
 };
 
 // ---------------------------------------------------------------------------

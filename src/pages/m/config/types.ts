@@ -311,6 +311,13 @@ export type ModuleConfig = {
   detail?: DetailConfig;
   /** One or more data sources (see DataSource). */
   sources: DataSource[];
+  /**
+   * Optional panel rendered ABOVE the list on specific sub-tabs (design source:
+   * the Employees "Pending requests" approve/reject card on the Attendance
+   * tab). Receives the active tab key; return null to render nothing. Keeps the
+   * generic list engine while letting one module inject a bespoke section.
+   */
+  topPanel?: (activeTab: string) => ReactNode;
 };
 
 /** Active filter state for one column. */

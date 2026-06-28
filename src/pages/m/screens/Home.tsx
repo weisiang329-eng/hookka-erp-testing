@@ -48,6 +48,7 @@ import {
   Bell,
   CircleAlert,
   TriangleAlert,
+  ClipboardCheck,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
@@ -75,6 +76,7 @@ import {
 type StatsResp = {
   success?: boolean;
   byStatus?: Record<string, number>;
+  revenueByStatus?: Record<string, number>;
   csRevenueSen?: number;
   deliveredItemsSen?: number;
   outstandingItemsSen?: number;
@@ -300,6 +302,41 @@ export default function MobileHome() {
       }));
   }, [orders]);
 
+  // ---- Daily Report (process exceptions to action today) ----
+  // Owner 2026-06-28 design adds a "DAILY REPORT" card. We surface ONLY the
+  // exception that is genuinely derivable from this Home's live data: overdue
+  // sales orders (non-terminal, Expected DD in the past). The design's other
+  // chips (SO-no-DO / PO-not-received / Low-efficiency) need cross-module joins
+  // not fetched here — left out rather than fabricated.
+  // TODO(api): a consolidated /api/dashboard/daily-report would let us show the
+  // full chip set (SO no DO, PO not received, low efficiency) with real counts.
+  const overdueCount = useMemo(() => {
+    const today = todayISO();
+    return orders.filter(
+      (so) =>
+        !TERMINAL_STATUSES.has(so.status) &&
+        !!so.hookkaExpectedDD &&
+        (so.hookkaExpectedDD || "").slice(0, 10) < today,
+    ).length;
+  }, [orders]);
+
+  // ---- Order Pipeline (this month) — Confirmed / Outstanding / Delivered. ----
+  // Real figures off /api/sales-orders/stats (the SAME totals the desktop
+  // Command Center uses): Confirmed = csRevenueSen, Outstanding =
+  // outstandingItemsSen, Delivered = deliveredItemsSen. Bars are scaled to the
+  // largest of the three.
+  const pipeline = useMemo(() => {
+    const confirmed = stats?.csRevenueSen ?? 0;
+    const outstanding = stats?.outstandingItemsSen ?? 0;
+    const delivered = stats?.deliveredItemsSen ?? 0;
+    const max = Math.max(confirmed, outstanding, delivered, 1);
+    return [
+      { label: "Confirmed", sen: confirmed, color: M.taupe },
+      { label: "Outstanding", sen: outstanding, color: M.gold },
+      { label: "Delivered", sen: delivered, color: M_DELTA.up },
+    ].map((p) => ({ ...p, pct: Math.round((p.sen / max) * 100) }));
+  }, [stats]);
+
   // ---- Stock alerts (raw materials at or below reorder / low threshold) ----
   const stockAlerts = useMemo(() => {
     const rms = inventory?.data?.rawMaterials ?? [];
@@ -486,6 +523,138 @@ export default function MobileHome() {
             onClick={() => navigate("/m/employees")}
           />
         </div>
+
+        {/* ===== Daily Report (exceptions to action today) ===== */}
+        <MobileCard
+          radius={16}
+          onClick={() => navigate("/m/sales")}
+          style={{ padding: "15px 16px", marginTop: 14 }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+            <div
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 11,
+                background: M_ACCENT.gold.bg,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flex: "none",
+              }}
+            >
+              <ClipboardCheck size={20} strokeWidth={1.75} color={M.taupe} />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  letterSpacing: 1,
+                  color: "#A89F8D",
+                }}
+              >
+                DAILY REPORT
+              </div>
+              <div
+                style={{
+                  fontSize: 22,
+                  fontWeight: 800,
+                  color: M.raisin,
+                  letterSpacing: "-0.4px",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {overdueCount}
+              </div>
+            </div>
+            <span style={{ fontSize: 11.5, color: M.taupe, fontWeight: 600 }}>
+              View ›
+            </span>
+          </div>
+          <div style={{ fontSize: 11.5, color: M.muted, marginTop: 3 }}>
+            overdue sales orders to action today
+          </div>
+          {overdueCount > 0 ? (
+            <div
+              style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 11 }}
+            >
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  color: M_ACCENT.danger.fg,
+                  background: M_ACCENT.danger.bg,
+                  border: "1px solid #E8B2A1",
+                  padding: "3px 9px",
+                  borderRadius: 20,
+                }}
+              >
+                Overdue <b>{overdueCount}</b>
+              </span>
+            </div>
+          ) : null}
+        </MobileCard>
+
+        {/* ===== Order Pipeline (this month) ===== */}
+        <MobileCard radius={16} style={{ padding: "15px 16px", marginTop: 14 }}>
+          <div
+            style={{
+              fontSize: 14,
+              fontWeight: 700,
+              color: M.raisin,
+              marginBottom: 13,
+            }}
+          >
+            Order Pipeline · this month
+          </div>
+          {pipeline.map((p) => (
+            <div key={p.label} style={{ marginBottom: 11 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginBottom: 5,
+                }}
+              >
+                <span style={{ fontSize: 12.5, color: M.body }}>
+                  {p.label} · {p.pct}%
+                </span>
+                <span
+                  style={{
+                    fontSize: 12.5,
+                    fontWeight: 700,
+                    color: M.raisin,
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {formatCurrency(p.sen)}
+                </span>
+              </div>
+              <div
+                style={{
+                  height: 8,
+                  background: "#F0EBE0",
+                  borderRadius: 5,
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    width: `${p.pct}%`,
+                    height: "100%",
+                    background: p.color,
+                    borderRadius: 5,
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+        </MobileCard>
 
         {/* ===== Stock alerts ===== */}
         <SectionHeader

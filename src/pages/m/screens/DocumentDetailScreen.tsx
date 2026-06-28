@@ -92,6 +92,63 @@ function Inner({
     [data, detail, id],
   );
 
+  // Effective config — a slug hosting multiple doc types (e.g. Procurement
+  // PO/GRN/PI) resolves the right sub-config once the doc is fetched.
+  const eff = useMemo(
+    () => (doc ? (detail.resolve?.(doc, id) ?? detail) : detail),
+    [detail, doc, id],
+  );
+
+  // ---- Derive ALL view data in ONE memo (perf — the L2 freeze fix). ----
+  // PREVIOUSLY every config mapper (lineItems / relatedDocs / subDocLists /
+  // kvSections / body / darkStat …) ran inline on EVERY render. They each
+  // allocate fresh arrays of objects, so each of the many re-renders this
+  // screen sees — useCachedJson seeds cached data then swaps in the network
+  // result; plus toast / sheet / formSpec / ctaBusy state changes — re-ran the
+  // whole heavy derivation tree AND handed every child a new array identity,
+  // forcing the entire subtree to re-render. On a heavy doc (an SO/DO/PI with
+  // dozens of line items, each carrying specs + customization chips) that work
+  // compounds into a visible hang/freeze. Memoising on [eff, doc, data] does it
+  // once per fetch instead of once per keystroke/state-change, and keeps array
+  // identities stable so React can skip untouched rows.
+  //
+  // NOTE: this hook MUST run before the early returns below (rules-of-hooks),
+  // so it guards `!doc` internally and returns empty placeholders in that case.
+  const derived = useMemo(() => {
+    if (!doc) {
+      return {
+        code: "—",
+        title: "—",
+        status: undefined as ReturnType<NonNullable<DetailConfig["status"]>>,
+        lineItems: [] as LineItemVM[],
+        relatedGroups: [] as { group: string; items: RelatedDocVM[] }[],
+        primaryCta: undefined as string | undefined,
+        darkStat: undefined as ReturnType<NonNullable<DetailConfig["darkStat"]>>,
+        bodyParas: [] as string[],
+        kvSections: [] as NonNullable<ReturnType<NonNullable<DetailConfig["kvSections"]>>>,
+        netPay: undefined as ReturnType<NonNullable<DetailConfig["netPay"]>>,
+        subDocLists: [] as NonNullable<ReturnType<NonNullable<DetailConfig["subDocLists"]>>>,
+      };
+    }
+    return {
+      code: eff.code(doc) || "—",
+      title: eff.title(doc) || "—",
+      status: eff.status?.(doc),
+      lineItems: eff.lineItems?.(doc) ?? [],
+      relatedGroups: groupRelated(eff.relatedDocs?.(doc, data) ?? []),
+      primaryCta: eff.primaryCta?.(doc),
+      // Optional special sections (rack hero / body / payslip / sub-doc lists)
+      // — each computed only when the config supplies it AND it has content.
+      darkStat: eff.darkStat?.(doc),
+      bodyParas: (eff.body?.(doc) ?? []).filter((p) => p && p.trim()),
+      kvSections: (eff.kvSections?.(doc) ?? []).filter((s) => s.rows.length),
+      netPay: eff.netPay?.(doc),
+      subDocLists: (eff.subDocLists?.(doc, data) ?? []).filter(
+        (l) => l.rows.length || l.emptyText,
+      ),
+    };
+  }, [eff, doc, data]);
+
   if (loading && !doc) {
     return (
       <>
@@ -115,39 +172,26 @@ function Inner({
     );
   }
 
-  // Effective config — a slug hosting multiple doc types (e.g. Procurement
-  // PO/GRN/PI) resolves the right sub-config once the doc is fetched.
-  const eff = detail.resolve?.(doc, id) ?? detail;
-
-  const code = eff.code(doc) || "—";
-  const title = eff.title(doc) || "—";
-  const status = eff.status?.(doc);
-  const lineItems = eff.lineItems?.(doc) ?? [];
-  const related = eff.relatedDocs?.(doc, data) ?? [];
-  const primaryCta = eff.primaryCta?.(doc);
-
-  // Optional special sections (design source: rack hero / body / payslip
-  // earnings-deductions-net / sub-doc lists). Each renders only when the config
-  // for this doc type supplies it AND it has content.
-  const darkStat = eff.darkStat?.(doc);
-  const bodyParas = (eff.body?.(doc) ?? []).filter((p) => p && p.trim());
-  const kvSections = (eff.kvSections?.(doc) ?? []).filter((s) => s.rows.length);
-  const netPay = eff.netPay?.(doc);
-  const subDocLists = (eff.subDocLists?.(doc, data) ?? []).filter(
-    (l) => l.rows.length || l.emptyText,
-  );
+  const {
+    code,
+    title,
+    status,
+    lineItems,
+    relatedGroups,
+    primaryCta,
+    darkStat,
+    bodyParas,
+    kvSections,
+    netPay,
+    subDocLists,
+  } = derived;
   const showActionBar = !eff.hideActionBar;
 
-  // Group related docs under their `group` heading, preserving first-seen
-  // order. Cheap pure transform — computed inline (placed after the early
-  // returns, so it must NOT be a hook).
-  const relatedGroups = groupRelated(related);
-
   // ---- Edit button → prefilled FormSpec (or null when not editable here). ----
+  // Built once per render and reused by onEdit (avoid a second build on tap).
   const editSpec = editSpecFor(config.slug, doc, id);
   const onEdit = () => {
-    const spec = editSpecFor(config.slug, doc, id);
-    if (spec) setFormSpec(spec);
+    if (editSpec) setFormSpec(editSpec);
     else
       setToast({
         kind: "err",

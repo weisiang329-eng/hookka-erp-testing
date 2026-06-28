@@ -22,15 +22,26 @@
 // ===========================================================================
 import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Printer, Pencil, ChevronRight, CheckCircle2 } from "lucide-react";
+import {
+  Printer,
+  Pencil,
+  ChevronRight,
+  CheckCircle2,
+  Check,
+  Package,
+  FileText,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+} from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, MobileCard, StatusPill, Sheet, FormSheet } from "../components";
-import { M } from "../theme";
+import { M, M_ACCENT } from "../theme";
 import {
   type ModuleConfig,
   type DetailConfig,
   type LineItemVM,
   type RelatedDocVM,
+  type SubDocRow,
 } from "../config/types";
 import { type FormSpec } from "../config/form-types";
 import { editSpecFor, newMailSpec } from "../config/forms";
@@ -114,6 +125,18 @@ function Inner({
   const lineItems = eff.lineItems?.(doc) ?? [];
   const related = eff.relatedDocs?.(doc, data) ?? [];
   const primaryCta = eff.primaryCta?.(doc);
+
+  // Optional special sections (design source: rack hero / body / payslip
+  // earnings-deductions-net / sub-doc lists). Each renders only when the config
+  // for this doc type supplies it AND it has content.
+  const darkStat = eff.darkStat?.(doc);
+  const bodyParas = (eff.body?.(doc) ?? []).filter((p) => p && p.trim());
+  const kvSections = (eff.kvSections?.(doc) ?? []).filter((s) => s.rows.length);
+  const netPay = eff.netPay?.(doc);
+  const subDocLists = (eff.subDocLists?.(doc, data) ?? []).filter(
+    (l) => l.rows.length || l.emptyText,
+  );
+  const showActionBar = !eff.hideActionBar;
 
   // Group related docs under their `group` heading, preserving first-seen
   // order. Cheap pure transform — computed inline (placed after the early
@@ -231,48 +254,47 @@ function Inner({
         <span>Overview</span>
       </div>
 
-      <div style={{ padding: "6px 12px 0", display: "grid", gap: 12 }}>
-        {/* Header card */}
-        <MobileCard>
+      <div style={{ padding: "6px 18px 0", display: "grid", gap: 13 }}>
+        {/* Header card — design source: code + status, big title, status flow. */}
+        <MobileCard radius={18} style={{ padding: 18 }}>
           <div
             style={{
               display: "flex",
-              alignItems: "flex-start",
+              alignItems: "center",
               justifyContent: "space-between",
               gap: 10,
             }}
           >
-            <div style={{ minWidth: 0 }}>
-              <div
-                style={{
-                  color: M.taupe,
-                  fontSize: 13,
-                  fontWeight: 700,
-                  fontFamily:
-                    "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-                  fontVariantNumeric: "tabular-nums",
-                  letterSpacing: 0.2,
-                }}
-              >
-                {code}
-              </div>
-              <div
-                style={{
-                  color: M.raisin,
-                  fontSize: 18,
-                  fontWeight: 700,
-                  marginTop: 2,
-                  wordBreak: "break-word",
-                }}
-              >
-                {title}
-              </div>
-            </div>
+            <span
+              style={{
+                color: M.taupe,
+                fontSize: 13,
+                fontWeight: 700,
+                fontVariantNumeric: "tabular-nums",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {code}
+            </span>
             {status ? (
               <div style={{ flexShrink: 0 }}>
                 <StatusPill style={status.style} label={status.label} />
               </div>
             ) : null}
+          </div>
+          <div
+            style={{
+              color: M.raisin,
+              fontSize: 21,
+              fontWeight: 800,
+              marginTop: 9,
+              letterSpacing: "-0.4px",
+              wordBreak: "break-word",
+            }}
+          >
+            {title}
           </div>
 
           {eff.flow && eff.flow.steps.length ? (
@@ -283,99 +305,239 @@ function Inner({
           ) : null}
         </MobileCard>
 
-        {/* Field grid */}
+        {/* Dark hero stat — design source: rack hero on warehouse detail. */}
+        {darkStat ? <DarkStatCard stat={darkStat} /> : null}
+
+        {/* Field grid — design source: label (left) / value (right) rows with
+            an inner hairline between each. */}
         {eff.fields.length ? (
-          <MobileCard>
-            <SectionLabel>Details</SectionLabel>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: "12px 10px",
-                marginTop: 8,
-              }}
-            >
-              {eff.fields.map((f, i) => (
+          <MobileCard radius={18} style={{ padding: "4px 18px" }}>
+            {eff.fields.map((f, i) => {
+              const last = i === eff.fields.length - 1;
+              return (
                 <div
                   key={i}
-                  style={{ gridColumn: f.full ? "1 / -1" : undefined, minWidth: 0 }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
+                    padding: "13px 0",
+                    borderBottom: last ? "none" : `1px solid ${M.divider}`,
+                  }}
                 >
-                  <div style={{ color: M.muted, fontSize: 11, marginBottom: 2 }}>
+                  <span style={{ color: M.muted, fontSize: 13, flexShrink: 0 }}>
                     {f.label}
-                  </div>
-                  <div
+                  </span>
+                  <span
                     style={{
                       color: M.raisin,
-                      fontSize: 14,
+                      fontSize: 13.5,
                       fontWeight: 600,
+                      textAlign: "right",
+                      maxWidth: "60%",
                       fontVariantNumeric: "tabular-nums",
                       wordBreak: "break-word",
                     }}
                   >
                     {f.value(doc) || "—"}
-                  </div>
+                  </span>
                 </div>
-              ))}
-            </div>
+              );
+            })}
           </MobileCard>
         ) : null}
 
-        {/* Line items */}
-        {eff.lineItems ? (
-          <MobileCard padded={false}>
-            <div style={{ padding: "14px 16px 6px" }}>
-              <SectionLabel>Items ({lineItems.length})</SectionLabel>
-            </div>
-            {lineItems.length === 0 ? (
-              <div style={{ padding: "4px 16px 16px", color: M.muted, fontSize: 13 }}>
-                No line items.
-              </div>
-            ) : (
-              lineItems.map((it) => (
-                <LineItemRow
-                  key={it.id}
-                  item={it}
-                  onClick={() =>
-                    navigate(
-                      `/m/${config.slug}/${encodeURIComponent(id)}/item/${encodeURIComponent(it.id)}`,
-                    )
-                  }
-                />
-              ))
-            )}
-          </MobileCard>
-        ) : null}
-
-        {/* Related documents */}
-        {relatedGroups.length ? (
-          <MobileCard padded={false}>
-            <div style={{ padding: "14px 16px 6px" }}>
-              <SectionLabel>Related documents</SectionLabel>
-            </div>
-            {relatedGroups.map((g) => (
-              <div key={g.group}>
-                <div
-                  style={{
-                    padding: "8px 16px 4px",
-                    fontSize: 11,
-                    fontWeight: 700,
-                    color: M.muted,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.4,
-                  }}
-                >
-                  {g.group}
-                </div>
-                {g.items.map((r) => (
-                  <RelatedRow
-                    key={r.id}
-                    rel={r}
-                    onClick={r.href ? () => navigate(r.href as string) : undefined}
-                  />
-                ))}
-              </div>
+        {/* Body paragraphs — design source: announcement / mail message body. */}
+        {bodyParas.length ? (
+          <MobileCard radius={18} style={{ padding: 18 }}>
+            {bodyParas.map((p, i) => (
+              <p
+                key={i}
+                style={{
+                  fontSize: 14,
+                  lineHeight: 1.6,
+                  color: "#3A352C",
+                  margin: i === bodyParas.length - 1 ? 0 : "0 0 12px",
+                  whiteSpace: "pre-line",
+                }}
+              >
+                {p}
+              </p>
             ))}
           </MobileCard>
+        ) : null}
+
+        {/* Key-value sections — design source: payslip Earnings / Deductions. */}
+        {kvSections.map((s) => (
+          <div key={s.title}>
+            <SectionHeading>{s.title}</SectionHeading>
+            <MobileCard radius={18} style={{ padding: "4px 18px" }}>
+              {s.rows.map((r, i) => {
+                const last = i === s.rows.length - 1;
+                return (
+                  <div
+                    key={i}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      padding: "12px 0",
+                      borderBottom: last ? "none" : `1px solid ${M.divider}`,
+                    }}
+                  >
+                    <span style={{ color: M.muted, fontSize: 13 }}>
+                      {r.label}
+                    </span>
+                    <span
+                      style={{
+                        color: s.negative ? "#9A3A2D" : M.raisin,
+                        fontSize: 13.5,
+                        fontWeight: 600,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {r.value}
+                    </span>
+                  </div>
+                );
+              })}
+            </MobileCard>
+          </div>
+        ))}
+
+        {/* Net pay — design source: payslip dark net-pay band. */}
+        {netPay ? (
+          <div
+            style={{
+              background: M.raisin,
+              borderRadius: 18,
+              padding: "16px 18px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <span style={{ fontSize: 13, color: "#C9BD9A", fontWeight: 600 }}>
+              {netPay.label}
+            </span>
+            <span
+              style={{
+                fontSize: 20,
+                fontWeight: 800,
+                color: "#F0ECE9",
+                letterSpacing: "-0.3px",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {netPay.value}
+            </span>
+          </div>
+        ) : null}
+
+        {/* Sub-document lists — design source: payslips under an employee,
+            rack contents + recent movements under a rack. */}
+        {subDocLists.map((list) => (
+          <div key={list.title}>
+            <SectionHeading>{list.title}</SectionHeading>
+            <MobileCard padded={false} radius={18} style={{ overflow: "hidden" }}>
+              {list.rows.length === 0 ? (
+                <div style={{ padding: 16, color: M.muted, fontSize: 13 }}>
+                  {list.emptyText}
+                </div>
+              ) : (
+                list.rows.map((r, i) => (
+                  <SubDocRowView
+                    key={r.id}
+                    row={r}
+                    first={i === 0}
+                    onClick={
+                      r.href ? () => navigate(r.href as string) : undefined
+                    }
+                  />
+                ))
+              )}
+            </MobileCard>
+          </div>
+        ))}
+
+        {/* Line items — design source: section heading above an overflow-hidden
+            card; each row has a gold icon tile + name/spec + qty/amount. */}
+        {eff.lineItems ? (
+          <div>
+            <SectionHeading>Line items</SectionHeading>
+            <MobileCard
+              padded={false}
+              radius={18}
+              style={{ overflow: "hidden" }}
+            >
+              {lineItems.length === 0 ? (
+                <div
+                  style={{ padding: "16px", color: M.muted, fontSize: 13 }}
+                >
+                  No line items.
+                </div>
+              ) : (
+                lineItems.map((it, i) => (
+                  <LineItemRow
+                    key={it.id}
+                    item={it}
+                    first={i === 0}
+                    onClick={() =>
+                      navigate(
+                        `/m/${config.slug}/${encodeURIComponent(id)}/item/${encodeURIComponent(it.id)}`,
+                      )
+                    }
+                  />
+                ))
+              )}
+            </MobileCard>
+          </div>
+        ) : null}
+
+        {/* Related documents — design source: section heading + card; each row
+            has a parchment icon tile + label/code. Grouped by relation. */}
+        {relatedGroups.length ? (
+          <div>
+            <SectionHeading>Related documents</SectionHeading>
+            <MobileCard
+              padded={false}
+              radius={18}
+              style={{ overflow: "hidden" }}
+            >
+              {relatedGroups.map((g, gi) => (
+                <div key={g.group}>
+                  {relatedGroups.length > 1 ? (
+                    <div
+                      style={{
+                        padding: gi === 0 ? "12px 16px 4px" : "12px 16px 4px",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: M.muted,
+                        textTransform: "uppercase",
+                        letterSpacing: 0.4,
+                        borderTop:
+                          gi === 0 ? "none" : `1px solid ${M.divider}`,
+                      }}
+                    >
+                      {g.group}
+                    </div>
+                  ) : null}
+                  {g.items.map((r, ri) => (
+                    <RelatedRow
+                      key={r.id}
+                      rel={r}
+                      first={gi === 0 && ri === 0 && relatedGroups.length === 1}
+                      onClick={
+                        r.href ? () => navigate(r.href as string) : undefined
+                      }
+                    />
+                  ))}
+                </div>
+              ))}
+            </MobileCard>
+          </div>
         ) : null}
 
         <div style={{ height: 12 }} />
@@ -383,23 +545,29 @@ function Inner({
 
       {/* Inline action feedback (no ToastProvider on /m). */}
       {toast ? (
-        <Toast toast={toast} onClose={() => setToast(null)} />
+        <Toast
+          toast={toast}
+          onClose={() => setToast(null)}
+          raised={showActionBar}
+        />
       ) : null}
 
-      {/* Bottom action bar */}
-      <ActionBar
-        primaryCta={primaryCta}
-        ctaBusy={ctaBusy}
-        editable={editSpec != null}
-        extraAction={
-          config.slug === "mail-center"
-            ? { label: "Sign", onClick: onSign }
-            : undefined
-        }
-        onPrint={() => setSheet("print")}
-        onEdit={onEdit}
-        onCta={runCta}
-      />
+      {/* Bottom action bar — hidden for read-only detail (payslip / rack). */}
+      {showActionBar ? (
+        <ActionBar
+          primaryCta={primaryCta}
+          ctaBusy={ctaBusy}
+          editable={editSpec != null}
+          extraAction={
+            config.slug === "mail-center"
+              ? { label: "Sign", onClick: onSign }
+              : undefined
+          }
+          onPrint={() => setSheet("print")}
+          onEdit={onEdit}
+          onCta={runCta}
+        />
+      ) : null}
 
       {/* Edit / reply form (real save). */}
       <FormSheet
@@ -448,9 +616,12 @@ function Inner({
 function Toast({
   toast,
   onClose,
+  raised = true,
 }: {
   toast: { kind: "ok" | "err"; text: string };
   onClose: () => void;
+  /** Sit above the bottom action bar; when false sit above the tab bar only. */
+  raised?: boolean;
 }) {
   const ok = toast.kind === "ok";
   return (
@@ -460,7 +631,9 @@ function Toast({
         position: "fixed",
         left: 0,
         right: 0,
-        bottom: "calc(120px + env(safe-area-inset-bottom))",
+        bottom: raised
+          ? "calc(120px + env(safe-area-inset-bottom))"
+          : "calc(72px + env(safe-area-inset-bottom))",
         display: "flex",
         justifyContent: "center",
         zIndex: 50,
@@ -513,10 +686,11 @@ function StatusFlow({
       style={{
         display: "flex",
         alignItems: "flex-start",
-        marginTop: 14,
+        marginTop: 18,
         overflowX: "auto",
         gap: 0,
         WebkitOverflowScrolling: "touch",
+        scrollbarWidth: "none",
       }}
     >
       {steps.map((s, i) => {
@@ -530,16 +704,16 @@ function StatusFlow({
               flexDirection: "column",
               alignItems: "center",
               flex: "1 0 auto",
-              minWidth: 52,
+              minWidth: 54,
               position: "relative",
             }}
           >
-            {/* Connector to the previous dot */}
+            {/* Connector from the previous dot (centered on the 18px dot row). */}
             {i > 0 ? (
               <div
                 style={{
                   position: "absolute",
-                  top: 7,
+                  top: 8,
                   right: "50%",
                   width: "100%",
                   height: 2,
@@ -551,22 +725,26 @@ function StatusFlow({
               style={{
                 position: "relative",
                 zIndex: 1,
-                width: isCurrent ? 16 : 14,
-                height: isCurrent ? 16 : 14,
+                width: 18,
+                height: 18,
                 borderRadius: 9999,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
                 backgroundColor: done ? M.taupe : M.card,
                 border: `2px solid ${done ? M.taupe : M.border}`,
-                marginTop: isCurrent ? 0 : 1,
               }}
-            />
+            >
+              {done ? <Check size={12} strokeWidth={3} color="#fff" /> : null}
+            </div>
             <div
               style={{
-                marginTop: 5,
+                marginTop: 6,
                 fontSize: 9.5,
                 lineHeight: 1.2,
                 textAlign: "center",
                 color: isCurrent ? M.raisin : M.muted,
-                fontWeight: isCurrent ? 700 : 500,
+                fontWeight: isCurrent ? 700 : 600,
               }}
             >
               {s.label}
@@ -578,13 +756,32 @@ function StatusFlow({
   );
 }
 
+// Customization-chip tints — mirror the desktop SO line "Customization" chips
+// (src/pages/sales/detail.tsx) via the shared mobile accent palette.
+const CHIP_TONE: Record<
+  NonNullable<NonNullable<LineItemVM["chips"]>[number]["tone"]>,
+  { bg: string; fg: string }
+> = {
+  neutral: { bg: "#F0EAD8", fg: M.taupe },
+  gold: M_ACCENT.gold,
+  info: M_ACCENT.info,
+  moss: M_ACCENT.moss,
+  danger: M_ACCENT.danger,
+  warning: M_ACCENT.warning,
+  plum: M_ACCENT.plum,
+};
+
 function LineItemRow({
   item,
+  first,
   onClick,
 }: {
   item: LineItemVM;
+  /** First row in the card — no top hairline. */
+  first?: boolean;
   onClick: () => void;
 }) {
+  const hasDetail = (item.specs?.length ?? 0) > 0 || (item.chips?.length ?? 0) > 0;
   return (
     <div
       onClick={onClick}
@@ -598,81 +795,177 @@ function LineItemRow({
       }}
       style={{
         display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "12px 16px",
-        borderTop: `1px solid ${M.border}`,
+        // Top-align when there are specs/chips so the icon sits beside the title.
+        alignItems: hasDetail ? "flex-start" : "center",
+        gap: 12,
+        padding: "13px 16px",
+        borderTop: first ? "none" : `1px solid ${M.divider}`,
         cursor: "pointer",
         WebkitTapHighlightColor: "transparent",
       }}
     >
+      {/* Gold icon tile (design source). Decorative — line items have no per-row
+          icon field, so a generic Package glyph is used for all. */}
+      <span
+        style={{
+          width: 38,
+          height: 38,
+          borderRadius: 10,
+          background: "#F0EAD8",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flex: "none",
+          marginTop: hasDetail ? 1 : 0,
+        }}
+      >
+        <Package size={18} strokeWidth={1.75} color={M.taupe} />
+      </span>
       <div style={{ minWidth: 0, flex: 1 }}>
-        <div
-          style={{
-            color: M.raisin,
-            fontSize: 14,
-            fontWeight: 600,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {item.title}
-        </div>
-        {item.subLine ? (
-          <div
-            style={{
-              color: M.muted,
-              fontSize: 12,
-              marginTop: 2,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {item.subLine}
-          </div>
-        ) : null}
-      </div>
-      {item.meta1 || item.meta2 ? (
+        {/* Title + (right) meta on the same top line. */}
         <div
           style={{
             display: "flex",
-            flexDirection: "column",
-            alignItems: "flex-end",
-            gap: 4,
-            flexShrink: 0,
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            gap: 10,
           }}
         >
-          {[item.meta1, item.meta2].map((m, i) =>
-            m ? (
-              <div key={i} style={{ textAlign: "right" }}>
-                <div style={{ color: M.muted, fontSize: 10 }}>{m.label}</div>
-                <div
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div
+              style={{
+                color: M.raisin,
+                fontSize: 13.5,
+                fontWeight: 600,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {item.title}
+            </div>
+            {item.subLine ? (
+              <div
+                style={{
+                  color: M.muted,
+                  fontSize: 11.5,
+                  marginTop: 2,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {item.subLine}
+              </div>
+            ) : null}
+          </div>
+          {item.meta1 || item.meta2 ? (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "flex-end",
+                gap: 3,
+                flexShrink: 0,
+              }}
+            >
+              {[item.meta1, item.meta2].map((m, i) =>
+                m ? (
+                  <div key={i} style={{ textAlign: "right" }}>
+                    <div style={{ color: M.muted, fontSize: 10 }}>{m.label}</div>
+                    <div
+                      style={{
+                        color: M.raisin,
+                        fontSize: 13,
+                        fontWeight: 700,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {m.value}
+                    </div>
+                  </div>
+                ) : null,
+              )}
+            </div>
+          ) : null}
+        </div>
+
+        {/* Spec rows — Category / Size / Fabric / Unit Price (label · value). */}
+        {item.specs?.length ? (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "2px 14px",
+              marginTop: 7,
+            }}
+          >
+            {item.specs.map((s, i) => (
+              <span key={i} style={{ fontSize: 11.5, color: M.muted }}>
+                {s.label}{" "}
+                <span
                   style={{
-                    color: M.raisin,
-                    fontSize: 13,
+                    color: M.ink,
                     fontWeight: 600,
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {m.value}
-                </div>
-              </div>
-            ) : null,
-          )}
-        </div>
-      ) : null}
-      <ChevronRight size={18} strokeWidth={1.75} color={M.muted} style={{ flexShrink: 0 }} />
+                  {s.value}
+                </span>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {/* Customization chips — Leg 6" / Divan 5" / Gap 2" / special / customs. */}
+        {item.chips?.length ? (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 5,
+              marginTop: 7,
+            }}
+          >
+            {item.chips.map((c, i) => {
+              const tone = CHIP_TONE[c.tone ?? "neutral"];
+              return (
+                <span
+                  key={i}
+                  style={{
+                    fontSize: 10.5,
+                    fontWeight: 600,
+                    color: tone.fg,
+                    background: tone.bg,
+                    padding: "2px 7px",
+                    borderRadius: 6,
+                  }}
+                >
+                  {c.text}
+                </span>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+      <ChevronRight
+        size={17}
+        strokeWidth={1.75}
+        color="#C4BDB2"
+        style={{ flexShrink: 0, marginTop: hasDetail ? 2 : 0 }}
+      />
     </div>
   );
 }
 
 function RelatedRow({
   rel,
+  first,
   onClick,
 }: {
   rel: RelatedDocVM;
+  /** First row in the card — no top hairline. */
+  first?: boolean;
   onClick?: () => void;
 }) {
   const interactive = typeof onClick === "function";
@@ -694,21 +987,46 @@ function RelatedRow({
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 10,
-        padding: "12px 16px",
-        borderTop: `1px solid ${M.border}`,
+        gap: 12,
+        padding: "14px 16px",
+        borderTop: first ? "none" : `1px solid ${M.divider}`,
         cursor: interactive ? "pointer" : "default",
         WebkitTapHighlightColor: "transparent",
       }}
     >
+      {/* Parchment icon tile (design source). */}
+      <span
+        style={{
+          width: 38,
+          height: 38,
+          borderRadius: 10,
+          background: "#F4EFE6",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flex: "none",
+        }}
+      >
+        <FileText size={18} strokeWidth={1.75} color={M.taupe} />
+      </span>
       <div style={{ minWidth: 0, flex: 1 }}>
         <div
           style={{
-            color: M.taupe,
-            fontSize: 13,
-            fontWeight: 700,
-            fontFamily:
-              "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+            color: M.raisin,
+            fontSize: 13.5,
+            fontWeight: 600,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {rel.subLine || rel.group}
+        </div>
+        <div
+          style={{
+            color: M.muted,
+            fontSize: 11.5,
+            marginTop: 2,
             fontVariantNumeric: "tabular-nums",
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -717,17 +1035,17 @@ function RelatedRow({
         >
           {rel.code}
         </div>
-        {rel.subLine ? (
-          <div style={{ color: M.muted, fontSize: 12, marginTop: 2 }}>
-            {rel.subLine}
-          </div>
-        ) : null}
       </div>
       {rel.status ? (
         <StatusPill style={rel.status.style} label={rel.status.label} size="sm" />
       ) : null}
       {interactive ? (
-        <ChevronRight size={18} strokeWidth={1.75} color={M.muted} style={{ flexShrink: 0 }} />
+        <ChevronRight
+          size={18}
+          strokeWidth={1.75}
+          color="#C4BDB2"
+          style={{ flexShrink: 0 }}
+        />
       ) : null}
     </div>
   );
@@ -858,18 +1176,180 @@ function SecondaryBtn({
   );
 }
 
-function SectionLabel({ children }: { children: React.ReactNode }) {
+/** Section heading above a card (design source: 13/700 ink, margin 4px 4px 9px). */
+function SectionHeading({ children }: { children: React.ReactNode }) {
   return (
     <div
       style={{
-        fontSize: 11,
+        fontSize: 13,
         fontWeight: 700,
-        color: M.muted,
-        textTransform: "uppercase",
-        letterSpacing: 0.4,
+        color: M.ink,
+        margin: "4px 4px 9px",
       }}
     >
       {children}
+    </div>
+  );
+}
+
+/** Dark hero "stat" card (design source: rack hero on warehouse detail). */
+function DarkStatCard({
+  stat,
+}: {
+  stat: { eyebrow: string; value: string; caption?: React.ReactNode };
+}) {
+  return (
+    <div
+      style={{
+        background: M.raisin,
+        borderRadius: 18,
+        padding: "17px 18px",
+      }}
+    >
+      <div
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          letterSpacing: 2,
+          color: "#857A66",
+          textTransform: "uppercase",
+        }}
+      >
+        {stat.eyebrow}
+      </div>
+      <div
+        style={{
+          fontSize: 22,
+          fontWeight: 800,
+          color: "#F0ECE9",
+          marginTop: 2,
+          letterSpacing: "-0.3px",
+        }}
+      >
+        {stat.value}
+      </div>
+      {stat.caption != null ? (
+        <div style={{ fontSize: 12, color: "#9A8F6B", marginTop: 4 }}>
+          {stat.caption}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** One row in a sub-document list (design source: payslips / rack contents). */
+function SubDocRowView({
+  row,
+  first,
+  onClick,
+}: {
+  row: SubDocRow;
+  first?: boolean;
+  onClick?: () => void;
+}) {
+  const interactive = typeof onClick === "function";
+  // Movement rows use a tinted in/out tile; everything else a parchment tile.
+  const isIn = row.icon === "arrow-down";
+  const isOut = row.icon === "arrow-up";
+  const tileBg = isIn ? "#EEF3E4" : isOut ? "#F9E1DA" : "#F0EAD8";
+  const tileFg = isIn ? "#4F7C3A" : isOut ? "#9A3A2D" : M.taupe;
+  const Icon = isIn
+    ? ArrowDownToLine
+    : isOut
+      ? ArrowUpFromLine
+      : row.icon === "package"
+        ? Package
+        : FileText;
+  return (
+    <div
+      onClick={onClick}
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      onKeyDown={
+        interactive
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick?.();
+              }
+            }
+          : undefined
+      }
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "13px 16px",
+        borderTop: first ? "none" : `1px solid ${M.divider}`,
+        cursor: interactive ? "pointer" : "default",
+        WebkitTapHighlightColor: "transparent",
+      }}
+    >
+      <span
+        style={{
+          width: 38,
+          height: 38,
+          borderRadius: 10,
+          background: tileBg,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flex: "none",
+        }}
+      >
+        <Icon size={18} strokeWidth={1.75} color={tileFg} />
+      </span>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div
+          style={{
+            color: M.raisin,
+            fontSize: 13.5,
+            fontWeight: 600,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {row.title}
+        </div>
+        {row.subLine ? (
+          <div
+            style={{
+              color: M.muted,
+              fontSize: 11.5,
+              marginTop: 2,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {row.subLine}
+          </div>
+        ) : null}
+      </div>
+      {row.status ? (
+        <StatusPill style={row.status.style} label={row.status.label} size="sm" />
+      ) : null}
+      {row.trailing ? (
+        <span
+          style={{
+            fontSize: 11.5,
+            color: M.muted,
+            flex: "none",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {row.trailing}
+        </span>
+      ) : null}
+      {interactive ? (
+        <ChevronRight
+          size={17}
+          strokeWidth={1.75}
+          color="#C4BDB2"
+          style={{ flexShrink: 0 }}
+        />
+      ) : null}
     </div>
   );
 }

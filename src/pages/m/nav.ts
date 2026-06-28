@@ -8,8 +8,9 @@ import {
   Home,
   ShoppingCart,
   Factory,
+  ShoppingBag,
   Truck,
-  MoreHorizontal,
+  LayoutGrid,
   Megaphone,
   Mail,
   Users,
@@ -31,14 +32,23 @@ export type TabDef = {
   icon: LucideIcon;
   /** Route this tab navigates to. "more" opens the More screen. */
   path: string;
+  /** When true this slot renders as the floating circular center button. */
+  raised?: boolean;
 };
 
+// Bottom-nav: 5 slots with More as the CENTER raised button (owner 2026-06-28,
+// reference: a colored circular grid button popping above the bar). Order:
+//   Home · Sales · [More — center raised button] · Production · Procure.
+// Icons: Home → house · Sales → shopping-cart · More → layout-grid (the raised
+// taupe circle) · Production → factory · Procure → shopping-bag.
+// The `raised` flag tells BottomTabBar to render that slot as the floating
+// circular action button instead of a flat icon+label.
 export const TABS: TabDef[] = [
   { key: "home", label: "Home", icon: Home, path: "/m" },
   { key: "sales", label: "Sales", icon: ShoppingCart, path: "/m/sales" },
+  { key: "more", label: "More", icon: LayoutGrid, path: "/m/more", raised: true },
   { key: "production", label: "Production", icon: Factory, path: "/m/production" },
-  { key: "procure", label: "Procure", icon: Truck, path: "/m/procurement" },
-  { key: "more", label: "More", icon: MoreHorizontal, path: "/m/more" },
+  { key: "procure", label: "Procure", icon: ShoppingBag, path: "/m/procurement" },
 ];
 
 export type ModuleLink = {
@@ -46,6 +56,12 @@ export type ModuleLink = {
   icon: LucideIcon;
   /** Route under /m/*. Phase 2 replaces placeholders with real screens. */
   path: string;
+  /**
+   * Optional red count badge (design source: e.g. an unread count on Mail /
+   * Announcements). Left unset until a real count source is wired — we never
+   * fabricate a number. // TODO: populate from unread mail / new announcements.
+   */
+  badge?: string | number;
 };
 
 export type ModuleGroup = {

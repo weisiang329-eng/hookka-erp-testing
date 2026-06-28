@@ -88,11 +88,81 @@ function itemVM(it: RawRow, i: number): LineItemVM {
   };
 }
 
+/**
+ * Customization chips from a sales/delivery/invoice line — mirrors the desktop
+ * "Customization" column (src/pages/sales/detail.tsx): Gap N" / Divan N" /
+ * Leg N" / special order (underscores → spaces) + free-text custom specials.
+ * Tones match the desktop chip colours (gap=info, divan=plum, leg=warning,
+ * special=danger).
+ */
+function customizationChips(it: RawRow): LineItemVM["chips"] {
+  const chips: NonNullable<LineItemVM["chips"]> = [];
+  const gap = num(it, "gapInches");
+  const divan = num(it, "divanHeightInches");
+  const leg = num(it, "legHeightInches");
+  if (gap > 0) chips.push({ text: `Gap ${gap}"`, tone: "info" });
+  if (divan > 0) chips.push({ text: `Divan ${divan}"`, tone: "plum" });
+  if (leg > 0) chips.push({ text: `Leg ${leg}"`, tone: "warning" });
+  const special = str(it, "specialOrder");
+  if (special) chips.push({ text: special.replace(/_/g, " "), tone: "danger" });
+  // Free-text custom specials (parsed array of { description }). See SO 0074.
+  const cs = it.customSpecials;
+  if (Array.isArray(cs)) {
+    for (const e of cs as RawRow[]) {
+      const desc = str(e, "description");
+      if (desc) chips.push({ text: desc, tone: "neutral" });
+    }
+  }
+  return chips.length ? chips : undefined;
+}
+
+/**
+ * Rich line item for SO/DO/Invoice/PI — adds the variant data the desktop
+ * tables show in their own columns (Category / Size / Fabric + Unit price),
+ * customization chips, and the line Total as the bold trailing figure. Falls
+ * back gracefully when a doc type doesn't carry a given field.
+ */
+function richItemVM(it: RawRow, i: number): LineItemVM {
+  const qty = num(it, "quantity", "qty", "receivedQty", "orderedQty");
+  const unit = num(it, "unitPriceSen", "priceSen", "unitCostSen");
+  const line = num(it, "lineTotalSen", "amountSen", "totalSen") || unit * qty;
+
+  const specs: NonNullable<LineItemVM["specs"]> = [];
+  const category = str(it, "itemCategory", "category");
+  if (category) specs.push({ label: "Category", value: category });
+  const size = str(it, "sizeLabel", "sizeCode", "size");
+  if (size) specs.push({ label: "Size", value: size });
+  const fabric = str(it, "fabricCode", "fabric");
+  if (fabric) specs.push({ label: "Fabric", value: fabric });
+  if (unit > 0) specs.push({ label: "Unit Price", value: money(unit) });
+
+  return {
+    id: str(it, "id", "lineNo") || String(i),
+    title:
+      str(it, "productName", "description", "itemDescription", "productCode") ||
+      "—",
+    subLine: str(it, "productCode", "itemCode", "sku") || undefined,
+    specs: specs.length ? specs : undefined,
+    chips: customizationChips(it),
+    meta1: { label: "Qty", value: qty },
+    meta2: { label: "Total", value: money(line) },
+  };
+}
+
 /** Map a raw line-items array (under any of the given keys) → LineItemVM[]. */
 function itemsOf(doc: RawRow, ...keys: string[]): LineItemVM[] {
   for (const k of keys) {
     const arr = doc[k];
     if (Array.isArray(arr)) return (arr as RawRow[]).map(itemVM);
+  }
+  return [];
+}
+
+/** Rich variant of itemsOf — variant fields + customization chips. */
+function richItemsOf(doc: RawRow, ...keys: string[]): LineItemVM[] {
+  for (const k of keys) {
+    const arr = doc[k];
+    if (Array.isArray(arr)) return (arr as RawRow[]).map(richItemVM);
   }
   return [];
 }
@@ -200,18 +270,27 @@ const salesDetail: DetailConfig = {
     ]),
     current: (d) => str(d, "status"),
   },
+  // Header field card — every customer/order field the SO GET payload exposes
+  // (owner 2026-06-28: "顾客的很多资料都没有接进来"). The SO record carries no
+  // contact/address/payment-terms columns, so those are intentionally NOT shown
+  // (the API doesn't return them — we don't fabricate fields).
   fields: [
-    fld("Customer SO", (d) => str(d, "customerSO", "customerSOId")),
-    fld("Customer PO", (d) => str(d, "customerPO", "customerPOId")),
     fld("Customer", (d) => str(d, "customerName")),
     fld("State", (d) => str(d, "customerState")),
+    fld("Customer SO", (d) => str(d, "customerSO", "customerSOId")),
+    fld("Customer PO", (d) => str(d, "customerPO", "customerPOId")),
+    fld("Customer PO Date", (d) => dateOnly(d, "customerPODate")),
     fld("Order Date", (d) => dateOnly(d, "companySODate")),
     fld("Expected DD", (d) => dateOnly(d, "hookkaExpectedDD")),
     fld("Customer Delivery", (d) => dateOnly(d, "customerDeliveryDate")),
+    fld("Delivery Hub", (d) => str(d, "hubName")),
     fld("Reference", (d) => str(d, "reference")),
+    fld("Items", (d) =>
+      String(Array.isArray(d.items) ? (d.items as unknown[]).length : 0)),
     fld("Amount", (d) => money(num(d, "totalSen"))),
+    fld("Notes", (d) => str(d, "notes"), true),
   ],
-  lineItems: (d) => itemsOf(d, "items"),
+  lineItems: (d) => richItemsOf(d, "items"),
   relatedDocs: (_d, resp) => {
     const r = (resp ?? {}) as Record<string, unknown>;
     const out: RelatedDocVM[] = [];
@@ -343,7 +422,8 @@ const deliveryDetail: DetailConfig = {
     fld("Reference", (d) => str(d, "reference")),
     fld("Delivery Address", (d) => str(d, "deliveryAddress"), true),
   ],
-  lineItems: (d) => itemsOf(d, "items"),
+  // DO items carry Size + Fabric (and customization where present) — show them.
+  lineItems: (d) => richItemsOf(d, "items"),
   relatedDocs: (d) => {
     const out: RelatedDocVM[] = [];
     const soId = str(d, "salesOrderId");
@@ -530,7 +610,9 @@ const invoiceDetail: DetailConfig = {
     fld("Outstanding", (d) => money(num(d, "totalSen") - num(d, "paidAmount"))),
     fld("Customer PO", (d) => str(d, "customerPOId")),
   ],
-  lineItems: (d) => itemsOf(d, "items"),
+  // Invoice items carry the full variant set (Category/Size/Fabric + leg/divan/
+  // gap/special) — show them like the desktop invoice line table.
+  lineItems: (d) => richItemsOf(d, "items"),
   relatedDocs: (d) => {
     const out: RelatedDocVM[] = [];
     const soId = str(d, "salesOrderId");
@@ -1015,10 +1097,119 @@ function warehouseSource(key: string, label: string): DataSource {
   };
 }
 
+// Warehouse rack detail — GET /api/warehouse/:id/details returns
+// { data: { rack, contents[], movements[] } }. The whole `data` object is the
+// "doc"; accessors reach into rack / contents / movements. Mirrors the design
+// source: a dark rack hero, a small field grid, "In this rack now" (current
+// contents), and "Recent movements" (stock_movements, newest-first). All real.
+const warehouseDetail: DetailConfig = {
+  url: (id) => `/api/warehouse/${encodeURIComponent(id)}/details`,
+  selectDoc: selectDocData,
+  code: (d) => {
+    const rack = (read(d, "rack") ?? {}) as RawRow;
+    return str(rack, "rack") || "Rack";
+  },
+  title: (d) => {
+    const rack = (read(d, "rack") ?? {}) as RawRow;
+    const label = [str(rack, "rack"), str(rack, "position")]
+      .filter(Boolean)
+      .join("-");
+    return label || str(rack, "rack") || "Rack";
+  },
+  status: (d) => {
+    const rack = (read(d, "rack") ?? {}) as RawRow;
+    return resolveStatus(str(rack, "status"), {
+      EMPTY: PAYMENT_STATUS_MAP.ACTIVE,
+      OCCUPIED: PAYMENT_STATUS_MAP.SUBMITTED,
+      RESERVED: PAYMENT_STATUS_MAP.PARTIAL,
+    });
+  },
+  darkStat: (d) => {
+    const rack = (read(d, "rack") ?? {}) as RawRow;
+    const contents = asArr(read(d, "contents"));
+    const label = [str(rack, "rack"), str(rack, "position")]
+      .filter(Boolean)
+      .join("-") || str(rack, "rack") || "Rack";
+    return {
+      eyebrow: "Rack",
+      value: label,
+      caption:
+        contents.length > 0
+          ? `Currently holds ${contents.length} item${contents.length === 1 ? "" : "s"}.`
+          : "Empty — no items stored.",
+    };
+  },
+  fields: (() => {
+    const rackField = (
+      label: string,
+      get: (rack: RawRow, d: RawRow) => string,
+    ): FieldDef => ({
+      label,
+      value: (d) => get((read(d, "rack") ?? {}) as RawRow, d),
+    });
+    return [
+      rackField("Rack", (rack) => str(rack, "rack")),
+      rackField("Position", (rack) => str(rack, "position")),
+      rackField("Status", (rack) => str(rack, "status")),
+      {
+        label: "Items",
+        value: (d) => String(asArr(read(d, "contents")).length),
+      },
+    ];
+  })(),
+  subDocLists: (d) => {
+    const contents = asArr(read(d, "contents"));
+    const movements = asArr(read(d, "movements"));
+    return [
+      {
+        title: "In this rack now",
+        emptyText: "No items in this rack.",
+        rows: contents.map((it, i) => ({
+          id: str(it, "productCode") + "-" + i,
+          title:
+            str(it, "productName", "productCode") || "Item",
+          subLine:
+            [str(it, "customerPOId", "productionOrderId"), str(it, "customerName")]
+              .filter(Boolean)
+              .join(" · ") || undefined,
+          trailing: dateOnly(it, "stockedInDate") || undefined,
+          icon: "package" as const,
+        })),
+      },
+      {
+        title: "Recent movements",
+        emptyText: "No movement history.",
+        rows: movements.map((mv) => {
+          const dir = str(mv, "type"); // STOCK_IN / STOCK_OUT / TRANSFER
+          const isIn = dir === "STOCK_IN";
+          return {
+            id: str(mv, "id"),
+            title: str(mv, "productName", "productCode") || "Movement",
+            subLine:
+              [isIn ? "Stock in" : dir === "STOCK_OUT" ? "Stock out" : "Transfer",
+                str(mv, "docRef"),
+                str(mv, "performedBy")]
+                .filter(Boolean)
+                .join(" · ") || undefined,
+            trailing: dateOnly(mv, "createdAt") || undefined,
+            icon: isIn ? ("arrow-down" as const) : ("arrow-up" as const),
+          };
+        }),
+      },
+    ];
+  },
+  // Design source: rack detail is a read-only view (no Print/Edit/CTA bar).
+  hideActionBar: true,
+};
+
 export const warehouseConfig: ModuleConfig = {
   slug: "warehouse",
   title: "Warehouse",
+  // Only Rack Overview rows (real rack ids) open the rack detail; the Stock
+  // In-Out / Movement sub-tabs reuse the same rack rows, so any rack id is a
+  // valid detail target.
   detailPath: (vm) => `/m/warehouse/${encodeURIComponent(vm.id)}`,
+  detail: warehouseDetail,
   sources: [
     warehouseSource("racks", "Rack Overview"),
     warehouseSource("stock_io", "Stock In-Out"),
@@ -1287,8 +1478,102 @@ const payrollSource: DataSource = {
 export const employeesConfig: ModuleConfig = {
   slug: "employees",
   title: "Employees",
-  detailPath: () => null, // L2 employee detail arrives in Phase 3.
+  // Only stored payslip rows (Payroll sub-tab, id "PS-YYMM-NNN") open a detail —
+  // the payslip detail (Earnings / Deductions / Net pay), reached at /m/payslips/:id.
+  // Directory / Attendance / Leave rows have no per-id office endpoint that
+  // returns the design's composite (attendance strip + payslip list) without
+  // fabricating data, so they stay non-tappable. Projected-only payslips
+  // ("projected-…") have no GET /:id, so they're excluded too.
+  detailPath: (vm) =>
+    /^PS-/.test(vm.id)
+      ? `/m/payslips/${encodeURIComponent(vm.id)}`
+      : null,
   sources: [directorySource, attendanceSource, leaveSource, payrollSource],
+};
+
+// ---------------------------------------------------------------------------
+// PAYSLIPS — no L1 list of its own in the More menu; reached by tapping a
+// Payroll row under Employees. GET /api/payslips/:id → { data, ytd, months }.
+// The detail mirrors the design source's payslip screen: Earnings / Deductions
+// key-value cards + a dark Net pay band. All figures are REAL (stored sen).
+// ---------------------------------------------------------------------------
+const payslipDetail: DetailConfig = {
+  url: (id) => `/api/payslips/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "period") || "Payslip",
+  title: (d) => str(d, "employeeName") || "Payslip",
+  status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  fields: [
+    fld("Employee", (d) => str(d, "employeeName")),
+    fld("Employee No.", (d) => str(d, "employeeNo")),
+    fld("Department", (d) => str(d, "departmentCode")),
+    fld("Period", (d) => str(d, "period")),
+    fld("Working Days", (d) => String(num(d, "workingDays"))),
+    fld("Bank Account", (d) => str(d, "bankAccount")),
+  ],
+  kvSections: (d) => {
+    const earnings = [
+      { label: "Basic salary", value: money(num(d, "basicSalary", "basicSalarySen")) },
+      { label: "Overtime", value: money(num(d, "totalOT", "totalOtSen")) },
+      { label: "Allowances", value: money(num(d, "allowances", "allowancesSen")) },
+      { label: "Gross pay", value: money(num(d, "grossPay", "grossPaySen")) },
+    ];
+    // Deductions: only show lines that exist (a zeroed statutory line is still a
+    // real figure — keep it so totals reconcile; the absence line is omitted
+    // when there's no deduction).
+    const deductions = [
+      { label: "EPF (employee)", value: money(num(d, "epfEmployee", "epfEmployeeSen")) },
+      { label: "SOCSO (employee)", value: money(num(d, "socsoEmployee", "socsoEmployeeSen")) },
+      { label: "EIS (employee)", value: money(num(d, "eisEmployee", "eisEmployeeSen")) },
+      { label: "PCB (tax)", value: money(num(d, "pcb", "pcbSen")) },
+    ];
+    const absence = num(d, "absenceDeductionSen");
+    if (absence > 0) {
+      deductions.push({ label: "Absence", value: money(absence) });
+    }
+    deductions.push({
+      label: "Total deductions",
+      value: money(num(d, "totalDeductions", "totalDeductionsSen")),
+    });
+    return [
+      { title: "Earnings", rows: earnings },
+      { title: "Deductions", rows: deductions, negative: true },
+    ];
+  },
+  netPay: (d) => ({
+    label: "Net pay",
+    value: money(num(d, "netPay", "netPaySen")),
+  }),
+  // Design source: the payslip is a read-only statement — no Print/Edit/CTA bar.
+  hideActionBar: true,
+};
+
+export const payslipsConfig: ModuleConfig = {
+  slug: "payslips",
+  title: "Payslip",
+  detailPath: () => null,
+  detail: payslipDetail,
+  // No standalone list source — payslips are reached from the Employees Payroll
+  // sub-tab. A minimal source keeps /m/payslips a valid (empty) list route.
+  sources: [
+    {
+      url: `/api/payslips?period=${thisPeriod()}`,
+      select: selectData,
+      toVM: (r): RowVM => ({
+        id: str(r, "id"),
+        code: str(r, "period") || thisPeriod(),
+        title: str(r, "employeeName") || "—",
+        subLine: str(r, "departmentCode") || undefined,
+        meta1: { label: "Amount", value: money(num(r, "netPay", "netPaySen")) },
+      }),
+      columns: [
+        textCol("name", "Customer", (r) => str(r, "employeeName")),
+        numCol("net", "Amount", (r) => num(r, "netPay", "netPaySen")),
+      ],
+      defaultSort: { key: "name", dir: "asc" },
+      subTabs: [{ key: "payslips", label: "Payslips", match: () => true }],
+    },
+  ],
 };
 
 // ---------------------------------------------------------------------------
@@ -1332,8 +1617,15 @@ const announcementsDetail: DetailConfig = {
     fld("Posted By", (d) => str(d, "createdBy")),
     fld("Order Date", (d) => dateOnly(d, "createdAt")),
     fld("Expires", (d) => dateOnly(d, "expiresAt")),
-    fld("Message", (d) => str(d, "body"), true),
   ],
+  // Design source: the announcement message renders as its own body card (not a
+  // cramped field-grid value). Split paragraphs on blank lines; only the real
+  // stored body is shown — no fabricated boilerplate.
+  body: (d) =>
+    str(d, "body", "message")
+      .split(/\n{2,}/)
+      .map((p) => p.trim())
+      .filter(Boolean),
   primaryCta: () => "Mark as Read",
 };
 
@@ -1401,6 +1693,21 @@ const mailDetail: DetailConfig = {
     fld("Messages", (d) => String(num(d, "messageCount"))),
     fld("Subject", (d) => str(d, "subject"), true),
   ],
+  // Design source: the mail reads as a message body. Show the most recent
+  // message's real text as the body card (full thread stays in the line items
+  // below). Nothing is fabricated — empty bodies just yield no card.
+  body: (d) => {
+    const msgs = Array.isArray(d.messages) ? (d.messages as RawRow[]) : [];
+    if (msgs.length === 0) return [];
+    const latest = msgs[msgs.length - 1];
+    const text = str(latest, "textBody", "body", "snippet");
+    return text
+      ? text
+          .split(/\n{2,}/)
+          .map((p) => p.trim())
+          .filter(Boolean)
+      : [];
+  },
   lineItems: (d) => {
     const msgs = d.messages;
     if (!Array.isArray(msgs)) return [];
@@ -1552,6 +1859,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   warehouseConfig,
   inventoryConfig,
   employeesConfig,
+  payslipsConfig,
   announcementsConfig,
   mailConfig,
   customersConfig,

@@ -15,7 +15,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, SlidersHorizontal, Plus } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
-import { MobileHeader, MobileCard, ListRow, StatusPill, FormSheet } from "../components";
+import { MobileHeader, DocCard, StatusPill, FormSheet } from "../components";
 import { SubTabs } from "../components/SubTabs";
 import { FilterSheet } from "../components/FilterSheet";
 import { M } from "../theme";
@@ -30,6 +30,12 @@ import {
 } from "../config/helpers";
 
 type Sort = { key: string; dir: "asc" | "desc" } | null;
+
+// Perf cap — the raw list can hold 1,800+ rows (Inventory). Painting that many
+// cards freezes a phone, so we render in pages and reveal more on demand. This
+// changes ONLY how many of the already-fetched rows are painted; the fetch and
+// the filtered/sorted set are untouched (counts, search, etc. still see all).
+const PAGE_SIZE = 40;
 
 export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   const navigate = useNavigate();
@@ -69,12 +75,46 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
     [sortByUrl, source.url, source.defaultSort],
   );
 
+  // Rows for the active source (pre-tab), reused for both the count badges and
+  // the visible list — avoids re-running select() twice.
+  const sourceRows = useMemo(
+    () => (data ? source.select(data) : []),
+    [data, source],
+  );
+
   const rows = useMemo(() => {
-    const raw = data ? source.select(data) : [];
-    const byTab = raw.filter((r) => tab.match(r));
+    const byTab = sourceRows.filter((r) => tab.match(r));
     const filtered = applyFilters(byTab, source.columns, filters, search);
     return applySort(filtered, source.columns, sort);
-  }, [data, source, tab, filters, search, sort]);
+  }, [sourceRows, source, tab, filters, search, sort]);
+
+  // How many rows are painted. Reset to the first page whenever the visible set
+  // changes (tab / source / filters / search / sort) so "Show more" never
+  // strands the list mid-scroll on a different dataset. Render-time state reset
+  // (the codebase's endorsed alternative to setState-in-effect).
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const resetKey = `${source.url}|${activeTab}|${search}|${JSON.stringify(
+    filters,
+  )}|${sort ? sort.key + sort.dir : ""}`;
+  const [lastResetKey, setLastResetKey] = useState(resetKey);
+  if (resetKey !== lastResetKey) {
+    setLastResetKey(resetKey);
+    setVisibleCount(PAGE_SIZE);
+  }
+
+  const visibleRows = rows.slice(0, visibleCount);
+  const hiddenCount = rows.length - visibleRows.length;
+
+  // Per-tab count badges (design source shows a count on each segment pill).
+  // Only the active source's tabs get real counts — tabs from other sources
+  // would need their own fetch, so they stay badge-less rather than fabricated.
+  const tabCounts = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const t of source.subTabs) {
+      out[t.key] = sourceRows.filter((r) => t.match(r)).length;
+    }
+    return out;
+  }, [source, sourceRows]);
 
   const fCount = activeFilterCount(filters);
 
@@ -108,26 +148,32 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
         }
       />
 
-      <SubTabs tabs={allTabs} active={activeTab} onChange={setActiveTab} />
+      <SubTabs
+        tabs={allTabs}
+        active={activeTab}
+        onChange={setActiveTab}
+        counts={tabCounts}
+      />
 
-      {/* Search + Filter bar */}
-      <div style={{ display: "flex", gap: 8, padding: "10px 12px 6px" }}>
+      {/* Search + Filter bar — design source: white pill (radius 12, border
+          #E2DDD8) + a square sliders button that dots when filters are active. */}
+      <div style={{ display: "flex", gap: 9, padding: "12px 18px 6px" }}>
         <div
           style={{
             flex: 1,
             display: "flex",
             alignItems: "center",
-            gap: 8,
-            padding: "8px 12px",
+            gap: 9,
+            padding: "11px 13px",
             backgroundColor: M.card,
-            border: `1px solid ${M.border}`,
+            border: `1px solid ${M.hairline}`,
             borderRadius: 12,
           }}
         >
-          <Search size={16} strokeWidth={1.75} color={M.muted} />
+          <Search size={18} strokeWidth={1.75} color={M.faint} />
           <input
             value={search}
-            placeholder="Search…"
+            placeholder={`Search ${config.title}…`}
             onChange={(e) => setSearch(e.target.value)}
             style={{
               flex: 1,
@@ -147,62 +193,91 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
             position: "relative",
             display: "flex",
             alignItems: "center",
+            justifyContent: "center",
             gap: 6,
-            padding: "0 14px",
+            width: fCount > 0 ? undefined : 44,
+            padding: fCount > 0 ? "0 14px" : 0,
             backgroundColor: fCount > 0 ? M.taupe : M.card,
-            border: `1px solid ${fCount > 0 ? M.taupe : M.border}`,
+            border: `1px solid ${fCount > 0 ? M.taupe : M.hairline}`,
             borderRadius: 12,
-            color: fCount > 0 ? "#fff" : M.body,
+            color: fCount > 0 ? "#fff" : M.ink,
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 700,
             cursor: "pointer",
+            flexShrink: 0,
             WebkitTapHighlightColor: "transparent",
           }}
         >
-          <SlidersHorizontal size={16} strokeWidth={1.75} />
+          <SlidersHorizontal size={19} strokeWidth={1.75} />
           {fCount > 0 ? fCount : ""}
         </button>
       </div>
 
-      {/* List */}
-      <div style={{ padding: "6px 12px 0" }}>
-        <MobileCard padded={false}>
-          {loading && rows.length === 0 ? (
-            <Msg text="Loading…" />
-          ) : rows.length === 0 ? (
-            <Msg
-              text={
-                error
-                  ? "Couldn’t load — pull to refresh or use the desktop app."
-                  : "No records match."
-              }
-            />
-          ) : (
-            rows.map((row) => {
-              const vm = source.toVM(row);
-              const dest = config.detailPath?.(vm, row) ?? null;
-              return (
-                <ListRow
-                  key={vm.id}
-                  code={vm.code}
-                  title={vm.title}
-                  subLine={vm.subLine}
-                  meta={[vm.meta1, vm.meta2]}
-                  pill={
-                    vm.status ? (
-                      <StatusPill
-                        style={vm.status.style}
-                        label={vm.status.label}
-                        size="sm"
-                      />
-                    ) : undefined
-                  }
-                  onClick={dest ? () => navigate(dest) : undefined}
-                />
-              );
-            })
-          )}
-        </MobileCard>
+      {/* List — card per document (design source: card-based list). */}
+      <div
+        style={{
+          padding: "6px 18px 0",
+          display: "flex",
+          flexDirection: "column",
+          gap: 11,
+        }}
+      >
+        {loading && rows.length === 0 ? (
+          <Msg text="Loading…" />
+        ) : rows.length === 0 ? (
+          <Msg
+            text={
+              error
+                ? "Couldn’t load — pull to refresh or use the desktop app."
+                : "No records match."
+            }
+          />
+        ) : (
+          visibleRows.map((row) => {
+            const vm = source.toVM(row);
+            const dest = config.detailPath?.(vm, row) ?? null;
+            return (
+              <DocCard
+                key={vm.id}
+                code={vm.code}
+                title={vm.title}
+                subLine={vm.subLine}
+                meta={[vm.meta1, vm.meta2]}
+                pill={
+                  vm.status ? (
+                    <StatusPill
+                      style={vm.status.style}
+                      label={vm.status.label}
+                      size="sm"
+                    />
+                  ) : undefined
+                }
+                onClick={dest ? () => navigate(dest) : undefined}
+              />
+            );
+          })
+        )}
+
+        {/* Show more — reveals the next page of the already-fetched rows. */}
+        {hiddenCount > 0 ? (
+          <button
+            onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}
+            style={{
+              marginTop: 3,
+              padding: "12px 0",
+              borderRadius: 12,
+              border: `1px solid ${M.hairline}`,
+              backgroundColor: M.card,
+              color: M.ink,
+              fontSize: 14,
+              fontWeight: 700,
+              cursor: "pointer",
+              WebkitTapHighlightColor: "transparent",
+            }}
+          >
+            Show more ({hiddenCount} more)
+          </button>
+        ) : null}
       </div>
 
       <div style={{ height: 12 }} />
@@ -237,7 +312,10 @@ function Msg({ text }: { text: string }) {
   return (
     <div
       style={{
-        padding: "28px 16px",
+        backgroundColor: M.card,
+        border: `1px solid ${M.border}`,
+        borderRadius: 16,
+        padding: "32px 16px",
         textAlign: "center",
         color: M.muted,
         fontSize: 13,

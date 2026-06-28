@@ -88,11 +88,81 @@ function itemVM(it: RawRow, i: number): LineItemVM {
   };
 }
 
+/**
+ * Customization chips from a sales/delivery/invoice line — mirrors the desktop
+ * "Customization" column (src/pages/sales/detail.tsx): Gap N" / Divan N" /
+ * Leg N" / special order (underscores → spaces) + free-text custom specials.
+ * Tones match the desktop chip colours (gap=info, divan=plum, leg=warning,
+ * special=danger).
+ */
+function customizationChips(it: RawRow): LineItemVM["chips"] {
+  const chips: NonNullable<LineItemVM["chips"]> = [];
+  const gap = num(it, "gapInches");
+  const divan = num(it, "divanHeightInches");
+  const leg = num(it, "legHeightInches");
+  if (gap > 0) chips.push({ text: `Gap ${gap}"`, tone: "info" });
+  if (divan > 0) chips.push({ text: `Divan ${divan}"`, tone: "plum" });
+  if (leg > 0) chips.push({ text: `Leg ${leg}"`, tone: "warning" });
+  const special = str(it, "specialOrder");
+  if (special) chips.push({ text: special.replace(/_/g, " "), tone: "danger" });
+  // Free-text custom specials (parsed array of { description }). See SO 0074.
+  const cs = it.customSpecials;
+  if (Array.isArray(cs)) {
+    for (const e of cs as RawRow[]) {
+      const desc = str(e, "description");
+      if (desc) chips.push({ text: desc, tone: "neutral" });
+    }
+  }
+  return chips.length ? chips : undefined;
+}
+
+/**
+ * Rich line item for SO/DO/Invoice/PI — adds the variant data the desktop
+ * tables show in their own columns (Category / Size / Fabric + Unit price),
+ * customization chips, and the line Total as the bold trailing figure. Falls
+ * back gracefully when a doc type doesn't carry a given field.
+ */
+function richItemVM(it: RawRow, i: number): LineItemVM {
+  const qty = num(it, "quantity", "qty", "receivedQty", "orderedQty");
+  const unit = num(it, "unitPriceSen", "priceSen", "unitCostSen");
+  const line = num(it, "lineTotalSen", "amountSen", "totalSen") || unit * qty;
+
+  const specs: NonNullable<LineItemVM["specs"]> = [];
+  const category = str(it, "itemCategory", "category");
+  if (category) specs.push({ label: "Category", value: category });
+  const size = str(it, "sizeLabel", "sizeCode", "size");
+  if (size) specs.push({ label: "Size", value: size });
+  const fabric = str(it, "fabricCode", "fabric");
+  if (fabric) specs.push({ label: "Fabric", value: fabric });
+  if (unit > 0) specs.push({ label: "Unit Price", value: money(unit) });
+
+  return {
+    id: str(it, "id", "lineNo") || String(i),
+    title:
+      str(it, "productName", "description", "itemDescription", "productCode") ||
+      "—",
+    subLine: str(it, "productCode", "itemCode", "sku") || undefined,
+    specs: specs.length ? specs : undefined,
+    chips: customizationChips(it),
+    meta1: { label: "Qty", value: qty },
+    meta2: { label: "Total", value: money(line) },
+  };
+}
+
 /** Map a raw line-items array (under any of the given keys) → LineItemVM[]. */
 function itemsOf(doc: RawRow, ...keys: string[]): LineItemVM[] {
   for (const k of keys) {
     const arr = doc[k];
     if (Array.isArray(arr)) return (arr as RawRow[]).map(itemVM);
+  }
+  return [];
+}
+
+/** Rich variant of itemsOf — variant fields + customization chips. */
+function richItemsOf(doc: RawRow, ...keys: string[]): LineItemVM[] {
+  for (const k of keys) {
+    const arr = doc[k];
+    if (Array.isArray(arr)) return (arr as RawRow[]).map(richItemVM);
   }
   return [];
 }
@@ -200,18 +270,27 @@ const salesDetail: DetailConfig = {
     ]),
     current: (d) => str(d, "status"),
   },
+  // Header field card — every customer/order field the SO GET payload exposes
+  // (owner 2026-06-28: "顾客的很多资料都没有接进来"). The SO record carries no
+  // contact/address/payment-terms columns, so those are intentionally NOT shown
+  // (the API doesn't return them — we don't fabricate fields).
   fields: [
-    fld("Customer SO", (d) => str(d, "customerSO", "customerSOId")),
-    fld("Customer PO", (d) => str(d, "customerPO", "customerPOId")),
     fld("Customer", (d) => str(d, "customerName")),
     fld("State", (d) => str(d, "customerState")),
+    fld("Customer SO", (d) => str(d, "customerSO", "customerSOId")),
+    fld("Customer PO", (d) => str(d, "customerPO", "customerPOId")),
+    fld("Customer PO Date", (d) => dateOnly(d, "customerPODate")),
     fld("Order Date", (d) => dateOnly(d, "companySODate")),
     fld("Expected DD", (d) => dateOnly(d, "hookkaExpectedDD")),
     fld("Customer Delivery", (d) => dateOnly(d, "customerDeliveryDate")),
+    fld("Delivery Hub", (d) => str(d, "hubName")),
     fld("Reference", (d) => str(d, "reference")),
+    fld("Items", (d) =>
+      String(Array.isArray(d.items) ? (d.items as unknown[]).length : 0)),
     fld("Amount", (d) => money(num(d, "totalSen"))),
+    fld("Notes", (d) => str(d, "notes"), true),
   ],
-  lineItems: (d) => itemsOf(d, "items"),
+  lineItems: (d) => richItemsOf(d, "items"),
   relatedDocs: (_d, resp) => {
     const r = (resp ?? {}) as Record<string, unknown>;
     const out: RelatedDocVM[] = [];
@@ -343,7 +422,8 @@ const deliveryDetail: DetailConfig = {
     fld("Reference", (d) => str(d, "reference")),
     fld("Delivery Address", (d) => str(d, "deliveryAddress"), true),
   ],
-  lineItems: (d) => itemsOf(d, "items"),
+  // DO items carry Size + Fabric (and customization where present) — show them.
+  lineItems: (d) => richItemsOf(d, "items"),
   relatedDocs: (d) => {
     const out: RelatedDocVM[] = [];
     const soId = str(d, "salesOrderId");
@@ -530,7 +610,9 @@ const invoiceDetail: DetailConfig = {
     fld("Outstanding", (d) => money(num(d, "totalSen") - num(d, "paidAmount"))),
     fld("Customer PO", (d) => str(d, "customerPOId")),
   ],
-  lineItems: (d) => itemsOf(d, "items"),
+  // Invoice items carry the full variant set (Category/Size/Fabric + leg/divan/
+  // gap/special) — show them like the desktop invoice line table.
+  lineItems: (d) => richItemsOf(d, "items"),
   relatedDocs: (d) => {
     const out: RelatedDocVM[] = [];
     const soId = str(d, "salesOrderId");

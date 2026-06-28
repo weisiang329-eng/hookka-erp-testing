@@ -1,36 +1,47 @@
 // ===========================================================================
 // Mobile Home / Dashboard
 //
-// Reskinned 1:1 to the design source (Hookka ERP Mobile.dc.html — HOME screen)
-// while keeping ALL existing real-data wiring. No data layer / route changes.
+// Owner 2026-06-28 ("把我们的 Home 换成 Dashboard 里的资料"): the /m Home KPI cards
+// now mirror the DESKTOP Command Center (src/pages/dashboard-b/index.tsx) so a
+// manager opening the phone sees the SAME headline numbers. Card set + data
+// sources are aligned 1:1 to the dashboard's KPI rail. Card styling (icon tile
+// + delta + big tabular number + label) and the Stock-alerts section are kept.
 //
-// KPI wiring (UNCHANGED — real data):
-//   • Open orders  → /api/sales-orders/stats  (byStatus: Confirmed +
-//                    In Production + Ready to Ship + Shipped — orders that are
-//                    live but not yet Delivered/Invoiced/Closed/Cancelled).
-//   • WIP units    → /api/dashboard/overview   (production.activeJobs:
-//                    bedframeUnits + sofaSets — units currently on the floor).
-//   • On-time %    → derived from the fetched SO list: of open orders with an
-//                    Expected DD, the share whose DD has NOT already passed.
-//   • AR due       → /api/sales-orders/stats  (outstandingItemsSen).
+// KPI wiring — each card mirrors the dashboard KPI of the same name, off the
+// SAME endpoints (current-month scope, the dashboard's default view):
+//   • This Month Sales    → /api/dashboard/overview?period=<YYYY-MM>
+//                           (salesThisMonthSen). Dashboard: KTile "This Month
+//                           Sales". MoM delta from overview.monthlyRevenue.
+//   • This Month Invoices → /api/dashboard/overview?period=<YYYY-MM>
+//                           (invoicesThisMonthSen). Dashboard: KTile "This
+//                           Month Invoices". MoM delta from monthlyRevenue.
+//   • Pending Delivery    → consolidated live figure = poReadyForDelivery sum
+//                           (/api/production-orders + /api/delivery-orders/
+//                           linked-po-ids + /po-values + /api/sales-orders
+//                           price-index) + dispatch chain (DRAFT + LOADED +
+//                           IN_TRANSIT) from /api/delivery-orders/stats. SAME
+//                           computation as the dashboard's Pending Delivery
+//                           KTile (via src/lib/delivery-pipeline.ts).
+//   • Outstanding         → /api/sales-orders/stats (outstandingItemsSen).
+//                           Dashboard: KTile "Outstanding".
 //
-// Lists:
+// Lists (kept):
 //   • Stock alerts → /api/inventory (raw materials at/below reorder / low).
 //   • Orders due   → /api/sales-orders (soonest Expected DD, non-terminal).
 //
-// Design deltas: the source shows static dummy deltas (+5, +38, -1.3%, "6 late").
-// We only render a delta we can actually compute (Open-orders MoM sales %); the
-// other cards show a real "N late" count (AR) / a muted hint instead of a
-// fabricated number. See inline TODOs for KPIs lacking a real prior-period
-// source.
+// Deltas: Sales / Invoices show the real month-over-month % from the same
+// monthlyRevenue series the dashboard's KTile sparkline/delta use. Pending
+// Delivery + Outstanding are point-in-time "live" figures (no prior-period
+// source on the dashboard either), so no delta — matching the dashboard.
 // ===========================================================================
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  ShoppingCart,
-  Factory,
+  DollarSign,
+  FileText,
+  Package,
+  Clock,
   Truck,
-  Receipt,
   Plus,
   PackageCheck,
   HardHat,
@@ -46,6 +57,10 @@ import {
   SO_STATUS_COLOR,
   type SemanticStyle,
 } from "@/lib/design-tokens";
+import {
+  poReadyForDelivery,
+  type PipelinePO,
+} from "@/lib/delivery-pipeline";
 import type { SalesOrder, RawMaterial } from "@/types";
 import { MobileCard, StatusPill, FormSheet } from "../components";
 import { M, M_ACCENT, M_DELTA } from "../theme";
@@ -66,30 +81,46 @@ type StatsResp = {
 };
 type OverviewResp = {
   success?: boolean;
-  production?: {
-    activeJobs?: { bedframeUnits?: number; sofaSets?: number };
-  };
-  monthlyRevenue?: { month: string; salesOrderSen: number }[];
+  salesThisMonthSen?: number;
+  invoicesThisMonthSen?: number;
+  monthlyRevenue?: {
+    month: string;
+    salesOrderSen: number;
+    invoiceSen?: number;
+  }[];
 };
 type SOListResp = { success?: boolean; data?: SalesOrder[] };
 type InventoryResp = {
   success?: boolean;
   data?: { rawMaterials?: RawMaterial[] };
 };
+// Pending Delivery support shapes — mirror the dashboard's fetches.
+type PODeliveryShape = PipelinePO & {
+  salesOrderId?: string;
+  productCode?: string;
+  quantity?: number;
+};
+type POResp = { success?: boolean; data?: PODeliveryShape[] };
+type POValuesResp = { success?: boolean; values?: Record<string, number> };
+type SOItemsResp = {
+  success?: boolean;
+  data?: {
+    id: string;
+    items?: { productCode?: string; unitPriceSen?: number }[];
+  }[];
+};
+type DoStatsResp = { valueByStatus?: Record<string, number> };
 
-// Statuses that count as a "live / open" order on the floor (not terminal).
-const OPEN_STATUSES = new Set([
-  "CONFIRMED",
-  "IN_PRODUCTION",
-  "READY_TO_SHIP",
-  "SHIPPED",
-]);
+// Statuses excluded from the Orders-due list + on-time derivation (terminal).
 const TERMINAL_STATUSES = new Set([
   "DELIVERED",
   "INVOICED",
   "CLOSED",
   "CANCELLED",
 ]);
+
+/** Current "YYYY-MM" — the dashboard's default Command Center period. */
+const CUR_YM = new Date().toISOString().slice(0, 7);
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
@@ -113,34 +144,78 @@ export default function MobileHome() {
   const [formSpec, setFormSpec] = useState<FormSpec | null>(null);
 
   const { data: stats } = useCachedJson<StatsResp>("/api/sales-orders/stats");
+  // Current-month overview = the dashboard's default Command Center period, so
+  // salesThisMonthSen / invoicesThisMonthSen match the desktop KPI rail.
   const { data: overview } = useCachedJson<OverviewResp>(
-    "/api/dashboard/overview?period=all",
+    `/api/dashboard/overview?period=${CUR_YM}`,
   );
   // Whole-table SO list (server caps at 5000; current ~350 SOs). Used for the
-  // Orders-due list + the on-time % derivation.
+  // Orders-due list.
   const { data: soList } = useCachedJson<SOListResp>("/api/sales-orders");
   const { data: inventory } = useCachedJson<InventoryResp>("/api/inventory");
 
-  // ---- KPI: Open orders ----
-  const openOrders = useMemo(() => {
-    const by = stats?.byStatus ?? {};
-    let n = 0;
-    for (const [k, v] of Object.entries(by)) {
-      if (OPEN_STATUSES.has(k)) n += Number(v) || 0;
+  // ---- Pending Delivery — SAME fetches + computation as the dashboard's
+  // consolidated "Pending Delivery" KTile (src/lib/delivery-pipeline.ts). ----
+  const { data: poRaw } = useCachedJson<POResp>(
+    "/api/production-orders?fields=minimal&include=jobCards",
+  );
+  const { data: linkedRaw } = useCachedJson<{ poIds?: string[] }>(
+    "/api/delivery-orders/linked-po-ids",
+  );
+  const { data: poValRaw } = useCachedJson<POValuesResp>(
+    "/api/delivery-orders/po-values",
+  );
+  const { data: soItemsRaw } = useCachedJson<SOItemsResp>(
+    "/api/sales-orders?fields=price-index",
+  );
+  const { data: doStatsRaw } = useCachedJson<DoStatsResp>(
+    "/api/delivery-orders/stats",
+  );
+
+  // ---- KPI: This Month Sales (confirmed-SO value, current month) ----
+  const salesThisMonthSen = overview?.salesThisMonthSen ?? 0;
+  // ---- KPI: This Month Invoices (issued, by invoice date, current month) ----
+  const invoicesThisMonthSen = overview?.invoicesThisMonthSen ?? 0;
+  // ---- KPI: Outstanding (confirmed sales value not yet delivered) ----
+  const outstandingSen = stats?.outstandingItemsSen ?? 0;
+
+  // ---- KPI: Pending Delivery (consolidated, live) — byte-identical to the
+  // dashboard: poReadyForDelivery value + DRAFT/LOADED/IN_TRANSIT DO value. ----
+  const pendingDeliverySen = useMemo(() => {
+    const pos = poRaw?.success ? poRaw.data ?? [] : [];
+    // Guard the loading flash: until linkedRaw lands, an empty set would wrongly
+    // count every PO as still-pending — bail to 0 (matches the dashboard).
+    if (!linkedRaw) return 0;
+    const linkedPOIds = new Set(linkedRaw.poIds ?? []);
+    const poValMap = new Map<string, number>();
+    for (const [k, v] of Object.entries(poValRaw?.values ?? {}))
+      poValMap.set(k, Number(v) || 0);
+    const soPriceByProduct = new Map<string, Map<string, number>>();
+    const sos = soItemsRaw?.success ? soItemsRaw.data ?? [] : [];
+    for (const s of sos) {
+      const m = new Map<string, number>();
+      for (const it of s.items ?? [])
+        if (it.productCode) m.set(it.productCode, Number(it.unitPriceSen) || 0);
+      soPriceByProduct.set(s.id, m);
     }
-    return n;
-  }, [stats]);
+    let readySen = 0;
+    for (const po of pos) {
+      if (!poReadyForDelivery(po, linkedPOIds)) continue;
+      readySen +=
+        poValMap.get(po.id) ??
+        (soPriceByProduct.get(po.salesOrderId || "")?.get(
+          po.productCode || "",
+        ) ?? 0) * (po.quantity || 0);
+    }
+    // Dispatch chain (owner 2026-06-11): DRAFT DOs (pending dispatch) +
+    // LOADED/IN_TRANSIT (on the road) fold into Pending Delivery.
+    const v = doStatsRaw?.valueByStatus ?? {};
+    const dispatchChain =
+      (v.DRAFT ?? 0) + (v.LOADED ?? 0) + (v.IN_TRANSIT ?? 0);
+    return readySen + dispatchChain;
+  }, [poRaw, linkedRaw, poValRaw, soItemsRaw, doStatsRaw]);
 
-  // ---- KPI: WIP units (bedframe units + sofa sets currently in production) ----
-  const wipUnits = useMemo(() => {
-    const aj = overview?.production?.activeJobs;
-    return (Number(aj?.bedframeUnits) || 0) + (Number(aj?.sofaSets) || 0);
-  }, [overview]);
-
-  // ---- KPI: AR due (confirmed sales value not yet delivered) ----
-  const arDueSen = stats?.outstandingItemsSen ?? 0;
-
-  // ---- Sales month-over-month delta (Open-orders card) ----
+  // ---- Sales month-over-month delta (This Month Sales card) ----
   const salesDeltaPct = useMemo(() => {
     const rev = overview?.monthlyRevenue ?? [];
     if (rev.length < 2) return null;
@@ -150,28 +225,21 @@ export default function MobileHome() {
     return Math.round(((cur - prev) / prev) * 100);
   }, [overview]);
 
-  // ---- Orders due + On-time % (both derived from the live SO list) ----
+  // ---- Invoices month-over-month delta (This Month Invoices card) ----
+  const invoiceDeltaPct = useMemo(() => {
+    const rev = overview?.monthlyRevenue ?? [];
+    if (rev.length < 2) return null;
+    const cur = rev[rev.length - 1]?.invoiceSen ?? 0;
+    const prev = rev[rev.length - 2]?.invoiceSen ?? 0;
+    if (prev <= 0) return null;
+    return Math.round(((cur - prev) / prev) * 100);
+  }, [overview]);
+
+  // ---- Orders due (derived from the live SO list) ----
   const orders = useMemo(
     () => (soList?.success ? soList.data ?? [] : []),
     [soList],
   );
-
-  const onTimePct = useMemo(() => {
-    const today = todayISO();
-    let tracked = 0;
-    let onTime = 0;
-    for (const so of orders) {
-      if (TERMINAL_STATUSES.has(so.status)) continue;
-      const dd = so.hookkaExpectedDD;
-      if (!dd) continue;
-      tracked++;
-      if (dd.slice(0, 10) >= today) onTime++;
-    }
-    // TODO(wave-x): replace with a dedicated delivered-on-time endpoint; this is
-    // a live, non-fabricated proxy (open orders not yet past due).
-    if (tracked === 0) return null;
-    return Math.round((onTime / tracked) * 100);
-  }, [orders]);
 
   const ordersDue = useMemo(() => {
     const today = todayISO();
@@ -202,12 +270,6 @@ export default function MobileHome() {
       .sort((a, b) => (Number(a.balanceQty) || 0) - (Number(b.balanceQty) || 0))
       .slice(0, 5);
   }, [inventory]);
-
-  // Count of late orders, shown as the AR-due delta badge ("N late").
-  const lateCount = useMemo(
-    () => ordersDue.filter((o) => o.overdue).length,
-    [ordersDue],
-  );
 
   return (
     <div style={{ paddingTop: "env(safe-area-inset-top)" }}>
@@ -301,11 +363,12 @@ export default function MobileHome() {
             gap: 11,
           }}
         >
+          {/* Mirrors dashboard KTile "This Month Sales" (overview.salesThisMonthSen). */}
           <KpiCard
-            icon={ShoppingCart}
+            icon={DollarSign}
             accent="gold"
-            label="Open orders"
-            value={openOrders.toLocaleString()}
+            label="This Month Sales"
+            value={formatCurrency(salesThisMonthSen)}
             delta={
               salesDeltaPct == null
                 ? null
@@ -315,32 +378,38 @@ export default function MobileHome() {
                   }
             }
           />
+          {/* Mirrors dashboard KTile "This Month Invoices" (overview.invoicesThisMonthSen). */}
           <KpiCard
-            icon={Factory}
+            icon={FileText}
             accent="info"
-            label="WIP units"
-            value={wipUnits.toLocaleString()}
-            // TODO(wave-x): no prior-period WIP snapshot to derive a delta from.
-            delta={null}
-          />
-          <KpiCard
-            icon={Truck}
-            accent="moss"
-            label="On-time"
-            value={onTimePct == null ? "—" : `${onTimePct}%`}
-            // TODO(wave-x): no prior-period on-time figure; delta omitted.
-            delta={null}
-          />
-          <KpiCard
-            icon={Receipt}
-            accent="danger"
-            label="AR due"
-            value={formatCurrency(arDueSen)}
+            label="This Month Invoices"
+            value={formatCurrency(invoicesThisMonthSen)}
             delta={
-              lateCount > 0
-                ? { text: `${lateCount} late`, good: false }
-                : null
+              invoiceDeltaPct == null
+                ? null
+                : {
+                    text: `${invoiceDeltaPct >= 0 ? "+" : ""}${invoiceDeltaPct}%`,
+                    good: invoiceDeltaPct >= 0,
+                  }
             }
+          />
+          {/* Mirrors dashboard KTile "Pending Delivery" (consolidated live). */}
+          <KpiCard
+            icon={Package}
+            accent="moss"
+            label="Pending Delivery"
+            value={formatCurrency(pendingDeliverySen)}
+            // Live point-in-time figure — no prior-period delta (as on desktop).
+            delta={null}
+          />
+          {/* Mirrors dashboard KTile "Outstanding" (stats.outstandingItemsSen). */}
+          <KpiCard
+            icon={Clock}
+            accent="danger"
+            label="Outstanding"
+            value={formatCurrency(outstandingSen)}
+            // Live point-in-time figure — no prior-period delta (as on desktop).
+            delta={null}
           />
         </div>
 

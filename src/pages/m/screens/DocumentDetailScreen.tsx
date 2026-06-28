@@ -35,7 +35,7 @@ import {
 } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, MobileCard, StatusPill, Sheet, FormSheet } from "../components";
-import { M } from "../theme";
+import { M, M_ACCENT } from "../theme";
 import {
   type ModuleConfig,
   type DetailConfig,
@@ -756,6 +756,21 @@ function StatusFlow({
   );
 }
 
+// Customization-chip tints — mirror the desktop SO line "Customization" chips
+// (src/pages/sales/detail.tsx) via the shared mobile accent palette.
+const CHIP_TONE: Record<
+  NonNullable<NonNullable<LineItemVM["chips"]>[number]["tone"]>,
+  { bg: string; fg: string }
+> = {
+  neutral: { bg: "#F0EAD8", fg: M.taupe },
+  gold: M_ACCENT.gold,
+  info: M_ACCENT.info,
+  moss: M_ACCENT.moss,
+  danger: M_ACCENT.danger,
+  warning: M_ACCENT.warning,
+  plum: M_ACCENT.plum,
+};
+
 function LineItemRow({
   item,
   first,
@@ -766,6 +781,7 @@ function LineItemRow({
   first?: boolean;
   onClick: () => void;
 }) {
+  const hasDetail = (item.specs?.length ?? 0) > 0 || (item.chips?.length ?? 0) > 0;
   return (
     <div
       onClick={onClick}
@@ -779,7 +795,8 @@ function LineItemRow({
       }}
       style={{
         display: "flex",
-        alignItems: "center",
+        // Top-align when there are specs/chips so the icon sits beside the title.
+        alignItems: hasDetail ? "flex-start" : "center",
         gap: 12,
         padding: "13px 16px",
         borderTop: first ? "none" : `1px solid ${M.divider}`,
@@ -799,72 +816,143 @@ function LineItemRow({
           alignItems: "center",
           justifyContent: "center",
           flex: "none",
+          marginTop: hasDetail ? 1 : 0,
         }}
       >
         <Package size={18} strokeWidth={1.75} color={M.taupe} />
       </span>
       <div style={{ minWidth: 0, flex: 1 }}>
-        <div
-          style={{
-            color: M.raisin,
-            fontSize: 13.5,
-            fontWeight: 600,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {item.title}
-        </div>
-        {item.subLine ? (
-          <div
-            style={{
-              color: M.muted,
-              fontSize: 11.5,
-              marginTop: 2,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {item.subLine}
-          </div>
-        ) : null}
-      </div>
-      {item.meta1 || item.meta2 ? (
+        {/* Title + (right) meta on the same top line. */}
         <div
           style={{
             display: "flex",
-            flexDirection: "column",
-            alignItems: "flex-end",
-            gap: 3,
-            flexShrink: 0,
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            gap: 10,
           }}
         >
-          {[item.meta1, item.meta2].map((m, i) =>
-            m ? (
-              <div key={i} style={{ textAlign: "right" }}>
-                <div style={{ color: M.muted, fontSize: 10 }}>{m.label}</div>
-                <div
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div
+              style={{
+                color: M.raisin,
+                fontSize: 13.5,
+                fontWeight: 600,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {item.title}
+            </div>
+            {item.subLine ? (
+              <div
+                style={{
+                  color: M.muted,
+                  fontSize: 11.5,
+                  marginTop: 2,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {item.subLine}
+              </div>
+            ) : null}
+          </div>
+          {item.meta1 || item.meta2 ? (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "flex-end",
+                gap: 3,
+                flexShrink: 0,
+              }}
+            >
+              {[item.meta1, item.meta2].map((m, i) =>
+                m ? (
+                  <div key={i} style={{ textAlign: "right" }}>
+                    <div style={{ color: M.muted, fontSize: 10 }}>{m.label}</div>
+                    <div
+                      style={{
+                        color: M.raisin,
+                        fontSize: 13,
+                        fontWeight: 700,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {m.value}
+                    </div>
+                  </div>
+                ) : null,
+              )}
+            </div>
+          ) : null}
+        </div>
+
+        {/* Spec rows — Category / Size / Fabric / Unit Price (label · value). */}
+        {item.specs?.length ? (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "2px 14px",
+              marginTop: 7,
+            }}
+          >
+            {item.specs.map((s, i) => (
+              <span key={i} style={{ fontSize: 11.5, color: M.muted }}>
+                {s.label}{" "}
+                <span
                   style={{
-                    color: M.raisin,
-                    fontSize: 13,
-                    fontWeight: 700,
+                    color: M.ink,
+                    fontWeight: 600,
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {m.value}
-                </div>
-              </div>
-            ) : null,
-          )}
-        </div>
-      ) : null}
+                  {s.value}
+                </span>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {/* Customization chips — Leg 6" / Divan 5" / Gap 2" / special / customs. */}
+        {item.chips?.length ? (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 5,
+              marginTop: 7,
+            }}
+          >
+            {item.chips.map((c, i) => {
+              const tone = CHIP_TONE[c.tone ?? "neutral"];
+              return (
+                <span
+                  key={i}
+                  style={{
+                    fontSize: 10.5,
+                    fontWeight: 600,
+                    color: tone.fg,
+                    background: tone.bg,
+                    padding: "2px 7px",
+                    borderRadius: 6,
+                  }}
+                >
+                  {c.text}
+                </span>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
       <ChevronRight
         size={17}
         strokeWidth={1.75}
         color="#C4BDB2"
-        style={{ flexShrink: 0 }}
+        style={{ flexShrink: 0, marginTop: hasDetail ? 2 : 0 }}
       />
     </div>
   );

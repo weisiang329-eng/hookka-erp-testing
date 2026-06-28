@@ -116,6 +116,16 @@ export type FieldDef = {
   full?: boolean;
 };
 
+/** A small inline chip on a line item (e.g. a customization like Leg 6"). */
+export type LineItemChip = {
+  text: string;
+  /** Semantic tint key. Defaults to the neutral parchment tint. */
+  tone?: "neutral" | "gold" | "info" | "moss" | "danger" | "warning" | "plum";
+};
+
+/** A small label/value spec row under a line item (e.g. Size / Fabric). */
+export type LineItemSpec = { label: string; value: string };
+
 /** One row in the line-items list. */
 export type LineItemVM = {
   id: string;
@@ -123,6 +133,16 @@ export type LineItemVM = {
   title: string;
   /** Left secondary (e.g. product code). */
   subLine?: string;
+  /**
+   * Optional spec rows (Category / Size / Fabric) stacked under the title —
+   * the variant data the desktop SO/DO/PI tables show in their own columns.
+   */
+  specs?: LineItemSpec[];
+  /**
+   * Optional customization chips (the desktop "Customization" column: Leg 6",
+   * Divan 5", Gap 2", special order, free-text customs).
+   */
+  chips?: LineItemChip[];
   /** Right meta columns (e.g. Qty / Amount). */
   meta1?: { label: string; value: ReactNode };
   meta2?: { label: string; value: ReactNode };

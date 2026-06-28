@@ -10,7 +10,7 @@ import {
   Factory,
   ShoppingBag,
   Truck,
-  Menu,
+  LayoutGrid,
   Megaphone,
   Mail,
   Users,
@@ -32,17 +32,23 @@ export type TabDef = {
   icon: LucideIcon;
   /** Route this tab navigates to. "more" opens the More screen. */
   path: string;
+  /** When true this slot renders as the floating circular center button. */
+  raised?: boolean;
 };
 
-// Bottom-nav icons mirror the design source exactly:
-//   Home → house · Sales → shopping-cart · Production → factory ·
-//   Procure → shopping-bag · More → menu.
+// Bottom-nav: 5 slots with More as the CENTER raised button (owner 2026-06-28,
+// reference: a colored circular grid button popping above the bar). Order:
+//   Home · Sales · [More — center raised button] · Production · Procure.
+// Icons: Home → house · Sales → shopping-cart · More → layout-grid (the raised
+// taupe circle) · Production → factory · Procure → shopping-bag.
+// The `raised` flag tells BottomTabBar to render that slot as the floating
+// circular action button instead of a flat icon+label.
 export const TABS: TabDef[] = [
   { key: "home", label: "Home", icon: Home, path: "/m" },
   { key: "sales", label: "Sales", icon: ShoppingCart, path: "/m/sales" },
+  { key: "more", label: "More", icon: LayoutGrid, path: "/m/more", raised: true },
   { key: "production", label: "Production", icon: Factory, path: "/m/production" },
   { key: "procure", label: "Procure", icon: ShoppingBag, path: "/m/procurement" },
-  { key: "more", label: "More", icon: Menu, path: "/m/more" },
 ];
 
 export type ModuleLink = {

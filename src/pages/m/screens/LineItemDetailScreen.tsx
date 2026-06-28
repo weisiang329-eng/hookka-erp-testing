@@ -326,7 +326,20 @@ function buildFields(item: LineItemVM): { label: string; value: React.ReactNode 
     out.push({ label: item.meta1.label || "Quantity", value: item.meta1.value });
   if (item.meta2)
     out.push({ label: item.meta2.label || "Amount", value: item.meta2.value });
-  out.push({ label: "Category", value: categoryLabel(item.subLine) });
+  // Real variant specs the rich SO/DO/Invoice mapper attached (Category / Size
+  // / Fabric / Unit Price). When present they replace the code-derived guess.
+  if (item.specs?.length) {
+    for (const s of item.specs) out.push({ label: s.label, value: s.value });
+  } else {
+    out.push({ label: "Category", value: categoryLabel(item.subLine) });
+  }
+  // Customization chips → a single comma-joined "Customization" row.
+  if (item.chips?.length) {
+    out.push({
+      label: "Customization",
+      value: item.chips.map((c) => c.text).join(", "),
+    });
+  }
   return out;
 }
 

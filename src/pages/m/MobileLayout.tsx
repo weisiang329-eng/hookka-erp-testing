@@ -20,6 +20,7 @@
 // ===========================================================================
 import { type ComponentType } from "react";
 import { Route, Routes } from "react-router-dom";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { BottomTabBar } from "./components";
 import { M, M_FONT, M_MAX_WIDTH } from "./theme";
 import MobileHome from "./screens/Home";
@@ -43,6 +44,14 @@ const CUSTOM_L1: Record<string, ComponentType> = {
 };
 
 export default function MobileLayout() {
+  // Fold-like wide landscape (Galaxy Z Fold unfolded, larger tablets in
+  // landscape) — dc12 design v12 has a wider Fold variant. MVP for now: just
+  // widen the shell so the Home grids (KPI 4-col, dashboard 2-col) have room
+  // to breathe. The full left-rail + 2-pane (list left, detail right) is a
+  // bigger refactor — deferred.
+  const fold = useMediaQuery(
+    "(min-width: 720px) and (orientation: landscape)",
+  );
   return (
     <div
       style={{
@@ -57,7 +66,7 @@ export default function MobileLayout() {
       <div
         style={{
           width: "100%",
-          maxWidth: M_MAX_WIDTH,
+          maxWidth: fold ? 880 : M_MAX_WIDTH,
           minHeight: "100dvh",
           // Clear the fixed bottom tab bar (56px + safe area).
           paddingBottom: "calc(72px + env(safe-area-inset-bottom))",

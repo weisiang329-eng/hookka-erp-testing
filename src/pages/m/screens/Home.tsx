@@ -56,6 +56,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { formatCurrency } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 import {
@@ -296,6 +297,11 @@ export default function MobileHome() {
   const navigate = useNavigate();
   const user = getCurrentUser();
   const firstName = (user?.displayName || "there").split(" ")[0];
+  // Fold-like wide landscape (dc12 design v12 Fold variant) — show the KPI
+  // rail as 4 columns instead of 2×2. Other dashboard cards stay stacked
+  // vertically (the design has a 2-col grid there too — bigger refactor,
+  // deferred).
+  const fold = useMediaQuery("(min-width: 720px) and (orientation: landscape)");
 
   // Quick-action create form: holds the active FormSpec, or null. "Staff" has
   // no in-scope create endpoint, so it routes to the Employees directory.
@@ -925,11 +931,11 @@ export default function MobileHome() {
       </div>
 
       <div style={{ padding: "0 18px" }}>
-        {/* ===== 2×2 KPI grid ===== */}
+        {/* ===== KPI grid — 2×2 on phone, 1×4 on fold (dc12 Fold variant). ===== */}
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "1fr 1fr",
+            gridTemplateColumns: fold ? "repeat(4, 1fr)" : "1fr 1fr",
             gap: 11,
           }}
         >

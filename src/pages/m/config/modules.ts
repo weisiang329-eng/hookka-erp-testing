@@ -1549,19 +1549,78 @@ const payrollSource: DataSource = {
   subTabs: [{ key: "payroll", label: "Payroll", match: () => true }],
 };
 
+// Employee (worker) detail — single-GET /api/workers/:id → { data: worker }.
+// dc12 design also wants an Attendance month bar + Payslips list, but those
+// require multi-fetch infra not in DetailConfig yet (TODO: round 5+ extends
+// the screen with extraFetches → currentMonth attendance + recent payslips).
+// For now: HR-info fields only, which is the worker record we DO have. Same
+// pattern as customerDetail — `detailPath` was returning null on directory
+// rows (tap = dead); now they open with worker fields + status pill.
+const employeeDetail: DetailConfig = {
+  url: (id) => `/api/workers/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "empNo") || "—",
+  title: (d) => str(d, "name") || "—",
+  status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  fields: [
+    fld("Employee No", (d) => str(d, "empNo")),
+    fld("Department", (d) =>
+      Array.isArray(d.departmentCodes) && (d.departmentCodes as unknown[]).length > 0
+        ? (d.departmentCodes as string[]).join(", ")
+        : str(d, "departmentCode"),
+    ),
+    fld("Position", (d) => str(d, "position")),
+    fld("Phone", (d) => str(d, "phone")),
+    fld("Nationality", (d) => str(d, "nationality")),
+    fld("IC No", (d) => str(d, "icNumber")),
+    fld("Passport No", (d) => str(d, "passportNumber")),
+    fld("Join Date", (d) => dateOnly(d, "joinDate")),
+    fld("Basic Salary", (d) => money(num(d, "basicSalarySen"))),
+    fld("OT Multiplier", (d) => {
+      const ot = num(d, "otMultiplier");
+      return ot > 0 ? `${ot}×` : "—";
+    }),
+    fld("Working Hours / Day", (d) => {
+      const h = num(d, "workingHoursPerDay");
+      return h > 0 ? `${h}h` : "—";
+    }),
+    fld("Working Days / Month", (d) => {
+      const w = num(d, "workingDaysPerMonth");
+      return w > 0 ? String(w) : "—";
+    }),
+    // Statutory flags rolled into one line — owner can see at a glance which
+    // of EPF/SOCSO/EIS/PCB apply. Dual-keyed but typically all true.
+    fld("Statutory", (d) => {
+      const on = [
+        d.epfEnabled === false ? null : "EPF",
+        d.socsoEnabled === false ? null : "SOCSO",
+        d.eisEnabled === false ? null : "EIS",
+        d.pcbEnabled === false ? null : "PCB",
+      ].filter(Boolean);
+      return on.length > 0 ? on.join(" · ") : "—";
+    }),
+  ],
+  // Read-only — no mobile edit form yet, no status transitions to expose.
+  hideActionBar: true,
+};
+
 export const employeesConfig: ModuleConfig = {
   slug: "employees",
   title: "Employees",
-  // Only stored payslip rows (Payroll sub-tab, id "PS-YYMM-NNN") open a detail —
-  // the payslip detail (Earnings / Deductions / Net pay), reached at /m/payslips/:id.
-  // Directory / Attendance / Leave rows have no per-id office endpoint that
-  // returns the design's composite (attendance strip + payslip list) without
-  // fabricating data, so they stay non-tappable. Projected-only payslips
-  // ("projected-…") have no GET /:id, so they're excluded too.
-  detailPath: (vm) =>
-    /^PS-/.test(vm.id)
-      ? `/m/payslips/${encodeURIComponent(vm.id)}`
-      : null,
+  // Two detail routes off this one module: Directory rows (worker id =
+  // /^wkr-/ or any non-PS id) → employee detail. Payroll rows (PS-…) →
+  // payslip detail. Attendance / Leave rows have no per-id office endpoint
+  // for the design's composite — stay non-tappable.
+  detailPath: (vm) => {
+    if (/^PS-/.test(vm.id)) return `/m/payslips/${encodeURIComponent(vm.id)}`;
+    // Directory rows are the only sub-tab whose vm.id is a real worker id
+    // (workers.ts genId → "worker-XXXXXXXX"). Attendance / Leave / Payroll
+    // rows have date/leave/PS-shaped ids that aren't valid /api/workers/:id
+    // targets, so a prefix sniff gates the route safely.
+    if (/^worker-/.test(vm.id)) return `/m/employees/${encodeURIComponent(vm.id)}`;
+    return null;
+  },
+  detail: employeeDetail,
   sources: [directorySource, attendanceSource, leaveSource, payrollSource],
   // Design source: a "Pending requests" approve/reject card above the list on
   // the Leave tab. Real leave-approval flow (GET/PUT /api/leaves).

@@ -1,0 +1,84 @@
+# Hookka ERP — Design Sources
+
+This folder holds the **canonical design source files** for every Hookka ERP surface. They are the single source of truth designers iterate on; dev (and AI agents like Claude / Codex / Gemini) implement the React code to match them 1:1.
+
+## Files
+
+| File | Type | Notes |
+|---|---|---|
+| `Hookka ERP Mobile.dc.html` | dc source | Phone UI (~390px wide) — full app: login + Home + module list + detail + Warehouse + Production board + Mail + Editor / FilterSheet / OCR / QR modals |
+| `Hookka ERP Fold.dc.html` | dc source | Galaxy Z Fold UI (~892×684 unfolded) — left rail nav + two-pane (list left, detail right) |
+| `Hookka ERP Desktop.dc.html` | dc source | Desktop UI — sidebar + topbar + 23 main scenes (Dashboard / Sales / Delivery / Invoices / Procurement / Production / Planning / BOM / Inventory / Warehouse / Customers / Suppliers / Products / CNC / Consignment / Service Cases / Mail / Announcements / Accounting / e-Invoice / Employees / User Management) |
+| `support.js` | helper | dc-html runtime (lucide icons, QR generator, x-dc element). Required next to every `.dc.html` to render. |
+| `hookka-logo.png` | asset | Brand logo (Fold left rail uses it). |
+| `standalone/Hookka ERP Mobile (Phone).html` | standalone | Pre-rendered single-file HTML — open directly in browser, no `support.js` needed. Designers who don't run dev tooling can use this. |
+| `standalone/Hookka ERP Fold.html` | standalone | Same for Fold. |
+
+## How to view
+
+**dc source** (best — interactive, editable):
+1. Open the `.dc.html` directly in Chrome / Safari / Firefox. It loads `support.js` from the same folder.
+2. You see the rendered design exactly as it appears on a real phone / fold / desktop.
+3. The Mobile + Fold files render a fake phone/fold frame around the UI. The Desktop file fills the browser window.
+
+**standalone HTML** (fastest — no dev tooling):
+1. Open `standalone/*.html` directly. Self-contained.
+
+## How designers edit
+
+1. Open the `.dc.html` source in any text editor + a browser (refresh to see changes).
+2. Edit:
+   - **Layout / structure** — change `<div>` nesting, grid/flex styles
+   - **Spacing / colours / typography** — change inline `style="..."` values
+   - **Copy / labels** — change text inside elements + the `{{ placeholder }}` data in the bottom `<script>`
+   - **Add new scenes / variants** — add a new `<sc-if value="{{ isXxx }}">...</sc-if>` block + add the `isXxx` flag in the script's `render()` return
+3. Save the `.dc.html`. Refresh the browser. Iterate.
+
+Designers do NOT need to know React. Just HTML + inline CSS.
+
+## How devs implement
+
+1. Read the relevant scene's `<sc-if>` block in the `.dc.html`.
+2. Implement 1:1 in React + TypeScript (`src/pages/m/` for mobile, `src/pages/` for desktop).
+3. Use the **same** colours / spacing / radii. Design tokens in `src/lib/design-tokens.ts` (desktop) and `src/pages/m/theme.ts` (mobile) carry the canonical values:
+   - Raisin `#1F1D1B` · Taupe `#6B5C32` · Paper `#FAF8F4`
+   - Card border `#E7E0D4` · Hairline `#E2DDD8` · Divider `#F2EEE6`
+   - Gold `#C9A961` · Body `#F0ECE9` (desktop only)
+   - system-ui font · tabular-nums · lucide-react icons (stroke 1.75)
+
+## Versioning
+
+- Owner exports a new dc.html from his design tool when iterating.
+- New versions overwrite the file in this folder (`.dc.html` is the source).
+- Git tracks the diff — you can see exactly what changed visually.
+- Round number is in the commit message (e.g. "design(v13): updated mobile + fold").
+
+## Device behaviour (Fold-specific)
+
+The Hookka phone app at `/m` is responsive:
+- **Folded** (cover screen, < 720px or portrait) → renders Mobile UI from `Hookka ERP Mobile.dc.html`
+- **Unfolded** (inner screen, ≥ 720px landscape) → renders Fold UI from `Hookka ERP Fold.dc.html` (left rail + two-pane)
+
+Detection in code: `useMediaQuery("(min-width: 720px) and (orientation: landscape)")` in `src/pages/m/MobileLayout.tsx`.
+
+## Workflow
+
+```
+Owner / Designer
+    │
+    │ edit .dc.html
+    ▼
+docs/design/Hookka ERP <Surface>.dc.html
+    │
+    │ commit + push
+    ▼
+GitHub main
+    │
+    │ Dev / AI reads + implements
+    ▼
+src/pages/...      (React code)
+    │
+    │ Cloudflare Pages deploys
+    ▼
+erp.hookka.com    (prod)
+```

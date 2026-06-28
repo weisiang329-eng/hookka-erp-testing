@@ -1358,6 +1358,56 @@ const wipSource: DataSource = {
   subTabs: [{ key: "wip", label: "WIP", match: () => true }],
 };
 
+// Raw Material detail — single GET /api/raw-materials/:id + an extraFetches
+// slot for the new GET /api/raw-materials/:id/used-in reverse-lookup (dc12
+// design v12 L4: tap a material → see which products' BOMs use it).
+const rawMaterialDetail: DetailConfig = {
+  url: (id) => `/api/raw-materials/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "itemCode") || "—",
+  title: (d) => str(d, "description") || str(d, "itemCode") || "—",
+  fields: [
+    fld("Item Code", (d) => str(d, "itemCode")),
+    fld("Item Group", (d) => str(d, "itemGroup")),
+    fld("Base UOM", (d) => str(d, "baseUOM")),
+    fld("Balance Qty", (d) => {
+      const q = num(d, "balanceQty");
+      const u = str(d, "baseUOM");
+      return `${q} ${u}`.trim();
+    }),
+    fld("Min Stock", (d) => {
+      const m = num(d, "minStock");
+      return m > 0 ? String(m) : "—";
+    }),
+    fld("Description", (d) => str(d, "description"), true),
+  ],
+  extraFetches: {
+    a: {
+      key: "usedIn",
+      url: (id) => `/api/raw-materials/${encodeURIComponent(id)}/used-in`,
+    },
+  },
+  subDocLists: (_d, _resp, extras) => {
+    const used = extras?.usedIn as
+      | { data?: { products?: { productCode: string; productName: string; category?: string }[] } }
+      | undefined;
+    const products = used?.data?.products ?? [];
+    if (products.length === 0) return [];
+    return [
+      {
+        title: `Used in · ${products.length} product${products.length === 1 ? "" : "s"}`,
+        rows: products.slice(0, 100).map((p) => ({
+          id: p.productCode,
+          title: p.productName || p.productCode,
+          subLine: [p.productCode, p.category].filter(Boolean).join(" · ") || undefined,
+          icon: "package" as const,
+        })),
+      },
+    ];
+  },
+  hideActionBar: true,
+};
+
 const rawMaterialsSource: DataSource = {
   url: "/api/raw-materials",
   select: selectData,
@@ -1444,7 +1494,15 @@ const adjustmentsSource: DataSource = {
 export const inventoryConfig: ModuleConfig = {
   slug: "inventory",
   title: "Inventory",
-  detailPath: () => null, // L2 inventory detail arrives in Phase 3.
+  // Raw Material rows have a real per-id endpoint (+ /used-in reverse
+  // lookup), so they navigate. FG / WIP / Fabrics / Stock Value / Adjustments
+  // are different shapes — keep non-tappable until they get their own detail
+  // configs. Sniff by id prefix: raw_materials.genId → "rm-…".
+  detailPath: (vm) =>
+    /^rm-/.test(vm.id)
+      ? `/m/inventory/${encodeURIComponent(vm.id)}`
+      : null,
+  detail: rawMaterialDetail,
   sources: [
     finishedGoodsSource,
     wipSource,

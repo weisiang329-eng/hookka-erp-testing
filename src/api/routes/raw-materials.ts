@@ -172,6 +172,47 @@ app.get("/:id", async (c) => {
   return c.json({ success: true, data: rowToApi(row) });
 });
 
+// GET /api/raw-materials/:id/used-in — reverse lookup: which products' BOMs
+// reference this material. Mobile dc12 design v12 L4 drill-down: tap an
+// inventory raw-material row → see "Used in 12 products". Mirrors the
+// assistant-tools find_products_using_fabric query, scoped to this org +
+// keyed by the material's itemCode.
+app.get("/:id/used-in", async (c) => {
+  const id = c.req.param("id");
+  const orgId = getOrgId(c);
+  const rm = await c.var.DB.prepare(
+    "SELECT itemCode FROM raw_materials WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ itemCode?: string | null }>();
+  if (!rm) {
+    return c.json({ success: false, error: "Raw material not found" }, 404);
+  }
+  const code = rm.itemCode ?? "";
+  if (!code) {
+    return c.json({ success: true, data: { itemCode: "", products: [] } });
+  }
+  // Join via bom_components.materialCode → products.code/name. DISTINCT so a
+  // product with multiple bom rows for the same material doesn't double-list.
+  const rows = await c.var.DB.prepare(
+    `SELECT DISTINCT p.code AS productCode, p.name AS productName, p.category AS category
+       FROM products p
+       JOIN bom_components bc ON bc.productId = p.id
+      WHERE p.orgId = ? AND bc.materialCode = ?
+   ORDER BY p.code LIMIT 200`,
+  )
+    .bind(orgId, code)
+    .all<{ productCode: string; productName: string; category: string }>();
+  return c.json({
+    success: true,
+    data: {
+      itemCode: code,
+      products: rows.results ?? [],
+      count: rows.results?.length ?? 0,
+    },
+  });
+});
+
 // POST /api/raw-materials
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "raw-materials", "create");

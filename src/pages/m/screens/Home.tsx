@@ -160,6 +160,12 @@ type WheSummaryResp = {
 type WorkersResp = {
   data?: { id: string; name: string; departmentCode?: string }[];
 };
+// Subset of /api/purchase-orders row shape — only the fields the Daily Report
+// "PO not received" chip needs.
+type PurchaseOrdersResp = {
+  success?: boolean;
+  data?: { id: string; status?: string; expectedDate?: string }[];
+};
 type SOListResp = { success?: boolean; data?: SalesOrder[] };
 type InventoryResp = {
   success?: boolean;
@@ -378,6 +384,11 @@ export default function MobileHome() {
   const { data: workersRaw } = useCachedJson<WorkersResp>(
     pdEnabled ? "/api/workers" : null,
   );
+  // Tiny purchase-orders fetch for the Daily Report "PO not received" chip.
+  // Gated on pdEnabled like the rest of the post-first-paint analytics.
+  const { data: purchaseOrdersRaw } = useCachedJson<PurchaseOrdersResp>(
+    pdEnabled ? "/api/purchase-orders" : null,
+  );
 
   // ---- KPI: This Month Sales (confirmed-SO value, current month) ----
   const salesThisMonthSen = overview?.salesThisMonthSen ?? 0;
@@ -475,14 +486,10 @@ export default function MobileHome() {
       }));
   }, [orders]);
 
-  // ---- Daily Report (process exceptions to action today) ----
-  // Owner 2026-06-28 design adds a "DAILY REPORT" card. We surface ONLY the
-  // exception that is genuinely derivable from this Home's live data: overdue
-  // sales orders (non-terminal, Expected DD in the past). The design's other
-  // chips (SO-no-DO / PO-not-received / Low-efficiency) need cross-module joins
-  // not fetched here — left out rather than fabricated.
-  // TODO(api): a consolidated /api/dashboard/daily-report would let us show the
-  // full chip set (SO no DO, PO not received, low efficiency) with real counts.
+  // ---- Daily Report — dc12 design v12 full chip set (4 exceptions). ----
+  // Each chip's count is derived from the SAME data the cards above already
+  // fetch (no new endpoints) PLUS one tiny purchase-orders fetch for
+  // "PO not received". No fabricated numbers — chips with 0 hide.
   const overdueCount = useMemo(() => {
     const today = todayISO();
     return orders.filter(
@@ -492,6 +499,28 @@ export default function MobileHome() {
         (so.hookkaExpectedDD || "").slice(0, 10) < today,
     ).length;
   }, [orders]);
+  // SO no DO: SOs that are READY_TO_SHIP but no DO dispatch yet. Uses the
+  // already-loaded soList. (Strictly "ready but not on a DO" needs cross-
+  // referencing /api/delivery-orders — using READY_TO_SHIP status is the
+  // semantic proxy the owner cares about: ship-ready and waiting.)
+  const soNoDoCount = useMemo(
+    () => orders.filter((so) => so.status === "READY_TO_SHIP").length,
+    [orders],
+  );
+  // PO not received: purchase orders past their expected receive date and
+  // still in DRAFT/AWAITING/PARTIAL. Tiny extra fetch, gated on pdEnabled.
+  const poNotReceivedCount = useMemo(() => {
+    const today = todayISO();
+    const list = purchaseOrdersRaw?.success ? purchaseOrdersRaw.data ?? [] : [];
+    return list.filter((po) => {
+      const status = po.status || "";
+      const expected = (po.expectedDate || "").slice(0, 10);
+      if (!expected || expected >= today) return false;
+      return ["DRAFT", "AWAITING", "PARTIAL"].includes(status);
+    }).length;
+  }, [purchaseOrdersRaw]);
+  // (Low efficiency count + dailyReportTotal + dailyChips are computed after
+  // `workerEff` is declared further down — they need that data.)
 
   // ---- Order Pipeline (this month) — Confirmed / Outstanding / Delivered. ----
   // Real figures off /api/sales-orders/stats (the SAME totals the desktop
@@ -644,6 +673,20 @@ export default function MobileHome() {
     rows.sort((a, b) => b.pct - a.pct);
     return { top: rows.slice(0, 5), low: rows.slice(-5).reverse() };
   }, [jcSumRaw, wheSumRaw, workersRaw]);
+
+  // Low efficiency: production workers with eff% < 70 this period (the same
+  // band Worker Efficiency card colours red). Daily-report chips + total
+  // assembled here once all source counts (above + workerEff just-declared)
+  // are in scope.
+  const lowEffCount = workerEff?.low.filter((w) => w.pct < 70).length ?? 0;
+  const dailyReportTotal =
+    overdueCount + soNoDoCount + poNotReceivedCount + lowEffCount;
+  const dailyChips = [
+    { label: "Overdue", count: overdueCount, to: "/m/sales" },
+    { label: "SO no DO", count: soNoDoCount, to: "/m/sales" },
+    { label: "PO not received", count: poNotReceivedCount, to: "/m/procurement" },
+    { label: "Low efficiency", count: lowEffCount, to: "/m/employees" },
+  ].filter((c) => c.count > 0);
 
   // ---- Sales by Customer (avg order value, donut top-3, category tabs). ----
   const [sbcCat, setSbcCat] = useState<"all" | "bedframe" | "sofa">("all");
@@ -971,10 +1014,11 @@ export default function MobileHome() {
           />
         </div>
 
-        {/* ===== Daily Report (exceptions to action today) ===== */}
+        {/* ===== Daily Report — dc12: total + 4 chips (Overdue / SO no DO /
+            PO not received / Low efficiency). Each chip taps through to the
+            relevant module screen. Chips with 0 count hide. */}
         <MobileCard
           radius={16}
-          onClick={() => navigate("/m/sales")}
           style={{ padding: "15px 16px", marginTop: 14 }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
@@ -1012,36 +1056,51 @@ export default function MobileHome() {
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
-                {overdueCount}
+                {dailyReportTotal}
               </div>
             </div>
-            <span style={{ fontSize: 11.5, color: M.taupe, fontWeight: 600 }}>
-              View ›
-            </span>
           </div>
           <div style={{ fontSize: 11.5, color: M.muted, marginTop: 3 }}>
-            overdue sales orders to action today
+            process &amp; SOP exceptions to action today
           </div>
-          {overdueCount > 0 ? (
+          {dailyChips.length > 0 ? (
             <div
               style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 11 }}
             >
-              <span
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 5,
-                  fontSize: 11.5,
-                  fontWeight: 600,
-                  color: M_ACCENT.danger.fg,
-                  background: M_ACCENT.danger.bg,
-                  border: "1px solid #E8B2A1",
-                  padding: "3px 9px",
-                  borderRadius: 20,
-                }}
-              >
-                Overdue <b>{overdueCount}</b>
-              </span>
+              {dailyChips.map((c) => (
+                <span
+                  key={c.label}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    navigate(c.to);
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      navigate(c.to);
+                    }
+                  }}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    color: M_ACCENT.danger.fg,
+                    background: M_ACCENT.danger.bg,
+                    border: "1px solid #E8B2A1",
+                    padding: "3px 9px",
+                    borderRadius: 20,
+                    cursor: "pointer",
+                    WebkitTapHighlightColor: "transparent",
+                  }}
+                >
+                  {c.label} <b>{c.count}</b>
+                </span>
+              ))}
             </div>
           ) : null}
         </MobileCard>

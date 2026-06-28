@@ -32,7 +32,10 @@ import {
   FileText,
   ArrowDownToLine,
   ArrowUpFromLine,
+  PackageCheck,
+  Receipt,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, MobileCard, StatusPill, Sheet, FormSheet } from "../components";
 import { M, M_ACCENT } from "../theme";
@@ -47,6 +50,13 @@ import { type FormSpec } from "../config/form-types";
 import { editSpecFor, newMailSpec } from "../config/forms";
 import { mutateJson, refreshOne, refreshList } from "../config/mutate";
 import { str } from "../config/helpers";
+
+/** Leading-glyph map for the "Convert document" action buttons. */
+const EXTRA_ACTION_ICONS: Record<string, LucideIcon> = {
+  "package-check": PackageCheck,
+  receipt: Receipt,
+  "file-text": FileText,
+};
 
 export function DocumentDetailScreen({ config }: { config: ModuleConfig }) {
   const navigate = useNavigate();
@@ -128,6 +138,7 @@ function Inner({
         kvSections: [] as NonNullable<ReturnType<NonNullable<DetailConfig["kvSections"]>>>,
         netPay: undefined as ReturnType<NonNullable<DetailConfig["netPay"]>>,
         subDocLists: [] as NonNullable<ReturnType<NonNullable<DetailConfig["subDocLists"]>>>,
+        extraActions: [] as NonNullable<ReturnType<NonNullable<DetailConfig["extraActions"]>>>,
       };
     }
     return {
@@ -137,6 +148,7 @@ function Inner({
       lineItems: eff.lineItems?.(doc) ?? [],
       relatedGroups: groupRelated(eff.relatedDocs?.(doc, data) ?? []),
       primaryCta: eff.primaryCta?.(doc),
+      extraActions: eff.extraActions?.(doc, id) ?? [],
       // Optional special sections (rack hero / body / payslip / sub-doc lists)
       // — each computed only when the config supplies it AND it has content.
       darkStat: eff.darkStat?.(doc),
@@ -147,7 +159,7 @@ function Inner({
         (l) => l.rows.length || l.emptyText,
       ),
     };
-  }, [eff, doc, data]);
+  }, [eff, doc, data, id]);
 
   if (loading && !doc) {
     return (
@@ -184,6 +196,7 @@ function Inner({
     kvSections,
     netPay,
     subDocLists,
+    extraActions,
   } = derived;
   const showActionBar = !eff.hideActionBar;
 
@@ -249,6 +262,32 @@ function Inner({
         return { ok: true };
       };
       setFormSpec(spec);
+      return;
+    }
+
+    if (config.slug === "servicecases") {
+      // Case lifecycle advance — a clean single endpoint (PUT
+      // /api/service-cases/:id/status). "Start Work" → IN_PROGRESS, "Close
+      // Case" → CLOSED. The backend enforces the allowed transitions, so a
+      // bad jump surfaces its error rather than us guessing.
+      const next = primaryCta === "Start Work" ? "IN_PROGRESS" : "CLOSED";
+      setCtaBusy(true);
+      const res = await mutateJson(
+        `/api/service-cases/${encodeURIComponent(id)}/status`,
+        "PUT",
+        { status: next },
+      );
+      setCtaBusy(false);
+      if (res.ok) {
+        refreshOne(`/api/service-cases/${encodeURIComponent(id)}`);
+        refreshList("/api/service-cases");
+        setToast({
+          kind: "ok",
+          text: next === "CLOSED" ? "Case closed." : "Case marked in progress.",
+        });
+      } else {
+        setToast({ kind: "err", text: res.error || "Status update failed." });
+      }
       return;
     }
 
@@ -450,6 +489,44 @@ function Inner({
             </MobileCard>
           </div>
         ))}
+
+        {/* Convert document — design source v10: PO → GRN / PO → Invoice. The
+            buttons deep-link to the desktop convert flows (real conversions). */}
+        {extraActions.length > 0 ? (
+          <div>
+            <SectionHeading>Convert document</SectionHeading>
+            <div style={{ display: "flex", gap: 8 }}>
+              {extraActions.map((a) => {
+                const Icon = EXTRA_ACTION_ICONS[a.icon ?? "file-text"];
+                return (
+                  <button
+                    key={a.label}
+                    onClick={() => navigate(a.to)}
+                    style={{
+                      flex: 1,
+                      height: 44,
+                      borderRadius: 12,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 7,
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      WebkitTapHighlightColor: "transparent",
+                      border: a.primary ? "none" : `1px solid ${M.hairline}`,
+                      background: a.primary ? M.taupe : M.card,
+                      color: a.primary ? "#fff" : M.ink,
+                    }}
+                  >
+                    <Icon size={16} strokeWidth={1.9} />
+                    {a.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
 
         {/* Net pay — design source: payslip dark net-pay band. */}
         {netPay ? (

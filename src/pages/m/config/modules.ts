@@ -26,6 +26,7 @@ import {
   type DetailConfig,
   type FlowStep,
   type RelatedDocVM,
+  type KvSection,
 } from "./types";
 import {
   read,
@@ -36,6 +37,7 @@ import {
   resolveStatus,
   STATUS_MAPS,
   PAYMENT_STATUS_MAP,
+  SERVICE_CASE_STATUS_MAP,
   selectData,
   selectNested,
   selectDocData,
@@ -832,6 +834,26 @@ const poDetail: DetailConfig = {
     fld("Notes", (d) => str(d, "notes"), true),
   ],
   lineItems: (d) => itemsOf(d, "items"),
+  // Convert document (owner 2026-06-28 design v10): PO → Goods Receipt / PO →
+  // Purchase Invoice. Both deep-link to the existing desktop convert pages
+  // (?poId=<id>), which prefill from the PO — the real, working conversion
+  // flows. (A native mobile GRN/PI capture form is a larger build; until then
+  // these route to the proven desktop forms rather than fabricating a result.)
+  // TODO(api): a one-shot POST /api/grn?fromPoId / purchase-invoices fromPoId
+  // would let us build the conversion fully in-app without leaving /m.
+  extraActions: (_d, id) => [
+    {
+      label: "Convert to GRN",
+      to: `/procurement/grn/create?poId=${encodeURIComponent(id)}`,
+      icon: "package-check",
+    },
+    {
+      label: "Convert to Invoice",
+      to: `/procurement/pi/create?poId=${encodeURIComponent(id)}`,
+      icon: "receipt",
+      primary: true,
+    },
+  ],
   primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Submit" : "Status"),
 };
 
@@ -1903,6 +1925,203 @@ export const productsConfig: ModuleConfig = {
 };
 
 // ---------------------------------------------------------------------------
+// SERVICE CASES — owner 2026-06-28 design v10 "Service & Support" module.
+// One source (/api/service-cases). Sub-tabs filter by the case status enum
+// (OPEN / IN_PROGRESS / CLOSED / CANCELLED). The L2 detail renders the design's
+// "Case lifecycle" timeline (via the generic flow indicator) plus real
+// affected-products / root-cause / prevention blocks and the linked service
+// orders. All wired to the existing service-cases API — no new backend.
+// ---------------------------------------------------------------------------
+const SERVICE_CASE_STATUSES = ["OPEN", "IN_PROGRESS", "CLOSED", "CANCELLED"];
+
+const serviceCasesSource: DataSource = {
+  url: "/api/service-cases",
+  select: selectData,
+  toVM: (r): RowVM => {
+    const orders = Array.isArray(r.orders) ? (r.orders as RawRow[]) : [];
+    const firstOrder = orders[0];
+    return {
+      id: str(r, "id"),
+      code: str(r, "caseNo") || "—",
+      title: str(r, "customerName") || "—",
+      subLine:
+        [
+          str(r, "sourceNo") || str(r, "sourceType"),
+          str(r, "rootCauseCategory"),
+        ]
+          .filter(Boolean)
+          .join(" · ") || undefined,
+      meta1: {
+        label: "Order",
+        value: firstOrder ? str(firstOrder, "serviceOrderNo") || "—" : "—",
+      },
+      meta2: { label: "Order Date", value: dateOnly(r, "createdAt") || "—" },
+      status: resolveStatus(str(r, "status"), SERVICE_CASE_STATUS_MAP),
+    };
+  },
+  columns: [
+    textCol("caseNo", "Reference", (r) => str(r, "caseNo")),
+    textCol("customer", "Customer", (r) => str(r, "customerName")),
+    textCol("source", "State", (r) => str(r, "sourceNo", "sourceType")),
+    textCol("category", "Reference", (r) => str(r, "rootCauseCategory")),
+    dateCol("createdAt", "Order Date", (r) => dateOnly(r, "createdAt")),
+    enumCol("status", "Status", (r) => str(r, "status"), SERVICE_CASE_STATUSES),
+  ],
+  defaultSort: { key: "createdAt", dir: "desc" },
+  subTabs: [
+    { key: "all", label: "All", match: () => true },
+    { key: "open", label: "Open", match: (r) => str(r, "status") === "OPEN" },
+    {
+      key: "progress",
+      label: "In Progress",
+      match: (r) => str(r, "status") === "IN_PROGRESS",
+    },
+    { key: "closed", label: "Closed", match: (r) => str(r, "status") === "CLOSED" },
+    {
+      key: "cancelled",
+      label: "Cancelled",
+      match: (r) => str(r, "status") === "CANCELLED",
+    },
+  ],
+};
+
+const serviceCaseDetail: DetailConfig = {
+  url: (id) => `/api/service-cases/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "caseNo") || "—",
+  title: (d) => str(d, "customerName") || "—",
+  status: (d) => resolveStatus(str(d, "status"), SERVICE_CASE_STATUS_MAP),
+  // Case lifecycle (design v10): Logged → Investigate → Service Order → Repair
+  // → Closed. The case status enum is coarse (OPEN / IN_PROGRESS / CLOSED /
+  // CANCELLED), so we map it onto the design's 5-step timeline: OPEN = Logged,
+  // IN_PROGRESS = Service Order (work scheduled), CLOSED = Closed. (The
+  // Investigate / Repair mid-steps are the design's narrative; the backend
+  // doesn't store a per-stage status, so they light up implicitly as the
+  // current step advances.) Cancelled cases keep the timeline at Logged.
+  flow: {
+    steps: [
+      { key: "OPEN", label: "Logged" },
+      { key: "INVESTIGATE", label: "Investigate" },
+      { key: "IN_PROGRESS", label: "Service Order" },
+      { key: "REPAIR", label: "Repair" },
+      { key: "CLOSED", label: "Closed" },
+    ],
+    current: (d) => {
+      const s = str(d, "status");
+      return s === "CANCELLED" ? "OPEN" : s;
+    },
+  },
+  fields: [
+    fld("Case No", (d) => str(d, "caseNo")),
+    fld("Customer", (d) => str(d, "customerName")),
+    fld("State", (d) => str(d, "customerState")),
+    fld("Source", (d) => str(d, "sourceNo", "sourceType")),
+    fld("Category", (d) => str(d, "rootCauseCategory")),
+    fld("Responsible", (d) => str(d, "responsibleUnit")),
+    fld("Prevention", (d) => str(d, "preventionStatus")),
+    fld("Order Date", (d) => dateOnly(d, "createdAt")),
+    fld("Issue", (d) => str(d, "issueDescription"), true),
+  ],
+  // Affected products / Root cause(s) / Prevention — rendered as KV blocks
+  // (the design's "case blocks"). Only real, populated values are shown.
+  kvSections: (d) => {
+    const sections: KvSection[] = [];
+
+    const affected = asArr(d.affectedProducts);
+    if (affected.length > 0) {
+      sections.push({
+        title: "Affected products",
+        rows: affected.map((p) => ({
+          label: str(p, "productCode", "code", "name") || "Product",
+          value: str(p, "description", "productName") || `×${num(p, "quantity", "qty") || 1}`,
+        })),
+      });
+    }
+
+    const rootCauses = asArr(d.rootCauses);
+    if (rootCauses.length > 0) {
+      sections.push({
+        title: "Root cause",
+        rows: rootCauses
+          .map((rc) => ({
+            label: str(rc, "category") || "Cause",
+            value: str(rc, "details") || "—",
+          }))
+          .filter((r) => r.value !== ""),
+      });
+    } else if (str(d, "rootCauseNotes")) {
+      sections.push({
+        title: "Root cause",
+        rows: [
+          {
+            label: str(d, "rootCauseCategory") || "Cause",
+            value: str(d, "rootCauseNotes"),
+          },
+        ],
+      });
+    }
+
+    if (str(d, "preventionAction")) {
+      sections.push({
+        title: "Prevention",
+        rows: [
+          { label: "Action", value: str(d, "preventionAction") },
+          ...(str(d, "preventionOwner")
+            ? [{ label: "Owner", value: str(d, "preventionOwner") }]
+            : []),
+          { label: "Status", value: str(d, "preventionStatus") || "PENDING" },
+        ],
+      });
+    }
+    return sections.filter((s) => s.rows.length > 0);
+  },
+  // Linked service orders (SV / service_orders rows). isSv steers to the SV
+  // sales-order detail; native service_orders have no mobile detail yet.
+  relatedDocs: (d) => {
+    const out: RelatedDocVM[] = [];
+    for (const o of asArr(d.orders)) {
+      const isSv = read(o, "isSv") === true;
+      const oid = str(o, "id");
+      out.push({
+        id: oid || str(o, "serviceOrderNo"),
+        group: "Service Orders",
+        code: str(o, "serviceOrderNo") || "—",
+        subLine: str(o, "mode") || undefined,
+        status: resolveStatus(str(o, "status"), PAYMENT_STATUS_MAP),
+        // SV orders are sales_orders rows → reachable on the mobile SO detail.
+        href: isSv && oid ? `/m/sales/${encodeURIComponent(oid)}` : undefined,
+      });
+    }
+    // Source SO cross-link (when the case originated from a real SO).
+    const srcId = str(d, "sourceId");
+    const srcNo = str(d, "sourceNo");
+    if (str(d, "sourceType") === "SO" && (srcId || srcNo)) {
+      out.push({
+        id: srcId || srcNo,
+        group: "Source Sales Order",
+        code: srcNo || "—",
+        href: srcId ? `/m/sales/${encodeURIComponent(srcId)}` : undefined,
+      });
+    }
+    return out;
+  },
+  primaryCta: (d) => {
+    const s = str(d, "status");
+    if (s === "OPEN") return "Start Work";
+    if (s === "IN_PROGRESS") return "Close Case";
+    return "Status";
+  },
+};
+
+export const serviceCasesConfig: ModuleConfig = {
+  slug: "servicecases",
+  title: "Service Cases",
+  detailPath: (vm) => `/m/servicecases/${encodeURIComponent(vm.id)}`,
+  detail: serviceCaseDetail,
+  sources: [serviceCasesSource],
+};
+
+// ---------------------------------------------------------------------------
 // Registry — slug → config, consumed by MobileLayout's route wiring.
 // ---------------------------------------------------------------------------
 export const MODULE_CONFIGS: ModuleConfig[] = [
@@ -1922,4 +2141,5 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   suppliersConfig,
   receivablesConfig,
   productsConfig,
+  serviceCasesConfig,
 ];

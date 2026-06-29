@@ -104,7 +104,7 @@ Designer workflow: open `.dc.html` → edit inline → hand back → dev impleme
 
 ---
 
-## What I did NOT finish (honest list)
+## What I did NOT finish (honest list — original)
 
 These are real work; not skipped lazily.
 
@@ -117,6 +117,45 @@ These are real work; not skipped lazily.
 | **Employee Labor Cost / Emp Perf / Dept Perf sub-tabs** | Each needs a new aggregation backend route |
 
 Owner can pick any of these for next round.
+
+---
+
+## Wave A — owner said "全部要跟著啊" (do them all)
+
+Owner woke + asked for the full deferred list. Completed 4 of 5 same night
+across 4 more commits → 8 total commits on prod for 2026-06-29.
+
+| # | Commit | What | Deploy |
+|---|---|---|---|
+| 5 | `dfac6734` | `feat(m): Fold 2-pane shell — list-left + detail-right on every detail route` — MobileLayout gets a `<TwoPane>` helper; on fold detail routes, parent list renders on left (340px) + detail on right (flex) with independent scrollbars | ✅ LIVE |
+| 6 | `c39fd572` | `docs(design): desktop dc.html — sub-tabs + buttons + rows now NAVIGATE (not just toast)` — round-23 safety-net extended with 70-pair navMap so clicks on Inventory's "Fabrics" actually jump to fabrics scene, "Goods Receipt" → grn, "Cash Flow" → cashflow, etc. Row clicks in list scenes go to detail variants. Tabs still get active-toggle | ✅ LIVE |
+| 7 | `eb109ab8` | `feat(m): R&D Projects module (dc13 v13 sync) — list + detail + More nav entry` — wires to existing /api/rd-projects; sub-tabs All/Active/Draft/On Hold/Completed; detail has Prototypes sub-list + flow indicator + file attachments | ✅ LIVE |
+| 8 | `64259587` | `feat(m): multi-select UI + bulk action bar (dc13 v13 SELECT ACTION BAR)` — ListChecks toggle in toolbar; per-row checkbox overlay when on; fixed-bottom raisin action bar with Cancel + N selected + Export + Mark. Actions toast pending real bulk endpoints | ✅ LIVE |
+
+### Still pending after Wave A
+
+| Item | Why |
+|---|---|
+| **PRICE COMPARISON / SKU MAPPING / COPY FROM SO·CO / CATALOGUE EXPORT** — 4 of the 5 v13 new screens | Each needs either a new backend (price-history projection, sku-mapping table, catalogue PDF generator) or a substantial FE flow (COPY FROM picker → prefill SO form). Owner Q&A needed first |
+| **Per-line attachments** (paperclip in row) | Schema change + multi-table migration; owner asked "我的数据不要改" — schema migration without explicit approval is risky in autonomous mode |
+| **Employee Labor Cost / Emp Perf / Dept Perf sub-tabs** | Each needs new aggregation backend route; need owner Q&A on the column definitions |
+| **Bulk endpoints behind the SELECT ACTION BAR** | UI ready; Export and Mark need owner Q&A on what they should actually do (bulk PDF? bulk status flip?) |
+| **Desktop sub-tab REAL content swap** (per-scene state.sub) | Quick win via navMap lands users on the right page; deeper per-tab table swap is per-scene work, defer to a focused round |
+
+### Sum of all 8 commits 2026-06-29
+
+| Surface | What changed |
+|---|---|
+| Mobile shell | Fold 2-pane on every detail route · multi-select toggle + bulk action bar · R&D module added |
+| Mobile Home | KPI tightened 25 → 18px · Quick Actions above grid |
+| Mobile detail | Supplier · Product · R&D detail screens added |
+| Desktop dc.html | 52 scenes · every label/tab/row click navigates or toasts · 70-pair navMap |
+| Design sources | v13 mobile + fold + standalone HTML + README all in `docs/design/` |
+
+Total LOC delta (excluding the 4 commits before Wave A): +391 / -39 across
+`src/pages/m/MobileLayout.tsx · src/pages/m/screens/ModuleListScreen.tsx ·
+src/pages/m/config/modules.ts · src/pages/m/nav.ts · docs/design/Hookka ERP
+Desktop.dc.html`
 
 ---
 

@@ -27,7 +27,7 @@ export type RawRow = Record<string, unknown>;
 export type RowVM = {
   /** Stable key for React + the L2 route param. */
   id: string;
-  /** Document code, taupe monospace (e.g. "SO-2606-0142"). */
+  /** Document code, taupe + tabular-nums sans-serif (e.g. "SO-2606-0142"). */
   code: string;
   /** Primary title (e.g. customer name). */
   title: string;

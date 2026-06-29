@@ -13,7 +13,7 @@ type Meta = {
 };
 
 type Props = {
-  /** Document code, e.g. "SO-2606-0142". Rendered taupe + monospace. */
+  /** Document code, e.g. "SO-2606-0142". Rendered taupe + tabular-nums. */
   code: string;
   /** Primary title, e.g. customer name. */
   title: string;
@@ -71,8 +71,8 @@ export function ListRow({
             color: M.taupe,
             fontSize: 12,
             fontWeight: 700,
-            fontFamily:
-              'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+            // dc13 uses body sans-serif + tabular-nums (not monospace) —
+            // Consolas/Menlo's "0" glyph differs from our brand font.
             fontVariantNumeric: "tabular-nums",
             letterSpacing: 0.2,
           }}

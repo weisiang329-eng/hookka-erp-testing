@@ -80,8 +80,9 @@ export function DocCard({ code, title, items, subLine, meta, pill, onClick }: Pr
             fontSize: 12,
             fontWeight: 700,
             color: M.taupe,
-            fontFamily:
-              "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+            // dc13 uses the body sans-serif font with tabular-nums for digit
+            // alignment (NOT a monospace face). The Consolas/Menlo fallback
+            // ships a different "0" glyph than our brand font — drop it.
             fontVariantNumeric: "tabular-nums",
             letterSpacing: 0.2,
             whiteSpace: "nowrap",

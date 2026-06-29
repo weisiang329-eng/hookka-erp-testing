@@ -1270,6 +1270,80 @@ export function editEmployeeSpec(doc: Record<string, unknown>, id: string): Form
 }
 
 // ===========================================================================
+// WORKING HOURS — log a per-day entry for a worker. CHANGELOG K.1 "可编辑
+// 行". Backend POST /api/working-hour-entries auto-creates the attendance
+// row if needed (working-hour-entries.ts:898). Mobile keeps it simple:
+// pick department + category + hours + optional notes.
+// ===========================================================================
+const WH_DEPT_OPTS: SelectOption[] = [
+  { value: "FAB_CUT", label: "Fab Cut" },
+  { value: "FAB_SEW", label: "Fab Sew" },
+  { value: "FOAM", label: "Foam" },
+  { value: "WOOD_CUT", label: "Wood Cut" },
+  { value: "FRAMING", label: "Framing" },
+  { value: "WEBBING", label: "Webbing" },
+  { value: "UPHOLSTERY", label: "Upholstery" },
+  { value: "PACKING", label: "Packing" },
+  { value: "WAREHOUSING", label: "Warehousing" },
+  { value: "MAINTENANCE", label: "Maintenance" },
+  { value: "R_AND_D", label: "R&D" },
+];
+const WH_CATEGORY_OPTS: SelectOption[] = [
+  { value: "", label: "—" },
+  { value: "SOFA", label: "Sofa" },
+  { value: "BEDFRAME", label: "Bedframe" },
+  { value: "ACCESSORY", label: "Accessory" },
+];
+
+export function logHoursSpec(workerId: string): FormSpec {
+  return {
+    title: "Log Working Hours",
+    submitLabel: "Save Entry",
+    fields: [
+      { name: "date", label: "Date", kind: "date" as const, required: true, full: true },
+      { name: "departmentCode", label: "Department", kind: "select" as const, options: WH_DEPT_OPTS, required: true, full: true },
+      { name: "category", label: "Category", kind: "select" as const, options: WH_CATEGORY_OPTS, full: true },
+      { name: "hours", label: "Hours", kind: "number" as const, required: true, full: true },
+      { name: "notes", label: "Notes", kind: "textarea" as const, full: true },
+    ],
+    initial: {
+      date: todayISO(),
+      departmentCode: "UPHOLSTERY",
+      category: "",
+      hours: 0,
+      notes: "",
+    },
+    submit: async (v) => {
+      const body = {
+        workerId,
+        date: s(v.date),
+        departmentCode: s(v.departmentCode),
+        category: s(v.category) || null,
+        hours: n(v.hours),
+        notes: s(v.notes),
+      };
+      const res = await mutateJson("/api/working-hour-entries", "POST", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshList("/api/working-hour-entries");
+      // Refresh the month summary used by /m/employees Working Hours tab
+      try {
+        const w = (() => {
+          const now = new Date();
+          const yyyy = now.getFullYear();
+          const mm = String(now.getMonth() + 1).padStart(2, "0");
+          const dd = String(now.getDate()).padStart(2, "0");
+          return { from: `${yyyy}-${mm}-01`, to: `${yyyy}-${mm}-${dd}` };
+        })();
+        refreshOne(`/api/working-hour-entries/summary?from=${w.from}&to=${w.to}`);
+      } catch {
+        // ignore
+      }
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
 // Create-form resolver — slug → its "New …" FormSpec, or null when the module
 // has no in-scope mobile create form. Drives the "+" affordance on the L1 list
 // header (ModuleListScreen).

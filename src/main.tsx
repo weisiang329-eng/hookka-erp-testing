@@ -31,16 +31,42 @@ initFeRum()
 // pull the new build instead of leaving the user with a cryptic
 // "Failed to fetch dynamically imported module" toast. 30s cooldown (shared
 // key with ErrorBoundary) prevents reload loops.
-window.addEventListener('vite:preloadError', () => {
-  const KEY = 'hookka-stale-chunk-reloaded-at'
-  const lastTs = Number(sessionStorage.getItem(KEY) || 0)
+// Shared single-shot reload helper. 30s cooldown prevents reload loops if
+// the new build ALSO 404s (network glitch, CF edge propagation lag, etc.).
+const STALE_RELOAD_KEY = 'hookka-stale-chunk-reloaded-at'
+function recoverFromStaleChunk(reason: string) {
+  const lastTs = Number(sessionStorage.getItem(STALE_RELOAD_KEY) || 0)
   if (Date.now() - lastTs < 30_000) return
-  sessionStorage.setItem(KEY, String(Date.now()))
-  // Nuke the SW + caches FIRST so the reload pulls the current build instead of
-  // re-serving the same stale shell (which would white-screen again). See
-  // src/lib/stale-chunk-recovery.ts.
+  sessionStorage.setItem(STALE_RELOAD_KEY, String(Date.now()))
+  // eslint-disable-next-line no-console
+  console.warn('[stale-chunk] hard-reloading:', reason)
   void purgeServiceWorkerAndCaches().finally(() => window.location.reload())
+}
+
+// (1) Vite's own dynamic-import-failed event — fires for every failed import()
+// across the app (lazy route, lazy() chunk, getModule() etc).
+window.addEventListener('vite:preloadError', () => {
+  recoverFromStaleChunk('vite:preloadError')
 })
+
+// (2) A <script> tag that failed to load — covers cases vite:preloadError
+// doesn't (e.g. an initial-bundle chunk 404 from a stale index.html, or a
+// non-import script tag the bundler emitted). Capture-phase is required —
+// 'error' events on <script>/<link>/<img> don't bubble.
+window.addEventListener('error', (e) => {
+  const t = e.target as HTMLElement | null
+  if (!t) return
+  const tag = t.tagName
+  // Only act on resource errors for our own JS chunks. Skip random IMG/IFRAME
+  // failures (those are content errors, not deploy artefacts).
+  if ((tag === 'SCRIPT' || tag === 'LINK') && 'src' in t) {
+    const src = (t as HTMLScriptElement | HTMLLinkElement & { src?: string }).src ||
+      (t as HTMLLinkElement).href || ''
+    if (src.includes('/assets/') && src.includes(location.origin)) {
+      recoverFromStaleChunk(`script-error: ${src.split('/').pop()}`)
+    }
+  }
+}, true) // capture = true → catch events on non-bubbling targets
 
 // Per-build id injected by Vite (vite.config.ts `define`). Used to cache-bust
 // the service worker registration URL on each deploy.

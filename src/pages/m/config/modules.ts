@@ -1168,7 +1168,9 @@ const productionSource: DataSource = {
   ],
   defaultSort: { key: "targetEndDate", dir: "asc" },
   subTabs: [
-    { key: "all", label: "All", match: () => true },
+    // dc13 production tabs (line ~1765): Overview / Fab Cut / Fab Sew /
+    // Foam / Wood Cut / Framing / Webbing / Upholstery / Packing
+    { key: "all", label: "Overview", match: () => true },
     ...DEPT_TABS.map((d) => ({
       key: d.key,
       label: d.label,
@@ -1288,7 +1290,7 @@ const planningCapacitySource: DataSource = {
     numCol("used", "Amount", (r) => num(r, "utilisationPct", "efficiencyPct")),
   ],
   defaultSort: { key: "used", dir: "desc" },
-  subTabs: [{ key: "cap", label: "Capacity", match: () => true }],
+  subTabs: [{ key: "cap", label: "Capacity Overview", match: () => true }],
 };
 
 const planningLoadSource: DataSource = {
@@ -1324,7 +1326,7 @@ const planningLoadSource: DataSource = {
     numCol("hours", "Amount", (r) => num(r, "totalHours")),
   ],
   defaultSort: { key: "hours", dir: "desc" },
-  subTabs: [{ key: "load", label: "Loading", match: () => true }],
+  subTabs: [{ key: "load", label: "Capacity Loading", match: () => true }],
 };
 
 // Lead Times — material shortages from /api/raw-materials. Items with

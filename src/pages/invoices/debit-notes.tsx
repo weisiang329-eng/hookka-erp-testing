@@ -16,8 +16,63 @@ import type { DebitNote, Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { DebitNoteSchema } from "@/lib/schemas/invoice";
+import { COMPANY } from "@/lib/constants";
+import { amountInWords } from "@/lib/amount-in-words";
+import { printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
+import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
 
 const DNMutationSchema = mutationWithData(DebitNoteSchema);
+
+// COMPANY.HOOKKA → the VoucherSpec.company shape (single source of truth);
+// mirrors VOUCHER_COMPANY in supplier-payments.tsx / accounting/index.tsx.
+const VOUCHER_COMPANY: VoucherSpec["company"] = {
+  name: COMPANY.HOOKKA.name,
+  addressLines: COMPANY.HOOKKA.addressLines,
+  regNo: COMPANY.HOOKKA.regNo,
+  tin: COMPANY.HOOKKA.tin,
+  phone: COMPANY.HOOKKA.phone,
+  email: COMPANY.HOOKKA.email,
+};
+
+// One debit note → a DEBIT NOTE voucher: one line per charged item
+// (Description · Qty · Unit Price · Amount), total = the note's totalAmount.
+// Money stays integer sen (unitPrice / total / totalAmount are all sen),
+// formatted with formatCurrency. Mirrors buildSupplierPaymentVoucher's shape.
+// DebitNote has no lifecycle/void state (status is DRAFT/APPROVED/POSTED), so
+// the defensive (lifecycleState ?? "ACTIVE") check always yields the live title.
+function buildDebitNoteVoucher(dn: DebitNote): VoucherSpec {
+  const active = ((dn as { lifecycleState?: string }).lifecycleState ?? "ACTIVE") === "ACTIVE";
+  const lines: VoucherLine[] = dn.items.map((item) => ({
+    cells: [
+      item.description ?? "",
+      String(item.quantity ?? ""),
+      formatCurrency(item.unitPrice),
+      formatCurrency(item.total),
+    ],
+  }));
+  const remarks = [dn.reason, dn.reasonDetail].filter(Boolean).join(" — ") || undefined;
+  return {
+    title: active ? "DEBIT NOTE" : "DEBIT NOTE — VOID",
+    company: VOUCHER_COMPANY,
+    docNo: dn.noteNumber,
+    date: formatDateDMY(dn.date),
+    partyLabel: "Customer",
+    partyName: dn.customerName ?? "",
+    columns: [
+      { label: "Description" },
+      { label: "Qty", align: "right" },
+      { label: "Unit Price", align: "right" },
+      { label: "Amount", align: "right" },
+    ],
+    lines,
+    totalCells: ["", "", "Total", formatCurrency(dn.totalAmount)],
+    footerNote: `Against Invoice: ${dn.invoiceNumber || "—"}`,
+    remarks,
+    amountWords: amountInWords(dn.totalAmount),
+    signatures: [{ label: "Issued by" }, { label: "Approved by" }],
+    printedOn: formatDateDMY(new Date()),
+  };
+}
 
 export default function DebitNotesPage() {
   const { data: dnResp, loading, refresh: refreshDebitNotes } = useCachedJson<{ success?: boolean; data?: DebitNote[] }>("/api/debit-notes");
@@ -58,6 +113,12 @@ export default function DebitNotesPage() {
   });
   const [items, setItems] = useState<DebitNoteItemRow[]>([newDNItem()]);
   const [creating, setCreating] = useState(false);
+
+  // Ticked-row selection for batch print voucher + Excel/CSV export. The list
+  // uses the shared DataGrid, which owns its own checkbox column (selectable)
+  // and reports the picked rows via onSelectionChange — mirror that into state
+  // so the BatchActionsBar can act on the selection (twin of payments.tsx).
+  const [selected, setSelected] = useState<DebitNote[]>([]);
 
   const openCreate = () => {
     refreshInvoices();
@@ -261,12 +322,37 @@ export default function DebitNotesPage() {
           <CardTitle>All Debit Notes</CardTitle>
         </CardHeader>
         <CardContent>
+          <BatchActionsBar
+            count={selected.length}
+            onPrint={() => printVouchers(selected.map(buildDebitNoteVoucher))}
+            exportName="debit-notes"
+            exportAoa={() => [
+              ["Note No", "Date", "Customer", "Status", "Invoice No", "Reason", "Voucher Total (RM)", "Description", "Qty", "Unit Price (RM)", "Amount (RM)"],
+              ...selected.flatMap((dn) =>
+                dn.items.map((item) => [
+                  dn.noteNumber,
+                  formatDateDMY(dn.date),
+                  dn.customerName ?? "",
+                  dn.status ?? "ACTIVE",
+                  dn.invoiceNumber ?? "",
+                  dn.reason ?? "",
+                  (Number(dn.totalAmount ?? 0) / 100).toFixed(2),
+                  item.description ?? "",
+                  String(item.quantity ?? ""),
+                  (Number(item.unitPrice ?? 0) / 100).toFixed(2),
+                  (Number(item.total ?? 0) / 100).toFixed(2),
+                ]),
+              ),
+            ]}
+          />
           <DataGrid
             columns={columns}
             data={debitNotes}
             keyField="id"
             virtualize
             gridId="debit-notes"
+            selectable
+            onSelectionChange={setSelected}
             contextMenuItems={contextMenuItems}
           />
         </CardContent>

@@ -40,6 +40,29 @@ type RumEvent =
       metric: "longtask" | "lcp" | "fcp" | "nav" | "ttfb";
       value: number;
       ts: number;
+    }
+  // Per-API-call timing. Only fired for calls that are SLOW (>3s) or
+  // FAILED (non-2xx, aborted, timeout) so the AE stream doesn't drown in
+  // fast-success noise. 2026-06-29: added after owner-reported "Dashboard
+  // 一直 Loading" couldn't be diagnosed — the existing perf events fire only
+  // on errors / paint, never on "API never returned".
+  | {
+      kind: "api";
+      route: string;
+      endpoint: string; // /api/path (no query)
+      method: string;
+      status: number; // 0 = aborted/timeout, otherwise HTTP status
+      value: number; // duration ms
+      ts: number;
+    }
+  // Page-stuck heartbeat — fired at the 15s mark on a fresh route when NO
+  // /api/* call has returned 2xx. Captures the case where the shell rendered
+  // but data fetches are all spinning ("Loading..." forever, no JS error).
+  | {
+      kind: "stuck";
+      route: string;
+      value: number; // ms elapsed since route change
+      ts: number;
     };
 
 const queue: RumEvent[] = [];
@@ -75,6 +98,79 @@ function pushEvent(ev: RumEvent): void {
   queue.push(ev);
   // Defensive cap — prevent unbounded growth if flushes start failing.
   if (queue.length > MAX_BATCH * 4) queue.splice(0, queue.length - MAX_BATCH * 4);
+}
+
+// -- Per-API-call telemetry --------------------------------------------------
+// Threshold above which a successful call is still reported as "slow"
+// (slow user experience, not an error). Below this, fast successes are
+// dropped to keep the AE stream signal-rich.
+const API_SLOW_MS = 3000;
+
+/**
+ * Record one /api/* call's timing. Called by src/lib/api-client.ts after
+ * each fetch resolves (or aborts/times out). Filters out fast successes
+ * — only emits when slow OR failed so the /admin/health "Slow APIs"
+ * panel surfaces actionable rows, not 10k/min noise.
+ */
+export function reportApiCall(opts: {
+  endpoint: string; // /api/path (strip query)
+  method: string; // GET / POST / etc
+  status: number; // HTTP status or 0 for aborted/timeout
+  duration: number; // ms
+}): void {
+  const { endpoint, method, status, duration } = opts;
+  const slow = duration >= API_SLOW_MS;
+  const failed = status === 0 || status >= 400;
+  if (!slow && !failed) return;
+  pushEvent({
+    kind: "api",
+    route: currentRoute(),
+    endpoint: endpoint.slice(0, 200),
+    method: (method || "GET").toUpperCase().slice(0, 8),
+    status,
+    value: Math.round(duration),
+    ts: Date.now(),
+  });
+  // If this call succeeded on the current route, cancel the page-stuck
+  // timer — at least one data fetch completed, the page is not stuck.
+  if (status >= 200 && status < 400) markRouteAlive();
+}
+
+// -- Page-stuck detector -----------------------------------------------------
+// Tracks: did any /api/* call succeed on this route within STUCK_TIMEOUT_MS
+// of arriving? If not, emit a "stuck" event so the dashboard can show
+// "user X on /dashboard was stuck for 15s, slow endpoints: ...". Called
+// after every SPA navigation (history.pushState / popstate / initial load).
+const STUCK_TIMEOUT_MS = 15_000;
+let stuckTimer: ReturnType<typeof setTimeout> | null = null;
+let stuckRoute = "";
+let stuckStartMs = 0;
+function markRouteAlive(): void {
+  if (stuckTimer) {
+    clearTimeout(stuckTimer);
+    stuckTimer = null;
+  }
+}
+function armStuckTimer(): void {
+  // Cancel any pending timer first — route changed mid-flight.
+  markRouteAlive();
+  stuckRoute = currentRoute();
+  stuckStartMs = performance.now();
+  stuckTimer = setTimeout(() => {
+    // Only emit if still on the same route. If user navigated away while
+    // the timer was running, the original route was abandoned, not stuck.
+    if (currentRoute() !== stuckRoute) {
+      stuckTimer = null;
+      return;
+    }
+    pushEvent({
+      kind: "stuck",
+      route: stuckRoute,
+      value: Math.round(performance.now() - stuckStartMs),
+      ts: Date.now(),
+    });
+    stuckTimer = null;
+  }, STUCK_TIMEOUT_MS);
 }
 
 function currentRoute(): string {
@@ -178,7 +274,10 @@ function installSpaNavTiming(): void {
     const r = _push(...args);
     // pushState updates location synchronously, so flushNav can read
     // the new route immediately on the next microtask.
-    queueMicrotask(flushNav);
+    queueMicrotask(() => {
+      flushNav();
+      armStuckTimer();
+    });
     return r;
   };
   history.replaceState = function (
@@ -186,7 +285,10 @@ function installSpaNavTiming(): void {
   ) {
     markNavStart();
     const r = _replace(...args);
-    queueMicrotask(flushNav);
+    queueMicrotask(() => {
+      flushNav();
+      armStuckTimer();
+    });
     return r;
   };
   // Browser back/forward → popstate, route already changed when this
@@ -200,8 +302,14 @@ function installSpaNavTiming(): void {
   window.addEventListener("popstate", () => {
     navStartMs = performance.now() - 1; // 1ms fudge
     navStartRoute = "__popstate__"; // force flushNav to emit (different route)
-    queueMicrotask(flushNav);
+    queueMicrotask(() => {
+      flushNav();
+      armStuckTimer();
+    });
   });
+  // Arm the timer for the INITIAL page load too — the cold open is
+  // where Dashboard-blank is most often reported.
+  armStuckTimer();
 }
 
 /**

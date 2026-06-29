@@ -1566,4 +1566,132 @@ app.get("/fe-perf", async (c) => {
   return c.json({ success: true, data: data ?? [] });
 });
 
+// ---------------------------------------------------------------------------
+// Slow / failed API call list (2026-06-29). Surfaces the gap previous
+// fe-perf couldn't cover: a /api/* request that never completes silently
+// (no JS error, no longtask, no LCP — just a spinner forever). The client
+// only emits these for calls > 3s OR with status != 2xx, so the table is
+// already filtered down to actionable rows.
+//
+// AE schema:
+//   blob1="fe_api", blob2=route, blob3=endpoint, blob4=method, blob5=userId,
+//   blob6=status (string; "0" = aborted/timeout), double1=duration_ms
+// ---------------------------------------------------------------------------
+app.get("/fe-api", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT blob2 AS route,
+             blob3 AS endpoint,
+             blob4 AS method,
+             blob6 AS status,
+             blob5 AS userId,
+             double1 AS value
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'fe_api'
+        AND timestamp > NOW() - ${WINDOW}
+      LIMIT 50000
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    type Bucket = {
+      endpoint: string;
+      method: string;
+      status: string;
+      samples: number[];
+      lastRoute: string;
+      lastUserId: string;
+    };
+    const grouped = new Map<string, Bucket>();
+    for (const r of resp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const endpoint = String(row.endpoint ?? "");
+      const method = String(row.method ?? "GET");
+      const status = String(row.status ?? "0");
+      const route = String(row.route ?? "");
+      const userId = String(row.userId ?? "");
+      const v = Number(row.value);
+      const key = `${endpoint}|${method}|${status}`;
+      if (!grouped.has(key))
+        grouped.set(key, {
+          endpoint,
+          method,
+          status,
+          samples: [],
+          lastRoute: route,
+          lastUserId: userId,
+        });
+      const g = grouped.get(key)!;
+      if (Number.isFinite(v)) g.samples.push(v);
+      if (route) g.lastRoute = route;
+      if (userId) g.lastUserId = userId;
+    }
+    const out = [...grouped.values()].map((g) => {
+      const sorted = [...g.samples].sort((a, b) => a - b);
+      const pick = (p: number): number =>
+        sorted.length === 0
+          ? 0
+          : sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+      return {
+        endpoint: g.endpoint,
+        method: g.method,
+        status: g.status,
+        hits: g.samples.length,
+        p50: Math.round(pick(0.5)),
+        p95: Math.round(pick(0.95)),
+        max: Math.round(Math.max(0, ...g.samples)),
+        sampleRoute: g.lastRoute,
+        sampleUserId: g.lastUserId,
+      };
+    });
+    // Sort: failures first (status=0 or 5xx), then by P95 desc — operator
+    // scans top-to-bottom for "what's the worst right now".
+    out.sort((a, b) => {
+      const aFail =
+        a.status === "0" || a.status.startsWith("5") ? 0 : 1;
+      const bFail =
+        b.status === "0" || b.status.startsWith("5") ? 0 : 1;
+      if (aFail !== bFail) return aFail - bFail;
+      return b.p95 - a.p95;
+    });
+    return out.slice(0, 50);
+  });
+  return c.json({ success: true, data: data ?? [] });
+});
+
+// ---------------------------------------------------------------------------
+// Page-stuck list (2026-06-29). Each row = "user X on route Y was stuck
+// > 15s with no /api/* call returning 2xx". Captures the case where the
+// app shell rendered (sidebar visible, user blob loaded) but data never
+// arrived. AE schema:
+//   blob1="fe_stuck", blob2=route, blob5=userId, double1=ms_elapsed
+// ---------------------------------------------------------------------------
+app.get("/fe-stuck", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT blob2 AS route,
+             blob5 AS userId,
+             count() AS n,
+             max(double1) AS maxMs
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'fe_stuck'
+        AND timestamp > NOW() - ${WINDOW}
+      GROUP BY route, userId
+      ORDER BY n DESC
+      LIMIT 100
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    return (resp.data ?? []).map((r) => {
+      const row = r as Record<string, unknown>;
+      return {
+        route: String(row.route ?? ""),
+        userId: String(row.userId ?? "(anon)"),
+        n: Number(row.n) || 0,
+        maxMs: Math.round(Number(row.maxMs) || 0),
+      };
+    });
+  });
+  return c.json({ success: true, data: data ?? [] });
+});
+
 export default app;

@@ -54,7 +54,42 @@ type PerfEv = {
   value: number;
   ts: number;
 };
-type AnyEv = ErrorEv | PerfEv;
+// Per-API-call timing (slow / failed / aborted calls only — fast successes
+// are dropped client-side to keep the AE stream signal-rich). Added
+// 2026-06-29 so /admin/health can answer "which user's Dashboard is stuck
+// on which API call". AE schema:
+//   blob1 = "fe_api"
+//   blob2 = route (where on the app the call originated)
+//   blob3 = endpoint (/api/path, no query)
+//   blob4 = method (GET/POST/...)
+//   blob5 = userId
+//   blob6 = status (string — 0 means aborted/timeout)
+//   double1 = duration_ms
+//   indexes = ["fe_api"]
+type ApiEv = {
+  kind: "api";
+  route: string;
+  endpoint: string;
+  method: string;
+  status: number;
+  value: number;
+  ts: number;
+};
+// Page-stuck heartbeat — fires at 15s when a route's shell rendered but no
+// API call returned 2xx. The signal everyone's been missing: "user is sitting
+// on a blank loading screen and we don't even know it". AE schema:
+//   blob1 = "fe_stuck"
+//   blob2 = route
+//   blob5 = userId
+//   double1 = ms_elapsed (always 15000ish, but logged for future tuning)
+//   indexes = ["fe_stuck"]
+type StuckEv = {
+  kind: "stuck";
+  route: string;
+  value: number;
+  ts: number;
+};
+type AnyEv = ErrorEv | PerfEv | ApiEv | StuckEv;
 
 // Conservative per-request cap. Matches the FE batch size; a malicious
 // client trying to flood AE would hit this and get truncated.
@@ -116,6 +151,37 @@ app.post("/event", async (c) => {
             "fe_perf",
             String(p.route ?? "").slice(0, 200),
             String(p.metric ?? "").slice(0, 32),
+            "",
+            userId.slice(0, 64),
+          ],
+          doubles: [value],
+        });
+      } else if (ev.kind === "api") {
+        const a = ev as ApiEv;
+        const value = Number(a.value);
+        if (!Number.isFinite(value)) continue;
+        ae?.writeDataPoint?.({
+          indexes: ["fe_api"],
+          blobs: [
+            "fe_api",
+            String(a.route ?? "").slice(0, 200),
+            String(a.endpoint ?? "").slice(0, 200),
+            String(a.method ?? "GET").slice(0, 8),
+            userId.slice(0, 64),
+            String(a.status ?? 0).slice(0, 8),
+          ],
+          doubles: [value],
+        });
+      } else if (ev.kind === "stuck") {
+        const s = ev as StuckEv;
+        const value = Number(s.value);
+        if (!Number.isFinite(value)) continue;
+        ae?.writeDataPoint?.({
+          indexes: ["fe_stuck"],
+          blobs: [
+            "fe_stuck",
+            String(s.route ?? "").slice(0, 200),
+            "",
             "",
             userId.slice(0, 64),
           ],

@@ -28,10 +28,28 @@
 // ---------------------------------------------------------------------------
 import { clearAuth } from "./auth";
 import { readCsrfCookie, CSRF_HEADER_NAME } from "./csrf";
+import { reportApiCall } from "./fe-rum";
 
 const originalFetch = window.fetch.bind(window);
 
 const CSRF_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+// Hard cap on how long any /api/* request can hang before we abort + report
+// it as a timeout. 30s is well past the human "this is broken" threshold
+// (typical complaint kicks in at 5-8s) but short enough that a stuck call
+// doesn't tie up the connection slot forever. Recovery: the page surfaces
+// a fetch error, the user retries / refreshes. Without this cap the call
+// hangs indefinitely and never shows up in observability.
+const API_TIMEOUT_MS = 30_000;
+
+function pathOf(url: string): string {
+  try {
+    if (url.startsWith("/")) return url.split(/[?#]/)[0];
+    return new URL(url, window.location.origin).pathname;
+  } catch {
+    return url.split(/[?#]/)[0].slice(0, 200);
+  }
+}
 
 function isApiRequest(url: string): boolean {
   // Support relative ("/api/...") and absolute URLs that target the same
@@ -64,6 +82,11 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         : input.url;
 
   let nextInit = init;
+  // Composed timeout controller — fires AbortController.abort() at 30s so
+  // a stuck call resolves as a TypeError instead of hanging forever. If the
+  // caller passed their own signal, chain it (caller-abort still wins).
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let aborted = false;
   if (isApiRequest(url)) {
     const headers = new Headers(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
@@ -74,9 +97,22 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const csrf = readCsrfCookie();
       if (csrf) headers.set(CSRF_HEADER_NAME, csrf);
     }
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => {
+      aborted = true;
+      controller.abort();
+    }, API_TIMEOUT_MS);
+    // Chain a caller-supplied signal if there is one. This way both
+    // caller-cancel and our timeout can fire abort.
+    const callerSignal = init?.signal ?? (input instanceof Request ? input.signal : null);
+    if (callerSignal) {
+      if (callerSignal.aborted) controller.abort();
+      else callerSignal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
     nextInit = {
       ...(init ?? {}),
       headers,
+      signal: controller.signal,
       // Always send cookies along with /api/* requests. Same-origin defaults
       // are usually `same-origin` already, but being explicit keeps things
       // working if the API ever lives on a sibling subdomain behind a CDN.
@@ -84,7 +120,38 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     };
   }
 
-  const response = await originalFetch(input as RequestInfo, nextInit);
+  // Time the call. Reported to fe-rum (which decides whether to emit —
+  // fast successes are dropped; slow / failed / aborted ones bubble up
+  // to /admin/health). t0 captured per-request so an in-flight stack of
+  // /m's 18 preload calls each gets its own measurement.
+  const t0 = isApiRequest(url) ? performance.now() : 0;
+  let response: Response;
+  try {
+    response = await originalFetch(input as RequestInfo, nextInit);
+  } catch (err) {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (isApiRequest(url)) {
+      reportApiCall({
+        endpoint: pathOf(url),
+        method: methodOf(input, init),
+        // 0 = aborted / network-level fail. The dashboard groups these as
+        // "didn't return a response" — distinct from 4xx/5xx server errors.
+        status: 0,
+        duration: performance.now() - t0,
+      });
+    }
+    // Re-throw so callers' .catch() still fires; we only OBSERVE here.
+    throw err;
+  }
+  if (timeoutId) clearTimeout(timeoutId);
+  if (isApiRequest(url)) {
+    reportApiCall({
+      endpoint: pathOf(url),
+      method: methodOf(input, init),
+      status: aborted ? 0 : response.status,
+      duration: performance.now() - t0,
+    });
+  }
 
   // 401 on /api/* → auth expired / invalid. Wipe state and redirect, but
   // don't loop if the user is already on /login.

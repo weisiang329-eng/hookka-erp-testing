@@ -250,6 +250,26 @@ type FePerfRow = {
   p50: number;
   p95: number;
 };
+// 2026-06-29 additions — per-API timing + page-stuck heartbeat. These
+// fill the diagnostic gap where a slow/hung endpoint silently spinners
+// the page and no error / longtask / paint event surfaces.
+type FeApiRow = {
+  endpoint: string;
+  method: string;
+  status: string; // "0" = aborted/timeout
+  hits: number;
+  p50: number;
+  p95: number;
+  max: number;
+  sampleRoute: string;
+  sampleUserId: string;
+};
+type FeStuckRow = {
+  route: string;
+  userId: string;
+  n: number;
+  maxMs: number;
+};
 // Plain-language description per perf metric so the operator knows
 // what each number means.
 const FE_METRIC_HINT: Record<string, string> = {
@@ -507,6 +527,14 @@ export default function AdminHealthPage() {
     success: boolean;
     data: FePerfRow[];
   }>(`/api/admin/health/fe-perf${rangeQS}`, 60);
+  const { data: feApiResp } = useCachedJson<{
+    success: boolean;
+    data: FeApiRow[];
+  }>(`/api/admin/health/fe-api${rangeQS}`, 60);
+  const { data: feStuckResp } = useCachedJson<{
+    success: boolean;
+    data: FeStuckRow[];
+  }>(`/api/admin/health/fe-stuck${rangeQS}`, 60);
   const { data: auditFeedResp } = useCachedJson<{
     success: boolean;
     data: AuditFeedRow[];
@@ -552,6 +580,8 @@ export default function AdminHealthPage() {
   const slowSql = useMemo(() => slowSqlResp?.data ?? [], [slowSqlResp]);
   const feErrors = useMemo(() => feErrorsResp?.data ?? [], [feErrorsResp]);
   const fePerf = useMemo(() => fePerfResp?.data ?? [], [fePerfResp]);
+  const feApi = useMemo(() => feApiResp?.data ?? [], [feApiResp]);
+  const feStuck = useMemo(() => feStuckResp?.data ?? [], [feStuckResp]);
   // Front-End perf rows re-ordered for display (Item 3). The backend
   // already groups longtask first, but within longtask we re-sort by hit
   // count desc so the MOST FREQUENTLY frozen pages lead — "how often did
@@ -1268,6 +1298,107 @@ export default function AdminHealthPage() {
               </CardContent>
             </Card>
           </div>
+
+          {/* 2026-06-29 — Slow / failed API calls panel. Fills the gap
+              that fe-perf can't: a request that hangs forever shows up here.
+              Client only emits when duration > 3s OR status != 2xx so this
+              table is already filtered to actionable rows. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                Slow / failed API calls ({RANGE_LABEL[range].toLowerCase()}) — duration {'>'} 3s or non-2xx
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {feApi.length === 0 ? (
+                <p className="text-xs text-[#8B8580]">
+                  No slow or failed API calls in this window. (Client emits only when {'>'} 3s or status != 2xx; status "0" = aborted / timeout / network.)
+                </p>
+              ) : (
+                <div className="overflow-y-auto max-h-72 overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-white">
+                      <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                        <th className="py-1.5 font-medium">Status</th>
+                        <th className="py-1.5 font-medium">Endpoint</th>
+                        <th className="py-1.5 font-medium">Sample user</th>
+                        <th className="py-1.5 font-medium text-right">Hits</th>
+                        <th className="py-1.5 font-medium text-right">P50</th>
+                        <th className="py-1.5 font-medium text-right">P95</th>
+                        <th className="py-1.5 font-medium text-right">Max</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {feApi.map((r, i) => {
+                        const fail = r.status === "0" || r.status.startsWith("5") || r.status.startsWith("4");
+                        const aborted = r.status === "0";
+                        return (
+                          <tr key={i} className="border-b border-[#F5F2EE] align-top">
+                            <td className="py-1.5">
+                              <span className={`font-mono text-[11px] font-semibold ${aborted ? "text-[#9A3A2D]" : fail ? "text-[#9C6F1E]" : "text-[#5A5550]"}`}>
+                                {aborted ? "ABRT" : r.status}
+                              </span>
+                              <div className="text-[10px] text-[#8B8580]">{r.method}</div>
+                            </td>
+                            <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B] truncate max-w-[280px]" title={`${r.endpoint} (route: ${r.sampleRoute})`}>{r.endpoint}</td>
+                            <td className="py-1.5 font-mono text-[10px] text-[#5A5550] truncate max-w-[120px]" title={r.sampleUserId}>{r.sampleUserId || "(anon)"}</td>
+                            <td className="py-1.5 text-right text-[#5A5550]">{r.hits}</td>
+                            <td className="py-1.5 text-right text-[#5A5550]">{r.p50}ms</td>
+                            <td className={`py-1.5 text-right font-semibold ${r.p95 >= 10000 ? "text-[#9A3A2D]" : r.p95 >= 5000 ? "text-[#9C6F1E]" : "text-[#5A5550]"}`}>{r.p95}ms</td>
+                            <td className={`py-1.5 text-right font-semibold ${r.max >= 15000 ? "text-[#9A3A2D]" : "text-[#5A5550]"}`}>{r.max}ms</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* 2026-06-29 — Page-stuck heartbeat. A row here = "user X
+              landed on route Y and 15s later no /api/* had returned 2xx".
+              This is the signal that catches the silent Dashboard-blank
+              owner reported (no JS error, no longtask, no LCP — just
+              spinner forever). Each row is per (route, user); n = how
+              many times that user got stuck on that page. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                Stuck pages ({RANGE_LABEL[range].toLowerCase()}) — shell rendered, no data within 15s
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {feStuck.length === 0 ? (
+                <p className="text-xs text-[#8B8580]">
+                  No stuck-page heartbeats in this window. A row appears when a user's route loads but no /api/* call returns within 15s.
+                </p>
+              ) : (
+                <div className="overflow-y-auto max-h-72 overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-white">
+                      <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                        <th className="py-1.5 font-medium">Route</th>
+                        <th className="py-1.5 font-medium">User</th>
+                        <th className="py-1.5 font-medium text-right">Times stuck</th>
+                        <th className="py-1.5 font-medium text-right">Worst wait</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {feStuck.map((r, i) => (
+                        <tr key={i} className="border-b border-[#F5F2EE]">
+                          <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B]">{r.route}</td>
+                          <td className="py-1.5 font-mono text-[10px] text-[#5A5550] truncate max-w-[120px]">{r.userId}</td>
+                          <td className={`py-1.5 text-right font-semibold ${r.n >= 5 ? "text-[#9A3A2D]" : r.n >= 2 ? "text-[#9C6F1E]" : "text-[#5A5550]"}`}>{r.n}</td>
+                          <td className="py-1.5 text-right text-[#5A5550]">{(r.maxMs / 1000).toFixed(1)}s</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
           {/* ────────── ACTIVITY ────────── */}
           <SectionHeader

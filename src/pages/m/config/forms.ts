@@ -720,7 +720,31 @@ export function newMailSpec(): FormSpec {
           return { value: addr, label: s(o.name) ? `${s(o.name)} <${addr}>` : addr };
         },
       },
-      { name: "to", label: "To", kind: "text" as const, required: true, full: true, placeholder: "name@example.com" },
+      // dc13 N.1: "To 不用手打要可选". Source from customers + suppliers
+      // emails (both contact lists are already in localStorage cache).
+      {
+        name: "to",
+        label: "To",
+        kind: "select" as const,
+        required: true,
+        full: true,
+        placeholder: "Select contact…",
+        optionsUrl: "/api/customers",
+        optionsSelect: (resp: unknown): unknown[] => {
+          if (Array.isArray(resp)) return resp;
+          const o = (resp ?? {}) as { data?: unknown };
+          return Array.isArray(o.data) ? (o.data as unknown[]) : [];
+        },
+        optionsMap: (r: unknown): SelectOption => {
+          const o = (r ?? {}) as Record<string, unknown>;
+          const email = s(o.email);
+          const name = s(o.name);
+          return {
+            value: email || name,
+            label: email ? `${name} · ${email}` : name,
+          };
+        },
+      },
       { name: "subject", label: "Subject", kind: "text" as const, required: true, full: true },
       { name: "text", label: "Message", kind: "textarea" as const, required: true, full: true },
     ],

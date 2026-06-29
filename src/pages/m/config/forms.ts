@@ -752,6 +752,288 @@ export function newMailSpec(): FormSpec {
 }
 
 // ===========================================================================
+// CUSTOMER — create + edit. Wires to /api/customers POST + PUT (the same
+// endpoints the desktop customers/index.tsx uses). The PUT also handles the
+// delivery_hubs sync via the customer's deliveryHubs array.
+// ===========================================================================
+const TERMS_OPTS: SelectOption[] = [
+  { value: "COD", label: "COD" },
+  { value: "NET30", label: "30 days" },
+  { value: "NET45", label: "45 days" },
+  { value: "NET60", label: "60 days" },
+  { value: "NET90", label: "90 days" },
+];
+
+export function newCustomerSpec(): FormSpec {
+  return {
+    title: "New Customer",
+    submitLabel: "Create",
+    fields: [
+      { name: "code", label: "Customer Code", kind: "text" as const, required: true, full: true, placeholder: "e.g. 300-NEW" },
+      { name: "name", label: "Company Name", kind: "text" as const, required: true, full: true },
+      { name: "contactName", label: "Contact", kind: "text" as const, full: true },
+      { name: "phone", label: "Phone", kind: "text" as const, full: true },
+      { name: "email", label: "Email", kind: "text" as const, full: true },
+      { name: "ssmNo", label: "SSM No (BIC reg.)", kind: "text" as const, full: true },
+      { name: "creditTerms", label: "Credit Terms", kind: "select" as const, options: TERMS_OPTS, full: true },
+      { name: "creditLimitSen", label: "Credit Limit (RM)", kind: "money" as const, full: true },
+      { name: "companyAddress", label: "Billing Address", kind: "textarea" as const, full: true },
+    ],
+    initial: {
+      code: "",
+      name: "",
+      contactName: "",
+      phone: "",
+      email: "",
+      ssmNo: "",
+      creditTerms: "NET30",
+      creditLimitSen: 0,
+      companyAddress: "",
+    },
+    submit: async (v) => {
+      const body = {
+        code: s(v.code).trim(),
+        name: s(v.name).trim(),
+        contactName: s(v.contactName),
+        phone: s(v.phone),
+        email: s(v.email),
+        ssmNo: s(v.ssmNo),
+        creditTerms: s(v.creditTerms) || "NET30",
+        creditLimitSen: n(v.creditLimitSen),
+        companyAddress: s(v.companyAddress),
+        isActive: true,
+      };
+      const res = await mutateJson("/api/customers", "POST", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshList("/api/customers");
+      const id = newIdOf(res.body);
+      return {
+        ok: true,
+        navigateTo: id ? `/m/customers/${encodeURIComponent(id)}` : undefined,
+      };
+    },
+  };
+}
+
+export function editCustomerSpec(doc: Record<string, unknown>, id: string): FormSpec {
+  return {
+    title: "Edit Customer",
+    submitLabel: "Save",
+    fields: [
+      { name: "code", label: "Customer Code", kind: "text" as const, required: true, full: true },
+      { name: "name", label: "Company Name", kind: "text" as const, required: true, full: true },
+      { name: "contactName", label: "Contact", kind: "text" as const, full: true },
+      { name: "phone", label: "Phone", kind: "text" as const, full: true },
+      { name: "email", label: "Email", kind: "text" as const, full: true },
+      { name: "ssmNo", label: "SSM No (BIC reg.)", kind: "text" as const, full: true },
+      { name: "creditTerms", label: "Credit Terms", kind: "select" as const, options: TERMS_OPTS, full: true },
+      { name: "creditLimitSen", label: "Credit Limit (RM)", kind: "money" as const, full: true },
+      { name: "companyAddress", label: "Billing Address", kind: "textarea" as const, full: true },
+    ],
+    initial: {
+      code: s(doc.code),
+      name: s(doc.name),
+      contactName: s(doc.contactName),
+      phone: s(doc.phone),
+      email: s(doc.email),
+      ssmNo: s(doc.ssmNo),
+      creditTerms: s(doc.creditTerms) || "NET30",
+      creditLimitSen: n(doc.creditLimitSen),
+      companyAddress: s(doc.companyAddress),
+    },
+    submit: async (v) => {
+      // Preserve the existing deliveryHubs array — the PUT route uses
+      // it to sync (delete missing + upsert present). Sending no
+      // deliveryHubs key means hubs are left alone.
+      const body = {
+        code: s(v.code).trim(),
+        name: s(v.name).trim(),
+        contactName: s(v.contactName),
+        phone: s(v.phone),
+        email: s(v.email),
+        ssmNo: s(v.ssmNo),
+        creditTerms: s(v.creditTerms) || "NET30",
+        creditLimitSen: n(v.creditLimitSen),
+        companyAddress: s(v.companyAddress),
+        isActive: doc.isActive !== false,
+        deliveryHubs: arr(doc.deliveryHubs),
+      };
+      const res = await mutateJson(`/api/customers/${encodeURIComponent(id)}`, "PUT", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshOne(`/api/customers/${encodeURIComponent(id)}`);
+      refreshList("/api/customers");
+      return { ok: true };
+    },
+  };
+}
+
+/**
+ * Add Hub form — PUTs the customer with deliveryHubs = [...existing, newHub].
+ * The /api/customers PUT route handles the delivery_hubs UPSERT atomically.
+ * Requires the customer doc (for the existing hub array).
+ */
+export function addHubSpec(customer: Record<string, unknown>, customerId: string): FormSpec {
+  return {
+    title: "Add Hub",
+    submitLabel: "Add",
+    fields: [
+      { name: "code", label: "Hub Code", kind: "text" as const, required: true, full: true, placeholder: "e.g. KL-01" },
+      { name: "shortName", label: "Short Name", kind: "text" as const, required: true, full: true },
+      { name: "state", label: "State", kind: "text" as const, full: true },
+      { name: "contactName", label: "Contact", kind: "text" as const, full: true },
+      { name: "phone", label: "Phone", kind: "text" as const, full: true },
+      { name: "address", label: "Address", kind: "textarea" as const, full: true },
+    ],
+    initial: {
+      code: "",
+      shortName: "",
+      state: "",
+      contactName: "",
+      phone: "",
+      address: "",
+    },
+    submit: async (v) => {
+      const existing = arr(customer.deliveryHubs);
+      const newHub = {
+        id: uuid(),
+        code: s(v.code).trim(),
+        shortName: s(v.shortName).trim(),
+        state: s(v.state),
+        contactName: s(v.contactName),
+        phone: s(v.phone),
+        address: s(v.address),
+      };
+      const body = {
+        // Required fields the PUT still expects — pass through unchanged.
+        code: s(customer.code),
+        name: s(customer.name),
+        contactName: s(customer.contactName),
+        phone: s(customer.phone),
+        email: s(customer.email),
+        ssmNo: s(customer.ssmNo),
+        creditTerms: s(customer.creditTerms) || "NET30",
+        creditLimitSen: n(customer.creditLimitSen),
+        companyAddress: s(customer.companyAddress),
+        isActive: customer.isActive !== false,
+        deliveryHubs: [...existing, newHub],
+      };
+      const res = await mutateJson(`/api/customers/${encodeURIComponent(customerId)}`, "PUT", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshOne(`/api/customers/${encodeURIComponent(customerId)}`);
+      refreshList("/api/customers");
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
+// SUPPLIER — create + edit. Wires to /api/suppliers POST + PUT.
+// ===========================================================================
+const PURCHASE_COMPANY_OPTS: SelectOption[] = [
+  { value: "HOOKKA_INDUSTRIES", label: "Hookka Industries Sdn Bhd" },
+  { value: "HOOKKA_FURNITURE", label: "Hookka Furniture Sdn Bhd" },
+];
+
+export function newSupplierSpec(): FormSpec {
+  return {
+    title: "New Supplier",
+    submitLabel: "Create",
+    fields: [
+      { name: "code", label: "Supplier Code", kind: "text" as const, required: true, full: true, placeholder: "e.g. 400-NEW" },
+      { name: "name", label: "Supplier Name", kind: "text" as const, required: true, full: true },
+      { name: "contactPerson", label: "Contact Person", kind: "text" as const, full: true },
+      { name: "phone", label: "Phone", kind: "text" as const, full: true },
+      { name: "email", label: "Email", kind: "text" as const, full: true },
+      { name: "state", label: "State", kind: "text" as const, full: true },
+      { name: "purchaseCompany", label: "Purchase Company", kind: "select" as const, options: PURCHASE_COMPANY_OPTS, full: true },
+      { name: "paymentTerms", label: "Payment Terms", kind: "select" as const, options: TERMS_OPTS, full: true },
+      { name: "address", label: "Address", kind: "textarea" as const, full: true },
+    ],
+    initial: {
+      code: "",
+      name: "",
+      contactPerson: "",
+      phone: "",
+      email: "",
+      state: "",
+      purchaseCompany: "HOOKKA_INDUSTRIES",
+      paymentTerms: "NET30",
+      address: "",
+    },
+    submit: async (v) => {
+      const body = {
+        code: s(v.code).trim(),
+        name: s(v.name).trim(),
+        contactPerson: s(v.contactPerson),
+        phone: s(v.phone),
+        email: s(v.email),
+        state: s(v.state),
+        purchaseCompany: s(v.purchaseCompany),
+        paymentTerms: s(v.paymentTerms),
+        address: s(v.address),
+        isActive: true,
+      };
+      const res = await mutateJson("/api/suppliers", "POST", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshList("/api/suppliers");
+      const id = newIdOf(res.body);
+      return {
+        ok: true,
+        navigateTo: id ? `/m/suppliers/${encodeURIComponent(id)}` : undefined,
+      };
+    },
+  };
+}
+
+export function editSupplierSpec(doc: Record<string, unknown>, id: string): FormSpec {
+  return {
+    title: "Edit Supplier",
+    submitLabel: "Save",
+    fields: [
+      { name: "code", label: "Supplier Code", kind: "text" as const, required: true, full: true },
+      { name: "name", label: "Supplier Name", kind: "text" as const, required: true, full: true },
+      { name: "contactPerson", label: "Contact Person", kind: "text" as const, full: true },
+      { name: "phone", label: "Phone", kind: "text" as const, full: true },
+      { name: "email", label: "Email", kind: "text" as const, full: true },
+      { name: "state", label: "State", kind: "text" as const, full: true },
+      { name: "purchaseCompany", label: "Purchase Company", kind: "select" as const, options: PURCHASE_COMPANY_OPTS, full: true },
+      { name: "paymentTerms", label: "Payment Terms", kind: "select" as const, options: TERMS_OPTS, full: true },
+      { name: "address", label: "Address", kind: "textarea" as const, full: true },
+    ],
+    initial: {
+      code: s(doc.code),
+      name: s(doc.name),
+      contactPerson: s(doc.contactPerson),
+      phone: s(doc.phone),
+      email: s(doc.email),
+      state: s(doc.state),
+      purchaseCompany: s(doc.purchaseCompany) || "HOOKKA_INDUSTRIES",
+      paymentTerms: s(doc.paymentTerms) || "NET30",
+      address: s(doc.address),
+    },
+    submit: async (v) => {
+      const body = {
+        code: s(v.code).trim(),
+        name: s(v.name).trim(),
+        contactPerson: s(v.contactPerson),
+        phone: s(v.phone),
+        email: s(v.email),
+        state: s(v.state),
+        purchaseCompany: s(v.purchaseCompany),
+        paymentTerms: s(v.paymentTerms),
+        address: s(v.address),
+        isActive: doc.isActive !== false,
+      };
+      const res = await mutateJson(`/api/suppliers/${encodeURIComponent(id)}`, "PUT", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshOne(`/api/suppliers/${encodeURIComponent(id)}`);
+      refreshList("/api/suppliers");
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
 // Create-form resolver — slug → its "New …" FormSpec, or null when the module
 // has no in-scope mobile create form. Drives the "+" affordance on the L1 list
 // header (ModuleListScreen).
@@ -768,8 +1050,13 @@ export function createSpecFor(slug: string): FormSpec | null {
       return newInvoiceSpec();
     case "announcements":
       return newAnnouncementSpec();
+    case "mail":
     case "mail-center":
       return newMailSpec();
+    case "customers":
+      return newCustomerSpec();
+    case "suppliers":
+      return newSupplierSpec();
     default:
       return null;
   }
@@ -797,6 +1084,10 @@ export function editSpecFor(
       // a mobile edit form here; GRN/PI editing stays on desktop.
       if (id.startsWith("po-")) return editPurchaseOrderSpec(doc, id);
       return null;
+    case "customers":
+      return editCustomerSpec(doc, id);
+    case "suppliers":
+      return editSupplierSpec(doc, id);
     default:
       // DO edit (status transitions / dispatch overlay), production, etc. are
       // not free-form edits — left to desktop / the CTA action. // TODO: add a

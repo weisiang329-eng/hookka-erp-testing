@@ -2730,16 +2730,8 @@ const customerDetail: DetailConfig = {
 
     return lists;
   },
-  // No status transitions on customers (no Confirm/Close on the desktop
-  // record), so no CTA. Hide the action bar since mobile customer edit isn't
-  // built yet — avoids a half-working Edit button. TODO: wire when /m/
-  // customer-edit form lands.
-  hideActionBar: true,
-  // dc13 v13 sync (owner 2026-06-29): Catalogue Export. Deep-links to
-  // desktop /products?autoCustomerCatalogueId=<id>; the products page
-  // auto-fetches that customer + fires the existing per-customer catalogue
-  // PDF pipeline. Mobile gets the PDF download without re-implementing
-  // fetchPhotoMap / buildCatalogueModels / pdf-lib on phone.
+  // Edit button now wires editCustomerSpec (forms.ts → /api/customers/:id PUT).
+  // Owner 2026-06-30 — mobile customer edit is now built.
   extraActions: (_d, id) => [
     {
       label: "Export Catalogue",
@@ -2863,7 +2855,8 @@ const supplierDetail: DetailConfig = {
 
     return lists;
   },
-  hideActionBar: true,
+  // Edit button now wires editSupplierSpec (forms.ts → /api/suppliers/:id PUT).
+  // Owner 2026-06-30.
 };
 
 export const suppliersConfig: ModuleConfig = {

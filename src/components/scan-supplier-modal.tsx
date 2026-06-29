@@ -690,6 +690,29 @@ function CreatePIWizard({
     [rawMaterials],
   );
 
+  // Per-supplier "supplier SKU" picker options. Owner ruling 2026-06-29
+  // evening: Supplier SKU must also be a dropdown (not free text), pulled
+  // from supplier_material_bindings for the chosen supplier. Picking a SKU
+  // fills both supplierSku AND the internal materialCode + name in one go,
+  // mirroring the Internal Code column's MaterialPicker.
+  const supplierSkuOptionsBy: Map<string, MaterialOption[]> = useMemo(() => {
+    const map = new Map<string, MaterialOption[]>();
+    for (const b of bindings) {
+      if (!b.supplierId || !b.supplierSku) continue;
+      const rm = materialByCode.get(b.materialCode.trim().toUpperCase());
+      const opt: MaterialOption = {
+        itemCode: b.supplierSku,
+        description: rm
+          ? `${rm.itemCode} · ${rm.description}`
+          : b.materialCode,
+      };
+      const arr = map.get(b.supplierId) ?? [];
+      arr.push(opt);
+      map.set(b.supplierId, arr);
+    }
+    return map;
+  }, [bindings, materialByCode]);
+
   // ─── Build a card from a successful extraction ─────────────────────────
   const buildCard = useCallback(
     (
@@ -1107,6 +1130,9 @@ function CreatePIWizard({
               suppliers={suppliers}
               activeOrgs={activeOrgs}
               materialOptions={materialOptionsAll}
+              supplierSkuOptionsBy={supplierSkuOptionsBy}
+              resolveBindingFor={resolveBindingFor}
+              materialByCode={materialByCode}
               errors={errors}
               onPatchCard={patchCard}
               onPatchLine={patchLine}
@@ -1329,6 +1355,9 @@ function PreviewStep({
   suppliers,
   activeOrgs,
   materialOptions,
+  supplierSkuOptionsBy,
+  resolveBindingFor,
+  materialByCode,
   errors,
   onPatchCard,
   onPatchLine,
@@ -1344,6 +1373,9 @@ function PreviewStep({
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   materialOptions: MaterialOption[];
+  supplierSkuOptionsBy: Map<string, MaterialOption[]>;
+  resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
+  materialByCode: Map<string, RawMaterial>;
   errors: string[];
   onPatchCard: (id: string, patch: Partial<PreviewCard>) => void;
   onPatchLine: (cardId: string, idx: number, patch: Partial<PreviewLine>) => void;
@@ -1389,6 +1421,9 @@ function PreviewStep({
             suppliers={suppliers}
             activeOrgs={activeOrgs}
             materialOptions={materialOptions}
+            supplierSkuOptions={supplierSkuOptionsBy.get(card.supplierId) ?? []}
+            resolveBindingFor={resolveBindingFor}
+            materialByCode={materialByCode}
             onPatch={(patch) => onPatchCard(card.id, patch)}
             onPatchLine={(idx, patch) => onPatchLine(card.id, idx, patch)}
             onAddLine={() => onAddLine(card.id)}
@@ -1421,6 +1456,9 @@ function PICard({
   suppliers,
   activeOrgs,
   materialOptions,
+  supplierSkuOptions,
+  resolveBindingFor,
+  materialByCode,
   onPatch,
   onPatchLine,
   onAddLine,
@@ -1432,6 +1470,9 @@ function PICard({
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   materialOptions: MaterialOption[];
+  supplierSkuOptions: MaterialOption[];
+  resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
+  materialByCode: Map<string, RawMaterial>;
   onPatch: (patch: Partial<PreviewCard>) => void;
   onPatchLine: (idx: number, patch: Partial<PreviewLine>) => void;
   onAddLine: () => void;
@@ -1640,12 +1681,27 @@ function PICard({
                       />
                     )}
                   </td>
+                  {/* Supplier SKU — owner 2026-06-29 evening: must be a
+                      picker from this supplier's bindings, not free text.
+                      Picking auto-fills the Internal Code + material name
+                      via the same supplier_material_bindings lookup. */}
                   <td className="px-1 py-1">
-                    <Input
-                      className="h-8 text-xs"
+                    <MaterialPicker
+                      className="h-8"
+                      inputClassName="h-8 text-xs"
+                      placeholder="SKU"
                       value={line.supplierSku}
-                      onChange={(e) => onPatchLine(i, { supplierSku: e.target.value })}
-                      disabled={!!card.createdPiNo}
+                      options={supplierSkuOptions}
+                      onPick={(o) => {
+                        const binding = resolveBindingFor(card.supplierId, o.itemCode);
+                        const rm = binding ? materialByCode.get(binding.materialCode.trim().toUpperCase()) : null;
+                        onPatchLine(i, {
+                          supplierSku: o.itemCode,
+                          materialCode: rm?.itemCode ?? binding?.materialCode ?? line.materialCode,
+                          materialName: rm?.description ?? line.materialName,
+                        });
+                      }}
+                      onTyped={(text) => onPatchLine(i, { supplierSku: text })}
                     />
                   </td>
                   <td className="px-1 py-1">

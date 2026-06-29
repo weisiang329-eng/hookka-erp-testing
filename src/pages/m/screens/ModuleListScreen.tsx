@@ -56,12 +56,14 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   // extracts via /api/scan-po/extract, opens a prefilled new-SO form.
   const [scanPOOpen, setScanPOOpen] = useState(false);
   const canScanPO = config.slug === "sales";
-  // Multi-select mode (dc13 v13 SELECT ACTION BAR). UI only — bulk
-  // operations (delete/export/mark) toast for now since no bulk endpoints
-  // exist on the backend yet. Owner can flip these to real calls once the
-  // endpoints land.
+  // Multi-select mode (dc13 v13 SELECT ACTION BAR). Mark wires to real
+  // per-module status-transition endpoints (matches desktop's
+  // BatchActionToolbar + delivery bulk-dispatch pattern). Export is a
+  // placeholder until owner defines what "bulk export" means per module
+  // (one combined PDF vs zip).
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -74,6 +76,74 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
     setSelectMode(false);
     setSelectedIds(new Set());
   };
+  // Per-module bulk-mark target (null = module has no bulk mark wired yet).
+  // Matches desktop:
+  //   sales      → CONFIRMED        (DRAFT → CONFIRMED)
+  //   delivery   → DISPATCHED       (LOADED/READY → DISPATCHED)
+  //   procurement→ SENT             (DRAFT → SENT)
+  //   invoices   → PAID             (UNPAID → PAID)
+  // For modules with no obvious next-status, the Mark button just toasts.
+  const bulkMarkConfig: Record<
+    string,
+    { label: string; status: string; endpoint: (id: string) => string }
+  > = {
+    sales: {
+      label: "Mark Confirmed",
+      status: "CONFIRMED",
+      endpoint: (id) => `/api/sales-orders/${encodeURIComponent(id)}`,
+    },
+    delivery: {
+      label: "Mark Dispatched",
+      status: "DISPATCHED",
+      endpoint: (id) => `/api/delivery-orders/${encodeURIComponent(id)}`,
+    },
+    procurement: {
+      label: "Mark Sent",
+      status: "SENT",
+      endpoint: (id) => `/api/purchase-orders/${encodeURIComponent(id)}`,
+    },
+    invoices: {
+      label: "Mark Paid",
+      status: "PAID",
+      endpoint: (id) => `/api/invoices/${encodeURIComponent(id)}`,
+    },
+    announcements: {
+      label: "Mark Read",
+      status: "READ",
+      endpoint: (id) => `/api/announcements/${encodeURIComponent(id)}/read`,
+    },
+  };
+  const bulkCfg = bulkMarkConfig[config.slug];
+  /** Sequential per-doc PUT — matches desktop's "avoid deadlock" pattern in
+   * delivery bulk-dispatch (src/pages/delivery/index.tsx:2851). One at a
+   * time, count successes, toast the result. */
+  async function runBulkMark() {
+    if (!bulkCfg || selectedIds.size === 0) return;
+    setBulkBusy(true);
+    const ids = Array.from(selectedIds);
+    let ok = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        const url = bulkCfg.endpoint(id);
+        const res = await fetch(url, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: bulkCfg.status }),
+        });
+        if (res.ok) ok++;
+        else failed++;
+      } catch {
+        failed++;
+      }
+    }
+    setBulkBusy(false);
+    setScanToast(
+      `${bulkCfg.label}: ${ok} done${failed > 0 ? ` · ${failed} failed` : ""}`,
+    );
+    window.setTimeout(() => setScanToast(null), 2400);
+    exitSelectMode();
+  }
   // "+" create form for modules that have one (SO / Delivery / Procure /
   // Invoice / Announcements / Mail). null = this module has no mobile create.
   const [createSpec, setCreateSpec] = useState<FormSpec | null>(null);
@@ -574,11 +644,16 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
           </button>
           <button
             onClick={() => {
-              setScanToast(
-                `Mark ${selectedIds.size} as read — bulk endpoint pending`,
-              );
-              window.setTimeout(() => setScanToast(null), 2200);
+              if (bulkCfg && !bulkBusy) {
+                void runBulkMark();
+              } else if (!bulkCfg) {
+                setScanToast(
+                  `Mark not wired for ${config.title} yet`,
+                );
+                window.setTimeout(() => setScanToast(null), 2200);
+              }
             }}
+            disabled={bulkBusy}
             style={{
               height: 38,
               padding: "0 14px",
@@ -589,14 +664,15 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
               fontFamily: "inherit",
               fontSize: 12.5,
               fontWeight: 700,
-              cursor: "pointer",
+              cursor: bulkBusy ? "wait" : "pointer",
+              opacity: bulkBusy ? 0.7 : 1,
               display: "flex",
               alignItems: "center",
               gap: 6,
             }}
           >
             <Check size={14} strokeWidth={2} />
-            Mark
+            {bulkBusy ? "…" : (bulkCfg?.label?.replace("Mark ", "") || "Mark")}
           </button>
         </div>
       ) : null}

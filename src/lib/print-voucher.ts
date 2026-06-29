@@ -80,45 +80,7 @@ function renderRow(cells: string[], columns: VoucherColumn[], tag: "td" | "th", 
     .join("");
 }
 
-/**
- * Build the full standalone HTML document for a voucher. Pure: no window/DOM
- * access, so it can be unit-tested. printVoucher() wraps this with the
- * window.open/print side effects.
- */
-export function buildVoucherHtml(spec: VoucherSpec): string {
-  const co = spec.company;
-  const addr = co.addressLines.map((l) => escapeHtml(l)).join("<br/>");
-
-  const headRow = `<tr>${renderRow(spec.columns.map((c) => c.label), spec.columns, "th")}</tr>`;
-  const bodyRows = spec.lines
-    .map((ln) => `<tr>${renderRow(ln.cells, spec.columns, "td")}</tr>`)
-    .join("");
-  const totalRow = spec.totalCells
-    ? `<tr class="total-row">${renderRow(spec.totalCells, spec.columns, "td", "total-cell")}</tr>`
-    : "";
-
-  const footerNote = spec.footerNote
-    ? `<div class="footer-note">${escapeHtml(spec.footerNote)}</div>`
-    : "";
-
-  const wordsBlock = spec.amountWords
-    ? `<div class="words"><span class="words-label">Amount in words:</span> ${escapeHtml(spec.amountWords)}</div>`
-    : "";
-
-  const remarksBlock = spec.remarks
-    ? `<div class="remarks"><span class="remarks-label">Remarks:</span> ${escapeHtml(spec.remarks)}</div>`
-    : "";
-
-  const sigCols = spec.signatures
-    .map(
-      (s) =>
-        `<div class="sig"><div class="sig-line"></div><div class="sig-label">${escapeHtml(s.label)}</div></div>`,
-    )
-    .join("");
-
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
-<title>${escapeHtml(spec.title)} — ${escapeHtml(spec.docNo)}</title>
-<style>
+const VOUCHER_STYLES = `
   * { box-sizing: border-box; }
   @page { size: A4; margin: 16mm; }
   body { font-family: "Segoe UI", Arial, sans-serif; font-size: 12px; color: #1F1D1B; margin: 0; }
@@ -149,8 +111,47 @@ export function buildVoucherHtml(spec: VoucherSpec): string {
   .sig-label { font-size: 11px; color: #444; }
   .printed { margin-top: 28px; text-align: right; font-size: 9.5px; color: #999; }
   @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
-</style></head>
-<body><div class="sheet">
+  .sheet { page-break-after: always; }
+  .sheet:last-child { page-break-after: auto; }
+`;
+
+/**
+ * Build the inner .sheet HTML for a single voucher (no <html>/<head>/<body>
+ * wrapper). Pure: no window/DOM access. Used by buildVoucherHtml and
+ * buildVouchersDocument.
+ */
+export function buildVoucherSheet(spec: VoucherSpec): string {
+  const co = spec.company;
+  const addr = co.addressLines.map((l) => escapeHtml(l)).join("<br/>");
+
+  const headRow = `<tr>${renderRow(spec.columns.map((c) => c.label), spec.columns, "th")}</tr>`;
+  const bodyRows = spec.lines
+    .map((ln) => `<tr>${renderRow(ln.cells, spec.columns, "td")}</tr>`)
+    .join("");
+  const totalRow = spec.totalCells
+    ? `<tr class="total-row">${renderRow(spec.totalCells, spec.columns, "td", "total-cell")}</tr>`
+    : "";
+
+  const footerNote = spec.footerNote
+    ? `<div class="footer-note">${escapeHtml(spec.footerNote)}</div>`
+    : "";
+
+  const wordsBlock = spec.amountWords
+    ? `<div class="words"><span class="words-label">Amount in words:</span> ${escapeHtml(spec.amountWords)}</div>`
+    : "";
+
+  const remarksBlock = spec.remarks
+    ? `<div class="remarks"><span class="remarks-label">Remarks:</span> ${escapeHtml(spec.remarks)}</div>`
+    : "";
+
+  const sigCols = spec.signatures
+    .map(
+      (s) =>
+        `<div class="sig"><div class="sig-line"></div><div class="sig-label">${escapeHtml(s.label)}</div></div>`,
+    )
+    .join("");
+
+  return `<div class="sheet">
   <div class="head">
     <div>
       <div class="co-name">${escapeHtml(co.name)}</div>
@@ -171,18 +172,44 @@ export function buildVoucherHtml(spec: VoucherSpec): string {
   ${remarksBlock}
   <div class="sigs">${sigCols}</div>
   <div class="printed">Printed on ${escapeHtml(spec.printedOn)}</div>
-</div></body></html>`;
+</div>`;
+}
+
+/**
+ * Build the full standalone HTML document for a voucher. Pure: no window/DOM
+ * access, so it can be unit-tested. printVoucher() wraps this with the
+ * window.open/print side effects.
+ */
+export function buildVoucherHtml(spec: VoucherSpec): string {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<title>${escapeHtml(spec.title)} — ${escapeHtml(spec.docNo)}</title>
+<style>${VOUCHER_STYLES}</style></head>
+<body>${buildVoucherSheet(spec)}</body></html>`;
+}
+
+// One standalone HTML document holding N vouchers, each on its own A4 page.
+export function buildVouchersDocument(specs: VoucherSpec[]): string {
+  const title = specs.length === 1 ? `${escapeHtml(specs[0].title)} — ${escapeHtml(specs[0].docNo)}` : `Vouchers (${specs.length})`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<title>${title}</title>
+<style>${VOUCHER_STYLES}</style></head>
+<body>${specs.map(buildVoucherSheet).join("")}</body></html>`;
+}
+
+// Open a window with all the vouchers and trigger the print dialog
+// (print to paper, or "Save as PDF"). Mirrors printVoucher().
+export function printVouchers(specs: VoucherSpec[]): void {
+  if (specs.length === 0) return;
+  const w = window.open("", "_blank");
+  if (!w) return;
+  w.document.write(buildVouchersDocument(specs));
+  w.document.close();
+  w.focus();
+  w.print();
 }
 
 /**
  * Open a new window, write the voucher HTML and trigger the browser print
  * dialog — the established pattern in this codebase (see printStmt).
  */
-export function printVoucher(spec: VoucherSpec): void {
-  const w = window.open("", "_blank");
-  if (!w) return;
-  w.document.write(buildVoucherHtml(spec));
-  w.document.close();
-  w.focus();
-  w.print();
-}
+export function printVoucher(spec: VoucherSpec): void { printVouchers([spec]); }

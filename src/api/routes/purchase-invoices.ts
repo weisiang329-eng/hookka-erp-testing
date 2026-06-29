@@ -65,6 +65,13 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // Now collapse PENDING_APPROVAL / APPROVED rows into CONFIRMED. Safe
       // because the CHECK above accepts CONFIRMED. Idempotent.
       "UPDATE purchase_invoices SET status = 'CONFIRMED' WHERE status IN ('PENDING_APPROVAL','APPROVED')",
+      // SST breakdown (owner 2026-06-30): per-line SST + header Subtotal / SST.
+      // Replaces the legacy single TAX line. snake_case → no rename-map entry.
+      // Legacy TAX-line PIs keep working: on read we synthesize subtotal/tax
+      // from the existing rows when header values are 0.
+      "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS subtotal_sen INTEGER DEFAULT 0",
+      "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS tax_sen INTEGER DEFAULT 0",
+      "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS tax_sen INTEGER DEFAULT 0",
     ];
     for (const sql of stmts) {
       try {
@@ -134,7 +141,11 @@ function apBankAcct(method: string | null | undefined): string {
 // recoverable asset.
 export async function mapPurchaseLinesToAccounts(
   db: Env["Variables"]["DB"],
-  lines: { mc: string | null; amt: number; lt: string }[],
+  // `taxAmt` (owner 2026-06-30): per-line SST in sen. Routed to 706-0000 SST
+  // CHARGES on top of the goods amount so DR side stays in lockstep with AP
+  // (total = subtotal + tax). Optional — legacy callers that pass only goods
+  // amounts via lt='TAX' still work.
+  lines: { mc: string | null; amt: number; lt: string; taxAmt?: number }[],
 ): Promise<{ bucket: Record<string, number>; pdefault: string }> {
   const rmRes = await db
     .prepare("SELECT * FROM raw_materials")
@@ -173,6 +184,13 @@ export async function mapPurchaseLinesToAccounts(
     const acct =
       (grp && (pmap[grp] ?? DEFAULT_PURCHASE_MAP[grp])) || pdefault;
     bucket[acct] = (bucket[acct] ?? 0) + (Number(ln.amt) || 0);
+    // Per-line SST (owner 2026-06-30): route this line's tax to 706-0000 SST
+    // CHARGES so DR side ties to AP (total = subtotal + tax). Goods amt stays
+    // pre-tax in the purchase account.
+    const tax = Number(ln.taxAmt) || 0;
+    if (tax > 0) {
+      bucket["706-0000"] = (bucket["706-0000"] ?? 0) + tax;
+    }
   }
   return { bucket, pdefault };
 }
@@ -218,6 +236,9 @@ export type PurchaseInvoiceItem = {
   qty: number;
   unitPriceSen: number;
   lineTotalSen: number;
+  // Per-line SST in sen (owner 2026-06-30). 0 for non-taxable lines and for
+  // legacy rows that never recorded per-line tax. lineTotalSen stays PRE-TAX.
+  taxSen: number;
   lineType: PurchaseInvoiceItemLineType;
   notes: string | null;
   grnItemId: string | null;
@@ -242,6 +263,8 @@ type PurchaseInvoiceItemRow = {
   lineTotalSen?: number;
   line_type?: string;
   lineType?: string;
+  tax_sen?: number | null;
+  taxSen?: number | null;
   notes: string | null;
   grn_item_id?: string | null;
   grnItemId?: string | null;
@@ -290,6 +313,10 @@ function rowToPI(r: PurchaseInvoiceRow) {
     supplier_do_no?: string | null;
     purchaseOrgCode?: string | null;
     purchase_org_code?: string | null;
+    subtotalSen?: number | null;
+    subtotal_sen?: number | null;
+    taxSen?: number | null;
+    tax_sen?: number | null;
   };
   return {
     id: r.id,
@@ -303,6 +330,11 @@ function rowToPI(r: PurchaseInvoiceRow) {
     invoiceDate: r.invoiceDate ?? "",
     dueDate: r.dueDate ?? "",
     amountSen: r.amountSen,
+    // SST breakdown (owner 2026-06-30). Header columns are authoritative when
+    // populated. For legacy rows where they're still 0 the FE falls back to
+    // computing subtotal = total − taxLine.amount on render via the items list.
+    subtotalSen: Number(fx.subtotalSen ?? fx.subtotal_sen ?? 0) || 0,
+    taxSen: Number(fx.taxSen ?? fx.tax_sen ?? 0) || 0,
     paidAmountSen: Number(fx.paid_amount_sen ?? r.paidAmountSen ?? 0),
     status: r.status,
     remarks: r.remarks ?? "",
@@ -335,6 +367,7 @@ function rowToItem(r: PurchaseInvoiceItemRow): PurchaseInvoiceItem {
     qty: Number(r.qty) || 0,
     unitPriceSen: Number(r.unit_price_sen ?? r.unitPriceSen) || 0,
     lineTotalSen: Number(r.line_total_sen ?? r.lineTotalSen) || 0,
+    taxSen: Number(r.tax_sen ?? r.taxSen) || 0,
     lineType: VALID_LINE_TYPES.includes(lineType) ? lineType : "OTHER",
     notes: r.notes ?? null,
     grnItemId: r.grnItemId ?? r.grn_item_id ?? null,
@@ -349,6 +382,12 @@ type PurchaseInvoiceItemInput = {
   supplierSku?: string | null;
   qty?: number;
   unitPriceSen?: number;
+  // Per-line SST (owner 2026-06-30). When omitted the line is treated as
+  // non-taxable (taxSen=0). The header pre-tax subtotal is the sum of goods-
+  // line amounts; header taxSen is the sum of per-line taxes plus any legacy
+  // TAX-line amount (so old payloads using lt='TAX' still produce a sensible
+  // breakdown).
+  taxSen?: number;
   lineType?: string;
   notes?: string | null;
   // Convert-chain: when this line is sourced from a GRN line, the grn_items
@@ -369,6 +408,7 @@ function normalizeItems(
     qty: number;
     unitPriceSen: number;
     lineTotalSen: number;
+    taxSen: number;
     lineType: PurchaseInvoiceItemLineType;
     notes: string | null;
     grnItemId: string | null;
@@ -384,6 +424,7 @@ function normalizeItems(
     qty: number;
     unitPriceSen: number;
     lineTotalSen: number;
+    taxSen: number;
     lineType: PurchaseInvoiceItemLineType;
     notes: string | null;
     grnItemId: string | null;
@@ -418,6 +459,8 @@ function normalizeItems(
       it.grnItemId == null || String(it.grnItemId).trim() === ""
         ? null
         : String(it.grnItemId).trim();
+    const taxSenIn = Math.round(Number(it.taxSen ?? 0));
+    const taxSen = Number.isFinite(taxSenIn) && taxSenIn >= 0 ? taxSenIn : 0;
     rows.push({
       id: `pii-${crypto.randomUUID().slice(0, 8)}`,
       materialCode: matCode,
@@ -426,6 +469,7 @@ function normalizeItems(
       qty,
       unitPriceSen,
       lineTotalSen: Math.round(qty * unitPriceSen),
+      taxSen,
       lineType,
       notes: it.notes == null ? null : String(it.notes),
       grnItemId,
@@ -643,7 +687,25 @@ app.get("/:id", async (c) => {
     .first<PurchaseInvoiceRow>();
   if (!row) return c.json({ success: false, error: "PI not found" }, 404);
   const items = await loadItemsForPI(db, id);
-  return c.json({ success: true, data: { ...rowToPI(row), items } });
+  const projected = rowToPI(row);
+  // Legacy synthesis: if header subtotal/tax are still 0 but a TAX line
+  // exists (or the line items now carry per-line tax), surface a sensible
+  // breakdown on the fly — read-only, no writes.
+  if (projected.subtotalSen === 0 && projected.taxSen === 0 && items.length > 0) {
+    const legacyTax = items
+      .filter((i) => i.lineType === "TAX")
+      .reduce((s, i) => s + (Number(i.lineTotalSen) || 0), 0);
+    const perLineTax = items.reduce((s, i) => s + (Number(i.taxSen) || 0), 0);
+    const goodsTotal = items
+      .filter((i) => i.lineType !== "TAX")
+      .reduce((s, i) => s + (Number(i.lineTotalSen) || 0), 0);
+    const synthTax = perLineTax || legacyTax;
+    if (synthTax > 0 || goodsTotal !== projected.amountSen) {
+      projected.taxSen = synthTax;
+      projected.subtotalSen = projected.amountSen - synthTax;
+    }
+  }
+  return c.json({ success: true, data: { ...projected, items } });
 });
 
 // ---------------------------------------------------------------------------
@@ -892,15 +954,33 @@ app.post("/", async (c) => {
   const piDueDate = nextMonthDueDate(piInvoiceDate);
 
   // When items[] is provided, the PI's amountSen is the sum of line totals
-  // (overrides any explicit body.amountSen). When omitted, fall back to
-  // body.amountSen for backward compat with the header-only API shape.
+  // PLUS per-line tax PLUS any legacy TAX-line amount (overrides any explicit
+  // body.amountSen). When omitted, fall back to body.amountSen for backward
+  // compat with the header-only API shape.
   // Foreign PIs: incoming amounts are in the document currency — the
   // FOREIGN total is preserved in foreignAmountSen, everything stored is
   // converted to home MYR at the booking rate.
+  // ── SST breakdown (owner 2026-06-30) ────────────────────────────────────
+  // subtotal = sum of GOODS line amounts (lt !== 'TAX').
+  // tax      = sum of per-line taxSen + any legacy TAX-line amount.
+  // total    = subtotal + tax. Always overrides body.amountSen.
+  const foreignSubtotalSen = normalizedItems && normalizedItems.ok
+    ? normalizedItems.rows
+        .filter((r) => r.lineType !== "TAX")
+        .reduce((s, r) => s + r.lineTotalSen, 0)
+    : 0;
+  const foreignTaxSen = normalizedItems && normalizedItems.ok
+    ? normalizedItems.rows.reduce(
+        (s, r) => s + (r.taxSen || 0) + (r.lineType === "TAX" ? r.lineTotalSen : 0),
+        0,
+      )
+    : 0;
   const foreignTotalSen = normalizedItems && normalizedItems.ok
-    ? normalizedItems.rows.reduce((s, r) => s + r.lineTotalSen, 0)
+    ? foreignSubtotalSen + foreignTaxSen
     : body.amountSen ?? 0;
   const amountSen = toHome(foreignTotalSen);
+  const subtotalSenHome = toHome(foreignSubtotalSen);
+  const taxSenHome = toHome(foreignTaxSen);
 
   // Resolve per-document purchase company. Order: body → source PO → source
   // GRN → supplier default → "HOOKKA". Never null in writes.
@@ -930,12 +1010,12 @@ app.post("/", async (c) => {
       .prepare(
         `INSERT INTO purchase_invoices (
            id, piNo, purchaseOrderId, poRef, grn_id, supplierId, supplierName,
-           invoiceDate, dueDate, amountSen, status, remarks,
+           invoiceDate, dueDate, amountSen, subtotal_sen, tax_sen, status, remarks,
            supplier_invoice_no, supplier_do_no,
            currency, fxRate, foreignAmountSen,
            purchase_org_code,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
@@ -948,6 +1028,8 @@ app.post("/", async (c) => {
         piInvoiceDate,
         piDueDate,
         amountSen,
+        subtotalSenHome,
+        taxSenHome,
         status,
         body.remarks ?? null,
         supplierInvoiceNo,
@@ -968,9 +1050,9 @@ app.post("/", async (c) => {
           .prepare(
             `INSERT INTO purchase_invoice_items (
                id, pi_id, material_code, material_name, supplier_sku,
-               qty, unit_price_sen, line_total_sen, line_type, notes,
+               qty, unit_price_sen, line_total_sen, tax_sen, line_type, notes,
                grn_item_id, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             r.id,
@@ -981,6 +1063,7 @@ app.post("/", async (c) => {
             r.qty,
             toHome(r.unitPriceSen),
             toHome(r.lineTotalSen),
+            toHome(r.taxSen),
             r.lineType,
             r.notes,
             r.grnItemId,
@@ -1027,6 +1110,7 @@ app.post("/", async (c) => {
             mc: r.materialCode,
             amt: toHome(r.lineTotalSen),
             lt: r.lineType,
+            taxAmt: toHome(r.taxSen),
           }))
         : [];
     const { bucket, pdefault } = await mapPurchaseLinesToAccounts(db, lines);
@@ -1072,19 +1156,20 @@ app.post("/", async (c) => {
     }
     // Legacy column list (no multi-currency cols). grn_id is kept — it is
     // self-applied by ensurePiMigrations() at the top of this handler, so it
-    // reliably exists even on a pre-0162 DB.
+    // reliably exists even on a pre-0162 DB. subtotal_sen/tax_sen are also
+    // self-applied above so we always include them.
     statements[0] = db
       .prepare(
         `INSERT INTO purchase_invoices (
            id, piNo, purchaseOrderId, poRef, grn_id, supplierId, supplierName,
-           invoiceDate, dueDate, amountSen, status, remarks,
+           invoiceDate, dueDate, amountSen, subtotal_sen, tax_sen, status, remarks,
            supplier_invoice_no, supplier_do_no, purchase_org_code,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id, piNo, body.purchaseOrderId ?? null, poRef, sourceGrnId, body.supplierId,
-        body.supplierName, piInvoiceDate, piDueDate, amountSen, status,
+        body.supplierName, piInvoiceDate, piDueDate, amountSen, subtotalSenHome, taxSenHome, status,
         body.remarks ?? null, supplierInvoiceNo, supplierDoNo, purchaseOrgCode, now, now,
       );
     await db.batch(statements);
@@ -1216,8 +1301,23 @@ app.put("/:id", async (c) => {
     }
   }
 
-  const recomputedAmount = normalizedItems && normalizedItems.ok
-    ? normalizedItems.rows.reduce((s, r) => s + r.lineTotalSen, 0)
+  // SST breakdown (owner 2026-06-30). When items[] is replaced we recompute
+  // subtotal (sum of goods-line amounts) + tax (sum of per-line tax + any
+  // legacy TAX-line amount); total is their sum. Otherwise the header
+  // breakdown is left as-is.
+  const recomputedSubtotal = normalizedItems && normalizedItems.ok
+    ? normalizedItems.rows
+        .filter((r) => r.lineType !== "TAX")
+        .reduce((s, r) => s + r.lineTotalSen, 0)
+    : null;
+  const recomputedTax = normalizedItems && normalizedItems.ok
+    ? normalizedItems.rows.reduce(
+        (s, r) => s + (r.taxSen || 0) + (r.lineType === "TAX" ? r.lineTotalSen : 0),
+        0,
+      )
+    : null;
+  const recomputedAmount = recomputedSubtotal !== null && recomputedTax !== null
+    ? recomputedSubtotal + recomputedTax
     : null;
 
   const existingRefs = existing as unknown as {
@@ -1232,12 +1332,26 @@ app.put("/:id", async (c) => {
     v == null || String(v).trim() === "" ? null : String(v).trim();
   const existingOrgCode =
     existingRefs.purchaseOrgCode ?? existingRefs.purchase_org_code ?? "HOOKKA";
+  const existingRefsForBreakdown = existing as unknown as {
+    subtotalSen?: number | null;
+    subtotal_sen?: number | null;
+    taxSen?: number | null;
+    tax_sen?: number | null;
+  };
+  const existingSubtotal = Number(
+    existingRefsForBreakdown.subtotalSen ?? existingRefsForBreakdown.subtotal_sen ?? 0,
+  ) || 0;
+  const existingTax = Number(
+    existingRefsForBreakdown.taxSen ?? existingRefsForBreakdown.tax_sen ?? 0,
+  ) || 0;
   const merged = {
     status: body.status ?? existing.status,
     remarks: body.remarks ?? existing.remarks,
     invoiceDate: body.invoiceDate ?? existing.invoiceDate,
     dueDate: body.dueDate ?? existing.dueDate,
     amountSen: recomputedAmount ?? body.amountSen ?? existing.amountSen,
+    subtotalSen: recomputedSubtotal ?? existingSubtotal,
+    taxSen: recomputedTax ?? existingTax,
     supplierInvoiceNo:
       body.supplierInvoiceNo !== undefined
         ? normRef(body.supplierInvoiceNo)
@@ -1258,6 +1372,7 @@ app.put("/:id", async (c) => {
       .prepare(
         `UPDATE purchase_invoices SET
            status = ?, remarks = ?, invoiceDate = ?, dueDate = ?, amountSen = ?,
+           subtotal_sen = ?, tax_sen = ?,
            supplier_invoice_no = ?, supplier_do_no = ?, purchase_org_code = ?,
            updated_at = ?
          WHERE id = ?`,
@@ -1268,6 +1383,8 @@ app.put("/:id", async (c) => {
         merged.invoiceDate,
         merged.dueDate,
         merged.amountSen,
+        merged.subtotalSen,
+        merged.taxSen,
         merged.supplierInvoiceNo,
         merged.supplierDoNo,
         merged.purchaseOrgCode,
@@ -1298,9 +1415,9 @@ app.put("/:id", async (c) => {
           .prepare(
             `INSERT INTO purchase_invoice_items (
                id, pi_id, material_code, material_name, supplier_sku,
-               qty, unit_price_sen, line_total_sen, line_type, notes,
+               qty, unit_price_sen, line_total_sen, tax_sen, line_type, notes,
                grn_item_id, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             r.id,
@@ -1311,6 +1428,7 @@ app.put("/:id", async (c) => {
             r.qty,
             r.unitPriceSen,
             r.lineTotalSen,
+            r.taxSen,
             r.lineType,
             r.notes,
             r.grnItemId,
@@ -1365,6 +1483,7 @@ app.put("/:id", async (c) => {
               mc: r.materialCode,
               amt: r.lineTotalSen,
               lt: r.lineType,
+              taxAmt: r.taxSen,
             }))
           : (
               (
@@ -1381,6 +1500,7 @@ app.put("/:id", async (c) => {
                 | null,
               amt: Number(r.line_total_sen ?? r.lineTotalSen ?? 0),
               lt: String(r.line_type ?? r.lineType ?? "STOCKED"),
+              taxAmt: Number(r.tax_sen ?? r.taxSen ?? 0),
             }));
         const { bucket, pdefault } = await mapPurchaseLinesToAccounts(
           db,
@@ -1581,6 +1701,7 @@ app.put("/:id", async (c) => {
         mc: r.materialCode,
         amt: r.lineTotalSen,
         lt: r.lineType,
+        taxAmt: r.taxSen,
       }));
       const oldItemsRes = (
         await db
@@ -1592,6 +1713,7 @@ app.put("/:id", async (c) => {
         mc: (r.material_code ?? r.materialCode ?? null) as string | null,
         amt: Number(r.line_total_sen ?? r.lineTotalSen ?? 0),
         lt: String(r.line_type ?? r.lineType ?? "STOCKED"),
+        taxAmt: Number(r.tax_sen ?? r.taxSen ?? 0),
       }));
       const { bucket: newBucket } = await mapPurchaseLinesToAccounts(db, newLines);
       const { bucket: oldBucket, pdefault } = await mapPurchaseLinesToAccounts(db, oldLines);

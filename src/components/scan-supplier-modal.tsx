@@ -1425,6 +1425,41 @@ function CreatePIWizard({
             });
             return;
           }
+          // Per-line SST distribution (owner 2026-06-30). Suppliers print a
+          // single footer SST total (rarely per-line). At Create time we
+          // distribute the footer tax pro-rata across goods lines by line
+          // amount; the LAST line absorbs rounding drift so Σ tax_sen ===
+          // footer tax in sen. When the OCR didn't pick up a tax footer
+          // (originalExtraction.tax null/0) all lines persist with taxSen=0
+          // and the operator can fill it in later via the PI detail editor.
+          const footerTaxRM = Number(card.originalExtraction.tax) || 0;
+          const lineAmtsSen = validLines.map(
+            (l) => Math.round((Number(l.qty) || 0) * (Number(l.unitPriceRM) || 0) * 100),
+          );
+          const subTotalSen = lineAmtsSen.reduce((s, v) => s + v, 0);
+          const footerTaxSen = Math.max(0, Math.round(footerTaxRM * 100));
+          let allocated = 0;
+          const itemsWithTax = validLines.map((l, idx) => {
+            let lineTaxSen = 0;
+            if (footerTaxSen > 0 && subTotalSen > 0) {
+              if (idx === validLines.length - 1) {
+                lineTaxSen = footerTaxSen - allocated;
+              } else {
+                lineTaxSen = Math.round((footerTaxSen * lineAmtsSen[idx]) / subTotalSen);
+                allocated += lineTaxSen;
+              }
+            }
+            return {
+              materialCode: l.materialCode.trim() || null,
+              materialName: (l.materialName || l.description).trim(),
+              supplierSku: l.supplierSku.trim() || null,
+              qty: Number(l.qty) || 0,
+              unitPriceSen: Math.round((Number(l.unitPriceRM) || 0) * 100),
+              taxSen: lineTaxSen < 0 ? 0 : lineTaxSen,
+              lineType: "STOCKED" as const,
+              grnItemId: null,
+            };
+          });
           const payload: Record<string, unknown> = {
             supplierId: sup.id,
             supplierName: sup.name,
@@ -1434,15 +1469,7 @@ function CreatePIWizard({
             purchaseOrgCode: card.purchaseOrgCode,
             supplierInvoiceNo: card.supplierInvoiceNo.trim() || null,
             supplierDoNo: card.supplierDoNo.trim() || null,
-            items: validLines.map((l) => ({
-              materialCode: l.materialCode.trim() || null,
-              materialName: (l.materialName || l.description).trim(),
-              supplierSku: l.supplierSku.trim() || null,
-              qty: Number(l.qty) || 0,
-              unitPriceSen: Math.round((Number(l.unitPriceRM) || 0) * 100),
-              lineType: "STOCKED" as const,
-              grnItemId: null,
-            })),
+            items: itemsWithTax,
           };
           // Linked PO → backend runs Convert-from-PO and draws down PO availability.
           if (card.purchaseOrderId) {
@@ -2700,6 +2727,41 @@ function PICard({
             </span>
           </div>
         </div>
+
+        {/* SST breakdown (owner 2026-06-30) — the supplier's footer figures
+            extracted by OCR. Read-only display; at Create time we distribute
+            this tax pro-rata across goods lines into purchase_invoice_items.
+            tax_sen so the persisted invoice has the same breakdown. */}
+        {(card.originalExtraction.subtotal != null
+          || card.originalExtraction.tax != null
+          || card.originalExtraction.total != null) && (
+          <div className="flex flex-wrap items-center justify-end gap-x-6 gap-y-1 text-xs pl-7 pt-1">
+            {card.originalExtraction.subtotal != null && (
+              <span className="text-[#6B7280]">
+                Subtotal:{" "}
+                <span className="text-[#1F1D1B] font-medium">
+                  RM {Number(card.originalExtraction.subtotal).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </span>
+            )}
+            {card.originalExtraction.tax != null && (
+              <span className="text-[#6B7280]">
+                SST:{" "}
+                <span className="text-[#1F1D1B] font-medium">
+                  RM {Number(card.originalExtraction.tax).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </span>
+            )}
+            {card.originalExtraction.total != null && (
+              <span className="text-[#6B7280]">
+                Total:{" "}
+                <span className="text-[#6B5C32] font-bold">
+                  RM {Number(card.originalExtraction.total).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </span>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   );

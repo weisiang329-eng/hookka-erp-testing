@@ -33,6 +33,8 @@ export type PurchaseInvoicePdfLine = {
   qty: number;
   unitPriceSen: number;
   lineTotalSen: number;
+  // Per-line SST in sen (owner 2026-06-30). 0 for non-taxable lines.
+  taxSen?: number | null;
   lineType?: string | null;
 };
 
@@ -63,6 +65,9 @@ export type PurchaseInvoicePdfData = {
   supplier_do_no?: string | null;
   // Computed subtotal when available (sum of line totals). Falls back to amountSen.
   subtotalSen?: number;
+  // SST total (owner 2026-06-30). Backend projects header tax_sen; for legacy
+  // PIs it synthesises from the TAX line on read.
+  taxSen?: number;
 };
 
 function defaultLetterhead(): LetterheadInfo {
@@ -280,13 +285,24 @@ export function generatePurchaseInvoicePdf(
     doc.text(value, valX, y, { align: "right" });
     y += big ? 8 : 6;
   };
-  // Derive subtotal from line totals when available; fall back to amountSen.
-  const subtotalSen =
-    pi.subtotalSen ??
-    (pi.items && pi.items.length > 0
-      ? pi.items.reduce((s, i) => s + (Number(i.lineTotalSen) || 0), 0)
-      : pi.amountSen);
+  // SST breakdown (owner 2026-06-30). Header subtotal_sen / tax_sen are
+  // authoritative when present; for legacy PIs we derive both from the line
+  // items (goods amount vs per-line tax + legacy TAX-line amount) so the PDF
+  // always shows a sensible 3-row breakdown.
+  const goodsLineSen = (pi.items ?? [])
+    .filter((i) => (i.lineType || "STOCKED").toUpperCase() !== "TAX")
+    .reduce((s, i) => s + (Number(i.lineTotalSen) || 0), 0);
+  const perLineTaxSen = (pi.items ?? []).reduce(
+    (s, i) => s + (Number(i.taxSen) || 0),
+    0,
+  );
+  const legacyTaxLineSen = (pi.items ?? [])
+    .filter((i) => (i.lineType || "STOCKED").toUpperCase() === "TAX")
+    .reduce((s, i) => s + (Number(i.lineTotalSen) || 0), 0);
+  const subtotalSen = pi.subtotalSen || goodsLineSen || pi.amountSen;
+  const taxSen = pi.taxSen || perLineTaxSen + legacyTaxLineSen;
   sumLine("Subtotal", fmtRM(subtotalSen), false);
+  sumLine("SST", fmtRM(taxSen), false);
   // Rule clears the 11pt TOTAL cap height (matches the Sales Invoice spacing).
   y += 3;
   doc.setDrawColor(...PDF.rule);

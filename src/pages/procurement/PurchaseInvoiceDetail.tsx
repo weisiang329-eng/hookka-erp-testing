@@ -44,6 +44,9 @@ type DraftLine = {
   supplierSku: string;
   qty: string;
   unitPriceRm: string;
+  // Per-line SST in RM as a string for the input (owner 2026-06-30). Blank or
+  // "0" = non-taxable. Converted to sen on save.
+  taxRm: string;
   lineType: LineType;
   // Convert-chain link: when a line was sourced from a GRN line, carry its
   // grn_items id so saving keeps grn_items.invoiced_qty in sync (the backend
@@ -83,6 +86,9 @@ type PurchaseInvoiceItem = {
   qty: number;
   unitPriceSen: number;
   lineTotalSen: number;
+  // Per-line SST in sen (owner 2026-06-30). Backend projects this from
+  // purchase_invoice_items.tax_sen; 0 for legacy / non-taxable lines.
+  taxSen?: number;
   lineType: LineType;
   notes: string | null;
   grnItemId?: string | number | null;
@@ -106,6 +112,11 @@ type PurchaseInvoiceDetail = {
   supplierDoNo?: string | null;
   // Purchase company on this PI (HOOKKA / OHANA / sister co). Read-only here.
   purchaseOrgCode?: string | null;
+  // SST breakdown (owner 2026-06-30). Backend projects header subtotal_sen /
+  // tax_sen; falls back to a synthesized breakdown when legacy TAX-line PIs
+  // never recorded them. amountSen stays the grand total.
+  subtotalSen?: number;
+  taxSen?: number;
   items?: PurchaseInvoiceItem[];
 };
 
@@ -169,7 +180,22 @@ export default function PurchaseInvoiceDetailPage() {
 
   const items = pi?.items ?? [];
   const totalQty = items.reduce((s, it) => s + (Number(it.qty) || 0), 0);
-  const totalAmount = items.reduce((s, it) => s + (Number(it.lineTotalSen) || 0), 0);
+  // SST breakdown (owner 2026-06-30): header subtotal/tax come from the
+  // backend; for legacy rows the backend already synthesizes them from the
+  // TAX line. We still derive client-side fallbacks so the table footer reads
+  // correctly even if the header values arrive 0.
+  const goodsLineAmount = items
+    .filter((it) => it.lineType !== "TAX")
+    .reduce((s, it) => s + (Number(it.lineTotalSen) || 0), 0);
+  const perLineTax = items.reduce((s, it) => s + (Number(it.taxSen) || 0), 0);
+  const legacyTaxLineAmount = items
+    .filter((it) => it.lineType === "TAX")
+    .reduce((s, it) => s + (Number(it.lineTotalSen) || 0), 0);
+  const headerSubtotal = pi?.subtotalSen ?? 0;
+  const headerTax = pi?.taxSen ?? 0;
+  const subtotalDisplay = headerSubtotal || goodsLineAmount;
+  const taxDisplay = headerTax || (perLineTax + legacyTaxLineAmount);
+  const totalAmount = subtotalDisplay + taxDisplay;
 
   // GRNs linked to the same PO as this PI — derived client-side.
   const relatedGrns = useMemo(
@@ -283,6 +309,7 @@ export default function PurchaseInvoiceDetailPage() {
         supplierSku: it.supplierSku || "",
         qty: String(it.qty ?? 0),
         unitPriceRm: (Number(it.unitPriceSen || 0) / 100).toFixed(2),
+        taxRm: (Number(it.taxSen || 0) / 100).toFixed(2),
         lineType: it.lineType,
         grnItemId: it.grnItemId == null ? null : String(it.grnItemId),
       })),
@@ -301,7 +328,7 @@ export default function PurchaseInvoiceDetailPage() {
   function addLine() {
     setDLines((p) => [
       ...p,
-      { materialCode: "", materialName: "", supplierSku: "", qty: "1", unitPriceRm: "0.00", lineType: "STOCKED", grnItemId: null },
+      { materialCode: "", materialName: "", supplierSku: "", qty: "1", unitPriceRm: "0.00", taxRm: "0.00", lineType: "STOCKED", grnItemId: null },
     ]);
     setDirty(true);
   }
@@ -310,10 +337,26 @@ export default function PurchaseInvoiceDetailPage() {
     setDirty(true);
   }
 
-  const draftTotalSen = dLines.reduce(
-    (s, l) => s + Math.round((parseFloat(l.unitPriceRm) || 0) * 100) * (parseFloat(l.qty) || 0),
+  // SST breakdown (owner 2026-06-30): subtotal = sum of GOODS line amounts
+  // (lt !== 'TAX'); tax = sum of per-line tax + any legacy TAX-line amount;
+  // grand total = subtotal + tax. Live-updates as the operator edits.
+  const draftSubtotalSen = dLines.reduce(
+    (s, l) =>
+      l.lineType === "TAX"
+        ? s
+        : s + Math.round((parseFloat(l.unitPriceRm) || 0) * 100) * (parseFloat(l.qty) || 0),
     0,
   );
+  const draftTaxSen = dLines.reduce(
+    (s, l) =>
+      s +
+      Math.round((parseFloat(l.taxRm) || 0) * 100) +
+      (l.lineType === "TAX"
+        ? Math.round((parseFloat(l.unitPriceRm) || 0) * 100) * (parseFloat(l.qty) || 0)
+        : 0),
+    0,
+  );
+  const draftTotalSen = draftSubtotalSen + draftTaxSen;
 
   // Base for %-discount: sum of non-DISCOUNT line totals (what the operator is discounting off).
   const discountBaseAmountSen = dLines.reduce(
@@ -357,6 +400,9 @@ export default function PurchaseInvoiceDetailPage() {
         supplierSku: l.supplierSku.trim() || null,
         qty: parseFloat(l.qty) || 0,
         unitPriceSen: Math.round((parseFloat(l.unitPriceRm) || 0) * 100),
+        // Per-line SST (owner 2026-06-30). 0 for non-taxable lines; backend
+        // rolls them into header tax_sen on save.
+        taxSen: Math.max(0, Math.round((parseFloat(l.taxRm) || 0) * 100)),
         lineType: l.lineType,
         // Preserve the GRN-source link so the backend keeps invoiced_qty in sync.
         grnItemId: l.grnItemId,
@@ -544,7 +590,18 @@ export default function PurchaseInvoiceDetailPage() {
             )}
 
             <div className="pt-3 border-t border-[#E2DDD8] space-y-1">
-              <div className="flex justify-between text-sm font-bold">
+              {/* SST breakdown (owner 2026-06-30) — Subtotal / SST / Total.
+                  Legacy PIs read header values as 0; backend synthesizes from
+                  the TAX line so this still renders sensibly. */}
+              <div className="flex justify-between text-sm">
+                <span className="text-[#6B7280]">Subtotal</span>
+                <span className="text-[#4B5563]">{formatCurrency(subtotalDisplay)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-[#6B7280]">SST</span>
+                <span className="text-[#4B5563]">{formatCurrency(taxDisplay)}</span>
+              </div>
+              <div className="flex justify-between text-sm font-bold pt-1 border-t border-[#E2DDD8]">
                 <span className="text-[#6B5C32]">Total</span>
                 <span className="text-[#6B5C32]">{formatCurrency(pi.amountSen)}</span>
               </div>
@@ -575,6 +632,7 @@ export default function PurchaseInvoiceDetailPage() {
                       <th className="h-10 px-3 text-left font-medium text-[#374151]">Supplier SKU</th>
                       <th className="h-10 px-3 text-right font-medium text-[#374151]">Qty</th>
                       <th className="h-10 px-3 text-right font-medium text-[#374151]">Unit Price</th>
+                      <th className="h-10 px-3 text-right font-medium text-[#374151]">SST</th>
                       <th className="h-10 px-3 text-right font-medium text-[#374151]">Line Total</th>
                       <th className="h-10 px-3 text-center font-medium text-[#374151]">Type</th>
                     </tr>
@@ -610,6 +668,7 @@ export default function PurchaseInvoiceDetailPage() {
                           <td className="h-12 px-3 text-[#4B5563]">{it.supplierSku || "-"}</td>
                           <td className="h-12 px-3 text-right text-[#4B5563]">{it.qty}</td>
                           <td className="h-12 px-3 text-right text-[#4B5563]">{formatCurrency(it.unitPriceSen)}</td>
+                          <td className="h-12 px-3 text-right text-[#4B5563]">{formatCurrency(Number(it.taxSen) || 0)}</td>
                           <td className="h-12 px-3 text-right font-medium text-[#1F1D1B]">{formatCurrency(it.lineTotalSen)}</td>
                           <td className="h-12 px-3 text-center">
                             <span
@@ -623,10 +682,25 @@ export default function PurchaseInvoiceDetailPage() {
                     })}
                   </tbody>
                   <tfoot>
-                    <tr className="bg-[#F0ECE9]">
-                      <td colSpan={4} className="h-10 px-3 font-semibold text-[#374151]">Total</td>
-                      <td className="h-10 px-3 text-right font-semibold text-[#374151]">{totalQty}</td>
-                      <td className="h-10 px-3"></td>
+                    {/* SST breakdown (owner 2026-06-30): 3-row Subtotal / SST /
+                        Total footer. Subtotal = goods-line sum (pre-tax); SST
+                        = per-line tax + any legacy TAX-line amount; Total =
+                        Subtotal + SST. */}
+                    <tr className="bg-[#FAF9F7]">
+                      <td colSpan={4} className="h-9 px-3 text-right text-xs font-medium text-[#6B7280]">Subtotal</td>
+                      <td className="h-9 px-3 text-right text-sm text-[#6B7280]">{totalQty}</td>
+                      <td className="h-9 px-3"></td>
+                      <td className="h-9 px-3"></td>
+                      <td className="h-9 px-3 text-right text-sm text-[#1F1D1B]">{formatCurrency(subtotalDisplay)}</td>
+                      <td className="h-9 px-3"></td>
+                    </tr>
+                    <tr className="bg-[#FAF9F7]">
+                      <td colSpan={7} className="h-9 px-3 text-right text-xs font-medium text-[#6B7280]">SST</td>
+                      <td className="h-9 px-3 text-right text-sm text-[#1F1D1B]">{formatCurrency(taxDisplay)}</td>
+                      <td className="h-9 px-3"></td>
+                    </tr>
+                    <tr className="bg-[#F0ECE9] border-t border-[#E2DDD8]">
+                      <td colSpan={7} className="h-10 px-3 text-right font-semibold text-[#374151]">Total</td>
                       <td className="h-10 px-3 text-right font-bold text-[#6B5C32]">{formatCurrency(totalAmount)}</td>
                       <td className="h-10 px-3"></td>
                     </tr>
@@ -709,6 +783,7 @@ export default function PurchaseInvoiceDetailPage() {
                     <th className="h-10 px-2 text-left font-medium text-[#374151]">Supplier SKU</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] w-20">Qty</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] w-28">Unit Price (RM)</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] w-24" title="Per-line SST in RM">SST (RM)</th>
                     <th className="h-10 px-2 text-left font-medium text-[#374151] w-32">Type</th>
                     <th className="h-10 px-2 text-center font-medium text-[#374151] w-12"></th>
                   </tr>
@@ -716,7 +791,7 @@ export default function PurchaseInvoiceDetailPage() {
                 <tbody>
                   {dLines.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="h-16 px-3 text-center text-sm text-[#9CA3AF]">
+                      <td colSpan={9} className="h-16 px-3 text-center text-sm text-[#9CA3AF]">
                         No lines. Use “Add Line” to start.
                       </td>
                     </tr>
@@ -785,6 +860,21 @@ export default function PurchaseInvoiceDetailPage() {
                             />
                           )}
                         </td>
+                        {/* Per-line SST (owner 2026-06-30). Skipped for TAX
+                            line type — the line amount itself IS the tax. */}
+                        <td className="px-2 py-1.5">
+                          {l.lineType === "TAX" ? (
+                            <span className="text-xs text-[#9CA3AF] italic">n/a</span>
+                          ) : (
+                            <MoneyInput
+                              value={parseFloat(l.taxRm) || null}
+                              onChange={(rm) =>
+                                patchLine(i, { taxRm: rm === null ? "0" : String(rm) })
+                              }
+                              className="text-right"
+                            />
+                          )}
+                        </td>
                         <td className="px-2 py-1.5">
                           <select
                             value={l.lineType}
@@ -811,13 +901,31 @@ export default function PurchaseInvoiceDetailPage() {
                   )}
                 </tbody>
                 <tfoot>
-                  <tr className="bg-[#F0ECE9]">
+                  {/* SST breakdown (owner 2026-06-30) — Subtotal / SST / Total
+                      live-updates as the operator edits per-line tax. */}
+                  <tr className="bg-[#FAF9F7]">
+                    <td colSpan={6} className="h-8 px-2 text-right text-xs font-medium text-[#6B7280]">
+                      Subtotal
+                    </td>
+                    <td colSpan={3} className="h-8 px-2 text-right text-sm text-[#1F1D1B]">
+                      {formatCurrency(draftSubtotalSen)}
+                    </td>
+                  </tr>
+                  <tr className="bg-[#FAF9F7]">
+                    <td colSpan={6} className="h-8 px-2 text-right text-xs font-medium text-[#6B7280]">
+                      SST
+                    </td>
+                    <td colSpan={3} className="h-8 px-2 text-right text-sm text-[#1F1D1B]">
+                      {formatCurrency(draftTaxSen)}
+                    </td>
+                  </tr>
+                  <tr className="bg-[#F0ECE9] border-t border-[#E2DDD8]">
                     <td colSpan={5} className="h-10 px-2">
                       <Button type="button" variant="outline" size="sm" onClick={addLine}>
                         <Plus className="h-3.5 w-3.5" /> Add Line
                       </Button>
                     </td>
-                    <td colSpan={3} className="h-10 px-2 text-right font-bold text-[#6B5C32]">
+                    <td colSpan={4} className="h-10 px-2 text-right font-bold text-[#6B5C32]">
                       Total: {formatCurrency(draftTotalSen)}
                     </td>
                   </tr>

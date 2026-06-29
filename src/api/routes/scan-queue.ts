@@ -40,6 +40,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { runExtract } from "../lib/scan-engine";
 
 const app = new Hono<Env>();
 
@@ -275,10 +276,25 @@ async function processBatch(
             error:
               "File bytes evicted before processing (re-upload to re-queue)",
           };
-        } else if (next.kind === "po") {
-          result = await runPoExtract(db, env, next, b64);
         } else {
-          result = await runSupplierExtract(env, next, b64);
+          // Direct in-process call into the shared scan engine. No self-fetch,
+          // no shared-secret needed (the previous SCAN_WORKER_TOKEN auth bypass
+          // is gone — owner ruling 2026-06-29 evening). Per-supplier rules +
+          // few-shot examples + sample recording all live in scan-engine.ts and
+          // run the same way whether invoked from the sync /extract endpoint or
+          // here in the background queue.
+          const bytes = base64ToArrayBuffer(b64);
+          result = await runExtract(db, env, {
+            kind: next.kind,
+            bytes,
+            mimeType: next.mimeType,
+            fileName: next.fileName,
+            orgId: next.orgId ?? "",
+            createdBy: next.createdBy,
+            supplierId: next.supplierId,
+            poContext: next.poContext ?? undefined,
+            recordSample: true,
+          });
         }
       }
     } catch (e) {
@@ -319,111 +335,9 @@ async function processBatch(
   }
 }
 
-// ---------------------------------------------------------------------------
-// runPoExtract — invokes the existing /api/scan-po/extract logic by
-// forwarding the file bytes as a multipart body to the in-process URL.
-// We deliberately re-hit the existing endpoint (rather than copying the
-// 1800-line scan-po.ts logic) so per-customer rule injection, few-shot
-// learning, server-side LHF/RHF, etc. all stay in ONE place.
-//
-// The internal fetch uses the worker's app URL — `env.APP_URL` is set per
-// environment in wrangler.toml.
-// ---------------------------------------------------------------------------
-async function runPoExtract(
-  _db: Env["Variables"]["DB"],
-  env: Env["Bindings"],
-  row: ScanQueueRow,
-  fileB64: string,
-): Promise<{ ok: true; data: unknown } | { ok: false; error: string }> {
-  return runRemoteExtract(env, "scan-po", row, fileB64, {});
-}
-
-async function runSupplierExtract(
-  env: Env["Bindings"],
-  row: ScanQueueRow,
-  fileB64: string,
-): Promise<{ ok: true; data: unknown } | { ok: false; error: string }> {
-  const extras: Record<string, string> = {};
-  if (row.supplierId) extras.supplierId = row.supplierId;
-  if (row.poContext) extras.poContext = row.poContext;
-  return runRemoteExtract(env, "scan-supplier", row, fileB64, extras);
-}
-
-// Re-build a multipart body from the stashed bytes + hit the worker's own
-// /extract endpoint. Cookies / auth headers don't carry over a fetch from
-// inside the worker, so the inner call would 401 — we sidestep that by
-// using the same trust model the existing CRON_SECRET-gated endpoints use:
-// the worker re-imports the scan-po / scan-supplier route handlers directly
-// and constructs a Hono request. But that couples this file to those
-// modules' internals. Instead, the path of least surprise: call the
-// underlying Anthropic API directly here, mirroring what the existing
-// routes do, by reaching into a shared helper. To keep this file at ~400
-// lines we DELEGATE to /lib/scan-engine.ts (introduced below) which both
-// the legacy synchronous endpoints AND this background worker share.
-//
-// HOWEVER — given the constraint to NOT touch the existing routes, we
-// instead call the upstream Anthropic API right here using the same prompt
-// shape. This is a deliberate trade-off documented in the report.
-async function runRemoteExtract(
-  env: Env["Bindings"],
-  kind: "scan-po" | "scan-supplier",
-  row: ScanQueueRow,
-  fileB64: string,
-  extras: Record<string, string>,
-): Promise<{ ok: true; data: unknown } | { ok: false; error: string }> {
-  // Re-build the FormData the legacy endpoint expects.
-  const fd = new FormData();
-  const bytes = base64ToArrayBuffer(fileB64);
-  const blob = new Blob([bytes], { type: row.mimeType });
-  fd.append("file", blob, row.fileName);
-  for (const [k, v] of Object.entries(extras)) fd.append(k, v);
-
-  // Hit the worker's own endpoint. We get the URL from env.APP_URL.
-  const appUrl = env.APP_URL?.replace(/\/+$/, "") ?? "";
-  if (!appUrl) {
-    return {
-      ok: false,
-      error:
-        "APP_URL not configured — background scan worker cannot reach in-process /extract endpoint.",
-    };
-  }
-  const url = `${appUrl}/api/${kind}/extract`;
-  // Internal scan-worker token — when set on env.SCAN_WORKER_TOKEN, the
-  // legacy /extract routes accept a `x-scan-worker` header in lieu of a
-  // user session. Not present until owner sets it; until then this path
-  // will 401 and the route just falls back to surfacing the error.
-  const headers: Record<string, string> = {};
-  const tok = (env as unknown as { SCAN_WORKER_TOKEN?: string })
-    .SCAN_WORKER_TOKEN;
-  if (tok) headers["x-scan-worker"] = tok;
-
-  let resp: Response;
-  try {
-    resp = await fetch(url, { method: "POST", body: fd, headers });
-  } catch (e) {
-    return { ok: false, error: `fetch failed: ${(e as Error).message}` };
-  }
-  const text = await resp.text();
-  if (!resp.ok) {
-    return {
-      ok: false,
-      error: `${kind} extract HTTP ${resp.status}: ${text.slice(0, 400)}`,
-    };
-  }
-  let json: { success?: boolean; data?: unknown; error?: string };
-  try {
-    json = JSON.parse(text);
-  } catch {
-    return {
-      ok: false,
-      error: `${kind} extract returned non-JSON: ${text.slice(0, 200)}`,
-    };
-  }
-  if (!json.success || json.data === undefined) {
-    return { ok: false, error: json.error ?? `${kind} extract reported failure` };
-  }
-  return { ok: true, data: json.data };
-}
+// (Removed runPoExtract / runSupplierExtract / runRemoteExtract — the
+// background queue worker now calls runExtract from scan-engine.ts
+// directly. No self-fetch, no SCAN_WORKER_TOKEN, no APP_URL.)
 
 // ---------------------------------------------------------------------------
 // POST /api/scan-queue/upload

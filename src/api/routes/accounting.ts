@@ -5356,6 +5356,14 @@ async function loadMaterialCostData(
   //    wrong: fg_units is piece-level (units×pieces rows per PO).)
   const deliveredAsOf = buildDeliveredAsOf(fguRes.results ?? []);
   const batches = fgbRes.results ?? [];
+  // Opening-date floor: finished-goods batches completed BEFORE the accounting
+  // opening date are pre-opening stock (represented by the seeded opening
+  // inventory), NOT the system's batch-by-batch computation. Without this floor
+  // every historical batch ever completed accumulates into FG closing — the
+  // ~RM 1.35M legacy over-statement the owner reported. (Relief by FG_DELIVERED
+  // only clears batches that were delivered via a DO; pre-opening / pre-cascade
+  // legacy batches have no FG_DELIVERED rows and would otherwise pile up.)
+  const fgOpeningIso = await getOpeningDate(db);
   // unitCostResolver returns the TOTAL completion cost basis (FIFO material +
   // labour) in sen for the PO; fgClosingSen divides by originalQty and rounds
   // the per-batch product once (cost basis unchanged from the original fgAsOf).
@@ -5364,6 +5372,7 @@ async function loadMaterialCostData(
       batches,
       asOfIso: dIso,
       deliveredAsOf,
+      openingIso: fgOpeningIso,
       unitCostResolver: (poId, completed) =>
         fifoMaterialAsOf(poId, completed) + laborAsOf(poId, completed),
     });

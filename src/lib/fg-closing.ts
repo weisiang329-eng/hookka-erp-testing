@@ -98,12 +98,21 @@ export function fgClosingSen(args: {
   deliveredAsOf: (batchId: string, dIso: string) => number;
   /** TOTAL completion cost basis (FIFO material + labour) in sen for the PO. */
   unitCostResolver: (poId: string, completedIso: string) => number;
+  /**
+   * Opening-date floor (YYYY-MM-DD) or null. Batches completed BEFORE this are
+   * pre-opening finished goods — they belong to the seeded opening inventory,
+   * NOT the system's batch-by-batch computation, so they are excluded here.
+   * Without this floor every historical batch ever completed accumulates
+   * (the legacy FG over-statement, ~RM 1.35M). Null = no floor (count all).
+   */
+  openingIso?: string | null;
 }): number {
-  const { batches, asOfIso, deliveredAsOf, unitCostResolver } = args;
+  const { batches, asOfIso, deliveredAsOf, unitCostResolver, openingIso } = args;
   let s = 0;
   for (const b of batches) {
     const completed = (b.completedDate ?? "").slice(0, 10);
     if (!completed || completed > asOfIso) continue; // not completed by D
+    if (openingIso && completed < openingIso) continue; // pre-opening → seeded, not computed
     const origQty = Number(b.originalQty) || 0;
     if (origQty <= 0) continue;
     const undelivered = origQty - deliveredAsOf(b.id, asOfIso);

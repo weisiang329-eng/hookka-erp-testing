@@ -94,6 +94,43 @@ test("batch not completed by D is excluded entirely", () => {
   );
 });
 
+test("opening-date floor: batches completed BEFORE openingIso are excluded (pre-opening seed)", () => {
+  // The owner's ~RM 1.35M legacy FG over-statement: historical batches completed
+  // before the accounting opening date are pre-opening stock (represented by the
+  // SEEDED opening inventory), NOT system-computed — fgClosingSen must skip them.
+  // Relief-by-FG_DELIVERED alone does NOT clear them (legacy batches have no
+  // FG_DELIVERED rows), so without the floor they accumulate forever.
+  const batches = [
+    { id: "old", productionOrderId: "po-old", completedDate: "2026-04-15", originalQty: 100 }, // pre-opening
+    { id: "new", productionOrderId: "po-new", completedDate: "2026-05-25", originalQty: 5 }, // post-opening
+  ];
+  const deliveredAsOf = buildDeliveredAsOf([]); // nothing delivered (legacy batches never were, via the system)
+  const resolver = (poId) => (poId === "po-old" ? 1000 * 100 : 1000 * 5);
+  const opening = "2026-05-22";
+
+  // With the floor: only the post-opening batch counts → 5 × 1000 = 5000.
+  assert.equal(
+    fgClosingSen({ batches, asOfIso: "2026-06-30", deliveredAsOf, openingIso: opening, unitCostResolver: resolver }),
+    5 * 1000,
+  );
+  // Without the floor (openingIso omitted): the legacy batch dominates → 105000.
+  assert.equal(
+    fgClosingSen({ batches, asOfIso: "2026-06-30", deliveredAsOf, unitCostResolver: resolver }),
+    105 * 1000,
+  );
+  // Boundary: a batch completed EXACTLY on openingIso is INCLUDED (>= floor).
+  assert.equal(
+    fgClosingSen({
+      batches: [{ id: "x", productionOrderId: "po-x", completedDate: opening, originalQty: 2 }],
+      asOfIso: "2026-06-30",
+      deliveredAsOf,
+      openingIso: opening,
+      unitCostResolver: () => 1000 * 2,
+    }),
+    2 * 1000,
+  );
+});
+
 test("multiple FG_DELIVERED slices for the same batch sum up", () => {
   // consumeFGBatchesForDO emits one row PER layer-slice; several deliveries of
   // the same batch must accumulate. 10 made; 2+3+1 delivered by D → 4 remain.

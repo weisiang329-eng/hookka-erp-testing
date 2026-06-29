@@ -510,13 +510,15 @@ export default function GRNPage() {
     }
   };
 
-  // ---- Summary stats ----
-  const totalGRNs = grns.length;
-  const pendingQC = grns.filter((g) => g.qcStatus === "PENDING").length;
+  // ---- Summary stats — reflect the user's active filters (status, supplier,
+  // ---- date range, arrival state) so the cards always match the table.
+  // ---- Owner ruling 2026-06-30.
+  const totalGRNs = filteredGRNsByUserFilters.length;
+  const pendingQC = filteredGRNsByUserFilters.filter((g) => g.qcStatus === "PENDING").length;
   const now = new Date();
   const mtdStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-  const approvedMTD = grns.filter((g) => g.status === "CONFIRMED" && (g.receiveDate ?? "") >= mtdStart).length;
-  const totalValueSen = grns.reduce((sum, g) => sum + g.totalAmount, 0);
+  const approvedMTD = filteredGRNsByUserFilters.filter((g) => g.status === "CONFIRMED" && (g.receiveDate ?? "") >= mtdStart).length;
+  const totalValueSen = filteredGRNsByUserFilters.reduce((sum, g) => sum + g.totalAmount, 0);
 
   // ---- Unique suppliers ----
   const uniqueSuppliers = useMemo(() => {

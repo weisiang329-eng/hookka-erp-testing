@@ -275,17 +275,19 @@ export default function PurchaseInvoicesPage() {
     URL.revokeObjectURL(url);
   };
 
-  // ---- Summary stats ----
-  const totalPIs = invoices.length;
+  // ---- Summary stats — reflect the user's active filters so the cards
+  // ---- always match the table below. Owner ruling 2026-06-30: if I filter
+  // ---- to a date range, the totals must follow.
+  const totalPIs = filteredByUserFilters.length;
   // "Pending payment" = anything not yet PAID and not cancelled. DRAFT +
   // CONFIRMED (incl. legacy PENDING_APPROVAL / APPROVED) all count.
-  const pendingPayment = invoices.filter(pi => {
+  const pendingPayment = filteredByUserFilters.filter(pi => {
     const s = normalizePiStatus(pi.status);
     return s !== "PAID" && s !== "CANCELLED";
   }).length;
   const today = new Date().toISOString().split("T")[0];
-  const overdue = invoices.filter(pi => normalizePiStatus(pi.status) !== "PAID" && pi.dueDate < today).length;
-  const totalValueSen = invoices.reduce((sum, pi) => sum + pi.amountSen, 0);
+  const overdue = filteredByUserFilters.filter(pi => normalizePiStatus(pi.status) !== "PAID" && pi.dueDate < today).length;
+  const totalValueSen = filteredByUserFilters.reduce((sum, pi) => sum + pi.amountSen, 0);
 
   // ---- Status pipeline (post-lifecycle simplification) ----
   const confirmedCount = invoices.filter(pi => {

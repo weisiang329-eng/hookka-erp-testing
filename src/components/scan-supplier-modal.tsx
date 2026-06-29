@@ -299,7 +299,12 @@ async function enqueueScanBatch(
 // Threshold above which uploads switch from the synchronous OCR path to the
 // background queue. ≤2 files stays on the fast path so single quick scans
 // don't bounce through the queue page.
-const QUEUE_BATCH_THRESHOLD = 2;
+// Owner ruling 2026-06-29 evening: ALL uploads go through the background
+// queue, even a single file. A 31-page multi-page PDF as 1 file would still
+// timeout the sync path; routing through the queue means each file runs
+// async + you can close the tab + each result becomes reviewable the moment
+// it lands (no waiting for the whole batch).
+const QUEUE_BATCH_THRESHOLD = 0;
 
 // ─── Top-level dispatcher ─────────────────────────────────────────────────
 

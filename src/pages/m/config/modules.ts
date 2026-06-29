@@ -3528,35 +3528,108 @@ const rdDetail: DetailConfig = {
   code: (d) => str(d, "code") || "—",
   title: (d) => str(d, "name") || "—",
   status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  // CHANGELOG I.2 Stage Timeline — the 6-stage R&D lifecycle matches the
+  // milestone array the backend writes at create time (rd-projects.ts:405).
   flow: {
-    steps: flowSteps(["DRAFT", "ACTIVE", "ON_HOLD", "COMPLETED"]),
-    current: (d) => str(d, "status"),
+    steps: flowSteps(["CONCEPT", "DESIGN", "PROTOTYPE", "TESTING", "APPROVED", "PRODUCTION_READY"]),
+    current: (d) => str(d, "currentStage", "status"),
   },
   fields: [
     fld("Code", (d) => str(d, "code")),
+    fld("Category", (d) => str(d, "productCategory")),
     fld("Project Type", (d) => str(d, "projectType")),
-    fld("Lead", (d) => str(d, "leadName") || str(d, "leadId")),
-    fld("Budget", (d) => money(num(d, "budgetSen"))),
-    fld("Labour Cost (so far)", (d) => money(num(d, "labourCostSen"))),
-    fld("Started", (d) => dateOnly(d, "startedAt")),
-    fld("Target Complete", (d) => dateOnly(d, "targetCompleteAt")),
+    fld("Current Stage", (d) => str(d, "currentStage")),
+    fld("Target Launch", (d) => dateOnly(d, "targetLaunchDate")),
+    fld("Total Budget", (d) => money(num(d, "totalBudget"))),
+    fld("Actual Cost", (d) => money(num(d, "actualCost"))),
+    fld("Labour Cost (logged)", (d) => {
+      const lc = d.labourCost as { totalSen?: number } | undefined;
+      return money(num(lc ?? {}, "totalSen") || num(d, "manualLabourCostSen"));
+    }),
+    fld("Target Sell Price", (d) => money(num(d, "targetSellingPriceSen"))),
+    fld("Target Material Cost", (d) => money(num(d, "targetMaterialCostSen"))),
+    // CHANGELOG I.2: Clone Source block
+    fld("Clone Source", (d) => str(d, "sourceProductName")),
+    fld("Source Brand", (d) => str(d, "sourceBrand")),
+    fld("Source Price", (d) => money(num(d, "sourcePriceSen"))),
+    fld("Started", (d) => dateOnly(d, "createdDate", "startedAt")),
     fld("Description", (d) => str(d, "description"), true),
   ],
-  subDocLists: (d) => {
+  extraFetches: {
+    a: {
+      key: "issuances",
+      url: (id) => `/api/rd-projects/${encodeURIComponent(id)}/issuances`,
+    },
+  },
+  // CHANGELOG I.2 sub-sections: Milestones · Prototypes (per-dept) ·
+  // Material Issuance · Labour Logs. Each rendered as a sub-doc list.
+  subDocLists: (d, _resp, extras) => {
+    const lists: SubDocList[] = [];
+
+    const milestones = asArr(d.milestones);
+    if (milestones.length > 0) {
+      lists.push({
+        title: `Milestones · ${milestones.length}`,
+        rows: milestones.slice(0, 20).map((m, i) => {
+          const stage = str(m, "stage");
+          const done = !!str(m, "actualDate");
+          return {
+            id: stage || String(i),
+            title: stage || "Milestone",
+            subLine: done ? `Done ${shortDate(dateOnly(m, "actualDate"))}` : `Target ${shortDate(dateOnly(m, "targetDate"))}`,
+            trailing: done ? "✓" : undefined,
+            icon: "file-text" as const,
+          };
+        }),
+      });
+    }
+
     const protos = asArr(d.prototypes);
-    if (protos.length === 0) return [];
-    return [
-      {
+    if (protos.length > 0) {
+      lists.push({
         title: `Prototypes · ${protos.length}`,
         rows: protos.slice(0, 30).map((p) => ({
           id: str(p, "id"),
-          title: str(p, "name") || str(p, "code") || "Prototype",
-          subLine: str(p, "status") || undefined,
-          trailing: dateOnly(p, "createdAt") || undefined,
+          title: str(p, "prototypeType") || `v${str(p, "version") || "1"}`,
+          subLine: [str(p, "description"), shortDate(dateOnly(p, "createdDate"))].filter(Boolean).join(" · ") || undefined,
+          trailing: num(p, "labourHours") > 0 ? `${num(p, "labourHours").toFixed(1)}h` : undefined,
           icon: "package" as const,
         })),
-      },
-    ];
+      });
+    }
+
+    const issuancesResp = extras?.issuances as
+      | { data?: { id: string; materialCode?: string; materialName?: string; qty?: number; cost?: number; issuedAt?: string }[] }
+      | undefined;
+    const issuances = issuancesResp?.data ?? [];
+    if (issuances.length > 0) {
+      lists.push({
+        title: `Material Issuance · ${issuances.length}`,
+        rows: issuances.slice(0, 30).map((m) => ({
+          id: m.id,
+          title: m.materialName || m.materialCode || "Material",
+          subLine: [m.materialCode, shortDate(m.issuedAt || "")].filter(Boolean).join(" · ") || undefined,
+          trailing: `${m.qty || 0} · ${money((m.cost || 0))}`,
+          icon: "package" as const,
+        })),
+      });
+    }
+
+    const labourLogs = asArr(d.labourLogs);
+    if (labourLogs.length > 0) {
+      lists.push({
+        title: `Labour Hours · ${labourLogs.length}`,
+        rows: labourLogs.slice(0, 30).map((l, i) => ({
+          id: str(l, "id") || String(i),
+          title: str(l, "workerName", "worker") || "Worker",
+          subLine: [str(l, "stage"), shortDate(dateOnly(l, "date", "loggedAt"))].filter(Boolean).join(" · ") || undefined,
+          trailing: `${num(l, "hours").toFixed(1)}h`,
+          icon: "file-text" as const,
+        })),
+      });
+    }
+
+    return lists;
   },
   attachmentsResource: (id) => ({ type: "RD_PROJECT", id }),
   hideActionBar: true,

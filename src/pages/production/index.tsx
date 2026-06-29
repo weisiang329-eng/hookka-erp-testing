@@ -9449,19 +9449,34 @@ export default function ProductionPage({
                           <div><span className="inline-block w-[30mm] font-semibold">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
                         </>
                       )}
-                      <div><span className="inline-block w-[30mm] font-semibold">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
-                      <div className="flex items-baseline gap-[1mm]">
-                        <span className="font-semibold shrink-0" style={{ width: "30mm", color: "#9A3A2D" }}>Notes</span>
-                        <span
-                          className="flex-1 min-w-0 truncate"
-                          style={{
-                            fontSize: "11pt",
-                            lineHeight: 1.2,
-                          }}
-                        >
-                          : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
-                        </span>
-                      </div>
+                      {/* Hide the upper "Leg : N"" row when the legsPair
+                          renders at the bottom — the info is duplicated
+                          there AND the extra bottom block (~13mm) leaves no
+                          room for two upper rows, so the printer's
+                          overflow:hidden clips Leg+Notes (Wei Siang 2026-06-29:
+                          "preview 沒問題 可是 print 出來就歪了"). Same SO with
+                          NO legsPair (e.g. HB piece) keeps the upper Leg row
+                          and prints all measurements. */}
+                      {!legsPair && (
+                        <div><span className="inline-block w-[30mm] font-semibold">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
+                      )}
+                      {/* Notes — also skip when empty so a "—" placeholder
+                          doesn't burn the one row needed by the legsPair
+                          bottom block. */}
+                      {(s.specialOrder || !legsPair) && (
+                        <div className="flex items-baseline gap-[1mm]">
+                          <span className="font-semibold shrink-0" style={{ width: "30mm", color: "#9A3A2D" }}>Notes</span>
+                          <span
+                            className="flex-1 min-w-0 truncate"
+                            style={{
+                              fontSize: "11pt",
+                              lineHeight: 1.2,
+                            }}
+                          >
+                            : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
+                          </span>
+                        </div>
+                      )}
                     </div>
                     {/* Wei Siang 2026-05-15 (revised again): leg moves
                         INTO the right column ABOVE the main piece

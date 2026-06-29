@@ -919,10 +919,20 @@ export function editCustomerSpec(doc: Record<string, unknown>, id: string): Form
  * The /api/customers PUT route handles the delivery_hubs UPSERT atomically.
  * Requires the customer doc (for the existing hub array).
  */
-export function addHubSpec(customer: Record<string, unknown>, customerId: string): FormSpec {
+/**
+ * Add OR Edit a delivery hub on a customer. When `existingHub` is supplied,
+ * the form prefills + the submit REPLACES that hub in deliveryHubs[]; when
+ * null, appends a new hub. Same PUT /api/customers/:id endpoint both ways.
+ */
+export function hubFormSpec(
+  customer: Record<string, unknown>,
+  customerId: string,
+  existingHub: Record<string, unknown> | null = null,
+): FormSpec {
+  const isEdit = existingHub != null;
   return {
-    title: "Add Hub",
-    submitLabel: "Add",
+    title: isEdit ? "Edit Hub" : "Add Hub",
+    submitLabel: isEdit ? "Save" : "Add",
     fields: [
       { name: "code", label: "Hub Code", kind: "text" as const, required: true, full: true, placeholder: "e.g. KL-01" },
       { name: "shortName", label: "Short Name", kind: "text" as const, required: true, full: true },
@@ -932,17 +942,17 @@ export function addHubSpec(customer: Record<string, unknown>, customerId: string
       { name: "address", label: "Address", kind: "textarea" as const, full: true },
     ],
     initial: {
-      code: "",
-      shortName: "",
-      state: "",
-      contactName: "",
-      phone: "",
-      address: "",
+      code: s(existingHub?.code),
+      shortName: s(existingHub?.shortName),
+      state: s(existingHub?.state),
+      contactName: s(existingHub?.contactName),
+      phone: s(existingHub?.phone),
+      address: s(existingHub?.address),
     },
     submit: async (v) => {
       const existing = arr(customer.deliveryHubs);
-      const newHub = {
-        id: uuid(),
+      const hub = {
+        id: isEdit ? s(existingHub!.id) : uuid(),
         code: s(v.code).trim(),
         shortName: s(v.shortName).trim(),
         state: s(v.state),
@@ -950,8 +960,10 @@ export function addHubSpec(customer: Record<string, unknown>, customerId: string
         phone: s(v.phone),
         address: s(v.address),
       };
+      const merged = isEdit
+        ? existing.map((h) => (s(h.id) === hub.id ? hub : h))
+        : [...existing, hub];
       const body = {
-        // Required fields the PUT still expects — pass through unchanged.
         code: s(customer.code),
         name: s(customer.name),
         contactName: s(customer.contactName),
@@ -962,7 +974,7 @@ export function addHubSpec(customer: Record<string, unknown>, customerId: string
         creditLimitSen: n(customer.creditLimitSen),
         companyAddress: s(customer.companyAddress),
         isActive: customer.isActive !== false,
-        deliveryHubs: [...existing, newHub],
+        deliveryHubs: merged,
       };
       const res = await mutateJson(`/api/customers/${encodeURIComponent(customerId)}`, "PUT", body);
       if (!res.ok) return { ok: false, error: res.error };
@@ -971,6 +983,41 @@ export function addHubSpec(customer: Record<string, unknown>, customerId: string
       return { ok: true };
     },
   };
+}
+
+/** Back-compat alias for the original add-only spec. */
+export const addHubSpec = (customer: Record<string, unknown>, customerId: string) =>
+  hubFormSpec(customer, customerId, null);
+
+/**
+ * Delete a hub via PUT customer with the hub filtered out of deliveryHubs.
+ * Returns a Promise that resolves true on success. Same /api/customers/:id PUT.
+ */
+export async function deleteHub(
+  customer: Record<string, unknown>,
+  customerId: string,
+  hubId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const existing = arr(customer.deliveryHubs);
+  const merged = existing.filter((h) => s(h.id) !== hubId);
+  const body = {
+    code: s(customer.code),
+    name: s(customer.name),
+    contactName: s(customer.contactName),
+    phone: s(customer.phone),
+    email: s(customer.email),
+    ssmNo: s(customer.ssmNo),
+    creditTerms: s(customer.creditTerms) || "NET30",
+    creditLimitSen: n(customer.creditLimitSen),
+    companyAddress: s(customer.companyAddress),
+    isActive: customer.isActive !== false,
+    deliveryHubs: merged,
+  };
+  const res = await mutateJson(`/api/customers/${encodeURIComponent(customerId)}`, "PUT", body);
+  if (!res.ok) return { ok: false, error: res.error };
+  refreshOne(`/api/customers/${encodeURIComponent(customerId)}`);
+  refreshList("/api/customers");
+  return { ok: true };
 }
 
 // ===========================================================================

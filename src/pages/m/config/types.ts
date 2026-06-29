@@ -205,6 +205,10 @@ export type SubDocRow = {
   icon?: "file-text" | "package" | "arrow-down" | "arrow-up";
   /** Destination route, or undefined if not linkable. */
   href?: string;
+  /** Custom click handler — overrides href. Use for inline edit/delete
+   * actions (Customer Hub Edit, etc). Receives the parent doc + the row's
+   * id so the handler can build the right PUT payload. */
+  onClick?: () => void;
 };
 
 export type SubDocList = {

@@ -925,7 +925,11 @@ function Inner({
                     row={r}
                     first={i === 0}
                     onClick={
-                      r.href ? () => navigate(r.href as string) : undefined
+                      r.onClick
+                        ? r.onClick
+                        : r.href
+                          ? () => navigate(r.href as string)
+                          : undefined
                     }
                   />
                 ))

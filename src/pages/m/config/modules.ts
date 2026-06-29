@@ -2741,6 +2741,16 @@ const customerDetail: DetailConfig = {
   // Owner 2026-06-30 — mobile customer edit is now built.
   extraActions: (_d, id) => [
     {
+      label: "Quotation PDF",
+      // Deep-link to desktop /customers — operator picks customer there.
+      // Desktop /customers has the full quotation export UI (asOf date
+      // picker + per-product overrides). Full mobile-side PDF generation
+      // would re-implement generateCustomerQuotationPdfV2 + letterhead
+      // resolution + customer-products lookup — defer until owner asks.
+      to: `/customers?autoOpenCustomerId=${encodeURIComponent(id)}`,
+      icon: "file-text",
+    },
+    {
       label: "Export Catalogue",
       to: `/products?autoCustomerCatalogueId=${encodeURIComponent(id)}`,
       icon: "file-text",

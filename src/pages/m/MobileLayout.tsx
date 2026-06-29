@@ -78,6 +78,11 @@ export default function MobileLayout() {
             ? "24px"
             : "calc(72px + env(safe-area-inset-bottom))",
           position: "relative",
+          // Safety net — clip horizontal overflow so a wide child (chip
+          // strip, toolbar buttons, flow indicator) can't cause the WHOLE
+          // page to scroll horizontally. Each scrolling sub-region keeps
+          // its own overflowX:auto (SubTabs, StatusFlow, etc.).
+          overflowX: "hidden",
         }}
       >
         <Routes>

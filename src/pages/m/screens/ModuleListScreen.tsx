@@ -182,8 +182,10 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
       />
 
       {/* Search + Filter bar — design source: white pill (radius 12, border
-          #E2DDD8) + a square sliders button that dots when filters are active. */}
-      <div style={{ display: "flex", gap: 9, padding: "12px 18px 6px" }}>
+          #E2DDD8) + a square sliders button that dots when filters are active.
+          gap 7px + 40px buttons so the row fits in 380px even on Sales (which
+          has the most buttons: Search + ScanQR + ScanPO + Filter + Select). */}
+      <div style={{ display: "flex", gap: 7, padding: "12px 18px 6px", minWidth: 0 }}>
         <div
           style={{
             flex: 1,
@@ -219,7 +221,7 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
           onClick={() => setScanOpen(true)}
           aria-label="Scan QR code"
           style={{
-            width: 44,
+            width: 40,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -241,7 +243,7 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
             onClick={() => setScanPOOpen(true)}
             aria-label="Scan customer PO"
             style={{
-              width: 44,
+              width: 40,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -293,7 +295,7 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
           }}
           aria-label={selectMode ? "Exit select mode" : "Select multiple"}
           style={{
-            width: 44,
+            width: 40,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",

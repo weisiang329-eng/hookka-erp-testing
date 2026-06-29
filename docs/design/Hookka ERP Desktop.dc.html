@@ -2063,14 +2063,14 @@
 
 </x-dc>
 
-<script>
-class App {
-  constructor() {
-    this.state = { view: "dashboard" };
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:900}}">
+class Component extends DCLogic {
+  state = { view: "dashboard" };
+  componentDidMount() {
+    // Expose to the safety-net + scene-switcher click handlers.
+    try { window.__app = this; } catch (e) {}
   }
-  setView(v) { this.state.view = v; this._update(); }
-  _update() { if (this._cb) this._cb(this.render()); }
-  mount(cb) { this._cb = cb; this._cb(this.render()); }
+  setView(v) { this.setState({ view: v }); }
   render() {
     const v = this.state.view;
     // ---- Sidebar nav groups (mirrors src/components/layout/sidebar.tsx) ----
@@ -3045,7 +3045,9 @@ class App {
     };
   }
 }
-window.__app = new App();
+// (App is wired by support.js — Component extends DCLogic via data-dc-script.
+// `window.__app` is set in componentDidMount above so the click safety net
+// below can call __app.setView() to switch scenes.)
 
 // ===========================================================================
 // Click-feedback safety net + sub-tab toggling.

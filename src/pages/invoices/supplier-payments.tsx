@@ -8,6 +8,11 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { defaultBankCode } from "@/lib/default-bank";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { COMPANY } from "@/lib/constants";
+import { amountInWords } from "@/lib/amount-in-words";
+import { printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
+import { useRowSelection } from "@/lib/use-row-selection";
+import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
 import { CreditCard } from "lucide-react";
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -72,6 +77,41 @@ type PaymentGroup = {
   lifecycleState?: string;
   lines: PaymentLine[];
 };
+
+// COMPANY.HOOKKA → the VoucherSpec.company shape (single source of truth);
+// mirrors VOUCHER_COMPANY in accounting/index.tsx.
+const VOUCHER_COMPANY: VoucherSpec["company"] = {
+  name: COMPANY.HOOKKA.name,
+  addressLines: COMPANY.HOOKKA.addressLines,
+  regNo: COMPANY.HOOKKA.regNo,
+  tin: COMPANY.HOOKKA.tin,
+  phone: COMPANY.HOOKKA.phone,
+  email: COMPANY.HOOKKA.email,
+};
+
+// One supplier payment → a SUPPLIER PAYMENT VOUCHER: one line per purchase
+// invoice paid (PI No · bank amount), total = totalBankSen. Money stays integer
+// sen, formatted with formatCurrency. Mirrors buildPvVoucher in accounting/index.
+function buildSupplierPaymentVoucher(p: PaymentGroup): VoucherSpec {
+  const active = (p.lifecycleState ?? "ACTIVE") === "ACTIVE";
+  const lines: VoucherLine[] = p.lines.map((l) => ({
+    cells: [l.piNo, formatCurrency(l.amountSen)],
+  }));
+  return {
+    title: active ? "SUPPLIER PAYMENT VOUCHER" : "SUPPLIER PAYMENT VOUCHER — VOID",
+    company: VOUCHER_COMPANY,
+    docNo: p.paymentNo,
+    date: formatDateDMY(p.date),
+    partyLabel: "Paid To",
+    partyName: p.supplierName ?? "",
+    columns: [{ label: "Purchase Invoice" }, { label: "Amount", align: "right" }],
+    lines,
+    totalCells: ["Total", formatCurrency(p.totalBankSen)],
+    amountWords: amountInWords(p.totalBankSen),
+    signatures: [{ label: "Prepared by" }, { label: "Approved by" }, { label: "Received by" }],
+    printedOn: formatDateDMY(new Date()),
+  };
+}
 
 export default function SupplierPaymentsPage() {
   const { toast } = useToast();
@@ -397,6 +437,8 @@ export default function SupplierPaymentsPage() {
   const filteredHistory = history.filter(
     (p) => !histLc || p.paymentNo.toLowerCase().includes(histLc) || (p.supplierName ?? "").toLowerCase().includes(histLc),
   );
+  // Ticked-row selection for batch print + export, keyed by payment number.
+  const sel = useRowSelection(filteredHistory, (p) => p.paymentNo);
 
   if (loading) {
     return (
@@ -660,6 +702,26 @@ export default function SupplierPaymentsPage() {
           </div>
         </CardHeader>
         <CardContent>
+          <BatchActionsBar
+            count={sel.count}
+            onClear={sel.clear}
+            onPrint={() => printVouchers(sel.selectedRows.map(buildSupplierPaymentVoucher))}
+            exportName="supplier-payments"
+            exportAoa={() => [
+              ["Payment #", "Date", "Supplier", "Status", "Voucher Total (RM)", "PI No", "Amount (RM)"],
+              ...sel.selectedRows.flatMap((p) =>
+                p.lines.map((l) => [
+                  p.paymentNo,
+                  formatDateDMY(p.date),
+                  p.supplierName ?? "",
+                  p.lifecycleState ?? "ACTIVE",
+                  (Number(p.totalBankSen ?? 0) / 100).toFixed(2),
+                  l.piNo,
+                  (Number(l.amountSen ?? 0) / 100).toFixed(2),
+                ]),
+              ),
+            ]}
+          />
           {history.length === 0 ? (
             <p className="text-sm text-gray-400 italic">No supplier payments yet</p>
           ) : (
@@ -667,6 +729,14 @@ export default function SupplierPaymentsPage() {
               <table className="w-full text-sm">
                 <thead className="bg-gray-50">
                   <tr>
+                    <th className="px-3 py-2 w-8 text-center">
+                      <input
+                        type="checkbox"
+                        checked={sel.allSelected}
+                        onChange={sel.toggleAll}
+                        className="h-3.5 w-3.5 accent-[#6B5C32] align-middle"
+                      />
+                    </th>
                     <th className="text-left px-3 py-2 font-medium text-gray-600">Payment #</th>
                     <th className="text-left px-3 py-2 font-medium text-gray-600">Supplier</th>
                     <th className="text-left px-3 py-2 font-medium text-gray-600">Date</th>
@@ -678,6 +748,14 @@ export default function SupplierPaymentsPage() {
                 <tbody>
                   {filteredHistory.map((p) => (
                     <tr key={p.paymentNo} onClick={() => setDetail(p)} className={`border-t hover:bg-gray-50 cursor-pointer ${(p.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? "opacity-50" : ""}`}>
+                      <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={sel.isSelected(p.paymentNo)}
+                          onChange={() => sel.toggle(p.paymentNo)}
+                          className="h-3.5 w-3.5 accent-[#6B5C32] align-middle"
+                        />
+                      </td>
                       <td className="px-3 py-2 font-mono font-medium">{p.paymentNo}</td>
                       <td className="px-3 py-2">{p.supplierName}</td>
                       <td className="px-3 py-2 text-gray-600">{formatDateDMY(p.date)}</td>

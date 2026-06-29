@@ -3160,6 +3160,42 @@ const serviceCaseDetail: DetailConfig = {
     }
     return sections.filter((s) => s.rows.length > 0);
   },
+  // Action Taken log + Issue Photos as sub-doc lists (CHANGELOG G.3-G.7).
+  // The case payload already carries both via rowToApi (service-cases.ts:357).
+  subDocLists: (d) => {
+    const lists: SubDocList[] = [];
+
+    const log = asArr(d.actionLog);
+    if (log.length > 0) {
+      lists.push({
+        title: `Action Taken · ${log.length}`,
+        rows: log.slice(0, 50).map((a, i) => ({
+          id: str(a, "id") || String(i),
+          title: str(a, "description", "action") || "Action",
+          subLine: [str(a, "createdByName", "by"), shortDate(dateOnly(a, "date", "createdAt"))].filter(Boolean).join(" · ") || undefined,
+          icon: "file-text" as const,
+        })),
+      });
+    }
+
+    const photos = asArr(d.issuePhotos);
+    // issuePhotos may also come as string[]; handle both
+    const photoRows = photos.length > 0
+      ? photos.map((p, i) => ({
+          id: typeof p === "string" ? p : str(p, "id") || String(i),
+          title: typeof p === "string" ? `Photo ${i + 1}` : (str(p, "filename") || `Photo ${i + 1}`),
+          icon: "package" as const,
+        }))
+      : [];
+    if (photoRows.length > 0) {
+      lists.push({
+        title: `Photos · ${photoRows.length}`,
+        rows: photoRows,
+      });
+    }
+
+    return lists;
+  },
   // Linked service orders (SV / service_orders rows). isSv steers to the SV
   // sales-order detail; native service_orders have no mobile detail yet.
   relatedDocs: (d) => {

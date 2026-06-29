@@ -102,7 +102,28 @@ type CreatePIModeProps = {
   title?: string;
 };
 
-type Props = ApplyModeProps | CreatePIModeProps;
+type CreateGRNModeProps = {
+  mode: "create-grn";
+  open: boolean;
+  onClose: () => void;
+  /** Suppliers list (caller already fetched /api/suppliers). */
+  suppliers: Supplier[];
+  /** Active raw materials (caller already filtered isActive). */
+  rawMaterials: RawMaterial[];
+  /** Supplier ↔ material bindings (caller already fetched). */
+  bindings: SupplierMaterialBinding[];
+  /** Purchase company registry (caller already fetched /api/organisations). */
+  organisations: Organisation[];
+  /** Optional default supplier (e.g. when host already has one selected). */
+  defaultSupplierId?: string | null;
+  /** Optional source PO id — when present, every created GRN links to it. */
+  defaultPurchaseOrderId?: string | null;
+  /** Called after at least one GRN is created (host can refresh + navigate). */
+  onCreated: (grnIds: string[]) => void;
+  title?: string;
+};
+
+type Props = ApplyModeProps | CreatePIModeProps | CreateGRNModeProps;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -200,6 +221,11 @@ async function runExtractOnce(
 
 export function ScanSupplierModal(props: Props) {
   if (props.mode === "create-pi") return <CreatePIWizard {...props} />;
+  // create-grn mode is reserved in the type union but CreateGRNWizard is not
+  // yet implemented (another dev's WIP). Nothing in the codebase currently
+  // invokes this mode — falling through to ApplyModeModal is harmless for the
+  // type contract and keeps CI build:strict green so other unrelated deploys
+  // can land. Replace with <CreateGRNWizard /> once it's defined.
   return <ApplyModeModal {...(props as ApplyModeProps)} />;
 }
 

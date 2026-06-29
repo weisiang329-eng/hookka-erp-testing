@@ -45,7 +45,9 @@ import {
   Sparkles,
   Plus,
   Trash2,
+  ChevronRight,
 } from "lucide-react";
+import { postScanQueueConsume } from "@/lib/scan-queue-client";
 
 // ─── Shared types (kept exported for callers) ─────────────────────────────
 
@@ -325,6 +327,12 @@ type QueueItem = {
   fileHash: string;
   createdAt: string;
   consumedAt: string | null;
+  // Per-doc consumed indices within rawJson.docs[]. The modal hides any
+  // (rowId, docIdx) pair that's in here so an X-deleted card doesn't
+  // re-appear on the next poll tick. Server-side: appended to by the
+  // /:id/consume POST with a docIdx body. Empty for legacy rows that
+  // pre-date the column (treated as "nothing consumed yet").
+  consumedDocIdxs?: number[];
 };
 type QueueBatchPayload = {
   batchId: string | null;
@@ -403,18 +411,9 @@ function extractDocsFromRawJson(rawJson: unknown): SupplierExtraction[] {
   return [rawJson as SupplierExtraction];
 }
 
-async function postScanQueueConsume(rowId: string): Promise<void> {
-  try {
-    await fetch(`/api/scan-queue/${encodeURIComponent(rowId)}/consume`, {
-      method: "POST",
-      credentials: "include",
-    });
-  } catch {
-    // best-effort — if the consume call fails, the worst case is the
-    // resume endpoint will resurface this row next session. The PI/GRN
-    // was already created, so the operator can ignore the duplicate.
-  }
-}
+// (consume helper moved to src/lib/scan-queue-client.ts so the PI + GRN
+// + PO modals all share one signature once the per-doc docIdx body
+// landed.)
 
 // ─── Top-level dispatcher ─────────────────────────────────────────────────
 
@@ -779,6 +778,11 @@ type PreviewCard = {
   sampleId: string | null;
   // Operator can opt in or out per card; defaults to true.
   include: boolean;
+  // Collapsed/expanded toggle for the card body (header row + line table).
+  // Default rule: total previews ≥5 → only the first card expanded; <5 → all
+  // expanded. Each card stores its own state so the operator can flip them
+  // independently afterwards.
+  expanded: boolean;
   // Per-card creating spinner — set true between submit and the response.
   creating: boolean;
   // Per-card "PI-CC0001" once the POST returns success.
@@ -1099,6 +1103,10 @@ function CreatePIWizard({
         scanQueueDocIdx,
         sampleId,
         include: true,
+        // Default true here — the caller (handleFiles / poll tick) re-applies
+        // the "first card expanded only when ≥5" rule after the full set is
+        // assembled.
+        expanded: true,
         creating: false,
         createdPiNo: null,
         createError: null,
@@ -1200,7 +1208,14 @@ function CreatePIWizard({
         setParsing(false);
         return;
       }
-      setCards(newCards);
+      // ≥5 cards: collapse all but the first. <5: leave every card expanded
+      // (buildCard's default). Owner ruling 2026-06-30 — keeps long batches
+      // scannable without forcing the operator to scroll past N tables.
+      const collapsed =
+        newCards.length >= 5
+          ? newCards.map((c, i) => ({ ...c, expanded: i === 0 }))
+          : newCards;
+      setCards(collapsed);
       setErrors(errs);
       setParsing(false);
       setStep("preview");
@@ -1250,16 +1265,63 @@ function CreatePIWizard({
     );
 
   const removeLine = (cardId: string, idx: number) =>
-    setCards((prev) =>
-      prev.map((c) => {
+    setCards((prev) => {
+      const next = prev.map((c) => {
         if (c.id !== cardId) return c;
-        const next = c.lines.filter((_, i) => i !== idx);
-        return { ...c, lines: next.length > 0 ? next : [makeBlankLine()] };
-      }),
-    );
+        const nextLines = c.lines.filter((_, i) => i !== idx);
+        return { ...c, lines: nextLines.length > 0 ? nextLines : [makeBlankLine()] };
+      });
+      return next;
+    });
 
-  const removeCard = (cardId: string) =>
+  // Per-card X-delete. Removes the card optimistically and posts to
+  // /consume with the row's docIdx so the resume endpoint doesn't
+  // resurface it next session. Reverts on server failure.
+  const removeCard = async (cardId: string) => {
+    const target = cards.find((c) => c.id === cardId);
+    if (!target) return;
+    const proceed = await confirm({
+      title: "Remove this preview?",
+      message:
+        "Remove this preview from the list? The original scan stays in the queue.",
+    });
+    if (!proceed) return;
+    const snapshot = cards;
     setCards((prev) => prev.filter((c) => c.id !== cardId));
+    if (target.scanQueueRowId) {
+      const r = await postScanQueueConsume(
+        target.scanQueueRowId,
+        target.scanQueueDocIdx,
+      );
+      if (!r.ok) {
+        setCards(snapshot);
+        setErrors([`Couldn't remove preview: ${r.error ?? `HTTP ${r.status}`}`]);
+      }
+    }
+  };
+
+  // Clear All — wipes every visible card after confirming, fanning out one
+  // per-doc /consume call per card so the resume endpoint forgets them all.
+  // Resets the wizard to the upload step. The queue rows themselves stay
+  // in the DB for audit; only their (rowId, docIdx) entries are marked.
+  const clearAllCards = async () => {
+    if (cards.length === 0) return;
+    const proceed = await confirm({
+      title: `Clear all ${cards.length} previews?`,
+      message: `Clear all ${cards.length} previews? The original scans stay in the queue but won't appear here again.`,
+    });
+    if (!proceed) return;
+    const toConsume = cards
+      .filter((c) => !!c.scanQueueRowId)
+      .map((c) =>
+        postScanQueueConsume(c.scanQueueRowId as string, c.scanQueueDocIdx),
+      );
+    void Promise.allSettled(toConsume);
+    setCards([]);
+    setStep("upload");
+    setActiveBatchId(null);
+    setQueueItems([]);
+  };
 
   // When the supplier on a card changes, re-resolve each line's internal
   // code from the bindings of the new supplier. We DON'T touch lines the
@@ -1519,7 +1581,13 @@ function CreatePIWizard({
           // Defensive parse — a malformed row shouldn't tear down the modal.
           const docs = extractDocsFromRawJson(it.rawJson);
           if (docs.length === 0) continue;
+          // Skip docs the row has already marked consumed (operator
+          // X-deleted them earlier). Treats missing column as "none".
+          const consumedIdxs = new Set<number>(
+            Array.isArray(it.consumedDocIdxs) ? it.consumedDocIdxs : [],
+          );
           docs.forEach((doc, idx) => {
+            if (consumedIdxs.has(idx)) return;
             const key = `${it.id}#${idx}`;
             if (have.has(key)) return;
             // sampleId is null for queue-built cards — the engine writes a
@@ -1528,7 +1596,30 @@ function CreatePIWizard({
             additions.push(buildCard(it.fileName, doc, null, it.id, idx));
           });
         }
-        return additions.length > 0 ? [...prev, ...additions] : prev;
+        if (additions.length === 0) return prev;
+        const combined = [...prev, ...additions];
+        // Apply the collapse rule across the WHOLE combined set: ≥5 → only
+        // the very first card stays expanded; <5 → all expanded. We only
+        // restamp `expanded` on the new additions so cards the operator
+        // has already toggled keep their state.
+        if (combined.length >= 5) {
+          let firstSeen = false;
+          return combined.map((c) => {
+            const isNew = additions.includes(c);
+            if (!isNew) {
+              if (c.expanded) firstSeen = true;
+              return c;
+            }
+            // For a brand-new card: keep it expanded only if no other card
+            // is currently expanded AND this is the leading new one.
+            if (!firstSeen) {
+              firstSeen = true;
+              return { ...c, expanded: true };
+            }
+            return { ...c, expanded: false };
+          });
+        }
+        return combined;
       });
     };
     void tick();
@@ -1620,7 +1711,8 @@ function CreatePIWizard({
               onPatchLine={patchLine}
               onAddLine={addLine}
               onRemoveLine={removeLine}
-              onRemoveCard={removeCard}
+              onRemoveCard={(id) => void removeCard(id)}
+              onClearAll={() => void clearAllCards()}
               onSupplierChange={onCardSupplierChange}
               onBack={() => {
                 setStep("upload");
@@ -1702,50 +1794,111 @@ function FileStatusBadge({ status }: { status: "queued" | "scanning" | "done" | 
 // row still scanning / queued, plus any rows that hit a hard failure, so
 // the operator can see exactly which file the modal is waiting on. Used by
 // both the PI and GRN wizards.
+//
+// 2026-06-30 restyle: pill rows (amber for in-flight, red for failed) so
+// the status pops out from the white cards below. >3 in-flight rows
+// collapse the tail into a muted "+ N more queued" row.
 function ScanQueueStrip({
   inFlight,
   failed,
+  onRetry,
 }: {
   inFlight: QueueItem[];
   failed: QueueItem[];
+  onRetry?: (id: string) => void;
 }) {
+  const visibleInFlight = inFlight.slice(0, 3);
+  const overflowCount = Math.max(0, inFlight.length - visibleInFlight.length);
   return (
-    <div className="border border-[#E2DDD8] rounded-lg overflow-hidden text-sm">
-      {inFlight.map((it) => (
-        <div
-          key={it.id}
-          className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[#EFEAE6] last:border-b-0 bg-[#FAFAF9]"
-        >
-          <div className="flex items-center gap-2 min-w-0">
-            <FileText className="h-4 w-4 text-[#9CA3AF] flex-shrink-0" />
-            <span className="truncate text-[#1F1D1B]">{it.fileName}</span>
+    <div className="space-y-1.5">
+      {visibleInFlight.map((it) => {
+        // Pull "page X / Y" out of rawJson if available — supplier engine
+        // emits {currentPage, totalPages} mid-flight on some rows. Safe to
+        // skip when absent.
+        let pageHint = "";
+        if (it.rawJson && typeof it.rawJson === "object") {
+          const rj = it.rawJson as { currentPage?: unknown; totalPages?: unknown };
+          if (typeof rj.currentPage === "number" && typeof rj.totalPages === "number") {
+            pageHint = ` · page ${rj.currentPage} / ${rj.totalPages}`;
+          }
+        }
+        return (
+          <div
+            key={it.id}
+            className="flex items-center justify-between gap-3 px-3 py-2 rounded-md text-sm"
+            style={{
+              background: "var(--bg-warning, #FEF3C7)",
+              border: "0.5px solid var(--border-warning, #FCD34D)",
+              color: "var(--text-warning, #92400E)",
+            }}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              {/* spin keyframe lives in the modal-level <style> tag below */}
+              <i
+                className="ti ti-loader"
+                style={{ animation: "scanqueue-spin 1s linear infinite" }}
+                aria-hidden
+              >
+                <Loader2 className="h-3.5 w-3.5" />
+              </i>
+              <span className="truncate">{it.fileName}{pageHint}</span>
+            </div>
+            <span className="text-xs font-medium uppercase tracking-wide flex-shrink-0">
+              {it.status === "queued" ? "Queued" : "Scanning"}
+            </span>
           </div>
-          <span className="flex items-center gap-1.5 text-xs font-medium text-[#6B5C32] flex-shrink-0">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            {it.status === "queued" ? "Queued" : "Scanning"}
-          </span>
+        );
+      })}
+      {overflowCount > 0 && (
+        <div className="px-3 py-1.5 rounded-md text-xs text-[#6B7280] bg-[#F3F4F6] text-center">
+          + {overflowCount} more queued
         </div>
-      ))}
+      )}
       {failed.map((it) => (
         <div
           key={it.id}
-          className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[#EFEAE6] last:border-b-0 bg-red-50/40"
+          className="flex items-center justify-between gap-3 px-3 py-2 rounded-md text-sm"
+          style={{
+            background: "var(--bg-danger, #FEE2E2)",
+            border: "0.5px solid var(--border-danger, #FCA5A5)",
+            color: "var(--text-danger, #991B1B)",
+          }}
         >
           <div className="flex items-center gap-2 min-w-0">
-            <FileText className="h-4 w-4 text-[#9CA3AF] flex-shrink-0" />
-            <span className="truncate text-[#1F1D1B]">{it.fileName}</span>
+            <i className="ti ti-alert-triangle" aria-hidden>
+              <AlertTriangle className="h-3.5 w-3.5" />
+            </i>
+            <span className="truncate">{it.fileName}</span>
             {it.error && (
-              <span className="text-xs text-red-700 truncate">— {it.error}</span>
+              <span className="text-xs truncate opacity-80">— {it.error.slice(0, 80)}</span>
             )}
           </div>
-          <span className="flex items-center gap-1.5 text-xs font-medium text-red-700 flex-shrink-0">
-            <AlertTriangle className="h-3.5 w-3.5" />
-            Failed
-          </span>
+          {onRetry && (
+            <button
+              type="button"
+              onClick={() => onRetry(it.id)}
+              className="text-xs font-medium uppercase tracking-wide flex-shrink-0 underline-offset-2 hover:underline"
+            >
+              Retry
+            </button>
+          )}
         </div>
       ))}
     </div>
   );
+}
+
+// Best-effort retry POST. Same gate as upload (purchase-orders create).
+// Errors are silently swallowed — operator can hit the button again.
+async function postScanQueueRetry(id: string): Promise<void> {
+  try {
+    await fetch(`/api/scan-queue/${encodeURIComponent(id)}/retry`, {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch {
+    /* best-effort */
+  }
 }
 
 function InfoCard({ icon, title, desc }: { icon: React.ReactNode; title: string; desc: string }) {
@@ -1901,6 +2054,7 @@ function PreviewStep({
   onAddLine,
   onRemoveLine,
   onRemoveCard,
+  onClearAll,
   onSupplierChange,
   onBack,
   onConfirm,
@@ -1922,6 +2076,7 @@ function PreviewStep({
   onAddLine: (cardId: string) => void;
   onRemoveLine: (cardId: string, idx: number) => void;
   onRemoveCard: (cardId: string) => void;
+  onClearAll: () => void;
   onSupplierChange: (cardId: string, newSupplierId: string) => void;
   onBack: () => void;
   onConfirm: () => void;
@@ -1943,6 +2098,10 @@ function PreviewStep({
   const failedQueue = queueItems.filter((q) => q.status === "failed");
   return (
     <div className="space-y-4">
+      {/* Inline spin keyframe for the .ti-loader icon in ScanQueueStrip.
+          Lives at the top of the preview body so it can't be missed by
+          any descendent. */}
+      <style>{`@keyframes scanqueue-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
       <div className="flex items-center justify-between">
         <div>
           <h3 className="font-semibold text-[#1F1D1B] flex items-center gap-2">
@@ -1959,10 +2118,28 @@ function PreviewStep({
               : `${includedCount} selected — edit any field, then create`}
           </p>
         </div>
+        {cards.length > 0 && (
+          <button
+            type="button"
+            onClick={onClearAll}
+            className="text-xs px-2 py-1 rounded border border-[#E2DDD8] bg-white hover:bg-[#FAFAF9] inline-flex items-center gap-1"
+            style={{ color: "var(--text-danger, #9A3A2D)" }}
+            title="Clear every preview from this list"
+          >
+            <i className="ti ti-trash" aria-hidden>
+              <Trash2 className="h-3 w-3" />
+            </i>
+            Clear all
+          </button>
+        )}
       </div>
 
       {(inFlight.length > 0 || failedQueue.length > 0) && (
-        <ScanQueueStrip inFlight={inFlight} failed={failedQueue} />
+        <ScanQueueStrip
+          inFlight={inFlight}
+          failed={failedQueue}
+          onRetry={(id) => void postScanQueueRetry(id)}
+        />
       )}
 
       {errors.length > 0 && (
@@ -2070,8 +2247,14 @@ function PICard({
     (s, l) => s + (Number(l.qty) || 0) * (Number(l.unitPriceRM) || 0),
     0,
   );
+  const supplierLabel =
+    suppliers.find((s) => s.id === card.supplierId)?.name ??
+    card.originalExtraction.supplierName ??
+    "(no supplier)";
+  const docNoLabel = card.supplierInvoiceNo || card.supplierDoNo || card.originalExtraction.docNo || "—";
 
-  // Linked-PO picker options: this supplier's POs in non-terminal status.
+  // Hooks MUST run before any early return — used by the expanded branch
+  // below but rules-of-hooks requires unconditional ordering.
   const linkedPoOptions = useMemo(
     () =>
       purchaseOrders
@@ -2085,6 +2268,81 @@ function PICard({
         .map((po) => ({ value: po.id, label: po.poNo })),
     [purchaseOrders, card.supplierId],
   );
+
+  // Collapsed strip — h ~48px summary row. Clicking anywhere except the
+  // checkbox or the X button expands the card; clicking the chevron toggles
+  // either way.
+  if (!card.expanded) {
+    return (
+      <Card
+        className={`border-2 transition-colors ${
+          card.include ? "border-[#6B5C32] bg-[#FAFAF9]" : "border-[#E2DDD8]"
+        }`}
+      >
+        <div
+          className="flex items-center gap-3 px-4 h-12 cursor-pointer hover:bg-[#F5F0EB]"
+          onClick={(e) => {
+            // Ignore clicks on the checkbox/X delete (their own handlers
+            // stopPropagation). Anywhere else expands.
+            const tag = (e.target as HTMLElement).tagName;
+            if (tag === "INPUT" || tag === "BUTTON" || tag === "svg" || tag === "path") return;
+            onPatch({ expanded: true });
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={card.include}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => onPatch({ include: e.target.checked })}
+            disabled={!!card.createdPiNo}
+            className="h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
+          />
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onPatch({ expanded: true });
+            }}
+            className="text-[#6B7280] hover:text-[#1F1D1B]"
+            title="Expand"
+          >
+            <ChevronRight className="h-4 w-4 transition-transform" />
+          </button>
+          <div className="flex-1 min-w-0 flex items-center gap-2 text-sm">
+            <span className="font-medium text-[#1F1D1B] truncate">{supplierLabel}</span>
+            <span className="text-[#9CA3AF]">·</span>
+            <span className="text-[#374151] truncate">#{docNoLabel}</span>
+            <span className="text-[#9CA3AF]">·</span>
+            <span className="text-[#374151]">{card.invoiceDate || "—"}</span>
+            <span className="text-[#9CA3AF]">·</span>
+            <span className="text-[#1F1D1B] font-medium whitespace-nowrap">
+              RM {totalRM.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </span>
+            {card.createdPiNo && (
+              <Badge className="bg-green-100 text-green-800 border border-green-300">
+                <CheckCircle className="h-3 w-3 inline mr-0.5" /> {card.createdPiNo}
+              </Badge>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemoveCard();
+            }}
+            disabled={!!card.createdPiNo}
+            className="hover:opacity-80 disabled:opacity-30"
+            style={{ color: "var(--text-danger, #9A3A2D)" }}
+            title="Remove this preview"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      </Card>
+    );
+  }
+
+  // linkedPoOptions hoisted above the early return (rules-of-hooks).
   const linkedPo = purchaseOrders.find((p) => p.id === card.purchaseOrderId) ?? null;
 
   return (
@@ -2164,14 +2422,24 @@ function PICard({
             <Star className={`h-3 w-3 ${card.markedGold ? "fill-amber-500 text-amber-500" : ""}`} />
             {card.markedGold ? "Gold" : "Mark gold"}
           </button>
+          {/* Chevron toggle — collapses the card body back to the 1-line strip. */}
+          <button
+            type="button"
+            onClick={() => onPatch({ expanded: false })}
+            className="mt-5 text-[#6B7280] hover:text-[#1F1D1B]"
+            title="Collapse"
+          >
+            <ChevronRight className="h-4 w-4 rotate-90 transition-transform" />
+          </button>
           <button
             type="button"
             onClick={onRemoveCard}
             disabled={!!card.createdPiNo}
-            className="mt-5 text-[#9CA3AF] hover:text-[#9A3A2D] disabled:opacity-30"
-            title="Remove this card"
+            className="mt-5 hover:opacity-80 disabled:opacity-30"
+            style={{ color: "var(--text-danger, #9A3A2D)" }}
+            title="Remove this preview"
           >
-            <Trash2 className="h-4 w-4" />
+            <X className="h-4 w-4" />
           </button>
         </div>
 
@@ -2570,6 +2838,8 @@ type GRNPreviewCard = {
   scanQueueDocIdx: number;
   sampleId: string | null;
   include: boolean;
+  // Collapsed/expanded toggle. ≥5 cards default to first-expanded-only.
+  expanded: boolean;
   creating: boolean;
   createdGrnNo: string | null;
   createError: string | null;
@@ -2822,6 +3092,8 @@ function CreateGRNWizard({
         scanQueueDocIdx,
         sampleId,
         include: true,
+        // Caller re-applies the ≥5 collapse rule across the full set.
+        expanded: true,
         creating: false,
         createdGrnNo: null,
         createError: null,
@@ -2919,7 +3191,11 @@ function CreateGRNWizard({
         setParsing(false);
         return;
       }
-      setCards(newCards);
+      const collapsed =
+        newCards.length >= 5
+          ? newCards.map((c, i) => ({ ...c, expanded: i === 0 }))
+          : newCards;
+      setCards(collapsed);
       setErrors(errs);
       setParsing(false);
       setStep("preview");
@@ -2975,8 +3251,50 @@ function CreateGRNWizard({
       }),
     );
 
-  const removeCard = (cardId: string) =>
+  // Per-card X-delete (GRN). Same shape as the PI wizard: optimistic remove
+  // + per-doc /consume + revert on failure.
+  const removeCard = async (cardId: string) => {
+    const target = cards.find((c) => c.id === cardId);
+    if (!target) return;
+    const proceed = await confirm({
+      title: "Remove this preview?",
+      message:
+        "Remove this preview from the list? The original scan stays in the queue.",
+    });
+    if (!proceed) return;
+    const snapshot = cards;
     setCards((prev) => prev.filter((c) => c.id !== cardId));
+    if (target.scanQueueRowId) {
+      const r = await postScanQueueConsume(
+        target.scanQueueRowId,
+        target.scanQueueDocIdx,
+      );
+      if (!r.ok) {
+        setCards(snapshot);
+        setErrors([`Couldn't remove preview: ${r.error ?? `HTTP ${r.status}`}`]);
+      }
+    }
+  };
+
+  // Clear All — confirm, fire per-doc /consume in parallel, reset to upload.
+  const clearAllCards = async () => {
+    if (cards.length === 0) return;
+    const proceed = await confirm({
+      title: `Clear all ${cards.length} previews?`,
+      message: `Clear all ${cards.length} previews? The original scans stay in the queue but won't appear here again.`,
+    });
+    if (!proceed) return;
+    const toConsume = cards
+      .filter((c) => !!c.scanQueueRowId)
+      .map((c) =>
+        postScanQueueConsume(c.scanQueueRowId as string, c.scanQueueDocIdx),
+      );
+    void Promise.allSettled(toConsume);
+    setCards([]);
+    setStep("upload");
+    setActiveBatchId(null);
+    setQueueItems([]);
+  };
 
   const onCardSupplierChange = (cardId: string, newSupplierId: string) => {
     setCards((prev) =>
@@ -3211,13 +3529,35 @@ function CreateGRNWizard({
         for (const it of ready) {
           const docs = extractDocsFromRawJson(it.rawJson);
           if (docs.length === 0) continue;
+          // Skip docs the row has already marked consumed (X-deleted earlier).
+          const consumedIdxs = new Set<number>(
+            Array.isArray(it.consumedDocIdxs) ? it.consumedDocIdxs : [],
+          );
           docs.forEach((doc, idx) => {
+            if (consumedIdxs.has(idx)) return;
             const key = `${it.id}#${idx}`;
             if (have.has(key)) return;
             additions.push(buildCard(it.fileName, doc, null, it.id, idx));
           });
         }
-        return additions.length > 0 ? [...prev, ...additions] : prev;
+        if (additions.length === 0) return prev;
+        const combined = [...prev, ...additions];
+        if (combined.length >= 5) {
+          let firstSeen = false;
+          return combined.map((c) => {
+            const isNew = additions.includes(c);
+            if (!isNew) {
+              if (c.expanded) firstSeen = true;
+              return c;
+            }
+            if (!firstSeen) {
+              firstSeen = true;
+              return { ...c, expanded: true };
+            }
+            return { ...c, expanded: false };
+          });
+        }
+        return combined;
       });
     };
     void tick();
@@ -3305,7 +3645,8 @@ function CreateGRNWizard({
               onPatchLine={patchLine}
               onAddLine={addLine}
               onRemoveLine={removeLine}
-              onRemoveCard={removeCard}
+              onRemoveCard={(id) => void removeCard(id)}
+              onClearAll={() => void clearAllCards()}
               onSupplierChange={onCardSupplierChange}
               onBack={() => {
                 setStep("upload");
@@ -3356,6 +3697,7 @@ function GRNPreviewStep({
   onAddLine,
   onRemoveLine,
   onRemoveCard,
+  onClearAll,
   onSupplierChange,
   onBack,
   onConfirm,
@@ -3377,6 +3719,7 @@ function GRNPreviewStep({
   onAddLine: (cardId: string) => void;
   onRemoveLine: (cardId: string, idx: number) => void;
   onRemoveCard: (cardId: string) => void;
+  onClearAll: () => void;
   onSupplierChange: (cardId: string, newSupplierId: string) => void;
   onBack: () => void;
   onConfirm: () => void;
@@ -3395,6 +3738,7 @@ function GRNPreviewStep({
 
   return (
     <div className="space-y-4">
+      <style>{`@keyframes scanqueue-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
       <div className="flex items-center justify-between">
         <div>
           <h3 className="font-semibold text-[#1F1D1B] flex items-center gap-2">
@@ -3411,10 +3755,28 @@ function GRNPreviewStep({
               : `${includedCount} selected — edit any field, then create`}
           </p>
         </div>
+        {cards.length > 0 && (
+          <button
+            type="button"
+            onClick={onClearAll}
+            className="text-xs px-2 py-1 rounded border border-[#E2DDD8] bg-white hover:bg-[#FAFAF9] inline-flex items-center gap-1"
+            style={{ color: "var(--text-danger, #9A3A2D)" }}
+            title="Clear every preview from this list"
+          >
+            <i className="ti ti-trash" aria-hidden>
+              <Trash2 className="h-3 w-3" />
+            </i>
+            Clear all
+          </button>
+        )}
       </div>
 
       {(inFlight.length > 0 || failedQueue.length > 0) && (
-        <ScanQueueStrip inFlight={inFlight} failed={failedQueue} />
+        <ScanQueueStrip
+          inFlight={inFlight}
+          failed={failedQueue}
+          onRetry={(id) => void postScanQueueRetry(id)}
+        />
       )}
 
       {errors.length > 0 && (
@@ -3536,6 +3898,80 @@ function GRNCard({
   );
   const linkedPo = purchaseOrders.find((p) => p.id === card.purchaseOrderId) ?? null;
 
+  const supplierLabel =
+    suppliers.find((s) => s.id === card.supplierId)?.name ??
+    card.originalExtraction.supplierName ??
+    "(no supplier)";
+  const docNoLabel = card.supplierDoNo || card.originalExtraction.docNo || "—";
+
+  if (!card.expanded) {
+    return (
+      <Card
+        className={`border-2 transition-colors ${
+          card.include ? "border-[#6B5C32] bg-[#FAFAF9]" : "border-[#E2DDD8]"
+        }`}
+      >
+        <div
+          className="flex items-center gap-3 px-4 h-12 cursor-pointer hover:bg-[#F5F0EB]"
+          onClick={(e) => {
+            const tag = (e.target as HTMLElement).tagName;
+            if (tag === "INPUT" || tag === "BUTTON" || tag === "svg" || tag === "path") return;
+            onPatch({ expanded: true });
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={card.include}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => onPatch({ include: e.target.checked })}
+            disabled={!!card.createdGrnNo}
+            className="h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
+          />
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onPatch({ expanded: true });
+            }}
+            className="text-[#6B7280] hover:text-[#1F1D1B]"
+            title="Expand"
+          >
+            <ChevronRight className="h-4 w-4 transition-transform" />
+          </button>
+          <div className="flex-1 min-w-0 flex items-center gap-2 text-sm">
+            <span className="font-medium text-[#1F1D1B] truncate">{supplierLabel}</span>
+            <span className="text-[#9CA3AF]">·</span>
+            <span className="text-[#374151] truncate">#{docNoLabel}</span>
+            <span className="text-[#9CA3AF]">·</span>
+            <span className="text-[#374151]">{card.receiveDate || "—"}</span>
+            <span className="text-[#9CA3AF]">·</span>
+            <span className="text-[#1F1D1B] font-medium whitespace-nowrap">
+              {totalReceived} received
+            </span>
+            {card.createdGrnNo && (
+              <Badge className="bg-green-100 text-green-800 border border-green-300">
+                <CheckCircle className="h-3 w-3 inline mr-0.5" /> {card.createdGrnNo}
+              </Badge>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemoveCard();
+            }}
+            disabled={!!card.createdGrnNo}
+            className="hover:opacity-80 disabled:opacity-30"
+            style={{ color: "var(--text-danger, #9A3A2D)" }}
+            title="Remove this preview"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      </Card>
+    );
+  }
+
   return (
     <Card
       className={`border-2 transition-colors ${
@@ -3612,14 +4048,24 @@ function GRNCard({
             <Star className={`h-3 w-3 ${card.markedGold ? "fill-amber-500 text-amber-500" : ""}`} />
             {card.markedGold ? "Gold" : "Mark gold"}
           </button>
+          {/* Chevron toggle — collapses back to the strip. */}
+          <button
+            type="button"
+            onClick={() => onPatch({ expanded: false })}
+            className="mt-5 text-[#6B7280] hover:text-[#1F1D1B]"
+            title="Collapse"
+          >
+            <ChevronRight className="h-4 w-4 rotate-90 transition-transform" />
+          </button>
           <button
             type="button"
             onClick={onRemoveCard}
             disabled={!!card.createdGrnNo}
-            className="mt-5 text-[#9CA3AF] hover:text-[#9A3A2D] disabled:opacity-30"
-            title="Remove this card"
+            className="mt-5 hover:opacity-80 disabled:opacity-30"
+            style={{ color: "var(--text-danger, #9A3A2D)" }}
+            title="Remove this preview"
           >
-            <Trash2 className="h-4 w-4" />
+            <X className="h-4 w-4" />
           </button>
         </div>
 

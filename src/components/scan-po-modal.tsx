@@ -8,7 +8,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { parsePOText, mapDeliveryHub, type ParsedPO, type POParseResult } from "@/lib/po-parser";
-import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles, Star, Plus } from "lucide-react";
+import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles, Star, Plus, Trash2 } from "lucide-react";
+import { postScanQueueConsume } from "@/lib/scan-queue-client";
 
 // Background scan queue dispatch — shared with scan-supplier-modal. >2-file
 // drops POST to /api/scan-queue/upload + navigate to /scan-queue/<batchId>
@@ -66,6 +67,10 @@ type QueueItem = {
   fileHash: string;
   createdAt: string;
   consumedAt: string | null;
+  // Per-doc consumed indices within rawJson.pos[]. The modal hides
+  // (rowId, docIdx) pairs that are in here so an X-deleted card doesn't
+  // re-appear on the next poll tick.
+  consumedDocIdxs?: number[];
 };
 type QueueBatchPayload = {
   batchId: string | null;
@@ -124,9 +129,13 @@ async function fetchScanQueuePending(): Promise<QueueBatchPayload | null> {
   return json.data;
 }
 
-async function postScanQueueConsume(rowId: string): Promise<void> {
+// (consume helper moved to src/lib/scan-queue-client.ts so the PO, PI, and
+// GRN modals all share the same docIdx signature.)
+
+// Best-effort retry POST for the in-flight queue strip.
+async function postScanQueueRetry(id: string): Promise<void> {
   try {
-    await fetch(`/api/scan-queue/${encodeURIComponent(rowId)}/consume`, {
+    await fetch(`/api/scan-queue/${encodeURIComponent(id)}/retry`, {
       method: "POST",
       credentials: "include",
     });
@@ -210,6 +219,13 @@ type ClaudeScanRow = {
   // when one file produced multiple POs — the modal de-dupes consume
   // calls.
   scanQueueRowId: string | null;
+  // 0..N-1 index within rawJson.pos[] for THIS PO. A single file can
+  // hold multiple POs; per-doc /consume marks just one off without
+  // discarding the rest.
+  scanQueueDocIdx: number;
+  // Collapsed/expanded toggle for the card body. Default rule: total rows
+  // ≥5 → only the first card expanded; <5 → all expanded.
+  expanded: boolean;
   extracted: ClaudeExtractedPO;
   // `original` is a frozen snapshot of `extracted` at parse time. We compare
   // against it on confirm to decide whether to write the row back as a few-
@@ -648,6 +664,11 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           claudeSuccesses.push({
             sampleId: s.sampleId,
             scanQueueRowId: null,
+            scanQueueDocIdx: 0,
+            // buildAllRows below re-applies the ≥5 collapse rule across the
+            // full set. Start expanded; the post-loop sweeper flips later
+            // additions to collapsed when we cross the threshold.
+            expanded: true,
             extracted,
             // Deep clone for diff comparison. Cheap (PO is small).
             original: JSON.parse(JSON.stringify(extracted)) as ClaudeExtractedPO,
@@ -696,7 +717,16 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     }
 
     setUsedClaude(claudeSuccesses.length > 0);
-    setClaudeRows(claudeSuccesses);
+    // ≥5 rows total → collapse all but the first claude row; <5 → all expanded.
+    // Fallback (non-AI) rows have their own POCard which still uses the
+    // legacy `expandedPO` index, so the rule only acts on claude rows.
+    const totalRows =
+      claudeSuccesses.length + (fallbackResult?.purchaseOrders.length ?? 0);
+    const sized =
+      totalRows >= 5
+        ? claudeSuccesses.map((r, i) => ({ ...r, expanded: i === 0 }))
+        : claudeSuccesses;
+    setClaudeRows(sized);
     setParseResult(fallbackResult);
 
     // Select all rows (Claude rows first, then fallback rows) by default.
@@ -716,6 +746,57 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     if (next.has(idx)) next.delete(idx);
     else next.add(idx);
     setSelectedPOs(next);
+  };
+
+  // Per-card X-delete (Claude rows only — template fallback rows are rare
+  // and the operator never asked for X on them). Optimistically removes
+  // the row + posts /consume with (rowId, docIdx) so the row's resume
+  // entry forgets just this PO. Reverts on server failure.
+  const removeClaudeRow = async (rowIdx: number) => {
+    const target = claudeRows[rowIdx];
+    if (!target) return;
+    const proceed = await confirm({
+      title: "Remove this preview?",
+      message:
+        "Remove this preview from the list? The original scan stays in the queue.",
+    });
+    if (!proceed) return;
+    const snapshot = claudeRows;
+    setClaudeRows((prev) => prev.filter((_, i) => i !== rowIdx));
+    if (target.scanQueueRowId) {
+      const r = await postScanQueueConsume(
+        target.scanQueueRowId,
+        target.scanQueueDocIdx,
+      );
+      if (!r.ok) {
+        setClaudeRows(snapshot);
+        setErrors([`Couldn't remove preview: ${r.error ?? `HTTP ${r.status}`}`]);
+      }
+    }
+  };
+
+  // Clear All — confirms, fans out per-(rowId, docIdx) /consume calls in
+  // parallel, then resets the wizard back to the upload step.
+  const clearAllPreviews = async () => {
+    const total = claudeRows.length + (parseResult?.purchaseOrders.length ?? 0);
+    if (total === 0) return;
+    const proceed = await confirm({
+      title: `Clear all ${total} previews?`,
+      message: `Clear all ${total} previews? The original scans stay in the queue but won't appear here again.`,
+    });
+    if (!proceed) return;
+    const toConsume = claudeRows
+      .filter((r) => !!r.scanQueueRowId)
+      .map((r) =>
+        postScanQueueConsume(r.scanQueueRowId as string, r.scanQueueDocIdx),
+      );
+    void Promise.allSettled(toConsume);
+    setClaudeRows([]);
+    setParseResult(null);
+    setStep("upload");
+    setActiveBatchId(null);
+    setQueueItems([]);
+    setSelectedPOs(new Set());
   };
 
   // Indices 0..claudeRows.length-1 are Claude rows; the rest map into
@@ -1005,15 +1086,18 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       onCreated(created.map(c => c.soNo));
     }
 
-    // Mark each unique scan-queue row consumed so /api/scan-queue/pending
-    // stops resurfacing them. A single file can produce multiple POs (and
-    // thus multiple rows in claudeRows), so de-dupe by rowId.
-    const consumedRowIds = new Set<string>();
+    // Mark each (rowId, docIdx) consumed so /api/scan-queue/pending stops
+    // resurfacing them. Per-doc: a row that produced 3 POs gets 3 separate
+    // /consume calls; backend stamps consumed_at only once every doc is
+    // accounted for, so a partial create (operator skipped one PO) keeps
+    // the un-created doc available on the next session.
+    const seenPairs = new Set<string>();
     for (const row of selectedClaude) {
-      if (row.scanQueueRowId && !consumedRowIds.has(row.scanQueueRowId)) {
-        consumedRowIds.add(row.scanQueueRowId);
-        void postScanQueueConsume(row.scanQueueRowId);
-      }
+      if (!row.scanQueueRowId) continue;
+      const key = `${row.scanQueueRowId}#${row.scanQueueDocIdx}`;
+      if (seenPairs.has(key)) continue;
+      seenPairs.add(key);
+      void postScanQueueConsume(row.scanQueueRowId, row.scanQueueDocIdx);
     }
   };
 
@@ -1068,16 +1152,18 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         const haveKeys = new Set(
           prev
             .filter((r2) => r2.scanQueueRowId)
-            .map((r2) => {
-              const page = r2.extracted.pageNumbers?.[0] ?? 0;
-              return `${r2.scanQueueRowId}:${page}:${r2.extracted.customerPO}`;
-            }),
+            .map((r2) => `${r2.scanQueueRowId}#${r2.scanQueueDocIdx}`),
         );
         const additions: ClaudeScanRow[] = [];
         for (const it of ready) {
           const raw = it.rawJson as { pos?: ClaudeExtractedPO[] } | null;
           const pos = Array.isArray(raw?.pos) ? raw.pos : [];
-          for (const poRaw of pos) {
+          // Skip per-doc-consumed indices (operator X-deleted them earlier).
+          const consumedIdxs = new Set<number>(
+            Array.isArray(it.consumedDocIdxs) ? it.consumedDocIdxs : [],
+          );
+          pos.forEach((poRaw, docIdx) => {
+            if (consumedIdxs.has(docIdx)) return;
             const po: ClaudeExtractedPO = {
               ...poRaw,
               pageNumbers: poRaw.pageNumbers ?? [],
@@ -1086,13 +1172,15 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
                 customSpecials: Array.isArray(item.customSpecials) ? item.customSpecials : [],
               })),
             };
-            if (po.items.length === 0) continue;
-            const key = `${it.id}:${po.pageNumbers[0] ?? 0}:${po.customerPO}`;
-            if (haveKeys.has(key)) continue;
+            if (po.items.length === 0) return;
+            const key = `${it.id}#${docIdx}`;
+            if (haveKeys.has(key)) return;
             haveKeys.add(key);
             additions.push({
-              sampleId: `queue-${it.id}-${po.pageNumbers[0] ?? 0}`,
+              sampleId: `queue-${it.id}-${docIdx}`,
               scanQueueRowId: it.id,
+              scanQueueDocIdx: docIdx,
+              expanded: true,
               extracted: po,
               original: JSON.parse(JSON.stringify(po)) as ClaudeExtractedPO,
               warnings: [],
@@ -1103,9 +1191,28 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
               pageImageB64: null,
               markedGold: false,
             });
-          }
+          });
         }
-        return additions.length > 0 ? [...prev, ...additions] : prev;
+        if (additions.length === 0) return prev;
+        const combined = [...prev, ...additions];
+        // Apply collapse rule across the combined set, only restamping
+        // new additions so cards the operator toggled keep their state.
+        if (combined.length >= 5) {
+          let firstSeen = false;
+          return combined.map((c) => {
+            const isNew = additions.includes(c);
+            if (!isNew) {
+              if (c.expanded) firstSeen = true;
+              return c;
+            }
+            if (!firstSeen) {
+              firstSeen = true;
+              return { ...c, expanded: true };
+            }
+            return { ...c, expanded: false };
+          });
+        }
+        return combined;
       });
     };
     void tick();
@@ -1200,6 +1307,8 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
               queueItems={queueItems}
               onTogglePO={togglePO}
               onExpandPO={setExpandedPO}
+              onRemoveClaudeRow={(i) => void removeClaudeRow(i)}
+              onClearAll={() => void clearAllPreviews()}
               onBack={() => {
                 setStep("upload");
                 setParseResult(null);
@@ -1401,7 +1510,7 @@ function InfoCard({ icon, title, desc }: { icon: string; title: string; desc: st
 }
 
 function PreviewStep({
-  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, queueItems, onTogglePO, onExpandPO, onBack, onConfirm, catalog,
+  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, queueItems, onTogglePO, onExpandPO, onRemoveClaudeRow, onClearAll, onBack, onConfirm, catalog,
 }: {
   claudeRows: ClaudeScanRow[];
   setClaudeRows: React.Dispatch<React.SetStateAction<ClaudeScanRow[]>>;
@@ -1412,6 +1521,8 @@ function PreviewStep({
   queueItems: QueueItem[];
   onTogglePO: (i: number) => void;
   onExpandPO: (i: number | null) => void;
+  onRemoveClaudeRow: (i: number) => void;
+  onClearAll: () => void;
   onBack: () => void;
   onConfirm: () => void;
   catalog: ScanCatalog | null;
@@ -1496,8 +1607,14 @@ function PreviewStep({
   );
   const failedQueue = queueItems.filter((q) => q.status === "failed");
 
+  // Cap displayed in-flight rows at 3; the rest collapse into a "+ N more" tail.
+  const visibleInFlight = inFlight.slice(0, 3);
+  const overflowCount = Math.max(0, inFlight.length - visibleInFlight.length);
+
   return (
     <div className="space-y-4">
+      {/* Inline keyframe for the .ti-loader spin in the queue strip below. */}
+      <style>{`@keyframes scanqueue-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
       {/* Summary */}
       <div className="flex items-center justify-between">
         <div>
@@ -1517,42 +1634,90 @@ function PreviewStep({
               : `${selectedPOs.size} selected — edit any field inline, then confirm`}
           </p>
         </div>
+        {totalCount > 0 && (
+          <button
+            type="button"
+            onClick={onClearAll}
+            className="text-xs px-2 py-1 rounded border border-[#E2DDD8] bg-white hover:bg-[#FAFAF9] inline-flex items-center gap-1"
+            style={{ color: "var(--text-danger, #9A3A2D)" }}
+            title="Clear every preview from this list"
+          >
+            <i className="ti ti-trash" aria-hidden>
+              <Trash2 className="h-3 w-3" />
+            </i>
+            Clear all
+          </button>
+        )}
       </div>
 
-      {/* In-flight queue status strip */}
+      {/* In-flight queue status strip — pill rows, restyled 2026-06-30. */}
       {(inFlight.length > 0 || failedQueue.length > 0) && (
-        <div className="border border-[#E2DDD8] rounded-lg overflow-hidden text-sm">
-          {inFlight.map((it) => (
-            <div
-              key={it.id}
-              className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[#EFEAE6] last:border-b-0 bg-[#FAFAF9]"
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                <FileText className="h-4 w-4 text-[#9CA3AF] flex-shrink-0" />
-                <span className="truncate text-[#1F1D1B]">{it.fileName}</span>
+        <div className="space-y-1.5">
+          {visibleInFlight.map((it) => {
+            let pageHint = "";
+            if (it.rawJson && typeof it.rawJson === "object") {
+              const rj = it.rawJson as { currentPage?: unknown; totalPages?: unknown };
+              if (typeof rj.currentPage === "number" && typeof rj.totalPages === "number") {
+                pageHint = ` · page ${rj.currentPage} / ${rj.totalPages}`;
+              }
+            }
+            return (
+              <div
+                key={it.id}
+                className="flex items-center justify-between gap-3 px-3 py-2 rounded-md text-sm"
+                style={{
+                  background: "var(--bg-warning, #FEF3C7)",
+                  border: "0.5px solid var(--border-warning, #FCD34D)",
+                  color: "var(--text-warning, #92400E)",
+                }}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <i
+                    className="ti ti-loader"
+                    style={{ animation: "scanqueue-spin 1s linear infinite" }}
+                    aria-hidden
+                  >
+                    <Loader2 className="h-3.5 w-3.5" />
+                  </i>
+                  <span className="truncate">{it.fileName}{pageHint}</span>
+                </div>
+                <span className="text-xs font-medium uppercase tracking-wide flex-shrink-0">
+                  {it.status === "queued" ? "Queued" : "Scanning"}
+                </span>
               </div>
-              <span className="flex items-center gap-1.5 text-xs font-medium text-[#6B5C32] flex-shrink-0">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {it.status === "queued" ? "Queued" : "Scanning"}
-              </span>
+            );
+          })}
+          {overflowCount > 0 && (
+            <div className="px-3 py-1.5 rounded-md text-xs text-[#6B7280] bg-[#F3F4F6] text-center">
+              + {overflowCount} more queued
             </div>
-          ))}
+          )}
           {failedQueue.map((it) => (
             <div
               key={it.id}
-              className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[#EFEAE6] last:border-b-0 bg-red-50/40"
+              className="flex items-center justify-between gap-3 px-3 py-2 rounded-md text-sm"
+              style={{
+                background: "var(--bg-danger, #FEE2E2)",
+                border: "0.5px solid var(--border-danger, #FCA5A5)",
+                color: "var(--text-danger, #991B1B)",
+              }}
             >
               <div className="flex items-center gap-2 min-w-0">
-                <FileText className="h-4 w-4 text-[#9CA3AF] flex-shrink-0" />
-                <span className="truncate text-[#1F1D1B]">{it.fileName}</span>
+                <i className="ti ti-alert-triangle" aria-hidden>
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                </i>
+                <span className="truncate">{it.fileName}</span>
                 {it.error && (
-                  <span className="text-xs text-red-700 truncate">— {it.error}</span>
+                  <span className="text-xs truncate opacity-80">— {it.error.slice(0, 80)}</span>
                 )}
               </div>
-              <span className="flex items-center gap-1.5 text-xs font-medium text-red-700 flex-shrink-0">
-                <AlertTriangle className="h-3.5 w-3.5" />
-                Failed
-              </span>
+              <button
+                type="button"
+                onClick={() => void postScanQueueRetry(it.id)}
+                className="text-xs font-medium uppercase tracking-wide flex-shrink-0 underline-offset-2 hover:underline"
+              >
+                Retry
+              </button>
             </div>
           ))}
         </div>
@@ -1582,15 +1747,24 @@ function PreviewStep({
             row={row}
             catalog={catalog}
             selected={selectedPOs.has(idx)}
-            expanded={expandedPO === idx}
+            // Per-card `expanded` field overrides the legacy one-at-a-time
+            // expandedPO index. The fallback POCard below still uses the
+            // legacy index because the operator never asked for the same
+            // strip-and-X UX on template-matched rows.
+            expanded={row.expanded}
             onToggle={() => onTogglePO(idx)}
-            onExpand={() => onExpandPO(expandedPO === idx ? null : idx)}
+            onExpand={() => {
+              setClaudeRows((prev) =>
+                prev.map((r, i) => (i === idx ? { ...r, expanded: !r.expanded } : r)),
+              );
+            }}
             onUpdate={(patch) => updateClaudeRow(idx, patch)}
             onUpdateItem={(itemIdx, patch) => updateClaudeItem(idx, itemIdx, patch)}
             onAddItem={() => addClaudeItem(idx)}
             onRemoveItem={(itemIdx) => removeClaudeItem(idx, itemIdx)}
             onMoveItem={(itemIdx, dir) => moveClaudeItem(idx, itemIdx, dir)}
             onToggleGold={() => toggleGold(idx)}
+            onRemoveCard={() => onRemoveClaudeRow(idx)}
           />
         ))}
         {fallbackPOs.map((po, idx) => {
@@ -1626,7 +1800,7 @@ function PreviewStep({
 }
 
 function ClaudePOCard({
-  row, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold,
+  row, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
 }: {
   row: ClaudeScanRow;
   catalog: ScanCatalog | null;
@@ -1640,17 +1814,76 @@ function ClaudePOCard({
   onRemoveItem: (itemIdx: number) => void;
   onMoveItem: (itemIdx: number, dir: -1 | 1) => void;
   onToggleGold: () => void;
+  onRemoveCard: () => void;
 }) {
   const po = row.extracted;
   const totalQty = po.items.reduce((s, i) => s + (i.quantity || 1), 0);
-  // On tablet (<= lg) the modal is max-w-4xl ~896px; the inner table needed
-  // min-w-[64rem] (1024px) which created a nested horizontal scroll inside
-  // the modal scrollbar. Hide non-load-bearing OCR-review columns at tablet
-  // width so the table fits the modal — operator can still verify the most
-  // important fields (Cat, Product, Qty, Special, Price) without scrolling
-  // sideways. Divan/Leg/Gap apply only to bedframes, Size + Fabric the
-  // operator can re-check by expanding/scrolling.
+  // Hooks MUST run before any early return — these are used by the
+  // expanded branch but React's rules-of-hooks require unconditional ordering.
   const isTablet = useMediaQuery("(max-width: 1024px)");
+
+  // Collapsed strip — h ~48px summary. Clicking the strip (not the checkbox
+  // / X) expands. ≥5 cards default to first-expanded-only (see PreviewStep
+  // setClaudeRows polling effect).
+  if (!expanded) {
+    return (
+      <Card className={`border-2 transition-colors ${selected ? "border-[#6B5C32] bg-[#FAFAF9]" : "border-[#E2DDD8]"}`}>
+        <div
+          className="flex items-center gap-3 px-4 h-12 cursor-pointer hover:bg-[#F5F0EB]"
+          onClick={(e) => {
+            const tag = (e.target as HTMLElement).tagName;
+            if (tag === "INPUT" || tag === "BUTTON" || tag === "svg" || tag === "path") return;
+            onExpand();
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={selected}
+            onClick={(e) => e.stopPropagation()}
+            onChange={onToggle}
+            className="h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
+          />
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onExpand();
+            }}
+            className="text-[#6B7280] hover:text-[#1F1D1B]"
+            title="Expand"
+          >
+            <ChevronRight className="h-4 w-4 transition-transform" />
+          </button>
+          <div className="flex-1 min-w-0 flex items-center gap-2 text-sm">
+            <span className="font-medium text-[#1F1D1B] truncate">{po.customerName || "(no customer)"}</span>
+            <span className="text-[#9CA3AF]">·</span>
+            <span className="text-[#374151] truncate">#{po.customerPO || "—"}</span>
+            <span className="text-[#9CA3AF]">·</span>
+            <span className="text-[#374151]">{po.deliveryDate || "—"}</span>
+            <span className="text-[#9CA3AF]">·</span>
+            <span className="text-[#374151] uppercase">{po.customerState || "—"}</span>
+            {po.isUrgent && (
+              <Badge className="bg-red-100 text-red-800 border-red-200">URGENT</Badge>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemoveCard();
+            }}
+            className="hover:opacity-80"
+            style={{ color: "var(--text-danger, #9A3A2D)" }}
+            title="Remove this preview"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      </Card>
+    );
+  }
+  // (isTablet hoisted to top of component for rules-of-hooks.)
+  // The OCR-review column hide-at-tablet behavior still uses it below.
   const stripInch = (s: string): number | null => {
     const m = s.replace(/[^0-9.]/g, "");
     return m ? Number(m) : null;
@@ -2120,9 +2353,20 @@ function ClaudePOCard({
               </div>
             )}
           </div>
-          <Button variant="ghost" size="sm" onClick={onExpand}>
-            {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-          </Button>
+          <div className="flex flex-col items-end gap-1">
+            <Button variant="ghost" size="sm" onClick={onExpand} title={expanded ? "Collapse" : "Expand"}>
+              {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+            </Button>
+            <button
+              type="button"
+              onClick={onRemoveCard}
+              className="px-2 py-1 hover:opacity-80"
+              style={{ color: "var(--text-danger, #9A3A2D)" }}
+              title="Remove this preview"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       </CardContent>
     </Card>

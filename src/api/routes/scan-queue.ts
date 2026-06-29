@@ -144,6 +144,16 @@ async function ensureScanQueueTable(
         "ALTER TABLE scan_queue ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMP",
       )
       .run();
+    // Per-doc consumed tracking added 2026-06-30. A single queue row can
+    // produce N preview cards (rawJson.docs[] for supplier, rawJson.pos[]
+    // for PO). The modal lets the operator X-delete one card without
+    // discarding the whole row — we record which docIdxs have been
+    // consumed and only stamp consumed_at once every doc is accounted for.
+    await db
+      .prepare(
+        "ALTER TABLE scan_queue ADD COLUMN IF NOT EXISTS consumed_doc_idxs JSONB DEFAULT '[]'::jsonb",
+      )
+      .run();
     await db
       .prepare(
         "CREATE INDEX IF NOT EXISTS scan_queue_pending_idx ON scan_queue (created_by, created_at) WHERE consumed_at IS NULL",
@@ -179,6 +189,7 @@ type ScanQueueRow = {
   completedAt: string | null;
   orgId: string | null;
   consumedAt: string | null;
+  consumedDocIdxs: number[];
 };
 
 // Hydrate a DB row (camelCase via the adapter's projection) into our typed
@@ -197,6 +208,29 @@ function hydrateRow(r: Record<string, unknown>): ScanQueueRow {
       }
     } else {
       rawJson = raw;
+    }
+  }
+  // consumed_doc_idxs comes back as JSONB — sometimes a parsed array (postgres
+  // hands JSONB back as JS), sometimes a JSON string (string mode connections).
+  // Tolerate both; default to [] for legacy rows that pre-date the column.
+  let consumedDocIdxs: number[] = [];
+  const cdi = r.consumedDocIdxs ?? r.consumed_doc_idxs;
+  if (cdi != null) {
+    if (typeof cdi === "string") {
+      try {
+        const parsed = JSON.parse(cdi);
+        if (Array.isArray(parsed)) {
+          consumedDocIdxs = parsed
+            .map((x) => Number(x))
+            .filter((n) => Number.isInteger(n) && n >= 0);
+        }
+      } catch {
+        /* leave as [] */
+      }
+    } else if (Array.isArray(cdi)) {
+      consumedDocIdxs = cdi
+        .map((x) => Number(x))
+        .filter((n) => Number.isInteger(n) && n >= 0);
     }
   }
   return {
@@ -221,6 +255,7 @@ function hydrateRow(r: Record<string, unknown>): ScanQueueRow {
     completedAt: (r.completedAt ?? r.completed_at ?? null) as string | null,
     orgId: (r.orgId ?? r.org_id ?? null) as string | null,
     consumedAt: (r.consumedAt ?? r.consumed_at ?? null) as string | null,
+    consumedDocIdxs,
   };
 }
 
@@ -580,6 +615,7 @@ app.get("/batch/:batchId", async (c) => {
       startedAt: row.startedAt,
       completedAt: row.completedAt,
       consumedAt: row.consumedAt,
+      consumedDocIdxs: row.consumedDocIdxs,
     };
   });
 
@@ -708,6 +744,7 @@ app.get("/pending", async (c) => {
       startedAt: row.startedAt,
       completedAt: row.completedAt,
       consumedAt: row.consumedAt,
+      consumedDocIdxs: row.consumedDocIdxs,
     };
   });
 
@@ -774,6 +811,7 @@ app.get("/:id", async (c) => {
       startedAt: hydrated.startedAt,
       completedAt: hydrated.completedAt,
       consumedAt: hydrated.consumedAt,
+      consumedDocIdxs: hydrated.consumedDocIdxs,
     },
   });
 });
@@ -847,6 +885,11 @@ app.post("/:id/retry", async (c) => {
 // once the PI/GRN/SO has been successfully created from the row's extraction.
 // Filtered by `kind/:id` is unnecessary — any caller with create perms for
 // the row can flip it (same gate as upload).
+//
+// Body (optional): { docIdx: number } — when present, marks ONLY that doc
+// within the row's rawJson.docs[] / rawJson.pos[] as consumed. The row's
+// consumed_at flips only once every doc is consumed. Lets the operator
+// X-delete one card from a multi-doc PDF without losing the rest.
 // ---------------------------------------------------------------------------
 app.post("/:id/consume", async (c) => {
   const denied = await requirePermission(c, "purchase-orders", "create");
@@ -857,30 +900,118 @@ app.post("/:id/consume", async (c) => {
   const orgId = getOrgId(c);
   const nowIso = new Date().toISOString();
 
-  let result;
+  // Optional docIdx from body. Tolerate empty / non-JSON body (legacy
+  // whole-row callers send no body at all).
+  let docIdx: number | null = null;
   try {
-    result = await c.var.DB.prepare(
-      `UPDATE scan_queue
-          SET consumed_at = ?
+    const body = await c.req.json<{ docIdx?: unknown }>().catch(() => null);
+    if (body && typeof body.docIdx === "number" && Number.isInteger(body.docIdx) && body.docIdx >= 0) {
+      docIdx = body.docIdx;
+    }
+  } catch {
+    /* empty body — whole-row consume, no docIdx */
+  }
+
+  // Whole-row consume — original behaviour. Flip consumed_at directly.
+  if (docIdx === null) {
+    let result;
+    try {
+      result = await c.var.DB.prepare(
+        `UPDATE scan_queue
+            SET consumed_at = ?
+          WHERE id = ?
+            AND (org_id = ? OR org_id IS NULL)`,
+      )
+        .bind(nowIso, id, orgId)
+        .run();
+    } catch (e) {
+      return c.json(
+        { success: false, error: `Consume failed: ${(e as Error).message}` },
+        500,
+      );
+    }
+    const changes = (result.meta?.changes ?? 0) as number;
+    if (changes === 0) {
+      return c.json(
+        { success: false, error: "Scan row not found." },
+        404,
+      );
+    }
+    return c.json({ success: true, data: { id, consumedAt: nowIso } });
+  }
+
+  // Per-doc consume — append docIdx to consumed_doc_idxs (dedup), and only
+  // stamp consumed_at if every doc in rawJson is now accounted for.
+  let row;
+  try {
+    row = await c.var.DB.prepare(
+      `SELECT * FROM scan_queue
         WHERE id = ?
           AND (org_id = ? OR org_id IS NULL)`,
     )
-      .bind(nowIso, id, orgId)
-      .run();
+      .bind(id, orgId)
+      .first<Record<string, unknown>>();
   } catch (e) {
     return c.json(
-      { success: false, error: `Consume failed: ${(e as Error).message}` },
+      { success: false, error: `Consume read failed: ${(e as Error).message}` },
       500,
     );
   }
-  const changes = (result.meta?.changes ?? 0) as number;
-  if (changes === 0) {
+  if (!row) {
+    return c.json({ success: false, error: "Scan row not found." }, 404);
+  }
+  const hydrated = hydrateRow(row);
+  const current = new Set(hydrated.consumedDocIdxs);
+  current.add(docIdx);
+  const nextIdxs = Array.from(current).sort((a, b) => a - b);
+
+  // Total docs in the row. Cover supplier (docs[]) AND po (pos[]) shapes.
+  // Legacy single-doc rows that pre-date the multi-doc envelope still count
+  // as 1 — so a single docIdx=0 consume flips the row immediately.
+  let totalDocs = 1;
+  if (hydrated.rawJson && typeof hydrated.rawJson === "object") {
+    const rj = hydrated.rawJson as { docs?: unknown; pos?: unknown };
+    if (Array.isArray(rj.docs)) totalDocs = Math.max(rj.docs.length, 1);
+    else if (Array.isArray(rj.pos)) totalDocs = Math.max(rj.pos.length, 1);
+  }
+  const shouldFinalise = nextIdxs.length >= totalDocs;
+
+  try {
+    if (shouldFinalise) {
+      await c.var.DB.prepare(
+        `UPDATE scan_queue
+            SET consumed_doc_idxs = ?::jsonb,
+                consumed_at = ?
+          WHERE id = ?
+            AND (org_id = ? OR org_id IS NULL)`,
+      )
+        .bind(JSON.stringify(nextIdxs), nowIso, id, orgId)
+        .run();
+    } else {
+      await c.var.DB.prepare(
+        `UPDATE scan_queue
+            SET consumed_doc_idxs = ?::jsonb
+          WHERE id = ?
+            AND (org_id = ? OR org_id IS NULL)`,
+      )
+        .bind(JSON.stringify(nextIdxs), id, orgId)
+        .run();
+    }
+  } catch (e) {
     return c.json(
-      { success: false, error: "Scan row not found." },
-      404,
+      { success: false, error: `Consume write failed: ${(e as Error).message}` },
+      500,
     );
   }
-  return c.json({ success: true, data: { id, consumedAt: nowIso } });
+  return c.json({
+    success: true,
+    data: {
+      id,
+      docIdx,
+      consumedDocIdxs: nextIdxs,
+      consumedAt: shouldFinalise ? nowIso : null,
+    },
+  });
 });
 
 // ---------------------------------------------------------------------------

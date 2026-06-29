@@ -22,7 +22,7 @@ import {
   type RowVM,
 } from "./types";
 import { PendingLeaveRequests } from "../components/PendingLeaveRequests";
-import { logHoursSpec } from "./forms";
+import { logHoursSpec, hubFormSpec, deleteHub } from "./forms";
 import {
   type DetailConfig,
   type FlowStep,
@@ -2763,13 +2763,14 @@ const customerDetail: DetailConfig = {
   // Delivery Hubs + Recent Orders + Invoices. The design source's "Delivery
   // Hubs · N" sub-list plus a "Recent Orders · N" + "Invoices · N" reverse
   // lookup. Customer detail is read-only on mobile so these are display only.
-  subDocLists: (d, _resp, extras) => {
+  subDocLists: (d, _resp, extras, openForm) => {
     const cid = str(d, "id");
     const cname = str(d, "name");
     const lists: SubDocList[] = [];
 
     const hubs = asArr(d.deliveryHubs);
     if (hubs.length > 0) {
+      const customerId = str(d, "id");
       lists.push({
         title: `Delivery Hubs · ${hubs.length}`,
         rows: hubs.map((h) => {
@@ -2784,6 +2785,12 @@ const customerDetail: DetailConfig = {
             subLine: parts.length > 0 ? parts.join(" · ") : undefined,
             trailing: str(h, "code") || undefined,
             icon: "package" as const,
+            // CHANGELOG #2 — tap a hub row to open the Edit form. Mirrors
+            // desktop /customers per-hub inline editor. openForm comes from
+            // DocumentDetailScreen via the subDocLists callback's 4th arg.
+            onClick: openForm
+              ? () => openForm(hubFormSpec(d, customerId, h))
+              : undefined,
           };
         }),
       });

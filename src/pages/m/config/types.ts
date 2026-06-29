@@ -316,6 +316,9 @@ export type DetailConfig = {
     doc: RawRow,
     resp: unknown,
     extras?: Record<string, unknown>,
+    /** Open a FormSheet with the given spec — used by row.onClick for
+     * inline edit flows (e.g. Customer Hub row → Edit Hub form). */
+    openForm?: (spec: import("./form-types").FormSpec) => void,
   ) => SubDocList[];
   /**
    * Optional extra single-shot fetches the screen fires alongside the main

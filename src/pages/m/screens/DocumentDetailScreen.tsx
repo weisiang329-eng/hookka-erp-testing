@@ -243,7 +243,11 @@ function Inner({
             ...(eff.extraFetches?.c
               ? { [eff.extraFetches.c.key]: extraCData }
               : {}),
-          }) ?? []
+          },
+          // openForm callback — used by row.onClick handlers (e.g. Customer
+          // Hub Edit) to open a FormSheet with the spec.
+          setFormSpec,
+          ) ?? []
         ).filter((l) => l.rows.length || l.emptyText);
 
         // Audit History — automatic sub-list when auditResource is set.

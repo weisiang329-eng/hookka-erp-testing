@@ -41,14 +41,72 @@ const CACHE = `hookka-shell-${BUILD_VERSION}`;
 // every build.
 const SHELL = ['/worker', '/manifest.webmanifest', '/pwa-icon-192.png'];
 
+// Background pre-cache of all hashed build assets referenced by the
+// current /dashboard HTML. Solves the owner-reported case (2026-06-29)
+// where react-vendor.js took 38s to download on a flaky factory wifi,
+// stranding the user on a blank page until React arrived. With this:
+//
+//   1. First install (any visit) → fetch /dashboard, parse out every
+//      /assets/* link, cache them all in background. Next visit (or
+//      navigation to a new route) hits SW cache → 0 ms.
+//   2. New deploy → new index hash → SW updates → install re-runs →
+//      new chunk URLs precached IN BACKGROUND while the user keeps
+//      using the OLD cached version. By the time they reload, the new
+//      chunks are already local. No "38s react-vendor" wait.
+//
+// Safety: per-asset 8s timeout, total cap of 60 assets, allSettled so
+// one 404 (e.g. removed chunk between deploys) doesn't fail install.
+// Skipped if /dashboard fetch itself fails (offline at install time —
+// rare, but we don't want to block the SW activation on it).
+async function precacheBuildAssets(cache) {
+  try {
+    const indexResp = await fetch('/dashboard', { credentials: 'omit' });
+    if (!indexResp.ok) return;
+    const html = await indexResp.text();
+    // Match every /assets/<hash>.(js|css) referenced by <script> / <link> tags.
+    // Dedupe with a Set (preload + script tag often point at the same URL).
+    const urls = new Set();
+    const re = /\/assets\/[A-Za-z0-9_.-]+\.(?:js|css)/g;
+    let m;
+    while ((m = re.exec(html)) !== null) urls.add(m[0]);
+    const list = [...urls].slice(0, 60);
+    if (list.length === 0) return;
+    await Promise.allSettled(
+      list.map((url) =>
+        Promise.race([
+          cache.add(url),
+          // Per-asset 8s timeout — a single slow chunk can't hold up
+          // the rest of the precache, and the install still succeeds.
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('precache-timeout')), 8000),
+          ),
+        ]).catch(() => {}),
+      ),
+    );
+  } catch {
+    // /dashboard unreachable at install (offline / DNS hiccup) — skip
+    // precache and let the on-demand cache-first rule below populate it
+    // when the user actually navigates. Better to install the SW with
+    // an empty asset cache than to wedge the whole install loop.
+  }
+}
+
 self.addEventListener('install', (event) => {
   // Pre-cache the shell, but don't fail the whole install if one URL 404s.
+  // Then kick off the build-asset precache (background; we don't await it
+  // for install to complete — skipWaiting fires immediately, asset
+  // download continues after the SW takes over).
   event.waitUntil(
     caches
       .open(CACHE)
-      .then((cache) =>
-        Promise.allSettled(SHELL.map((url) => cache.add(url))),
-      )
+      .then(async (cache) => {
+        await Promise.allSettled(SHELL.map((url) => cache.add(url)));
+        // Start the heavy precache but don't await — install resolves
+        // immediately so the new SW activates fast. Background fetches
+        // populate the cache over the next ~30s on a normal connection,
+        // longer on a slow one — either way, they're invisible.
+        precacheBuildAssets(cache);
+      })
       .then(() => self.skipWaiting()),
   );
 });

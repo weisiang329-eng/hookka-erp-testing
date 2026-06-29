@@ -34,7 +34,7 @@ import { Input } from "@/components/ui/input";
 import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { PurchaseOrder, Supplier } from "@/types";
+import type { PurchaseOrder, Supplier, RawMaterial, SupplierMaterialBinding } from "@/types";
 import { ArrowLeft, Save, ScanLine, Plus, Trash2, ChevronDown, ChevronUp, Ship, FolderInput } from "lucide-react";
 import {
   ScanSupplierModal,
@@ -124,6 +124,16 @@ function GRNCreatePage() {
   // Purchase Company registry — feeds the per-GRN buying-company dropdown.
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code: string; name: string; isActive?: boolean }> }>("/api/organisations");
 
+  // Raw materials + supplier↔material bindings — fed to the scan-create wizard
+  // (mode="create-grn") so its strict-pick MaterialPickers + binding lookups work.
+  const { data: invResp } = useCachedJson<{
+    success?: boolean;
+    data?: { rawMaterials?: RawMaterial[] };
+  }>("/api/inventory");
+  const { data: bindingsResp } = useCachedJson<
+    { success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]
+  >("/api/supplier-materials");
+
   const purchaseOrders: PurchaseOrder[] = useMemo(
     () =>
       (poResp as { data?: PurchaseOrder[] } | undefined)?.data ??
@@ -135,6 +145,20 @@ function GRNCreatePage() {
     () => supResp?.data ?? [],
     [supResp],
   );
+
+  // Active raw materials (for the scan-create wizard's MaterialPicker).
+  const allRawMaterials: RawMaterial[] = useMemo(
+    () =>
+      (invResp?.success ? invResp.data?.rawMaterials ?? [] : []).filter(
+        (rm) => rm.isActive,
+      ),
+    [invResp],
+  );
+
+  const supplierMaterialBindings: SupplierMaterialBinding[] = useMemo(() => {
+    const b = (bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? bindingsResp;
+    return Array.isArray(b) ? b : [];
+  }, [bindingsResp]);
 
   // ── PO link state ─────────────────────────────────────────────────────────
   // The page is "PO-linked" whenever selectedPO is set (deep-link or convert).
@@ -148,6 +172,10 @@ function GRNCreatePage() {
   // Supplier's own delivery-order number on this receipt (owner 2026-06-21).
   const [supplierDoNo, setSupplierDoNo] = useState("");
   const [scanOpen, setScanOpen] = useState(false);
+  // The scan-create wizard (mode="create-grn"): a separate flow from the
+  // in-page apply-mode "Scan supplier document" autofill. Opens via the
+  // top-right "Scan & Create GRNs" button or the ?scan=1 deep-link.
+  const [scanCreateOpen, setScanCreateOpen] = useState(false);
   const [convertOpen, setConvertOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   // OCR gate (owner ruling 2026-06-21, mirrors PI create): a GRN built from a
@@ -187,13 +215,22 @@ function GRNCreatePage() {
   );
 
   // ── Auto-scan gate ─────────────────────────────────────────────────────────
+  // ?scan=1 + locked PO → open the in-page apply-mode autofill (legacy).
+  // ?scan=1 alone (no PO) → open the create-grn wizard so the operator can
+  // scan multiple delivery notes straight into DRAFT GRNs.
   const autoScanFired = useRef(false);
   useEffect(() => {
-    if (autoScan && po && !autoScanFired.current) {
+    if (autoScanFired.current) return;
+    if (autoScan && po) {
       autoScanFired.current = true;
+      /* eslint-disable-next-line react-hooks/set-state-in-effect */
       setScanOpen(true);
+    } else if (autoScan && !isLockedPO) {
+      autoScanFired.current = true;
+      /* eslint-disable-next-line react-hooks/set-state-in-effect */
+      setScanCreateOpen(true);
     }
-  }, [autoScan, po]);
+  }, [autoScan, po, isLockedPO]);
   // NOTE: ocrUsed is flipped in applyOcr (the authoritative moment a scanned
   // document actually builds the lines), covering both the PO-linked and manual
   // scan flows. We deliberately do NOT force it on the ?scan=1 deep-link alone:
@@ -618,6 +655,18 @@ function GRNCreatePage() {
             title="Pick a Purchase Order and its lines to pre-fill this receipt"
           >
             <FolderInput className="h-4 w-4" /> Convert from PO
+          </Button>
+        )}
+        {/* Scan & Create GRNs (multi-document wizard) — only when not deep-linked
+            to a locked PO; the in-page autofill is the right path when a PO is
+            already pinned. */}
+        {!isLockedPO && (
+          <Button
+            variant="outline"
+            onClick={() => setScanCreateOpen(true)}
+            title="Upload supplier delivery notes (multiple OK) and auto-create one DRAFT GRN per document"
+          >
+            <ScanLine className="h-4 w-4" /> Scan &amp; Create GRNs
           </Button>
         )}
         <Button
@@ -1304,7 +1353,7 @@ function GRNCreatePage() {
         onConfirm={handleConvert}
       />
 
-      {/* Scan supplier document modal */}
+      {/* Scan supplier document modal (apply mode — autofills this form's lines) */}
       <ScanSupplierModal
         open={scanOpen}
         onClose={() => setScanOpen(false)}
@@ -1312,6 +1361,38 @@ function GRNCreatePage() {
         supplierName={scanSupplierName}
         poContext={scanPoContext}
         onApply={applyOcr}
+      />
+
+      {/* Scan-create wizard (create-grn mode) — multi-document → DRAFT GRNs.
+          The wizard owns the entire OCR-to-GRN flow; this host page just
+          refreshes the GRN list cache and navigates on success. */}
+      <ScanSupplierModal
+        mode="create-grn"
+        open={scanCreateOpen}
+        onClose={() => setScanCreateOpen(false)}
+        suppliers={suppliers}
+        rawMaterials={allRawMaterials}
+        bindings={supplierMaterialBindings}
+        organisations={activeOrgs}
+        purchaseOrders={purchaseOrders}
+        defaultSupplierId={
+          isPoLinked ? po?.supplierId ?? null : (supplierId || null)
+        }
+        defaultPurchaseOrderId={isPoLinked ? selectedPO || null : null}
+        onCreated={(ids) => {
+          if (ids.length > 0) {
+            invalidateCachePrefix("/api/grn");
+            invalidateCachePrefix("/api/purchase-orders");
+            invalidateCachePrefix("/api/inventory");
+            invalidateCachePrefix("/api/raw-materials");
+            toast.success(
+              ids.length === 1
+                ? "Goods Receipt Note created"
+                : `${ids.length} Goods Receipt Notes created`,
+            );
+            navigate("/procurement/grn");
+          }
+        }}
       />
     </div>
   );

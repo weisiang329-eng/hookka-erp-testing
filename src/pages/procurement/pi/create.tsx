@@ -916,6 +916,7 @@ function CreatePurchaseInvoicePage() {
         bindings={supplierMaterialBindings}
         organisations={activeOrgs}
         defaultSupplierId={supplier?.id ?? null}
+        defaultPurchaseOrderId={sourcePurchaseOrderId}
         purchaseOrders={allPurchaseOrders}
         onCreated={(ids) => {
           if (ids.length > 0) {

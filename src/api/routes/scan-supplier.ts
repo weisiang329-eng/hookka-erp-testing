@@ -87,6 +87,11 @@ type ExtractionResult = {
   docNo?: string | null;
   docDate?: string | null;
   currency?: string | null;
+  // The buyer-side PO ref the supplier wrote on their doc (their "Customer
+  // P.O." / "B.O. NO." / "Cust DO" field). When present, the FE matches
+  // this against /api/purchase-orders to auto-link the PI/GRN to the
+  // upstream PO. Owner ruling 2026-06-29: must be extracted for Convert.
+  customerPoRef?: string | null;
   lines?: ExtractedLine[];
   subtotal?: number | null;
   tax?: number | null;
@@ -136,6 +141,7 @@ function sanitizeExtraction(
     docNo: str(raw.docNo),
     docDate: str(raw.docDate),
     currency: str(raw.currency) ?? "MYR",
+    customerPoRef: str(raw.customerPoRef),
     lines,
     subtotal: num(raw.subtotal),
     tax: num(raw.tax),
@@ -152,6 +158,7 @@ EXTRACTION RULES
 - docType: "DELIVERY_NOTE" if it is a delivery order/note (no prices, or "D/O"), "INVOICE" if it is a tax invoice (has prices + invoice no.), else "OTHER".
 - docNo: the supplier's own document number (their DO no. or invoice no.), verbatim incl. any prefix.
 - docDate: ISO YYYY-MM-DD. Convert DD/MM/YYYY (Malaysian convention) correctly — 03/06/2026 is 2026-06-03.
+- customerPoRef: the BUYER-side purchase order reference the supplier wrote on their doc. Look for labels like "Customer P.O.", "Cust P.O.", "P.O. No", "B.O. NO.", "Buyer Order", "Cust DO No.", "Customer Order". Return the value verbatim (e.g. "2606-007", "PO-000123", "K20061904"). null if not printed. This lets the buyer auto-link the scanned doc to an existing purchase order.
 - currency: ISO code, default "MYR" if a Malaysian RM document doesn't say otherwise.
 - lines[]: one object per goods line. Skip non-goods rows (subtotal, SST, rounding, freight-as-note, "Thank you" lines).
     - supplierCode: the supplier's item / material code if printed (the code in their own catalogue), else null.
@@ -165,7 +172,7 @@ EXTRACTION RULES
 NUMBERS: plain numbers, no currency symbol, no commas. Use a dot decimal. If a field is genuinely absent, use null — never guess.
 
 OUTPUT: VALID JSON ONLY, this exact shape, no preamble, no markdown, no chain-of-thought. First character '{', last character '}':
-{"supplierName": string|null, "docType": "DELIVERY_NOTE"|"INVOICE"|"OTHER", "docNo": string|null, "docDate": string|null, "currency": string|null, "lines": [{"supplierCode": string|null, "description": string|null, "qty": number|null, "uom": string|null, "unitPrice": number|null, "amount": number|null}], "subtotal": number|null, "tax": number|null, "total": number|null}`;
+{"supplierName": string|null, "docType": "DELIVERY_NOTE"|"INVOICE"|"OTHER", "docNo": string|null, "docDate": string|null, "currency": string|null, "customerPoRef": string|null, "lines": [{"supplierCode": string|null, "description": string|null, "qty": number|null, "uom": string|null, "unitPrice": number|null, "amount": number|null}], "subtotal": number|null, "tax": number|null, "total": number|null}`;
 
 // Build the per-supplier rule block (Phase 1's distilled output) for the prompt.
 function formatSupplierRules(

@@ -63,6 +63,10 @@ export type SupplierExtraction = {
   docNo?: string | null;
   docDate?: string | null;
   currency?: string | null;
+  /** Buyer-side PO ref the supplier printed (their "Customer P.O." / "B.O.
+   *  NO." field). Used to auto-link the scanned doc to an existing
+   *  purchase order. */
+  customerPoRef?: string | null;
   lines?: ExtractedSupplierLine[];
   subtotal?: number | null;
   tax?: number | null;
@@ -148,6 +152,30 @@ function makeUploadId(): string {
 // Borrowed verbatim from the 431-line predecessor: retry transient OCR
 // failures + abort wedged calls past 90s. One file per request — multi-file
 // callers run this in parallel.
+// Auto-link the scanned doc to an existing PO when the supplier printed our
+// PO ref on it (their "Customer P.O." / "B.O. NO." / "Cust DO" field). Falls
+// back to the host-supplied default if no match. The match is fuzzy
+// (uppercase + strip non-alphanumeric, then equality OR endsWith either way)
+// because real-world refs drift: "2606-007" vs "PO-2606-007" vs "PO2606007".
+function autoLinkPoId(
+  ex: SupplierExtraction,
+  purchaseOrders: PurchaseOrder[],
+  fallback: string | null | undefined,
+): string | null {
+  const raw = (ex.customerPoRef ?? "").trim();
+  if (raw) {
+    const ref = raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (ref) {
+      const hit = purchaseOrders.find((p) => {
+        const poNo = (p.poNo ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+        return poNo && (poNo === ref || poNo.endsWith(ref) || ref.endsWith(poNo));
+      });
+      if (hit) return hit.id;
+    }
+  }
+  return fallback ?? null;
+}
+
 async function runExtractOnce(
   file: File,
   opts: {
@@ -849,7 +877,10 @@ function CreatePIWizard({
         createError: null,
         supplierId: sId,
         purchaseOrgCode: orgCode,
-        purchaseOrderId: defaultPurchaseOrderId ?? null,
+        // Auto-link to an existing PO when the supplier wrote our PO ref
+        // on their doc (their "Customer P.O.", "B.O. NO.", etc.). Falls
+        // back to the host-supplied default if no match.
+        purchaseOrderId: autoLinkPoId(ex, purchaseOrders, defaultPurchaseOrderId),
         invoiceDate: docDate,
         supplierInvoiceNo: supInvNo,
         supplierDoNo: supDoNo,
@@ -1835,18 +1866,15 @@ function PICard({
                       <MaterialPicker
                         className="h-8"
                         inputClassName="h-8 text-xs"
-                        placeholder="(pick from catalog)"
-                        value={line.materialName || line.description}
+                        // Unbound row: empty input so the dropdown shows the
+                        // FULL catalog on click (mirrors SO picker behaviour).
+                        // The OCR's description still shows in the next column
+                        // as the hint of what the operator is mapping.
+                        placeholder={line.description?.slice(0, 40) || "(pick from catalog)"}
+                        value=""
                         options={materialOptions}
                         strictPick
                         onPick={(o) => {
-                          // Bidirectional: when picking Internal Code, also
-                          // fill Supplier SKU via reverse-binding lookup. If
-                          // no binding exists for this (supplier, material)
-                          // pair, leave the SKU blank — the row shows a
-                          // "binding missing" hint and the operator can
-                          // either add the binding (Suppliers > Materials)
-                          // or pick the Supplier SKU manually.
                           const reverse = card.supplierId
                             ? resolveBindingForMaterial(card.supplierId, o.itemCode)
                             : null;
@@ -1861,13 +1889,15 @@ function PICard({
                     )}
                   </td>
                   {/* Supplier SKU — strict picker from this supplier's bindings.
-                      Picking auto-fills Internal Code + name via binding lookup. */}
+                      Picking auto-fills Internal Code + name via binding lookup.
+                      Empty input when no value set so the dropdown shows the
+                      supplier's full binding list on click. */}
                   <td className="px-1 py-1">
                     <MaterialPicker
                       className="h-8"
                       inputClassName="h-8 text-xs"
                       placeholder="SKU"
-                      value={line.supplierSku}
+                      value={line.supplierSku && line.materialCode ? line.supplierSku : ""}
                       options={supplierSkuOptions}
                       strictPick
                       onPick={(o) => {
@@ -2336,7 +2366,10 @@ function CreateGRNWizard({
         createError: null,
         supplierId: sId,
         purchaseOrgCode: orgCode,
-        purchaseOrderId: defaultPurchaseOrderId ?? null,
+        // Auto-link to an existing PO when the supplier wrote our PO ref
+        // on their doc (their "Customer P.O.", "B.O. NO.", etc.). Falls
+        // back to the host-supplied default if no match.
+        purchaseOrderId: autoLinkPoId(ex, purchaseOrders, defaultPurchaseOrderId),
         receiveDate: docDate,
         supplierDoNo: supDoNo,
         markedGold: false,
@@ -3106,8 +3139,8 @@ function GRNCard({
                       <MaterialPicker
                         className="h-8"
                         inputClassName="h-8 text-xs"
-                        placeholder="(pick from catalog)"
-                        value={line.materialName || line.description}
+                        placeholder={line.description?.slice(0, 40) || "(pick from catalog)"}
+                        value=""
                         options={materialOptions}
                         strictPick
                         onPick={(o) => {
@@ -3129,7 +3162,7 @@ function GRNCard({
                       className="h-8"
                       inputClassName="h-8 text-xs"
                       placeholder="SKU"
-                      value={line.supplierSku}
+                      value={line.supplierSku && line.materialCode ? line.supplierSku : ""}
                       options={supplierSkuOptions}
                       strictPick
                       onPick={(o) => {

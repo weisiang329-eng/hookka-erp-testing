@@ -34,6 +34,7 @@ import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
+import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
 import { DOC_DATE_FAMILIES, stripLegSuffix, parseSourceIdDate } from "../../lib/doc-date";
 import {
   prefixForPartyType,
@@ -5148,10 +5149,20 @@ async function loadMaterialCostData(
       .prepare("SELECT id, productionOrderId, completedDate, originalQty FROM fg_batches WHERE orgId = ?")
       .bind(orgId)
       .all<{ id: string; productionOrderId: string | null; completedDate: string | null; originalQty: number | null }>(),
+    // FG relief signal: cost_ledger FG_DELIVERED rows. consumeFGBatchesForDO
+    // (do-cost-cascade.ts) emits one row per layer-slice on every DO→DELIVERED
+    // with (date, qty, batchId), where qty is the SAME quantity decremented
+    // from fg_batches.remainingQty — i.e. the SAME unit as fg_batches.originalQty
+    // (which is piece-level when a product has >1 piece). This replaces the old
+    // `fg_units.batchId` count, which was always 0 because fg_units.batchId is
+    // never written (fg-units.ts INSERT omits it) → FG closing accumulated
+    // without bound. Keyed by batchId = fg_batches.id (real, non-null here).
     db
-      .prepare("SELECT batchId, deliveredAt FROM fg_units WHERE orgId = ? AND deliveredAt IS NOT NULL")
+      .prepare(
+        "SELECT batchId, date, qty FROM cost_ledger WHERE orgId = ? AND type = 'FG_DELIVERED' AND batchId IS NOT NULL",
+      )
       .bind(orgId)
-      .all<{ batchId: string | null; deliveredAt: string | null }>(),
+      .all<{ batchId: string | null; date: string | null; qty: number | null }>(),
   ]);
 
   // 3. PI-weighted-average layer cost, batched into one map keyed PO+material.
@@ -5334,41 +5345,28 @@ async function loadMaterialCostData(
   // 8. FG as of D = Σ over batches completed by D, of undelivered qty × FIFO
   //    unit cost. Unit cost = (PO FIFO material@completion + PO labour@completion)
   //    / original_qty — re-valued from the engine, NOT fg_batches.unit_cost_sen.
-  //    Undelivered qty = original_qty − COUNT(fg_units of this batch delivered<=D).
-  const deliveredByBatch = new Map<string, { date: string }[]>();
-  for (const u of fguRes.results ?? []) {
-    if (!u.batchId) continue;
-    const date = (u.deliveredAt ?? "").slice(0, 10);
-    if (!date) continue;
-    let arr = deliveredByBatch.get(u.batchId);
-    if (!arr) { arr = []; deliveredByBatch.set(u.batchId, arr); }
-    arr.push({ date });
-  }
-  const deliveredAsOf = (batchId: string, dIso: string): number => {
-    const arr = deliveredByBatch.get(batchId);
-    if (!arr) return 0;
-    let n = 0;
-    for (const e of arr) if (e.date <= dIso) n += 1;
-    return n;
-  };
+  //    Undelivered qty = original_qty − Σ FG_DELIVERED.qty for this batch (date<=D).
+  //
+  //    Relief signal = cost_ledger FG_DELIVERED rows (fguRes), summed per batch
+  //    up to D. This is the only as-of-date, qty-correct, real-batchId signal:
+  //    its qty is the exact quantity decremented from fg_batches.remainingQty,
+  //    so it is in the SAME unit as originalQty by construction. (The old
+  //    fg_units.batchId count was always 0 — batchId is never written — so FG
+  //    closing accumulated without bound. A raw COUNT(fg_units) would also be
+  //    wrong: fg_units is piece-level (units×pieces rows per PO).)
+  const deliveredAsOf = buildDeliveredAsOf(fguRes.results ?? []);
   const batches = fgbRes.results ?? [];
-  const fgAsOf = (dIso: string): number => {
-    let s = 0;
-    for (const b of batches) {
-      const completed = (b.completedDate ?? "").slice(0, 10);
-      if (!completed || completed > dIso) continue;        // not completed by D
-      const origQty = Number(b.originalQty) || 0;
-      if (origQty <= 0) continue;
-      const undelivered = origQty - deliveredAsOf(b.id, dIso);
-      if (undelivered <= 0) continue;                       // fully shipped by D
-      const poId = b.productionOrderId;
-      if (!poId) continue;
-      // FIFO unit cost at completion (material + labour) / original_qty.
-      const unitCostSen = (fifoMaterialAsOf(poId, completed) + laborAsOf(poId, completed)) / origQty;
-      s += Math.round(undelivered * unitCostSen);
-    }
-    return s;
-  };
+  // unitCostResolver returns the TOTAL completion cost basis (FIFO material +
+  // labour) in sen for the PO; fgClosingSen divides by originalQty and rounds
+  // the per-batch product once (cost basis unchanged from the original fgAsOf).
+  const fgAsOf = (dIso: string): number =>
+    fgClosingSen({
+      batches,
+      asOfIso: dIso,
+      deliveredAsOf,
+      unitCostResolver: (poId, completed) =>
+        fifoMaterialAsOf(poId, completed) + laborAsOf(poId, completed),
+    });
 
   // Precompute WIP/FG stock value as of EACH month-end so a window's open/close
   // are O(1) lookups (open of a window = value at the end of the prior month).

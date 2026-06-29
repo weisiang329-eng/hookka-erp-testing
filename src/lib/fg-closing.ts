@@ -1,0 +1,118 @@
+// ---------------------------------------------------------------------------
+// fg-closing.ts — pure, as-of-date finished-goods closing-stock valuation.
+//
+// Extracted from accounting.ts `loadMaterialCostData` so the relief math is
+// unit-testable in isolation. The P&L's finished-goods CLOSING stock is:
+//
+//   fgCloseSen(D) = Σ over fg_batches completed by D of
+//                     undeliveredQty(batch, D) × unitCostSen(batch)
+//
+//   undeliveredQty(batch, D) = originalQty − deliveredAsOf(batch, D)
+//   unitCostSen(batch)       = (FIFO material@completion + labour@completion)
+//                              / originalQty                  (per-unit-of-originalQty)
+//
+// THE BUG THIS FIXES (FG closing accumulated without bound):
+//   The old relief signal counted `fg_units` rows keyed on `fg_units.batchId`,
+//   but that column is ALWAYS NULL (fg-units.ts never writes it) → delivered
+//   was always 0 → undelivered = originalQty forever → FG closing = every
+//   batch ever completed (~RM 1,355,189).
+//
+//   The correct as-of-date relief signal is the `cost_ledger` FG_DELIVERED
+//   rows emitted by `consumeFGBatchesForDO` (do-cost-cascade.ts) on every
+//   DO → DELIVERED transition: each carries (date, qty, batchId) where `qty`
+//   is the SAME quantity decremented from `fg_batches.remainingQty`, so it is
+//   in the SAME unit as `originalQty` BY CONSTRUCTION — regardless of whether
+//   originalQty is a unit count or a piece count.  See accounting.ts.
+//
+// Money is integer sen; quantities are exact counts. unitCostSen is divided by
+// originalQty (may be fractional) and the per-batch product is rounded once —
+// identical to the original inline `fgAsOf`.
+// ---------------------------------------------------------------------------
+
+/** One FG_DELIVERED relief event: a quantity delivered out of a batch on a date. */
+export type FgDeliveredRow = {
+  /** fg_batches.id this relief applies to (cost_ledger.batchId). */
+  batchId: string | null;
+  /** Delivery date (cost_ledger.date); only the YYYY-MM-DD prefix is used. */
+  date: string | null;
+  /** Quantity relieved — same unit as fg_batches.originalQty. */
+  qty: number | null;
+};
+
+/** An FG batch row needed to value undelivered closing stock. */
+export type FgBatchRow = {
+  id: string;
+  productionOrderId: string | null;
+  completedDate: string | null;
+  originalQty: number | null;
+};
+
+/**
+ * Build an as-of-date delivered-quantity accessor from FG_DELIVERED rows.
+ *
+ * Returns `deliveredAsOf(batchId, dIso)` = Σ qty of FG_DELIVERED rows for that
+ * batch whose date ≤ dIso. Rows with a null/empty batchId or non-positive qty
+ * are ignored. Dates are compared on their YYYY-MM-DD prefix (ISO-sortable).
+ */
+export function buildDeliveredAsOf(
+  rows: Iterable<FgDeliveredRow>,
+): (batchId: string, dIso: string) => number {
+  const byBatch = new Map<string, { date: string; qty: number }[]>();
+  for (const r of rows) {
+    if (!r.batchId) continue;
+    const date = (r.date ?? "").slice(0, 10);
+    if (!date) continue;
+    const qty = Number(r.qty) || 0;
+    if (qty <= 0) continue;
+    let arr = byBatch.get(r.batchId);
+    if (!arr) {
+      arr = [];
+      byBatch.set(r.batchId, arr);
+    }
+    arr.push({ date, qty });
+  }
+  return (batchId: string, dIso: string): number => {
+    const arr = byBatch.get(batchId);
+    if (!arr) return 0;
+    let q = 0;
+    for (const e of arr) if (e.date <= dIso) q += e.qty;
+    return q;
+  };
+}
+
+/**
+ * Closing finished-goods stock value (integer sen) as of `asOfIso`.
+ *
+ * For each batch completed on/before `asOfIso`, values the still-undelivered
+ * quantity at its FIFO unit cost. `unitCostResolver(poId, completedIso)` must
+ * return the batch's TOTAL cost basis at completion (FIFO material + labour) in
+ * sen for the production order; this function divides by originalQty and rounds
+ * the per-batch product once, exactly as the original inline `fgAsOf`.
+ *
+ * `deliveredAsOf` supplies the relief quantity (see {@link buildDeliveredAsOf}).
+ * undelivered is clamped at 0 so an over-relieved batch never goes negative.
+ */
+export function fgClosingSen(args: {
+  batches: Iterable<FgBatchRow>;
+  asOfIso: string;
+  deliveredAsOf: (batchId: string, dIso: string) => number;
+  /** TOTAL completion cost basis (FIFO material + labour) in sen for the PO. */
+  unitCostResolver: (poId: string, completedIso: string) => number;
+}): number {
+  const { batches, asOfIso, deliveredAsOf, unitCostResolver } = args;
+  let s = 0;
+  for (const b of batches) {
+    const completed = (b.completedDate ?? "").slice(0, 10);
+    if (!completed || completed > asOfIso) continue; // not completed by D
+    const origQty = Number(b.originalQty) || 0;
+    if (origQty <= 0) continue;
+    const undelivered = origQty - deliveredAsOf(b.id, asOfIso);
+    if (undelivered <= 0) continue; // fully shipped by D
+    const poId = b.productionOrderId;
+    if (!poId) continue;
+    // Per-unit-of-originalQty FIFO cost = total completion basis / originalQty.
+    const unitCostSen = unitCostResolver(poId, completed) / origQty;
+    s += Math.round(undelivered * unitCostSen);
+  }
+  return s;
+}

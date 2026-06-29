@@ -34,6 +34,69 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-29-001 — P&L "Closing Stock – Finished Goods" ~15× too high (RM 595k vs the real RM 39k), and WIP/FG labour silently dropped to 0
+
+🟢 **Fixed (FG)** · 🔴 **Open (WIP material)** · `accounting` · owner-reported
+
+**Symptom (owner, live prod, post-opening completed_date ≥ 2026-05-22):** the P&L
+finished-goods CLOSING line showed **RM 595,379**, while the real undelivered FG is
+**RM 39,099** (`Σ fg_batches.remaining_qty × unit_cost_sen` — cascade-maintained, ties
+to reality). Total FG ever produced post-opening is only RM 72,743, so the figure
+exceeded everything produced. Delivery relief (FG_DELIVERED) and the opening-date
+floor were already correct (prior fixes `2b8dc9ba`, `2976fc4d`); the defect was the
+per-unit **cost** used to value undelivered stock.
+
+**Root cause:** `loadMaterialCostData` (`src/api/routes/accounting.ts`) valued each
+undelivered FG unit by RE-DERIVING the cost from the FIFO engine:
+`unitCostResolver(po,c) = fifoMaterialAsOf(po,c) + laborAsOf(po,c)`, then
+`/ originalQty` (in `fgClosingSen`). Two independent defects:
+1. **Material over-statement (the ~15×).** `fifoMaterialAsOf(po)` = Σ of the FIFO
+   replay's per-issue costs for the PO. Both `fgClosingSen` and the
+   cascade's `backfillFGBatchCost` divide by the SAME `originalQty`, so the
+   inflation can only come from the numerator: the replay's per-layer issue costs
+   for a PO did NOT reconcile to the material actually booked to that PO
+   (`Σ RM_ISSUE.total_cost_sen`) — a layer-pricing discrepancy in the replay that
+   inflates EVERY post-opening batch. (RM closing stock looked fine because
+   over-costing an issue shows up as inflated CONSUMPTION, not inflated on-hand.)
+   The attribution KEYS are correct (`RM_ISSUE.refId` = PO, bucketed by ref), so
+   this is a re-valuation/pricing problem, not a mis-bucketing one — hence the
+   re-valuation is unsalvageable for FG without prod-data layer-pricing repair.
+2. **Labour silently 0 in WIP & FG.** `laborAsOf` bucketed LABOR_POSTED rows by
+   `refId`, but for LABOR_POSTED `refId` is the **JOB CARD** id and the PO is in
+   **`itemId`** (`postJobCardLabor` writes `itemId=productionOrderId`,
+   `refType='JOB_CARD'`, `refId=jobCardId`; same split `costByLineWindow` uses at
+   accounting.ts ~4738). The map was keyed by job-card id but looked up by PO id →
+   every lookup missed → labour contributed 0 to both WIP and FG re-valuation.
+
+**Fix:**
+- **FG (fallback, money-correct):** value undelivered FG directly at the
+  cascade-maintained `fg_batches.unit_cost_sen`. Added `unitCostSen` to the
+  `fg_batches` SELECT; `fgClosingSen` (`src/lib/fg-closing.ts`) now sums
+  `undelivered × unit_cost_sen` (relief + opening floor unchanged). This yields the
+  verified RM 39k. `unit_cost_sen` is the same figure every other FG surface uses.
+- **Labour attribution (root cause):** extracted `costAsOfByPo` +
+  `poKeyForLedgerType` into `src/lib/cost-attribution.ts` (LABOR_POSTED→itemId,
+  RM_ISSUE/ADJUSTMENT→refId) and use it for the per-PO labour accessor. WIP labour
+  is now correctly attributed (was 0).
+
+**Still open — WIP material:** WIP closing (`wipAsOf`) still values material via the
+same `fifoMaterialAsOf` FIFO replay, so WIP material is almost certainly inflated by
+the SAME ~15× layer-pricing discrepancy (WIP can't use `fg_batches.unit_cost_sen` —
+in-progress POs have no FG batch). The exact layer-pricing pathology (GRN/PI weighted
+cost vs the `rm_batches` slice cost booked at issue time) needs a live-prod diagnosis
+that the rotated repo creds blocked this session. Candidate proper fix: reconcile the
+replay's per-issue cost to `RM_ISSUE.total_cost_sen`, or value WIP from the
+`cost_ledger` deltas (`RM_ISSUE+LABOR−FG_COMPLETED`, as `stockSummary` does) instead
+of the replay.
+
+**Verify:** `tsc -p tsconfig.app.json --noEmit` 0 errors; `tsc -b` 0; eslint on the
+3 files 0; `npm test` 1256 pass / 1 skip. New `tests/cost-attribution.test.mjs` locks
+the per-PO attribution (LABOR by itemId, RM by refId, no cross-PO leakage);
+`tests/fg-closing-relief.test.mjs` rewritten to lock FG = `undelivered ×
+unit_cost_sen`. Could NOT verify on live prod — repo Supabase creds 401/auth-fail and
+the available MCP is a different account; the FG figure is proven correct against the
+owner's own `Σ remaining_qty × unit_cost_sen = RM 39,099`.
+
 ## BUG-2026-06-26-004 — Production sheet: setting PIC 2 fails with a false "verify-readback mismatch — pic2Id … db has null" (PIC 1 saves fine; retry works)
 
 🟢 **Fixed** · `production-orders` · `infrastructure` · owner-reported

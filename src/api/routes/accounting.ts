@@ -35,6 +35,7 @@ import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
 import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
+import { costAsOfByPo } from "../../lib/cost-attribution";
 import { DOC_DATE_FAMILIES, stripLegSuffix, parseSourceIdDate } from "../../lib/doc-date";
 import {
   prefixForPartyType,
@@ -5146,9 +5147,9 @@ async function loadMaterialCostData(
       .bind(orgId)
       .all<{ id: string; startDate: string | null; completedDate: string | null; status: string | null }>(),
     db
-      .prepare("SELECT id, productionOrderId, completedDate, originalQty FROM fg_batches WHERE orgId = ?")
+      .prepare("SELECT id, productionOrderId, completedDate, originalQty, unitCostSen FROM fg_batches WHERE orgId = ?")
       .bind(orgId)
-      .all<{ id: string; productionOrderId: string | null; completedDate: string | null; originalQty: number | null }>(),
+      .all<{ id: string; productionOrderId: string | null; completedDate: string | null; originalQty: number | null; unitCostSen: number | null }>(),
     // FG relief signal: cost_ledger FG_DELIVERED rows. consumeFGBatchesForDO
     // (do-cost-cascade.ts) emits one row per layer-slice on every DO→DELIVERED
     // with (date, qty, batchId), where qty is the SAME quantity decremented
@@ -5307,25 +5308,13 @@ async function loadMaterialCostData(
   };
 
   // 6b. Per-PO labour cost as of a date D = Σ LABOR_POSTED.total_cost_sen for
-  //     that PO (cost_ledger.ref_id = PO) with date <= D.
-  const laborByPo = new Map<string, { date: string; sen: number }[]>();
-  for (const l of clRes.results ?? []) {
-    if (l.type !== "LABOR_POSTED") continue;
-    const ref = l.refId;
-    if (!ref) continue;
-    const date = (l.date ?? "").slice(0, 10);
-    if (!date) continue;
-    let arr = laborByPo.get(ref);
-    if (!arr) { arr = []; laborByPo.set(ref, arr); }
-    arr.push({ date, sen: Number(l.totalCostSen) || 0 });
-  }
-  const laborAsOf = (poId: string, dIso: string): number => {
-    const arr = laborByPo.get(poId);
-    if (!arr) return 0;
-    let s = 0;
-    for (const e of arr) if (e.date <= dIso) s += e.sen;
-    return s;
-  };
+  //     that PO with date <= D. ATTRIBUTION (locked by cost-attribution.test):
+  //     for LABOR_POSTED the PO is in `itemId` — postJobCardLabor
+  //     (po-cost-cascade.ts) writes itemId=productionOrderId, refType='JOB_CARD',
+  //     refId=jobCardId. (RM_ISSUE is the opposite: refId=PO.) The previous code
+  //     bucketed by refId (the JOB CARD id) but looked up by poId, so every
+  //     lookup missed and labour was silently 0 in WIP & FG.
+  const laborAsOf = costAsOfByPo(clRes.results ?? [], "LABOR_POSTED");
 
   // 7. WIP as of D = Σ over production_orders in progress at D of
   //    (FIFO material issued so far + labour posted so far).
@@ -5342,10 +5331,16 @@ async function loadMaterialCostData(
     return s;
   };
 
-  // 8. FG as of D = Σ over batches completed by D, of undelivered qty × FIFO
-  //    unit cost. Unit cost = (PO FIFO material@completion + PO labour@completion)
-  //    / original_qty — re-valued from the engine, NOT fg_batches.unit_cost_sen.
+  // 8. FG as of D = Σ over batches completed by D, of undelivered qty ×
+  //    fg_batches.unit_cost_sen (the cascade-maintained per-unit cost).
   //    Undelivered qty = original_qty − Σ FG_DELIVERED.qty for this batch (date<=D).
+  //
+  //    NOT re-valued from the FIFO engine: a (PO FIFO material + labour)/qty
+  //    re-valuation came out ~15× too high on live prod (FG closing RM 595k vs
+  //    the real RM 39k) because the replay's per-layer issue costs for a PO did
+  //    not reconcile to the material booked to that PO. unit_cost_sen is the
+  //    figure backfillFGBatchCost rolls up from the same RM_ISSUE+LABOR rows and
+  //    is what every other FG surface uses — sane and authoritative.
   //
   //    Relief signal = cost_ledger FG_DELIVERED rows (fguRes), summed per batch
   //    up to D. This is the only as-of-date, qty-correct, real-batchId signal:
@@ -5364,17 +5359,15 @@ async function loadMaterialCostData(
   // only clears batches that were delivered via a DO; pre-opening / pre-cascade
   // legacy batches have no FG_DELIVERED rows and would otherwise pile up.)
   const fgOpeningIso = await getOpeningDate(db);
-  // unitCostResolver returns the TOTAL completion cost basis (FIFO material +
-  // labour) in sen for the PO; fgClosingSen divides by originalQty and rounds
-  // the per-batch product once (cost basis unchanged from the original fgAsOf).
+  // fgClosingSen values each batch's undelivered qty at its stored
+  // fg_batches.unit_cost_sen (cascade-maintained), clamps relief at 0, and floors
+  // out pre-opening batches.
   const fgAsOf = (dIso: string): number =>
     fgClosingSen({
       batches,
       asOfIso: dIso,
       deliveredAsOf,
       openingIso: fgOpeningIso,
-      unitCostResolver: (poId, completed) =>
-        fifoMaterialAsOf(poId, completed) + laborAsOf(poId, completed),
     });
 
   // Precompute WIP/FG stock value as of EACH month-end so a window's open/close

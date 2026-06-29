@@ -8,8 +8,8 @@
 //                     undeliveredQty(batch, D) × unitCostSen(batch)
 //
 //   undeliveredQty(batch, D) = originalQty − deliveredAsOf(batch, D)
-//   unitCostSen(batch)       = (FIFO material@completion + labour@completion)
-//                              / originalQty                  (per-unit-of-originalQty)
+//   unitCostSen(batch)       = fg_batches.unit_cost_sen  (cascade-maintained,
+//                              per-unit-of-originalQty; piece-level)
 //
 // THE BUG THIS FIXES (FG closing accumulated without bound):
 //   The old relief signal counted `fg_units` rows keyed on `fg_units.batchId`,
@@ -24,9 +24,8 @@
 //   in the SAME unit as `originalQty` BY CONSTRUCTION — regardless of whether
 //   originalQty is a unit count or a piece count.  See accounting.ts.
 //
-// Money is integer sen; quantities are exact counts. unitCostSen is divided by
-// originalQty (may be fractional) and the per-batch product is rounded once —
-// identical to the original inline `fgAsOf`.
+// Money is integer sen; quantities are exact counts. The per-batch product
+// (undelivered × unit_cost_sen) is rounded once.
 // ---------------------------------------------------------------------------
 
 /** One FG_DELIVERED relief event: a quantity delivered out of a batch on a date. */
@@ -45,6 +44,15 @@ export type FgBatchRow = {
   productionOrderId: string | null;
   completedDate: string | null;
   originalQty: number | null;
+  /**
+   * Cascade-maintained per-unit cost (sen) of THIS batch — the figure
+   * `backfillFGBatchCost` writes as `floor((ΣRM_ISSUE + ΣLABOR) / originalQty)`
+   * for the batch's own PO. This is the authoritative, sane per-unit value
+   * (it is what the rest of the ERP — stock pages, FG_COMPLETED ledger — uses),
+   * and it is in the SAME unit as `originalQty`/`remainingQty` (piece-level).
+   * Closing stock is valued from this directly; see {@link fgClosingSen}.
+   */
+  unitCostSen: number | null;
 };
 
 /**
@@ -84,10 +92,20 @@ export function buildDeliveredAsOf(
  * Closing finished-goods stock value (integer sen) as of `asOfIso`.
  *
  * For each batch completed on/before `asOfIso`, values the still-undelivered
- * quantity at its FIFO unit cost. `unitCostResolver(poId, completedIso)` must
- * return the batch's TOTAL cost basis at completion (FIFO material + labour) in
- * sen for the production order; this function divides by originalQty and rounds
- * the per-batch product once, exactly as the original inline `fgAsOf`.
+ * quantity at the batch's cascade-maintained per-unit cost
+ * (`fg_batches.unit_cost_sen`):  Σ undelivered(batch, D) × unitCostSen(batch).
+ *
+ * WHY stored unit cost, not a re-valuation:  the previous implementation
+ * re-derived the unit cost as (FIFO material@completion + labour@completion) /
+ * originalQty via a per-PO resolver.  On live prod that re-valuation came out
+ * ~15× too high (post-opening FG closing RM 595k vs the real RM 39k =
+ * Σ remaining_qty × unit_cost_sen), because the FIFO replay's per-layer costs
+ * for a PO's issues did not reconcile to the material actually booked to that PO
+ * (RM_ISSUE.total_cost_sen) — a layer-pricing discrepancy in the replay, not an
+ * attribution bug, so it inflated EVERY batch.  `fg_batches.unit_cost_sen` is the
+ * figure `backfillFGBatchCost` rolls up from the same RM_ISSUE+LABOR rows and is
+ * what every other FG surface in the ERP uses; it is sane and authoritative.  It
+ * is in the SAME unit as originalQty/remainingQty (piece-level) by construction.
  *
  * `deliveredAsOf` supplies the relief quantity (see {@link buildDeliveredAsOf}).
  * undelivered is clamped at 0 so an over-relieved batch never goes negative.
@@ -96,8 +114,6 @@ export function fgClosingSen(args: {
   batches: Iterable<FgBatchRow>;
   asOfIso: string;
   deliveredAsOf: (batchId: string, dIso: string) => number;
-  /** TOTAL completion cost basis (FIFO material + labour) in sen for the PO. */
-  unitCostResolver: (poId: string, completedIso: string) => number;
   /**
    * Opening-date floor (YYYY-MM-DD) or null. Batches completed BEFORE this are
    * pre-opening finished goods — they belong to the seeded opening inventory,
@@ -107,7 +123,7 @@ export function fgClosingSen(args: {
    */
   openingIso?: string | null;
 }): number {
-  const { batches, asOfIso, deliveredAsOf, unitCostResolver, openingIso } = args;
+  const { batches, asOfIso, deliveredAsOf, openingIso } = args;
   let s = 0;
   for (const b of batches) {
     const completed = (b.completedDate ?? "").slice(0, 10);
@@ -117,10 +133,9 @@ export function fgClosingSen(args: {
     if (origQty <= 0) continue;
     const undelivered = origQty - deliveredAsOf(b.id, asOfIso);
     if (undelivered <= 0) continue; // fully shipped by D
-    const poId = b.productionOrderId;
-    if (!poId) continue;
-    // Per-unit-of-originalQty FIFO cost = total completion basis / originalQty.
-    const unitCostSen = unitCostResolver(poId, completed) / origQty;
+    // Cascade-maintained per-unit cost (sen), same unit as undelivered.
+    const unitCostSen = Number(b.unitCostSen) || 0;
+    if (unitCostSen <= 0) continue; // cost not yet rolled up → contributes 0
     s += Math.round(undelivered * unitCostSen);
   }
   return s;

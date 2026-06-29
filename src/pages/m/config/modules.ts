@@ -1386,15 +1386,26 @@ const rawMaterialDetail: DetailConfig = {
       key: "usedIn",
       url: (id) => `/api/raw-materials/${encodeURIComponent(id)}/used-in`,
     },
+    // Price Comparison (dc13 v13 sync, owner 2026-06-29) — per-material
+    // supplier-price lookup. Hits /api/supplier-materials?materialCode=X
+    // which we just extended to JOIN suppliers so each row carries
+    // supplierName + supplierCode in the response. Backend ORDER BY
+    // unitPrice ASC means the cheapest supplier comes first.
+    b: {
+      key: "supplierPrices",
+      url: (id) =>
+        `/api/supplier-materials?materialCode=${encodeURIComponent(id)}`,
+    },
   },
   subDocLists: (_d, _resp, extras) => {
+    const lists = [];
+
     const used = extras?.usedIn as
       | { data?: { products?: { productCode: string; productName: string; category?: string }[] } }
       | undefined;
     const products = used?.data?.products ?? [];
-    if (products.length === 0) return [];
-    return [
-      {
+    if (products.length > 0) {
+      lists.push({
         title: `Used in · ${products.length} product${products.length === 1 ? "" : "s"}`,
         rows: products.slice(0, 100).map((p) => ({
           id: p.productCode,
@@ -1402,8 +1413,52 @@ const rawMaterialDetail: DetailConfig = {
           subLine: [p.productCode, p.category].filter(Boolean).join(" · ") || undefined,
           icon: "package" as const,
         })),
-      },
-    ];
+      });
+    }
+
+    const prices = extras?.supplierPrices as
+      | {
+          data?: {
+            id: string;
+            supplierId: string;
+            supplierName?: string;
+            supplierCode?: string;
+            supplierSku?: string;
+            unitPrice?: number;
+            currency?: string;
+            leadTimeDays?: number;
+            moq?: number;
+            isMainSupplier?: boolean;
+          }[];
+        }
+      | undefined;
+    const priceRows = prices?.data ?? [];
+    if (priceRows.length > 0) {
+      lists.push({
+        title: `Suppliers · prices · ${priceRows.length}`,
+        rows: priceRows.slice(0, 50).map((p) => {
+          const cur = p.currency || "MYR";
+          const price = typeof p.unitPrice === "number" ? p.unitPrice : 0;
+          const priceLabel = `${cur === "MYR" ? "RM" : cur} ${price.toFixed(2)}`;
+          const sub = [
+            p.supplierSku ? `SKU ${p.supplierSku}` : "",
+            p.leadTimeDays ? `LT ${p.leadTimeDays}d` : "",
+            p.moq && p.moq > 0 ? `MOQ ${p.moq}` : "",
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          return {
+            id: p.id,
+            title: `${p.isMainSupplier ? "★ " : ""}${p.supplierName || p.supplierCode || p.supplierId}`,
+            subLine: sub || undefined,
+            trailing: priceLabel,
+            icon: "package" as const,
+          };
+        }),
+      });
+    }
+
+    return lists;
   },
   hideActionBar: true,
 };

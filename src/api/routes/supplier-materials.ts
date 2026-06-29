@@ -126,25 +126,39 @@ function ensureBindingColumns(db: D1Database): Promise<void> {
 }
 
 // GET /api/supplier-materials?supplierId=...&materialCode=...
+//
+// LEFT JOIN suppliers so each binding carries supplierName + supplierCode in
+// the response — the mobile Price Comparison view (Raw Material detail) shows
+// supplier NAMES, not opaque sup-XXX ids. Desktop reads supplierId direct so
+// the addition is purely additive.
 app.get("/", async (c) => {
   const supplierId = c.req.query("supplierId");
   const materialCode = c.req.query("materialCode");
   const orgId = getOrgId(c);
-  const where: string[] = ["orgId = ?"];
+  const where: string[] = ["b.orgId = ?"];
   const binds: unknown[] = [orgId];
   if (supplierId) {
-    where.push("supplierId = ?");
+    where.push("b.supplierId = ?");
     binds.push(supplierId);
   }
   if (materialCode) {
-    where.push("materialCode = ?");
+    where.push("b.materialCode = ?");
     binds.push(materialCode);
   }
-  const sql = `SELECT * FROM supplier_material_bindings WHERE ${where.join(" AND ")} ORDER BY materialCode`;
+  const sql = `
+    SELECT b.*, s.name AS _supplierName, s.code AS _supplierCode
+    FROM supplier_material_bindings b
+    LEFT JOIN suppliers s ON s.id = b.supplierId
+    WHERE ${where.join(" AND ")}
+    ORDER BY b.materialCode, b.unitPrice ASC`;
   const res = await c.var.DB.prepare(sql)
     .bind(...binds)
-    .all<BindingRow>();
-  const data = (res.results ?? []).map(rowToBinding);
+    .all<BindingRow & { _supplierName?: string | null; _supplierCode?: string | null }>();
+  const data = (res.results ?? []).map((r) => ({
+    ...rowToBinding(r),
+    supplierName: r._supplierName ?? "",
+    supplierCode: r._supplierCode ?? "",
+  }));
   return c.json({ success: true, data });
 });
 

@@ -206,6 +206,54 @@ function buildJvVoucher(je: JournalEntry): VoucherSpec {
   };
 }
 
+// Other-party bill → voucher: one line per item (Account · Description · Amount),
+// "Reference" footer note, amount in words. VOID-tagged if voided/deleted.
+function buildOtherPartyBillVoucher(b: OtherPartyBill, accounts: ChartOfAccount[]): VoucherSpec {
+  const voided = b.lifecycleState === "VOID" || b.lifecycleState === "DELETED";
+  const lines: VoucherLine[] = b.items.map((it) => ({
+    cells: [accountLabel(accounts, it.counterAccount), it.description ?? "", formatCurrency(it.amountSen)],
+  }));
+  return {
+    title: voided ? "OTHER-PARTY BILL — VOID" : "OTHER-PARTY BILL",
+    company: VOUCHER_COMPANY,
+    docNo: b.billNo,
+    date: formatDateDMY(b.billDate),
+    partyLabel: "Party",
+    partyName: b.partyName,
+    columns: [{ label: "Account" }, { label: "Description" }, { label: "Amount", align: "right" }],
+    lines,
+    footerNote: `Reference: ${b.referenceNo || "—"}`,
+    totalCells: ["", "Total", formatCurrency(b.totalSen)],
+    amountWords: amountInWords(b.totalSen),
+    signatures: [{ label: "Prepared by" }, { label: "Approved by" }],
+    printedOn: todayDMY(),
+  };
+}
+
+// Other-party payment → voucher: one line per allocated bill (Bill No · Amount),
+// "Paid from" bank note, amount in words. VOID-tagged if voided/deleted.
+function buildOtherPartyPaymentVoucher(p: PaymentGroup, accounts: ChartOfAccount[]): VoucherSpec {
+  const voided = p.lifecycleState === "VOID" || p.lifecycleState === "DELETED";
+  const lines: VoucherLine[] = p.lines.map((l) => ({
+    cells: [l.billNo, formatCurrency(l.amountSen)],
+  }));
+  return {
+    title: voided ? "OTHER-PARTY PAYMENT VOUCHER — VOID" : "OTHER-PARTY PAYMENT VOUCHER",
+    company: VOUCHER_COMPANY,
+    docNo: p.paymentNo,
+    date: formatDateDMY(p.date),
+    partyLabel: "Party",
+    partyName: p.partyName,
+    columns: [{ label: "Bill No" }, { label: "Amount", align: "right" }],
+    lines,
+    footerNote: `Paid from: ${p.bankAccount ? accountLabel(accounts, p.bankAccount) : "—"}`,
+    totalCells: ["Total", formatCurrency(p.totalSen)],
+    amountWords: amountInWords(p.totalSen),
+    signatures: [{ label: "Prepared by" }, { label: "Approved by" }, { label: "Received by" }],
+    printedOn: todayDMY(),
+  };
+}
+
 // Phase 2 follow-up (owner) — searchable account combobox: type a keyword
 // (code or name fragment) to filter, click to pick. Headers (isPostable
 // false) are excluded — journals must hit leaf accounts.
@@ -5051,6 +5099,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   const visibleBills = (bills ?? []).filter((b) =>
     !kw || [b.billNo, b.partyName, b.referenceNo, b.description].some((s) => (s ?? "").toLowerCase().includes(kw)),
   );
+  const billSel = useRowSelection(visibleBills, (b) => b.billNo ?? b.id);
 
   const handleLifecycle = async (billNo: string, action: "void" | "delete" | "unvoid") => {
     const verb = action === "unvoid" ? "Restore" : action === "delete" ? "Delete" : "Void";
@@ -5169,6 +5218,30 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
       <div className="flex items-center">
         <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search bill no / party / reference / description" className="rounded-md border border-[#E2DDD8] px-3 py-1.5 text-sm w-80 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
       </div>
+
+      <BatchActionsBar
+        count={billSel.count}
+        onClear={billSel.clear}
+        onPrint={() => printVouchers(billSel.selectedRows.map((b) => buildOtherPartyBillVoucher(b, accounts)))}
+        exportName="other-party-bills"
+        exportAoa={() => [
+          ["Bill No", "Date", "Party", "Status", "Reference No", "Voucher Total (RM)", "Account", "Description", "Amount (RM)"],
+          ...billSel.selectedRows.flatMap((b) =>
+            b.items.map((it) => [
+              b.billNo,
+              formatDateDMY(b.billDate),
+              b.partyName ?? "",
+              b.status ?? "ACTIVE",
+              b.referenceNo ?? "",
+              (b.totalSen / 100).toFixed(2),
+              accountLabel(accounts, it.counterAccount),
+              it.description ?? "",
+              (it.amountSen / 100).toFixed(2),
+            ]),
+          ),
+        ]}
+      />
+
       <Card><CardContent className="p-0 overflow-x-auto">
         {bills === null ? (
           <div className="py-10 text-center text-[#6B7280] text-sm">Loading…</div>
@@ -5177,6 +5250,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
         ) : (
           <table className="w-full text-sm">
             <thead><tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+              <th className="px-3 py-2 w-8"><input type="checkbox" checked={billSel.allSelected} onChange={billSel.toggleAll} className="h-3.5 w-3.5 accent-[#6B5C32] align-middle" /></th>
               <th className="px-4 py-2 text-left">Bill No</th><th className="px-4 py-2 text-left">Party</th>
               <th className="px-4 py-2 text-left">Description</th>
               <th className="px-4 py-2 text-left">Date</th><th className="px-4 py-2 text-right">Total</th>
@@ -5187,6 +5261,9 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
               {visibleBills.map((b) => (
                 <React.Fragment key={b.id}>
                   <tr className="border-b border-[#F0ECE9]">
+                    <td className="px-3 py-1.5 w-8">
+                      <input type="checkbox" checked={billSel.isSelected(b.billNo ?? b.id)} onChange={() => billSel.toggle(b.billNo ?? b.id)} className="h-3.5 w-3.5 accent-[#6B5C32] align-middle" />
+                    </td>
                     <td className="px-4 py-1.5 font-mono text-xs">
                       <button onClick={() => setOpenBill(openBill === b.id ? null : b.id)} className="cursor-pointer hover:underline">{openBill === b.id ? "▾ " : "▸ "}{b.billNo}</button>
                     </td>
@@ -5201,6 +5278,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
                       {(b.lifecycleState ?? "ACTIVE") === "ACTIVE" && b.status}
                     </td>
                     <td className="px-4 py-1.5 text-right whitespace-nowrap">
+                      <button onClick={() => printVoucher(buildOtherPartyBillVoucher(b, accounts))} title="Print bill voucher" className="inline-flex items-center gap-1 text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3"><Printer className="h-3 w-3" />print</button>
                       <button onClick={() => copyBill(b)} className="text-[#6B5C32] hover:underline text-xs mr-3">Copy</button>
                       <LifecycleActions
                         state={b.lifecycleState}
@@ -5213,7 +5291,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
                   </tr>
                   {openBill === b.id && (
                     <tr className="border-b border-[#F0ECE9] bg-[#FAF8F5]">
-                      <td colSpan={9} className="px-8 py-2">
+                      <td colSpan={10} className="px-8 py-2">
                         <div className="text-xs text-[#6B7280] space-y-0.5">
                           {b.items.map((it, i) => (
                             <div key={i} className="flex justify-between max-w-md">
@@ -5229,7 +5307,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
                 </React.Fragment>
               ))}
               {visibleBills.length === 0 && (
-                <tr><td colSpan={9} className="px-4 py-8 text-center text-sm text-[#9CA3AF]">No bills match</td></tr>
+                <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-[#9CA3AF]">No bills match</td></tr>
               )}
             </tbody>
           </table>
@@ -5382,6 +5460,8 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
     loadOpenBills(g.partyId, g.lines);
   };
 
+  const opaySel = useRowSelection(history ?? [], (p) => p.paymentNo);
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -5463,6 +5543,27 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
 
       </CardContent></Card>
 
+      <BatchActionsBar
+        count={opaySel.count}
+        onClear={opaySel.clear}
+        onPrint={() => printVouchers(opaySel.selectedRows.map((p) => buildOtherPartyPaymentVoucher(p, accounts)))}
+        exportName="other-party-payments"
+        exportAoa={() => [
+          ["Payment No", "Date", "Party", "Status", "Voucher Total (RM)", "Bill No", "Amount (RM)"],
+          ...opaySel.selectedRows.flatMap((p) =>
+            p.lines.map((l) => [
+              p.paymentNo,
+              formatDateDMY(p.date),
+              p.partyName ?? "",
+              p.lifecycleState ?? "ACTIVE",
+              (p.totalSen / 100).toFixed(2),
+              l.billNo,
+              (l.amountSen / 100).toFixed(2),
+            ]),
+          ),
+        ]}
+      />
+
       <Card><CardContent className="p-0 overflow-x-auto">
         {history === null ? (
           <div className="py-8 text-center text-[#6B7280] text-sm">Loading…</div>
@@ -5471,18 +5572,23 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
         ) : (
           <table className="w-full text-sm">
             <thead><tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280] text-left">
+              <th className="px-3 py-2 w-8"><input type="checkbox" checked={opaySel.allSelected} onChange={opaySel.toggleAll} className="h-3.5 w-3.5 accent-[#6B5C32] align-middle" /></th>
               <th className="px-4 py-2">No</th><th className="px-4 py-2">Party</th><th className="px-4 py-2">Date</th>
               <th className="px-4 py-2 text-right">Total</th><th className="px-4 py-2 text-center">Bills</th><th className="px-4 py-2 text-right"></th>
             </tr></thead>
             <tbody>
               {history.map((g) => (
                 <tr key={g.paymentNo} onClick={() => setDetail(g)} className="border-b border-[#F0ECE9] cursor-pointer hover:bg-[#FAF8F5]">
+                  <td className="px-3 py-1.5 w-8" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={opaySel.isSelected(g.paymentNo)} onChange={() => opaySel.toggle(g.paymentNo)} className="h-3.5 w-3.5 accent-[#6B5C32] align-middle" />
+                  </td>
                   <td className="px-4 py-1.5 font-mono text-xs">{g.paymentNo}</td>
                   <td className="px-4 py-1.5">{g.partyName}</td>
                   <td className="px-4 py-1.5">{g.date}</td>
                   <td className="px-4 py-1.5 text-right tabular-nums">{formatCurrency(g.totalSen)}</td>
                   <td className="px-4 py-1.5 text-center">{g.lines.length}</td>
                   <td className="px-4 py-1.5 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                    <button onClick={() => printVoucher(buildOtherPartyPaymentVoucher(g, accounts))} title="Print payment voucher" className="inline-flex items-center gap-1 text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3"><Printer className="h-3 w-3" />print</button>
                     {(g.lifecycleState ?? "ACTIVE") === "ACTIVE" && (
                       <button onClick={() => editPayment(g)} className="text-xs text-[#3E6570] hover:underline mr-2">Edit</button>
                     )}

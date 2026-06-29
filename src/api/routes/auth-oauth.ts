@@ -223,12 +223,13 @@ app.get("/google/callback", async (c) => {
   // the CSRF middleware (BUG-2026-06-05: "Apply Date shows success but never
   // persists" for OAuth users; password/TOTP login already set both cookies).
   // Mirror the password login's csrf cookie: NOT HttpOnly (the client must read
-  // and echo it), Secure + SameSite=Strict, same Max-Age as the session.
+  // and echo it), Secure + SameSite=Lax (Lax matches the session cookie so they
+  // ride cross-site navigations together — see session-cookie.ts for the why).
   const csrfParts = [
     `${CSRF_COOKIE}=${crypto.randomUUID()}`,
     `Path=/`,
     `Max-Age=${sessionMaxAge}`,
-    `SameSite=Strict`,
+    `SameSite=Lax`,
     `Secure`,
   ];
   c.header("Set-Cookie", cookieParts.join("; "), { append: true });

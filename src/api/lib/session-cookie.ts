@@ -20,18 +20,23 @@ import { SESSION_COOKIE, CSRF_COOKIE } from "./auth-middleware";
 // 7-day window, matching the user_sessions TTL the sliding-refresh extends.
 export const SESSION_COOKIE_TTL_S = 7 * 24 * 60 * 60;
 
-// `hookka_session`: HttpOnly + Secure + SameSite=Strict so JS can't read the
-// token and it never leaves a same-site context. This is the credential.
+// `hookka_session`: HttpOnly + Secure + SameSite=Lax so the cookie still rides
+// along on cross-site NAVIGATIONS (clicking erp.hookka.com from WhatsApp Web,
+// email, Notion etc — Strict drops the cookie on those, the user lands without
+// a session, hits a 401, and the api-client bounces them to /login. Owner
+// 2026-06-29: "为什么一直被登錄出去"). Lax still blocks cross-site forms / POSTs,
+// and CSRF is double-defended by the X-CSRF-Token header (csrfCookieHeader
+// below + src/lib/api-client.ts). HttpOnly keeps JS from reading the token.
 export function sessionCookieHeader(token: string, persistent: boolean): string {
-  const base = `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/`;
+  const base = `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/`;
   return persistent ? `${base}; Max-Age=${SESSION_COOKIE_TTL_S}` : base;
 }
 
 // `hookka_csrf`: NOT HttpOnly so the api-client can read it and echo it in the
-// X-CSRF-Token header (double-submit). Secure + SameSite=Strict so a
-// cross-origin page can neither read nor forge it. Same persistence as the
-// session cookie so both expire together.
+// X-CSRF-Token header (double-submit). Lax so it rides cross-site navigations
+// in lockstep with the session cookie (otherwise the user arrives session-OK
+// but CSRF-empty and their first mutating click 403s).
 export function csrfCookieHeader(csrfToken: string, persistent: boolean): string {
-  const base = `${CSRF_COOKIE}=${csrfToken}; Secure; SameSite=Strict; Path=/`;
+  const base = `${CSRF_COOKIE}=${csrfToken}; Secure; SameSite=Lax; Path=/`;
   return persistent ? `${base}; Max-Age=${SESSION_COOKIE_TTL_S}` : base;
 }

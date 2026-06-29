@@ -56,8 +56,10 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 // Clear cookie variants — Max-Age=0 + empty value tells the browser to drop
 // the cookie immediately. Path/SameSite must mirror the originally-issued
 // cookie or the browser ignores the clear.
-const SESSION_CLEAR_COOKIE = `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`;
-const CSRF_CLEAR_COOKIE = `${CSRF_COOKIE}=; Secure; SameSite=Strict; Path=/; Max-Age=0`;
+// SameSite must match the originally-issued cookie (now Lax — see
+// session-cookie.ts) or the browser ignores the clear and the cookie lingers.
+const SESSION_CLEAR_COOKIE = `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`;
+const CSRF_CLEAR_COOKIE = `${CSRF_COOKIE}=; Secure; SameSite=Lax; Path=/; Max-Age=0`;
 
 // Random URL-safe-ish CSRF token. crypto.randomUUID() is plenty of entropy
 // (122 bits) and is already used for session tokens — no need for a heavier

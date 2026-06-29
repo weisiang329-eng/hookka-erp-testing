@@ -323,6 +323,12 @@ export default function PurchaseInvoicesPage() {
     { key: "piNo", label: "PI No.", type: "docno", width: "130px", sortable: true },
     { key: "poRef", label: "PO Ref", type: "docno", width: "130px", sortable: true },
     { key: "supplier", label: "Supplier", type: "text", sortable: true },
+    // Supplier-side reference numbers (migration 0105). Operator-critical:
+    // these are what the supplier writes on their own invoice/DO and what
+    // the AP team matches against. Owner ruling 2026-06-29 evening: these
+    // belong as first-class columns next to the supplier.
+    { key: "supplierInvoiceNo", label: "Supplier Inv No.", type: "text", width: "140px", sortable: true },
+    { key: "supplierDoNo", label: "Supplier DO No.", type: "text", width: "140px", sortable: true },
     {
       key: "purchaseOrgCode",
       label: "Purchase co",

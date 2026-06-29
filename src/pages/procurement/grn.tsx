@@ -648,6 +648,9 @@ export default function GRNPage() {
     { key: "grnNumber", label: "GRN No.", type: "docno", width: "130px", sortable: true },
     { key: "poNumber", label: "PO No.", type: "docno", width: "130px", sortable: true },
     { key: "supplierName", label: "Supplier", type: "text", sortable: true },
+    // Supplier's own DO number (their delivery-order ref). First-class
+    // column per owner ruling 2026-06-29 evening — AP team matches on it.
+    { key: "supplierDoNo", label: "Supplier DO No.", type: "text", width: "140px", sortable: true },
     {
       key: "purchaseOrgCode",
       label: "Purchase co",

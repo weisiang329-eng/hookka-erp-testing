@@ -58,13 +58,14 @@ export default function MobileLayout() {
     preloadMobileCritical();
   }, []);
 
-  // Fold-like wide landscape (Galaxy Z Fold unfolded, larger tablets in
-  // landscape) — dc13 design v13. When on a detail route AND fold, render
-  // the parent list on the LEFT (320px) + detail on the RIGHT (flex). Each
-  // pane scrolls independently. Phone keeps the single-pane stacked flow.
-  const fold = useMediaQuery(
-    "(min-width: 720px) and (orientation: landscape)",
-  );
+  // Fold detection — owner 2026-06-30: "折叠如果没有展开,应该是在电话
+  // 版本的;展开了之后,才在 Fold 版本". Galaxy Z Fold inner screen is
+  // ~884px wide in EITHER orientation (portrait or landscape) when unfolded,
+  // and the cover screen is ~390px wide when folded. So a single width
+  // threshold (>=720) is the correct gate — orientation does NOT enter the
+  // decision. Previously required landscape too, which made the inner screen
+  // in portrait incorrectly stay on phone mode.
+  const fold = useMediaQuery("(min-width: 720px)");
   return (
     <div
       style={{

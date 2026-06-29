@@ -46,6 +46,7 @@ import {
   PackageCheck,
   HardHat,
   Bell,
+  Search as SearchIcon,
   CircleAlert,
   TriangleAlert,
   ClipboardCheck,
@@ -69,6 +70,7 @@ import {
 } from "@/lib/delivery-pipeline";
 import type { SalesOrder, RawMaterial } from "@/types";
 import { MobileCard, StatusPill, FormSheet, Sheet } from "../components";
+import { GlobalSearchSheet } from "../components/GlobalSearchSheet";
 import { M, M_ACCENT, M_DELTA } from "../theme";
 import { type FormSpec } from "../config/form-types";
 import {
@@ -306,6 +308,9 @@ export default function MobileHome() {
   // Quick-action create form: holds the active FormSpec, or null. "Staff" has
   // no in-scope create endpoint, so it routes to the Employees directory.
   const [formSpec, setFormSpec] = useState<FormSpec | null>(null);
+  // Global search overlay (CHANGELOG O.1) — fans out across the localStorage
+  // cache that preload.ts warmed at /m mount.
+  const [searchOpen, setSearchOpen] = useState(false);
 
   // ---- Pending Delivery is the ONLY expensive section of this Home: it needs
   // five heavy fetches (production-orders + linked-po-ids + po-values +
@@ -892,6 +897,29 @@ export default function MobileHome() {
           >
             {periodLabel(period)}
             <ChevronDown size={14} strokeWidth={1.75} color={M.taupe} />
+          </button>
+          {/* Global Search — CHANGELOG O.1. Opens GlobalSearchSheet which
+              fans out across the preloaded localStorage cache (every
+              endpoint in preload.ts). Searchable: customer / PO / SO /
+              reference / doc number — across every module. */}
+          <button
+            onClick={() => setSearchOpen(true)}
+            aria-label="Search"
+            style={{
+              width: 42,
+              height: 42,
+              borderRadius: "50%",
+              backgroundColor: M.card,
+              border: `1px solid ${M.hairline}`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flex: "none",
+              cursor: "pointer",
+              WebkitTapHighlightColor: "transparent",
+            }}
+          >
+            <SearchIcon size={20} strokeWidth={1.75} color={M.ink} />
           </button>
           {/* Notification bell (round white button, unread dot) */}
           <button
@@ -2031,6 +2059,9 @@ export default function MobileHome() {
           if (to) navigate(to);
         }}
       />
+
+      {/* Global search overlay (CHANGELOG O.1) — Home header's search icon. */}
+      <GlobalSearchSheet open={searchOpen} onClose={() => setSearchOpen(false)} />
 
       {/* Period picker — dc12: pick from the last 12 months. Tapping a row
           updates `period`, refetches the 9 analytics cards, closes the sheet. */}

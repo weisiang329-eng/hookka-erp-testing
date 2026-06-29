@@ -63,6 +63,15 @@ function storageKey(url: string): string {
   return NAMESPACE + url;
 }
 
+/**
+ * Sync read of the cached value for a URL — no network. Returns null if
+ * nothing is cached. Useful for synchronous overlays (e.g. global search)
+ * that need to read multiple cached lists without triggering network.
+ */
+export function peekCache<T>(url: string): T | null {
+  return readCache<T>(url)?.data ?? null;
+}
+
 function readCache<T>(url: string): CacheEntry<T> | null {
   if (typeof window === "undefined") return null;
   try {

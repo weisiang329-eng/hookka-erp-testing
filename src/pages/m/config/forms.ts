@@ -1185,6 +1185,91 @@ export function inviteUserSpec(): FormSpec {
 }
 
 // ===========================================================================
+// EMPLOYEE MASTER — edit worker fields. CHANGELOG K.7. PUT /api/workers/:id.
+// Backend accepts all the fields below. Salary changes trigger a backend
+// salary-history append automatically (no separate request needed at this
+// layer — the desktop's verifiedSave handles read-back; mobile defers).
+// ===========================================================================
+const POSITION_OPTS: SelectOption[] = [
+  { value: "Operator", label: "Operator" },
+  { value: "Operator Leader", label: "Operator Leader" },
+  { value: "Supervisor", label: "Supervisor" },
+  { value: "Manager", label: "Manager" },
+  { value: "Driver", label: "Driver" },
+  { value: "Admin", label: "Admin" },
+];
+const WORKER_STATUS_OPTS: SelectOption[] = [
+  { value: "ACTIVE", label: "Active" },
+  { value: "RESIGNED", label: "Resigned" },
+];
+
+export function editEmployeeSpec(doc: Record<string, unknown>, id: string): FormSpec {
+  return {
+    title: "Edit Employee",
+    submitLabel: "Save",
+    fields: [
+      { name: "name", label: "Name", kind: "text" as const, required: true, full: true },
+      { name: "empNo", label: "Employee No", kind: "text" as const, full: true },
+      { name: "position", label: "Position", kind: "select" as const, options: POSITION_OPTS, full: true },
+      { name: "phone", label: "Phone", kind: "text" as const, full: true },
+      { name: "basicSalarySen", label: "Basic Salary (RM)", kind: "money" as const, full: true },
+      { name: "workingHoursPerDay", label: "Working Hours / Day", kind: "number" as const },
+      { name: "workingDaysPerMonth", label: "Working Days / Month", kind: "number" as const },
+      { name: "otMultiplier", label: "OT Multiplier", kind: "number" as const },
+      { name: "efficiencyAllowanceSen", label: "Efficiency Allowance (RM)", kind: "money" as const, full: true },
+      { name: "status", label: "Status", kind: "select" as const, options: WORKER_STATUS_OPTS, full: true },
+      { name: "resignedAt", label: "Resigned Date (if RESIGNED)", kind: "date" as const, full: true },
+    ],
+    initial: {
+      name: s(doc.name),
+      empNo: s(doc.empNo),
+      position: s(doc.position) || "Operator",
+      phone: s(doc.phone),
+      basicSalarySen: n(doc.basicSalarySen),
+      workingHoursPerDay: n(doc.workingHoursPerDay) || 9,
+      workingDaysPerMonth: n(doc.workingDaysPerMonth) || 26,
+      otMultiplier: n(doc.otMultiplier) || 1.5,
+      efficiencyAllowanceSen: n(doc.efficiencyAllowanceSen),
+      status: s(doc.status) || "ACTIVE",
+      resignedAt: s(doc.resignedAt),
+    },
+    validate: (v) => {
+      if (s(v.status) === "RESIGNED" && !s(v.resignedAt)) {
+        return "Resigned date is required when status is RESIGNED.";
+      }
+      return null;
+    },
+    submit: async (v) => {
+      const body = {
+        empNo: s(v.empNo),
+        name: s(v.name).trim(),
+        position: s(v.position),
+        phone: s(v.phone),
+        basicSalarySen: n(v.basicSalarySen),
+        workingHoursPerDay: n(v.workingHoursPerDay) || 9,
+        workingDaysPerMonth: n(v.workingDaysPerMonth) || 26,
+        otMultiplier: n(v.otMultiplier) || 1.5,
+        efficiencyAllowanceSen: n(v.efficiencyAllowanceSen),
+        status: s(v.status) || "ACTIVE",
+        resignedAt: s(v.resignedAt) || null,
+        // Preserve existing arrays/flags the backend expects in PUT.
+        departmentCodes: arr(doc.departmentCodes),
+        categories: arr(doc.categories),
+        epfEnabled: doc.epfEnabled !== false,
+        socsoEnabled: doc.socsoEnabled !== false,
+        eisEnabled: doc.eisEnabled !== false,
+        pcbEnabled: doc.pcbEnabled !== false,
+      };
+      const res = await mutateJson(`/api/workers/${encodeURIComponent(id)}`, "PUT", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshOne(`/api/workers/${encodeURIComponent(id)}`);
+      refreshList("/api/workers");
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
 // Create-form resolver — slug → its "New …" FormSpec, or null when the module
 // has no in-scope mobile create form. Drives the "+" affordance on the L1 list
 // header (ModuleListScreen).
@@ -1243,6 +1328,8 @@ export function editSpecFor(
       return editCustomerSpec(doc, id);
     case "suppliers":
       return editSupplierSpec(doc, id);
+    case "employees":
+      return editEmployeeSpec(doc, id);
     default:
       // DO edit (status transitions / dispatch overlay), production, etc. are
       // not free-form edits — left to desktop / the CTA action. // TODO: add a

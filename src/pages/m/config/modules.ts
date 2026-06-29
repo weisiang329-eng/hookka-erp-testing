@@ -2278,8 +2278,47 @@ const employeeDetail: DetailConfig = {
     }
     return out;
   },
-  // Read-only — no mobile edit form yet, no status transitions to expose.
-  hideActionBar: true,
+  // CHANGELOG K.7: Employee Master form (mobile Edit unlocked by
+  // editEmployeeSpec in forms.ts) + admin actions for PIN + login pwd.
+  extraActions: (_d, id) => [
+    {
+      label: "Set Scan PIN",
+      icon: "package-check",
+      onClick: async () => {
+        if (!window.confirm("Generate a new scan PIN for this worker?")) return;
+        try {
+          const r = await fetch(`/api/workers/${encodeURIComponent(id)}/set-pin`, { method: "POST" });
+          const j = (await r.json().catch(() => null)) as { success?: boolean; data?: { pin?: string }; error?: string } | null;
+          if (r.ok && j?.success && j.data?.pin) {
+            window.alert(`New PIN: ${j.data.pin}\n\nShown once — save it now.`);
+          } else {
+            window.alert(j?.error || "Failed to set PIN.");
+          }
+        } catch {
+          window.alert("Network error.");
+        }
+      },
+    },
+    {
+      label: "Reset Login Password",
+      icon: "copy",
+      onClick: async () => {
+        const pwd = window.prompt("New login password (min 6 chars):");
+        if (!pwd || pwd.length < 6) return;
+        try {
+          const r = await fetch(`/api/users/${encodeURIComponent(id)}/reset-password`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ newPassword: pwd }),
+          });
+          if (r.ok) window.alert("Password reset. User sessions purged.");
+          else window.alert("Failed to reset password (user may not have a login account).");
+        } catch {
+          window.alert("Network error.");
+        }
+      },
+    },
+  ],
 };
 
 /** Current-month title used by the Attendance sub-doc list header. */

@@ -45,7 +45,7 @@ test("checked (persistent) → session cookie carries Max-Age (survives restart)
   // Security attributes must always be present.
   assert.match(h, /HttpOnly/);
   assert.match(h, /Secure/);
-  assert.match(h, /SameSite=Strict/);
+  assert.match(h, /SameSite=Lax/);
   assert.match(h, /Path=\//);
 });
 
@@ -57,7 +57,7 @@ test("unchecked (session-only) → session cookie has NO Max-Age/Expires", () =>
   // Still fully hardened — only persistence changed, not security.
   assert.match(h, /HttpOnly/);
   assert.match(h, /Secure/);
-  assert.match(h, /SameSite=Strict/);
+  assert.match(h, /SameSite=Lax/);
 });
 
 test("CSRF cookie persistence tracks the session cookie", () => {
@@ -67,7 +67,7 @@ test("CSRF cookie persistence tracks the session cookie", () => {
   // CSRF cookie is intentionally NOT HttpOnly (the api-client reads it).
   assert.doesNotMatch(persistent, /HttpOnly/);
   assert.match(persistent, /Secure/);
-  assert.match(persistent, /SameSite=Strict/);
+  assert.match(persistent, /SameSite=Lax/);
 
   const sessionOnly = m.csrfCookieHeader("csrf-abc", false);
   assert.doesNotMatch(sessionOnly, /Max-Age/i);

@@ -16,13 +16,14 @@
 //
 // ADDITIVE: consumer of existing endpoints + Phase-1/2 primitives only.
 // ===========================================================================
-import { useMemo } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ChevronRight, FileText, Package } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, MobileCard, StatusPill } from "../components";
 import { M, SEMANTIC } from "../theme";
 import { type ModuleConfig, type LineItemVM } from "../config/types";
+import { refreshOne } from "../config/mutate";
 
 export function LineItemDetailScreen({ config }: { config: ModuleConfig }) {
   const navigate = useNavigate();
@@ -46,6 +47,29 @@ export function LineItemDetailScreen({ config }: { config: ModuleConfig }) {
   const item = items.find((it) => it.id === itemId) ?? null;
   const code = doc && eff ? eff.code(doc) : "";
   const parentTitle = doc && eff ? eff.title(doc) : "";
+
+  // Per-line attachments (dc13 v13, owner 2026-06-29). When the detail config
+  // declares a lineAttachmentsResource, fetch this line's files (no schema
+  // change — resourceType + resourceId on the existing /api/files mechanism).
+  const lineAttRes =
+    eff?.lineAttachmentsResource && id && itemId
+      ? eff.lineAttachmentsResource(id, itemId)
+      : null;
+  const filesUrl = lineAttRes
+    ? `/api/files?resourceType=${encodeURIComponent(lineAttRes.type)}&resourceId=${encodeURIComponent(lineAttRes.id)}`
+    : null;
+  const { data: filesData } = useCachedJson<{
+    success?: boolean;
+    data?: {
+      id: string;
+      filename: string;
+      contentType?: string;
+      sizeBytes?: number;
+      uploadedAt?: string;
+    }[];
+  }>(filesUrl);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   // Field grid — mirrors the design source's item detail rows, populated from
   // the real LineItemVM the L2 mapper already produced.
@@ -251,6 +275,134 @@ export function LineItemDetailScreen({ config }: { config: ModuleConfig }) {
                 </div>
               </MobileCard>
             </div>
+
+            {/* Files attached to THIS line (dc13 v13 sync, owner 2026-06-29).
+                Reuses /api/files with resourceType=<MODULE>_LINE +
+                resourceId=lineId. Upload via the hidden file input — list
+                refreshes on success. Same UX as the doc-level Files section
+                on DocumentDetailScreen so the operator language is consistent. */}
+            {lineAttRes ? (
+              <div>
+                <SectionHeading>Files</SectionHeading>
+                <MobileCard padded={false} radius={18} style={{ overflow: "hidden" }}>
+                  <div
+                    style={{
+                      padding: "12px 16px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      borderBottom: `1px solid ${M.divider}`,
+                    }}
+                  >
+                    <span style={{ fontSize: 13, color: M.body }}>
+                      {(filesData?.data ?? []).length} attached
+                    </span>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploading}
+                      style={{
+                        fontFamily: "inherit",
+                        fontSize: 13,
+                        fontWeight: 700,
+                        color: uploading ? M.muted : "#fff",
+                        background: uploading ? M.hairline : M.taupe,
+                        border: "none",
+                        borderRadius: 10,
+                        padding: "8px 14px",
+                        cursor: uploading ? "default" : "pointer",
+                        WebkitTapHighlightColor: "transparent",
+                      }}
+                    >
+                      {uploading ? "Uploading…" : "Upload"}
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                      capture="environment"
+                      style={{ display: "none" }}
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0];
+                        if (!f) return;
+                        setUploading(true);
+                        try {
+                          const fd = new FormData();
+                          fd.append("file", f);
+                          fd.append("resourceType", lineAttRes.type);
+                          fd.append("resourceId", lineAttRes.id);
+                          const resp = await fetch("/api/files", {
+                            method: "POST",
+                            body: fd,
+                            credentials: "include",
+                          });
+                          const json = (await resp.json()) as {
+                            success?: boolean;
+                            error?: string;
+                          };
+                          if (!resp.ok || !json.success) {
+                            window.alert(json.error || `Upload failed (${resp.status})`);
+                          } else if (filesUrl) {
+                            refreshOne(filesUrl);
+                          }
+                        } catch (err) {
+                          window.alert((err as Error).message || "Upload failed");
+                        } finally {
+                          setUploading(false);
+                          if (fileInputRef.current) fileInputRef.current.value = "";
+                        }
+                      }}
+                    />
+                  </div>
+                  {(filesData?.data ?? []).length === 0 ? (
+                    <div style={{ padding: 16, color: M.muted, fontSize: 13 }}>
+                      No files yet.
+                    </div>
+                  ) : (
+                    (filesData?.data ?? []).map((f, i) => (
+                      <a
+                        key={f.id}
+                        href={`/api/files/${encodeURIComponent(f.id)}/download`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                          padding: "12px 16px",
+                          borderTop: i === 0 ? "none" : `1px solid ${M.divider}`,
+                          color: M.raisin,
+                          textDecoration: "none",
+                          WebkitTapHighlightColor: "transparent",
+                        }}
+                      >
+                        <FileText size={18} color={M.taupe} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div
+                            style={{
+                              fontSize: 13.5,
+                              fontWeight: 600,
+                              color: M.raisin,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {f.filename}
+                          </div>
+                          <div style={{ fontSize: 11.5, color: M.muted }}>
+                            {f.sizeBytes ? `${Math.round(f.sizeBytes / 1024)} KB · ` : ""}
+                            {f.uploadedAt
+                              ? new Date(f.uploadedAt).toLocaleDateString()
+                              : ""}
+                          </div>
+                        </div>
+                        <ChevronRight size={17} color="#C4BDB2" />
+                      </a>
+                    ))
+                  )}
+                </MobileCard>
+              </div>
+            ) : null}
 
             <div style={{ height: 12 }} />
           </>

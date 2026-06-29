@@ -323,6 +323,15 @@ export type DetailConfig = {
    * mobile UI gracefully shows an empty state if /api/files returns 503.
    */
   attachmentsResource?: (id: string) => { type: string; id: string };
+  /** Per-line attachments (dc13 v13 sync, owner 2026-06-29) — when set, the
+   * LineItemDetailScreen renders a Files section keyed by (parentId, lineId).
+   * Reuses the same /api/files mechanism (no schema change — line attachments
+   * are stored as resourceType="SO_LINE" / "DO_LINE" / etc., resourceId=lineId).
+   * Each line then carries its own paperclip. */
+  lineAttachmentsResource?: (
+    parentId: string,
+    lineId: string,
+  ) => { type: string; id: string };
   /**
    * Optional "Convert document" action row (owner 2026-06-28 design v10) —
    * rendered as a titled pair of buttons below the field grid. Each action

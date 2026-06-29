@@ -388,6 +388,7 @@ const salesDetail: DetailConfig = {
   // matches the desktop convention (so files uploaded from mobile show up on
   // the desktop attachment list, and vice versa).
   attachmentsResource: (id) => ({ type: "SO", id }),
+  lineAttachmentsResource: (_parent, lineId) => ({ type: "SO_LINE", id: lineId }),
   // dc13 v13 sync (owner 2026-06-29): "Copy SO" — matches the desktop's
   // existing clone flow (src/pages/sales/detail.tsx → "Copy" button which
   // writes localStorage.so-clone-data + navigates to /sales/create?clone=1).
@@ -538,6 +539,7 @@ const deliveryDetail: DetailConfig = {
   },
   primaryCta: (d) => (str(d, "status") === "DELIVERED" ? "Sign" : "Dispatch"),
   attachmentsResource: (id) => ({ type: "DO", id }),
+  lineAttachmentsResource: (_parent, lineId) => ({ type: "DO_LINE", id: lineId }),
 };
 
 export const deliveryConfig: ModuleConfig = {
@@ -736,6 +738,7 @@ const invoiceDetail: DetailConfig = {
   },
   primaryCta: (d) => (str(d, "status") === "PAID" ? "Status" : "Record Payment"),
   attachmentsResource: (id) => ({ type: "INVOICE", id }),
+  lineAttachmentsResource: (_parent, lineId) => ({ type: "INVOICE_LINE", id: lineId }),
 };
 
 export const invoicesConfig: ModuleConfig = {
@@ -901,6 +904,7 @@ const poDetail: DetailConfig = {
   ],
   primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Submit" : "Status"),
   attachmentsResource: (id) => ({ type: "PO", id }),
+  lineAttachmentsResource: (_parent, lineId) => ({ type: "PO_LINE", id: lineId }),
 };
 
 const grnDetail: DetailConfig = {
@@ -937,6 +941,7 @@ const grnDetail: DetailConfig = {
   },
   primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Post to Stock" : "Status"),
   attachmentsResource: (id) => ({ type: "GRN", id }),
+  lineAttachmentsResource: (_parent, lineId) => ({ type: "GRN_LINE", id: lineId }),
 };
 
 const piDetail: DetailConfig = {
@@ -985,6 +990,7 @@ const piDetail: DetailConfig = {
   },
   primaryCta: (d) => (str(d, "status") === "PAID" ? "Status" : "Record Payment"),
   attachmentsResource: (id) => ({ type: "PI", id }),
+  lineAttachmentsResource: (_parent, lineId) => ({ type: "PI_LINE", id: lineId }),
 };
 
 /** Dispatch the procurement detail by id prefix. */

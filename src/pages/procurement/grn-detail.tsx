@@ -35,6 +35,7 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   isGrnLineEditable,
+  isGrnLockedByDownstreamPi,
   checkGrnLineQtyEdit,
   describeGrnStockDelta,
 } from "@/lib/purchase-edit-rules";
@@ -785,8 +786,10 @@ export default function GRNDetailPage() {
               </CardTitle>
               {/* Edit accepted quantities. For a POSTED GRN the save posts a
                   compensating stock movement; for DRAFT/CONFIRMED it just
-                  re-lines (pre-commit). Shown only when the status allows it. */}
-              {qtyEdit === null && items.length > 0 && isGrnLineEditable(grn.status) && (
+                  re-lines (pre-commit). Hidden when status doesn't allow OR
+                  when a downstream PI has already billed this GRN (owner
+                  ruling 2026-06-29 evening — must delete the PI first). */}
+              {qtyEdit === null && items.length > 0 && isGrnLineEditable(grn.status) && !isGrnLockedByDownstreamPi(items) && (
                 <Button
                   type="button"
                   variant="outline"
@@ -800,6 +803,13 @@ export default function GRNDetailPage() {
             </div>
           </CardHeader>
           <CardContent>
+            {/* Locked banner: GRN has at least one line already invoiced by a
+                downstream PI. Edit unavailable until that PI is deleted. */}
+            {qtyEdit === null && items.length > 0 && isGrnLineEditable(grn.status) && isGrnLockedByDownstreamPi(items) && (
+              <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                A purchase invoice has already billed off this GRN — line edits are locked. Delete the linked PI first to unlock.
+              </div>
+            )}
             {/* Amber banner when editing a POSTED GRN's accepted quantities —
                 saving moves stock + writes a cost-ledger correction. */}
             {qtyEdit !== null && grn.status === "POSTED" && (

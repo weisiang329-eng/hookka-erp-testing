@@ -26,7 +26,7 @@ import { requirePermission } from "../lib/rbac";
 import { makeLedgerEntry } from "../../lib/costing";
 import { emitAudit } from "../lib/audit";
 import { availableQty as computeAvailableQty, clampDecrement } from "../../lib/convert-chain";
-import { checkGrnLineQtyEdit } from "../../lib/purchase-edit-rules";
+import { checkGrnLineQtyEdit, isGrnLockedByDownstreamPi, grnLockedByDownstreamPiError } from "../../lib/purchase-edit-rules";
 
 const app = new Hono<Env>();
 
@@ -1484,6 +1484,15 @@ app.put("/:id", async (c) => {
           .bind(id)
           .all<GRNItemRow>();
         const existingItems = existingItemsRes.results ?? [];
+        // Owner ruling 2026-06-29 (evening): once a PI has billed off any
+        // line on this GRN, the entire GRN is locked. Delete the linked PI
+        // first to unlock — see isGrnLockedByDownstreamPi.
+        if (isGrnLockedByDownstreamPi(existingItems)) {
+          return c.json(
+            { success: false, error: grnLockedByDownstreamPiError() },
+            409,
+          );
+        }
         const rawItems: Array<Record<string, unknown>> = body.items;
         if (rawItems.length !== existingItems.length) {
           return c.json(

@@ -472,18 +472,20 @@ test("GRN POSTED edit 5→3 moves stock −2; editing back 3→5 is a net no-op"
   assert.equal(Number(inEntries[0].qty), 2);
 });
 
-test("GRN POSTED edit: reducing accepted below the invoiced qty is BLOCKED", async () => {
+test("GRN POSTED edit: ANY invoiced_qty > 0 BLOCKS the whole edit (owner 2026-06-29)", async () => {
   const db = makeDb();
   seed(db);
-  // Pretend a PI already billed 4 of the 5 accepted on this line.
+  // Pretend a PI already billed 4 of the 5 accepted on this line. Under the
+  // new lock rule the entire GRN is now locked — not just the below-invoiced
+  // reduction. Any attempted edit (up, down, no-op) returns the same 409.
   db.tables.grn_items.find((r) => r.id === 201).invoiced_qty = 4;
   const grnRoot = mount(grnApp, db);
 
   const grn = await getGrn(grnRoot, "grn-1");
-  const res = await editGrnAccepted(grnRoot, grn, 0, 3); // 3 < 4 invoiced
+  const res = await editGrnAccepted(grnRoot, grn, 0, 3);
   assert.equal(res.status, 409);
   const body = await res.json();
-  assert.match(body.error, /already been invoiced/);
+  assert.match(body.error, /linked PI/);
   // Stock untouched.
   assert.equal(db.tables.raw_materials.find((r) => r.id === "rm-foam-1").balanceQty, 5);
 });

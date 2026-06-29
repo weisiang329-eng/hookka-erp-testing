@@ -63,6 +63,30 @@ export function isGrnLineEditable(status: string | null | undefined): boolean {
 }
 
 /**
+ * Owner ruling 2026-06-29 (evening): once a Purchase Invoice has consumed
+ * any qty off this GRN, the GRN is FULLY LOCKED for line edits — including
+ * the per-line invoiced_qty cap path. The operator must delete the
+ * downstream PI first (which returns invoiced_qty to 0), then re-edit the
+ * GRN, then re-create the PI. The previous "can reduce down to invoiced_qty"
+ * rule is too easy to misuse — even an UP edit on an already-invoiced line
+ * leaves the PI sitting on stale qty/price.
+ *
+ * Returns true when ANY line on this GRN has been invoiced (sum > 0).
+ */
+export function isGrnLockedByDownstreamPi(
+  items: { invoicedQty?: number | null; invoiced_qty?: number | null }[],
+): boolean {
+  return items.some(
+    (it) =>
+      (Number(it.invoicedQty ?? it.invoiced_qty) || 0) > 0,
+  );
+}
+
+export function grnLockedByDownstreamPiError(): string {
+  return "This GRN has been billed on a purchase invoice. Delete the linked PI first to unlock the GRN for edit.";
+}
+
+/**
  * A POSTED GRN line whose accepted qty is being changed. Pure check: the new
  * accepted qty must not drop BELOW what a purchase invoice has already billed
  * off this line (invoiced_qty), or the PI would silently desync (it would be

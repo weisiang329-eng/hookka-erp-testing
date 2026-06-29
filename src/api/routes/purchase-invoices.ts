@@ -252,10 +252,17 @@ const VALID_LINE_TYPES: PurchaseInvoiceItemLineType[] = [
 
 // Lifecycle (owner 2026-06-29): DRAFT → CONFIRMED → PAID. CONFIRMED is the
 // "approved + GL posted" state and is terminal-for-editing; PAID is terminal.
+// PENDING_APPROVAL and APPROVED are legacy source states (pre-2026-06-29) —
+// kept here as equivalent to CONFIRMED so any row the runtime backfill hasn't
+// reached yet still transitions to PAID without a 409 from the FE Confirm
+// button. The backfill UPDATE in ensurePiMigrations() is the canonical fix;
+// these entries are belt-and-braces.
 const VALID_TRANSITIONS: Record<string, string[]> = {
   DRAFT: ["CONFIRMED"],
   CONFIRMED: ["PAID"],
   PAID: [],
+  PENDING_APPROVAL: ["CONFIRMED", "PAID"],
+  APPROVED: ["CONFIRMED", "PAID"],
 };
 
 function rowToPI(r: PurchaseInvoiceRow) {

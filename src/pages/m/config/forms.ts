@@ -1034,6 +1034,110 @@ export function editSupplierSpec(doc: Record<string, unknown>, id: string): Form
 }
 
 // ===========================================================================
+// R&D PROJECT — create. Wires to /api/rd-projects POST (rd-projects.ts:383).
+// Required: name + productCategory. Optional: projectType, currentStage,
+// targetLaunchDate, totalBudget.
+// ===========================================================================
+const RD_CATEGORY_OPTS: SelectOption[] = [
+  { value: "BEDFRAME", label: "Bedframe" },
+  { value: "SOFA", label: "Sofa" },
+  { value: "ACCESSORY", label: "Accessory" },
+];
+const RD_STAGE_OPTS: SelectOption[] = [
+  { value: "CONCEPT", label: "Concept" },
+  { value: "DESIGN", label: "Design" },
+  { value: "PROTOTYPE", label: "Prototype" },
+  { value: "TESTING", label: "Testing" },
+  { value: "APPROVED", label: "Approved" },
+  { value: "PRODUCTION_READY", label: "Production Ready" },
+];
+
+export function newRdProjectSpec(): FormSpec {
+  return {
+    title: "New R&D Project",
+    submitLabel: "Create",
+    fields: [
+      { name: "name", label: "Project Name", kind: "text" as const, required: true, full: true },
+      { name: "productCategory", label: "Category", kind: "select" as const, options: RD_CATEGORY_OPTS, required: true, full: true },
+      { name: "currentStage", label: "Current Stage", kind: "select" as const, options: RD_STAGE_OPTS, full: true },
+      { name: "targetLaunchDate", label: "Target Launch Date", kind: "date" as const, full: true },
+      { name: "totalBudget", label: "Total Budget (RM)", kind: "money" as const, full: true },
+      { name: "description", label: "Description", kind: "textarea" as const, full: true },
+    ],
+    initial: {
+      name: "",
+      productCategory: "BEDFRAME",
+      currentStage: "CONCEPT",
+      targetLaunchDate: "",
+      totalBudget: 0,
+      description: "",
+    },
+    submit: async (v) => {
+      const body = {
+        name: s(v.name).trim(),
+        productCategory: s(v.productCategory),
+        description: s(v.description),
+        currentStage: s(v.currentStage) || "CONCEPT",
+        targetLaunchDate: s(v.targetLaunchDate),
+        totalBudget: n(v.totalBudget),
+      };
+      const res = await mutateJson("/api/rd-projects", "POST", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshList("/api/rd-projects");
+      const id = newIdOf(res.body);
+      return {
+        ok: true,
+        navigateTo: id ? `/m/rd/${encodeURIComponent(id)}` : undefined,
+      };
+    },
+  };
+}
+
+// ===========================================================================
+// USER MANAGEMENT — invite. Wires to /api/users/invite POST (users.ts:625).
+// SUPER_ADMIN-only on the backend; FE just opens the form. Body: { email,
+// displayName, role }. Backend generates 72h link.
+// ===========================================================================
+const USER_ROLE_OPTS: SelectOption[] = [
+  { value: "SUPER_ADMIN", label: "Super Admin" },
+  { value: "ADMIN", label: "Admin" },
+  { value: "MANAGER", label: "Manager" },
+  { value: "STAFF", label: "Staff" },
+  { value: "READ_ONLY", label: "Read Only" },
+];
+
+export function inviteUserSpec(): FormSpec {
+  return {
+    title: "Invite User",
+    submitLabel: "Send Invite",
+    fields: [
+      { name: "email", label: "Email", kind: "text" as const, required: true, full: true, placeholder: "name@hookka.com" },
+      { name: "displayName", label: "Display Name", kind: "text" as const, required: true, full: true },
+      { name: "role", label: "Role", kind: "select" as const, options: USER_ROLE_OPTS, required: true, full: true },
+    ],
+    initial: { email: "", displayName: "", role: "STAFF" },
+    validate: (v) => {
+      const e = s(v.email).trim();
+      if (e && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) {
+        return "Enter a valid email address.";
+      }
+      return null;
+    },
+    submit: async (v) => {
+      const body = {
+        email: s(v.email).trim(),
+        displayName: s(v.displayName).trim(),
+        role: s(v.role) || "STAFF",
+      };
+      const res = await mutateJson("/api/users/invite", "POST", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshList("/api/users");
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
 // Create-form resolver — slug → its "New …" FormSpec, or null when the module
 // has no in-scope mobile create form. Drives the "+" affordance on the L1 list
 // header (ModuleListScreen).
@@ -1057,6 +1161,10 @@ export function createSpecFor(slug: string): FormSpec | null {
       return newCustomerSpec();
     case "suppliers":
       return newSupplierSpec();
+    case "rd":
+      return newRdProjectSpec();
+    case "usermgmt":
+      return inviteUserSpec();
     default:
       return null;
   }

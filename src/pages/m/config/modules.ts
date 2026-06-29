@@ -2741,12 +2741,15 @@ const customerDetail: DetailConfig = {
   // Owner 2026-06-30 — mobile customer edit is now built.
   extraActions: (_d, id) => [
     {
+      label: "Edit Hubs",
+      // Deep-link to desktop /customers where the full hub CRUD lives
+      // (add/edit/delete with state + contact + phone + address). Mobile
+      // Add Hub form (addHubSpec) covers add-only; full editor on desktop.
+      to: `/customers?autoOpenCustomerId=${encodeURIComponent(id)}`,
+      icon: "package-check",
+    },
+    {
       label: "Quotation PDF",
-      // Deep-link to desktop /customers — operator picks customer there.
-      // Desktop /customers has the full quotation export UI (asOf date
-      // picker + per-product overrides). Full mobile-side PDF generation
-      // would re-implement generateCustomerQuotationPdfV2 + letterhead
-      // resolution + customer-products lookup — defer until owner asks.
       to: `/customers?autoOpenCustomerId=${encodeURIComponent(id)}`,
       icon: "file-text",
     },
@@ -3282,10 +3285,67 @@ export const serviceCasesConfig: ModuleConfig = {
 // page — they're SUPER_ADMIN-only and the mobile detail-edit form isn't
 // built. Tapping a row stays non-tappable for the same reason.
 // ---------------------------------------------------------------------------
+// User detail — enables tap-to-open for the per-row admin actions
+// (Reset password / Deactivate / Resend invite / Revoke). Reuses the
+// existing /api/users/:id GET (users.ts) — fields are read from the row.
+const userDetail: DetailConfig = {
+  url: (id) => `/api/users/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "role") || "USER",
+  title: (d) => str(d, "displayName") || str(d, "email") || "—",
+  status: (d) => resolveStatus(
+    read(d, "isActive") === true ? "ACTIVE" : "INACTIVE",
+    PAYMENT_STATUS_MAP,
+  ),
+  fields: [
+    fld("Email", (d) => str(d, "email")),
+    fld("Role", (d) => str(d, "role")),
+    fld("Department", (d) => str(d, "department")),
+    fld("Position", (d) => str(d, "position")),
+    fld("Phone", (d) => str(d, "phone")),
+    fld("Last Login", (d) => dateOnly(d, "lastLoginAt")),
+    fld("Created", (d) => dateOnly(d, "createdAt")),
+  ],
+  // CHANGELOG L: per-row admin actions. Backend already supports each
+  // (users.ts:480 reset-password, :417 DELETE, /invites/:token/resend, etc).
+  extraActions: (_d, id) => [
+    {
+      label: "Reset Password",
+      icon: "package-check",
+      onClick: async () => {
+        if (!window.confirm("Send password reset email to this user?")) return;
+        try {
+          const r = await fetch(`/api/users/${encodeURIComponent(id)}/reset-password`, { method: "POST" });
+          if (r.ok) window.alert("Reset password email sent.");
+          else window.alert("Failed to send reset password email.");
+        } catch {
+          window.alert("Network error.");
+        }
+      },
+    },
+    {
+      label: "Deactivate",
+      icon: "copy",
+      onClick: async () => {
+        if (!window.confirm("Deactivate this user? They will lose access.")) return;
+        try {
+          const r = await fetch(`/api/users/${encodeURIComponent(id)}`, { method: "DELETE" });
+          if (r.ok) window.alert("User deactivated.");
+          else window.alert("Failed to deactivate user.");
+        } catch {
+          window.alert("Network error.");
+        }
+      },
+    },
+  ],
+  hideActionBar: true,
+};
+
 export const usermgmtConfig: ModuleConfig = {
   slug: "usermgmt",
   title: "User Management",
-  detailPath: () => null,
+  detailPath: (vm) => `/m/usermgmt/${encodeURIComponent(vm.id)}`,
+  detail: userDetail,
   sources: [
     {
       url: "/api/users",

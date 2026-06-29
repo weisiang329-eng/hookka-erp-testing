@@ -121,6 +121,9 @@ function GRNCreatePage() {
     data?: Supplier[];
   }>("/api/suppliers");
 
+  // Purchase Company registry — feeds the per-GRN buying-company dropdown.
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code: string; name: string; isActive?: boolean }> }>("/api/organisations");
+
   const purchaseOrders: PurchaseOrder[] = useMemo(
     () =>
       (poResp as { data?: PurchaseOrder[] } | undefined)?.data ??
@@ -174,6 +177,14 @@ function GRNCreatePage() {
   const [manualItems, setManualItems] = useState<ManualItemEntry[]>([
     newManualRow(),
   ]);
+
+  // ── Purchase company (HOOKKA / OHANA / sister co) on this GRN ─────────────
+  // Defaults from source PO → supplier → "HOOKKA". Always overridable.
+  const [purchaseOrgCode, setPurchaseOrgCode] = useState<string>("HOOKKA");
+  const activeOrgs = useMemo(
+    () => (orgsResp?.organisations ?? []).filter((o) => o.isActive !== false),
+    [orgsResp],
+  );
 
   // ── Auto-scan gate ─────────────────────────────────────────────────────────
   const autoScanFired = useRef(false);
@@ -288,7 +299,25 @@ function GRNCreatePage() {
     setSupplierId(id);
     const s = suppliers.find((x) => x.id === id);
     setSupplierName(s?.name ?? "");
+    // Prefill the Purchase company from this supplier's default; always
+    // overridable below. Empty supplier resets to "HOOKKA".
+    if (s?.purchaseOrgCode) {
+      setPurchaseOrgCode(s.purchaseOrgCode);
+    } else if (!id) {
+      setPurchaseOrgCode("HOOKKA");
+    }
   };
+
+  // Prefill Purchase company when the source PO resolves (deep-link or
+  // convert flow). Source PO wins over supplier; supplier wins over default.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!isPoLinked) return;
+    const sup = po?.supplierId ? suppliers.find((s) => s.id === po.supplierId) : null;
+    const next = po?.purchaseOrgCode || sup?.purchaseOrgCode || "HOOKKA";
+    /* eslint-disable-next-line react-hooks/set-state-in-effect */
+    setPurchaseOrgCode(next);
+  }, [isPoLinked, po, suppliers]);
 
   // ── OCR apply ────────────────────────────────────────────────────────────
   const applyOcr = (ex: SupplierExtraction) => {
@@ -434,6 +463,7 @@ function GRNCreatePage() {
         const hasShipment = shipmentMethod || shipmentCarrier || shipmentExpectedArrival;
         body = {
           poId: selectedPO,
+          purchaseOrgCode,
           receivedBy: receivedBy.trim(),
           notes: notes.trim(),
           supplier_do_no: supplierDoNo.trim() || null,
@@ -456,6 +486,7 @@ function GRNCreatePage() {
         body = {
           supplierId,
           supplierName,
+          purchaseOrgCode,
           receivedBy: receivedBy.trim(),
           notes: notes.trim(),
           supplier_do_no: supplierDoNo.trim() || null,
@@ -689,6 +720,27 @@ function GRNCreatePage() {
                   />
                 </div>
               )}
+
+              {/* Purchase company (HOOKKA / OHANA / sister co) */}
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">
+                  Purchase company<span className="text-[#9A3A2D]"> *</span>
+                </label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  value={purchaseOrgCode}
+                  onChange={(e) => setPurchaseOrgCode(e.target.value)}
+                  aria-label="Purchase company"
+                >
+                  {activeOrgs.length === 0 ? (
+                    <option value="HOOKKA">HOOKKA</option>
+                  ) : (
+                    activeOrgs.map((o) => (
+                      <option key={o.code} value={o.code}>{o.name}</option>
+                    ))
+                  )}
+                </select>
+              </div>
 
               {/* Received By */}
               <div>

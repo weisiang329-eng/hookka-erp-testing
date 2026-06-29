@@ -512,7 +512,7 @@ function seedApprovedPi(db) {
   db.tables.purchase_invoices.push({
     id: "pi-1", piNo: "PI-1", purchaseOrderId: "po-1", poRef: "PO-1", grn_id: "grn-1",
     supplierId: "sup-1", supplierName: "ACME", invoiceDate: "2026-06-03", dueDate: "2026-07-31",
-    amountSen: 60000, paid_amount_sen: 0, status: "APPROVED", remarks: "", currency: "MYR",
+    amountSen: 60000, paid_amount_sen: 0, status: "DRAFT", remarks: "", currency: "MYR",
     created_at: "2026-06-03", updated_at: "2026-06-03",
   });
   db.tables.purchase_invoice_items.push({
@@ -580,6 +580,6 @@ test("PI PAID cannot be line-edited (locked)", async () => {
     }),
   });
   assert.equal(res.status, 409);
-  assert.match((await res.json()).error, /DRAFT or APPROVED/);
+  assert.match((await res.json()).error, /DRAFT/);
   assert.equal(Number(db.tables.grn_items.find((r) => r.id === 201).invoiced_qty), 6);
 });

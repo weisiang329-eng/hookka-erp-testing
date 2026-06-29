@@ -77,6 +77,9 @@ function CreatePurchaseOrderPage() {
   const { data: supResp } = useCachedJson<{ success?: boolean; data?: Supplier[] }>("/api/suppliers");
   const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
   const { data: bindingsResp } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
+  // Purchase Company registry — feeds the per-PO buying-company dropdown.
+  // Same endpoint pi.tsx / index.tsx use, so the cache is warmed.
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code: string; name: string; isActive?: boolean }> }>("/api/organisations");
 
   const allSuppliers: Supplier[] = useMemo(
     () => (supResp?.success ? supResp.data ?? [] : Array.isArray(supResp) ? supResp : []),
@@ -102,6 +105,15 @@ function CreatePurchaseOrderPage() {
   // filtering — only materials offered by this supplier appear in the
   // add-material list once a supplier is selected.
   const [selectedSupplierId, setSelectedSupplierId] = useState<string>("");
+  // Purchase company (HOOKKA / OHANA / sister co) that buys on this PO.
+  // Prefilled from the picked supplier's default; always overridable.
+  const [purchaseOrgCode, setPurchaseOrgCode] = useState<string>("HOOKKA");
+
+  // Active Purchase Company options for the dropdown.
+  const activeOrgs = useMemo(
+    () => (orgsResp?.organisations ?? []).filter((o) => o.isActive !== false),
+    [orgsResp],
+  );
 
   // ── Derived: supplier helpers (ACTIVE-only filtering) ─────────
   const activeSupplierIds = useMemo(
@@ -394,6 +406,7 @@ function CreatePurchaseOrderPage() {
     supplierId: headerSupplierId,
     supplierName: headerSupplierName,
     status: "CONFIRMED",
+    purchaseOrgCode,
     expectedDate,
     notes,
     items: items.map((it) => ({
@@ -472,10 +485,18 @@ function CreatePurchaseOrderPage() {
     let okCount = 0;
     const failures: { supplierName: string; error: string }[] = [];
 
-    const groups = Array.from(bySupplier.entries()).map(([sid, lines]) => ({
+    const groups = Array.from(bySupplier.entries()).map(([sid, lines]) => {
+      // Per-supplier Purchase company: prefer THAT supplier's default so a
+      // split across companies (e.g. HOOKKA + OHANA suppliers in one cart)
+      // produces correctly-companied POs. Falls back to the form-level
+      // selection if the supplier has no default.
+      const sup = allSuppliers.find((s) => s.id === sid);
+      const supOrg = sup?.purchaseOrgCode || purchaseOrgCode || "HOOKKA";
+      return ({
       supplierId: sid,
       supplierName: lines[0].supplierName,
       status: "CONFIRMED",
+      purchaseOrgCode: supOrg,
       expectedDate,
       notes,
       items: lines.map((it) => ({
@@ -487,7 +508,8 @@ function CreatePurchaseOrderPage() {
         unitPriceSen: it.unitPriceSen,
         unit: it.unit,
       })),
-    }));
+    });
+    });
 
     try {
       for (let i = 0; i < groups.length; i++) {
@@ -599,7 +621,7 @@ function CreatePurchaseOrderPage() {
         <Card className="lg:col-span-2">
           <CardHeader className="pb-3"><CardTitle>Order Details</CardTitle></CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Supplier</label>
                 {/* Explicit supplier picker — drives the material-add list
@@ -610,11 +632,20 @@ function CreatePurchaseOrderPage() {
                   className="w-full h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
                   value={selectedSupplierId}
                   onChange={(e) => {
-                    setSelectedSupplierId(e.target.value);
+                    const nextId = e.target.value;
+                    setSelectedSupplierId(nextId);
                     // Reset picker filters when supplier changes so the
                     // operator isn't stranded in a now-empty category.
                     setSelectedCategory("ALL");
                     setRmSearch("");
+                    // Prefill the Purchase company from this supplier's
+                    // default — always overridable by the operator below.
+                    const sup = allSuppliers.find((s) => s.id === nextId);
+                    if (sup?.purchaseOrgCode) {
+                      setPurchaseOrgCode(sup.purchaseOrgCode);
+                    } else if (!nextId) {
+                      setPurchaseOrgCode("HOOKKA");
+                    }
                   }}
                   aria-label="Select supplier for this purchase order"
                 >
@@ -637,6 +668,23 @@ function CreatePurchaseOrderPage() {
                     <span className="text-[#6B7280]">PO supplier: <span className="font-medium text-[#1F1D1B]">{headerSupplierName}</span></span>
                   ) : null}
                 </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">Purchase company<span className="text-[#9A3A2D]"> *</span></label>
+                <select
+                  className="w-full h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  value={purchaseOrgCode}
+                  onChange={(e) => setPurchaseOrgCode(e.target.value)}
+                  aria-label="Purchase company"
+                >
+                  {activeOrgs.length === 0 ? (
+                    <option value="HOOKKA">HOOKKA</option>
+                  ) : (
+                    activeOrgs.map((o) => (
+                      <option key={o.code} value={o.code}>{o.name}</option>
+                    ))
+                  )}
+                </select>
               </div>
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Expected Delivery Date</label>

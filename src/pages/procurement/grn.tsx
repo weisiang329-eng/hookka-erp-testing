@@ -1,14 +1,16 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { formatCurrency, getStatusColor } from "@/lib/utils";
+import { formatCurrency, getStatusColor, cn } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useUrlState } from "@/lib/use-url-state";
 import type { GoodsReceiptNote, PurchaseOrder, ArrivalState } from "@/types";
 import { Ship } from "lucide-react";
 import {
@@ -344,7 +346,14 @@ const ALL_GRN_STATUSES = [
 // ============================================================
 export default function GRNPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const navigate = useNavigate();
+
+  // Draft / Confirmed split — mirrors the Sales Order list. CONFIRMED tab
+  // shows everything that ISN'T DRAFT (CONFIRMED + POSTED + CANCELLED);
+  // DRAFT tab is only DRAFT rows. URL-synced.
+  const [tab, setTab] = useUrlState<"DRAFT" | "CONFIRMED">("tab", "CONFIRMED");
+  const [bulkConverting, setBulkConverting] = useState(false);
 
   // Filters
   const [filterStatus, setFilterStatus] = useState("");
@@ -389,7 +398,7 @@ export default function GRNPage() {
     setFilterArrivalState("");
   };
 
-  const filteredGRNs = useMemo(() => {
+  const filteredGRNsByUserFilters = useMemo(() => {
     return grns.filter(grn => {
       if (filterStatus) {
         // Map QC status filter
@@ -409,6 +418,26 @@ export default function GRNPage() {
       return true;
     });
   }, [grns, filterStatus, filterSupplier, filterDateFrom, filterDateTo, filterArrivalState]);
+
+  // Tab split — DRAFT tab = only DRAFT; CONFIRMED tab = everything else
+  // (CONFIRMED + POSTED + CANCELLED). Mirrors the Sales Order list.
+  const filteredGRNs = useMemo(() => {
+    return filteredGRNsByUserFilters.filter(grn => {
+      if (tab === "DRAFT" && grn.status !== "DRAFT") return false;
+      if (tab === "CONFIRMED" && grn.status === "DRAFT") return false;
+      return true;
+    });
+  }, [filteredGRNsByUserFilters, tab]);
+
+  // Tab badge counts come from the whole list, not the current filter.
+  const draftCount = useMemo(
+    () => grns.filter(g => g.status === "DRAFT").length,
+    [grns],
+  );
+  const tabConfirmedCount = useMemo(
+    () => grns.filter(g => g.status !== "DRAFT").length,
+    [grns],
+  );
 
   // ---- Export CSV ----
   const exportCSV = () => {
@@ -557,11 +586,87 @@ export default function GRNPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedGrns, bulkArrivalBusy, toast, fetchData]);
 
+  // Bulk DRAFT → CONFIRMED — mirrors the Sales Order bulk-confirm UX. GRNs
+  // transition DRAFT → CONFIRMED via PUT /api/grn/:id; the move to POSTED
+  // (which actually commits stock) stays on the per-row context menu.
+  const bulkConvertDrafts = useCallback(async () => {
+    const drafts = selectedGrns.filter(g => g.status === "DRAFT");
+    if (drafts.length === 0) return;
+    if (
+      !(await confirm({
+        title: "Convert drafts",
+        message: `Confirm ${drafts.length} draft GRN(s)? They will move to CONFIRMED (Post to Stock stays per-row).`,
+        danger: false,
+      }))
+    )
+      return;
+    setBulkConverting(true);
+    const results = await Promise.all(
+      drafts.map(async (g) => {
+        try {
+          const res = await fetch(`/api/grn/${g.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "CONFIRMED" }),
+          });
+          const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+          if (!res.ok || !j?.success) {
+            return { ok: false, id: g.grnNumber, err: j?.error || `HTTP ${res.status}` };
+          }
+          return { ok: true, id: g.grnNumber };
+        } catch (e) {
+          return { ok: false, id: g.grnNumber, err: (e as Error).message };
+        }
+      }),
+    );
+    setBulkConverting(false);
+    const failed = results.filter(r => !r.ok);
+    invalidateCachePrefix("/api/grn");
+    fetchData();
+    setSelectedGrns([]);
+    if (failed.length > 0) {
+      const sample = failed.slice(0, 3).map(f => f.id).join(", ");
+      toast.error(`Confirmed ${results.length - failed.length} · Failed ${failed.length} (${sample})`);
+    } else {
+      toast.success(`Confirmed ${results.length} GRN${results.length !== 1 ? "s" : ""} successfully.`);
+    }
+    if (results.length - failed.length > 0) setTab("CONFIRMED");
+  }, [selectedGrns, confirm, toast, fetchData, setTab]);
+
+  // Purchase company display map: org code → legal name. Falls back to
+  // the code when no name is registered.
+  const orgNameByCode = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const o of orgsResp?.organisations ?? []) {
+      if (o.code) out[o.code] = o.name || o.code;
+    }
+    return out;
+  }, [orgsResp]);
+
   // ---- Columns ----
   const grnGridColumns: Column<GoodsReceiptNote>[] = useMemo(() => [
     { key: "grnNumber", label: "GRN No.", type: "docno", width: "130px", sortable: true },
     { key: "poNumber", label: "PO No.", type: "docno", width: "130px", sortable: true },
     { key: "supplierName", label: "Supplier", type: "text", sortable: true },
+    {
+      key: "purchaseOrgCode",
+      label: "Purchase co",
+      type: "text",
+      width: "120px",
+      sortable: true,
+      render: (_v: unknown, row: GoodsReceiptNote) => {
+        const code = row.purchaseOrgCode || "HOOKKA";
+        const label = orgNameByCode[code] || code;
+        return (
+          <span
+            className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-[#F0ECE9] text-[#6B5C32]"
+            title={code}
+          >
+            {label}
+          </span>
+        );
+      },
+    },
     { key: "receiveDate", label: "Receive Date", type: "date", width: "120px", sortable: true },
     { key: "items.length", label: "Items", type: "number", width: "70px", align: "right", sortable: true,
       render: (_v: unknown, row: GoodsReceiptNote) => <span>{row.items.length}</span>,
@@ -576,7 +681,7 @@ export default function GRNPage() {
     },
     { key: "qcStatus", label: "QC Status", type: "status", width: "110px", sortable: true },
     { key: "status", label: "Status", type: "status", width: "110px", sortable: true },
-  ], []);
+  ], [orgNameByCode]);
 
   const grnGridContextMenu = useCallback((row: GoodsReceiptNote): ContextMenuItem[] => {
     return [
@@ -955,12 +1060,57 @@ export default function GRNPage() {
       {/* GRN DataGrid */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2">
-            <Package className="h-5 w-5 text-[#6B5C32]" />
-            Goods Receipt Notes
-          </CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle className="flex items-center gap-2">
+              <Package className="h-5 w-5 text-[#6B5C32]" />
+              Goods Receipt Notes
+            </CardTitle>
+            {/* Draft / Confirmed toggle — mirrors SO list shell. */}
+            <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
+              <button
+                onClick={() => { setTab("DRAFT"); setSelectedGrns([]); }}
+                className={cn(
+                  "px-4 py-1.5 text-sm rounded transition-colors",
+                  tab === "DRAFT"
+                    ? "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm"
+                    : "text-[#6B7280] hover:text-[#1F1D1B]"
+                )}
+              >
+                Draft ({draftCount})
+              </button>
+              <button
+                onClick={() => { setTab("CONFIRMED"); setSelectedGrns([]); }}
+                className={cn(
+                  "px-4 py-1.5 text-sm rounded transition-colors",
+                  tab === "CONFIRMED"
+                    ? "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm"
+                    : "text-[#6B7280] hover:text-[#1F1D1B]"
+                )}
+              >
+                Confirmed ({tabConfirmedCount})
+              </button>
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
+          {tab === "DRAFT" && selectedGrns.length > 0 && (
+            <div className="mb-3 flex items-center justify-between rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-sm">
+              <span className="text-[#9C6F1E]">
+                {selectedGrns.filter(g => g.status === "DRAFT").length} draft GRN(s) selected
+              </span>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={bulkConverting}
+                onClick={bulkConvertDrafts}
+              >
+                <CheckCircle2 className="h-4 w-4" />{" "}
+                {bulkConverting
+                  ? "Converting..."
+                  : `Convert ${selectedGrns.filter(g => g.status === "DRAFT").length} drafts`}
+              </Button>
+            </div>
+          )}
           <DataGrid<GoodsReceiptNote>
             columns={grnGridColumns}
             data={filteredGRNs}
@@ -973,7 +1123,7 @@ export default function GRNPage() {
             onDoubleClick={(row) => navigate(`/procurement/grn/${row.id}`)}
             contextMenuItems={grnGridContextMenu}
             maxHeight="calc(100vh - 300px)"
-            emptyMessage="No GRNs found."
+            emptyMessage={tab === "DRAFT" ? "No draft GRNs." : "No GRNs found."}
           />
         </CardContent>
       </Card>

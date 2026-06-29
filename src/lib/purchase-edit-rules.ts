@@ -18,13 +18,14 @@
 
 /**
  * PI statuses whose header + lines may be edited.
- *   • DRAFT     — never posted to the GL, fully editable (legacy behaviour).
- *   • APPROVED  — already posted to the GL, but the owner wants corrections
- *                 with the AP total + GRN consumption following the change.
- * PAID / CANCELLED are terminal-for-editing: PAID has a settled payment +
- * realised FX, CANCELLED has already released its GRN consumption.
+ *   • DRAFT — pre-confirm, fully editable (lifecycle simplification 2026-06-29:
+ *     PENDING_APPROVAL / APPROVED were dropped; CONFIRMED replaces APPROVED
+ *     and is treated as LOCKED, same as PAID).
+ * CONFIRMED / PAID / CANCELLED are terminal-for-editing: CONFIRMED has posted
+ * to the GL, PAID has a settled payment + realised FX, CANCELLED has already
+ * released its GRN consumption.
  */
-export const PI_EDITABLE_STATUSES = ["DRAFT", "APPROVED"] as const;
+export const PI_EDITABLE_STATUSES = ["DRAFT"] as const;
 
 export function isPiEditable(status: string | null | undefined): boolean {
   return PI_EDITABLE_STATUSES.includes(
@@ -38,7 +39,7 @@ export function isPiEditable(status: string | null | undefined): boolean {
  * consistent message.
  */
 export function piEditBlockedError(status: string | null | undefined): string {
-  return `Line items can only be edited while the invoice is DRAFT or APPROVED (current: ${String(status ?? "").toUpperCase() || "UNKNOWN"}).`;
+  return `Line items can only be edited while the invoice is DRAFT (current: ${String(status ?? "").toUpperCase() || "UNKNOWN"}).`;
 }
 
 // ── Goods Receipt Note ─────────────────────────────────────────────────────

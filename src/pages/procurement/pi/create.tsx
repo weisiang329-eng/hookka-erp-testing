@@ -127,6 +127,8 @@ function CreatePurchaseInvoicePage() {
   const { data: bindingsResp } = useCachedJson<
     { success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]
   >("/api/supplier-materials");
+  // Purchase Company registry — feeds the per-PI buying-company dropdown.
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code: string; name: string; isActive?: boolean }> }>("/api/organisations");
 
   const suppliers: Supplier[] = useMemo(
     () => supResp?.data ?? [],
@@ -165,7 +167,17 @@ function CreatePurchaseInvoicePage() {
   // an OCR/scan-built PI lands as DRAFT (editable, like a Sales Order). This
   // flag flips true when the form is built via the scan path (?scan=1 deep-link
   // or the in-form Scan modal's applyOcr).
-  const [ocrUsed, setOcrUsed] = useState(false);
+  // Lifecycle simplification (owner 2026-06-29): every create now lands as
+  // DRAFT regardless of OCR — kept the flag so callers don't break, but it no
+  // longer drives the POST status.
+  const [, setOcrUsed] = useState(false);
+  // Purchase company (HOOKKA / OHANA / sister co) on this PI. Defaults in
+  // order: source PO → source GRN → supplier → "HOOKKA". Always overridable.
+  const [purchaseOrgCode, setPurchaseOrgCode] = useState<string>("HOOKKA");
+  const activeOrgs = useMemo(
+    () => (orgsResp?.organisations ?? []).filter((o) => o.isActive !== false),
+    [orgsResp],
+  );
 
   // ── Source PO id to include in POST body for lineage ─────────────────────
   const [sourcePurchaseOrderId, setSourcePurchaseOrderId] = useState<
@@ -183,12 +195,14 @@ function CreatePurchaseInvoicePage() {
       fetch(`/api/purchase-orders/${poId}`)
         .then((r) => r.json())
         .then((j) => {
-          const resp = j as { success?: boolean; data?: POShape };
+          const resp = j as { success?: boolean; data?: POShape & { purchaseOrgCode?: string } };
           const po = resp.data;
           if (!po) return;
           setSupplierId(po.supplierId);
           setRemarks(`Created from PO ${po.poNo}`);
           setSourcePurchaseOrderId(po.id);
+          // Prefill Purchase company from the source PO (highest priority).
+          if (po.purchaseOrgCode) setPurchaseOrgCode(po.purchaseOrgCode);
           const prefilled = po.items.map((it) => ({
             materialCode: "",
             materialName: it.materialName,
@@ -206,13 +220,16 @@ function CreatePurchaseInvoicePage() {
       fetch(`/api/grn/${grnId}`)
         .then((r) => r.json())
         .then((j) => {
-          const resp = j as { success?: boolean; data?: GRNShape };
+          const resp = j as { success?: boolean; data?: GRNShape & { purchaseOrgCode?: string } };
           const grn = resp.data;
           if (!grn) return;
           setSupplierId(grn.supplierId);
           setRemarks(`From GRN ${grn.grnNumber}`);
           setSourceGrnId(grn.id);
           if (grn.poId) setSourcePurchaseOrderId(grn.poId);
+          // Prefill Purchase company from the source GRN (fallback when PI is
+          // built from a GRN that wasn't deep-linked via its PO).
+          if (grn.purchaseOrgCode) setPurchaseOrgCode(grn.purchaseOrgCode);
           // Deep-link path: take every line that still has something to invoice
           // (availableQty, falling back to acceptedQty for pre-column rows) and
           // CARRY grnItemId so the backend increments invoiced_qty + guards.
@@ -315,12 +332,30 @@ function CreatePurchaseInvoicePage() {
       prev.length === 1 ? [emptyPILine()] : prev.filter((_, i) => i !== idx),
     );
 
-  // OCR apply — verbatim from PIFormDialog.applyOcr
+  // OCR apply — verbatim from PIFormDialog.applyOcr, plus auto-fill of
+  // supplierInvoiceNo / supplierDoNo / invoiceDate from the OCR header. Owner
+  // 2026-06-29: the operator was re-typing every supplier doc number after
+  // scanning — the docNo was sitting in `ex` unused. INVOICE docs → fill
+  // supplierInvoiceNo; DELIVERY_NOTE docs → fill supplierDoNo. Both flows
+  // also seed invoiceDate from ex.docDate if present.
   const applyOcr = (ex: SupplierExtraction) => {
-    // Using OCR to build the lines = the scan path → this PI lands as DRAFT
-    // (editable), matching the Sales Order rule. A manual create stays
-    // non-draft (active + locked).
     setOcrUsed(true);
+    const dt = (ex.docType ?? "").toUpperCase();
+    const docNo = (ex.docNo ?? "").trim();
+    if (docNo) {
+      if (dt === "INVOICE" && !supplierInvoiceNo.trim()) {
+        setSupplierInvoiceNo(docNo);
+      } else if (dt === "DELIVERY_NOTE" && !supplierDoNo.trim()) {
+        setSupplierDoNo(docNo);
+      } else if (!supplierInvoiceNo.trim() && !supplierDoNo.trim()) {
+        // OTHER / unknown — default to invoice no since this IS the PI page.
+        setSupplierInvoiceNo(docNo);
+      }
+    }
+    const docDate = (ex.docDate ?? "").trim();
+    if (docDate && /^\d{4}-\d{2}-\d{2}$/.test(docDate)) {
+      setInvoiceDate(docDate);
+    }
     const norm = (s: string | null | undefined) =>
       String(s ?? "")
         .toUpperCase()
@@ -385,6 +420,16 @@ function CreatePurchaseInvoicePage() {
     setSupplierId(res.supplierId);
     setSourceGrnId(res.grnId);
     setSourcePurchaseOrderId(res.purchaseOrderId);
+    // Prefill Purchase company in priority order: convert payload (if it
+    // carries one) → supplier default → leave current. The convert payload
+    // doesn't carry the org today; fall back to the supplier.
+    const convRes = res as ConvertToPIResult & { purchaseOrgCode?: string };
+    if (convRes.purchaseOrgCode) {
+      setPurchaseOrgCode(convRes.purchaseOrgCode);
+    } else {
+      const sup = suppliers.find((s) => s.id === res.supplierId);
+      if (sup?.purchaseOrgCode) setPurchaseOrgCode(sup.purchaseOrgCode);
+    }
     setRemarks(
       res.source === "grn"
         ? `From GRN ${res.docLabel}`
@@ -431,10 +476,11 @@ function CreatePurchaseInvoicePage() {
         supplierName: supplier.name,
         invoiceDate,
         remarks,
-        // Owner ruling 2026-06-21: manual create → PENDING_APPROVAL (active,
-        // non-draft, locked from line edits — re-edit via the OCR-draft path);
-        // OCR/scan create → DRAFT (editable, like a Sales Order).
-        status: ocrUsed ? "DRAFT" : "PENDING_APPROVAL",
+        // Lifecycle simplification (owner 2026-06-29): every create lands as
+        // DRAFT. The old OCR-vs-manual split (PENDING_APPROVAL on manual) is
+        // gone — operator flips to CONFIRMED from the detail page when ready.
+        status: "DRAFT",
+        purchaseOrgCode,
         supplierInvoiceNo: supplierInvoiceNo.trim() || null,
         supplierDoNo: supplierDoNo.trim() || null,
         items: validLines.map((l) => ({
@@ -568,10 +614,39 @@ function CreatePurchaseInvoicePage() {
                 </label>
                 <SearchableSelect
                   value={supplierId}
-                  onChange={setSupplierId}
+                  onChange={(nextId) => {
+                    setSupplierId(nextId);
+                    // Prefill Purchase company from the supplier's default
+                    // ONLY when no source PO/GRN has already set it (PO →
+                    // GRN → supplier → "HOOKKA"). Source-doc wins.
+                    if (!sourcePurchaseOrderId && !sourceGrnId) {
+                      const s = suppliers.find((x) => x.id === nextId);
+                      if (s?.purchaseOrgCode) setPurchaseOrgCode(s.purchaseOrgCode);
+                      else if (!nextId) setPurchaseOrgCode("HOOKKA");
+                    }
+                  }}
                   options={suppliers.map((s) => ({ value: s.id, label: `${s.code} - ${s.name}` }))}
                   placeholder="Select supplier..."
                 />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">
+                  Purchase company<span className="text-[#9A3A2D]"> *</span>
+                </label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  value={purchaseOrgCode}
+                  onChange={(e) => setPurchaseOrgCode(e.target.value)}
+                  aria-label="Purchase company"
+                >
+                  {activeOrgs.length === 0 ? (
+                    <option value="HOOKKA">HOOKKA</option>
+                  ) : (
+                    activeOrgs.map((o) => (
+                      <option key={o.code} value={o.code}>{o.name}</option>
+                    ))
+                  )}
+                </select>
               </div>
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">
@@ -674,9 +749,7 @@ function CreatePurchaseInvoicePage() {
               <span className="text-[#6B5C32]">{formatCurrency(totalSen)}</span>
             </div>
             <div className="text-xs text-[#9CA3AF]">
-              {ocrUsed
-                ? "Scanned invoice — status will be set to DRAFT (editable)"
-                : "Status will be set to PENDING APPROVAL (locked from editing)"}
+              Status will be set to DRAFT — confirm from the invoice detail page when ready.
             </div>
           </CardContent>
         </Card>

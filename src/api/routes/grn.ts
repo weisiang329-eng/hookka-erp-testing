@@ -69,6 +69,18 @@ function ensureGrnMigrations(db: D1Database): Promise<void> {
       // guard ("already invoiced?") never 500s on a missing column when the
       // GRN route boots first.
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS grn_id TEXT",
+      // 0200 — per-document purchase company override. Inherits from source PO
+      // → supplier → HOOKKA on create; never null.
+      "ALTER TABLE grns ADD COLUMN IF NOT EXISTS purchase_org_code TEXT",
+      "UPDATE grns SET purchase_org_code = 'HOOKKA' WHERE purchase_org_code IS NULL",
+      // Arrival-vs-status integrity fix (owner 2026-06-29): the legacy cascade
+      // import (one-shot endpoints) created `GRN-IMPORT-PI-*` rows that landed
+      // POSTED with QC PASSED but never had arrival_state set — leaving the UI
+      // showing "Planning" arrival on already-posted, already-consumed stock.
+      // Since POSTED requires arrived goods (cost already in ledger, stock
+      // already incremented), backfill those rows to ARRIVED. Idempotent.
+      "UPDATE grns SET arrival_state = 'ARRIVED' " +
+        "WHERE status = 'POSTED' AND (arrival_state IS NULL OR arrival_state <> 'ARRIVED')",
     ];
     for (const sql of stmts) {
       try {
@@ -127,6 +139,9 @@ type GRNRow = {
   currency: string | null;
   landed_cost_sen: number | null;
   supplier_do_no: string | null;
+  // Per-document purchase company override; nullable until ensureGrnMigrations
+  // backfills legacy rows to HOOKKA.
+  purchase_org_code: string | null;
   supplierDoNo?: string | null;
   // toCamel folds the snake_case DB columns to camelCase on read — dual-key
   // the reads below so the stored arrival/shipment/cost values are recovered.
@@ -144,6 +159,8 @@ type GRNRow = {
   customsDutySen?: number | null;
   exchangeRate?: number | null;
   landedCostSen?: number | null;
+  // toCamel may fold purchase_org_code → purchaseOrgCode; dual-key on read.
+  purchaseOrgCode?: string | null;
 };
 
 type GRNItemRow = {
@@ -269,6 +286,8 @@ function rowToGRN(row: GRNRow, items: GRNItemRow[] = []) {
     currency: row.currency ?? null,
     landed_cost_sen: row.landedCostSen ?? row.landed_cost_sen ?? 0,
     supplier_do_no: row.supplierDoNo ?? row.supplier_do_no ?? null,
+    // Per-document purchase company override (HOOKKA default).
+    purchaseOrgCode: row.purchaseOrgCode ?? row.purchase_org_code ?? "HOOKKA",
     notes: row.notes ?? "",
   };
 }
@@ -1099,14 +1118,22 @@ app.post("/", async (c) => {
       unitPrice: number;
     }>;
 
+    // Per-document purchase company — resolved later in this handler. We need
+    // it before the INSERT runs; defaults to HOOKKA if everything in the chain
+    // (body → PO → supplier) comes back empty.
+    let purchaseOrgCode: string =
+      typeof body.purchaseOrgCode === "string" && body.purchaseOrgCode.trim()
+        ? body.purchaseOrgCode.trim()
+        : "";
+
     if (poId) {
       // ── PO mode ─────────────────────────────────────────────────────────
       const [po, poItemsRes] = await Promise.all([
         c.var.DB.prepare(
-          "SELECT id, poNo, supplierId, supplierName FROM purchase_orders WHERE id = ?",
+          "SELECT id, poNo, supplierId, supplierName, purchase_org_code FROM purchase_orders WHERE id = ?",
         )
           .bind(poId)
-          .first<PurchaseOrderRow>(),
+          .first<PurchaseOrderRow & { purchase_org_code?: string | null; purchaseOrgCode?: string | null }>(),
         c.var.DB.prepare(
           "SELECT * FROM purchase_order_items WHERE purchaseOrderId = ?",
         )
@@ -1143,6 +1170,15 @@ app.post("/", async (c) => {
       grnPoNumber = po.poNo;
       grnSupplierId = po.supplierId;
       grnSupplierName = po.supplierName ?? "";
+
+      // Inherit purchase company from the source PO when body didn't set it.
+      if (!purchaseOrgCode) {
+        const poOrg =
+          (po as { purchaseOrgCode?: string | null }).purchaseOrgCode ??
+          (po as { purchase_org_code?: string | null }).purchase_org_code ??
+          null;
+        if (poOrg && String(poOrg).trim()) purchaseOrgCode = String(poOrg).trim();
+      }
 
       grnItems = (
         items as Array<{
@@ -1202,6 +1238,19 @@ app.post("/", async (c) => {
       0,
     );
 
+    // Final fall-through for purchase company: if body and source PO didn't
+    // resolve it, try the supplier; finally default to HOOKKA. Never null.
+    if (!purchaseOrgCode && grnSupplierId) {
+      const sup = await c.var.DB.prepare(
+        "SELECT purchaseOrgCode FROM suppliers WHERE id = ?",
+      )
+        .bind(grnSupplierId)
+        .first<{ purchaseOrgCode?: string | null; purchase_org_code?: string | null }>();
+      const supOrg = sup?.purchaseOrgCode ?? sup?.purchase_org_code ?? null;
+      if (supOrg && String(supOrg).trim()) purchaseOrgCode = String(supOrg).trim();
+    }
+    if (!purchaseOrgCode) purchaseOrgCode = "HOOKKA";
+
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
         `INSERT INTO grns (id, grnNumber, poId, poNumber, supplierId,
@@ -1211,9 +1260,9 @@ app.post("/", async (c) => {
            container_number, expected_arrival, shipped_date, actual_arrival,
            customs_status, customs_clearance_date,
            shipping_cost_sen, customs_duty_sen, exchange_rate, currency,
-           landed_cost_sen, supplier_do_no)
+           landed_cost_sen, supplier_do_no, purchase_org_code)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         grnId,
         grnNumber,
@@ -1244,6 +1293,7 @@ app.post("/", async (c) => {
         body.currency ?? null,
         body.landed_cost_sen ?? 0,
         body.supplier_do_no ?? null,
+        purchaseOrgCode,
       ),
       ...grnItems.map((item) =>
         c.var.DB.prepare(
@@ -1361,6 +1411,14 @@ app.put("/:id", async (c) => {
       body.supplier_do_no !== undefined
         ? (String(body.supplier_do_no ?? "").trim() || null)
         : existingSupplierDoNo;
+    // Purchase company override — keep existing value unless body provides a
+    // non-empty string; never null (HOOKKA fallback applied below).
+    const existingOrgCode =
+      (existing as GRNRow).purchaseOrgCode ?? existing.purchase_org_code ?? "HOOKKA";
+    const newPurchaseOrgCode =
+      typeof body.purchaseOrgCode === "string" && body.purchaseOrgCode.trim()
+        ? body.purchaseOrgCode.trim()
+        : existingOrgCode || "HOOKKA";
 
     // ── Lock POSTED (received) GRNs from un-posting ──────────────────────
     // Owner ruling 2026-06-21 (option A): once a GRN is POSTED its stock is in
@@ -1568,8 +1626,18 @@ app.put("/:id", async (c) => {
     statements.push(
       c.var.DB.prepare(
         `UPDATE grns SET qcStatus = ?, status = ?, notes = ?,
-           receivedBy = ?, totalAmount = ?, supplier_do_no = ? WHERE id = ?`,
-      ).bind(newQcStatus, newStatus, newNotes, newReceivedBy, totalAmount, newSupplierDoNo, id),
+           receivedBy = ?, totalAmount = ?, supplier_do_no = ?,
+           purchase_org_code = ? WHERE id = ?`,
+      ).bind(
+        newQcStatus,
+        newStatus,
+        newNotes,
+        newReceivedBy,
+        totalAmount,
+        newSupplierDoNo,
+        newPurchaseOrgCode,
+        id,
+      ),
     );
 
     await c.var.DB.batch(statements);

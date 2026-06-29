@@ -895,6 +895,58 @@ export default function ProcurementPage() {
   const [selectedPOs, setSelectedPOs] = useState<PurchaseOrder[]>([]);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [bulkGrnRunning, setBulkGrnRunning] = useState(false);
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+
+  // Bulk DRAFT → SUBMITTED — mirrors the Sales Order bulk-confirm UX. POs
+  // transition DRAFT → SUBMITTED via PUT /api/purchase-orders/:id; later
+  // states (CONFIRMED / RECEIVED / etc.) are reached through the normal
+  // detail-page actions.
+  const bulkSubmitDrafts = useCallback(async () => {
+    const drafts = selectedPOs.filter((p) => p.status === "DRAFT");
+    if (drafts.length === 0) return;
+    if (
+      !(await confirm({
+        title: "Submit drafts",
+        message: `Submit ${drafts.length} draft purchase order(s)? They will move to SUBMITTED and be ready for supplier acknowledgement.`,
+        danger: false,
+      }))
+    )
+      return;
+    setBulkSubmitting(true);
+    let ok = 0;
+    let fail = 0;
+    const errors: string[] = [];
+    for (const po of drafts) {
+      try {
+        const res = await fetch(`/api/purchase-orders/${po.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "SUBMITTED" }),
+        });
+        const text = await res.text();
+        let d: { success?: boolean; error?: string } = {};
+        try { d = JSON.parse(text); } catch { d = { error: text.slice(0, 200) }; }
+        if (res.ok && d.success) ok++;
+        else {
+          fail++;
+          if (errors.length < 3) errors.push(`${po.poNo}: ${d.error || `HTTP ${res.status}`}`);
+        }
+      } catch (e) {
+        fail++;
+        if (errors.length < 3) errors.push(`${po.poNo}: ${(e as Error).message}`);
+      }
+    }
+    setBulkSubmitting(false);
+    setSelectedPOs([]);
+    invalidateCachePrefix("/api/purchase-orders");
+    refreshPOs();
+    if (fail > 0) {
+      toast.error(`Submitted: ${ok} · Failed: ${fail}${errors.length ? " — " + errors[0] : ""}`);
+    } else {
+      toast.success(`Submitted ${ok} order${ok !== 1 ? "s" : ""} successfully.`);
+    }
+    if (ok > 0) setTab("CONFIRMED");
+  }, [selectedPOs, confirm, toast, refreshPOs, setTab]);
 
   const loading = supLoading || poLoading || invLoading || bindingsLoading;
 
@@ -1466,10 +1518,40 @@ export default function ProcurementPage() {
     return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
   }, [purchaseOrders]);
 
+  // Purchase company display map: org code → legal name. Built off the
+  // /api/organisations registry so badges read "Hookka Industries" instead
+  // of raw "HOOKKA". Falls back to the code when no name is registered.
+  const orgNameByCode = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const o of orgsResp?.organisations ?? []) {
+      if (o.code) out[o.code] = o.name || o.code;
+    }
+    return out;
+  }, [orgsResp]);
+
   // ---- Columns ----
   const poGridColumns: Column<PurchaseOrder>[] = useMemo(() => [
     { key: "poNo", label: "PO No", type: "docno", width: "120px", sortable: true },
     { key: "supplierName", label: "Supplier", type: "text", sortable: true },
+    {
+      key: "purchaseOrgCode",
+      label: "Purchase co",
+      type: "text",
+      width: "120px",
+      sortable: true,
+      render: (_v: unknown, row: PurchaseOrder) => {
+        const code = row.purchaseOrgCode || "HOOKKA";
+        const label = orgNameByCode[code] || code;
+        return (
+          <span
+            className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-[#F0ECE9] text-[#6B5C32]"
+            title={code}
+          >
+            {label}
+          </span>
+        );
+      },
+    },
     {
       key: "supplierOtr",
       label: "Supplier OTR%",
@@ -1533,7 +1615,7 @@ export default function ProcurementPage() {
     },
     { key: "totalSen", label: "Total", type: "currency", width: "120px", sortable: true },
     { key: "status", label: "Status", type: "status", width: "120px", sortable: true },
-  ], [otrMap]);
+  ], [otrMap, orgNameByCode]);
 
   const poGridContextMenu = useCallback((row: PurchaseOrder): ContextMenuItem[] => {
     return [
@@ -1944,6 +2026,24 @@ export default function ProcurementPage() {
           </div>
         </CardHeader>
         <CardContent>
+          {tab === "DRAFT" && selectedPOs.length > 0 && (
+            <div className="mb-3 flex items-center justify-between rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-sm">
+              <span className="text-[#9C6F1E]">
+                {selectedPOs.filter((p) => p.status === "DRAFT").length} draft PO(s) selected
+              </span>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={bulkSubmitting}
+                onClick={bulkSubmitDrafts}
+              >
+                <ClipboardCheck className="h-4 w-4" />{" "}
+                {bulkSubmitting
+                  ? "Submitting..."
+                  : `Submit ${selectedPOs.filter((p) => p.status === "DRAFT").length} drafts`}
+              </Button>
+            </div>
+          )}
           <DataGrid<PurchaseOrder>
             columns={poGridColumns}
             data={filteredOrders}

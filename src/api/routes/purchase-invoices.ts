@@ -5,8 +5,11 @@
 // src/pages/procurement/pi.tsx (audit #2). Shape matches the old in-memory
 // PurchaseInvoice type so the SPA upgrade is a swap-out, not a rewrite.
 //
-// Lifecycle: DRAFT → PENDING_APPROVAL → APPROVED → PAID. PAID is terminal.
-// DELETE is gated to DRAFT only — once approved we keep the row for audit.
+// Lifecycle (owner ruling 2026-06-29): DRAFT → CONFIRMED → PAID. PAID is
+// terminal. PENDING_APPROVAL / APPROVED were dropped — CONFIRMED replaces both
+// and is treated as locked-for-editing (same as PAID). Legacy rows in those
+// statuses are backfilled to CONFIRMED by ensurePiMigrations() below.
+// DELETE is gated to DRAFT only — once confirmed we keep the row for audit.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
@@ -46,6 +49,14 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // column-rename-map.json entry needed.
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS supplier_invoice_no TEXT",
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS supplier_do_no TEXT",
+      // 0200 — per-document purchase company override (HOOKKA / OHANA / HOUZS).
+      // Inherits PO → GRN → supplier → HOOKKA on create; never null.
+      "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS purchase_org_code TEXT",
+      "UPDATE purchase_invoices SET purchase_org_code = 'HOOKKA' WHERE purchase_org_code IS NULL",
+      // Lifecycle simplification (owner 2026-06-29): collapse PENDING_APPROVAL
+      // and APPROVED rows into CONFIRMED. Idempotent — re-running the UPDATE is
+      // a no-op once the legacy rows have been flipped.
+      "UPDATE purchase_invoices SET status = 'CONFIRMED' WHERE status IN ('PENDING_APPROVAL','APPROVED')",
     ];
     for (const sql of stmts) {
       try {
@@ -239,10 +250,11 @@ const VALID_LINE_TYPES: PurchaseInvoiceItemLineType[] = [
   "OTHER",
 ];
 
+// Lifecycle (owner 2026-06-29): DRAFT → CONFIRMED → PAID. CONFIRMED is the
+// "approved + GL posted" state and is terminal-for-editing; PAID is terminal.
 const VALID_TRANSITIONS: Record<string, string[]> = {
-  DRAFT: ["PENDING_APPROVAL", "APPROVED"],
-  PENDING_APPROVAL: ["APPROVED", "DRAFT"],
-  APPROVED: ["PAID"],
+  DRAFT: ["CONFIRMED"],
+  CONFIRMED: ["PAID"],
   PAID: [],
 };
 
@@ -261,6 +273,8 @@ function rowToPI(r: PurchaseInvoiceRow) {
     supplier_invoice_no?: string | null;
     supplierDoNo?: string | null;
     supplier_do_no?: string | null;
+    purchaseOrgCode?: string | null;
+    purchase_org_code?: string | null;
   };
   return {
     id: r.id,
@@ -281,6 +295,8 @@ function rowToPI(r: PurchaseInvoiceRow) {
     // read in workers, but raw Postgres/mock rows stay snake_case; dual-key.
     supplierInvoiceNo: fx.supplierInvoiceNo ?? fx.supplier_invoice_no ?? "",
     supplierDoNo: fx.supplierDoNo ?? fx.supplier_do_no ?? "",
+    // Per-document purchase company override (HOOKKA default).
+    purchaseOrgCode: fx.purchaseOrgCode ?? fx.purchase_org_code ?? "HOOKKA",
     currency: fx.currency ?? "MYR",
     fxRate: fx.fxRate ?? null,
     foreignAmountSen: fx.foreignAmountSen ?? null,
@@ -561,7 +577,7 @@ async function generatePiNo(db: D1Database): Promise<string> {
 
 // ---------------------------------------------------------------------------
 // GET /api/purchase-invoices — list with optional filters.
-//   ?status=DRAFT,PENDING_APPROVAL  (CSV)
+//   ?status=DRAFT,CONFIRMED  (CSV)
 //   ?supplierId=...
 //   ?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD  (filters invoiceDate)
 // ---------------------------------------------------------------------------
@@ -641,9 +657,13 @@ app.post("/", async (c) => {
     status?: string;
     supplierInvoiceNo?: string | null;
     supplierDoNo?: string | null;
+    purchaseOrgCode?: string;
     items?: PurchaseInvoiceItemInput[];
     currency?: string;
     fxRate?: number;
+    // Kept in the request shape so the FE can keep sending ocrUsed (legacy flag);
+    // status is now ALWAYS DRAFT on create regardless of OCR vs manual.
+    ocrUsed?: boolean;
   };
 
   if (!body.supplierId || !body.supplierName) {
@@ -691,14 +711,17 @@ app.post("/", async (c) => {
     }
   }
 
-  // Resolve poRef from purchaseOrderId if given.
+  // Resolve poRef + the source PO's purchase company override if given.
   let poRef: string | null = null;
+  let sourcePoOrgCode: string | null = null;
   if (body.purchaseOrderId) {
     const po = await db
-      .prepare("SELECT poNo FROM purchase_orders WHERE id = ?")
+      .prepare("SELECT poNo, purchase_org_code FROM purchase_orders WHERE id = ?")
       .bind(body.purchaseOrderId)
-      .first<{ poNo: string }>();
+      .first<{ poNo: string; purchase_org_code?: string | null; purchaseOrgCode?: string | null }>();
     poRef = po?.poNo ?? null;
+    sourcePoOrgCode =
+      po?.purchaseOrgCode ?? po?.purchase_org_code ?? null;
   }
 
   // ── LINE-LEVEL double-bill guard (replaces the old PO-level 409) ─────────
@@ -711,15 +734,24 @@ app.post("/", async (c) => {
   // Only an over-drawn line is rejected; a 2nd PI is allowed when qty remains.
   // grnId resolves the GRN → its PO so poRef/header stay populated.
   let sourceGrnId: string | null = null;
+  let sourceGrnOrgCode: string | null = null;
   if (body.grnId) {
     const grn = await db
-      .prepare("SELECT id, poId, poNumber FROM grns WHERE id = ?")
+      .prepare("SELECT id, poId, poNumber, purchase_org_code FROM grns WHERE id = ?")
       .bind(body.grnId)
-      .first<{ id: string; poId: string | null; poNumber: string | null }>();
+      .first<{
+        id: string;
+        poId: string | null;
+        poNumber: string | null;
+        purchase_org_code?: string | null;
+        purchaseOrgCode?: string | null;
+      }>();
     if (!grn) {
       return c.json({ success: false, error: "Source GRN not found" }, 404);
     }
     sourceGrnId = grn.id;
+    sourceGrnOrgCode =
+      grn.purchaseOrgCode ?? grn.purchase_org_code ?? null;
     if (!poRef) poRef = grn.poNumber ?? null;
 
     if (normalizedItems && normalizedItems.ok) {
@@ -855,6 +887,29 @@ app.post("/", async (c) => {
     : body.amountSen ?? 0;
   const amountSen = toHome(foreignTotalSen);
 
+  // Resolve per-document purchase company. Order: body → source PO → source
+  // GRN → supplier default → "HOOKKA". Never null in writes.
+  const bodyOrg =
+    typeof body.purchaseOrgCode === "string" && body.purchaseOrgCode.trim()
+      ? body.purchaseOrgCode.trim()
+      : "";
+  let purchaseOrgCode: string = bodyOrg;
+  if (!purchaseOrgCode && sourcePoOrgCode && String(sourcePoOrgCode).trim()) {
+    purchaseOrgCode = String(sourcePoOrgCode).trim();
+  }
+  if (!purchaseOrgCode && sourceGrnOrgCode && String(sourceGrnOrgCode).trim()) {
+    purchaseOrgCode = String(sourceGrnOrgCode).trim();
+  }
+  if (!purchaseOrgCode && body.supplierId) {
+    const sup = await db
+      .prepare("SELECT purchaseOrgCode FROM suppliers WHERE id = ?")
+      .bind(body.supplierId)
+      .first<{ purchaseOrgCode?: string | null; purchase_org_code?: string | null }>();
+    const supOrg = sup?.purchaseOrgCode ?? sup?.purchase_org_code ?? null;
+    if (supOrg && String(supOrg).trim()) purchaseOrgCode = String(supOrg).trim();
+  }
+  if (!purchaseOrgCode) purchaseOrgCode = "HOOKKA";
+
   const statements: D1PreparedStatement[] = [
     db
       .prepare(
@@ -863,8 +918,9 @@ app.post("/", async (c) => {
            invoiceDate, dueDate, amountSen, status, remarks,
            supplier_invoice_no, supplier_do_no,
            currency, fxRate, foreignAmountSen,
+           purchase_org_code,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
@@ -884,6 +940,7 @@ app.post("/", async (c) => {
         currency,
         isForeign ? fxRate : null,
         isForeign ? foreignTotalSen : null,
+        purchaseOrgCode,
         now,
         now,
       ),
@@ -933,19 +990,20 @@ app.post("/", async (c) => {
     }
   }
 
-  // An APPROVED-on-create PI must hit the GL exactly like the DRAFT/PENDING →
-  // APPROVED transition does (PUT below): DR mapped buckets · CR 400-0000.
-  // Without this a PI born APPROVED (e.g. a bulk import that sets status
-  // directly) feeds AP aging but never the ledger, so 400-0000 drifts from its
-  // subsidiary. Same leg builder as the PUT path + ledgerHasSource keep it
-  // identical and idempotent. Opening balances use /opening-balance/ap
-  // (isOpening, no GL) and never reach this handler. (BUG-2026-06-23-007)
+  // A CONFIRMED-on-create PI must hit the GL exactly like the DRAFT → CONFIRMED
+  // transition does (PUT below): DR mapped buckets · CR 400-0000. Without this
+  // a PI born CONFIRMED (e.g. a bulk import that sets status directly) feeds AP
+  // aging but never the ledger, so 400-0000 drifts from its subsidiary. Same
+  // leg builder as the PUT path + ledgerHasSource keep it identical and
+  // idempotent. Opening balances use /opening-balance/ap (isOpening, no GL) and
+  // never reach this handler. (BUG-2026-06-23-007 — renamed APPROVED→CONFIRMED
+  // as part of the 2026-06-29 lifecycle simplification.)
   const orgId = getOrgId(c);
   const actorUserId =
     (c as unknown as { get: (k: string) => string | undefined }).get("userId") ??
     null;
   if (
-    status === "APPROVED" &&
+    status === "CONFIRMED" &&
     !(await ledgerHasSource(db, orgId, "purchase_invoice", id))
   ) {
     const lines =
@@ -1005,14 +1063,14 @@ app.post("/", async (c) => {
         `INSERT INTO purchase_invoices (
            id, piNo, purchaseOrderId, poRef, grn_id, supplierId, supplierName,
            invoiceDate, dueDate, amountSen, status, remarks,
-           supplier_invoice_no, supplier_do_no,
+           supplier_invoice_no, supplier_do_no, purchase_org_code,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id, piNo, body.purchaseOrderId ?? null, poRef, sourceGrnId, body.supplierId,
         body.supplierName, piInvoiceDate, piDueDate, amountSen, status,
-        body.remarks ?? null, supplierInvoiceNo, supplierDoNo, now, now,
+        body.remarks ?? null, supplierInvoiceNo, supplierDoNo, purchaseOrgCode, now, now,
       );
     await db.batch(statements);
   }
@@ -1068,6 +1126,7 @@ app.put("/:id", async (c) => {
     amountSen?: number;
     supplierInvoiceNo?: string | null;
     supplierDoNo?: string | null;
+    purchaseOrgCode?: string;
     items?: PurchaseInvoiceItemInput[];
   };
 
@@ -1148,9 +1207,13 @@ app.put("/:id", async (c) => {
     supplier_invoice_no?: string | null;
     supplierDoNo?: string | null;
     supplier_do_no?: string | null;
+    purchaseOrgCode?: string | null;
+    purchase_org_code?: string | null;
   };
   const normRef = (v: string | null | undefined): string | null =>
     v == null || String(v).trim() === "" ? null : String(v).trim();
+  const existingOrgCode =
+    existingRefs.purchaseOrgCode ?? existingRefs.purchase_org_code ?? "HOOKKA";
   const merged = {
     status: body.status ?? existing.status,
     remarks: body.remarks ?? existing.remarks,
@@ -1165,6 +1228,10 @@ app.put("/:id", async (c) => {
       body.supplierDoNo !== undefined
         ? normRef(body.supplierDoNo)
         : (existingRefs.supplierDoNo ?? existingRefs.supplier_do_no ?? null),
+    purchaseOrgCode:
+      typeof body.purchaseOrgCode === "string" && body.purchaseOrgCode.trim()
+        ? body.purchaseOrgCode.trim()
+        : existingOrgCode || "HOOKKA",
   };
   const now = new Date().toISOString();
 
@@ -1173,7 +1240,7 @@ app.put("/:id", async (c) => {
       .prepare(
         `UPDATE purchase_invoices SET
            status = ?, remarks = ?, invoiceDate = ?, dueDate = ?, amountSen = ?,
-           supplier_invoice_no = ?, supplier_do_no = ?,
+           supplier_invoice_no = ?, supplier_do_no = ?, purchase_org_code = ?,
            updated_at = ?
          WHERE id = ?`,
       )
@@ -1185,6 +1252,7 @@ app.put("/:id", async (c) => {
         merged.amountSen,
         merged.supplierInvoiceNo,
         merged.supplierDoNo,
+        merged.purchaseOrgCode,
         now,
         id,
       ),
@@ -1271,7 +1339,7 @@ app.put("/:id", async (c) => {
       const piNo = (existing as unknown as { piNo?: string }).piNo ?? id;
 
       if (
-        merged.status === "APPROVED" &&
+        merged.status === "CONFIRMED" &&
         !(await ledgerHasSource(db, orgId, "purchase_invoice", id))
       ) {
         const lines = normalizedItems?.ok
@@ -1468,7 +1536,7 @@ app.put("/:id", async (c) => {
   if (
     normalizedItems &&
     normalizedItems.ok &&
-    existing.status === "APPROVED" &&
+    existing.status === "CONFIRMED" &&
     body.status === undefined && // pure edit, not a transition (handled above)
     recomputedAmount !== null &&
     recomputedAmount !== existing.amountSen

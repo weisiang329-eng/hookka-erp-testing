@@ -4,7 +4,7 @@
 // reject the same PI / GRN edits with the same message.
 //
 // Asserts:
-//   • PI editable for DRAFT + APPROVED only (PAID / CANCELLED locked)
+//   • PI editable for DRAFT only (CONFIRMED / PAID / CANCELLED locked)
 //   • GRN POSTED-line accepted-qty edit allowed unless it drops below what a PI
 //     already invoiced; delta = new − old
 //   • the plain-language stock-delta summary
@@ -32,10 +32,11 @@ const {
 );
 
 // ── PI editability ──────────────────────────────────────────────────────────
-test("PI is editable for DRAFT and APPROVED only", () => {
+test("PI is editable for DRAFT only (owner 2026-06-29 lifecycle simplification)", () => {
   assert.equal(isPiEditable("DRAFT"), true);
-  assert.equal(isPiEditable("APPROVED"), true);
   assert.equal(isPiEditable("draft"), true); // case-insensitive
+  assert.equal(isPiEditable("CONFIRMED"), false);
+  assert.equal(isPiEditable("APPROVED"), false); // legacy status, no longer editable
   assert.equal(isPiEditable("PENDING_APPROVAL"), false);
   assert.equal(isPiEditable("PAID"), false);
   assert.equal(isPiEditable("CANCELLED"), false);
@@ -44,7 +45,7 @@ test("PI is editable for DRAFT and APPROVED only", () => {
 });
 
 test("PI blocked-edit message names the current status", () => {
-  assert.match(piEditBlockedError("PAID"), /DRAFT or APPROVED/);
+  assert.match(piEditBlockedError("PAID"), /DRAFT/);
   assert.match(piEditBlockedError("PAID"), /current: PAID/);
 });
 

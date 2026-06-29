@@ -1,14 +1,16 @@
 import { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, cn } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useUrlState } from "@/lib/use-url-state";
 import type { Supplier } from "@/types";
 import {
   FileText,
@@ -35,7 +37,11 @@ import {
 // ============================================================
 // Types
 // ============================================================
-type PIStatus = "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "PAID";
+// Lifecycle simplification (owner 2026-06-29): DRAFT → CONFIRMED → PAID.
+// PENDING_APPROVAL / APPROVED kept in the union only so legacy rows that
+// still carry those values don't break TypeScript reads; the UI renders
+// them as CONFIRMED (see normalizePiStatus below).
+type PIStatus = "DRAFT" | "CONFIRMED" | "PAID" | "PENDING_APPROVAL" | "APPROVED" | "CANCELLED";
 
 type PurchaseInvoice = {
   id: string;
@@ -48,7 +54,16 @@ type PurchaseInvoice = {
   amountSen: number;
   status: PIStatus;
   remarks: string;
+  purchaseOrgCode?: string;
 };
+
+// Fold legacy PENDING_APPROVAL / APPROVED rows into CONFIRMED so the UI
+// shows one active state. The backend may still emit either value until
+// migrated — read-side only normalization, never written back.
+function normalizePiStatus(s: string): string {
+  if (s === "PENDING_APPROVAL" || s === "APPROVED") return "CONFIRMED";
+  return s;
+}
 
 // ============================================================
 // STATUS OPTIONS
@@ -56,9 +71,9 @@ type PurchaseInvoice = {
 const ALL_PI_STATUSES = [
   { value: "", label: "All Statuses" },
   { value: "DRAFT", label: "Draft" },
-  { value: "PENDING_APPROVAL", label: "Pending Approval" },
-  { value: "APPROVED", label: "Approved" },
+  { value: "CONFIRMED", label: "Confirmed" },
   { value: "PAID", label: "Paid" },
+  { value: "CANCELLED", label: "Cancelled" },
 ];
 
 // ============================================================
@@ -66,10 +81,19 @@ const ALL_PI_STATUSES = [
 // ============================================================
 export default function PurchaseInvoicesPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const navigate = useNavigate();
 
   // Tabs — single "Purchase Invoices" tab, same skeleton as Sales Invoice list
   const [activeTab] = useState<"list">("list");
+
+  // Draft / Confirmed split — mirrors the Sales Order list. CONFIRMED tab
+  // shows everything that ISN'T DRAFT (so CONFIRMED + PAID + CANCELLED all
+  // live here); DRAFT tab is only DRAFT rows. URL-synced so refresh and
+  // shared links land on the same view.
+  const [tab, setTab] = useUrlState<"DRAFT" | "CONFIRMED">("tab", "CONFIRMED");
+  const [selectedRows, setSelectedRows] = useState<PurchaseInvoice[]>([]);
+  const [bulkConverting, setBulkConverting] = useState(false);
 
   // Filters
   const [filterStatus, setFilterStatus] = useState("");
@@ -147,15 +171,85 @@ export default function PurchaseInvoicesPage() {
     setFilterDateTo("");
   };
 
-  const filteredInvoices = useMemo(() => {
+  const filteredByUserFilters = useMemo(() => {
     return invoices.filter(pi => {
-      if (filterStatus && pi.status !== filterStatus) return false;
+      // Status filter normalizes the row so a CONFIRMED filter also matches
+      // legacy PENDING_APPROVAL / APPROVED rows during the lifecycle migration.
+      if (filterStatus && normalizePiStatus(pi.status) !== filterStatus) return false;
       if (filterSupplier && pi.supplierId !== filterSupplier) return false;
       if (filterDateFrom && pi.invoiceDate < filterDateFrom) return false;
       if (filterDateTo && pi.invoiceDate > filterDateTo) return false;
       return true;
     });
   }, [invoices, filterStatus, filterSupplier, filterDateFrom, filterDateTo]);
+
+  // Tab filter — DRAFT tab shows only DRAFT rows; CONFIRMED tab shows
+  // everything else (CONFIRMED + legacy PENDING_APPROVAL/APPROVED + PAID +
+  // CANCELLED). Mirrors the Sales Order list split.
+  const filteredInvoices = useMemo(() => {
+    return filteredByUserFilters.filter(pi => {
+      if (tab === "DRAFT" && pi.status !== "DRAFT") return false;
+      if (tab === "CONFIRMED" && pi.status === "DRAFT") return false;
+      return true;
+    });
+  }, [filteredByUserFilters, tab]);
+
+  // Tab badge counts — whole-list, not the current filter, so the operator
+  // always sees the real Draft backlog.
+  const draftCount = useMemo(
+    () => invoices.filter(pi => pi.status === "DRAFT").length,
+    [invoices],
+  );
+  const tabConfirmedCount = useMemo(
+    () => invoices.filter(pi => pi.status !== "DRAFT").length,
+    [invoices],
+  );
+
+  // Bulk DRAFT → CONFIRMED — parallel PUTs, then cache invalidation. Per the
+  // BE lifecycle map only DRAFT rows are valid sources for this transition.
+  const bulkConvertDrafts = useCallback(async () => {
+    const drafts = selectedRows.filter(r => r.status === "DRAFT");
+    if (drafts.length === 0) return;
+    if (
+      !(await confirm({
+        title: "Convert drafts",
+        message: `Convert ${drafts.length} draft invoice(s) to CONFIRMED?`,
+        danger: false,
+      }))
+    )
+      return;
+    setBulkConverting(true);
+    const results = await Promise.all(
+      drafts.map(async (pi) => {
+        try {
+          const res = await fetch(`/api/purchase-invoices/${pi.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "CONFIRMED" }),
+          });
+          const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+          if (!res.ok || !j?.success) {
+            return { ok: false, id: pi.piNo, err: j?.error || `HTTP ${res.status}` };
+          }
+          return { ok: true, id: pi.piNo };
+        } catch (e) {
+          return { ok: false, id: pi.piNo, err: (e as Error).message };
+        }
+      }),
+    );
+    setBulkConverting(false);
+    const failed = results.filter(r => !r.ok);
+    invalidateCachePrefix("/api/purchase-invoices");
+    fetchData();
+    setSelectedRows([]);
+    if (failed.length > 0) {
+      const sample = failed.slice(0, 3).map(f => f.id).join(", ");
+      toast.error(`Converted ${results.length - failed.length} · Failed ${failed.length} (${sample})`);
+    } else {
+      toast.success(`Converted ${results.length} invoice${results.length !== 1 ? "s" : ""} successfully.`);
+    }
+    if (results.length - failed.length > 0) setTab("CONFIRMED");
+  }, [selectedRows, confirm, toast, fetchData, setTab]);
 
   // ---- Export CSV ----
   const exportCSV = () => {
@@ -183,16 +277,24 @@ export default function PurchaseInvoicesPage() {
 
   // ---- Summary stats ----
   const totalPIs = invoices.length;
-  const pendingPayment = invoices.filter(pi => pi.status === "PENDING_APPROVAL" || pi.status === "DRAFT").length;
+  // "Pending payment" = anything not yet PAID and not cancelled. DRAFT +
+  // CONFIRMED (incl. legacy PENDING_APPROVAL / APPROVED) all count.
+  const pendingPayment = invoices.filter(pi => {
+    const s = normalizePiStatus(pi.status);
+    return s !== "PAID" && s !== "CANCELLED";
+  }).length;
   const today = new Date().toISOString().split("T")[0];
-  const overdue = invoices.filter(pi => pi.status !== "PAID" && pi.dueDate < today).length;
+  const overdue = invoices.filter(pi => normalizePiStatus(pi.status) !== "PAID" && pi.dueDate < today).length;
   const totalValueSen = invoices.reduce((sum, pi) => sum + pi.amountSen, 0);
 
-  // ---- Status pipeline ----
+  // ---- Status pipeline (post-lifecycle simplification) ----
+  const confirmedCount = invoices.filter(pi => {
+    const s = normalizePiStatus(pi.status);
+    return s === "CONFIRMED";
+  }).length;
   const statusCounts = [
     { label: "Draft", status: "DRAFT", count: invoices.filter(pi => pi.status === "DRAFT").length },
-    { label: "Pending Approval", status: "PENDING_APPROVAL", count: invoices.filter(pi => pi.status === "PENDING_APPROVAL").length },
-    { label: "Approved", status: "APPROVED", count: invoices.filter(pi => pi.status === "APPROVED").length },
+    { label: "Confirmed", status: "CONFIRMED", count: confirmedCount },
     { label: "Paid", status: "PAID", count: invoices.filter(pi => pi.status === "PAID").length },
   ];
 
@@ -207,16 +309,56 @@ export default function PurchaseInvoicesPage() {
     return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
   }, [invoices]);
 
+  // Purchase company display map: org code → legal name (badge).
+  const orgNameByCode = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const o of orgsResp?.organisations ?? []) {
+      if (o.code) out[o.code] = o.name || o.code;
+    }
+    return out;
+  }, [orgsResp]);
+
   // ---- Columns ----
   const piGridColumns: Column<PurchaseInvoice>[] = useMemo(() => [
     { key: "piNo", label: "PI No.", type: "docno", width: "130px", sortable: true },
     { key: "poRef", label: "PO Ref", type: "docno", width: "130px", sortable: true },
     { key: "supplier", label: "Supplier", type: "text", sortable: true },
+    {
+      key: "purchaseOrgCode",
+      label: "Purchase co",
+      type: "text",
+      width: "120px",
+      sortable: true,
+      render: (_v: unknown, row: PurchaseInvoice) => {
+        const code = row.purchaseOrgCode || "HOOKKA";
+        const label = orgNameByCode[code] || code;
+        return (
+          <span
+            className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-[#F0ECE9] text-[#6B5C32]"
+            title={code}
+          >
+            {label}
+          </span>
+        );
+      },
+    },
     { key: "invoiceDate", label: "Invoice Date", type: "date", width: "120px", sortable: true },
     { key: "dueDate", label: "Due Date", type: "date", width: "120px", sortable: true },
     { key: "amountSen", label: "Amount", type: "currency", width: "130px", sortable: true },
-    { key: "status", label: "Status", type: "status", width: "140px", sortable: true },
-  ], []);
+    {
+      key: "status",
+      label: "Status",
+      type: "status",
+      width: "140px",
+      sortable: true,
+      // Lifecycle simplification (2026-06-29): legacy PENDING_APPROVAL / APPROVED
+      // rows render as CONFIRMED so the operator only sees the new vocabulary.
+      render: (_v: unknown, row: PurchaseInvoice) => {
+        const shown = normalizePiStatus(row.status);
+        return <Badge variant="status" status={shown}>{shown.replace(/_/g, " ")}</Badge>;
+      },
+    },
+  ], [orgNameByCode]);
 
   const piGridContextMenu = useCallback((row: PurchaseInvoice): ContextMenuItem[] => {
     return [
@@ -263,19 +405,12 @@ export default function PurchaseInvoicesPage() {
       },
       { label: "", separator: true, action: () => {} },
       {
-        label: "Submit for Approval",
-        icon: <ArrowRight className="h-3.5 w-3.5" />,
-        action: () => updateStatus(row.id, "PENDING_APPROVAL"),
-        disabled: row.status !== "DRAFT",
-      },
-      {
-        label: "Approve",
+        // Lifecycle simplification (2026-06-29): one Confirm step takes a
+        // DRAFT straight to CONFIRMED — no Pending Approval / Approve hop.
+        label: "Confirm",
         icon: <CheckCircle2 className="h-3.5 w-3.5" />,
-        action: () => updateStatus(row.id, "APPROVED"),
-        // Backend transitions allow both DRAFT→APPROVED and PENDING_APPROVAL
-        // →APPROVED. Match here so the menu doesn't ghost the option for an
-        // operator who skipped the review step.
-        disabled: row.status !== "PENDING_APPROVAL" && row.status !== "DRAFT",
+        action: () => updateStatus(row.id, "CONFIRMED" as PIStatus),
+        disabled: row.status !== "DRAFT",
       },
       {
         label: "Mark Paid",
@@ -295,7 +430,9 @@ export default function PurchaseInvoicesPage() {
             updateStatus(row.id, "PAID");
           }
         },
-        disabled: row.status !== "APPROVED",
+        // Mark Paid available from any active state (CONFIRMED, or legacy
+        // APPROVED while the backend transitions over).
+        disabled: !["CONFIRMED", "APPROVED"].includes(row.status),
       },
       { label: "", separator: true, action: () => {} },
       {
@@ -493,8 +630,8 @@ export default function PurchaseInvoicesPage() {
           {/* PI DataGrid */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <CardTitle className="flex items-center gap-2">
                   <FileText className="h-5 w-5 text-[#6B5C32]" />
                   All Purchase Invoices
                   {hasActiveFilters && (
@@ -502,13 +639,58 @@ export default function PurchaseInvoicesPage() {
                       ({filteredInvoices.length} of {invoices.length})
                     </span>
                   )}
+                </CardTitle>
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Draft / Confirmed toggle — mirrors SO list shell. */}
+                  <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
+                    <button
+                      onClick={() => { setTab("DRAFT"); setSelectedRows([]); }}
+                      className={cn(
+                        "px-4 py-1.5 text-sm rounded transition-colors",
+                        tab === "DRAFT"
+                          ? "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm"
+                          : "text-[#6B7280] hover:text-[#1F1D1B]"
+                      )}
+                    >
+                      Draft ({draftCount})
+                    </button>
+                    <button
+                      onClick={() => { setTab("CONFIRMED"); setSelectedRows([]); }}
+                      className={cn(
+                        "px-4 py-1.5 text-sm rounded transition-colors",
+                        tab === "CONFIRMED"
+                          ? "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm"
+                          : "text-[#6B7280] hover:text-[#1F1D1B]"
+                      )}
+                    >
+                      Confirmed ({tabConfirmedCount})
+                    </button>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={exportCSV}>
+                    <Download className="h-4 w-4" /> Export CSV
+                  </Button>
                 </div>
-                <Button variant="outline" size="sm" onClick={exportCSV}>
-                  <Download className="h-4 w-4" /> Export CSV
-                </Button>
-              </CardTitle>
+              </div>
             </CardHeader>
             <CardContent>
+              {tab === "DRAFT" && selectedRows.length > 0 && (
+                <div className="mb-3 flex items-center justify-between rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-sm">
+                  <span className="text-[#9C6F1E]">
+                    {selectedRows.filter(r => r.status === "DRAFT").length} draft invoice(s) selected
+                  </span>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={bulkConverting}
+                    onClick={bulkConvertDrafts}
+                  >
+                    <CheckCircle2 className="h-4 w-4" />{" "}
+                    {bulkConverting
+                      ? "Converting..."
+                      : `Convert ${selectedRows.filter(r => r.status === "DRAFT").length} drafts`}
+                  </Button>
+                </div>
+              )}
               <DataGrid<PurchaseInvoice>
                 columns={piGridColumns}
                 data={filteredInvoices}
@@ -516,10 +698,12 @@ export default function PurchaseInvoicesPage() {
                 virtualize
                 loading={loading}
                 stickyHeader={true}
+                selectable
+                onSelectionChange={setSelectedRows}
                 onDoubleClick={(row) => navigate(`/procurement/pi/${row.id}`)}
                 contextMenuItems={piGridContextMenu}
                 maxHeight="calc(100vh - 300px)"
-                emptyMessage="No purchase invoices found."
+                emptyMessage={tab === "DRAFT" ? "No draft invoices." : "No purchase invoices found."}
               />
             </CardContent>
           </Card>

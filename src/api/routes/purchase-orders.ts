@@ -36,6 +36,11 @@ type PurchaseOrderRow = {
   // the FE can show "Last sent: …" + a Resend affordance. Nullable until
   // first send. Column added by ensurePendingMigrations() below.
   lastEmailedAt: string | null;
+  // Per-document purchase company override (HOOKKA / OHANA / HOUZS …).
+  // Defaults from the supplier's purchaseOrgCode on create when omitted,
+  // backfilled to HOOKKA for legacy rows by ensurePendingMigrations().
+  purchase_org_code?: string | null;
+  purchaseOrgCode?: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -107,6 +112,9 @@ function rowToPO(row: PurchaseOrderRow, items: PurchaseOrderItemRow[] = []) {
     receivedDate: row.receivedDate,
     notes: row.notes ?? "",
     lastEmailedAt: row.lastEmailedAt ?? null,
+    // Dual-keyed read — Postgres folds snake_case to camelCase on some adapters
+    // but raw rows stay snake_case. Default to HOOKKA when both are null.
+    purchaseOrgCode: row.purchaseOrgCode ?? row.purchase_org_code ?? "HOOKKA",
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
   };
@@ -225,15 +233,25 @@ app.post("/", async (c) => {
       );
     }
 
-    // Validate supplier exists
+    // Validate supplier exists + grab its default purchase company code so
+    // an omitted body field inherits from the supplier rather than nulling.
     const supplier = await c.var.DB.prepare(
-      "SELECT id FROM suppliers WHERE id = ?",
+      "SELECT id, purchaseOrgCode FROM suppliers WHERE id = ?",
     )
       .bind(supplierId)
-      .first<{ id: string }>();
+      .first<{ id: string; purchaseOrgCode?: string | null; purchase_org_code?: string | null }>();
     if (!supplier) {
       return c.json({ success: false, error: "Supplier not found" }, 400);
     }
+    // Resolve purchase company: body wins → supplier's → HOOKKA. Never null.
+    const supplierOrgCode =
+      supplier.purchaseOrgCode ?? supplier.purchase_org_code ?? null;
+    const purchaseOrgCode =
+      (typeof body.purchaseOrgCode === "string" && body.purchaseOrgCode.trim()
+        ? body.purchaseOrgCode.trim()
+        : supplierOrgCode && String(supplierOrgCode).trim()
+          ? String(supplierOrgCode).trim()
+          : "HOOKKA");
 
     const poId = genPoId();
     const now = new Date().toISOString();
@@ -282,8 +300,8 @@ app.post("/", async (c) => {
         c.var.DB.prepare(
           `INSERT INTO purchase_orders (id, poNo, supplierId, supplierName,
              subtotalSen, totalSen, status, orderDate, expectedDate, receivedDate,
-             notes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             notes, purchase_org_code, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           poId,
           poNo,
@@ -296,6 +314,7 @@ app.post("/", async (c) => {
           body.expectedDate ?? "",
           null,
           body.notes ?? "",
+          purchaseOrgCode,
           now,
           now,
         ),
@@ -548,6 +567,8 @@ app.put("/:id", async (c) => {
       totalSen = body.totalSen ?? existing.totalSen;
     }
 
+    const existingOrgCode =
+      existing.purchaseOrgCode ?? existing.purchase_org_code ?? "HOOKKA";
     const merged = {
       supplierId: body.supplierId ?? existing.supplierId,
       supplierName: body.supplierName ?? existing.supplierName ?? "",
@@ -559,6 +580,10 @@ app.put("/:id", async (c) => {
           ? body.receivedDate
           : existing.receivedDate,
       notes: body.notes ?? existing.notes ?? "",
+      purchaseOrgCode:
+        typeof body.purchaseOrgCode === "string" && body.purchaseOrgCode.trim()
+          ? body.purchaseOrgCode.trim()
+          : existingOrgCode,
     };
 
     statements.push(
@@ -566,7 +591,7 @@ app.put("/:id", async (c) => {
         `UPDATE purchase_orders SET
            supplierId = ?, supplierName = ?, subtotalSen = ?, totalSen = ?,
            status = ?, orderDate = ?, expectedDate = ?, receivedDate = ?,
-           notes = ?, updated_at = ?
+           notes = ?, purchase_org_code = ?, updated_at = ?
          WHERE id = ?`,
       ).bind(
         merged.supplierId,
@@ -578,6 +603,7 @@ app.put("/:id", async (c) => {
         merged.expectedDate,
         merged.receivedDate,
         merged.notes,
+        merged.purchaseOrgCode,
         now,
         id,
       ),
@@ -666,6 +692,10 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_orders_po_no ON purchase_orders(poNo)",
       // 0181 — real material_code column so new POs don't mash code into name.
       "ALTER TABLE purchase_order_items ADD COLUMN IF NOT EXISTS material_code TEXT",
+      // 0200 — per-document purchase company override. Defaulted from the
+      // supplier on create; never null in writes (HOOKKA fallback).
+      "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS purchase_org_code TEXT",
+      "UPDATE purchase_orders SET purchase_org_code = 'HOOKKA' WHERE purchase_org_code IS NULL",
     ];
     for (const sql of stmts) {
       try {

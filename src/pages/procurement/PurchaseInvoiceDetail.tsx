@@ -52,20 +52,25 @@ type DraftLine = {
   grnItemId: string | null;
 };
 
-// Status lifecycle (matches backend VALID_TRANSITIONS in purchase-invoices.ts).
-// Each current status → the action buttons it offers.
+// Status lifecycle (post-simplification, owner 2026-06-29):
+//   DRAFT → CONFIRMED → PAID
+// Legacy PENDING_APPROVAL / APPROVED rows still in the wild are normalized
+// to CONFIRMED on render so the operator sees the new vocabulary; their
+// action sets mirror CONFIRMED so the buttons keep working until the
+// backend has migrated.
 const PI_STATUS_ACTIONS: Record<string, Array<{ label: string; next: string }>> = {
-  DRAFT: [
-    { label: "Submit for Approval", next: "PENDING_APPROVAL" },
-    { label: "Approve", next: "APPROVED" },
-  ],
-  PENDING_APPROVAL: [
-    { label: "Approve", next: "APPROVED" },
-    { label: "Back to Draft", next: "DRAFT" },
-  ],
+  DRAFT: [{ label: "Confirm", next: "CONFIRMED" }],
+  CONFIRMED: [{ label: "Mark Paid", next: "PAID" }],
+  PENDING_APPROVAL: [{ label: "Confirm", next: "CONFIRMED" }],
   APPROVED: [{ label: "Mark Paid", next: "PAID" }],
   PAID: [],
 };
+
+// Same read-side normalization as the list page.
+function normalizePiStatus(s: string): string {
+  if (s === "PENDING_APPROVAL" || s === "APPROVED") return "CONFIRMED";
+  return s;
+}
 
 type LineType = "STOCKED" | "FEE" | "TAX" | "REBATE" | "DISCOUNT" | "OTHER";
 
@@ -99,6 +104,8 @@ type PurchaseInvoiceDetail = {
   // Supplier reference numbers (dual-keyed on read by the backend).
   supplierInvoiceNo?: string | null;
   supplierDoNo?: string | null;
+  // Purchase company on this PI (HOOKKA / OHANA / sister co). Read-only here.
+  purchaseOrgCode?: string | null;
   items?: PurchaseInvoiceItem[];
 };
 
@@ -414,7 +421,10 @@ export default function PurchaseInvoiceDetailPage() {
         backTo="/procurement/pi"
         title={pi.piNo}
         subtitle={`Supplier: ${pi.supplierName}${pi.poRef ? ` · PO ${pi.poRef}` : ""}`}
-        badges={<Badge variant="status" status={pi.status} />}
+        badges={(() => {
+          const shown = normalizePiStatus(pi.status);
+          return <Badge variant="status" status={shown}>{shown.replace(/_/g, " ")}</Badge>;
+        })()}
         actions={
           <>
             {!editing && (
@@ -487,7 +497,21 @@ export default function PurchaseInvoiceDetailPage() {
               <span className="text-[#4B5563]">{pi.dueDate ? formatDate(pi.dueDate) : "-"}</span>
 
               <span className="text-[#6B7280]">Status</span>
-              <span><Badge variant="status" status={pi.status} /></span>
+              <span>
+                {(() => {
+                  const shown = normalizePiStatus(pi.status);
+                  return <Badge variant="status" status={shown}>{shown.replace(/_/g, " ")}</Badge>;
+                })()}
+              </span>
+
+              <span className="text-[#6B7280]">Purchase company</span>
+              <span className="text-[#4B5563]">
+                {(() => {
+                  const code = pi.purchaseOrgCode || "HOOKKA";
+                  const name = (orgsResp?.organisations ?? []).find((o) => o.code === code)?.name || code;
+                  return name;
+                })()}
+              </span>
 
               <span className="text-[#6B7280]">Linked PO</span>
               <span>

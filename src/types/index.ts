@@ -555,6 +555,10 @@ export type PurchaseOrder = {
   expectedDate: string;
   receivedDate: string | null;
   notes: string;
+  // Purchase company that buys on this PO (HOOKKA / OHANA / sister co).
+  // Mirrors the supplier-level default in Supplier.purchaseOrgCode but is
+  // captured per-PO so swaps don't rewrite history.
+  purchaseOrgCode?: string;
   // 3.1 — set by the manual "Email to Supplier" button on detail.tsx.
   // Null until the operator hits send for the first time.
   lastEmailedAt?: string | null;
@@ -1494,6 +1498,9 @@ export type GoodsReceiptNote = {
   receivedBy: string;
   items: GRNItem[];
   totalAmount: number;
+  // Purchase company (HOOKKA / OHANA / sister co) — defaulted from source
+  // PO then supplier on create, overridable per receipt.
+  purchaseOrgCode?: string;
   qcStatus: "PENDING" | "PASSED" | "PARTIAL" | "FAILED";
   status: "DRAFT" | "CONFIRMED" | "POSTED";
   notes: string;

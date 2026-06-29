@@ -89,14 +89,29 @@ export default defineConfig({
         // in the main chunk.
         manualChunks: (id) => {
           if (!id.includes('node_modules')) return
+          // Split react-vendor into 3 parallel chunks (owner 2026-06-29: the
+          // single 87 KB react-vendor took 38 s on a flaky factory wifi
+          // because all of React had to arrive before paint).
+          //   • react-core   = react + scheduler (small, ~10 KB)
+          //   • react-dom    = the bulk of the runtime (~75 KB)
+          //   • react-router = routing only (~10 KB)
+          // On HTTP/2 all 3 stream in parallel; if one stalls the other 2
+          // can still finish, and React can boot the moment react-core +
+          // react-dom both arrive — router can land slightly after.
           if (
             id.includes('node_modules/react/') ||
-            id.includes('node_modules/react-dom/') ||
-            id.includes('node_modules/react-router-dom/') ||
-            id.includes('node_modules/react-router/') ||
             id.includes('node_modules/scheduler/')
           ) {
-            return 'react-vendor'
+            return 'react-core'
+          }
+          if (id.includes('node_modules/react-dom/')) {
+            return 'react-dom'
+          }
+          if (
+            id.includes('node_modules/react-router-dom/') ||
+            id.includes('node_modules/react-router/')
+          ) {
+            return 'react-router'
           }
           if (id.includes('node_modules/recharts/') || id.includes('node_modules/d3-')) {
             return 'charts'

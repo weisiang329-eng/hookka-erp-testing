@@ -60,6 +60,15 @@ const SHELL = ['/worker', '/manifest.webmanifest', '/pwa-icon-192.png'];
 // rare, but we don't want to block the SW activation on it).
 async function precacheBuildAssets(cache) {
   try {
+    // Respect "Data Saver" mode (Android Chrome / Brave / Edge surface this).
+    // Pre-cache would silently burn extra MB on a worker's 4G hotspot data
+    // plan; if they explicitly opted into saver mode, skip the background
+    // pull and fall back to on-demand caching as the user navigates.
+    const conn =
+      typeof navigator !== 'undefined' && navigator.connection
+        ? navigator.connection
+        : null;
+    if (conn && conn.saveData === true) return;
     const indexResp = await fetch('/dashboard', { credentials: 'omit' });
     if (!indexResp.ok) return;
     const html = await indexResp.text();

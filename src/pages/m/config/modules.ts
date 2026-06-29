@@ -2991,7 +2991,12 @@ const productDetail: DetailConfig = {
       },
     ];
   },
-  hideActionBar: true,
+  // CHANGELOG F.1: product detail with photo upload. The existing /api/files
+  // mechanism (resourceType="PRODUCT") handles cover photos + supporting
+  // docs uniformly. The Files section + upload button appear automatically
+  // when attachmentsResource is set.
+  attachmentsResource: (id) => ({ type: "PRODUCT", id }),
+  auditResource: () => "products",
 };
 
 export const productsConfig: ModuleConfig = {

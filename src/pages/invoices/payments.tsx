@@ -15,6 +15,10 @@ import type { PaymentRecord, Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { PaymentSchema } from "@/lib/schemas/invoice";
+import { COMPANY } from "@/lib/constants";
+import { amountInWords } from "@/lib/amount-in-words";
+import { printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
+import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
 
 const PaymentMutationSchema = mutationWithData(PaymentSchema);
 
@@ -22,6 +26,45 @@ type CustomerOption = {
   id: string;
   name: string;
 };
+
+// COMPANY.HOOKKA → the VoucherSpec.company shape (single source of truth);
+// mirrors VOUCHER_COMPANY in supplier-payments.tsx / accounting/index.tsx.
+const VOUCHER_COMPANY: VoucherSpec["company"] = {
+  name: COMPANY.HOOKKA.name,
+  addressLines: COMPANY.HOOKKA.addressLines,
+  regNo: COMPANY.HOOKKA.regNo,
+  tin: COMPANY.HOOKKA.tin,
+  phone: COMPANY.HOOKKA.phone,
+  email: COMPANY.HOOKKA.email,
+};
+
+// One customer receipt → a PAYMENT RECEIPT voucher: one line per invoice the
+// receipt cleared (Invoice No · amount), total = the receipt amount. Money
+// stays integer sen, formatted with formatCurrency. The customer twin of
+// buildSupplierPaymentVoucher in supplier-payments.tsx.
+function buildCustomerPaymentVoucher(p: PaymentRecord): VoucherSpec {
+  const active = (p.lifecycleState ?? "ACTIVE") === "ACTIVE";
+  const lines: VoucherLine[] = p.allocations.map((a) => ({
+    cells: [a.invoiceNumber, formatCurrency(a.amount)],
+  }));
+  return {
+    title: active ? "PAYMENT RECEIPT" : "PAYMENT RECEIPT — VOID",
+    company: VOUCHER_COMPANY,
+    docNo: p.receiptNumber,
+    date: formatDateDMY(p.date),
+    partyLabel: "Received From",
+    partyName: p.customerName ?? "",
+    columns: [{ label: "Invoice" }, { label: "Amount", align: "right" }],
+    lines,
+    totalCells: ["Total", formatCurrency(p.amount)],
+    amountWords: amountInWords(p.amount),
+    // The customer receipt carries no bank/deposit account in PaymentRecord, so
+    // there is no "Deposited to" footer; surface the payment reference instead.
+    remarks: p.reference || undefined,
+    signatures: [{ label: "Received by" }, { label: "Issued by" }],
+    printedOn: formatDateDMY(new Date()),
+  };
+}
 
 export default function PaymentsPage() {
   const { data: payResp, loading, refresh: refreshPayments } = useCachedJson<{ success?: boolean; data?: PaymentRecord[] }>("/api/payments");
@@ -51,6 +94,11 @@ export default function PaymentsPage() {
   const [allocations, setAllocations] = useState<{ invoiceId: string; amount: number }[]>([]);
   const [creating, setCreating] = useState(false);
   const [detail, setDetail] = useState<PaymentRecord | null>(null);
+  // Ticked-row selection for batch print + export. The history list uses the
+  // shared DataGrid, which owns its own checkbox column (selectable) and
+  // reports the picked rows via onSelectionChange — mirror that into state so
+  // the BatchActionsBar (print receipt / Excel / CSV) can act on the selection.
+  const [selectedPayments, setSelectedPayments] = useState<PaymentRecord[]>([]);
   const { toast } = useToast();
   const { confirm } = useConfirm();
   // Edit mode: when set, the inline form is editing an existing receipt in place
@@ -528,12 +576,35 @@ export default function PaymentsPage() {
           <CardTitle>All Payments</CardTitle>
         </CardHeader>
         <CardContent>
+          <BatchActionsBar
+            count={selectedPayments.length}
+            onClear={() => setSelectedPayments([])}
+            onPrint={() => printVouchers(selectedPayments.map(buildCustomerPaymentVoucher))}
+            exportName="customer-payments"
+            exportAoa={() => [
+              ["Receipt #", "Date", "Customer", "Status", "Reference", "Voucher Total (RM)", "Invoice No", "Amount (RM)"],
+              ...selectedPayments.flatMap((p) =>
+                p.allocations.map((a) => [
+                  p.receiptNumber,
+                  formatDateDMY(p.date),
+                  p.customerName ?? "",
+                  p.lifecycleState ?? "ACTIVE",
+                  p.reference ?? "",
+                  (Number(p.amount ?? 0) / 100).toFixed(2),
+                  a.invoiceNumber,
+                  (Number(a.amount ?? 0) / 100).toFixed(2),
+                ]),
+              ),
+            ]}
+          />
           <DataGrid
             columns={columns}
             data={payments}
             keyField="id"
             virtualize
             gridId="payments"
+            selectable
+            onSelectionChange={setSelectedPayments}
             contextMenuItems={contextMenuItems}
             onRowClick={(row) => setDetail(row)}
             rowClassName={(row) => ((row.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? "opacity-50" : "")}

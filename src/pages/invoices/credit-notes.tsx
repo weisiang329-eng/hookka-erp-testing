@@ -17,8 +17,63 @@ import type { CreditNote, Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { CreditNoteSchema } from "@/lib/schemas/invoice";
+import { COMPANY } from "@/lib/constants";
+import { amountInWords } from "@/lib/amount-in-words";
+import { printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
+import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
 
 const CNMutationSchema = mutationWithData(CreditNoteSchema);
+
+// COMPANY.HOOKKA → the VoucherSpec.company shape (single source of truth);
+// mirrors VOUCHER_COMPANY in supplier-payments.tsx / accounting/index.tsx.
+const VOUCHER_COMPANY: VoucherSpec["company"] = {
+  name: COMPANY.HOOKKA.name,
+  addressLines: COMPANY.HOOKKA.addressLines,
+  regNo: COMPANY.HOOKKA.regNo,
+  tin: COMPANY.HOOKKA.tin,
+  phone: COMPANY.HOOKKA.phone,
+  email: COMPANY.HOOKKA.email,
+};
+
+// One credit note → a CREDIT NOTE voucher: one line per credited item
+// (Description · Qty · Unit Price · Amount), total = the note's totalAmount.
+// Money stays integer sen (unitPrice / total / totalAmount are all sen),
+// formatted with formatCurrency. Mirrors buildSupplierPaymentVoucher's shape.
+// CreditNote has no lifecycle/void state (status is DRAFT/APPROVED/POSTED), so
+// the defensive (lifecycleState ?? "ACTIVE") check always yields the live title.
+function buildCreditNoteVoucher(cn: CreditNote): VoucherSpec {
+  const active = ((cn as { lifecycleState?: string }).lifecycleState ?? "ACTIVE") === "ACTIVE";
+  const lines: VoucherLine[] = cn.items.map((item) => ({
+    cells: [
+      item.description ?? "",
+      String(item.quantity ?? ""),
+      formatCurrency(item.unitPrice),
+      formatCurrency(item.total),
+    ],
+  }));
+  const remarks = [cn.reason, cn.reasonDetail].filter(Boolean).join(" — ") || undefined;
+  return {
+    title: active ? "CREDIT NOTE" : "CREDIT NOTE — VOID",
+    company: VOUCHER_COMPANY,
+    docNo: cn.noteNumber,
+    date: formatDateDMY(cn.date),
+    partyLabel: "Customer",
+    partyName: cn.customerName ?? "",
+    columns: [
+      { label: "Description" },
+      { label: "Qty", align: "right" },
+      { label: "Unit Price", align: "right" },
+      { label: "Amount", align: "right" },
+    ],
+    lines,
+    totalCells: ["", "", "Total", formatCurrency(cn.totalAmount)],
+    footerNote: `Against Invoice: ${cn.invoiceNumber || "—"}`,
+    remarks,
+    amountWords: amountInWords(cn.totalAmount),
+    signatures: [{ label: "Issued by" }, { label: "Approved by" }],
+    printedOn: formatDateDMY(new Date()),
+  };
+}
 
 export default function CreditNotesPage() {
   const { data: cnResp, loading, refresh: refreshCreditNotes } = useCachedJson<{ success?: boolean; data?: CreditNote[] }>("/api/credit-notes");
@@ -339,6 +394,29 @@ export default function CreditNotesPage() {
               </div>
             </div>
           )}
+          <BatchActionsBar
+            count={selectedCreditNotes.length}
+            onPrint={() => printVouchers(selectedCreditNotes.map(buildCreditNoteVoucher))}
+            exportName="credit-notes"
+            exportAoa={() => [
+              ["Note No", "Date", "Customer", "Status", "Invoice No", "Reason", "Voucher Total (RM)", "Description", "Qty", "Unit Price (RM)", "Amount (RM)"],
+              ...selectedCreditNotes.flatMap((cn) =>
+                cn.items.map((item) => [
+                  cn.noteNumber,
+                  formatDateDMY(cn.date),
+                  cn.customerName ?? "",
+                  cn.status ?? "ACTIVE",
+                  cn.invoiceNumber ?? "",
+                  cn.reason ?? "",
+                  (Number(cn.totalAmount ?? 0) / 100).toFixed(2),
+                  item.description ?? "",
+                  String(item.quantity ?? ""),
+                  (Number(item.unitPrice ?? 0) / 100).toFixed(2),
+                  (Number(item.total ?? 0) / 100).toFixed(2),
+                ]),
+              ),
+            ]}
+          />
           <DataGrid
             columns={columns}
             data={creditNotes}

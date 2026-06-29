@@ -41,7 +41,21 @@
     />
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Pre-paint loading state. Lives inside #root so React's first render
+         replaces it automatically — no flicker, no removeChild. The point:
+         on a cold first-visit over a weak factory wifi (the owner's 2026-06-29
+         report: react-vendor.js took 38 s to download), the user previously
+         saw pure white until React arrived. Now they see "Loading Hookka ERP"
+         immediately — same paint speed as plain HTML, ~0 bytes added. Pure
+         CSS, no JS, no fonts — so it shows BEFORE the JS bundle is fetched. -->
+    <div id="root">
+      <div id="boot-splash" style="position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; background:#FAF8F4; color:#1F1D1B; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; -webkit-font-smoothing:antialiased;">
+        <div style="font-size:22px; font-weight:700; letter-spacing:0.5px; margin-bottom:18px;">Hookka Manufacturing ERP</div>
+        <div style="width:36px; height:36px; border:3px solid #E2DDD8; border-top-color:#6B5C32; border-radius:50%; animation:hk-spin 0.9s linear infinite;"></div>
+        <div style="margin-top:18px; font-size:12.5px; color:#8B8580;">Loading… first open may take a moment on slow Wi-Fi</div>
+        <style>@keyframes hk-spin { to { transform: rotate(360deg); } }</style>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

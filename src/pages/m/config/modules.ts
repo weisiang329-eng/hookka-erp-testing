@@ -2379,6 +2379,7 @@ export const employeesConfig: ModuleConfig = {
     payrollSource,
     empPerfSource,
     deptPerfSource,
+    laborRevenueSource,
   ],
   // Design source: a "Pending requests" approve/reject card above the list on
   // the Leave tab. Real leave-approval flow (GET/PUT /api/leaves).

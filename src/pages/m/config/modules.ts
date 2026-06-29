@@ -1773,6 +1773,83 @@ const leaveSource: DataSource = {
   subTabs: [{ key: "leave", label: "Leave", match: () => true }],
 };
 
+// Employee Performance sub-tab (dc13 v13 sync, owner 2026-06-29 — backed
+// by existing /api/working-hour-entries/summary, same endpoint the
+// "Working Hours" tab uses but presented as a per-worker performance
+// view: total hours + day-count + ratio. Sorted by hours desc.
+const empPerfSource: DataSource = {
+  url: (() => {
+    const w = thisMonthWindow();
+    return `/api/working-hour-entries/summary?from=${w.from}&to=${w.to}`;
+  })(),
+  select: selectData,
+  toVM: (r): RowVM => {
+    const hours = num(r, "totalHours");
+    const days = num(r, "daysWithEntries");
+    const perDay = days > 0 ? hours / days : 0;
+    return {
+      id: str(r, "workerId") || str(r, "id"),
+      code: str(r, "workerId") || "—",
+      title: str(r, "name", "workerName") || str(r, "workerId") || "—",
+      subLine: `${days} day${days === 1 ? "" : "s"} logged`,
+      meta1: { label: "Hours", value: `${hours.toFixed(1)}h` },
+      meta2: { label: "Per Day", value: `${perDay.toFixed(1)}h` },
+    };
+  },
+  columns: [
+    textCol("workerId", "Reference", (r) => str(r, "workerId")),
+    numCol("hours", "Qty", (r) => num(r, "totalHours")),
+    numCol("days", "Amount", (r) => num(r, "daysWithEntries")),
+  ],
+  defaultSort: { key: "hours", dir: "desc" },
+  subTabs: [{ key: "emp-perf", label: "Emp Perf", match: () => true }],
+};
+
+// Department Performance sub-tab — /api/department-performance returns
+// per-department utilization + output aggregates for the date range.
+// dc13 v13 sync.
+const deptPerfSource: DataSource = {
+  url: (() => {
+    const w = thisMonthWindow();
+    return `/api/department-performance?from=${w.from}&to=${w.to}`;
+  })(),
+  // Response shape: { success, data: { departments: [{ departmentCode,
+  // departmentName, totalHours, efficiency%, ... }] } } — peel the
+  // departments array.
+  select: (resp) => {
+    if (!resp || typeof resp !== "object") return [];
+    const o = resp as {
+      data?: { departments?: unknown };
+      departments?: unknown;
+    };
+    const list = (o.data?.departments ?? o.departments) as unknown;
+    return Array.isArray(list) ? (list as RawRow[]) : [];
+  },
+  toVM: (r): RowVM => {
+    const eff = num(r, "efficiencyPct", "efficiency");
+    const hrs = num(r, "totalHours", "hours");
+    return {
+      id: str(r, "departmentCode") || str(r, "code") || "—",
+      code: str(r, "departmentCode") || "—",
+      title: str(r, "departmentName", "name") || str(r, "departmentCode") || "—",
+      subLine: `${hrs.toFixed(0)}h logged`,
+      meta1: {
+        label: "Efficiency",
+        value: eff > 0 ? `${eff.toFixed(0)}%` : "—",
+      },
+      meta2: { label: "Hours", value: `${hrs.toFixed(1)}h` },
+    };
+  },
+  columns: [
+    textCol("dept", "Reference", (r) => str(r, "departmentCode")),
+    textCol("name", "Customer", (r) => str(r, "departmentName")),
+    numCol("eff", "Qty", (r) => num(r, "efficiencyPct", "efficiency")),
+    numCol("hrs", "Amount", (r) => num(r, "totalHours", "hours")),
+  ],
+  defaultSort: { key: "eff", dir: "desc" },
+  subTabs: [{ key: "dept-perf", label: "Dept Perf", match: () => true }],
+};
+
 const payrollSource: DataSource = {
   url: `/api/payslips?period=${thisPeriod()}`,
   select: selectData,
@@ -1947,6 +2024,8 @@ export const employeesConfig: ModuleConfig = {
     deptLaborSource,
     leaveSource,
     payrollSource,
+    empPerfSource,
+    deptPerfSource,
   ],
   // Design source: a "Pending requests" approve/reject card above the list on
   // the Leave tab. Real leave-approval flow (GET/PUT /api/leaves).

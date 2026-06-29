@@ -3258,6 +3258,88 @@ export const usermgmtConfig: ModuleConfig = {
 };
 
 // ---------------------------------------------------------------------------
+// 3PL PROVIDERS — standalone module (CHANGELOG E). Reuses the threePlSource
+// (delivery sub-tab) as its list, adds a detail config with State Rate Card +
+// Drivers + Vehicles sub-doc lists, plus the existing /m/delivery sub-tab.
+// Backend: /api/drivers (providers) + /api/three-pl-state-rates?providerId=X +
+// /api/three-pl-vehicles?providerId=X (+ /api/three-pl-drivers per CHANGELOG).
+// ---------------------------------------------------------------------------
+const threePlDetail: DetailConfig = {
+  url: (id) => `/api/drivers/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "vehicleNo") || str(d, "code") || str(d, "id") || "—",
+  title: (d) => str(d, "name") || "—",
+  status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  fields: [
+    fld("Provider", (d) => str(d, "name")),
+    fld("Contact", (d) => str(d, "contactPerson")),
+    fld("Phone", (d) => str(d, "phone")),
+    fld("Email", (d) => str(d, "email")),
+    fld("Service Type", (d) => str(d, "serviceType", "vehicleType")),
+    fld("Coverage", (d) => str(d, "coverage", "region", "state")),
+    fld("Notes", (d) => str(d, "notes"), true),
+  ],
+  extraFetches: {
+    a: {
+      key: "rateCard",
+      url: (id) => `/api/three-pl-state-rates?providerId=${encodeURIComponent(id)}`,
+    },
+    b: {
+      key: "fleet",
+      url: (id) => `/api/three-pl-vehicles?providerId=${encodeURIComponent(id)}`,
+    },
+  },
+  subDocLists: (_d, _resp, extras) => {
+    const lists: SubDocList[] = [];
+
+    const rates = extras?.rateCard as
+      | { data?: { id: string; state: string; stateLabel?: string; ratePerTripSen: number; ratePerExtraDropSen?: number; remarks?: string }[] }
+      | undefined;
+    const rateRows = rates?.data ?? [];
+    if (rateRows.length > 0) {
+      lists.push({
+        title: `State Rate Card · ${rateRows.length}`,
+        rows: rateRows.map((r) => ({
+          id: r.id,
+          title: r.stateLabel || r.state || "—",
+          subLine: r.remarks || undefined,
+          trailing: `${money(r.ratePerTripSen)}/trip`,
+          icon: "package" as const,
+        })),
+      });
+    }
+
+    const fleet = extras?.fleet as
+      | { data?: { id: string; vehicleNo: string; vehicleType?: string; capacityM3?: number; status?: string }[] }
+      | undefined;
+    const fleetRows = fleet?.data ?? [];
+    if (fleetRows.length > 0) {
+      lists.push({
+        title: `Fleet · ${fleetRows.length}`,
+        rows: fleetRows.map((v) => ({
+          id: v.id,
+          title: v.vehicleNo,
+          subLine: [v.vehicleType, v.status].filter(Boolean).join(" · ") || undefined,
+          trailing: v.capacityM3 ? `${v.capacityM3} m³` : undefined,
+          icon: "package" as const,
+        })),
+      });
+    }
+
+    return lists;
+  },
+  attachmentsResource: (id) => ({ type: "THREE_PL_PROVIDER", id }),
+};
+
+export const logisticsConfig: ModuleConfig = {
+  slug: "logistics",
+  title: "3PL Providers",
+  detailPath: (vm) => `/m/logistics/${encodeURIComponent(vm.id)}`,
+  detail: threePlDetail,
+  sources: [threePlSource],
+};
+
+// ---------------------------------------------------------------------------
 // SERVICE ORDERS — CHANGELOG: separate module (NOT just a sub-tab under
 // Service Cases). List columns: Company SO / Customer SO / Customer PO /
 // Customer / State / Reference / date / Items / Qty / Total. Wires to
@@ -3476,4 +3558,5 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   serviceOrdersConfig,
   usermgmtConfig,
   rdConfig,
+  logisticsConfig,
 ];

@@ -121,6 +121,7 @@ export const MORE_GROUPS: ModuleGroup[] = [
       { label: "Inventory", icon: Package, path: "/m/inventory" },
       { label: "Purchase Orders", icon: ShoppingBag, path: "/m/procurement" },
       { label: "Suppliers", icon: UserSquare, path: "/m/suppliers" },
+      { label: "3PL Providers", icon: Truck, path: "/m/logistics" },
     ],
   },
   {

@@ -1951,14 +1951,28 @@ const directorySource: DataSource = {
 const attendanceSource: DataSource = {
   url: `/api/attendance?date=${todayISO()}`,
   select: selectData,
-  toVM: (r): RowVM => ({
-    id: str(r, "id"),
-    code: str(r, "date") || todayISO(),
-    title: str(r, "employeeName") || "—",
-    subLine: str(r, "departmentName", "departmentCode") || undefined,
-    meta1: { label: "In/Out", value: `${str(r, "clockIn") || "—"} / ${str(r, "clockOut") || "—"}` },
-    status: resolveStatus(str(r, "status"), STATUS_MAPS.attendance),
-  }),
+  // CHANGELOG #19 — read-only attendance with GPS indicator + selfie flag.
+  // Real fields per attendance.ts response: clockInLat/Lng, hasClockInPhoto,
+  // workingMinutes, efficiencyPct. Read-only on mobile (just view data).
+  toVM: (r): RowVM => {
+    const gps = num(r, "clockInLat") !== 0 || num(r, "clockInLng") !== 0;
+    const photo = read(r, "hasClockInPhoto") === true;
+    const dept = str(r, "departmentName", "departmentCode");
+    const flags = [gps ? "📍 GPS" : "", photo ? "📸 Photo" : ""].filter(Boolean).join(" · ");
+    const workingMins = num(r, "workingMinutes");
+    return {
+      id: str(r, "id"),
+      code: str(r, "date") || todayISO(),
+      title: str(r, "employeeName") || "—",
+      items: [dept, flags].filter(Boolean).join(" · ") || undefined,
+      metas: [
+        { label: "In", value: str(r, "clockIn") || "—" },
+        { label: "Out", value: str(r, "clockOut") || "—" },
+        { label: "Hours", value: workingMins > 0 ? `${(workingMins / 60).toFixed(1)}h` : "—" },
+      ],
+      status: resolveStatus(str(r, "status"), STATUS_MAPS.attendance),
+    };
+  },
   columns: [
     textCol("name", "Customer", (r) => str(r, "employeeName")),
     textCol("dept", "State", (r) => str(r, "departmentName", "departmentCode")),
@@ -3312,6 +3326,19 @@ const serviceCaseDetail: DetailConfig = {
     if (s === "IN_PROGRESS") return "Close Case";
     return "Status";
   },
+  // CHANGELOG #12 + G.3-G.7: managing affected products + replacement parts
+  // (RM/WIP/FG picker + components) requires the desktop service-case edit
+  // modal which has the product/component multi-pickers + sanitization. The
+  // backend PUT /api/service-cases/:id accepts the affectedProducts array;
+  // surfacing the full picker on mobile would require building those
+  // multi-selects. For now deep-link to desktop where the flow exists.
+  extraActions: (_d, id) => [
+    {
+      label: "Manage Parts",
+      to: `/service-cases/${encodeURIComponent(id)}`,
+      icon: "package-check",
+    },
+  ],
 };
 
 export const serviceCasesConfig: ModuleConfig = {

@@ -388,6 +388,44 @@ const salesDetail: DetailConfig = {
   // matches the desktop convention (so files uploaded from mobile show up on
   // the desktop attachment list, and vice versa).
   attachmentsResource: (id) => ({ type: "SO", id }),
+  // dc13 v13 sync (owner 2026-06-29): "Copy SO" — matches the desktop's
+  // existing clone flow (src/pages/sales/detail.tsx → "Copy" button which
+  // writes localStorage.so-clone-data + navigates to /sales/create?clone=1).
+  // Mobile re-uses that pipeline: fetch the SO doc fresh, write the exact
+  // payload shape desktop reads, then deep-link to desktop /sales/create.
+  // The user lands on the desktop create form fully prefilled — owner can
+  // tweak + save there. No new backend needed.
+  extraActions: (_d, id) => [
+    {
+      label: "Copy SO",
+      icon: "copy",
+      primary: true,
+      onClick: async (navigate) => {
+        try {
+          const res = await fetch(
+            `/api/sales-orders/${encodeURIComponent(id)}`,
+          );
+          const j = (await res.json().catch(() => null)) as
+            | { success?: boolean; data?: Record<string, unknown> }
+            | null;
+          if (!res.ok || !j?.success || !j.data) {
+            window.alert("Could not load SO to copy.");
+            return;
+          }
+          // Match desktop's so-clone-data shape: the entire SO record,
+          // including header + items, becomes the prefill payload. Desktop
+          // /sales/create on mount reads this and hydrates the form.
+          window.localStorage.setItem(
+            "so-clone-data",
+            JSON.stringify(j.data),
+          );
+          navigate("/sales/create?clone=1");
+        } catch {
+          window.alert("Copy failed — please try again.");
+        }
+      },
+    },
+  ],
 };
 
 export const salesConfig: ModuleConfig = {
@@ -2274,6 +2312,19 @@ const customerDetail: DetailConfig = {
   // built yet — avoids a half-working Edit button. TODO: wire when /m/
   // customer-edit form lands.
   hideActionBar: true,
+  // dc13 v13 sync (owner 2026-06-29): Catalogue Export. Deep-links to
+  // desktop /products?autoCustomerCatalogueId=<id>; the products page
+  // auto-fetches that customer + fires the existing per-customer catalogue
+  // PDF pipeline. Mobile gets the PDF download without re-implementing
+  // fetchPhotoMap / buildCatalogueModels / pdf-lib on phone.
+  extraActions: (_d, id) => [
+    {
+      label: "Export Catalogue",
+      to: `/products?autoCustomerCatalogueId=${encodeURIComponent(id)}`,
+      icon: "file-text",
+      primary: true,
+    },
+  ],
 };
 
 export const customersConfig: ModuleConfig = {

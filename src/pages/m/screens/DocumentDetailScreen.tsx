@@ -30,6 +30,7 @@ import {
   Check,
   Package,
   FileText,
+  Copy,
   ArrowDownToLine,
   ArrowUpFromLine,
   PackageCheck,
@@ -57,6 +58,7 @@ const EXTRA_ACTION_ICONS: Record<string, LucideIcon> = {
   "package-check": PackageCheck,
   receipt: Receipt,
   "file-text": FileText,
+  copy: Copy,
 };
 
 export function DocumentDetailScreen({ config }: { config: ModuleConfig }) {
@@ -671,7 +673,14 @@ function Inner({
                 return (
                   <button
                     key={a.label}
-                    onClick={() => navigate(a.to)}
+                    onClick={() => {
+                      if (a.onClick) {
+                        // Pass navigate so onClick can route after its async work
+                        void a.onClick(navigate);
+                      } else if (a.to) {
+                        navigate(a.to);
+                      }
+                    }}
                     style={{
                       flex: 1,
                       height: 44,

@@ -223,9 +223,15 @@ export type DarkStat = {
  */
 export type DetailAction = {
   label: string;
-  to: string;
+  /** Router-internal navigation target. Set ONE of `to` or `onClick`. */
+  to?: string;
+  /** Custom onClick — overrides `to`. Use for actions that need to write
+   * localStorage / fetch / await before navigating (e.g. Copy SO clones
+   * the doc into a localStorage payload, then deep-links to desktop
+   * /sales/create?clone=1). */
+  onClick?: (navigate: (to: string) => void) => void | Promise<void>;
   /** lucide icon name for the leading glyph. */
-  icon?: "package-check" | "receipt" | "file-text";
+  icon?: "package-check" | "receipt" | "file-text" | "copy";
   primary?: boolean;
 };
 

@@ -2821,6 +2821,37 @@ export default function ProductsPage() {
     load();
   }, []);
 
+  // Mobile deep-link auto-export — when /products is opened with
+  // ?autoCustomerCatalogueId=<id>, fetch that customer + immediately
+  // trigger the per-customer catalogue PDF. Used by /m/customers/:id's
+  // "Export Catalogue" extraAction so mobile users get a one-tap export
+  // (the heavy fetchPhotoMap + buildCatalogueModels + pdf-lib pipeline
+  // stays on this page). One-shot — strips the param after firing.
+  useEffect(() => {
+    if (loading || products.length === 0) return;
+    const url = new URL(window.location.href);
+    const wantId = url.searchParams.get("autoCustomerCatalogueId");
+    if (!wantId) return;
+    url.searchParams.delete("autoCustomerCatalogueId");
+    window.history.replaceState(null, "", url.toString());
+    void (async () => {
+      try {
+        const res = await fetch(`/api/customers/${encodeURIComponent(wantId)}`);
+        const j = (await res.json().catch(() => null)) as
+          | { success?: boolean; data?: { id: string; code: string; name: string } }
+          | null;
+        if (res.ok && j?.success && j.data) {
+          await handleExportCustomerCatalogue(j.data);
+        } else {
+          toast.error("Could not fetch that customer.");
+        }
+      } catch {
+        toast.error("Catalogue export failed.");
+      }
+    })();
+  }, [loading, products.length]);
+
+
   const configMap = useMemo(() => {
     const map = new Map<string, ProductDeptConfig>();
     configs.forEach((c) => map.set(c.productCode, c));

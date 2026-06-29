@@ -1057,7 +1057,7 @@ function Inner({
                           </span>
                         ) : null}
                         {r.status ? (
-                          <span style={{ fontSize: 10, fontWeight: 600, padding: "1px 7px", borderRadius: 6, background: r.status.style.bg, color: r.status.style.fg, marginLeft: "auto" }}>
+                          <span style={{ fontSize: 10, fontWeight: 600, padding: "1px 7px", borderRadius: 6, color: r.status.style.hex, marginLeft: "auto" }}>
                             {r.status.label}
                           </span>
                         ) : null}

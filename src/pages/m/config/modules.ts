@@ -22,7 +22,7 @@ import {
   type RowVM,
 } from "./types";
 import { PendingLeaveRequests } from "../components/PendingLeaveRequests";
-import { logHoursSpec, hubFormSpec, deleteHub } from "./forms";
+import { logHoursSpec, hubFormSpec, deleteHub, addAffectedProductSpec } from "./forms";
 import {
   type DetailConfig,
   type FlowStep,

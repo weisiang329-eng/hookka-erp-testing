@@ -732,9 +732,22 @@ function CreatePIWizard({
     (supplierId: string, supplierSku: string): SupplierMaterialBinding | null => {
       const sku = normSku(supplierSku);
       if (!sku || !supplierId) return null;
-      return bindingsBySupplierSku.get(`${supplierId}__${sku}`) ?? null;
+      const exact = bindingsBySupplierSku.get(`${supplierId}__${sku}`);
+      if (exact) return exact;
+      // Fallback for supplier-side SKU prefixing: "OST- SL 27" (binding)
+      // vs "SL.27" (OCR) — exact normalised match fails because the
+      // binding has a vendor prefix. Try endsWith / contains either way
+      // for this supplier's bindings. First hit wins. Owner ruling
+      // 2026-06-29: binding SKUs in the wild carry inconsistent prefixes.
+      for (const b of bindings) {
+        if (b.supplierId !== supplierId) continue;
+        const bSku = normSku(b.supplierSku);
+        if (!bSku) continue;
+        if (bSku.endsWith(sku) || sku.endsWith(bSku)) return b;
+      }
+      return null;
     },
-    [bindingsBySupplierSku],
+    [bindingsBySupplierSku, bindings],
   );
 
   // Reverse lookup: (supplierId, materialCode) → binding. Lets us fill the
@@ -768,14 +781,6 @@ function CreatePIWizard({
     return m;
   }, [rawMaterials]);
 
-  const materialOptionsAll: MaterialOption[] = useMemo(
-    () =>
-      rawMaterials.map((rm) => ({
-        itemCode: rm.itemCode,
-        description: rm.description,
-      })),
-    [rawMaterials],
-  );
 
   // Per-supplier "supplier SKU" picker options. Owner ruling 2026-06-29
   // evening: Supplier SKU must also be a dropdown (not free text), pulled
@@ -795,6 +800,32 @@ function CreatePIWizard({
       };
       const arr = map.get(b.supplierId) ?? [];
       arr.push(opt);
+      map.set(b.supplierId, arr);
+    }
+    return map;
+  }, [bindings, materialByCode]);
+
+  // Internal Code picker options NARROWED to materials the current supplier
+  // has bindings for. Owner ruling 2026-06-29 evening: picking from the
+  // full catalogue lets the operator choose an unbound material whose
+  // Supplier SKU then drifts away from the line above — they end up with
+  // a row whose IC and SKU point to different bindings. The narrowed list
+  // guarantees every pick keeps both columns coherent. To bind a new
+  // material, the operator adds it under Suppliers > Materials first.
+  const internalCodeOptionsBy: Map<string, MaterialOption[]> = useMemo(() => {
+    const map = new Map<string, MaterialOption[]>();
+    const seen = new Map<string, Set<string>>(); // supplierId → set of materialCode
+    for (const b of bindings) {
+      if (!b.supplierId || !b.materialCode) continue;
+      const rm = materialByCode.get(b.materialCode.trim().toUpperCase());
+      if (!rm) continue;
+      const key = rm.itemCode.trim().toUpperCase();
+      const set = seen.get(b.supplierId) ?? new Set<string>();
+      if (set.has(key)) continue;
+      set.add(key);
+      seen.set(b.supplierId, set);
+      const arr = map.get(b.supplierId) ?? [];
+      arr.push({ itemCode: rm.itemCode, description: rm.description });
       map.set(b.supplierId, arr);
     }
     return map;
@@ -1241,7 +1272,7 @@ function CreatePIWizard({
               suppliers={suppliers}
               activeOrgs={activeOrgs}
               purchaseOrders={purchaseOrders}
-              materialOptions={materialOptionsAll}
+              internalCodeOptionsBy={internalCodeOptionsBy}
               supplierSkuOptionsBy={supplierSkuOptionsBy}
               resolveBindingFor={resolveBindingFor}
               resolveBindingForMaterial={resolveBindingForMaterial}
@@ -1468,7 +1499,7 @@ function PreviewStep({
   suppliers,
   activeOrgs,
   purchaseOrders,
-  materialOptions,
+  internalCodeOptionsBy,
   supplierSkuOptionsBy,
   resolveBindingFor,
   resolveBindingForMaterial,
@@ -1488,7 +1519,7 @@ function PreviewStep({
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
-  materialOptions: MaterialOption[];
+  internalCodeOptionsBy: Map<string, MaterialOption[]>;
   supplierSkuOptionsBy: Map<string, MaterialOption[]>;
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
   resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
@@ -1547,7 +1578,7 @@ function PreviewStep({
             suppliers={suppliers}
             activeOrgs={activeOrgs}
             purchaseOrders={purchaseOrders}
-            materialOptions={materialOptions}
+            internalCodeOptions={internalCodeOptionsBy.get(card.supplierId) ?? []}
             supplierSkuOptions={supplierSkuOptionsBy.get(card.supplierId) ?? []}
             resolveBindingFor={resolveBindingFor}
             resolveBindingForMaterial={resolveBindingForMaterial}
@@ -1596,7 +1627,7 @@ function PICard({
   suppliers,
   activeOrgs,
   purchaseOrders,
-  materialOptions,
+  internalCodeOptions,
   supplierSkuOptions,
   resolveBindingFor,
   resolveBindingForMaterial,
@@ -1612,7 +1643,7 @@ function PICard({
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
-  materialOptions: MaterialOption[];
+  internalCodeOptions: MaterialOption[];
   supplierSkuOptions: MaterialOption[];
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
   resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
@@ -1853,7 +1884,7 @@ function PICard({
                       inputClassName="h-8 text-xs"
                       placeholder={line.description?.slice(0, 40) || "(pick from catalog)"}
                       value={line.materialCode ? `${line.materialCode} · ${line.materialName}` : ""}
-                      options={materialOptions}
+                      options={internalCodeOptions}
                       strictPick
                       onPick={(o) => {
                         const reverse = card.supplierId
@@ -2228,9 +2259,19 @@ function CreateGRNWizard({
     (supplierId: string, supplierSku: string): SupplierMaterialBinding | null => {
       const sku = normSkuG(supplierSku);
       if (!sku || !supplierId) return null;
-      return bindingsBySupplierSku.get(`${supplierId}__${sku}`) ?? null;
+      const exact = bindingsBySupplierSku.get(`${supplierId}__${sku}`);
+      if (exact) return exact;
+      // Prefix-tolerant fallback (e.g. binding "OST-SL 157" vs OCR "SL 157"):
+      // try endsWith / contains either way for this supplier's bindings.
+      for (const b of bindings) {
+        if (b.supplierId !== supplierId) continue;
+        const bSku = normSkuG(b.supplierSku);
+        if (!bSku) continue;
+        if (bSku.endsWith(sku) || sku.endsWith(bSku)) return b;
+      }
+      return null;
     },
-    [bindingsBySupplierSku],
+    [bindingsBySupplierSku, bindings],
   );
 
   const normCodeG = (s: string | null | undefined) =>
@@ -2262,14 +2303,6 @@ function CreateGRNWizard({
     return m;
   }, [rawMaterials]);
 
-  const materialOptionsAll: MaterialOption[] = useMemo(
-    () =>
-      rawMaterials.map((rm) => ({
-        itemCode: rm.itemCode,
-        description: rm.description,
-      })),
-    [rawMaterials],
-  );
 
   const supplierSkuOptionsBy: Map<string, MaterialOption[]> = useMemo(() => {
     const map = new Map<string, MaterialOption[]>();
@@ -2284,6 +2317,26 @@ function CreateGRNWizard({
       };
       const arr = map.get(b.supplierId) ?? [];
       arr.push(opt);
+      map.set(b.supplierId, arr);
+    }
+    return map;
+  }, [bindings, materialByCode]);
+
+  // Internal Code picker narrowed to bound materials only — same rule as PI.
+  const internalCodeOptionsBy: Map<string, MaterialOption[]> = useMemo(() => {
+    const map = new Map<string, MaterialOption[]>();
+    const seen = new Map<string, Set<string>>();
+    for (const b of bindings) {
+      if (!b.supplierId || !b.materialCode) continue;
+      const rm = materialByCode.get(b.materialCode.trim().toUpperCase());
+      if (!rm) continue;
+      const key = rm.itemCode.trim().toUpperCase();
+      const set = seen.get(b.supplierId) ?? new Set<string>();
+      if (set.has(key)) continue;
+      set.add(key);
+      seen.set(b.supplierId, set);
+      const arr = map.get(b.supplierId) ?? [];
+      arr.push({ itemCode: rm.itemCode, description: rm.description });
       map.set(b.supplierId, arr);
     }
     return map;
@@ -2693,7 +2746,7 @@ function CreateGRNWizard({
               suppliers={suppliers}
               activeOrgs={activeOrgs}
               purchaseOrders={purchaseOrders}
-              materialOptions={materialOptionsAll}
+              internalCodeOptionsBy={internalCodeOptionsBy}
               supplierSkuOptionsBy={supplierSkuOptionsBy}
               resolveBindingFor={resolveBindingFor}
               resolveBindingForMaterial={resolveBindingForMaterial}
@@ -2740,7 +2793,7 @@ function GRNPreviewStep({
   suppliers,
   activeOrgs,
   purchaseOrders,
-  materialOptions,
+  internalCodeOptionsBy,
   supplierSkuOptionsBy,
   resolveBindingFor,
   resolveBindingForMaterial,
@@ -2760,7 +2813,7 @@ function GRNPreviewStep({
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
-  materialOptions: MaterialOption[];
+  internalCodeOptionsBy: Map<string, MaterialOption[]>;
   supplierSkuOptionsBy: Map<string, MaterialOption[]>;
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
   resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
@@ -2817,7 +2870,7 @@ function GRNPreviewStep({
             suppliers={suppliers}
             activeOrgs={activeOrgs}
             purchaseOrders={purchaseOrders}
-            materialOptions={materialOptions}
+            internalCodeOptions={internalCodeOptionsBy.get(card.supplierId) ?? []}
             supplierSkuOptions={supplierSkuOptionsBy.get(card.supplierId) ?? []}
             resolveBindingFor={resolveBindingFor}
             resolveBindingForMaterial={resolveBindingForMaterial}
@@ -2866,7 +2919,7 @@ function GRNCard({
   suppliers,
   activeOrgs,
   purchaseOrders,
-  materialOptions,
+  internalCodeOptions,
   supplierSkuOptions,
   resolveBindingFor,
   resolveBindingForMaterial,
@@ -2882,7 +2935,7 @@ function GRNCard({
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
-  materialOptions: MaterialOption[];
+  internalCodeOptions: MaterialOption[];
   supplierSkuOptions: MaterialOption[];
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
   resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
@@ -3104,7 +3157,7 @@ function GRNCard({
                       inputClassName="h-8 text-xs"
                       placeholder={line.description?.slice(0, 40) || "(pick from catalog)"}
                       value={line.materialCode ? `${line.materialCode} · ${line.materialName}` : ""}
-                      options={materialOptions}
+                      options={internalCodeOptions}
                       strictPick
                       onPick={(o) => {
                         const reverse = card.supplierId

@@ -23,7 +23,7 @@
 // detail at /m/production/:id, the More-menu "Production Orders" entry, and
 // the desktop / dashboard-b production data — are untouched.
 // ===========================================================================
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, StatusPill } from "../components";
@@ -97,13 +97,33 @@ export function ProductionScreen() {
     "/api/production-orders?fields=minimal&include=jobCards",
   );
 
+  // Owner 2026-06-30: factory needs to find a job by Customer PO / Customer
+  // SO Reference / Company SO / Product / Customer Name from the phone. Match
+  // is case-insensitive substring against the same fields the desktop list
+  // already searches.
+  const [query, setQuery] = useState("");
+
   const groups = useMemo(() => {
     const all = data?.success ? data.data ?? [] : [];
     // Exclude terminal POs (completed/cancelled) — a board view shows
     // in-flight work. The desktop dashboard's plant-load uses the same cut.
+    const q = query.trim().toLowerCase();
     const live = all.filter((po) => {
       const s = str(po, "status");
-      return s !== "COMPLETED" && s !== "CANCELLED";
+      if (s === "COMPLETED" || s === "CANCELLED") return false;
+      if (!q) return true;
+      const hay = [
+        str(po, "poNo"),
+        str(po, "companySO"),
+        str(po, "customerSO"),
+        str(po, "productCode"),
+        str(po, "productName"),
+        str(po, "customerName"),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
     });
     const byDept = new Map<string, PO[]>();
     for (const po of live) {
@@ -124,11 +144,31 @@ export function ProductionScreen() {
       ordered.push({ code, label: code, jobs, accent: "plum" });
     }
     return ordered;
-  }, [data]);
+  }, [data, query]);
 
   return (
     <>
       <MobileHeader title="Production" />
+      <div style={{ padding: "10px 16px 4px" }}>
+        <input
+          type="search"
+          inputMode="search"
+          placeholder="Search PO# / Company SO / Customer SO / product"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          style={{
+            width: "100%",
+            height: 38,
+            padding: "0 12px",
+            fontSize: 14,
+            color: M.raisin,
+            background: M.card,
+            border: `1px solid ${M.border}`,
+            borderRadius: 10,
+            outline: "none",
+          }}
+        />
+      </div>
       {loading && !data ? (
         <Msg text="Loading…" />
       ) : error && !data ? (
@@ -136,7 +176,7 @@ export function ProductionScreen() {
       ) : (
         <div style={{ padding: "2px 0 120px" }}>
           {groups.every((g) => g.jobs.length === 0) ? (
-            <Msg text="No live production orders." />
+            <Msg text={query ? `No matches for "${query}".` : "No live production orders."} />
           ) : (
             groups.map((g) => {
               if (g.jobs.length === 0) return null;

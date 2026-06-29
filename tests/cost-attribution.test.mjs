@@ -88,3 +88,73 @@ test("date compares on the YYYY-MM-DD prefix (full ISO timestamps work)", () => 
   assert.equal(laborAsOf("po", "2026-06-15"), 250);
   assert.equal(laborAsOf("po", "2026-06-14"), 0);
 });
+
+// --- BUG-2026-06-29-001: WIP per PO = ACTUAL booked cost, NOT a FIFO re-valuation ---
+//
+// `wipAsOf` in loadMaterialCostData values each in-progress production order as
+//   materialAsOf(po,D) + laborAsOf(po,D)
+// where BOTH accessors are costAsOfByPo over the SAME cost_ledger rows:
+//   materialAsOf = costAsOfByPo(rows, "RM_ISSUE")     // RM_ISSUE.total_cost_sen by refId(=PO)
+//   laborAsOf    = costAsOfByPo(rows, "LABOR_POSTED") // LABOR_POSTED.total_cost_sen by itemId(=PO)
+// i.e. WIP per PO is exactly Σ that PO's OWN (RM_ISSUE + LABOR_POSTED) total_cost_sen
+// dated ≤ D — the material actually booked to the PO + labour posted to it. It is
+// NOT the FIFO replay's per-issue re-valuation (the old `fifoMaterialAsOf`), which
+// was ~15× too high on live prod (WIP-CLOSING RM 267,721 vs the real ~RM 10k).
+// These tests lock that composition: integer-sen booked totals, as-of-date, and no
+// cross-PO leakage. They mirror exactly how wipAsOf builds the two accessors.
+
+// Replicates wipAsOf's per-PO term from raw cost_ledger rows.
+function wipPoAsOf(rows, poId, dIso) {
+  const materialAsOf = costAsOfByPo(rows, "RM_ISSUE");
+  const laborAsOf = costAsOfByPo(rows, "LABOR_POSTED");
+  return materialAsOf(poId, dIso) + laborAsOf(poId, dIso);
+}
+
+test("WIP per PO = Σ its own RM_ISSUE + LABOR_POSTED total_cost_sen (the booked cost, not a FIFO replay)", () => {
+  // po-1: two RM issues (refId=PO) + two labour postings (itemId=PO).
+  const rows = [
+    { type: "RM_ISSUE", itemId: "rm-foam", refId: "po-1", date: "2026-06-01", totalCostSen: 4000 },
+    { type: "RM_ISSUE", itemId: "rm-fabric", refId: "po-1", date: "2026-06-03", totalCostSen: 1500 },
+    { type: "LABOR_POSTED", itemId: "po-1", refId: "jc-1", date: "2026-06-02", totalCostSen: 800 },
+    { type: "LABOR_POSTED", itemId: "po-1", refId: "jc-2", date: "2026-06-04", totalCostSen: 1200 },
+  ];
+  // EXACT integer-sen sum of the PO's own booked rows: 4000+1500 material + 800+1200 labour.
+  assert.equal(wipPoAsOf(rows, "po-1", "2026-06-30"), 4000 + 1500 + 800 + 1200); // 7500
+});
+
+test("WIP per PO honours as-of-date (only rows dated <= D, material and labour alike)", () => {
+  const rows = [
+    { type: "RM_ISSUE", itemId: "rm-x", refId: "po-1", date: "2026-05-10", totalCostSen: 1000 },
+    { type: "LABOR_POSTED", itemId: "po-1", refId: "jc-a", date: "2026-05-20", totalCostSen: 300 },
+    { type: "RM_ISSUE", itemId: "rm-y", refId: "po-1", date: "2026-06-15", totalCostSen: 2000 },
+    { type: "LABOR_POSTED", itemId: "po-1", refId: "jc-b", date: "2026-06-25", totalCostSen: 700 },
+  ];
+  assert.equal(wipPoAsOf(rows, "po-1", "2026-04-30"), 0);              // nothing yet
+  assert.equal(wipPoAsOf(rows, "po-1", "2026-05-31"), 1000 + 300);    // only May rows
+  assert.equal(wipPoAsOf(rows, "po-1", "2026-06-30"), 1000 + 300 + 2000 + 700); // all
+});
+
+test("WIP per PO has NO cross-PO leakage (po-1 never includes po-2's material or labour)", () => {
+  const rows = [
+    { type: "RM_ISSUE", itemId: "rm-x", refId: "po-1", date: "2026-06-01", totalCostSen: 5000 },
+    { type: "LABOR_POSTED", itemId: "po-1", refId: "jc-a", date: "2026-06-01", totalCostSen: 600 },
+    // po-2's rows must NOT bleed into po-1.
+    { type: "RM_ISSUE", itemId: "rm-x", refId: "po-2", date: "2026-06-01", totalCostSen: 99999 },
+    { type: "LABOR_POSTED", itemId: "po-2", refId: "jc-b", date: "2026-06-01", totalCostSen: 88888 },
+  ];
+  assert.equal(wipPoAsOf(rows, "po-1", "2026-06-30"), 5000 + 600);        // only po-1
+  assert.equal(wipPoAsOf(rows, "po-2", "2026-06-30"), 99999 + 88888);     // only po-2
+});
+
+test("WIP per PO uses RM_ISSUE.total_cost_sen verbatim — independent of any FIFO layer/qty re-pricing", () => {
+  // The booked RM_ISSUE total is taken as-is. Even if a FIFO replay would re-cost
+  // these issues differently (e.g. layer pricing inflating them ~15×), WIP must
+  // equal the booked sen, not the replay figure. qty/unitCost are deliberately
+  // absent here: the accessor reads total_cost_sen only.
+  const rows = [
+    { type: "RM_ISSUE", itemId: "rm-1", refId: "po-1", date: "2026-06-01", totalCostSen: 333 },
+    { type: "RM_ISSUE", itemId: "rm-1", refId: "po-1", date: "2026-06-02", totalCostSen: 667 },
+  ];
+  // No labour: WIP material-only = exactly Σ booked RM_ISSUE = 1000 sen (RM 10.00).
+  assert.equal(wipPoAsOf(rows, "po-1", "2026-06-30"), 1000);
+});

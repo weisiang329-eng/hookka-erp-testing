@@ -57,12 +57,10 @@ import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import {
-  valueIssues,
   computeMaterialCheckpoints,
   windowFromCheckpoints,
   type MaterialInput,
   type FifoEvent,
-  type IssueCost,
   type CheckpointCum,
 } from "../../lib/material-cost-fifo";
 
@@ -4959,14 +4957,20 @@ async function glWindowSigned(
 // being fed after 2026-03) with a from-source FIFO replay, for the three
 // inventory layers the manufacturing P&L needs:
 //   · RM  — opening + GRN purchases − closing, per item_group (FIFO consumption)
-//   · WIP — per in-progress production_order: FIFO material issued + labour
-//   · FG  — per completed-not-delivered fg_batch: undelivered qty × FIFO unit cost
+//   · WIP — per in-progress production_order: Σ RM_ISSUE.total_cost_sen (material
+//           actually booked) + Σ LABOR_POSTED.total_cost_sen, both as-of-date
+//   · FG  — per completed-not-delivered fg_batch: undelivered qty × the
+//           cascade-maintained fg_batches.unit_cost_sen
 //
 // The pure FIFO maths live in src/lib/material-cost-fifo.ts; here we only
-// assemble the events from the operational tables and feed the engine. The
-// engine guarantees  Σ valueIssues(m).fifoCostSen in [a,b] === consumedSen
-// for the same window, so WIP/FG (which sum per-issue costs) and RM (which use
-// consumed) stay coherent to the sen.
+// assemble the events from the operational tables and feed the engine for the RM
+// layer (opening/purchase/closing/consumed via monthly checkpoints). WIP material
+// and FG are NOT taken from the replay's per-issue costs: that re-valuation was
+// ~15× too high on live prod because the replay's per-layer issue costs for a PO
+// did not reconcile to Σ RM_ISSUE.total_cost_sen booked to it. WIP/FG now read the
+// actual booked cost_ledger totals (and FG's cascade unit cost) instead — see
+// BUG-2026-06-29-001. The RM checkpoint path (computeMaterialCheckpoints) is
+// unaffected and stays coherent to the sen.
 //
 // As-of-date reconstruction (the hard part — owner accepts pre-cutover /
 // transitional imperfection, but the CURRENT period, whose closing date is
@@ -5237,13 +5241,13 @@ async function loadMaterialCostData(
   const monthsYm = monthsBetweenYm(globalFirstYm, lastYm); // [] when first > last
   const monthEnds = monthsYm.map(monthEndIso);
 
-  // Replay each item ONCE; sum its monthly checkpoints into its item-group, and
-  // collect per-PO issue costs (for WIP/FG) from the same pass. No per-window
-  // re-replay — that repetition was the prod P&L hang.
+  // Replay each item ONCE and sum its monthly checkpoints into its item-group.
+  // No per-window re-replay — that repetition was the prod P&L hang. (Per-PO
+  // material cost for WIP comes from cost_ledger RM_ISSUE totals below, NOT this
+  // replay — see materialAsOf / BUG-2026-06-29-001.)
   const rank = (e: FifoEvent) => (e.kind === "receipt" ? 0 : 1);
   const groupCum = new Map<string, Map<string, CheckpointCum>>(); // group → ym → cumulative
   const allGroups = new Set<string>();
-  const issuesByRef = new Map<string, IssueCost[]>(); // ref(PO) → its issues
   const negatives: { rmId: string; itemCode: string; units: number }[] = [];
   const openByRm = new Map<string, { rmId: string; qty: number | null; unitCostSen: number | null; asOfDate: string | null }>();
   for (const r of openingRows) openByRm.set(r.rmId, r);
@@ -5284,28 +5288,28 @@ async function loadMaterialCostData(
       acc.cumConsumedSen += cp.cumConsumedSen;
       acc.cumNegativeUnits += cp.cumNegativeUnits;
     }
-    // Per-issue FIFO costs (full timeline ≤ matEndIso) — grouped by PO for WIP/FG.
-    for (const ic of valueIssues(m)) {
-      if (!ic.ref) continue;
-      let arr = issuesByRef.get(ic.ref);
-      if (!arr) { arr = []; issuesByRef.set(ic.ref, arr); }
-      arr.push(ic);
-    }
     // Whole-range negative-stock flag (fractional qty → rounded; diagnostic only).
     const lastCp = cps.length ? cps[cps.length - 1] : null;
     const negUnits = lastCp ? lastCp.cumNegativeUnits : 0;
     if (negUnits > 1e-9) negatives.push({ rmId, itemCode: codeOf.get(rmId) ?? rmId, units: Math.round(negUnits * 1000) / 1000 });
   }
 
-  // 6a. Per-PO FIFO material cost as of a date D = Σ issue.fifoCostSen for that
-  //     PO with date <= D. Computed on demand from the grouped issues.
-  const fifoMaterialAsOf = (poId: string, dIso: string): number => {
-    const arr = issuesByRef.get(poId);
-    if (!arr) return 0;
-    let s = 0;
-    for (const ic of arr) if (ic.date <= dIso) s += ic.fifoCostSen;
-    return s;
-  };
+  // 6a. Per-PO material cost as of a date D = Σ RM_ISSUE.total_cost_sen for that
+  //     PO with date <= D — the material ACTUALLY booked to the PO. ATTRIBUTION
+  //     (locked by cost-attribution.test): for RM_ISSUE the PO is in `refId`
+  //     (itemId is the raw-material id). Built the SAME way as the labour
+  //     accessor below, via costAsOfByPo.
+  //
+  //     NOT re-valued from the FIFO replay (the old `fifoMaterialAsOf` = Σ of the
+  //     replay's per-issue costs for the PO): that re-valuation came out ~15× too
+  //     high on live prod (WIP-CLOSING RM 267,721 vs the owner's real ~RM 10k)
+  //     because the replay's per-layer issue costs for a PO did NOT reconcile to
+  //     Σ RM_ISSUE.total_cost_sen booked to that PO. The same defect inflated FG
+  //     (worked around there by valuing FG at fg_batches.unit_cost_sen, which is
+  //     floor((ΣRM_ISSUE+ΣLABOR)/originalQty) — i.e. this same RM_ISSUE total).
+  //     WIP has no per-batch unit cost to fall back to, so the material basis is
+  //     fixed at source here. See BUG-2026-06-29-001.
+  const materialAsOf = costAsOfByPo(clRes.results ?? [], "RM_ISSUE");
 
   // 6b. Per-PO labour cost as of a date D = Σ LABOR_POSTED.total_cost_sen for
   //     that PO with date <= D. ATTRIBUTION (locked by cost-attribution.test):
@@ -5317,7 +5321,9 @@ async function loadMaterialCostData(
   const laborAsOf = costAsOfByPo(clRes.results ?? [], "LABOR_POSTED");
 
   // 7. WIP as of D = Σ over production_orders in progress at D of
-  //    (FIFO material issued so far + labour posted so far).
+  //    (material issued so far + labour posted so far) — both the ACTUAL booked
+  //    cost_ledger totals (Σ RM_ISSUE.total_cost_sen + Σ LABOR_POSTED.total_cost_sen
+  //    ≤ D for that PO), matching what the cascade rolls into fg_batches.unit_cost_sen.
   const pos = poRes.results ?? [];
   const wipAsOf = (dIso: string): number => {
     let s = 0;
@@ -5326,7 +5332,7 @@ async function loadMaterialCostData(
       const completed = (p.completedDate ?? "").slice(0, 10);
       if (!start || start > dIso) continue;            // not started yet
       if (completed && completed <= dIso) continue;    // already completed by D
-      s += fifoMaterialAsOf(p.id, dIso) + laborAsOf(p.id, dIso);
+      s += materialAsOf(p.id, dIso) + laborAsOf(p.id, dIso);
     }
     return s;
   };

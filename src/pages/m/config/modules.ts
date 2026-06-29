@@ -481,15 +481,17 @@ const deliveryOrdersSource: DataSource = {
 const threePlSource: DataSource = {
   url: "/api/drivers",
   select: selectData,
+  // dc13 (line ~1864): code · provider · "vehicle type · N vehicles" · [Coverage · Fleet · On-time]
   toVM: (r): RowVM => ({
     id: str(r, "id"),
     code: str(r, "vehicleNo") || str(r, "id"),
     title: str(r, "name") || "—",
-    subLine:
-      [str(r, "contactPerson"), str(r, "phone")].filter(Boolean).join(" · ") ||
-      undefined,
-    meta1: { label: "Vehicle", value: str(r, "vehicleType") || "—" },
-    meta2: { label: "Capacity", value: `${num(r, "capacityM3")} m³` },
+    items: [str(r, "vehicleType"), str(r, "contactPerson")].filter(Boolean).join(" · ") || undefined,
+    metas: [
+      { label: "Coverage", value: str(r, "coverage", "region") || "—" },
+      { label: "Capacity", value: `${num(r, "capacityM3")} m³` },
+      { label: "Phone", value: str(r, "phone") || "—" },
+    ],
     status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
   }),
   columns: [
@@ -2177,13 +2179,20 @@ export const payslipsConfig: ModuleConfig = {
 const announcementsSource: DataSource = {
   url: "/api/announcements",
   select: selectData,
-  toVM: (r): RowVM => ({
-    id: str(r, "id"),
-    code: str(r, "category") || "Notice",
-    title: str(r, "title") || "—",
-    subLine: str(r, "createdBy") || undefined,
-    meta1: { label: "Order Date", value: dateOnly(r, "createdAt") || "—" },
-  }),
+  // dc13 (line ~1900): code · title · body preview · [Posted · By]
+  toVM: (r): RowVM => {
+    const body = str(r, "body", "description", "content");
+    return {
+      id: str(r, "id"),
+      code: str(r, "category") || "Notice",
+      title: str(r, "title") || "—",
+      items: body ? (body.length > 80 ? body.slice(0, 79) + "…" : body) : undefined,
+      metas: [
+        { label: "Posted", value: shortDate(dateOnly(r, "createdAt")) || "—" },
+        { label: "By", value: str(r, "createdBy", "createdByName") || "—" },
+      ],
+    };
+  },
   columns: [
     textCol("title", "Customer", (r) => str(r, "title")),
     textCol("category", "State", (r) => str(r, "category")),
@@ -2296,13 +2305,16 @@ export const announcementsConfig: ModuleConfig = {
 const mailSource: DataSource = {
   url: "/api/mail-center/threads",
   select: (resp) => (Array.isArray(resp) ? (resp as RawRow[]) : selectData(resp)),
+  // dc13 (line ~1906): code · counterparty · subject · [From/To · Date]
   toVM: (r): RowVM => ({
     id: str(r, "id"),
-    code: read(r, "unread") === true ? "New" : "Read",
-    title: str(r, "subject") || "(No subject)",
-    subLine: str(r, "counterpartyName", "counterpartyEmail") || undefined,
-    meta1: { label: "Updated", value: dateOnly(r, "lastMessageAt") || "—" },
-    meta2: { label: "Msgs", value: num(r, "messageCount") },
+    code: read(r, "unread") === true ? "Unread" : "Read",
+    title: str(r, "counterpartyName", "counterpartyEmail") || "—",
+    items: str(r, "subject") || undefined,
+    metas: [
+      { label: "From", value: str(r, "counterpartyEmail") || "—" },
+      { label: "Date", value: shortDate(dateOnly(r, "lastMessageAt")) || "—" },
+    ],
   }),
   columns: [
     textCol("subject", "Reference", (r) => str(r, "subject")),
@@ -2468,14 +2480,23 @@ export const customersConfig: ModuleConfig = {
     {
       url: "/api/customers",
       select: selectData,
-      toVM: (r): RowVM => ({
-        id: str(r, "id", "code"),
-        code: str(r, "code", "debtorCode") || "—",
-        title: str(r, "name") || "—",
-        subLine: [str(r, "phone"), str(r, "state")].filter(Boolean).join(" · ") || undefined,
-        meta1: { label: "Outstanding", value: money(num(r, "outstandingSen")) },
-        status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
-      }),
+      // dc13 (line ~1847): code · customer · "contact · N hubs" · [Terms · Credit · AR]
+      toVM: (r): RowVM => {
+        const hubs = Array.isArray(r.deliveryHubs) ? (r.deliveryHubs as unknown[]).length : 0;
+        const contact = str(r, "contactName", "picName", "phone");
+        return {
+          id: str(r, "id", "code"),
+          code: str(r, "code", "debtorCode") || "—",
+          title: str(r, "name") || "—",
+          items: [contact, hubs > 0 ? `${hubs} hub${hubs === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ") || undefined,
+          metas: [
+            { label: "Terms", value: str(r, "creditTerms") || "—" },
+            { label: "Credit", value: money(num(r, "creditLimitSen")) },
+            { label: "AR", value: money(num(r, "outstandingSen")) },
+          ],
+          status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
+        };
+      },
       columns: [
         textCol("code", "Reference", (r) => str(r, "code", "debtorCode")),
         textCol("name", "Customer", (r) => str(r, "name")),
@@ -2548,12 +2569,17 @@ export const suppliersConfig: ModuleConfig = {
     {
       url: "/api/suppliers",
       select: selectData,
+      // dc13 (line ~1856): code · supplier · "contact · category" · [Terms · Lead · MTD]
       toVM: (r): RowVM => ({
         id: str(r, "id", "code"),
         code: str(r, "code") || "—",
         title: str(r, "name") || "—",
-        subLine: [str(r, "phone"), str(r, "state")].filter(Boolean).join(" · ") || undefined,
-        meta1: { label: "Contact", value: str(r, "contactPerson") || "—" },
+        items: [str(r, "contactPerson", "contactName"), str(r, "category", "itemGroup")].filter(Boolean).join(" · ") || undefined,
+        metas: [
+          { label: "Terms", value: str(r, "paymentTerms") || "—" },
+          { label: "Lead", value: num(r, "leadTimeDays") > 0 ? `${num(r, "leadTimeDays")} d` : "—" },
+          { label: "MTD", value: money(num(r, "mtdSpendSen")) },
+        ],
         status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
       }),
       columns: [
@@ -2642,13 +2668,21 @@ export const productsConfig: ModuleConfig = {
     {
       url: "/api/products",
       select: selectData,
-      toVM: (r): RowVM => ({
-        id: str(r, "id", "code"),
-        code: str(r, "code") || "—",
-        title: str(r, "name") || "—",
-        subLine: [str(r, "category"), str(r, "sizeLabel")].filter(Boolean).join(" · ") || undefined,
-        meta1: { label: "Amount", value: money(num(r, "basePriceSen", "price1Sen")) },
-      }),
+      // dc13 (line ~1873): code · product · "Sofa · N variants" · [Price · Lead]
+      toVM: (r): RowVM => {
+        const cat = str(r, "category");
+        const size = str(r, "sizeLabel");
+        return {
+          id: str(r, "id", "code"),
+          code: str(r, "code") || "—",
+          title: str(r, "name") || "—",
+          items: [cat, size].filter(Boolean).join(" · ") || undefined,
+          metas: [
+            { label: "Price", value: money(num(r, "basePriceSen", "price1Sen")) },
+            { label: "Lead", value: num(r, "leadTimeDays") > 0 ? `${num(r, "leadTimeDays")} d` : "—" },
+          ],
+        };
+      },
       columns: [
         textCol("code", "Reference", (r) => str(r, "code")),
         textCol("name", "Customer", (r) => str(r, "name")),
@@ -2674,6 +2708,7 @@ const SERVICE_CASE_STATUSES = ["OPEN", "IN_PROGRESS", "CLOSED", "CANCELLED"];
 const serviceCasesSource: DataSource = {
   url: "/api/service-cases",
   select: selectData,
+  // dc13 (line ~1914): code · customer · "SO-... · CATEGORY" · [Stage · Order]
   toVM: (r): RowVM => {
     const orders = Array.isArray(r.orders) ? (r.orders as RawRow[]) : [];
     const firstOrder = orders[0];
@@ -2681,18 +2716,11 @@ const serviceCasesSource: DataSource = {
       id: str(r, "id"),
       code: str(r, "caseNo") || "—",
       title: str(r, "customerName") || "—",
-      subLine:
-        [
-          str(r, "sourceNo") || str(r, "sourceType"),
-          str(r, "rootCauseCategory"),
-        ]
-          .filter(Boolean)
-          .join(" · ") || undefined,
-      meta1: {
-        label: "Order",
-        value: firstOrder ? str(firstOrder, "serviceOrderNo") || "—" : "—",
-      },
-      meta2: { label: "Order Date", value: dateOnly(r, "createdAt") || "—" },
+      items: [str(r, "sourceNo") || str(r, "sourceType"), str(r, "rootCauseCategory")].filter(Boolean).join(" · ") || undefined,
+      metas: [
+        { label: "Stage", value: str(r, "status") || "—" },
+        { label: "Order", value: firstOrder ? str(firstOrder, "serviceOrderNo") || "—" : "—" },
+      ],
       status: resolveStatus(str(r, "status"), SERVICE_CASE_STATUS_MAP),
     };
   },
@@ -2873,15 +2901,16 @@ export const usermgmtConfig: ModuleConfig = {
     {
       url: "/api/users",
       select: selectData,
+      // dc13 (line ~1880): code · name · email · [Role · Last seen]
       toVM: (r): RowVM => ({
         id: str(r, "id"),
         code: str(r, "role") || "USER",
         title: str(r, "displayName") || str(r, "email") || "—",
-        subLine:
-          [str(r, "email"), str(r, "department")].filter(Boolean).join(" · ") ||
-          undefined,
-        meta1: { label: "Position", value: str(r, "position") || "—" },
-        meta2: { label: "Order Date", value: dateOnly(r, "lastLoginAt", "createdAt") || "—" },
+        items: str(r, "email") || undefined,
+        metas: [
+          { label: "Role", value: str(r, "role") || "—" },
+          { label: "Last seen", value: shortDate(dateOnly(r, "lastLoginAt", "createdAt")) || "—" },
+        ],
         status: resolveStatus(
           read(r, "isActive") === true ? "ACTIVE" : "INACTIVE",
           PAYMENT_STATUS_MAP,
@@ -2921,12 +2950,12 @@ const rdSource: DataSource = {
     id: str(r, "id"),
     code: str(r, "code") || "—",
     title: str(r, "name") || "—",
-    subLine:
-      [str(r, "projectType"), str(r, "leadName") || str(r, "leadId")]
-        .filter(Boolean)
-        .join(" · ") || undefined,
-    meta1: { label: "Budget", value: money(num(r, "budgetSen")) },
-    meta2: { label: "Order Date", value: dateOnly(r, "createdAt") || "—" },
+    items: [str(r, "projectType"), str(r, "leadName") || str(r, "leadId")].filter(Boolean).join(" · ") || undefined,
+    metas: [
+      { label: "Stage", value: str(r, "status") || "—" },
+      { label: "Budget", value: money(num(r, "budgetSen")) },
+      { label: "Launch", value: shortDate(dateOnly(r, "targetCompleteAt")) || "—" },
+    ],
     status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
   }),
   columns: [

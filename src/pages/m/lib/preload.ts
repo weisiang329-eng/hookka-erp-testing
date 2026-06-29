@@ -15,35 +15,53 @@
 // ============================================================================
 import { cachedFetchJson } from "@/lib/cached-fetch";
 
-// Endpoints sorted roughly by visit frequency — the most-hit ones go first
-// (they win the cache race on slow connections).
-const CRITICAL_ENDPOINTS = [
-  // Operator's main lists
-  "/api/sales-orders",
-  "/api/delivery-orders",
-  "/api/purchase-orders",
-  "/api/invoices",
-  "/api/production-orders",
-  // Reference data
-  "/api/customers",
-  "/api/suppliers",
-  "/api/products",
-  "/api/raw-materials",
-  "/api/inventory",
-  // Comms
-  "/api/announcements",
-  "/api/mail-center/threads",
-  // HR / planning
-  "/api/workers",
-  "/api/payslips",
-];
+// "This month" window for analytics endpoints (matches the dashboard's
+// default Command Center period). Computed once per page load.
+function thisMonthWindow(): { from: string; to: string } {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const from = `${yyyy}-${mm}-01`;
+  const to = `${yyyy}-${mm}-${dd}`;
+  return { from, to };
+}
+
+function buildEndpoints(): string[] {
+  const w = thisMonthWindow();
+  return [
+    // ---- Home (eager — every visit hits these) ----
+    "/api/sales-orders/stats",
+    `/api/dashboard/overview?period=${w.from.slice(0, 7)}`,
+    "/api/inventory",
+    "/api/sales-orders",
+    // ---- Module lists (operator hits within first 30s) ----
+    "/api/delivery-orders",
+    "/api/purchase-orders",
+    "/api/invoices",
+    "/api/production-orders",
+    // ---- Reference data ----
+    "/api/customers",
+    "/api/suppliers",
+    "/api/products",
+    "/api/raw-materials",
+    // ---- Comms ----
+    "/api/announcements",
+    "/api/mail-center/threads",
+    // ---- HR / employees ----
+    "/api/workers",
+    "/api/payslips",
+    `/api/working-hour-entries/summary?from=${w.from}&to=${w.to}`,
+    `/api/department-performance?from=${w.from}&to=${w.to}`,
+  ];
+}
 
 /**
  * Fire all critical fetches in parallel. Caught errors are silently swallowed
  * — preload is best-effort, never a blocker. Call once at /m shell mount.
  */
 export function preloadMobileCritical(): void {
-  for (const url of CRITICAL_ENDPOINTS) {
+  for (const url of buildEndpoints()) {
     // Don't await — let them run in parallel in the background while React
     // continues to mount the home screen.
     void cachedFetchJson(url).catch(() => {

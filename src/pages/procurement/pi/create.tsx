@@ -772,6 +772,12 @@ function CreatePurchaseInvoicePage() {
                   </th>
                   <th
                     className="text-left px-3 py-2 font-medium"
+                    style={{ minWidth: 120 }}
+                  >
+                    Internal Code
+                  </th>
+                  <th
+                    className="text-left px-3 py-2 font-medium"
                     style={{ minWidth: 140 }}
                   >
                     Supplier SKU
@@ -839,6 +845,25 @@ function CreatePurchaseInvoicePage() {
                           }
                         />
                       </td>
+                      {/* Internal Code — read-only display of materialCode, set
+                          by the Description picker. Blank until a catalog item
+                          is picked (raw OCR / hand-typed lines have no code). */}
+                      <td className="px-2 py-1.5">
+                        <span
+                          className={
+                            line.materialCode
+                              ? "inline-flex items-center px-2 py-1 rounded text-xs font-mono bg-[#F0ECE9] text-[#1F1D1B]"
+                              : "text-xs text-[#9CA3AF] italic"
+                          }
+                          title={
+                            line.materialCode
+                              ? "Bound to catalog item"
+                              : "Pick from Description to bind"
+                          }
+                        >
+                          {line.materialCode || "—"}
+                        </span>
+                      </td>
                       {/* Supplier SKU */}
                       <td className="px-2 py-1.5">
                         <Input
@@ -898,7 +923,7 @@ function CreatePurchaseInvoicePage() {
               <tfoot className="bg-[#FAF9F7] border-t border-[#E2DDD8]">
                 <tr>
                   <td
-                    colSpan={4}
+                    colSpan={5}
                     className="px-3 py-2 text-right text-sm font-medium text-[#6B7280]"
                   >
                     TOTAL

@@ -2112,6 +2112,52 @@ const empPerfSource: DataSource = {
   subTabs: [{ key: "emp-perf", label: "Emp Perf", match: () => true }],
 };
 
+// Labor vs Revenue sub-tab (CHANGELOG #7 K.5) — production revenue
+// recognized at UPHOLSTERY completion, per completed PO. Backend
+// /api/working-hour-entries/production-revenue returns
+// { SOFA, BEDFRAME, ACCESSORY, totalSen, rows[], byDeptCategory }.
+const laborRevenueSource: DataSource = {
+  url: (() => {
+    const w = thisMonthWindow();
+    return `/api/working-hour-entries/production-revenue?from=${w.from}&to=${w.to}`;
+  })(),
+  select: (resp) => {
+    if (!resp || typeof resp !== "object") return [];
+    const o = resp as { data?: { rows?: unknown[] } };
+    return Array.isArray(o.data?.rows) ? (o.data.rows as RawRow[]) : [];
+  },
+  toVM: (r): RowVM => ({
+    id: `${str(r, "date")}-${str(r, "productCode")}-${str(r, "soNo")}`,
+    code: str(r, "soNo") || "—",
+    title: str(r, "customerName") || "—",
+    items: [str(r, "productName") || str(r, "productCode"), `×${num(r, "qty")}`].filter(Boolean).join(" "),
+    metas: [
+      { label: "Category", value: str(r, "category") || "—" },
+      { label: "Revenue", value: money(num(r, "totalPriceSen")) },
+      { label: "When", value: shortDate(dateOnly(r, "date")) || "—" },
+    ],
+    status: resolveStatus(str(r, "category"), {
+      SOFA: PAYMENT_STATUS_MAP.SUBMITTED,
+      BEDFRAME: PAYMENT_STATUS_MAP.PARTIAL,
+      ACCESSORY: PAYMENT_STATUS_MAP.ACTIVE,
+    }),
+  }),
+  columns: [
+    textCol("soNo", "Reference", (r) => str(r, "soNo")),
+    textCol("customer", "Customer", (r) => str(r, "customerName")),
+    textCol("category", "State", (r) => str(r, "category")),
+    numCol("revenue", "Amount", (r) => num(r, "totalPriceSen")),
+    dateCol("date", "Order Date", (r) => dateOnly(r, "date")),
+  ],
+  defaultSort: { key: "date", dir: "desc" },
+  subTabs: [
+    { key: "labrev", label: "Labor vs Revenue", match: () => true },
+    { key: "labrev-sofa", label: "Sofa", match: (r) => str(r, "category") === "SOFA" },
+    { key: "labrev-bed", label: "Bedframe", match: (r) => str(r, "category") === "BEDFRAME" },
+    { key: "labrev-acc", label: "Accessory", match: (r) => str(r, "category") === "ACCESSORY" },
+  ],
+};
+
 // Department Performance sub-tab — /api/department-performance returns
 // per-department utilization + output aggregates for the date range.
 // dc13 v13 sync.

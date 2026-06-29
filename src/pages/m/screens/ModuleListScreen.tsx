@@ -425,8 +425,9 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
                 <DocCard
                   code={vm.code}
                   title={vm.title}
+                  items={vm.items}
                   subLine={vm.subLine}
-                  meta={[vm.meta1, vm.meta2]}
+                  meta={vm.metas ?? [vm.meta1, vm.meta2]}
                   pill={
                     vm.status ? (
                       <StatusPill

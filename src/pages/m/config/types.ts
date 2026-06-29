@@ -31,10 +31,18 @@ export type RowVM = {
   code: string;
   /** Primary title (e.g. customer name). */
   title: string;
-  /** Optional secondary line. */
+  /** dc13 "items line" — what the doc is FOR (e.g. "Aspen 3-Seater ×12,
+   * Hudson HB ×8" on a sales order, "Pine 2×2 ×400, MDF ×120" on a PO).
+   * Takes the slot below the title; hides subLine when both are set. */
+  items?: string;
+  /** Optional secondary line (back-compat — modules with no items concept). */
   subLine?: string;
-  /** Up to two right-aligned meta columns. */
+  /** dc13 footer metas — 2 to 4, wrap in a 3-col grid. Prefer this over
+   * meta1/meta2 (which remain for back-compat with existing modules). */
+  metas?: { label: string; value: ReactNode }[];
+  /** @deprecated — use `metas` (a 2- to 4-array). Kept for back-compat. */
   meta1?: { label: string; value: ReactNode };
+  /** @deprecated — use `metas` (a 2- to 4-array). Kept for back-compat. */
   meta2?: { label: string; value: ReactNode };
   /** Resolved status pill (style + raw label), or undefined for no pill. */
   status?: { style: SemanticStyle; label: string };

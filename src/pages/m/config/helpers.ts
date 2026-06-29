@@ -61,6 +61,36 @@ export function money(sen: number): string {
   return formatCurrency(sen || 0);
 }
 
+/** dc13 short date — "2026-07-02" → "02 Jul" (used in card meta chips). */
+export function shortDate(iso: string | undefined | null): string {
+  if (!iso) return "";
+  const s = String(iso).slice(0, 10);
+  const [y, m, d] = s.split("-");
+  if (!y || !m || !d) return s;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const idx = Math.max(0, Math.min(11, parseInt(m, 10) - 1));
+  return `${d} ${months[idx]}`;
+}
+
+/** dc13 items summary — "Aspen 3-Seater ×12, Hudson HB ×8" from a row's
+ * `items` array. Falls back to "" for rows without items. Truncates to a
+ * sensible length for the card so it stays single-line. */
+export function summariseItems(row: RawRow, limit = 60): string {
+  const items = row.items;
+  if (!Array.isArray(items) || items.length === 0) return "";
+  const parts: string[] = [];
+  for (const it of items as RawRow[]) {
+    const name =
+      str(it, "productName", "description", "materialName", "name") ||
+      str(it, "productCode", "materialCode", "code") || "";
+    const qty = num(it, "quantity", "qty");
+    if (name) parts.push(qty > 0 ? `${name} ×${qty}` : name);
+    if (parts.join(", ").length > limit) break;
+  }
+  const joined = parts.join(", ");
+  return joined.length > limit ? joined.slice(0, limit - 1) + "…" : joined;
+}
+
 // ---------------------------------------------------------------------------
 // Status resolution.
 // ---------------------------------------------------------------------------

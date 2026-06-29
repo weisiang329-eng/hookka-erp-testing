@@ -35,6 +35,8 @@ import {
   num,
   dateOnly,
   money,
+  shortDate,
+  summariseItems,
   resolveStatus,
   STATUS_MAPS,
   PAYMENT_STATUS_MAP,
@@ -223,16 +225,19 @@ const PROD_STATUSES = [
 const salesSource: DataSource = {
   url: "/api/sales-orders",
   select: selectData,
+  // dc13 card shape (Hookka ERP Mobile.dc.html line ~1714):
+  //   code · customer · items summary · [Cust PO · Cust SO · Hub · Exp DD]
   toVM: (r): RowVM => ({
     id: str(r, "id", "companySOId", "companySO"),
     code: str(r, "companySO", "companySOId") || "—",
     title: str(r, "customerName") || "—",
-    subLine:
-      [str(r, "customerPO", "customerPOId"), str(r, "customerState")]
-        .filter(Boolean)
-        .join(" · ") || undefined,
-    meta1: { label: "Expected DD", value: dateOnly(r, "hookkaExpectedDD") || "—" },
-    meta2: { label: "Amount", value: money(num(r, "totalSen")) },
+    items: summariseItems(r),
+    metas: [
+      { label: "Cust PO", value: str(r, "customerPO", "customerPOId") || "—" },
+      { label: "Cust SO", value: str(r, "customerSO", "customerSOId") || "—" },
+      { label: "Hub", value: str(r, "hubName", "hubShortName") || "—" },
+      { label: "Exp DD", value: shortDate(dateOnly(r, "hookkaExpectedDD")) || "—" },
+    ],
     status: resolveStatus(str(r, "status"), STATUS_MAPS.so),
   }),
   columns: [
@@ -444,16 +449,19 @@ export const salesConfig: ModuleConfig = {
 const deliveryOrdersSource: DataSource = {
   url: "/api/delivery-orders",
   select: selectData,
+  // dc13 card shape (Hookka ERP Mobile.dc.html line ~1730):
+  //   code · customer · items summary · [Cust PO · Cust SO · Hub · Exp Ship]
   toVM: (r): RowVM => ({
     id: str(r, "id", "doNo"),
     code: str(r, "doNo") || "—",
     title: str(r, "customerName") || "—",
-    subLine:
-      [str(r, "companySO", "companySOId"), str(r, "customerState")]
-        .filter(Boolean)
-        .join(" · ") || undefined,
-    meta1: { label: "Expected DD", value: dateOnly(r, "deliveryDate", "hookkaExpectedDD") || "—" },
-    meta2: { label: "Amount", value: money(num(r, "valueSen")) },
+    items: summariseItems(r),
+    metas: [
+      { label: "Cust PO", value: str(r, "customerPO", "customerPOId") || "—" },
+      { label: "Cust SO", value: str(r, "customerSO", "companySO", "companySOId") || "—" },
+      { label: "Hub", value: str(r, "hubName", "hubShortName") || "—" },
+      { label: "Exp Ship", value: shortDate(dateOnly(r, "deliveryDate", "hookkaExpectedDD")) || "—" },
+    ],
     status: resolveStatus(str(r, "status"), STATUS_MAPS.delivery),
   }),
   columns: [
@@ -559,13 +567,20 @@ export const deliveryConfig: ModuleConfig = {
 const invoicesSource: DataSource = {
   url: "/api/invoices",
   select: selectData,
+  // dc13 card shape (line ~1739):
+  //   code · customer · SO/DO ref · [Due · Balance/Amount]
   toVM: (r): RowVM => ({
     id: str(r, "id", "invoiceNo"),
     code: str(r, "invoiceNo") || "—",
     title: str(r, "customerName") || "—",
-    subLine: str(r, "doNo", "companySOId") || undefined,
-    meta1: { label: "Outstanding", value: money(num(r, "totalSen") - num(r, "paidAmount")) },
-    meta2: { label: "Amount", value: money(num(r, "totalSen")) },
+    items: str(r, "companySO", "companySOId", "doNo") || undefined,
+    metas: [
+      { label: "Due", value: shortDate(dateOnly(r, "dueDate")) || "—" },
+      {
+        label: num(r, "paidAmount") > 0 && num(r, "paidAmount") < num(r, "totalSen") ? "Balance" : "Amount",
+        value: money(num(r, "totalSen") - num(r, "paidAmount") || num(r, "totalSen")),
+      },
+    ],
     status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
   }),
   columns: [
@@ -768,13 +783,16 @@ export const invoicesConfig: ModuleConfig = {
 const poSource: DataSource = {
   url: "/api/purchase-orders",
   select: selectData,
+  // dc13 (line ~1753): code · supplier · items summary · [ETA · Amount]
   toVM: (r): RowVM => ({
     id: str(r, "id", "poNo"),
     code: str(r, "poNo") || "—",
     title: str(r, "supplierName") || "—",
-    subLine: undefined,
-    meta1: { label: "Expected DD", value: dateOnly(r, "expectedDate") || "—" },
-    meta2: { label: "Amount", value: money(num(r, "totalSen")) },
+    items: summariseItems(r),
+    metas: [
+      { label: "ETA", value: shortDate(dateOnly(r, "expectedDate")) || "—" },
+      { label: "Amount", value: money(num(r, "totalSen")) },
+    ],
     status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
   }),
   columns: [
@@ -793,14 +811,24 @@ const poSource: DataSource = {
 const grnSource: DataSource = {
   url: "/api/grn",
   select: selectData,
-  toVM: (r): RowVM => ({
-    id: str(r, "id", "grnNo"),
-    code: str(r, "grnNo") || "—",
-    title: str(r, "supplierName") || "—",
-    subLine: str(r, "poRef", "poNo") || undefined,
-    meta1: { label: "Order Date", value: dateOnly(r, "receivedDate", "createdAt") || "—" },
-    status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
-  }),
+  // dc13 (line ~1756): code · supplier · "PO-... · full/partial" · [Date · Lines]
+  toVM: (r): RowVM => {
+    const items = Array.isArray(r.items) ? (r.items as RawRow[]) : [];
+    const matched = items.filter((i) => num(i, "receivedQty") > 0).length;
+    const total = items.length;
+    const sub = str(r, "poRef", "poNo");
+    return {
+      id: str(r, "id", "grnNo"),
+      code: str(r, "grnNo") || "—",
+      title: str(r, "supplierName") || "—",
+      items: sub ? `${sub} · ${matched === total ? "full" : "partial"}` : undefined,
+      metas: [
+        { label: "Date", value: shortDate(dateOnly(r, "receivedDate", "createdAt")) || "—" },
+        { label: "Lines", value: total === matched ? `${total}` : `${matched}/${total}` },
+      ],
+      status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
+    };
+  },
   columns: [
     textCol("grnNo", "Reference", (r) => str(r, "grnNo")),
     textCol("poRef", "Customer PO", (r) => str(r, "poRef", "poNo")),
@@ -815,15 +843,25 @@ const grnSource: DataSource = {
 const piSource: DataSource = {
   url: "/api/purchase-invoices",
   select: selectData,
-  toVM: (r): RowVM => ({
-    id: str(r, "id", "piNo"),
-    code: str(r, "piNo") || "—",
-    title: str(r, "supplier", "supplierName") || "—",
-    subLine: str(r, "poRef", "poNo") || undefined,
-    meta1: { label: "Expected DD", value: dateOnly(r, "dueDate") || "—" },
-    meta2: { label: "Amount", value: money(num(r, "amountSen", "totalSen")) },
-    status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
-  }),
+  // dc13 (line ~1758): code · supplier · "GRN-... · matched" · [Due · Amount]
+  toVM: (r): RowVM => {
+    const grn = str(r, "grnRef", "grnNo");
+    const status = str(r, "status").toUpperCase();
+    const sub = grn
+      ? `${grn} · ${status === "MISMATCH" ? "mismatch" : "matched"}`
+      : str(r, "poRef", "poNo") || undefined;
+    return {
+      id: str(r, "id", "piNo"),
+      code: str(r, "piNo") || "—",
+      title: str(r, "supplier", "supplierName") || "—",
+      items: sub,
+      metas: [
+        { label: "Due", value: shortDate(dateOnly(r, "dueDate")) || "—" },
+        { label: "Amount", value: money(num(r, "amountSen", "totalSen")) },
+      ],
+      status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
+    };
+  },
   columns: [
     textCol("piNo", "Reference", (r) => str(r, "piNo")),
     textCol("poRef", "Customer PO", (r) => str(r, "poRef", "poNo")),
@@ -1050,18 +1088,24 @@ const DEPT_TABS: { key: string; label: string; code: string }[] = [
 const productionSource: DataSource = {
   url: "/api/production-orders",
   select: selectData,
-  toVM: (r): RowVM => ({
-    id: str(r, "id", "poNo"),
-    code: str(r, "poNo") || "—",
-    title: str(r, "productName", "productCode") || "—",
-    subLine:
-      [str(r, "customerName"), str(r, "currentDepartment")]
-        .filter(Boolean)
-        .join(" · ") || undefined,
-    meta1: { label: "Qty", value: num(r, "quantity") },
-    meta2: { label: "Expected DD", value: dateOnly(r, "targetEndDate") || "—" },
-    status: resolveStatus(str(r, "status"), STATUS_MAPS.production),
-  }),
+  // dc13 (line ~1765): code · product · "customer · SO-..." · [Our SO · Cust PO · Cust SO · Ref]
+  toVM: (r): RowVM => {
+    const cust = str(r, "customerName");
+    const ourSO = str(r, "companySO", "companySOId");
+    return {
+      id: str(r, "id", "poNo"),
+      code: str(r, "poNo") || "—",
+      title: str(r, "productName", "productCode") || "—",
+      items: cust || ourSO ? `${cust}${cust && ourSO ? " · " : ""}${ourSO}` : undefined,
+      metas: [
+        { label: "Our SO", value: ourSO || "—" },
+        { label: "Cust PO", value: str(r, "customerPO", "customerPOId") || "—" },
+        { label: "Cust SO", value: str(r, "customerSO", "customerSOId") || "—" },
+        { label: "Ref", value: str(r, "reference", "currentDepartment") || "—" },
+      ],
+      status: resolveStatus(str(r, "status"), STATUS_MAPS.production),
+    };
+  },
   columns: [
     textCol("poNo", "Reference", (r) => str(r, "poNo")),
     textCol("product", "Customer", (r) => str(r, "productName", "productCode")),
@@ -1148,13 +1192,16 @@ export const productionConfig: ModuleConfig = {
 const planningRows = (label: string): SubTabFactory => ({
   url: "/api/production-orders",
   select: selectData,
+  // dc13 (line ~1777): code · product · dept · [Qty · Due]
   toVM: (r): RowVM => ({
     id: str(r, "id", "poNo"),
     code: str(r, "poNo") || "—",
     title: str(r, "productName", "productCode") || "—",
-    subLine: str(r, "currentDepartment") || undefined,
-    meta1: { label: "Qty", value: num(r, "quantity") },
-    meta2: { label: "Expected DD", value: dateOnly(r, "targetEndDate") || "—" },
+    items: str(r, "currentDepartment") || str(r, "customerName") || undefined,
+    metas: [
+      { label: "Qty", value: num(r, "quantity") },
+      { label: "Due", value: shortDate(dateOnly(r, "targetEndDate")) || "—" },
+    ],
     status: resolveStatus(str(r, "status"), STATUS_MAPS.production),
   }),
   columns: [

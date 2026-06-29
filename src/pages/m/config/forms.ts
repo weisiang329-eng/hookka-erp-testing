@@ -1317,6 +1317,53 @@ export function editEmployeeSpec(doc: Record<string, unknown>, id: string): Form
 }
 
 // ===========================================================================
+// SERVICE ORDER — "Copy from Sales / Consignment Order" dialog (CHANGELOG H.2).
+// Operator types the source SO/CO number → next step pre-fills the new SV
+// from that source (mirrors desktop service-orders create modal). Sends
+// POST /api/service-orders { sourceType, sourceNo, customerId? } — backend
+// resolves source + copies lines (price reset to 0 per CHANGELOG).
+// ===========================================================================
+const SV_SOURCE_OPTS: SelectOption[] = [
+  { value: "SO", label: "Sales Order" },
+  { value: "CO", label: "Consignment Order" },
+];
+
+export function newServiceOrderSpec(): FormSpec {
+  return {
+    title: "New Service Order",
+    submitLabel: "Create",
+    fields: [
+      { name: "sourceType", label: "Source Type", kind: "select" as const, options: SV_SOURCE_OPTS, required: true, full: true },
+      { name: "sourceNo", label: "Source SO / PO / Reference", kind: "text" as const, required: true, full: true, placeholder: "e.g. SO-2606-014" },
+      { name: "mode", label: "Mode", kind: "select" as const, full: true, options: [
+        { value: "REPAIR", label: "Repair" },
+        { value: "REPLACEMENT", label: "Replacement" },
+        { value: "STOCK_SWAP", label: "Stock Swap" },
+        { value: "INSPECTION", label: "Inspection" },
+      ]},
+      { name: "notes", label: "Notes", kind: "textarea" as const, full: true },
+    ],
+    initial: { sourceType: "SO", sourceNo: "", mode: "REPAIR", notes: "" },
+    submit: async (v) => {
+      const body = {
+        sourceType: s(v.sourceType),
+        sourceNo: s(v.sourceNo).trim(),
+        mode: s(v.mode) || "REPAIR",
+        notes: s(v.notes),
+      };
+      const res = await mutateJson("/api/service-orders", "POST", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshList("/api/service-orders");
+      const id = newIdOf(res.body);
+      return {
+        ok: true,
+        navigateTo: id ? `/m/serviceorders/${encodeURIComponent(id)}` : undefined,
+      };
+    },
+  };
+}
+
+// ===========================================================================
 // SERVICE CASE — Add Affected Product. CHANGELOG #12 / G.3. Mirrors desktop
 // service-cases/detail.tsx inline editor. PUT /api/service-cases/:id with
 // affectedProducts: [...existing, {productId, code, name, qty, components}].
@@ -1473,6 +1520,8 @@ export function createSpecFor(slug: string): FormSpec | null {
       return newRdProjectSpec();
     case "usermgmt":
       return inviteUserSpec();
+    case "serviceorders":
+      return newServiceOrderSpec();
     default:
       return null;
   }

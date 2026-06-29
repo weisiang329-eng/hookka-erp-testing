@@ -2949,22 +2949,31 @@ const supplierDetail: DetailConfig = {
 
     const mats = asArr(d.materials);
     if (mats.length > 0) {
+      // CHANGELOG D.3: full price SKU table with header — supplier code +
+      // material name + supplier SKU + price + lead. dc13 desktop's
+      // /suppliers/:id "Pricing & SKUs" tab uses the same columns.
       lists.push({
-        title: `Materials supplied · ${mats.length}`,
-        rows: mats.slice(0, 50).map((m) => ({
-          id: str(m, "id"),
-          title: str(m, "materialName") || str(m, "itemCode") || "Material",
-          subLine:
-            [
-              str(m, "itemCode"),
-              num(m, "leadTimeDays") > 0 ? `${num(m, "leadTimeDays")}d lead` : "",
-            ]
-              .filter(Boolean)
-              .join(" · ") || undefined,
-          trailing:
-            num(m, "lastPriceSen") > 0 ? money(num(m, "lastPriceSen")) : undefined,
-          icon: "package" as const,
-        })),
+        title: `Price · SKU table · ${mats.length}`,
+        rows: mats.slice(0, 80).map((m) => {
+          const sku = str(m, "supplierSku");
+          const code = str(m, "itemCode", "materialCode");
+          const lead = num(m, "leadTimeDays");
+          const moq = num(m, "moq");
+          return {
+            id: str(m, "id"),
+            title: str(m, "materialName") || code || "Material",
+            subLine: [
+              code,
+              sku ? `SKU ${sku}` : "",
+              lead > 0 ? `LT ${lead}d` : "",
+              moq > 0 ? `MOQ ${moq}` : "",
+            ].filter(Boolean).join(" · ") || undefined,
+            trailing: num(m, "lastPriceSen", "unitPrice") > 0
+              ? money(num(m, "lastPriceSen", "unitPrice"))
+              : undefined,
+            icon: "package" as const,
+          };
+        }),
       });
     }
 
@@ -3370,9 +3379,10 @@ const serviceCaseDetail: DetailConfig = {
     if (s === "IN_PROGRESS") return "Close Case";
     return "Status";
   },
-  // CHANGELOG #12 — Add Affected Product inline. PUT /api/service-cases/:id
-  // appends to affectedProducts[] (which carries optional components[]).
-  // Matches desktop service-cases/detail.tsx inline editor pattern.
+  // CHANGELOG #12 + G.2: Add Affected Product inline + Spawn Service Order
+  // (matches desktop "Spawn SO" button on service-cases/detail.tsx which
+  // creates a new SV order pre-filled from this case + its affectedProducts).
+  // PUT /api/service-cases/:id appends to affectedProducts[].
   extraActions: (d, id) => [
     {
       label: "Add Part",
@@ -3380,7 +3390,21 @@ const serviceCaseDetail: DetailConfig = {
       formSpec: () => addAffectedProductSpec(d, id),
       primary: true,
     },
+    {
+      label: "Spawn SO",
+      icon: "receipt",
+      // Desktop service-cases creates a SV-prefixed sales-order seeded from
+      // the case (caseid → /api/sales-orders POST). Mobile deep-links to the
+      // existing /sales/create route with ?fromCase=<id> — desktop SO create
+      // recognises that and prefills from the case payload.
+      to: `/sales/create?fromCase=${encodeURIComponent(id)}`,
+    },
   ],
+  // CHANGELOG G.5: Issue Photos upload section. Backend /api/files accepts
+  // arbitrary resourceType (already in use for SO/DO/etc) — adding the
+  // resource binding surfaces the standard Files section on serviceCaseDetail
+  // automatically (DocumentDetailScreen handles the rest).
+  attachmentsResource: (id) => ({ type: "SERVICE_CASE", id }),
 };
 
 export const serviceCasesConfig: ModuleConfig = {

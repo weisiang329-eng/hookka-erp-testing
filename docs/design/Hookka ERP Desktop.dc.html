@@ -2071,7 +2071,11 @@ class Component extends DCLogic {
     try { window.__app = this; } catch (e) {}
   }
   setView(v) { this.setState({ view: v }); }
-  render() {
+  // DCLogic calls renderVals() (NOT render()) to get the flat object the
+  // template merges over props. Naming this `render` would silently leave
+  // every {{ placeholder }} unresolved — the page would render blank.
+  // See support.js line ~709 in this folder for the DCLogic base.
+  renderVals() {
     const v = this.state.view;
     // ---- Sidebar nav groups (mirrors src/components/layout/sidebar.tsx) ----
     const navGroups = [

@@ -385,6 +385,24 @@ async function fetchScanQueuePending(
   return json.data;
 }
 
+// Split a queue row's rawJson into N SupplierExtraction docs. Since
+// 2026-06-30 the engine emits the multi-doc envelope {docs:[...]} — one PDF
+// can carry many invoices (e.g. a supplier dumps 50 PIs into one 85-page
+// file). Falls back to wrapping a legacy single-doc shape as docs:[<that>]
+// so older in-flight queue batches uploaded before this rollout still
+// render correctly. Returns [] if rawJson is unparseable.
+function extractDocsFromRawJson(rawJson: unknown): SupplierExtraction[] {
+  if (!rawJson || typeof rawJson !== "object") return [];
+  const obj = rawJson as { docs?: unknown };
+  if (Array.isArray(obj.docs)) {
+    return obj.docs.filter(
+      (d): d is SupplierExtraction => !!d && typeof d === "object",
+    );
+  }
+  // Legacy single-doc envelope (pre-2026-06-30).
+  return [rawJson as SupplierExtraction];
+}
+
 async function postScanQueueConsume(rowId: string): Promise<void> {
   try {
     await fetch(`/api/scan-queue/${encodeURIComponent(rowId)}/consume`, {
@@ -747,10 +765,16 @@ type PreviewCard = {
   id: string;
   fileName: string;
   // Background scan-queue row that produced this card. When set, a
-  // successful Create-as-DRAFT also POSTs /api/scan-queue/:id/consume so
-  // the resume endpoint stops surfacing the row next session. Null when
-  // the card was built off the legacy sync /extract path.
+  // successful Create-as-DRAFT bookkeeps (rowId, docIdx) in a client-side
+  // consumed-pairs set; once EVERY doc that the row's rawJson contains is
+  // consumed we POST /api/scan-queue/:id/consume so the resume endpoint
+  // stops surfacing the row next session. Null when the card was built off
+  // the legacy sync /extract path.
   scanQueueRowId: string | null;
+  // 0..N-1 index within rawJson.docs[] for this card. 0 for legacy
+  // single-doc rows. A single uploaded PDF can carry N supplier docs (each
+  // with its own letterhead / invoice block) — see SUPPLIER_SYSTEM_PROMPT.
+  scanQueueDocIdx: number;
   // Sample id for the gold/confirm endpoint.
   sampleId: string | null;
   // Operator can opt in or out per card; defaults to true.
@@ -1006,6 +1030,7 @@ function CreatePIWizard({
       ex: SupplierExtraction,
       sampleId: string | null,
       scanQueueRowId: string | null = null,
+      scanQueueDocIdx: number = 0,
     ): PreviewCard => {
       // Try to match the extracted supplierName to a real supplier in the
       // catalog. Failing that, fall back to the host-supplied default.
@@ -1071,6 +1096,7 @@ function CreatePIWizard({
         id: `card-${makeUploadId()}`,
         fileName,
         scanQueueRowId,
+        scanQueueDocIdx,
         sampleId,
         include: true,
         creating: false,
@@ -1382,11 +1408,6 @@ function CreatePIWizard({
           });
           if (j.data?.id) createdIds.push(j.data.id);
           else if (j.data?.piNo) createdIds.push(j.data.piNo);
-          // Mark the queue row consumed so /api/scan-queue/pending stops
-          // resurfacing it on re-open. Best-effort — see postScanQueueConsume.
-          if (card.scanQueueRowId) {
-            void postScanQueueConsume(card.scanQueueRowId);
-          }
         } catch (err) {
           patchCard(card.id, {
             creating: false,
@@ -1395,6 +1416,30 @@ function CreatePIWizard({
         }
       }),
     );
+
+    // Consume queue rows ONLY when every card produced from that row is
+    // successfully created. A single uploaded PDF can carry N supplier docs
+    // (rowId fans out to N cards by docIdx); consuming early would prevent
+    // the resume endpoint from resurfacing the row when the operator
+    // re-opens the modal to finish the rest. Read the LATEST cards via the
+    // functional setState — the patchCard above scheduled updates that may
+    // not be visible in the outer `cards` snapshot yet.
+    setCards((latest) => {
+      const byRow = new Map<string, { total: number; created: number }>();
+      for (const c of latest) {
+        if (!c.scanQueueRowId) continue;
+        const slot = byRow.get(c.scanQueueRowId) ?? { total: 0, created: 0 };
+        slot.total += 1;
+        if (c.createdPiNo) slot.created += 1;
+        byRow.set(c.scanQueueRowId, slot);
+      }
+      for (const [rowId, { total, created }] of byRow) {
+        if (total > 0 && created === total) {
+          void postScanQueueConsume(rowId);
+        }
+      }
+      return latest;
+    });
 
     setStep("done");
     if (createdIds.length > 0) onCreated(createdIds);
@@ -1460,26 +1505,28 @@ function CreatePIWizard({
       );
       if (ready.length === 0) return;
       setCards((prev) => {
-        const have = new Set(
-          prev.map((c) => c.scanQueueRowId).filter((x): x is string => !!x),
-        );
+        // De-dupe across (rowId, docIdx) so a row processed across multiple
+        // poll ticks doesn't re-emit its cards. The queue row itself can
+        // produce N cards now (one per supplier doc inside the PDF).
+        const have = new Set<string>();
+        for (const c of prev) {
+          if (c.scanQueueRowId) {
+            have.add(`${c.scanQueueRowId}#${c.scanQueueDocIdx}`);
+          }
+        }
         const additions: PreviewCard[] = [];
         for (const it of ready) {
-          if (have.has(it.id)) continue;
-          // Each row's rawJson is a SupplierExtraction (the engine returns
-          // it verbatim for kind=supplier). Defensive parse so a malformed
-          // row doesn't tear down the whole modal.
-          let ex: SupplierExtraction | null = null;
-          try {
-            ex = it.rawJson as SupplierExtraction;
-          } catch {
-            ex = null;
-          }
-          if (!ex) continue;
-          // sampleId is null for queue-built cards — the engine writes a
-          // file-level sample on its own and the id isn't recoverable from
-          // the queue. Gold/correction confirm skipped in that case.
-          additions.push(buildCard(it.fileName, ex, null, it.id));
+          // Defensive parse — a malformed row shouldn't tear down the modal.
+          const docs = extractDocsFromRawJson(it.rawJson);
+          if (docs.length === 0) continue;
+          docs.forEach((doc, idx) => {
+            const key = `${it.id}#${idx}`;
+            if (have.has(key)) return;
+            // sampleId is null for queue-built cards — the engine writes a
+            // file-level sample on its own and the id isn't recoverable
+            // from the queue. Gold/correction confirm skipped in that case.
+            additions.push(buildCard(it.fileName, doc, null, it.id, idx));
+          });
         }
         return additions.length > 0 ? [...prev, ...additions] : prev;
       });
@@ -2516,8 +2563,11 @@ type GRNPreviewCard = {
   id: string;
   fileName: string;
   // Queue row id when this card was built off a background scan-queue row.
-  // Null for sync /extract path. Drives the post-create `/consume` POST.
+  // Null for sync /extract path. Drives the post-create `/consume` POST,
+  // which fires only when every card for this row has been saved.
   scanQueueRowId: string | null;
+  // 0..N-1 within rawJson.docs[]. A PDF can carry N supplier docs.
+  scanQueueDocIdx: number;
   sampleId: string | null;
   include: boolean;
   creating: boolean;
@@ -2722,6 +2772,7 @@ function CreateGRNWizard({
       ex: SupplierExtraction,
       sampleId: string | null,
       scanQueueRowId: string | null = null,
+      scanQueueDocIdx: number = 0,
     ): GRNPreviewCard => {
       const guessName = (ex.supplierName ?? "").trim().toUpperCase();
       const matched = guessName
@@ -2768,6 +2819,7 @@ function CreateGRNWizard({
         id: `card-${makeUploadId()}`,
         fileName,
         scanQueueRowId,
+        scanQueueDocIdx,
         sampleId,
         include: true,
         creating: false,
@@ -3066,9 +3118,6 @@ function CreateGRNWizard({
           });
           if (j.data?.id) createdIds.push(j.data.id);
           else if (grnNo !== "(created)") createdIds.push(grnNo);
-          if (card.scanQueueRowId) {
-            void postScanQueueConsume(card.scanQueueRowId);
-          }
         } catch (err) {
           patchCard(card.id, {
             creating: false,
@@ -3077,6 +3126,26 @@ function CreateGRNWizard({
         }
       }),
     );
+
+    // Consume queue rows ONLY when every card from that row was saved (a row
+    // can fan out to N cards via rawJson.docs[]). Mirrors CreatePIWizard —
+    // see comments there.
+    setCards((latest) => {
+      const byRow = new Map<string, { total: number; created: number }>();
+      for (const c of latest) {
+        if (!c.scanQueueRowId) continue;
+        const slot = byRow.get(c.scanQueueRowId) ?? { total: 0, created: 0 };
+        slot.total += 1;
+        if (c.createdGrnNo) slot.created += 1;
+        byRow.set(c.scanQueueRowId, slot);
+      }
+      for (const [rowId, { total, created }] of byRow) {
+        if (total > 0 && created === total) {
+          void postScanQueueConsume(rowId);
+        }
+      }
+      return latest;
+    });
 
     setStep("done");
     if (createdIds.length > 0) onCreated(createdIds);
@@ -3130,20 +3199,23 @@ function CreateGRNWizard({
       );
       if (ready.length === 0) return;
       setCards((prev) => {
-        const have = new Set(
-          prev.map((c) => c.scanQueueRowId).filter((x): x is string => !!x),
-        );
+        // De-dupe across (rowId, docIdx) — a single uploaded PDF can yield
+        // N supplier docs, each as its own card.
+        const have = new Set<string>();
+        for (const c of prev) {
+          if (c.scanQueueRowId) {
+            have.add(`${c.scanQueueRowId}#${c.scanQueueDocIdx}`);
+          }
+        }
         const additions: GRNPreviewCard[] = [];
         for (const it of ready) {
-          if (have.has(it.id)) continue;
-          let ex: SupplierExtraction | null = null;
-          try {
-            ex = it.rawJson as SupplierExtraction;
-          } catch {
-            ex = null;
-          }
-          if (!ex) continue;
-          additions.push(buildCard(it.fileName, ex, null, it.id));
+          const docs = extractDocsFromRawJson(it.rawJson);
+          if (docs.length === 0) continue;
+          docs.forEach((doc, idx) => {
+            const key = `${it.id}#${idx}`;
+            if (have.has(key)) return;
+            additions.push(buildCard(it.fileName, doc, null, it.id, idx));
+          });
         }
         return additions.length > 0 ? [...prev, ...additions] : prev;
       });

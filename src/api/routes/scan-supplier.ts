@@ -103,7 +103,21 @@ app.post("/extract", async (c) => {
       502,
     );
   }
-  return c.json({ success: true, data: result.data, sampleId: result.sampleId });
+  // Backward-compat unwrap for the legacy sync ApplyModeModal caller, which
+  // pre-2026-06-30 expected a single-doc SupplierExtraction at data.*. The
+  // engine now ALWAYS returns the multi-doc {docs:[...]} envelope; if a PDF
+  // happens to contain N docs on this sync path, return the first one and
+  // surface a hint so the operator knows the rest were dropped. The multi-doc
+  // wizards (CreatePIWizard / CreateGRNWizard) consume the queue endpoints
+  // instead and get the full docs[] array.
+  const env = result.data as { docs?: unknown[] };
+  const docs = Array.isArray(env.docs) ? env.docs : [];
+  const first = (docs[0] ?? {}) as Record<string, unknown>;
+  const data =
+    docs.length > 1
+      ? { ...first, _extraDocsDropped: docs.length - 1 }
+      : first;
+  return c.json({ success: true, data, sampleId: result.sampleId });
 });
 
 // ---------------------------------------------------------------------------

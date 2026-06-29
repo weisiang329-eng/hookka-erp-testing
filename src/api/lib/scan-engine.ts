@@ -117,7 +117,9 @@ type SupplierExtractedLine = {
   unitPrice?: number | null;
   amount?: number | null;
 };
-type SupplierExtractionResult = {
+// One supplier-side document (DO or invoice). A single uploaded PDF can carry
+// many of these — see the multi-doc rule in SUPPLIER_SYSTEM_PROMPT.
+export type SupplierDoc = {
   supplierName?: string | null;
   docType?: string | null;
   docNo?: string | null;
@@ -129,10 +131,17 @@ type SupplierExtractionResult = {
   tax?: number | null;
   total?: number | null;
 };
+// Engine-level supplier return. ALWAYS multi-doc since 2026-06-30 — a PDF can
+// contain N supplier docs (each with its own letterhead / docNo). Legacy
+// single-doc shapes from Claude or older few-shot samples are wrapped into
+// docs:[<single>] by sanitizeSupplierExtraction.
+type SupplierExtractionResult = {
+  docs: SupplierDoc[];
+};
 
-export function sanitizeSupplierExtraction(
-  raw: SupplierExtractionResult & { items?: SupplierExtractedLine[] },
-): SupplierExtractionResult {
+export function sanitizeSupplierDoc(
+  raw: SupplierDoc & { items?: SupplierExtractedLine[] },
+): SupplierDoc {
   const rawLines = Array.isArray(raw.lines)
     ? raw.lines
     : Array.isArray(raw.items)
@@ -162,18 +171,47 @@ export function sanitizeSupplierExtraction(
   };
 }
 
-export const SUPPLIER_SYSTEM_PROMPT = `You are an OCR extraction engine for a furniture manufacturer (Hookka) in Malaysia. You read a SUPPLIER's document — a delivery order / delivery note (DO) or a tax invoice — and return the line items so the operator can build a Goods Received Note or a Purchase Invoice.
+// Backward-compat: Claude (or an older few-shot sample) might still return the
+// pre-2026-06-30 single-doc shape with top-level supplierName/lines/etc. and
+// no docs[] array. Wrap that as docs:[<single>] so the rest of the engine and
+// the FE always sees the multi-doc envelope.
+export function sanitizeSupplierExtraction(
+  raw: unknown,
+): SupplierExtractionResult {
+  if (raw && typeof raw === "object") {
+    const obj = raw as { docs?: unknown };
+    if (Array.isArray(obj.docs)) {
+      return {
+        docs: obj.docs.map((d) =>
+          sanitizeSupplierDoc((d ?? {}) as SupplierDoc & { items?: SupplierExtractedLine[] }),
+        ),
+      };
+    }
+  }
+  // Legacy single-doc envelope.
+  return {
+    docs: [
+      sanitizeSupplierDoc(
+        (raw ?? {}) as SupplierDoc & { items?: SupplierExtractedLine[] },
+      ),
+    ],
+  };
+}
+
+export const SUPPLIER_SYSTEM_PROMPT = `You are an OCR extraction engine for a furniture manufacturer (Hookka) in Malaysia. You read SUPPLIER documents — delivery orders / delivery notes (DO) or tax invoices — and return the line items so the operator can build a Goods Received Note or a Purchase Invoice.
+
+PDFs frequently contain MULTIPLE separate supplier documents stitched together (one supplier may bundle 50 invoices into a single 85-page PDF, or a single document may span several pages). Each separate document has its OWN supplier letterhead at the top, its OWN docNo, its OWN invoice/delivery block, and its OWN footer totals. Return ONE entry in docs[] per distinct document. If the whole PDF is just one document, return docs[] with a single entry.
 
 You will be given the document (PDF or photo). Extract EXACTLY what is printed. Do not invent, do not "correct" the supplier's figures, do not compute totals the document doesn't show.
 
-EXTRACTION RULES
+PER-DOCUMENT EXTRACTION RULES
 - supplierName: the supplier's company name from the letterhead (the SENDER / seller — NOT "Hookka", who is the buyer/recipient).
 - docType: "DELIVERY_NOTE" if it is a delivery order/note (no prices, or "D/O"), "INVOICE" if it is a tax invoice (has prices + invoice no.), else "OTHER".
 - docNo: the supplier's own document number (their DO no. or invoice no.), verbatim incl. any prefix.
 - docDate: ISO YYYY-MM-DD. Convert DD/MM/YYYY (Malaysian convention) correctly — 03/06/2026 is 2026-06-03.
 - customerPoRef: the BUYER-side purchase order reference the supplier wrote on their doc. Look for labels like "Customer P.O.", "Cust P.O.", "P.O. No", "B.O. NO.", "Buyer Order", "Cust DO No.", "Customer Order". Return the value verbatim (e.g. "2606-007", "PO-000123", "K20061904"). null if not printed. This lets the buyer auto-link the scanned doc to an existing purchase order.
 - currency: ISO code, default "MYR" if a Malaysian RM document doesn't say otherwise.
-- lines[]: one object per goods line. Skip non-goods rows (subtotal, SST, rounding, freight-as-note, "Thank you" lines).
+- lines[]: one object per goods line on THIS document only — do NOT pool lines across documents. Skip non-goods rows (subtotal, SST, rounding, freight-as-note, "Thank you" lines).
     - supplierCode: the supplier's item / material code if printed (the code in their own catalogue), else null.
     - description: the item description text, trimmed, single line.
     - qty: numeric quantity delivered/billed. Strip thousands separators.
@@ -185,7 +223,7 @@ EXTRACTION RULES
 NUMBERS: plain numbers, no currency symbol, no commas. Use a dot decimal. If a field is genuinely absent, use null — never guess.
 
 OUTPUT: VALID JSON ONLY, this exact shape, no preamble, no markdown, no chain-of-thought. First character '{', last character '}':
-{"supplierName": string|null, "docType": "DELIVERY_NOTE"|"INVOICE"|"OTHER", "docNo": string|null, "docDate": string|null, "currency": string|null, "customerPoRef": string|null, "lines": [{"supplierCode": string|null, "description": string|null, "qty": number|null, "uom": string|null, "unitPrice": number|null, "amount": number|null}], "subtotal": number|null, "tax": number|null, "total": number|null}`;
+{"docs": [{"supplierName": string|null, "docType": "DELIVERY_NOTE"|"INVOICE"|"OTHER", "docNo": string|null, "docDate": string|null, "currency": string|null, "customerPoRef": string|null, "lines": [{"supplierCode": string|null, "description": string|null, "qty": number|null, "uom": string|null, "unitPrice": number|null, "amount": number|null}], "subtotal": number|null, "tax": number|null, "total": number|null}]}`;
 
 function formatSupplierRules(
   supplierName: string | null,
@@ -869,10 +907,10 @@ async function runSupplierExtract(
           parsedResp.content?.find((b) => b.type === "text")?.text ?? "";
         claudeText = stripJsonFences(firstText);
         try {
-          const raw = JSON.parse(claudeText) as SupplierExtractionResult & {
-            items?: SupplierExtractedLine[];
-          };
-          parsed = sanitizeSupplierExtraction(raw);
+          // sanitizeSupplierExtraction tolerates BOTH the new {docs:[...]}
+          // envelope and the legacy single-doc shape (for older few-shot
+          // samples or stale prompts).
+          parsed = sanitizeSupplierExtraction(JSON.parse(claudeText));
         } catch (e) {
           errorMsg = `Claude returned invalid JSON: ${(e as Error).message}. Raw: ${claudeText.slice(0, 300)}`;
         }
@@ -883,11 +921,16 @@ async function runSupplierExtract(
   }
 
   // Sample row — fed back into distillSupplierRules for the learning loop.
+  // Multi-doc shape since 2026-06-30: rawJson stores the full {docs:[...]}
+  // envelope verbatim. The indexable docIdentifier/docType columns get the
+  // FIRST doc's values (sufficient as a hint for sample listing UIs; the
+  // distillation loop reads the JSON blob, not these columns).
   let sampleId: string | null = null;
   if (opts.recordSample) {
     sampleId = genSupplierSampleId();
     try {
       const nowIso = new Date().toISOString();
+      const firstDoc = parsed?.docs[0] ?? null;
       await db
         .prepare(
           `INSERT INTO supplier_scan_samples
@@ -899,8 +942,8 @@ async function runSupplierExtract(
           orgId,
           supplierId,
           supplierHint,
-          parsed?.docNo ?? null,
-          parsed?.docType ?? null,
+          firstDoc?.docNo ?? null,
+          firstDoc?.docType ?? null,
           parsed ? JSON.stringify(parsed) : claudeText || null,
           opts.createdBy ?? null,
           nowIso,

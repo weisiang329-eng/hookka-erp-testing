@@ -2368,25 +2368,6 @@ const employeeDetail: DetailConfig = {
         }
       },
     },
-    {
-      label: "Reset Login Password",
-      icon: "copy",
-      onClick: async () => {
-        const pwd = window.prompt("New login password (min 6 chars):");
-        if (!pwd || pwd.length < 6) return;
-        try {
-          const r = await fetch(`/api/users/${encodeURIComponent(id)}/reset-password`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ newPassword: pwd }),
-          });
-          if (r.ok) window.alert("Password reset. User sessions purged.");
-          else window.alert("Failed to reset password (user may not have a login account).");
-        } catch {
-          window.alert("Network error.");
-        }
-      },
-    },
   ],
 };
 
@@ -3382,19 +3363,10 @@ const serviceCaseDetail: DetailConfig = {
     if (s === "IN_PROGRESS") return "Close Case";
     return "Status";
   },
-  // CHANGELOG #12 + G.3-G.7: managing affected products + replacement parts
-  // (RM/WIP/FG picker + components) requires the desktop service-case edit
-  // modal which has the product/component multi-pickers + sanitization. The
-  // backend PUT /api/service-cases/:id accepts the affectedProducts array;
-  // surfacing the full picker on mobile would require building those
-  // multi-selects. For now deep-link to desktop where the flow exists.
-  extraActions: (_d, id) => [
-    {
-      label: "Manage Parts",
-      to: `/service-cases/${encodeURIComponent(id)}`,
-      icon: "package-check",
-    },
-  ],
+  // Affected products + replacement parts are edited INLINE on the desktop
+  // case detail (no standalone button). Mobile mirrors that — the parts
+  // surface as the existing "Affected products" kvSection. A future round
+  // can add an inline picker if the operator needs to edit on mobile.
 };
 
 export const serviceCasesConfig: ModuleConfig = {

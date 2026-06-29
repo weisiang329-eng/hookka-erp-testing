@@ -29,10 +29,7 @@ import { formatCurrency } from "@/lib/utils";
 import type { Supplier, RawMaterial, SupplierMaterialBinding } from "@/types";
 import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
 import { ArrowLeft, Plus, Save, Trash2, FolderInput } from "lucide-react";
-import {
-  ScanSupplierModal,
-  type SupplierExtraction,
-} from "@/components/scan-supplier-modal";
+import { ScanSupplierModal } from "@/components/scan-supplier-modal";
 import {
   ConvertToPIModal,
   type ConvertToPIResult,
@@ -332,85 +329,12 @@ function CreatePurchaseInvoicePage() {
       prev.length === 1 ? [emptyPILine()] : prev.filter((_, i) => i !== idx),
     );
 
-  // OCR apply — verbatim from PIFormDialog.applyOcr, plus auto-fill of
-  // supplierInvoiceNo / supplierDoNo / invoiceDate from the OCR header. Owner
-  // 2026-06-29: the operator was re-typing every supplier doc number after
-  // scanning — the docNo was sitting in `ex` unused. INVOICE docs → fill
-  // supplierInvoiceNo; DELIVERY_NOTE docs → fill supplierDoNo. Both flows
-  // also seed invoiceDate from ex.docDate if present.
-  const applyOcr = (ex: SupplierExtraction) => {
-    setOcrUsed(true);
-    const dt = (ex.docType ?? "").toUpperCase();
-    const docNo = (ex.docNo ?? "").trim();
-    if (docNo) {
-      if (dt === "INVOICE" && !supplierInvoiceNo.trim()) {
-        setSupplierInvoiceNo(docNo);
-      } else if (dt === "DELIVERY_NOTE" && !supplierDoNo.trim()) {
-        setSupplierDoNo(docNo);
-      } else if (!supplierInvoiceNo.trim() && !supplierDoNo.trim()) {
-        // OTHER / unknown — default to invoice no since this IS the PI page.
-        setSupplierInvoiceNo(docNo);
-      }
-    }
-    const docDate = (ex.docDate ?? "").trim();
-    if (docDate && /^\d{4}-\d{2}-\d{2}$/.test(docDate)) {
-      setInvoiceDate(docDate);
-    }
-    const norm = (s: string | null | undefined) =>
-      String(s ?? "")
-        .toUpperCase()
-        .replace(/[^A-Z0-9]/g, "");
-    setLines((prev) => {
-      const seed = prev.filter(
-        (l) =>
-          l.materialName.trim() !== "" ||
-          l.supplierSku.trim() !== "" ||
-          l.materialCode.trim() !== "" ||
-          l.qty !== 1 ||
-          l.unitPriceRM !== 0,
-      );
-      const next = seed.map((l) => ({ ...l }));
-      for (const sl of ex.lines ?? []) {
-        const qty = Number(sl.qty) || 0;
-        const priceRM =
-          sl.unitPrice == null || Number.isNaN(Number(sl.unitPrice))
-            ? null
-            : Number(sl.unitPrice);
-        const codeN = norm(sl.supplierCode);
-        const descN = norm(sl.description);
-        const hitIdx = next.findIndex((l) => {
-          const sku = norm(l.supplierSku || l.materialCode);
-          const nm = norm(l.materialName);
-          const codeHit =
-            !!codeN &&
-            !!sku &&
-            (sku === codeN || sku.includes(codeN) || codeN.includes(sku));
-          const nameHit =
-            !!descN && !!nm && (nm.includes(descN) || descN.includes(nm));
-          return codeHit || nameHit;
-        });
-        if (hitIdx >= 0) {
-          next[hitIdx] = {
-            ...next[hitIdx],
-            qty: qty > 0 ? qty : next[hitIdx].qty,
-            unitPriceRM: priceRM != null ? priceRM : next[hitIdx].unitPriceRM,
-          };
-        } else {
-          next.push({
-            materialCode: "",
-            materialName:
-              sl.description?.trim() ||
-              sl.supplierCode?.trim() ||
-              "(Scanned item - add name)",
-            supplierSku: sl.supplierCode?.trim() || "",
-            qty: qty > 0 ? qty : 1,
-            unitPriceRM: priceRM != null ? priceRM : 0,
-          });
-        }
-      }
-      return next.length > 0 ? next : [emptyPILine()];
-    });
-  };
+  // Scan modal now uses mode="create-pi" — it owns the entire OCR-to-PI flow
+  // (multi-file drag-drop, per-card editable preview, POST /api/purchase-invoices
+  // per card). The host page just opens it and refreshes on success. The old
+  // single-extract → applyOcr-into-this-form pipeline is gone: the operator
+  // creates the PIs directly from inside the modal, then optionally navigates
+  // to the list. setOcrUsed kept as a no-op to preserve the existing flag wiring.
 
   // ── Convert picker handler — pre-fills the form in place from picked lines ──
   // Sets supplier, source ids (grnId for GRN-source so the backend increments
@@ -970,23 +894,29 @@ function CreatePurchaseInvoicePage() {
         onConfirm={handleConvert}
       />
 
-      {/* Scan modal — wired to the same applyOcr handler */}
+      {/* Scan modal — 3-step wizard mode. Creates DRAFT PIs directly from
+          each extracted document; the host page just refreshes the PI list
+          and navigates on success. */}
       <ScanSupplierModal
+        mode="create-pi"
         open={scanOpen}
         onClose={() => setScanOpen(false)}
-        supplierId={supplier?.id ?? null}
-        supplierName={supplier?.name ?? null}
-        poContext={
-          validLines.length > 0
-            ? validLines
-                .map((l) =>
-                  `${l.supplierSku || ""} ${l.materialName || ""}`.trim(),
-                )
-                .filter(Boolean)
-                .join("\n")
-            : undefined
-        }
-        onApply={applyOcr}
+        suppliers={suppliers}
+        rawMaterials={allRawMaterials}
+        bindings={supplierMaterialBindings}
+        organisations={activeOrgs}
+        defaultSupplierId={supplier?.id ?? null}
+        onCreated={(ids) => {
+          if (ids.length > 0) {
+            invalidateCachePrefix("/api/purchase-invoices");
+            toast.success(
+              ids.length === 1
+                ? "Purchase invoice created"
+                : `${ids.length} purchase invoices created`,
+            );
+            navigate("/procurement/pi");
+          }
+        }}
       />
     </div>
   );

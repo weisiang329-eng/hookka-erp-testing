@@ -336,13 +336,15 @@ export default function PurchaseInvoiceDetailPage() {
         return;
       }
     }
-    // Editing an APPROVED invoice moves the books: the AP total + GL re-sync to
-    // the new amount. Confirm with the operator in plain words before saving
+    // Editing a CONFIRMED invoice moves the books: the AP total + GL re-sync to
+    // the new amount (the backend reverses the original posting and writes a
+    // delta correction). Confirm with the operator in plain words before saving
     // (DRAFT invoices haven't posted to the GL, so they save without a prompt).
-    if (pi.status === "APPROVED" && draftTotalSen !== pi.amountSen) {
+    const confirmedStatuses = new Set(["CONFIRMED", "APPROVED"]);
+    if (confirmedStatuses.has(pi.status) && draftTotalSen !== pi.amountSen) {
       const ok = await confirm({
-        title: "Save changes to an approved invoice?",
-        message: `This invoice is already approved. Saving changes the amount payable from ${formatCurrency(pi.amountSen)} to ${formatCurrency(draftTotalSen)}, and posts a matching accounting correction. Continue?`,
+        title: "Save changes to a confirmed invoice?",
+        message: `This invoice is already confirmed. Saving changes the amount payable from ${formatCurrency(pi.amountSen)} to ${formatCurrency(draftTotalSen)}, and posts a matching accounting correction. Continue?`,
         danger: false,
       });
       if (!ok) return;
@@ -646,6 +648,12 @@ export default function PurchaseInvoiceDetailPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-5">
+            {/* Amber banner: editing a CONFIRMED PI reverses GL and reposts. */}
+            {(pi.status === "CONFIRMED" || pi.status === "APPROVED") && (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                Editing a confirmed PI will reverse the old GL entry and post a new one.
+              </div>
+            )}
             {/* Header fields */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>

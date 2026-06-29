@@ -53,9 +53,17 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // Inherits PO → GRN → supplier → HOOKKA on create; never null.
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS purchase_org_code TEXT",
       "UPDATE purchase_invoices SET purchase_org_code = 'HOOKKA' WHERE purchase_org_code IS NULL",
-      // Lifecycle simplification (owner 2026-06-29): collapse PENDING_APPROVAL
-      // and APPROVED rows into CONFIRMED. Idempotent — re-running the UPDATE is
-      // a no-op once the legacy rows have been flipped.
+      // Lifecycle simplification (owner 2026-06-29): the old CHECK constraint
+      // listed PENDING_APPROVAL / APPROVED and did NOT include the new
+      // CONFIRMED — owner hit it on the backfill UPDATE. Drop and recreate
+      // with both the new vocab AND the legacy values so the transition
+      // window is safe (idempotent — re-running is fine, the IF EXISTS / re-
+      // ADD pattern doesn't double-add).
+      "ALTER TABLE purchase_invoices DROP CONSTRAINT IF EXISTS purchase_invoices_status_chk",
+      "ALTER TABLE purchase_invoices ADD CONSTRAINT purchase_invoices_status_chk " +
+        "CHECK (status IN ('DRAFT','CONFIRMED','PAID','CANCELLED','PENDING_APPROVAL','APPROVED'))",
+      // Now collapse PENDING_APPROVAL / APPROVED rows into CONFIRMED. Safe
+      // because the CHECK above accepts CONFIRMED. Idempotent.
       "UPDATE purchase_invoices SET status = 'CONFIRMED' WHERE status IN ('PENDING_APPROVAL','APPROVED')",
     ];
     for (const sql of stmts) {
@@ -492,7 +500,7 @@ async function buildGrnRestoreStatements(
 
 // ---------------------------------------------------------------------------
 // Convert-chain CEILING guard for an items-replace edit. When a PI's lines are
-// rewritten (DRAFT or APPROVED), the OLD GRN consumption is given back and the
+// rewritten (DRAFT or CONFIRMED), the OLD GRN consumption is given back and the
 // NEW lines re-consume. This verifies the NEW consumption can't push any GRN
 // line's invoiced_qty past its acceptedQty — the invoice must never claim more
 // than the GRN received.
@@ -1155,11 +1163,14 @@ app.put("/:id", async (c) => {
   // If items[] is omitted, leave existing items + amountSen logic untouched.
   let normalizedItems: ReturnType<typeof normalizeItems> | null = null;
   if (body.items !== undefined) {
-    // Line-item edits are allowed while DRAFT or APPROVED (owner ruling
-    // 2026-06-22 — "editable, with stock/ledger following the change"). PAID
-    // has a settled payment (+ realised FX) and CANCELLED has already released
-    // its GRN consumption, so both stay locked. The shared rule + message keep
-    // the frontend Save handler and this guard in lock-step.
+    // Line-item edits are allowed while DRAFT or CONFIRMED (owner ruling
+    // 2026-06-22 / re-confirmed 2026-06-29 — "editable, with stock/ledger
+    // following the change"). CONFIRMED edits flow into the GL CORRECTION
+    // block below which reverses the original PI posting and posts a new one
+    // for the delta. PAID has a settled payment (+ realised FX) and CANCELLED
+    // has already released its GRN consumption, so both stay locked. The
+    // shared rule + message keep the frontend Save handler and this guard in
+    // lock-step.
     if (!isPiEditable(existing.status)) {
       return c.json(
         { success: false, error: piEditBlockedError(existing.status) },
@@ -1530,8 +1541,8 @@ app.put("/:id", async (c) => {
     }
   }
 
-  // ---- GL CORRECTION on editing an already-APPROVED PI's amount ----
-  // An APPROVED PI already posted its purchase + AP legs at the OLD amount. The
+  // ---- GL CORRECTION on editing an already-CONFIRMED PI's amount ----
+  // A CONFIRMED PI already posted its purchase + AP legs at the OLD amount. The
   // ledger is an append-only hash chain (journal-hash.ts) — we must NOT mutate
   // those legs. Instead, when an edit changes the amount, post a CORRECTING
   // double-entry for the DELTA against a fresh sourceId so the trial balance
@@ -1539,7 +1550,8 @@ app.put("/:id", async (c) => {
   // AP); an increase posts the same direction as the original. No transition is
   // happening here — this is the amount-changed path, distinct from the
   // status-transition block above. PAID/CANCELLED never reach here (the edit is
-  // blocked by isPiEditable), so we only ever correct an APPROVED PI.
+  // blocked by isPiEditable); legacy APPROVED rows get backfilled to CONFIRMED
+  // by ensurePiMigrations() so they also flow through this path.
   if (
     normalizedItems &&
     normalizedItems.ok &&

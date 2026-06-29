@@ -567,6 +567,69 @@ test("PI APPROVED edit cannot push invoiced_qty past the GRN line's acceptedQty"
   assert.equal(Number(db.tables.grn_items.find((r) => r.id === 201).invoiced_qty), 6);
 });
 
+test("PI CONFIRMED edit reverses GL and reposts (delta correction)", async () => {
+  const db = makeDb();
+  seedApprovedPi(db);
+  // Flip the seed PI to CONFIRMED — and seed a pretend prior posting in the
+  // ledger so the read-back proves we DIDN'T mutate it. The GL CORRECTION
+  // block writes NEW rows with sourceId = `${piId}:edit-…`, not the original.
+  db.tables.purchase_invoices.find((r) => r.id === "pi-1").status = "CONFIRMED";
+  db.tables.ledger_journal_entries.push({
+    id: "lje-orig-1", sourceType: "purchase_invoice", sourceId: "pi-1",
+    legNo: 1, accountCode: "703-0010", debitSen: 60000, creditSen: 0,
+    description: "Purchase · PI PI-1", orgId: "org-test",
+  });
+  db.tables.ledger_journal_entries.push({
+    id: "lje-orig-2", sourceType: "purchase_invoice", sourceId: "pi-1",
+    legNo: 2, accountCode: "400-0000", debitSen: 0, creditSen: 60000,
+    description: "AP · PI PI-1", orgId: "org-test",
+  });
+  const beforeLedgerCount = db.tables.ledger_journal_entries.length;
+
+  const piRoot = mount(piApp, db);
+
+  // Edit the line down to qty 4 (from 6) — amount drops 60000 → 40000 (delta −20000).
+  const res = await piRoot.request("/pi-1", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      items: [
+        { materialCode: "FOAM-1", materialName: "FOAM-1 - Foam block", qty: 4, unitPriceSen: 10000, lineType: "STOCKED", grnItemId: 201 },
+      ],
+    }),
+  });
+  assert.equal(res.status, 200, await res.text());
+
+  const piRow = db.tables.purchase_invoices.find((r) => r.id === "pi-1");
+  // PI line total recomputed: 4 × 100.00 = 40000 sen.
+  assert.equal(Number(piRow.amountSen), 40000);
+  // Status stayed CONFIRMED (pure edit, no transition).
+  assert.equal(piRow.status, "CONFIRMED");
+  // Original ledger rows are NOT mutated (append-only chain).
+  const origRow = db.tables.ledger_journal_entries.find((r) => r.id === "lje-orig-1");
+  assert.equal(Number(origRow.debitSen), 60000, "original ledger leg must not be mutated");
+
+  // A correction was written: NEW rows with sourceId starting `pi-1:edit-`.
+  const corrections = db.tables.ledger_journal_entries.filter(
+    (r) => typeof r.sourceId === "string" && r.sourceId.startsWith("pi-1:edit-"),
+  );
+  assert.ok(corrections.length >= 2, `expected at least 2 correction legs, got ${corrections.length}`);
+  // Net debit minus credit across the correction legs equals the delta (−20000):
+  // a reduction credits the purchase account and debits AP.
+  const netDr = corrections.reduce((s, r) => s + Number(r.debitSen) - Number(r.creditSen), 0);
+  assert.equal(netDr, 0, "correction must balance (sum of debits = sum of credits)");
+  // The AP leg posts the delta on the DEBIT side (reversal of original credit).
+  const apLeg = corrections.find((r) => r.accountCode === "400-0000");
+  assert.ok(apLeg, "expected an AP correction leg");
+  assert.equal(Number(apLeg.debitSen), 20000);
+  assert.equal(Number(apLeg.creditSen), 0);
+  // And new rows were appended (not in place of existing).
+  assert.ok(
+    db.tables.ledger_journal_entries.length > beforeLedgerCount,
+    "correction legs must be appended, not replace existing",
+  );
+});
+
 test("PI PAID cannot be line-edited (locked)", async () => {
   const db = makeDb();
   seedApprovedPi(db);

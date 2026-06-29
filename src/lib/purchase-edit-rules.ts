@@ -18,14 +18,18 @@
 
 /**
  * PI statuses whose header + lines may be edited.
- *   • DRAFT — pre-confirm, fully editable (lifecycle simplification 2026-06-29:
- *     PENDING_APPROVAL / APPROVED were dropped; CONFIRMED replaces APPROVED
- *     and is treated as LOCKED, same as PAID).
- * CONFIRMED / PAID / CANCELLED are terminal-for-editing: CONFIRMED has posted
- * to the GL, PAID has a settled payment + realised FX, CANCELLED has already
- * released its GRN consumption.
+ *   • DRAFT — pre-confirm, fully editable.
+ *   • CONFIRMED — owner ruling 2026-06-29: editable, GL reverses-and-reposts on
+ *     save (the existing GL CORRECTION block in purchase-invoices.ts PUT
+ *     handles the delta).
+ *   • APPROVED — legacy status (pre-2026-06-29 lifecycle simplification); still
+ *     editable so rows that haven't been backfilled by ensurePiMigrations()
+ *     don't 409 on edit. Treated the same as CONFIRMED.
+ *
+ * PAID / CANCELLED stay terminal-for-editing: PAID has a settled payment +
+ * realised FX, CANCELLED has already released its GRN consumption.
  */
-export const PI_EDITABLE_STATUSES = ["DRAFT"] as const;
+export const PI_EDITABLE_STATUSES = ["DRAFT", "CONFIRMED", "APPROVED"] as const;
 
 export function isPiEditable(status: string | null | undefined): boolean {
   return PI_EDITABLE_STATUSES.includes(
@@ -39,7 +43,7 @@ export function isPiEditable(status: string | null | undefined): boolean {
  * consistent message.
  */
 export function piEditBlockedError(status: string | null | undefined): string {
-  return `Line items can only be edited while the invoice is DRAFT (current: ${String(status ?? "").toUpperCase() || "UNKNOWN"}).`;
+  return `Line items can only be edited while the invoice is DRAFT or CONFIRMED (current: ${String(status ?? "").toUpperCase() || "UNKNOWN"}).`;
 }
 
 // ── Goods Receipt Note ─────────────────────────────────────────────────────

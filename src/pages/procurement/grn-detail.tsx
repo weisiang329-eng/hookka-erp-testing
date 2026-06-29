@@ -800,6 +800,13 @@ export default function GRNDetailPage() {
             </div>
           </CardHeader>
           <CardContent>
+            {/* Amber banner when editing a POSTED GRN's accepted quantities —
+                saving moves stock + writes a cost-ledger correction. */}
+            {qtyEdit !== null && grn.status === "POSTED" && (
+              <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                Editing a posted GRN will adjust stock and write a cost-ledger correction.
+              </div>
+            )}
             {items.length === 0 ? (
               <div className="rounded-md border border-dashed border-[#E2DDD8] p-6 text-center text-sm text-[#9CA3AF]">
                 No line items on this GRN.

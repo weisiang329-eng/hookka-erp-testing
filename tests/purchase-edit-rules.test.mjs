@@ -32,11 +32,12 @@ const {
 );
 
 // ── PI editability ──────────────────────────────────────────────────────────
-test("PI is editable for DRAFT only (owner 2026-06-29 lifecycle simplification)", () => {
+test("PI is editable for DRAFT and CONFIRMED (owner 2026-06-29 ruling)", () => {
   assert.equal(isPiEditable("DRAFT"), true);
   assert.equal(isPiEditable("draft"), true); // case-insensitive
-  assert.equal(isPiEditable("CONFIRMED"), false);
-  assert.equal(isPiEditable("APPROVED"), false); // legacy status, no longer editable
+  assert.equal(isPiEditable("CONFIRMED"), true);
+  assert.equal(isPiEditable("confirmed"), true);
+  assert.equal(isPiEditable("APPROVED"), true); // legacy status, still editable as CONFIRMED
   assert.equal(isPiEditable("PENDING_APPROVAL"), false);
   assert.equal(isPiEditable("PAID"), false);
   assert.equal(isPiEditable("CANCELLED"), false);
@@ -45,7 +46,7 @@ test("PI is editable for DRAFT only (owner 2026-06-29 lifecycle simplification)"
 });
 
 test("PI blocked-edit message names the current status", () => {
-  assert.match(piEditBlockedError("PAID"), /DRAFT/);
+  assert.match(piEditBlockedError("PAID"), /DRAFT or CONFIRMED/);
   assert.match(piEditBlockedError("PAID"), /current: PAID/);
 });
 

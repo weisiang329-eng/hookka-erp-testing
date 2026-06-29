@@ -102,6 +102,7 @@ export const MORE_GROUPS: ModuleGroup[] = [
     title: "Service & Support",
     items: [
       { label: "Service Cases", icon: Wrench, path: "/m/servicecases" },
+      { label: "Service Orders", icon: Wrench, path: "/m/serviceorders" },
     ],
   },
   {

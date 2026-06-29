@@ -972,44 +972,98 @@ function Inner({
           </div>
         ) : null}
 
-        {/* Related documents — design source: section heading + card; each row
-            has a parchment icon tile + label/code. Grouped by relation. */}
+        {/* Document relationship — CHANGELOG #6. Visual flow:
+            current doc highlighted, related docs grouped + linked with
+            connectors. Mirrors desktop /src/components/ui/so-document-
+            relationship.tsx as a vertical stacked flow (suited for
+            mobile width). */}
         {relatedGroups.length ? (
           <div>
-            <SectionHeading>Related documents</SectionHeading>
-            <MobileCard
-              padded={false}
-              radius={18}
-              style={{ overflow: "hidden" }}
-            >
-              {relatedGroups.map((g, gi) => (
+            <SectionHeading>Document relationship</SectionHeading>
+            <MobileCard padded={false} radius={18} style={{ overflow: "hidden", padding: "16px 8px" }}>
+              {/* Current document — yellow-highlighted node */}
+              <div
+                style={{
+                  margin: "0 auto 10px",
+                  maxWidth: 280,
+                  textAlign: "center",
+                  padding: "10px 14px",
+                  background: "#F0EAD8",
+                  border: `2px solid ${M.taupe}`,
+                  borderRadius: 12,
+                  color: M.raisin,
+                  fontSize: 13,
+                  fontWeight: 700,
+                }}
+              >
+                {code} (this doc)
+              </div>
+              {relatedGroups.map((g) => (
                 <div key={g.group}>
-                  {relatedGroups.length > 1 ? (
-                    <div
-                      style={{
-                        padding: gi === 0 ? "12px 16px 4px" : "12px 16px 4px",
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: M.muted,
-                        textTransform: "uppercase",
-                        letterSpacing: 0.4,
-                        borderTop:
-                          gi === 0 ? "none" : `1px solid ${M.divider}`,
-                      }}
-                    >
-                      {g.group}
-                    </div>
-                  ) : null}
-                  {g.items.map((r, ri) => (
-                    <RelatedRow
-                      key={r.id}
-                      rel={r}
-                      first={gi === 0 && ri === 0 && relatedGroups.length === 1}
-                      onClick={
-                        r.href ? () => navigate(r.href as string) : undefined
-                      }
-                    />
-                  ))}
+                  {/* Vertical connector line */}
+                  <div
+                    style={{
+                      width: 2,
+                      height: 18,
+                      background: M.taupe,
+                      margin: "0 auto",
+                    }}
+                  />
+                  {/* Group label */}
+                  <div
+                    style={{
+                      textAlign: "center",
+                      fontSize: 10,
+                      fontWeight: 700,
+                      color: M.muted,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.5,
+                      marginBottom: 6,
+                    }}
+                  >
+                    {g.group}
+                  </div>
+                  {/* Stacked related-doc nodes */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "center" }}>
+                    {g.items.map((r) => (
+                      <button
+                        key={r.id}
+                        onClick={r.href ? () => navigate(r.href as string) : undefined}
+                        disabled={!r.href}
+                        style={{
+                          minWidth: 220,
+                          padding: "9px 14px",
+                          background: M.card,
+                          border: `1px solid ${M.border}`,
+                          borderRadius: 11,
+                          color: M.raisin,
+                          fontFamily: "inherit",
+                          fontSize: 12.5,
+                          fontWeight: 600,
+                          cursor: r.href ? "pointer" : "default",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          textAlign: "left",
+                          WebkitTapHighlightColor: "transparent",
+                        }}
+                      >
+                        <span style={{ color: M.taupe, fontVariantNumeric: "tabular-nums" }}>
+                          {r.code}
+                        </span>
+                        {r.subLine ? (
+                          <span style={{ color: M.muted, fontSize: 11, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {r.subLine}
+                          </span>
+                        ) : null}
+                        {r.status ? (
+                          <span style={{ fontSize: 10, fontWeight: 600, padding: "1px 7px", borderRadius: 6, background: r.status.style.bg, color: r.status.style.fg, marginLeft: "auto" }}>
+                            {r.status.label}
+                          </span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               ))}
             </MobileCard>

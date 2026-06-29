@@ -11,7 +11,6 @@ import {
   FileX,
   X,
   Trash2,
-  Download,
 } from "lucide-react";
 import type { CreditNote, Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
@@ -118,9 +117,8 @@ export default function CreditNotesPage() {
   const [items, setItems] = useState<CreditNoteItemRow[]>([newCNItem()]);
   const [creating, setCreating] = useState(false);
 
-  // Bulk "Download PDF" of the selected credit notes, merged into one file.
+  // Ticked rows for the batch actions bar (print vouchers + Excel/CSV export).
   const [selectedCreditNotes, setSelectedCreditNotes] = useState<CreditNote[]>([]);
-  const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const openCreate = () => {
     refreshInvoices();
@@ -175,48 +173,6 @@ export default function CreditNotesPage() {
       // ignore
     }
     setCreating(false);
-  };
-
-  // Bulk "Download PDF" — render every selected credit note into one merged
-  // PDF. The list rows already carry the full credit note (items + totals), so
-  // map each row to the generator's field shape (cnNo / customerName /
-  // invoiceRef / per-item qty + amount) and hand the batch to
-  // generateCombinedCreditNotePdf.
-  const downloadSelectedPdf = async () => {
-    if (selectedCreditNotes.length === 0 || downloadingPdf) return;
-    setDownloadingPdf(true);
-    try {
-      const ordered = [...selectedCreditNotes].sort((a, b) =>
-        String(a.noteNumber || "").localeCompare(String(b.noteNumber || "")),
-      );
-      const pdfItems = ordered.map((cn) => ({
-        data: {
-          cnNo: cn.noteNumber,
-          date: cn.date,
-          invoiceRef: cn.invoiceNumber,
-          customerName: cn.customerName,
-          reason: cn.reasonDetail,
-          totalSen: cn.totalAmount,
-          items: cn.items.map((it) => ({
-            description: it.description,
-            qty: it.quantity,
-            unitPriceSen: it.unitPrice,
-            amountSen: it.total,
-          })),
-        },
-      }));
-      const { generateCombinedCreditNotePdf } = await import(
-        "@/lib/generate-credit-note-pdf"
-      );
-      await generateCombinedCreditNotePdf(
-        pdfItems,
-        `CreditNotes-${pdfItems.length}.pdf`,
-      );
-    } catch {
-      /* best-effort; the button returns to idle on failure */
-    } finally {
-      setDownloadingPdf(false);
-    }
   };
 
   const columns: Column<CreditNote>[] = [
@@ -367,33 +323,6 @@ export default function CreditNotesPage() {
           <CardTitle>All Credit Notes</CardTitle>
         </CardHeader>
         <CardContent>
-          {selectedCreditNotes.length > 0 && (
-            <div className="flex items-center justify-between bg-[#F7F4F0] border border-[#E2DDD8] rounded-md px-4 py-2 mb-3">
-              <span className="text-sm text-[#4B5563]">
-                {selectedCreditNotes.length} selected
-              </span>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setSelectedCreditNotes([])}
-                >
-                  Clear
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={downloadingPdf}
-                  onClick={downloadSelectedPdf}
-                >
-                  <Download className="w-4 h-4 mr-1" />
-                  {downloadingPdf
-                    ? "Preparing…"
-                    : `Download PDF (${selectedCreditNotes.length})`}
-                </Button>
-              </div>
-            </div>
-          )}
           <BatchActionsBar
             count={selectedCreditNotes.length}
             onPrint={() => printVouchers(selectedCreditNotes.map(buildCreditNoteVoucher))}

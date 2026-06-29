@@ -5450,6 +5450,17 @@ async function computePnlWindow(
   };
 
   // --- Sales (revenue < 530), net (credit-normal so sign −1 on DR−CR) ---
+  // Revenue is posted to LINE-SPECIFIC GL accounts (BEDFRAME → 500-0000; SOFA +
+  // ACCESSORY → 500-0020 / 500-0030, per SALES_ACCT in invoices.ts), so a
+  // product-line P&L filters its SALES section by account — it must NOT pro-rate
+  // the whole-company total or the other line's revenue leaks in. Mirrors
+  // costByLineWindow's split (BEDFRAME vs everything-else → sofa): bedframe view
+  // keeps only the bedframe sales account; sofa view keeps every other revenue
+  // account. Revenue is therefore EXACT (not R-scaled); only the shared cost
+  // lines below stay apportioned by the sales ratio R.
+  const BEDFRAME_SALES_CODE = "500-0000";
+  const revOnLine = (code: string): boolean =>
+    isAll ? true : line === "bedframe" ? code === BEDFRAME_SALES_CODE : code !== BEDFRAME_SALES_CODE;
   const revLines: { code: string; name: string; amountSen: number }[] = [];
   let otherIncomeSen = 0;
   const otherIncomeLines: { code: string; name: string; amountSen: number }[] = [];
@@ -5458,12 +5469,11 @@ async function computePnlWindow(
     if (!meta) continue;
     const bucket = pnlBucketFor(code, meta.type, override);
     const amt = -v; // credit-normal (income class)
-    if (bucket === "REVENUE") revLines.push({ code, name: meta.name, amountSen: amt });
+    if (bucket === "REVENUE") { if (revOnLine(code)) revLines.push({ code, name: meta.name, amountSen: amt }); }
     else if (bucket === "OTHER_INCOME") { otherIncomeSen += amt; otherIncomeLines.push({ code, name: meta.name, amountSen: amt }); }
   }
-  const grossSalesSen = revLines.reduce((s, r) => s + r.amountSen, 0);
-  // For a line, scale sales by the line's share (sofa = sofa+accessory).
-  const netSalesSen = isAll ? grossSalesSen : Math.round(grossSalesSen * R);
+  // revLines is already filtered to the selected line, so net sales is exact.
+  const netSalesSen = revLines.reduce((s, r) => s + r.amountSen, 0);
 
   // --- Raw materials (per group, opening+purchase−closing = consumed) ---
   // From the FIFO engine (loadMaterialCost). The engine guarantees
@@ -5529,7 +5539,7 @@ async function computePnlWindow(
 
   return {
     netSalesSen,
-    revLines: isAll ? revLines : revLines.map((r) => ({ ...r, amountSen: Math.round(r.amountSen * R) })),
+    revLines, // already filtered to the selected line; exact (not R-scaled)
     rmGroups,
     rmConsumedSen,
     carriageSen,

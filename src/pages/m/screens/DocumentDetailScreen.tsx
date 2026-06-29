@@ -706,7 +706,11 @@ function Inner({
                   <button
                     key={a.label}
                     onClick={() => {
-                      if (a.onClick) {
+                      if (a.formSpec) {
+                        // Open the FormSheet with the returned spec — used for
+                        // Log Hours and other mobile-side create/edit flows.
+                        setFormSpec(a.formSpec());
+                      } else if (a.onClick) {
                         // Pass navigate so onClick can route after its async work
                         void a.onClick(navigate);
                       } else if (a.to) {

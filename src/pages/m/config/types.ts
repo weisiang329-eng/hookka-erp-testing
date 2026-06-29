@@ -231,13 +231,15 @@ export type DarkStat = {
  */
 export type DetailAction = {
   label: string;
-  /** Router-internal navigation target. Set ONE of `to` or `onClick`. */
+  /** Router-internal navigation target. Set ONE of `to` / `onClick` / `formSpec`. */
   to?: string;
   /** Custom onClick — overrides `to`. Use for actions that need to write
-   * localStorage / fetch / await before navigating (e.g. Copy SO clones
-   * the doc into a localStorage payload, then deep-links to desktop
-   * /sales/create?clone=1). */
+   * localStorage / fetch / await before navigating. */
   onClick?: (navigate: (to: string) => void) => void | Promise<void>;
+  /** Opens a FormSheet with the returned spec when clicked. Used for
+   * mobile-side mutations that don't fit a status PUT (e.g. Log Hours,
+   * Set Affected Products). The form's submit handler runs the API call. */
+  formSpec?: () => import("./form-types").FormSpec;
   /** lucide icon name for the leading glyph. */
   icon?: "package-check" | "receipt" | "file-text" | "copy";
   primary?: boolean;

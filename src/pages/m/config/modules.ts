@@ -22,6 +22,7 @@ import {
   type RowVM,
 } from "./types";
 import { PendingLeaveRequests } from "../components/PendingLeaveRequests";
+import { logHoursSpec } from "./forms";
 import {
   type DetailConfig,
   type FlowStep,
@@ -2292,9 +2293,16 @@ const employeeDetail: DetailConfig = {
     }
     return out;
   },
-  // CHANGELOG K.7: Employee Master form (mobile Edit unlocked by
-  // editEmployeeSpec in forms.ts) + admin actions for PIN + login pwd.
+  // CHANGELOG K.7 + K.1: Employee Master + admin actions + Log Hours.
+  // Log Hours opens an inline form (logHoursSpec) that POSTs to
+  // /api/working-hour-entries — auto-creates the attendance row.
   extraActions: (_d, id) => [
+    {
+      label: "Log Hours",
+      icon: "file-text",
+      formSpec: () => logHoursSpec(id),
+      primary: true,
+    },
     {
       label: "Set Scan PIN",
       icon: "package-check",

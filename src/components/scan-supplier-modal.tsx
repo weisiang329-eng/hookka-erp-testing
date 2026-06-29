@@ -1842,62 +1842,42 @@ function PICard({
                 return (
                 <React.Fragment key={i}>
                 <tr className="border-t border-[#EFEAE6] align-top">
-                  {/* Internal Code — badge if bound, strict picker if not */}
+                  {/* Internal Code — always a strict picker, even after binding.
+                      Owner ruling 2026-06-29 evening: bound rows must stay
+                      switchable from the dropdown (no badge-then-X-then-pick
+                      detour). Picking re-binds; cross-resolves Supplier SKU
+                      via the same supplier's binding catalogue. */}
                   <td className="px-2 py-1">
-                    {line.materialCode ? (
-                      <span
-                        className="inline-flex items-center px-2 py-1 rounded text-xs font-mono bg-[#F0ECE9] text-[#1F1D1B]"
-                        title="Bound to catalog item"
-                      >
-                        {line.materialCode}
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onPatchLine(i, { materialCode: "", materialName: line.description || line.materialName })
-                          }
-                          disabled={!!card.createdPiNo}
-                          className="ml-1 text-[#9CA3AF] hover:text-[#9A3A2D]"
-                          title="Unbind"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </span>
-                    ) : (
-                      <MaterialPicker
-                        className="h-8"
-                        inputClassName="h-8 text-xs"
-                        // Unbound row: empty input so the dropdown shows the
-                        // FULL catalog on click (mirrors SO picker behaviour).
-                        // The OCR's description still shows in the next column
-                        // as the hint of what the operator is mapping.
-                        placeholder={line.description?.slice(0, 40) || "(pick from catalog)"}
-                        value=""
-                        options={materialOptions}
-                        strictPick
-                        onPick={(o) => {
-                          const reverse = card.supplierId
-                            ? resolveBindingForMaterial(card.supplierId, o.itemCode)
-                            : null;
-                          onPatchLine(i, {
-                            materialCode: o.itemCode,
-                            materialName: o.description,
-                            supplierSku: reverse?.supplierSku ?? line.supplierSku,
-                          });
-                        }}
-                        onTyped={() => {}}
-                      />
-                    )}
+                    <MaterialPicker
+                      className="h-8"
+                      inputClassName="h-8 text-xs"
+                      placeholder={line.description?.slice(0, 40) || "(pick from catalog)"}
+                      value={line.materialCode ? `${line.materialCode} · ${line.materialName}` : ""}
+                      options={materialOptions}
+                      strictPick
+                      onPick={(o) => {
+                        const reverse = card.supplierId
+                          ? resolveBindingForMaterial(card.supplierId, o.itemCode)
+                          : null;
+                        onPatchLine(i, {
+                          materialCode: o.itemCode,
+                          materialName: o.description,
+                          supplierSku: reverse?.supplierSku ?? line.supplierSku,
+                        });
+                      }}
+                      onTyped={() => {}}
+                    />
                   </td>
-                  {/* Supplier SKU — strict picker from this supplier's bindings.
-                      Picking auto-fills Internal Code + name via binding lookup.
-                      Empty input when no value set so the dropdown shows the
-                      supplier's full binding list on click. */}
+                  {/* Supplier SKU — same model as Internal Code: always a
+                      strict picker, bound or not, so the operator can change
+                      the supplier SKU directly and have the Internal Code
+                      auto-cross-resolve via the supplier's binding catalogue. */}
                   <td className="px-1 py-1">
                     <MaterialPicker
                       className="h-8"
                       inputClassName="h-8 text-xs"
                       placeholder="SKU"
-                      value={line.supplierSku && line.materialCode ? line.supplierSku : ""}
+                      value={line.supplierSku || ""}
                       options={supplierSkuOptions}
                       strictPick
                       onPick={(o) => {
@@ -3116,53 +3096,35 @@ function GRNCard({
                 return (
                 <React.Fragment key={i}>
                 <tr className="border-t border-[#EFEAE6] align-top">
+                  {/* Internal Code — always strict picker, even after binding.
+                      Owner ruling 2026-06-29 evening. */}
                   <td className="px-2 py-1">
-                    {line.materialCode ? (
-                      <span
-                        className="inline-flex items-center px-2 py-1 rounded text-xs font-mono bg-[#F0ECE9] text-[#1F1D1B]"
-                        title="Bound to catalog item"
-                      >
-                        {line.materialCode}
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onPatchLine(i, { materialCode: "", materialName: line.description || line.materialName })
-                          }
-                          disabled={!!card.createdGrnNo}
-                          className="ml-1 text-[#9CA3AF] hover:text-[#9A3A2D]"
-                          title="Unbind"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </span>
-                    ) : (
-                      <MaterialPicker
-                        className="h-8"
-                        inputClassName="h-8 text-xs"
-                        placeholder={line.description?.slice(0, 40) || "(pick from catalog)"}
-                        value=""
-                        options={materialOptions}
-                        strictPick
-                        onPick={(o) => {
-                          const reverse = card.supplierId
-                            ? resolveBindingForMaterial(card.supplierId, o.itemCode)
-                            : null;
-                          onPatchLine(i, {
-                            materialCode: o.itemCode,
-                            materialName: o.description,
-                            supplierSku: reverse?.supplierSku ?? line.supplierSku,
-                          });
-                        }}
-                        onTyped={() => {}}
-                      />
-                    )}
+                    <MaterialPicker
+                      className="h-8"
+                      inputClassName="h-8 text-xs"
+                      placeholder={line.description?.slice(0, 40) || "(pick from catalog)"}
+                      value={line.materialCode ? `${line.materialCode} · ${line.materialName}` : ""}
+                      options={materialOptions}
+                      strictPick
+                      onPick={(o) => {
+                        const reverse = card.supplierId
+                          ? resolveBindingForMaterial(card.supplierId, o.itemCode)
+                          : null;
+                        onPatchLine(i, {
+                          materialCode: o.itemCode,
+                          materialName: o.description,
+                          supplierSku: reverse?.supplierSku ?? line.supplierSku,
+                        });
+                      }}
+                      onTyped={() => {}}
+                    />
                   </td>
                   <td className="px-1 py-1">
                     <MaterialPicker
                       className="h-8"
                       inputClassName="h-8 text-xs"
                       placeholder="SKU"
-                      value={line.supplierSku && line.materialCode ? line.supplierSku : ""}
+                      value={line.supplierSku || ""}
                       options={supplierSkuOptions}
                       strictPick
                       onPick={(o) => {

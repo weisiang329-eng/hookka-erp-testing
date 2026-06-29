@@ -3265,6 +3265,113 @@ export const usermgmtConfig: ModuleConfig = {
 };
 
 // ---------------------------------------------------------------------------
+// SERVICE ORDERS — CHANGELOG: separate module (NOT just a sub-tab under
+// Service Cases). List columns: Company SO / Customer SO / Customer PO /
+// Customer / State / Reference / date / Items / Qty / Total. Wires to
+// existing /api/service-orders backend (no new endpoint needed).
+// ---------------------------------------------------------------------------
+const SV_STATUSES = ["DRAFT", "IN_PROGRESS", "COMPLETED", "CLOSED", "CANCELLED"];
+const serviceOrdersSource: DataSource = {
+  url: "/api/service-orders",
+  select: selectData,
+  toVM: (r): RowVM => {
+    const lines = Array.isArray(r.lines) ? (r.lines as RawRow[]) : [];
+    const items = lines.length;
+    const qty = lines.reduce((s, l) => s + num(l, "qty"), 0);
+    return {
+      id: str(r, "id", "serviceOrderNo"),
+      code: str(r, "serviceOrderNo") || "—",
+      title: str(r, "customerName") || "—",
+      items: [str(r, "sourceNo"), str(r, "sourceType")].filter(Boolean).join(" · ") || undefined,
+      metas: [
+        { label: "Items", value: String(items) },
+        { label: "Qty", value: String(qty) },
+        { label: "When", value: shortDate(dateOnly(r, "createdAt")) || "—" },
+      ],
+      status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
+    };
+  },
+  columns: [
+    textCol("serviceOrderNo", "Reference", (r) => str(r, "serviceOrderNo")),
+    textCol("customer", "Customer", (r) => str(r, "customerName")),
+    textCol("source", "State", (r) => str(r, "sourceNo", "sourceType")),
+    dateCol("createdAt", "Order Date", (r) => dateOnly(r, "createdAt")),
+    enumCol("status", "Status", (r) => str(r, "status"), SV_STATUSES),
+  ],
+  defaultSort: { key: "createdAt", dir: "desc" },
+  subTabs: [
+    { key: "all", label: "All", match: () => true },
+    { key: "draft", label: "Draft", match: (r) => str(r, "status") === "DRAFT" },
+    { key: "progress", label: "In Progress", match: (r) => str(r, "status") === "IN_PROGRESS" },
+    { key: "done", label: "Completed", match: (r) => ["COMPLETED", "CLOSED"].includes(str(r, "status")) },
+  ],
+};
+
+const serviceOrderDetail: DetailConfig = {
+  url: (id) => `/api/service-orders/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "serviceOrderNo") || "—",
+  title: (d) => str(d, "customerName") || "—",
+  status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  flow: {
+    steps: flowSteps(["DRAFT", "IN_PROGRESS", "COMPLETED", "CLOSED"]),
+    current: (d) => str(d, "status"),
+  },
+  fields: [
+    fld("Service Order", (d) => str(d, "serviceOrderNo")),
+    fld("Customer", (d) => str(d, "customerName")),
+    fld("Source", (d) => `${str(d, "sourceType") || "—"} · ${str(d, "sourceNo") || "—"}`),
+    fld("Mode", (d) => str(d, "mode")),
+    fld("Created By", (d) => str(d, "createdByName", "createdBy")),
+    fld("Order Date", (d) => dateOnly(d, "createdAt")),
+    fld("Closed", (d) => dateOnly(d, "closedAt")),
+    fld("Notes", (d) => str(d, "notes"), true),
+  ],
+  lineItems: (d) => {
+    const lines = Array.isArray(d.lines) ? (d.lines as RawRow[]) : [];
+    return lines.map((l, i) => ({
+      id: str(l, "id") || String(i),
+      title: str(l, "productName", "productCode") || "Item",
+      subLine: str(l, "issueSummary") || str(l, "productCode") || undefined,
+      meta1: { label: "Qty", value: num(l, "qty") },
+    }));
+  },
+  relatedDocs: (d) => {
+    const out: RelatedDocVM[] = [];
+    const caseId = str(d, "caseId");
+    if (caseId) {
+      out.push({
+        id: caseId,
+        group: "Service Case",
+        code: caseId,
+        href: `/m/servicecases/${encodeURIComponent(caseId)}`,
+      });
+    }
+    const sourceType = str(d, "sourceType");
+    const sourceId = str(d, "sourceId");
+    if (sourceType === "SO" && sourceId) {
+      out.push({
+        id: sourceId,
+        group: "Sales Order",
+        code: str(d, "sourceNo") || sourceId,
+        href: `/m/sales/${encodeURIComponent(sourceId)}`,
+      });
+    }
+    return out;
+  },
+  attachmentsResource: (id) => ({ type: "SERVICE_ORDER", id }),
+  lineAttachmentsResource: (_parent, lineId) => ({ type: "SERVICE_ORDER_LINE", id: lineId }),
+};
+
+export const serviceOrdersConfig: ModuleConfig = {
+  slug: "serviceorders",
+  title: "Service Orders",
+  detailPath: (vm) => `/m/serviceorders/${encodeURIComponent(vm.id)}`,
+  detail: serviceOrderDetail,
+  sources: [serviceOrdersSource],
+};
+
+// ---------------------------------------------------------------------------
 // R&D PROJECTS — dc13 design v13 added an R&D module to mobile. Wires to
 // the existing /api/rd-projects backend (route GET / + GET /:id). Read-only
 // mobile (mutations stay on the desktop /rd page).
@@ -3373,6 +3480,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   receivablesConfig,
   productsConfig,
   serviceCasesConfig,
+  serviceOrdersConfig,
   usermgmtConfig,
   rdConfig,
 ];

@@ -26,9 +26,12 @@ import {
   Megaphone,
   Mail,
   LogOut,
+  Moon,
+  Sun,
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { M } from "../theme";
+import { useMobileThemeMode } from "../lib/theme-mode";
 import { getCurrentUser, clearAuth } from "@/lib/auth";
 
 type RailEntry =
@@ -187,6 +190,9 @@ export function LeftRail() {
         })}
       </div>
 
+      {/* Dark/Light mode toggle — CHANGELOG: "Fold 版在左栏底部". */}
+      <ThemeModeRow />
+
       {/* Account footer — avatar · name · role · log-out. */}
       <div
         style={{
@@ -252,5 +258,73 @@ export function LeftRail() {
         </button>
       </div>
     </nav>
+  );
+}
+
+function ThemeModeRow() {
+  const { mode, toggle } = useMobileThemeMode();
+  return (
+    <button
+      onClick={toggle}
+      aria-label={`Switch to ${mode === "dark" ? "light" : "dark"} mode`}
+      style={{
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "8px 10px",
+        background: "transparent",
+        border: "none",
+        cursor: "pointer",
+        fontFamily: "inherit",
+        WebkitTapHighlightColor: "transparent",
+        marginTop: 4,
+      }}
+    >
+      <span
+        style={{
+          width: 26,
+          height: 26,
+          borderRadius: 7,
+          background: mode === "dark" ? "#2A2722" : "#FAEFCB",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flex: "none",
+        }}
+      >
+        {mode === "dark" ? (
+          <Moon size={14} color="#D9BD7B" strokeWidth={1.9} />
+        ) : (
+          <Sun size={14} color="#9C6F1E" strokeWidth={1.9} />
+        )}
+      </span>
+      <span style={{ flex: 1, fontSize: 12, color: M.raisin, fontWeight: 600, textAlign: "left" }}>
+        {mode === "dark" ? "Dark" : "Light"}
+      </span>
+      <span
+        style={{
+          width: 32,
+          height: 18,
+          borderRadius: 10,
+          background: mode === "dark" ? M.taupe : M.hairline,
+          position: "relative",
+          flex: "none",
+        }}
+      >
+        <span
+          style={{
+            position: "absolute",
+            top: 2,
+            left: mode === "dark" ? 16 : 2,
+            width: 14,
+            height: 14,
+            borderRadius: "50%",
+            background: "#fff",
+            transition: "left .18s",
+          }}
+        />
+      </span>
+    </button>
   );
 }

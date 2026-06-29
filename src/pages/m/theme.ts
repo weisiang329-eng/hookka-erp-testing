@@ -20,39 +20,33 @@ import {
 } from "@/lib/design-tokens";
 
 /**
- * Brand palette for the phone UI — values are the EXACT 1:1 design-source
- * tokens (Hookka ERP Mobile.dc.html inline styles). Keep names stable; only
- * the values are authoritative.
+ * Brand palette for the phone UI. CHANGELOG (owner 2026-06-29) requires
+ * Dark/Light mode toggle. Values are now CSS custom properties — the
+ * concrete colour values live in src/pages/m/theme-vars.css and flip per
+ * `[data-theme="dark"]` on the document root. Components reference M.foo
+ * verbatim (e.g. `style={{ backgroundColor: M.paper }}`) so the CSS-var
+ * indirection is transparent.
+ *
+ * Light mode = the design source's authoritative values (Hookka ERP
+ * Mobile.dc.html). Dark mode swaps surfaces to dark + text to light while
+ * keeping the taupe accent + gold readable.
  */
 export const M = {
-  /** Dark raisin — dark surfaces / primary text on light. */
-  raisin: "#1F1D1B",
-  /** Warm taupe — primary / active. */
-  taupe: "#6B5C32",
-  taupeDark: "#574A28",
-  /** Paper — app background. */
-  paper: "#FAF8F4",
-  /** White card surface. */
-  card: "#FFFFFF",
-  /** Card / hairline border (design source: #E7E0D4). */
-  border: "#E7E0D4",
-  /** Slightly cooler hairline used on inputs / round buttons (#E2DDD8). */
-  hairline: "#E2DDD8",
-  /** Inner divider between list rows (#F2EEE6). */
-  divider: "#F2EEE6",
-  /** Gold accent. */
-  gold: "#C9A961",
-  /** Strong heading/label ink used on dark-on-paper labels (#4D4630). */
-  ink: "#4D4630",
-  /** Body / muted text. */
-  body: "#6B7280",
-  /** Muted label text (design source uses #9A9082 for sub-labels). */
-  muted: "#9A9082",
-  /** Faint meta text (#9CA3AF). */
-  faint: "#9CA3AF",
-  /** Logo / avatar gradient endpoints. */
-  logoFrom: "#8B7A4E",
-  logoTo: "#6B5C32",
+  raisin: "var(--m-raisin)",
+  taupe: "var(--m-taupe)",
+  taupeDark: "var(--m-taupe-dark)",
+  paper: "var(--m-paper)",
+  card: "var(--m-card)",
+  border: "var(--m-border)",
+  hairline: "var(--m-hairline)",
+  divider: "var(--m-divider)",
+  gold: "var(--m-gold)",
+  ink: "var(--m-ink)",
+  body: "var(--m-body)",
+  muted: "var(--m-muted)",
+  faint: "var(--m-faint)",
+  logoFrom: "var(--m-logo-from)",
+  logoTo: "var(--m-logo-to)",
 } as const;
 
 /**

@@ -1,0 +1,64 @@
+/* ===========================================================================
+ * /m theme CSS variables — light (default) + dark.
+ *
+ * The mobile shell sets data-theme="light" or "dark" on the body (managed by
+ * src/pages/m/lib/theme-mode.ts + persisted to localStorage). Components
+ * import the M.* constants from src/pages/m/theme.ts which resolve to these
+ * variables, so a single attribute flip re-tints the whole app.
+ *
+ * Light mode values come from the design source (Hookka ERP Mobile.dc.html).
+ * Dark mode values are tuned to keep the taupe + gold accents readable on
+ * raisin-dark surfaces.
+ * ========================================================================= */
+
+/* Body bg matches theme so pull-to-refresh / overscroll show the right tint. */
+body[data-theme] {
+  background-color: var(--m-paper);
+}
+
+body[data-theme="light"],
+body:not([data-theme]) {
+  --m-raisin: #1F1D1B;
+  --m-taupe: #6B5C32;
+  --m-taupe-dark: #574A28;
+  --m-paper: #FAF8F4;
+  --m-card: #FFFFFF;
+  --m-border: #E7E0D4;
+  --m-hairline: #E2DDD8;
+  --m-divider: #F2EEE6;
+  --m-gold: #C9A961;
+  --m-ink: #4D4630;
+  --m-body: #6B7280;
+  --m-muted: #9A9082;
+  --m-faint: #9CA3AF;
+  --m-logo-from: #8B7A4E;
+  --m-logo-to: #6B5C32;
+}
+
+body[data-theme="dark"] {
+  /* Surfaces */
+  --m-paper: #1A1816;
+  --m-card: #2A2722;
+  --m-border: #3A352C;
+  --m-hairline: #3A352C;
+  --m-divider: #2F2C26;
+  /* Text */
+  --m-raisin: #F0EBE2;     /* primary text — was dark on light */
+  --m-ink: #D4C9A8;        /* strong label */
+  --m-body: #B9B0A0;
+  --m-muted: #8A8170;
+  --m-faint: #6B6353;
+  /* Accents kept BRAND-warm but slightly brighter for dark surface contrast */
+  --m-taupe: #B59A5C;      /* lighter taupe — primary CTAs stay readable */
+  --m-taupe-dark: #8B7A4E;
+  --m-gold: #D9BD7B;
+  --m-logo-from: #C9A961;
+  --m-logo-to: #B59A5C;
+}
+
+/* Logo + photos must NOT invert (per CHANGELOG: "logo/QR/photos
+ * don't invert"). Components apply this class to img tags they want to
+ * preserve. */
+.m-no-invert {
+  filter: none !important;
+}

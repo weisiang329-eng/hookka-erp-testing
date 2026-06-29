@@ -8,10 +8,11 @@
 // (getCurrentUser); sign-out reuses the SAME POST /api/auth/logout + clearAuth
 // flow as the desktop top bar. No fabricated profile data.
 import { useNavigate } from "react-router-dom";
-import { ChevronRight, LogOut } from "lucide-react";
+import { ChevronRight, LogOut, Moon, Sun } from "lucide-react";
 import { MobileHeader, MobileCard } from "../components";
 import { MORE_GROUPS } from "../nav";
 import { M } from "../theme";
+import { useMobileThemeMode } from "../lib/theme-mode";
 import { getCurrentUser, clearAuth } from "@/lib/auth";
 
 // POST /api/auth/logout, then clear local state and bounce to /login — the same
@@ -48,6 +49,7 @@ function prettyRole(role: string): string {
 
 export default function MobileMore() {
   const navigate = useNavigate();
+  const { mode, toggle } = useMobileThemeMode();
   const user = getCurrentUser();
   const name = user?.displayName || user?.email || "—";
   const role = prettyRole(user?.role || "");
@@ -130,6 +132,81 @@ export default function MobileMore() {
             }}
           >
             <LogOut size={20} strokeWidth={1.9} color="#C0463A" />
+          </button>
+        </MobileCard>
+
+        {/* Dark/Light Mode toggle — CHANGELOG: "手机版在 More 菜单、即时切换、
+            记忆设置". A single-row card that flips the body[data-theme] attribute
+            and persists to localStorage. */}
+        <MobileCard radius={14} style={{ padding: 0, marginBottom: 18, overflow: "hidden" }}>
+          <button
+            onClick={toggle}
+            aria-label={`Switch to ${mode === "dark" ? "light" : "dark"} mode`}
+            style={{
+              width: "100%",
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: "13px 16px",
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontFamily: "inherit",
+              color: M.raisin,
+              textAlign: "left",
+              WebkitTapHighlightColor: "transparent",
+            }}
+          >
+            <span
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 10,
+                background: mode === "dark" ? "#2A2722" : "#FAEFCB",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flex: "none",
+              }}
+            >
+              {mode === "dark" ? (
+                <Moon size={18} color="#D9BD7B" strokeWidth={1.9} />
+              ) : (
+                <Sun size={18} color="#9C6F1E" strokeWidth={1.9} />
+              )}
+            </span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: M.raisin }}>
+                {mode === "dark" ? "Dark mode" : "Light mode"}
+              </div>
+              <div style={{ fontSize: 12, color: M.muted, marginTop: 1 }}>
+                Tap to switch to {mode === "dark" ? "light" : "dark"}
+              </div>
+            </div>
+            <span
+              style={{
+                width: 44,
+                height: 26,
+                borderRadius: 13,
+                background: mode === "dark" ? M.taupe : M.hairline,
+                position: "relative",
+                flex: "none",
+              }}
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  top: 3,
+                  left: mode === "dark" ? 21 : 3,
+                  width: 20,
+                  height: 20,
+                  borderRadius: "50%",
+                  background: "#fff",
+                  transition: "left .18s",
+                  boxShadow: "0 1px 3px rgba(0,0,0,.2)",
+                }}
+              />
+            </span>
           </button>
         </MobileCard>
 

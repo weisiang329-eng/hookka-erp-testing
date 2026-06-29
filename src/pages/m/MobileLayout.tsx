@@ -33,6 +33,12 @@ import { WarehouseScreen } from "./screens/WarehouseScreen";
 import { ProductionScreen } from "./screens/ProductionScreen";
 import { MODULE_CONFIGS } from "./config/modules";
 import { preloadMobileCritical } from "./lib/preload";
+import { bootstrapMobileTheme } from "./lib/theme-mode";
+import "./theme-vars.css";
+
+// Apply persisted dark/light mode BEFORE first paint to avoid a flash. This
+// runs once at module load time (the import side-effect).
+bootstrapMobileTheme();
 
 // Modules whose L1 list is a bespoke screen (not the generic ModuleListScreen).
 // Their L2 detail route still uses the config-driven DocumentDetailScreen.

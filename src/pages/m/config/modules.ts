@@ -393,6 +393,7 @@ const salesDetail: DetailConfig = {
   // matches the desktop convention (so files uploaded from mobile show up on
   // the desktop attachment list, and vice versa).
   attachmentsResource: (id) => ({ type: "SO", id }),
+  auditResource: () => "sales-orders",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "SO_LINE", id: lineId }),
   // dc13 v13 sync (owner 2026-06-29): "Copy SO" — matches the desktop's
   // existing clone flow (src/pages/sales/detail.tsx → "Copy" button which
@@ -592,6 +593,7 @@ const deliveryDetail: DetailConfig = {
   },
   primaryCta: (d) => (str(d, "status") === "DELIVERED" ? "Sign" : "Dispatch"),
   attachmentsResource: (id) => ({ type: "DO", id }),
+  auditResource: () => "delivery-orders",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "DO_LINE", id: lineId }),
 };
 
@@ -798,6 +800,7 @@ const invoiceDetail: DetailConfig = {
   },
   primaryCta: (d) => (str(d, "status") === "PAID" ? "Status" : "Record Payment"),
   attachmentsResource: (id) => ({ type: "INVOICE", id }),
+  auditResource: () => "invoices",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "INVOICE_LINE", id: lineId }),
 };
 
@@ -987,6 +990,7 @@ const poDetail: DetailConfig = {
   ],
   primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Submit" : "Status"),
   attachmentsResource: (id) => ({ type: "PO", id }),
+  auditResource: () => "purchase-orders",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "PO_LINE", id: lineId }),
 };
 

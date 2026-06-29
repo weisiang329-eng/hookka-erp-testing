@@ -321,7 +321,12 @@ export type DetailConfig = {
   extraFetches?: {
     a?: { key: string; url: (id: string) => string | null };
     b?: { key: string; url: (id: string) => string | null };
+    c?: { key: string; url: (id: string) => string | null };
   };
+  /** Optional audit-history resource. When set, DocumentDetailScreen fetches
+   * /api/audit-events?resource=<resource>&resourceId=<id> + renders a
+   * "History · N" sub-doc list. dc13 CHANGELOG B.7 "History audit" gap. */
+  auditResource?: (id: string) => string;
   /**
    * Optional file-attachments resource for this doc. When set, the detail
    * screen fires GET /api/files?resourceType=<type>&resourceId=<id> + renders

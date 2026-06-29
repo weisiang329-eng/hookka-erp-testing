@@ -97,8 +97,20 @@ function Inner({
   // config didn't declare it or the slot's url-builder returned null.
   const extraAUrl = id && detail.extraFetches?.a ? detail.extraFetches.a.url(id) : null;
   const extraBUrl = id && detail.extraFetches?.b ? detail.extraFetches.b.url(id) : null;
+  const extraCUrl = id && detail.extraFetches?.c ? detail.extraFetches.c.url(id) : null;
   const { data: extraAData } = useCachedJson<unknown>(extraAUrl);
   const { data: extraBData } = useCachedJson<unknown>(extraBUrl);
+  const { data: extraCData } = useCachedJson<unknown>(extraCUrl);
+  // Audit history — CHANGELOG B.7 "History audit". When the config declares
+  // auditResource, fetch /api/audit-events?resource=X&resourceId=Y.
+  const auditResource = id && detail.auditResource ? detail.auditResource(id) : null;
+  const auditUrl = auditResource
+    ? `/api/audit-events?resource=${encodeURIComponent(auditResource)}&resourceId=${encodeURIComponent(id)}`
+    : null;
+  const { data: auditData } = useCachedJson<{
+    success?: boolean;
+    data?: { id: string; action: string; actorUserName?: string; ts: string }[];
+  }>(auditUrl);
   // Doc-level file attachments — when the config declares an
   // attachmentsResource, fetch its files list + render an upload section.
   const attResource = id && detail.attachmentsResource ? detail.attachmentsResource(id) : null;
@@ -219,18 +231,38 @@ function Inner({
       bodyParas: (eff.body?.(doc) ?? []).filter((p) => p && p.trim()),
       kvSections: (eff.kvSections?.(doc) ?? []).filter((s) => s.rows.length),
       netPay: eff.netPay?.(doc),
-      subDocLists: (
-        eff.subDocLists?.(doc, data, {
-          ...(eff.extraFetches?.a
-            ? { [eff.extraFetches.a.key]: extraAData }
-            : {}),
-          ...(eff.extraFetches?.b
-            ? { [eff.extraFetches.b.key]: extraBData }
-            : {}),
-        }) ?? []
-      ).filter((l) => l.rows.length || l.emptyText),
+      subDocLists: (() => {
+        const base = (
+          eff.subDocLists?.(doc, data, {
+            ...(eff.extraFetches?.a
+              ? { [eff.extraFetches.a.key]: extraAData }
+              : {}),
+            ...(eff.extraFetches?.b
+              ? { [eff.extraFetches.b.key]: extraBData }
+              : {}),
+            ...(eff.extraFetches?.c
+              ? { [eff.extraFetches.c.key]: extraCData }
+              : {}),
+          }) ?? []
+        ).filter((l) => l.rows.length || l.emptyText);
+
+        // Audit History — automatic sub-list when auditResource is set.
+        const events = (auditData?.data ?? []) as { id: string; action: string; actorUserName?: string; ts: string }[];
+        if (events.length > 0) {
+          base.push({
+            title: `History · ${events.length}`,
+            rows: events.slice(0, 30).map((e) => ({
+              id: e.id,
+              title: e.action,
+              subLine: [e.actorUserName || "—", new Date(e.ts).toLocaleString()].join(" · "),
+              icon: "file-text" as const,
+            })),
+          });
+        }
+        return base;
+      })(),
     };
-  }, [eff, doc, data, id, extraAData, extraBData]);
+  }, [eff, doc, data, id, extraAData, extraBData, extraCData, auditData]);
 
   if (loading && !doc) {
     return (

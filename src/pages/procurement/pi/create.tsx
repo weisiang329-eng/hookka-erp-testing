@@ -37,6 +37,7 @@ import {
 
 // ── Source-doc shapes (minimal fields we need for pre-fill) ────────────────
 type POItemShape = {
+  materialCode?: string | null;
   materialName: string;
   supplierSKU?: string | null;
   quantity: number;
@@ -76,6 +77,10 @@ type PILineDraft = {
   // it as number, parsed at submit via Math.round(unitPriceRM * 100). Kept
   // identical — do NOT convert to MoneyInput / string state.
   unitPriceRM: number;
+  // Per-line SST in RM (owner 2026-06-30). 0 for non-taxable lines. The
+  // backend stores it in sen as purchase_invoice_items.tax_sen and rolls it
+  // into the header tax_sen — the legacy single TAX line is no longer needed.
+  taxRM: number;
   // Convert-chain: set ONLY when this line was picked from a GRN line. Sent in
   // the POST so the backend increments grn_items.invoiced_qty and runs the
   // line-level availability guard. null = manual / PO-source line.
@@ -89,6 +94,7 @@ function emptyPILine(): PILineDraft {
     supplierSku: "",
     qty: 1,
     unitPriceRM: 0,
+    taxRM: 0,
     grnItemId: null,
   };
 }
@@ -211,11 +217,15 @@ function CreatePurchaseInvoicePage() {
           // Prefill Purchase company from the source PO (highest priority).
           if (po.purchaseOrgCode) setPurchaseOrgCode(po.purchaseOrgCode);
           const prefilled = po.items.map((it) => ({
-            materialCode: "",
+            // BUG-FIX 2026-06-30: was hardcoded to "" — Material Code never
+            // carried over from the PO. Now reads it.materialCode (PO API
+            // returns it, just wasn't being plumbed through).
+            materialCode: it.materialCode ?? "",
             materialName: it.materialName,
             supplierSku: it.supplierSKU ?? "",
             qty: it.quantity,
             unitPriceRM: it.unitPriceSen / 100,
+            taxRM: 0,
             grnItemId: null,
           }));
           setLines(prefilled.length > 0 ? prefilled : [emptyPILine()]);
@@ -250,9 +260,14 @@ function CreatePurchaseInvoicePage() {
             .map((it) => ({
               materialCode: it.materialCode ?? "",
               materialName: it.materialName,
-              supplierSku: it.materialCode ?? "",
+              // BUG-FIX 2026-06-30: was wrongly using materialCode as the
+              // supplier SKU. The form's binding lookup will fill it from
+              // supplier_material_bindings when materialCode is set, so
+              // leaving blank here is correct.
+              supplierSku: "",
               qty: it.remaining,
               unitPriceRM: it.unitPrice / 100,
+              taxRM: 0,
               grnItemId: it.id,
             }));
           setLines(prefilled.length > 0 ? prefilled : [emptyPILine()]);
@@ -377,19 +392,40 @@ function CreatePurchaseInvoicePage() {
             supplierSku: l.supplierSku,
             qty: l.qty,
             unitPriceRM: l.unitPriceRM,
+            taxRM: 0,
             grnItemId: l.grnItemId,
           }))
         : [emptyPILine()],
     );
   };
 
+  // SST fallback: when the operator doesn't fill per-line tax, they can type
+  // the supplier's footer SST total into this field and we distribute it
+  // pro-rata across goods lines on Save. Empty string = no override (use the
+  // per-line taxRM values directly).
+  const [headerTaxRMInput, setHeaderTaxRMInput] = useState<string>("");
+
   // ── Derived totals ────────────────────────────────────────────────────────
   const validLines = lines.filter((l) => l.materialName.trim() !== "");
-  const totalRM = validLines.reduce(
+  const subtotalRM = validLines.reduce(
     (s, l) => s + (Number(l.qty) || 0) * (Number(l.unitPriceRM) || 0),
     0,
   );
-  // totalRM is in RM — convert to sen for formatCurrency
+  const perLineTaxRM = validLines.reduce(
+    (s, l) => s + (Number(l.taxRM) || 0),
+    0,
+  );
+  const headerTaxOverride = headerTaxRMInput.trim() === ""
+    ? null
+    : Number(headerTaxRMInput);
+  const taxRM =
+    headerTaxOverride != null && Number.isFinite(headerTaxOverride) && headerTaxOverride >= 0
+      ? headerTaxOverride
+      : perLineTaxRM;
+  const totalRM = subtotalRM + taxRM;
+  // *RM are RM — convert to sen for formatCurrency
+  const subtotalSen = Math.round(subtotalRM * 100);
+  const taxSen = Math.round(taxRM * 100);
   const totalSen = Math.round(totalRM * 100);
 
   // ── Submit ────────────────────────────────────────────────────────────────
@@ -417,17 +453,48 @@ function CreatePurchaseInvoicePage() {
         purchaseOrgCode,
         supplierInvoiceNo: supplierInvoiceNo.trim() || null,
         supplierDoNo: supplierDoNo.trim() || null,
-        items: validLines.map((l) => ({
-          materialCode: l.materialCode.trim() || null,
-          materialName: l.materialName.trim(),
-          supplierSku: l.supplierSku.trim() || null,
-          qty: Number(l.qty) || 0,
-          unitPriceSen: Math.round((Number(l.unitPriceRM) || 0) * 100),
-          lineType: "STOCKED" as const,
-          // Convert-chain: carry the GRN source line so the backend draws down
-          // grn_items.invoiced_qty and enforces the line-level guard.
-          grnItemId: l.grnItemId ?? null,
-        })),
+        items: (() => {
+          // Per-line tax: by default we use the operator-entered taxRM on each
+          // line. If the operator left per-line tax blank and instead typed a
+          // header SST total, distribute it pro-rata across goods lines (by
+          // line amount), with the LAST line absorbing any rounding drift so
+          // Σ line tax === header tax in sen.
+          const lineAmountsSen = validLines.map(
+            (l) => Math.round((Number(l.qty) || 0) * (Number(l.unitPriceRM) || 0) * 100),
+          );
+          const subtotalLocalSen = lineAmountsSen.reduce((s, v) => s + v, 0);
+          const usePerLine =
+            headerTaxOverride == null || !Number.isFinite(headerTaxOverride) || headerTaxOverride <= 0;
+          const headerTaxLocalSen = Math.round((taxRM || 0) * 100);
+          let allocated = 0;
+          return validLines.map((l, idx) => {
+            let lineTaxSen = 0;
+            if (usePerLine) {
+              lineTaxSen = Math.round((Number(l.taxRM) || 0) * 100);
+            } else if (subtotalLocalSen > 0) {
+              if (idx === validLines.length - 1) {
+                lineTaxSen = headerTaxLocalSen - allocated;
+              } else {
+                lineTaxSen = Math.round(
+                  (headerTaxLocalSen * lineAmountsSen[idx]) / subtotalLocalSen,
+                );
+                allocated += lineTaxSen;
+              }
+            }
+            return {
+              materialCode: l.materialCode.trim() || null,
+              materialName: l.materialName.trim(),
+              supplierSku: l.supplierSku.trim() || null,
+              qty: Number(l.qty) || 0,
+              unitPriceSen: Math.round((Number(l.unitPriceRM) || 0) * 100),
+              taxSen: lineTaxSen < 0 ? 0 : lineTaxSen,
+              lineType: "STOCKED" as const,
+              // Convert-chain: carry the GRN source line so the backend draws down
+              // grn_items.invoiced_qty and enforces the line-level guard.
+              grnItemId: l.grnItemId ?? null,
+            };
+          });
+        })(),
       };
       if (sourcePurchaseOrderId) {
         payload.purchaseOrderId = sourcePurchaseOrderId;
@@ -678,6 +745,31 @@ function CreatePurchaseInvoicePage() {
               <span className="font-medium">{invoiceDate || "-"}</span>
             </div>
             <hr className="border-[#E2DDD8]" />
+            <div className="flex justify-between text-sm">
+              <span className="text-[#6B7280]">Subtotal</span>
+              <span className="font-medium">{formatCurrency(subtotalSen)}</span>
+            </div>
+            <div className="flex justify-between text-sm items-center">
+              <span className="text-[#6B7280]">SST</span>
+              <span className="font-medium">{formatCurrency(taxSen)}</span>
+            </div>
+            {/* SST fallback: when the operator doesn't fill per-line tax,
+                type the supplier's footer SST total here and we distribute
+                it pro-rata across goods lines on Save. Leave blank to use
+                per-line tax values. */}
+            <div className="flex justify-between gap-2 text-xs items-center">
+              <span className="text-[#9CA3AF] whitespace-nowrap">SST override (RM)</span>
+              <Input
+                type="number"
+                min={0}
+                step="0.01"
+                className="h-7 w-24 text-right"
+                placeholder="auto"
+                value={headerTaxRMInput}
+                onChange={(e) => setHeaderTaxRMInput(e.target.value)}
+              />
+            </div>
+            <hr className="border-[#E2DDD8]" />
             <div className="flex justify-between text-lg font-bold">
               <span>Total</span>
               <span className="text-[#6B5C32]">{formatCurrency(totalSen)}</span>
@@ -727,6 +819,13 @@ function CreatePurchaseInvoicePage() {
                     style={{ minWidth: 130 }}
                   >
                     Unit Price (RM)
+                  </th>
+                  <th
+                    className="text-right px-3 py-2 font-medium"
+                    style={{ minWidth: 110 }}
+                    title="Per-line SST in RM. Leave 0 for non-taxable lines."
+                  >
+                    SST (RM)
                   </th>
                   <th
                     className="text-right px-3 py-2 font-medium"
@@ -832,7 +931,19 @@ function CreatePurchaseInvoicePage() {
                           }
                         />
                       </td>
-                      {/* Line total */}
+                      {/* Per-line SST (owner 2026-06-30) — leave 0 for non-
+                          taxable lines. Alternatively use the Summary's
+                          "SST override (RM)" fallback. */}
+                      <td className="px-2 py-1.5">
+                        <MoneyInput
+                          className="h-8 w-24 ml-auto"
+                          value={line.taxRM === 0 ? null : line.taxRM}
+                          onChange={(rm) =>
+                            updateLine(idx, "taxRM", rm ?? 0)
+                          }
+                        />
+                      </td>
+                      {/* Line total (pre-tax — header adds SST on top) */}
                       <td className="px-3 py-1.5 text-right font-medium text-[#1F1D1B]">
                         {lineTotal.toLocaleString("en-MY", {
                           minimumFractionDigits: 2,
@@ -857,7 +968,37 @@ function CreatePurchaseInvoicePage() {
               <tfoot className="bg-[#FAF9F7] border-t border-[#E2DDD8]">
                 <tr>
                   <td
-                    colSpan={5}
+                    colSpan={6}
+                    className="px-3 py-1.5 text-right text-xs font-medium text-[#6B7280]"
+                  >
+                    Subtotal
+                  </td>
+                  <td className="px-3 py-1.5 text-right text-sm font-medium text-[#1F1D1B]">
+                    {subtotalRM.toLocaleString("en-MY", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </td>
+                  <td />
+                </tr>
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="px-3 py-1.5 text-right text-xs font-medium text-[#6B7280]"
+                  >
+                    SST
+                  </td>
+                  <td className="px-3 py-1.5 text-right text-sm font-medium text-[#1F1D1B]">
+                    {taxRM.toLocaleString("en-MY", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </td>
+                  <td />
+                </tr>
+                <tr className="border-t border-[#E2DDD8]">
+                  <td
+                    colSpan={6}
                     className="px-3 py-2 text-right text-sm font-medium text-[#6B7280]"
                   >
                     TOTAL

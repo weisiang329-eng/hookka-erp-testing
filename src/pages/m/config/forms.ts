@@ -84,6 +84,14 @@ function soItemsForServer(items: Record<string, unknown>[]): unknown[] {
     fabricCode: s(it.fabricCode), // empty allowed
     quantity: n(it.quantity) || 1,
     basePriceSen: n(it.basePriceSen), // 0 lets the server resolve catalog price
+    // dc13 v17 variant fields — map to columns on sales_order_items.
+    gapInches: n(it.gapInches) || undefined,
+    legHeightInches: n(it.legHeightInches) || undefined,
+    legPriceSen: n(it.legPriceSen),
+    divanHeightInches: n(it.divanHeightInches) || undefined,
+    divanPriceSen: n(it.divanPriceSen),
+    discountSen: n(it.discountSen),
+    notes: s(it.notes),
   }));
 }
 
@@ -120,6 +128,13 @@ const SO_FIELDS = [
   { name: "notes", label: "Notes", kind: "textarea" as const, full: true },
 ];
 
+// dc13 v17 variant fields per category — CHANGELOG B.9 "SO 行项目按品类
+// 出不同变体字段". The simpler-typed fields land here flat; the complex
+// Sofa Specials (multi-select from kv_config('variants-config')) stays on
+// desktop /sales/create — mobile can't replicate that picker without
+// re-implementing the variants-config dropdowns. Each field maps to an
+// existing column on sales_order_items so the backend stores them on POST
+// without any schema change.
 const SO_LINE = {
   name: "items",
   label: "Line items",
@@ -134,6 +149,14 @@ const SO_LINE = {
     { name: "fabricCode", label: "Fabric Code", kind: "text" as const },
     { name: "quantity", label: "Qty", kind: "number" as const, required: true },
     { name: "basePriceSen", label: "Unit Price", kind: "money" as const },
+    // Variant fields shared by Sofa + Bedframe — map to existing columns.
+    { name: "gapInches", label: "Mattress Gap (in)", kind: "number" as const },
+    { name: "legHeightInches", label: "Leg Height (in)", kind: "number" as const },
+    { name: "legPriceSen", label: "Leg Surcharge", kind: "money" as const },
+    { name: "divanHeightInches", label: "Divan/Base Height (in)", kind: "number" as const },
+    { name: "divanPriceSen", label: "Divan Surcharge", kind: "money" as const },
+    { name: "discountSen", label: "Line Discount", kind: "money" as const },
+    { name: "notes", label: "Line Notes (color / D1 / seat depth / other)", kind: "text" as const },
   ],
 };
 

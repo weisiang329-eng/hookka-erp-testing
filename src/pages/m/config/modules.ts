@@ -1436,67 +1436,68 @@ function warehouseSource(key: string, label: string): DataSource {
   };
 }
 
-// Stock In/Out source (v17 line ~1819) — backed by /api/stock-movements
-// which is the same table the warehouse detail surface uses. Cards:
-//   IO-... · item · "IN/OUT · ref · customer" · [Qty · When]
+// Stock In/Out source (v17 line ~1819) — backed by /api/warehouse/movements
+// (stock_movements rowToMovement shape). Cards:
+//   IO-... · product · "IN/OUT · docRef · performedBy" · [Qty · When]
 const stockInOutSource: DataSource = {
-  url: "/api/stock-movements",
+  url: "/api/warehouse/movements",
   select: selectData,
   toVM: (r): RowVM => {
-    const dir = str(r, "direction", "moveType").toUpperCase();
+    // type = STOCK_IN | STOCK_OUT | TRANSFER. Map STOCK_IN/OUT → IO sub-tab.
+    const type = str(r, "type").toUpperCase();
+    const dir = type === "STOCK_IN" ? "IN" : type === "STOCK_OUT" ? "OUT" : "";
     return {
       id: str(r, "id"),
-      code: str(r, "movementNo", "code") || `IO-${str(r, "id").slice(0, 8)}`,
-      title: str(r, "productName", "productCode", "itemCode") || "—",
-      items: [dir, str(r, "referenceNo", "soNo", "doNo"), str(r, "customerName", "supplierName")].filter(Boolean).join(" · ") || undefined,
+      code: `IO-${str(r, "id").slice(0, 8)}`,
+      title: str(r, "productName", "productCode") || "—",
+      items: [dir, str(r, "docRef", "poNo", "salesOrderNo"), str(r, "performedBy")].filter(Boolean).join(" · ") || undefined,
       metas: [
-        { label: "Qty", value: num(r, "quantity", "qty") },
-        { label: "When", value: shortDate(dateOnly(r, "movedAt", "createdAt")) || "—" },
+        { label: "Qty", value: num(r, "quantity") },
+        { label: "When", value: shortDate(dateOnly(r, "createdAt")) || "—" },
       ],
-      status: resolveStatus(dir === "IN" ? "IN" : "OUT", PAYMENT_STATUS_MAP),
+      status: resolveStatus(dir || "Active", PAYMENT_STATUS_MAP),
     };
   },
   columns: [
-    textCol("code", "Reference", (r) => str(r, "movementNo", "code")),
     textCol("product", "Customer", (r) => str(r, "productName", "productCode")),
-    numCol("qty", "Qty", (r) => num(r, "quantity", "qty")),
-    dateCol("when", "Order Date", (r) => dateOnly(r, "movedAt", "createdAt")),
+    enumCol("type", "State", (r) => str(r, "type"), ["STOCK_IN", "STOCK_OUT", "TRANSFER"]),
+    numCol("qty", "Qty", (r) => num(r, "quantity")),
+    dateCol("when", "Order Date", (r) => dateOnly(r, "createdAt")),
   ],
   defaultSort: { key: "when", dir: "desc" },
   subTabs: [
-    { key: "io", label: "Stock In/Out", match: (r) => ["IN", "OUT"].includes(str(r, "direction", "moveType").toUpperCase()) },
+    { key: "io", label: "Stock In/Out", match: (r) => ["STOCK_IN", "STOCK_OUT"].includes(str(r, "type").toUpperCase()) },
   ],
 };
 
-// Movement source (v17 line ~1821) — rack-to-rack moves (same endpoint,
-// different direction filter). Cards: MV-... · item · "Rack X ← Y · who" · [Qty · When]
+// Movement source (v17 line ~1821) — TRANSFER rows (rack-to-rack moves).
+// Same endpoint, different type filter. Cards: MV-... · product · "rack · who" · [Qty · When]
 const stockMovementSource: DataSource = {
-  url: "/api/stock-movements",
+  url: "/api/warehouse/movements",
   select: selectData,
   toVM: (r): RowVM => {
-    const fromRack = str(r, "fromRack");
-    const toRack = str(r, "toRack");
-    const who = str(r, "movedByName", "doneBy");
+    const rack = str(r, "rackLabel", "rackLocationId");
+    const who = str(r, "performedBy");
     return {
       id: str(r, "id"),
-      code: str(r, "movementNo", "code") || `MV-${str(r, "id").slice(0, 8)}`,
-      title: str(r, "productName", "productCode", "itemCode") || "—",
-      items: [fromRack && toRack ? `${toRack} ← ${fromRack}` : "", who].filter(Boolean).join(" · ") || undefined,
+      code: `MV-${str(r, "id").slice(0, 8)}`,
+      title: str(r, "productName", "productCode") || "—",
+      items: [rack, who, str(r, "reason")].filter(Boolean).join(" · ") || undefined,
       metas: [
-        { label: "Qty", value: num(r, "quantity", "qty") },
-        { label: "When", value: shortDate(dateOnly(r, "movedAt", "createdAt")) || "—" },
+        { label: "Qty", value: num(r, "quantity") },
+        { label: "When", value: shortDate(dateOnly(r, "createdAt")) || "—" },
       ],
       status: resolveStatus("Active", PAYMENT_STATUS_MAP),
     };
   },
   columns: [
-    textCol("code", "Reference", (r) => str(r, "movementNo", "code")),
     textCol("product", "Customer", (r) => str(r, "productName", "productCode")),
-    numCol("qty", "Qty", (r) => num(r, "quantity", "qty")),
+    textCol("rack", "Reference", (r) => str(r, "rackLabel")),
+    numCol("qty", "Qty", (r) => num(r, "quantity")),
   ],
-  defaultSort: { key: "movementNo", dir: "desc" },
+  defaultSort: { key: "rack", dir: "desc" },
   subTabs: [
-    { key: "move", label: "Movement", match: (r) => str(r, "moveType", "direction").toUpperCase() === "MOVE" || (!!str(r, "fromRack") && !!str(r, "toRack")) },
+    { key: "move", label: "Movement", match: (r) => str(r, "type").toUpperCase() === "TRANSFER" },
   ],
 };
 

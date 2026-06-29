@@ -18,7 +18,7 @@
 // see src/pages/m/config/modules.ts). L2 detail routes (/m/<slug>/:id) land on
 // a ComingSoon detail until Phase 3 supplies the real detail screen.
 // ===========================================================================
-import { type ComponentType, type ReactNode } from "react";
+import { useEffect, type ComponentType, type ReactNode } from "react";
 import { Route, Routes } from "react-router-dom";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { BottomTabBar, LeftRail } from "./components";
@@ -32,6 +32,7 @@ import { LineItemDetailScreen } from "./screens/LineItemDetailScreen";
 import { WarehouseScreen } from "./screens/WarehouseScreen";
 import { ProductionScreen } from "./screens/ProductionScreen";
 import { MODULE_CONFIGS } from "./config/modules";
+import { preloadMobileCritical } from "./lib/preload";
 
 // Modules whose L1 list is a bespoke screen (not the generic ModuleListScreen).
 // Their L2 detail route still uses the config-driven DocumentDetailScreen.
@@ -44,6 +45,13 @@ const CUSTOM_L1: Record<string, ComponentType> = {
 };
 
 export default function MobileLayout() {
+  // Kick off background preload of high-traffic endpoints on mount — every
+  // subsequent module list navigation paints from cache, not network. Runs
+  // once per shell mount (the shell stays mounted for the whole /m session).
+  useEffect(() => {
+    preloadMobileCritical();
+  }, []);
+
   // Fold-like wide landscape (Galaxy Z Fold unfolded, larger tablets in
   // landscape) — dc13 design v13. When on a detail route AND fold, render
   // the parent list on the LEFT (320px) + detail on the RIGHT (flex). Each

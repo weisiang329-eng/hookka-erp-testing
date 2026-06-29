@@ -646,20 +646,27 @@ function CreatePIWizard({
   );
 
   // Build a quick "supplier + supplierSku → binding" lookup so OCR lines
-  // can resolve the internal materialCode automatically.
+  // can resolve the internal materialCode automatically. The key is
+  // AGGRESSIVELY normalised (strip every non-alphanumeric char) so OCR
+  // drift like "SL.27" / "SL 27" / "SL-27" all hit the same binding row.
+  // Without this, the BE auto-bind silently misses ~half the lines on
+  // a real supplier doc because supplier SKUs are written inconsistently
+  // (dotted in one invoice, spaced in another, hyphenated in a third).
+  const normSku = (s: string | null | undefined) =>
+    (s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   const bindingsBySupplierSku = useMemo(() => {
     const m = new Map<string, SupplierMaterialBinding>();
     for (const b of bindings) {
-      const key = `${b.supplierId}__${(b.supplierSku || "").trim().toUpperCase()}`;
-      if (key.endsWith("__")) continue;
-      m.set(key, b);
+      const k = normSku(b.supplierSku);
+      if (!k || !b.supplierId) continue;
+      m.set(`${b.supplierId}__${k}`, b);
     }
     return m;
   }, [bindings]);
 
   const resolveBindingFor = useCallback(
     (supplierId: string, supplierSku: string): SupplierMaterialBinding | null => {
-      const sku = (supplierSku || "").trim().toUpperCase();
+      const sku = normSku(supplierSku);
       if (!sku || !supplierId) return null;
       return bindingsBySupplierSku.get(`${supplierId}__${sku}`) ?? null;
     },

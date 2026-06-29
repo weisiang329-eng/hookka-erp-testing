@@ -2,7 +2,6 @@
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useId } from "react";
 import { createPortal } from "react-dom";
-import { useNavigate } from "react-router-dom";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -47,6 +46,94 @@ async function enqueuePoBatch(
 // queue. Sync path was timing out on multi-page PDFs; queue path is async
 // + each result becomes reviewable the moment it lands.
 const QUEUE_BATCH_THRESHOLD = 0;
+
+// Polling interval for the in-modal /api/scan-queue/batch/:batchId polling
+// loop. Matches the legacy /scan-queue/:batchId page.
+const QUEUE_POLL_MS = 5000;
+
+// Minimal queue-row shape that the modal reads back. The kind=po rawJson
+// from the engine is `{ pos: ExtractedPO[] }`; we hydrate per-PO cards
+// from it on the client.
+type QueueItem = {
+  id: string;
+  batchId: string;
+  kind: "po" | "supplier";
+  fileName: string;
+  status: "queued" | "processing" | "done" | "failed" | "cached";
+  rawJson: unknown | null;
+  error: string | null;
+  cached: boolean;
+  fileHash: string;
+  createdAt: string;
+  consumedAt: string | null;
+};
+type QueueBatchPayload = {
+  batchId: string | null;
+  items: QueueItem[];
+  summary: {
+    total: number;
+    done: number;
+    failed: number;
+    processing: number;
+    queued: number;
+    cached: number;
+  } | null;
+};
+
+async function fetchScanQueueBatch(
+  batchId: string,
+): Promise<{ ok: true; data: QueueBatchPayload } | { ok: false; error: string }> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/scan-queue/batch/${encodeURIComponent(batchId)}`, {
+      credentials: "include",
+    });
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Network error" };
+  }
+  const text = await res.text();
+  let json: { success?: boolean; error?: string; data?: QueueBatchPayload };
+  try {
+    json = JSON.parse(text) as typeof json;
+  } catch {
+    return { ok: false, error: `Non-JSON response: ${text.slice(0, 120)}` };
+  }
+  if (!res.ok || !json.success || !json.data) {
+    return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+  }
+  return { ok: true, data: json.data };
+}
+
+async function fetchScanQueuePending(): Promise<QueueBatchPayload | null> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/scan-queue/pending?kind=po`, {
+      credentials: "include",
+    });
+  } catch {
+    return null;
+  }
+  const text = await res.text();
+  let json: { success?: boolean; data?: QueueBatchPayload };
+  try {
+    json = JSON.parse(text) as typeof json;
+  } catch {
+    return null;
+  }
+  if (!res.ok || !json.success || !json.data) return null;
+  return json.data;
+}
+
+async function postScanQueueConsume(rowId: string): Promise<void> {
+  try {
+    await fetch(`/api/scan-queue/${encodeURIComponent(rowId)}/consume`, {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch {
+    /* best-effort */
+  }
+}
 
 type Props = {
   open: boolean;
@@ -115,6 +202,14 @@ type ClaudeWarning = {
 
 type ClaudeScanRow = {
   sampleId: string;
+  // Background scan-queue row this PO was hydrated from (only set when the
+  // operator resumed via /api/scan-queue/pending or while polling an
+  // in-flight batch). Drives the post-create `/consume` POST so the
+  // resume endpoint stops surfacing this row on the next modal open. Null
+  // for sync /extract path. The same rowId may appear on multiple rows
+  // when one file produced multiple POs — the modal de-dupes consume
+  // calls.
+  scanQueueRowId: string | null;
   extracted: ClaudeExtractedPO;
   // `original` is a frozen snapshot of `extracted` at parse time. We compare
   // against it on confirm to decide whether to write the row back as a few-
@@ -179,10 +274,15 @@ function makeUploadId(): string {
 }
 
 export function ScanPOModal({ open, onClose, onCreated }: Props) {
-  const navigate = useNavigate();
   const [step, setStep] = useState<StepState>("upload");
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [parsing, setParsing] = useState(false);
+  // Background scan-queue plumbing (added 2026-06-30). The modal now holds
+  // the polling state in-place — no more redirect to /scan-queue/:batchId
+  // on upload. Each row that finishes scanning hydrates into a ClaudeScanRow
+  // and joins the preview list.
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   // Per-file OCR status, keyed by the file's stable upload id (NOT name —
   // two uploads can share a name). Lets the operator see each PDF advance
   // through queued → scanning → done/failed during a batch instead of one
@@ -239,6 +339,8 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     setCreating(false);
     setCreatedSOs([]);
     setErrors([]);
+    setActiveBatchId(null);
+    setQueueItems([]);
   };
 
   const handleClose = () => {
@@ -305,16 +407,16 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
 
     // BIG-batch path — anything past the threshold goes to the async
     // background scan queue. POST returns immediately with a batchId;
-    // navigate to /scan-queue/<batchId> and let the operator close the
-    // tab while OCR runs server-side. ≤2 files keeps the synchronous
-    // fan-out path below (so single quick scans don't bounce through the
-    // queue page). Owner ruling 2026-06-29.
+    // the modal STAYS OPEN and switches to the preview/waiting state.
+    // Each row becomes a ClaudeScanRow card the moment its status flips
+    // to done/cached. Operator can close + re-open and the resume effect
+    // below lands them back on the same in-flight preview.
     if (pdfFiles.length > QUEUE_BATCH_THRESHOLD) {
       const r = await enqueuePoBatch(pdfFiles);
       if (r.ok) {
+        setActiveBatchId(r.batchId);
         setParsing(false);
-        onClose();
-        navigate(`/scan-queue/${r.batchId}`);
+        setStep("preview");
         return;
       }
       setErrors([`Queue upload failed: ${r.error}`]);
@@ -545,6 +647,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           };
           claudeSuccesses.push({
             sampleId: s.sampleId,
+            scanQueueRowId: null,
             extracted,
             // Deep clone for diff comparison. Cheap (PO is small).
             original: JSON.parse(JSON.stringify(extracted)) as ClaudeExtractedPO,
@@ -601,7 +704,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     setSelectedPOs(new Set(Array.from({ length: total }, (_, i) => i)));
     setStep("preview");
     setParsing(false);
-  }, [navigate, onClose]);
+  }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -901,7 +1004,140 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     if (created.length > 0) {
       onCreated(created.map(c => c.soNo));
     }
+
+    // Mark each unique scan-queue row consumed so /api/scan-queue/pending
+    // stops resurfacing them. A single file can produce multiple POs (and
+    // thus multiple rows in claudeRows), so de-dupe by rowId.
+    const consumedRowIds = new Set<string>();
+    for (const row of selectedClaude) {
+      if (row.scanQueueRowId && !consumedRowIds.has(row.scanQueueRowId)) {
+        consumedRowIds.add(row.scanQueueRowId);
+        void postScanQueueConsume(row.scanQueueRowId);
+      }
+    }
   };
+
+  // Resume an in-flight batch when the modal opens (owner ruling 2026-06-29
+  // evening: re-opening the modal lands on the in-flight batch). kind=po
+  // filters out supplier scans from a different module.
+  useEffect(() => {
+    if (!open) return;
+    if (activeBatchId) return;
+    if (claudeRows.length > 0) return;
+    let cancelled = false;
+    void (async () => {
+      const pending = await fetchScanQueuePending();
+      if (cancelled || !pending?.batchId) return;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+      setActiveBatchId(pending.batchId);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+      setQueueItems(pending.items);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+      setStep("preview");
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+      setUsedClaude(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Poll the active batch + hydrate ClaudeScanRow cards from finished rows.
+  useEffect(() => {
+    if (!open || !activeBatchId) return;
+    let cancelled = false;
+    const tick = async () => {
+      const r = await fetchScanQueueBatch(activeBatchId);
+      if (cancelled) return;
+      if (!r.ok) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+        setErrors([`Queue poll failed: ${r.error}`]);
+        return;
+      }
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+      setQueueItems(r.data.items);
+      const ready = r.data.items.filter(
+        (it) =>
+          (it.status === "done" || it.status === "cached") &&
+          !it.consumedAt &&
+          it.rawJson != null,
+      );
+      if (ready.length === 0) return;
+      setClaudeRows((prev) => {
+        const haveKeys = new Set(
+          prev
+            .filter((r2) => r2.scanQueueRowId)
+            .map((r2) => {
+              const page = r2.extracted.pageNumbers?.[0] ?? 0;
+              return `${r2.scanQueueRowId}:${page}:${r2.extracted.customerPO}`;
+            }),
+        );
+        const additions: ClaudeScanRow[] = [];
+        for (const it of ready) {
+          const raw = it.rawJson as { pos?: ClaudeExtractedPO[] } | null;
+          const pos = Array.isArray(raw?.pos) ? raw.pos : [];
+          for (const poRaw of pos) {
+            const po: ClaudeExtractedPO = {
+              ...poRaw,
+              pageNumbers: poRaw.pageNumbers ?? [],
+              items: (poRaw.items ?? []).map((item) => ({
+                ...item,
+                customSpecials: Array.isArray(item.customSpecials) ? item.customSpecials : [],
+              })),
+            };
+            if (po.items.length === 0) continue;
+            const key = `${it.id}:${po.pageNumbers[0] ?? 0}:${po.customerPO}`;
+            if (haveKeys.has(key)) continue;
+            haveKeys.add(key);
+            additions.push({
+              sampleId: `queue-${it.id}-${po.pageNumbers[0] ?? 0}`,
+              scanQueueRowId: it.id,
+              extracted: po,
+              original: JSON.parse(JSON.stringify(po)) as ClaudeExtractedPO,
+              warnings: [],
+              // No client-side File for queue rows. The SO POST will send
+              // customerPOImageB64: null (renderPdfPagesToPng skips empty
+              // files). Original PDF lives in the queue table only.
+              file: new File([], it.fileName, { type: "application/pdf" }),
+              pageImageB64: null,
+              markedGold: false,
+            });
+          }
+        }
+        return additions.length > 0 ? [...prev, ...additions] : prev;
+      });
+    };
+    void tick();
+    const allTerminal = (its: QueueItem[]) =>
+      its.length > 0 &&
+      its.every((it) => ["done", "cached", "failed"].includes(it.status));
+    if (allTerminal(queueItems)) return;
+    // eslint-disable-next-line no-restricted-syntax -- polling loop, stops on terminal status
+    const id = window.setInterval(() => {
+      void tick();
+    }, QUEUE_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, activeBatchId]);
+
+  // Auto-select newly added queue rows so the operator doesn't have to tick
+  // every checkbox manually. Mirrors how the sync path defaults to all-
+  // selected.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional sync of derived selection state
+    setSelectedPOs((prev) => {
+      const fbCount = parseResult?.purchaseOrders.length ?? 0;
+      const total = claudeRows.length + fbCount;
+      if (total === prev.size) return prev;
+      const next = new Set(prev);
+      for (let i = 0; i < total; i++) next.add(i);
+      return next;
+    });
+  }, [claudeRows.length, parseResult?.purchaseOrders.length]);
 
   if (!open) return null;
 
@@ -953,7 +1189,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             />
           )}
 
-          {step === "preview" && (claudeRows.length > 0 || parseResult) && (
+          {step === "preview" && (
             <PreviewStep
               claudeRows={claudeRows}
               setClaudeRows={setClaudeRows}
@@ -961,9 +1197,16 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
               result={parseResult}
               selectedPOs={selectedPOs}
               expandedPO={expandedPO}
+              queueItems={queueItems}
               onTogglePO={togglePO}
               onExpandPO={setExpandedPO}
-              onBack={() => { setStep("upload"); setParseResult(null); setClaudeRows([]); }}
+              onBack={() => {
+                setStep("upload");
+                setParseResult(null);
+                setClaudeRows([]);
+                setActiveBatchId(null);
+                setQueueItems([]);
+              }}
               onConfirm={handleCreateSOs}
               catalog={catalog}
             />
@@ -1158,7 +1401,7 @@ function InfoCard({ icon, title, desc }: { icon: string; title: string; desc: st
 }
 
 function PreviewStep({
-  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, onTogglePO, onExpandPO, onBack, onConfirm, catalog,
+  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, queueItems, onTogglePO, onExpandPO, onBack, onConfirm, catalog,
 }: {
   claudeRows: ClaudeScanRow[];
   setClaudeRows: React.Dispatch<React.SetStateAction<ClaudeScanRow[]>>;
@@ -1166,6 +1409,7 @@ function PreviewStep({
   result: POParseResult | null;
   selectedPOs: Set<number>;
   expandedPO: number | null;
+  queueItems: QueueItem[];
   onTogglePO: (i: number) => void;
   onExpandPO: (i: number | null) => void;
   onBack: () => void;
@@ -1245,13 +1489,22 @@ function PreviewStep({
     setClaudeRows(prev => prev.map((r, i) => i === rowIdx ? { ...r, markedGold: !r.markedGold } : r));
   };
 
+  // Queue-state split — drives the scanning-status strip + empty-state
+  // language when no cards have arrived yet.
+  const inFlight = queueItems.filter(
+    (q) => q.status === "queued" || q.status === "processing",
+  );
+  const failedQueue = queueItems.filter((q) => q.status === "failed");
+
   return (
     <div className="space-y-4">
       {/* Summary */}
       <div className="flex items-center justify-between">
         <div>
           <h3 className="font-semibold text-[#1F1D1B] flex items-center gap-2">
-            Found {totalCount} Purchase Order{totalCount !== 1 ? "s" : ""}
+            {totalCount === 0 && inFlight.length > 0
+              ? `Reading ${inFlight.length} document${inFlight.length !== 1 ? "s" : ""}…`
+              : `Found ${totalCount} Purchase Order${totalCount !== 1 ? "s" : ""}`}
             {usedClaude && (
               <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
                 <Sparkles className="h-3 w-3 inline mr-1" /> AI
@@ -1259,10 +1512,51 @@ function PreviewStep({
             )}
           </h3>
           <p className="text-sm text-[#6B7280]">
-            {selectedPOs.size} selected — edit any field inline, then confirm
+            {totalCount === 0 && inFlight.length > 0
+              ? "Stay on this screen — each PO appears here the moment it lands. You can close the modal and come back later too."
+              : `${selectedPOs.size} selected — edit any field inline, then confirm`}
           </p>
         </div>
       </div>
+
+      {/* In-flight queue status strip */}
+      {(inFlight.length > 0 || failedQueue.length > 0) && (
+        <div className="border border-[#E2DDD8] rounded-lg overflow-hidden text-sm">
+          {inFlight.map((it) => (
+            <div
+              key={it.id}
+              className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[#EFEAE6] last:border-b-0 bg-[#FAFAF9]"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="h-4 w-4 text-[#9CA3AF] flex-shrink-0" />
+                <span className="truncate text-[#1F1D1B]">{it.fileName}</span>
+              </div>
+              <span className="flex items-center gap-1.5 text-xs font-medium text-[#6B5C32] flex-shrink-0">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {it.status === "queued" ? "Queued" : "Scanning"}
+              </span>
+            </div>
+          ))}
+          {failedQueue.map((it) => (
+            <div
+              key={it.id}
+              className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[#EFEAE6] last:border-b-0 bg-red-50/40"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="h-4 w-4 text-[#9CA3AF] flex-shrink-0" />
+                <span className="truncate text-[#1F1D1B]">{it.fileName}</span>
+                {it.error && (
+                  <span className="text-xs text-red-700 truncate">— {it.error}</span>
+                )}
+              </div>
+              <span className="flex items-center gap-1.5 text-xs font-medium text-red-700 flex-shrink-0">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                Failed
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Warnings */}
       {result && result.errors.length > 0 && (
@@ -1277,6 +1571,11 @@ function PreviewStep({
 
       {/* PO Cards */}
       <div className="space-y-3 max-h-[65vh] overflow-y-auto">
+        {totalCount === 0 && inFlight.length === 0 && (
+          <div className="border border-dashed border-[#E2DDD8] rounded-lg p-8 text-center text-sm text-[#6B7280]">
+            No purchase orders ready yet — waiting for the scan to finish.
+          </div>
+        )}
         {claudeRows.map((row, idx) => (
           <ClaudePOCard
             key={`claude-${idx}`}

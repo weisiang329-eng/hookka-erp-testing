@@ -23,7 +23,6 @@
 // ---------------------------------------------------------------------------
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
@@ -305,6 +304,99 @@ async function enqueueScanBatch(
 // async + you can close the tab + each result becomes reviewable the moment
 // it lands (no waiting for the whole batch).
 const QUEUE_BATCH_THRESHOLD = 0;
+
+// Poll interval for /api/scan-queue/batch/:batchId. Matches the legacy
+// /scan-queue/:batchId page so the load profile is unchanged.
+const QUEUE_POLL_MS = 5000;
+
+// Shape of the rows the modal cares about from the queue endpoints. The
+// scan-queue worker fills rawJson with the SupplierExtraction (kind=supplier)
+// or the engine's raw { pos: [...] } payload (kind=po). Both PI and GRN
+// wizards consume the supplier shape; the PO wizard handles its own.
+type QueueItem = {
+  id: string;
+  batchId: string;
+  kind: "po" | "supplier";
+  fileName: string;
+  status: "queued" | "processing" | "done" | "failed" | "cached";
+  rawJson: unknown | null;
+  error: string | null;
+  cached: boolean;
+  fileHash: string;
+  createdAt: string;
+  consumedAt: string | null;
+};
+type QueueBatchPayload = {
+  batchId: string | null;
+  items: QueueItem[];
+  summary: {
+    total: number;
+    done: number;
+    failed: number;
+    processing: number;
+    queued: number;
+    cached: number;
+  } | null;
+};
+
+async function fetchScanQueueBatch(
+  batchId: string,
+): Promise<{ ok: true; data: QueueBatchPayload } | { ok: false; error: string }> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/scan-queue/batch/${encodeURIComponent(batchId)}`, {
+      credentials: "include",
+    });
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Network error" };
+  }
+  const text = await res.text();
+  let json: { success?: boolean; error?: string; data?: QueueBatchPayload };
+  try {
+    json = JSON.parse(text) as typeof json;
+  } catch {
+    return { ok: false, error: `Non-JSON response: ${text.slice(0, 120)}` };
+  }
+  if (!res.ok || !json.success || !json.data) {
+    return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+  }
+  return { ok: true, data: json.data };
+}
+
+async function fetchScanQueuePending(
+  kind: "po" | "supplier",
+): Promise<QueueBatchPayload | null> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/scan-queue/pending?kind=${kind}`, {
+      credentials: "include",
+    });
+  } catch {
+    return null;
+  }
+  const text = await res.text();
+  let json: { success?: boolean; data?: QueueBatchPayload };
+  try {
+    json = JSON.parse(text) as typeof json;
+  } catch {
+    return null;
+  }
+  if (!res.ok || !json.success || !json.data) return null;
+  return json.data;
+}
+
+async function postScanQueueConsume(rowId: string): Promise<void> {
+  try {
+    await fetch(`/api/scan-queue/${encodeURIComponent(rowId)}/consume`, {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch {
+    // best-effort — if the consume call fails, the worst case is the
+    // resume endpoint will resurface this row next session. The PI/GRN
+    // was already created, so the operator can ignore the duplicate.
+  }
+}
 
 // ─── Top-level dispatcher ─────────────────────────────────────────────────
 
@@ -627,6 +719,11 @@ function ApplyModeModal({
 
 // ─── create-pi wizard (NEW, mirrors scan-po-modal shell) ──────────────────
 
+// Step state. After the 2026-06-30 in-modal queue rework the "preview" step
+// also handles the waiting-for-OCR sub-state (each queue row becomes a card
+// the moment its status flips to done/cached). The dedicated "creating"
+// pseudo-step renders a centred spinner only when EVERY included card is
+// being POSTed at once; per-card create still runs on the preview screen.
 type StepState = "upload" | "preview" | "creating" | "done";
 
 type PreviewLine = {
@@ -649,6 +746,11 @@ type PreviewLine = {
 type PreviewCard = {
   id: string;
   fileName: string;
+  // Background scan-queue row that produced this card. When set, a
+  // successful Create-as-DRAFT also POSTs /api/scan-queue/:id/consume so
+  // the resume endpoint stops surfacing the row next session. Null when
+  // the card was built off the legacy sync /extract path.
+  scanQueueRowId: string | null;
   // Sample id for the gold/confirm endpoint.
   sampleId: string | null;
   // Operator can opt in or out per card; defaults to true.
@@ -707,7 +809,6 @@ function CreatePIWizard({
   title = "Scan supplier document",
 }: CreatePIModeProps) {
   const { confirm } = useConfirm();
-  const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState<StepState>("upload");
@@ -718,6 +819,13 @@ function CreatePIWizard({
   >({});
   const [errors, setErrors] = useState<string[]>([]);
   const [cards, setCards] = useState<PreviewCard[]>([]);
+  // Active background-queue batch (set the moment /upload returns; cleared
+  // when the modal resets). Drives the polling effect + queue row list.
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
+  // Latest poll snapshot of every row in `activeBatchId`. Modal renders a
+  // per-file status strip from this above the preview cards. Cards are
+  // built lazily inside the poll once a row's status hits done/cached.
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
 
   const activeOrgs = useMemo(
     () => organisations.filter((o) => o.isActive !== false),
@@ -732,6 +840,8 @@ function CreatePIWizard({
     setFileProgress({});
     setErrors([]);
     setCards([]);
+    setActiveBatchId(null);
+    setQueueItems([]);
   }, []);
 
   const handleClose = useCallback(() => {
@@ -739,6 +849,11 @@ function CreatePIWizard({
     onClose();
   }, [reset, onClose]);
 
+  // "Busy" gates the close-confirm dialog. Once the operator has switched to
+  // the preview step the background queue keeps running even if they close
+  // the modal — re-opening resumes via /pending — so we DON'T treat preview
+  // with in-flight queue rows as busy. Only an in-progress upload POST or
+  // an in-flight create-all really needs the discard prompt.
   const isBusy = parsing || step === "creating";
 
   const requestClose = async () => {
@@ -890,6 +1005,7 @@ function CreatePIWizard({
       fileName: string,
       ex: SupplierExtraction,
       sampleId: string | null,
+      scanQueueRowId: string | null = null,
     ): PreviewCard => {
       // Try to match the extracted supplierName to a real supplier in the
       // catalog. Failing that, fall back to the host-supplied default.
@@ -954,6 +1070,7 @@ function CreatePIWizard({
       return {
         id: `card-${makeUploadId()}`,
         fileName,
+        scanQueueRowId,
         sampleId,
         include: true,
         creating: false,
@@ -973,7 +1090,7 @@ function CreatePIWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, defaultSupplierId, defaultPurchaseOrderId, supplierById, activeOrgs, resolveBindingFor, materialByCode],
+    [suppliers, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, materialByCode],
   );
 
   // ─── Drag-drop + multi-file extract ────────────────────────────────────
@@ -1004,18 +1121,18 @@ function CreatePIWizard({
 
       // BIG-batch path — anything past the threshold goes to the async
       // background queue so the operator can close the tab and the OCR
-      // continues server-side. ≤2 files stays on the synchronous path
-      // below so a quick single-file scan doesn't bounce through the
-      // queue page. Owner ruling 2026-06-29.
+      // continues server-side. Owner ruling 2026-06-29 evening: the modal
+      // STAYS OPEN and switches to the preview/waiting screen. Cards
+      // populate as each row finishes scanning, in-place.
       if (accepted.length > QUEUE_BATCH_THRESHOLD) {
         const supplierIdForHint = defaultSupplierId ?? null;
         const r = await enqueueScanBatch("supplier", accepted, {
           supplierId: supplierIdForHint,
         });
         if (r.ok) {
+          setActiveBatchId(r.batchId);
           setParsing(false);
-          onClose();
-          navigate(`/scan-queue/${r.batchId}`);
+          setStep("preview");
           return;
         }
         setErrors([`Queue upload failed: ${r.error}`]);
@@ -1062,7 +1179,7 @@ function CreatePIWizard({
       setParsing(false);
       setStep("preview");
     },
-    [buildCard, defaultSupplierId, supplierById, navigate, onClose],
+    [buildCard, defaultSupplierId, supplierById],
   );
 
   const handleDrop = useCallback(
@@ -1265,6 +1382,11 @@ function CreatePIWizard({
           });
           if (j.data?.id) createdIds.push(j.data.id);
           else if (j.data?.piNo) createdIds.push(j.data.piNo);
+          // Mark the queue row consumed so /api/scan-queue/pending stops
+          // resurfacing it on re-open. Best-effort — see postScanQueueConsume.
+          if (card.scanQueueRowId) {
+            void postScanQueueConsume(card.scanQueueRowId);
+          }
         } catch (err) {
           patchCard(card.id, {
             creating: false,
@@ -1284,6 +1406,100 @@ function CreatePIWizard({
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
     if (!open) reset();
   }, [open, reset]);
+
+  // Resume an in-flight batch on modal open. The owner ruling 2026-06-29
+  // evening: "点了出去再点进来,它就会把那些扫描好的东西准备好" — re-opening
+  // the modal jumps straight to the preview/waiting state with the user's
+  // most recent un-consumed batch. `kind=supplier` so we don't pick up a PO
+  // batch from a different module. Skipped if cards are already populated
+  // (a sync /extract path already filled them).
+  useEffect(() => {
+    if (!open) return;
+    if (activeBatchId) return;
+    if (cards.length > 0) return;
+    let cancelled = false;
+    void (async () => {
+      const pending = await fetchScanQueuePending("supplier");
+      if (cancelled || !pending?.batchId) return;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+      setActiveBatchId(pending.batchId);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+      setQueueItems(pending.items);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+      setStep("preview");
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once per open
+  }, [open]);
+
+  // Poll the active batch every 5s while the modal is open. The loop self-
+  // terminates once every row reaches a terminal status (done/cached/failed).
+  // We also turn each newly-done row into a PreviewCard on first sight,
+  // keyed by scanQueueRowId so a row never builds twice.
+  useEffect(() => {
+    if (!open || !activeBatchId) return;
+    let cancelled = false;
+    const tick = async () => {
+      const r = await fetchScanQueueBatch(activeBatchId);
+      if (cancelled) return;
+      if (!r.ok) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+        setErrors([`Queue poll failed: ${r.error}`]);
+        return;
+      }
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+      setQueueItems(r.data.items);
+      // Promote freshly-finished, un-consumed rows into preview cards.
+      const ready = r.data.items.filter(
+        (it) =>
+          (it.status === "done" || it.status === "cached") &&
+          !it.consumedAt &&
+          it.rawJson != null,
+      );
+      if (ready.length === 0) return;
+      setCards((prev) => {
+        const have = new Set(
+          prev.map((c) => c.scanQueueRowId).filter((x): x is string => !!x),
+        );
+        const additions: PreviewCard[] = [];
+        for (const it of ready) {
+          if (have.has(it.id)) continue;
+          // Each row's rawJson is a SupplierExtraction (the engine returns
+          // it verbatim for kind=supplier). Defensive parse so a malformed
+          // row doesn't tear down the whole modal.
+          let ex: SupplierExtraction | null = null;
+          try {
+            ex = it.rawJson as SupplierExtraction;
+          } catch {
+            ex = null;
+          }
+          if (!ex) continue;
+          // sampleId is null for queue-built cards — the engine writes a
+          // file-level sample on its own and the id isn't recoverable from
+          // the queue. Gold/correction confirm skipped in that case.
+          additions.push(buildCard(it.fileName, ex, null, it.id));
+        }
+        return additions.length > 0 ? [...prev, ...additions] : prev;
+      });
+    };
+    void tick();
+    const allTerminal = (its: QueueItem[]) =>
+      its.length > 0 &&
+      its.every((it) => ["done", "cached", "failed"].includes(it.status));
+    if (allTerminal(queueItems)) return;
+    // eslint-disable-next-line no-restricted-syntax -- polling loop, stops on terminal status
+    const id = window.setInterval(() => {
+      void tick();
+    }, QUEUE_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+    // queueItems intentionally not a dep — we read it inside the closure for the stop check, which is fine for an interval driver
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, activeBatchId, buildCard]);
 
   if (!open) return null;
 
@@ -1343,6 +1559,7 @@ function CreatePIWizard({
           {step === "preview" && (
             <PreviewStep
               cards={cards}
+              queueItems={queueItems}
               suppliers={suppliers}
               activeOrgs={activeOrgs}
               purchaseOrders={purchaseOrders}
@@ -1361,6 +1578,8 @@ function CreatePIWizard({
               onBack={() => {
                 setStep("upload");
                 setCards([]);
+                setActiveBatchId(null);
+                setQueueItems([]);
               }}
               onConfirm={handleCreateAll}
               includedCount={includedCount}
@@ -1430,6 +1649,56 @@ function FileStatusBadge({ status }: { status: "queued" | "scanning" | "done" | 
     );
   }
   return <span className="text-xs font-medium text-[#9CA3AF] flex-shrink-0">Queued</span>;
+}
+
+// Shared queue-status strip rendered above the preview cards. Lists every
+// row still scanning / queued, plus any rows that hit a hard failure, so
+// the operator can see exactly which file the modal is waiting on. Used by
+// both the PI and GRN wizards.
+function ScanQueueStrip({
+  inFlight,
+  failed,
+}: {
+  inFlight: QueueItem[];
+  failed: QueueItem[];
+}) {
+  return (
+    <div className="border border-[#E2DDD8] rounded-lg overflow-hidden text-sm">
+      {inFlight.map((it) => (
+        <div
+          key={it.id}
+          className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[#EFEAE6] last:border-b-0 bg-[#FAFAF9]"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <FileText className="h-4 w-4 text-[#9CA3AF] flex-shrink-0" />
+            <span className="truncate text-[#1F1D1B]">{it.fileName}</span>
+          </div>
+          <span className="flex items-center gap-1.5 text-xs font-medium text-[#6B5C32] flex-shrink-0">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {it.status === "queued" ? "Queued" : "Scanning"}
+          </span>
+        </div>
+      ))}
+      {failed.map((it) => (
+        <div
+          key={it.id}
+          className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[#EFEAE6] last:border-b-0 bg-red-50/40"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <FileText className="h-4 w-4 text-[#9CA3AF] flex-shrink-0" />
+            <span className="truncate text-[#1F1D1B]">{it.fileName}</span>
+            {it.error && (
+              <span className="text-xs text-red-700 truncate">— {it.error}</span>
+            )}
+          </div>
+          <span className="flex items-center gap-1.5 text-xs font-medium text-red-700 flex-shrink-0">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Failed
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function InfoCard({ icon, title, desc }: { icon: React.ReactNode; title: string; desc: string }) {
@@ -1570,6 +1839,7 @@ function UploadStep({
 
 function PreviewStep({
   cards,
+  queueItems,
   suppliers,
   activeOrgs,
   purchaseOrders,
@@ -1590,6 +1860,7 @@ function PreviewStep({
   includedCount,
 }: {
   cards: PreviewCard[];
+  queueItems: QueueItem[];
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
@@ -1618,21 +1889,34 @@ function PreviewStep({
     (c) => c.include && !c.createdPiNo && c.lines.some(isLineUnbound),
   );
   const hasBlocking = blockingCards.length > 0;
+  // Queue-state split: which uploads are still being read by Claude?
+  const inFlight = queueItems.filter(
+    (q) => q.status === "queued" || q.status === "processing",
+  );
+  const failedQueue = queueItems.filter((q) => q.status === "failed");
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h3 className="font-semibold text-[#1F1D1B] flex items-center gap-2">
-            Found {cards.length} document{cards.length !== 1 ? "s" : ""}
+            {cards.length === 0 && inFlight.length > 0
+              ? `Reading ${inFlight.length} document${inFlight.length !== 1 ? "s" : ""}…`
+              : `Found ${cards.length} document${cards.length !== 1 ? "s" : ""}`}
             <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
               <Sparkles className="h-3 w-3 inline mr-1" /> AI
             </Badge>
           </h3>
           <p className="text-sm text-[#6B7280]">
-            {includedCount} selected — edit any field, then create
+            {cards.length === 0 && inFlight.length > 0
+              ? "Stay on this screen — each result appears here the moment it lands. You can close the modal and come back later too."
+              : `${includedCount} selected — edit any field, then create`}
           </p>
         </div>
       </div>
+
+      {(inFlight.length > 0 || failedQueue.length > 0) && (
+        <ScanQueueStrip inFlight={inFlight} failed={failedQueue} />
+      )}
 
       {errors.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
@@ -1645,6 +1929,11 @@ function PreviewStep({
       )}
 
       <div className="space-y-3 max-h-[65vh] overflow-y-auto">
+        {cards.length === 0 && inFlight.length === 0 && (
+          <div className="border border-dashed border-[#E2DDD8] rounded-lg p-8 text-center text-sm text-[#6B7280]">
+            No documents ready yet — waiting for the scan to finish.
+          </div>
+        )}
         {cards.map((card) => (
           <PICard
             key={card.id}
@@ -2226,6 +2515,9 @@ type GRNPreviewLine = {
 type GRNPreviewCard = {
   id: string;
   fileName: string;
+  // Queue row id when this card was built off a background scan-queue row.
+  // Null for sync /extract path. Drives the post-create `/consume` POST.
+  scanQueueRowId: string | null;
   sampleId: string | null;
   include: boolean;
   creating: boolean;
@@ -2268,7 +2560,6 @@ function CreateGRNWizard({
   title = "Scan supplier document",
 }: CreateGRNModeProps) {
   const { confirm } = useConfirm();
-  const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState<StepState>("upload");
@@ -2279,6 +2570,9 @@ function CreateGRNWizard({
   >({});
   const [errors, setErrors] = useState<string[]>([]);
   const [cards, setCards] = useState<GRNPreviewCard[]>([]);
+  // Background-queue plumbing (mirrors CreatePIWizard 2026-06-30 rework).
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
 
   const activeOrgs = useMemo(
     () => organisations.filter((o) => o.isActive !== false),
@@ -2292,6 +2586,8 @@ function CreateGRNWizard({
     setFileProgress({});
     setErrors([]);
     setCards([]);
+    setActiveBatchId(null);
+    setQueueItems([]);
   }, []);
 
   const handleClose = useCallback(() => {
@@ -2425,6 +2721,7 @@ function CreateGRNWizard({
       fileName: string,
       ex: SupplierExtraction,
       sampleId: string | null,
+      scanQueueRowId: string | null = null,
     ): GRNPreviewCard => {
       const guessName = (ex.supplierName ?? "").trim().toUpperCase();
       const matched = guessName
@@ -2470,6 +2767,7 @@ function CreateGRNWizard({
       return {
         id: `card-${makeUploadId()}`,
         fileName,
+        scanQueueRowId,
         sampleId,
         include: true,
         creating: false,
@@ -2488,7 +2786,7 @@ function CreateGRNWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, defaultSupplierId, defaultPurchaseOrderId, supplierById, activeOrgs, resolveBindingFor, materialByCode],
+    [suppliers, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, materialByCode],
   );
 
   const handleFiles = useCallback(
@@ -2516,17 +2814,19 @@ function CreateGRNWizard({
       setParsing(true);
       setFileProgress(Object.fromEntries(uploaded.map((u) => [u.id, "queued" as const])));
 
-      // BIG-batch path — same gating as CreatePIWizard. >2 files goes to
-      // the async queue so the operator can close the tab. ≤2 stays sync.
+      // BIG-batch path — same gating as CreatePIWizard. Owner ruling
+      // 2026-06-29 evening: keep the modal open and switch to preview, so
+      // each result lands in-place. The operator can close + re-open and
+      // /api/scan-queue/pending resumes them right back here.
       if (accepted.length > QUEUE_BATCH_THRESHOLD) {
         const supplierIdForHint = defaultSupplierId ?? null;
         const r = await enqueueScanBatch("supplier", accepted, {
           supplierId: supplierIdForHint,
         });
         if (r.ok) {
+          setActiveBatchId(r.batchId);
           setParsing(false);
-          onClose();
-          navigate(`/scan-queue/${r.batchId}`);
+          setStep("preview");
           return;
         }
         setErrors([`Queue upload failed: ${r.error}`]);
@@ -2572,7 +2872,7 @@ function CreateGRNWizard({
       setParsing(false);
       setStep("preview");
     },
-    [buildCard, defaultSupplierId, supplierById, navigate, onClose],
+    [buildCard, defaultSupplierId, supplierById],
   );
 
   const handleDrop = useCallback(
@@ -2766,6 +3066,9 @@ function CreateGRNWizard({
           });
           if (j.data?.id) createdIds.push(j.data.id);
           else if (grnNo !== "(created)") createdIds.push(grnNo);
+          if (card.scanQueueRowId) {
+            void postScanQueueConsume(card.scanQueueRowId);
+          }
         } catch (err) {
           patchCard(card.id, {
             creating: false,
@@ -2783,6 +3086,83 @@ function CreateGRNWizard({
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
     if (!open) reset();
   }, [open, reset]);
+
+  // Resume + polling — exact mirror of CreatePIWizard. See comments there.
+  useEffect(() => {
+    if (!open) return;
+    if (activeBatchId) return;
+    if (cards.length > 0) return;
+    let cancelled = false;
+    void (async () => {
+      const pending = await fetchScanQueuePending("supplier");
+      if (cancelled || !pending?.batchId) return;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+      setActiveBatchId(pending.batchId);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+      setQueueItems(pending.items);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+      setStep("preview");
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !activeBatchId) return;
+    let cancelled = false;
+    const tick = async () => {
+      const r = await fetchScanQueueBatch(activeBatchId);
+      if (cancelled) return;
+      if (!r.ok) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+        setErrors([`Queue poll failed: ${r.error}`]);
+        return;
+      }
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+      setQueueItems(r.data.items);
+      const ready = r.data.items.filter(
+        (it) =>
+          (it.status === "done" || it.status === "cached") &&
+          !it.consumedAt &&
+          it.rawJson != null,
+      );
+      if (ready.length === 0) return;
+      setCards((prev) => {
+        const have = new Set(
+          prev.map((c) => c.scanQueueRowId).filter((x): x is string => !!x),
+        );
+        const additions: GRNPreviewCard[] = [];
+        for (const it of ready) {
+          if (have.has(it.id)) continue;
+          let ex: SupplierExtraction | null = null;
+          try {
+            ex = it.rawJson as SupplierExtraction;
+          } catch {
+            ex = null;
+          }
+          if (!ex) continue;
+          additions.push(buildCard(it.fileName, ex, null, it.id));
+        }
+        return additions.length > 0 ? [...prev, ...additions] : prev;
+      });
+    };
+    void tick();
+    const allTerminal = (its: QueueItem[]) =>
+      its.length > 0 &&
+      its.every((it) => ["done", "cached", "failed"].includes(it.status));
+    if (allTerminal(queueItems)) return;
+    // eslint-disable-next-line no-restricted-syntax -- polling loop, stops on terminal status
+    const id = window.setInterval(() => {
+      void tick();
+    }, QUEUE_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, activeBatchId, buildCard]);
 
   if (!open) return null;
 
@@ -2839,6 +3219,7 @@ function CreateGRNWizard({
           {step === "preview" && (
             <GRNPreviewStep
               cards={cards}
+              queueItems={queueItems}
               suppliers={suppliers}
               activeOrgs={activeOrgs}
               purchaseOrders={purchaseOrders}
@@ -2857,6 +3238,8 @@ function CreateGRNWizard({
               onBack={() => {
                 setStep("upload");
                 setCards([]);
+                setActiveBatchId(null);
+                setQueueItems([]);
               }}
               onConfirm={handleCreateAll}
               includedCount={includedCount}
@@ -2886,6 +3269,7 @@ function CreateGRNWizard({
 
 function GRNPreviewStep({
   cards,
+  queueItems,
   suppliers,
   activeOrgs,
   purchaseOrders,
@@ -2906,6 +3290,7 @@ function GRNPreviewStep({
   includedCount,
 }: {
   cards: GRNPreviewCard[];
+  queueItems: QueueItem[];
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
@@ -2931,22 +3316,34 @@ function GRNPreviewStep({
     (c) => c.include && !c.createdGrnNo && c.lines.some(isLineUnbound),
   );
   const hasBlocking = blockingCards.length > 0;
+  const inFlight = queueItems.filter(
+    (q) => q.status === "queued" || q.status === "processing",
+  );
+  const failedQueue = queueItems.filter((q) => q.status === "failed");
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h3 className="font-semibold text-[#1F1D1B] flex items-center gap-2">
-            Found {cards.length} document{cards.length !== 1 ? "s" : ""}
+            {cards.length === 0 && inFlight.length > 0
+              ? `Reading ${inFlight.length} document${inFlight.length !== 1 ? "s" : ""}…`
+              : `Found ${cards.length} document${cards.length !== 1 ? "s" : ""}`}
             <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
               <Sparkles className="h-3 w-3 inline mr-1" /> AI
             </Badge>
           </h3>
           <p className="text-sm text-[#6B7280]">
-            {includedCount} selected — edit any field, then create
+            {cards.length === 0 && inFlight.length > 0
+              ? "Stay on this screen — each result appears here the moment it lands. You can close the modal and come back later too."
+              : `${includedCount} selected — edit any field, then create`}
           </p>
         </div>
       </div>
+
+      {(inFlight.length > 0 || failedQueue.length > 0) && (
+        <ScanQueueStrip inFlight={inFlight} failed={failedQueue} />
+      )}
 
       {errors.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
@@ -2959,6 +3356,11 @@ function GRNPreviewStep({
       )}
 
       <div className="space-y-3 max-h-[65vh] overflow-y-auto">
+        {cards.length === 0 && inFlight.length === 0 && (
+          <div className="border border-dashed border-[#E2DDD8] rounded-lg p-8 text-center text-sm text-[#6B7280]">
+            No documents ready yet — waiting for the scan to finish.
+          </div>
+        )}
         {cards.map((card) => (
           <GRNCard
             key={card.id}

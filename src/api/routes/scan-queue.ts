@@ -114,7 +114,8 @@ async function ensureScanQueueTable(
            created_at      TEXT NOT NULL,
            started_at      TEXT,
            completed_at    TEXT,
-           org_id          TEXT
+           org_id          TEXT,
+           consumed_at     TIMESTAMP
          )`,
       )
       .run();
@@ -131,6 +132,21 @@ async function ensureScanQueueTable(
     await db
       .prepare(
         "CREATE INDEX IF NOT EXISTS scan_queue_hash_idx ON scan_queue (file_hash)",
+      )
+      .run();
+    // Runtime self-apply for the consumed_at column added 2026-06-29 (owner
+    // ruling). The CREATE TABLE above carries it for fresh installs; this
+    // ALTER ... IF NOT EXISTS handles existing deployments. Once the modal
+    // creates a PI/GRN/SO from a queue row, that row's consumed_at flips
+    // and /api/scan-queue/pending stops resurfacing it.
+    await db
+      .prepare(
+        "ALTER TABLE scan_queue ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMP",
+      )
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS scan_queue_pending_idx ON scan_queue (created_by, created_at) WHERE consumed_at IS NULL",
       )
       .run();
     scanQueueTableEnsured = true;
@@ -162,6 +178,7 @@ type ScanQueueRow = {
   startedAt: string | null;
   completedAt: string | null;
   orgId: string | null;
+  consumedAt: string | null;
 };
 
 // Hydrate a DB row (camelCase via the adapter's projection) into our typed
@@ -203,6 +220,7 @@ function hydrateRow(r: Record<string, unknown>): ScanQueueRow {
     startedAt: (r.startedAt ?? r.started_at ?? null) as string | null,
     completedAt: (r.completedAt ?? r.completed_at ?? null) as string | null,
     orgId: (r.orgId ?? r.org_id ?? null) as string | null,
+    consumedAt: (r.consumedAt ?? r.consumed_at ?? null) as string | null,
   };
 }
 
@@ -561,6 +579,7 @@ app.get("/batch/:batchId", async (c) => {
       createdAt: row.createdAt,
       startedAt: row.startedAt,
       completedAt: row.completedAt,
+      consumedAt: row.consumedAt,
     };
   });
 
@@ -574,6 +593,137 @@ app.get("/batch/:batchId", async (c) => {
   };
 
   return c.json({ success: true, data: { batchId, items, summary } });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/scan-queue/pending?kind=po|supplier
+// Returns the user's MOST RECENT batch (within the last 7 days) that still
+// has at least one un-consumed row. The modal calls this on open so an
+// operator who closed the modal mid-batch lands back on the same in-flight
+// preview the next time they re-open it. If `kind` is supplied, only batches
+// of that kind are eligible — keeps the PI modal from resuming a PO batch.
+//
+// Response shape mirrors GET /batch/:batchId so the modal can use the same
+// hydration path. Empty payload (`data.batchId === null`) means "no pending
+// batch — show the upload step".
+//
+// IMPORTANT: this route MUST be registered before the `/:id` catch-all, or
+// Hono will treat "pending" as a row id and shadow this endpoint.
+// ---------------------------------------------------------------------------
+app.get("/pending", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+
+  await ensureScanQueueTable(c.var.DB);
+  const orgId = getOrgId(c);
+  const userId = (c.get("userId" as never) as string | undefined) ?? null;
+  const kindFilter = c.req.query("kind");
+  const cutoffIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  if (!userId) {
+    return c.json({ success: true, data: { batchId: null, items: [], summary: null } });
+  }
+
+  // Find the most recent batch (by max created_at) that the user owns and
+  // still has at least one un-consumed row. Optionally constrained by kind.
+  let latest: { batchId: string; createdAt: string } | null = null;
+  try {
+    if (kindFilter === "po" || kindFilter === "supplier") {
+      latest = await c.var.DB.prepare(
+        `SELECT batch_id AS "batchId", MAX(created_at) AS "createdAt"
+           FROM scan_queue
+          WHERE created_by = ?
+            AND (org_id = ? OR org_id IS NULL)
+            AND kind = ?
+            AND created_at >= ?
+            AND consumed_at IS NULL
+          GROUP BY batch_id
+          ORDER BY MAX(created_at) DESC
+          LIMIT 1`,
+      )
+        .bind(userId, orgId, kindFilter, cutoffIso)
+        .first<{ batchId: string; createdAt: string }>();
+    } else {
+      latest = await c.var.DB.prepare(
+        `SELECT batch_id AS "batchId", MAX(created_at) AS "createdAt"
+           FROM scan_queue
+          WHERE created_by = ?
+            AND (org_id = ? OR org_id IS NULL)
+            AND created_at >= ?
+            AND consumed_at IS NULL
+          GROUP BY batch_id
+          ORDER BY MAX(created_at) DESC
+          LIMIT 1`,
+      )
+        .bind(userId, orgId, cutoffIso)
+        .first<{ batchId: string; createdAt: string }>();
+    }
+  } catch (e) {
+    return c.json(
+      { success: false, error: `Pending query failed: ${(e as Error).message}` },
+      500,
+    );
+  }
+
+  if (!latest?.batchId) {
+    return c.json({ success: true, data: { batchId: null, items: [], summary: null } });
+  }
+
+  // Now pull every row for that batch (including ones already consumed, so
+  // the modal can show the full audit). The modal filters out consumed
+  // rows client-side when rendering cards.
+  let rows;
+  try {
+    rows = await c.var.DB.prepare(
+      `SELECT * FROM scan_queue
+        WHERE batch_id = ? AND (org_id = ? OR org_id IS NULL)
+        ORDER BY created_at ASC`,
+    )
+      .bind(latest.batchId, orgId)
+      .all<Record<string, unknown>>();
+  } catch (e) {
+    return c.json(
+      { success: false, error: `Pending fetch failed: ${(e as Error).message}` },
+      500,
+    );
+  }
+
+  const items = (rows.results ?? []).map((r) => {
+    const row = hydrateRow(r);
+    return {
+      id: row.id,
+      batchId: row.batchId,
+      kind: row.kind,
+      fileName: row.fileName,
+      mimeType: row.mimeType,
+      fileSize: row.fileSize,
+      supplierId: row.supplierId,
+      status: row.status,
+      rawJson: row.rawJson,
+      error: row.error,
+      cached: row.status === "cached",
+      cacheSourceId: row.cacheSourceId,
+      fileHash: row.fileHash,
+      createdAt: row.createdAt,
+      startedAt: row.startedAt,
+      completedAt: row.completedAt,
+      consumedAt: row.consumedAt,
+    };
+  });
+
+  const summary = {
+    total: items.length,
+    done: items.filter((i) => i.status === "done" || i.status === "cached").length,
+    failed: items.filter((i) => i.status === "failed").length,
+    processing: items.filter((i) => i.status === "processing").length,
+    queued: items.filter((i) => i.status === "queued").length,
+    cached: items.filter((i) => i.status === "cached").length,
+  };
+
+  return c.json({
+    success: true,
+    data: { batchId: latest.batchId, items, summary },
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -623,6 +773,7 @@ app.get("/:id", async (c) => {
       createdAt: hydrated.createdAt,
       startedAt: hydrated.startedAt,
       completedAt: hydrated.completedAt,
+      consumedAt: hydrated.consumedAt,
     },
   });
 });
@@ -688,6 +839,48 @@ app.post("/:id/retry", async (c) => {
   }
   c.executionCtx?.waitUntil(processBatch(c.var.DB, c.env, row.batchId));
   return c.json({ success: true, data: { id, status: "queued" } });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/scan-queue/:id/consume — mark a row consumed_at = NOW() so the
+// pending-batch resume endpoint no longer surfaces it. Called by the modal
+// once the PI/GRN/SO has been successfully created from the row's extraction.
+// Filtered by `kind/:id` is unnecessary — any caller with create perms for
+// the row can flip it (same gate as upload).
+// ---------------------------------------------------------------------------
+app.post("/:id/consume", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+
+  await ensureScanQueueTable(c.var.DB);
+  const id = c.req.param("id");
+  const orgId = getOrgId(c);
+  const nowIso = new Date().toISOString();
+
+  let result;
+  try {
+    result = await c.var.DB.prepare(
+      `UPDATE scan_queue
+          SET consumed_at = ?
+        WHERE id = ?
+          AND (org_id = ? OR org_id IS NULL)`,
+    )
+      .bind(nowIso, id, orgId)
+      .run();
+  } catch (e) {
+    return c.json(
+      { success: false, error: `Consume failed: ${(e as Error).message}` },
+      500,
+    );
+  }
+  const changes = (result.meta?.changes ?? 0) as number;
+  if (changes === 0) {
+    return c.json(
+      { success: false, error: "Scan row not found." },
+      404,
+    );
+  }
+  return c.json({ success: true, data: { id, consumedAt: nowIso } });
 });
 
 // ---------------------------------------------------------------------------

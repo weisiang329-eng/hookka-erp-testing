@@ -58,6 +58,11 @@ const SUPPLIER_MODEL = "claude-haiku-4-5";
 // more than speed, and the catalog injection makes the call expensive
 // enough that the prompt-cache discount on Sonnet pays for the latency.
 const PO_MODEL = "claude-sonnet-4-6";
+// Boundary detection (auto-split): owner ruling 2026-06-30. A single PDF
+// the operator drops in may bundle N separate supplier documents. Before
+// the heavy Sonnet/Haiku extractor runs, we let Haiku scan ONLY the page
+// boundaries — much cheaper and parallelisable per chunk afterwards.
+const BOUNDARY_MODEL = "claude-haiku-4-5-20251001";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 
 // Maps to a Cloudflare D1Database-shaped surface — the SupabaseAdapter the
@@ -1161,4 +1166,217 @@ async function runPoExtract(
     sampleId,
     meta: { cacheHit, cacheCreated },
   };
+}
+
+// ===========================================================================
+// AUTO-SPLIT — boundary detection + pdf-lib chunking
+// ===========================================================================
+//
+// Owner ruling 2026-06-30: a single PDF the operator drops into the scan
+// modal may bundle N separate supplier documents (e.g. an 85-page file
+// containing 16 invoices, each with its own letterhead + docNo + footer).
+// Holding the connection while Sonnet/Haiku reads all 16 in a single
+// monolithic call takes 5-10 min and forces the operator to wait for the
+// whole batch before any preview lands.
+//
+// New flow: BEFORE the heavy extractor runs, ask Haiku for ONLY the page-
+// range boundaries (one cheap, fast call). If the PDF turned out to be
+// just one document, the heavy extractor runs once as before. If it's
+// N documents, the queue worker splits the source PDF into N child PDFs
+// (via pdf-lib) and re-enqueues each child as a sibling scan_queue row
+// under the same batch — each child OCR runs independently and appears
+// in the modal preview as soon as it lands.
+//
+// The boundary detector is intentionally minimal: no line extraction, no
+// totals, no catalog injection — just where each document starts and ends.
+// max_tokens 4096 is plenty (16 chunks × ~30 tokens each ≈ 500 tokens).
+
+export type DocBoundary = { startPage: number; endPage: number };
+
+const BOUNDARY_SYSTEM_PROMPT = `You receive a multi-page supplier-document PDF that may bundle multiple separate documents (tax invoices, delivery orders) together.
+
+Return ONLY the page-range boundaries — do NOT extract line items or any other data.
+
+Output VALID JSON only, no preamble, no markdown:
+{"chunks": [{"startPage": 1, "endPage": 2}, {"startPage": 3, "endPage": 3}, ...]}
+
+Rules:
+- Page numbers are 1-indexed.
+- Each chunk = ONE supplier document. A tax INVOICE and its matching DELIVERY ORDER (same docNo, same supplier) belong in the SAME chunk — they're part of one document set.
+- A new chunk starts when: supplier letterhead changes, OR docNo changes, OR document type switches from one set to a new set.
+- Cover every page exactly once. The last chunk's endPage MUST equal the total page count.
+- If the PDF is just ONE document (single letterhead, single docNo throughout), return a single chunk covering all pages.
+
+OUTPUT FIRST CHARACTER MUST BE '{', LAST '}'.`;
+
+/**
+ * Ask Haiku for the per-document page-range boundaries of a multi-page PDF.
+ * Returns `{ chunks: [...] }` on success, or `{ error }` on any failure
+ * (network, non-JSON, malformed shape). Callers should treat an error as
+ * "fall back to single-chunk" — i.e. process the whole PDF as one document.
+ */
+export async function detectSupplierDocBoundaries(
+  bytes: ArrayBuffer,
+  mimeType: string,
+  env: Env["Bindings"],
+): Promise<{ chunks: DocBoundary[] } | { error: string }> {
+  const apiKey = env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return { error: "ANTHROPIC_API_KEY not configured" };
+  }
+  // Boundary detection is a PDF-only concern — single-page images are never
+  // multi-document. Guard so a misrouted image doesn't burn a Haiku call.
+  const isPdf =
+    mimeType === "application/pdf" ||
+    mimeType === "application/x-pdf" ||
+    mimeType === "";
+  if (!isPdf) return { error: "boundary detection skipped for non-PDF" };
+
+  const base64 = toBase64(bytes);
+  const mediaBlock = {
+    type: "document",
+    source: {
+      type: "base64",
+      media_type: "application/pdf",
+      data: base64,
+    },
+  };
+
+  try {
+    const resp = await fetch(ANTHROPIC_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: BOUNDARY_MODEL,
+        max_tokens: 4096,
+        temperature: 0,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: BOUNDARY_SYSTEM_PROMPT },
+              mediaBlock,
+              {
+                type: "text",
+                text: "Return the chunks JSON only. First character '{', last '}'.",
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    const bodyText = await resp.text();
+    if (!resp.ok) {
+      return {
+        error: `Anthropic ${resp.status}: ${bodyText.slice(0, 300)}`,
+      };
+    }
+    let parsedResp: AnthropicResponse = {};
+    try {
+      parsedResp = JSON.parse(bodyText) as AnthropicResponse;
+    } catch {
+      return { error: `Anthropic returned non-JSON: ${bodyText.slice(0, 200)}` };
+    }
+    if (parsedResp.error) {
+      return {
+        error: `Anthropic: ${parsedResp.error.type}: ${parsedResp.error.message}`,
+      };
+    }
+    const firstText =
+      parsedResp.content?.find((b) => b.type === "text")?.text ?? "";
+    const cleaned = stripJsonFences(firstText);
+    let parsed: { chunks?: unknown };
+    try {
+      parsed = JSON.parse(cleaned) as { chunks?: unknown };
+    } catch (e) {
+      return {
+        error: `Boundary JSON parse failed: ${(e as Error).message}. Raw: ${cleaned.slice(0, 200)}`,
+      };
+    }
+    if (!Array.isArray(parsed.chunks)) {
+      return { error: "Boundary response missing chunks[] array" };
+    }
+    const chunks: DocBoundary[] = [];
+    for (const raw of parsed.chunks) {
+      if (!raw || typeof raw !== "object") continue;
+      const obj = raw as { startPage?: unknown; endPage?: unknown };
+      const start = Number(obj.startPage);
+      const end = Number(obj.endPage);
+      if (
+        !Number.isInteger(start) ||
+        !Number.isInteger(end) ||
+        start < 1 ||
+        end < start
+      ) {
+        return {
+          error: `Invalid chunk shape: ${JSON.stringify(raw).slice(0, 100)}`,
+        };
+      }
+      chunks.push({ startPage: start, endPage: end });
+    }
+    if (chunks.length === 0) {
+      return { error: "Boundary detector returned zero chunks" };
+    }
+    return { chunks };
+  } catch (e) {
+    return { error: `Network/fetch error: ${(e as Error).message}` };
+  }
+}
+
+/**
+ * Split a source PDF into N child PDFs by the given page-range chunks.
+ * pdf-lib is already in the project — used by generate-product-pack-pdf.ts
+ * and merge-pdf.ts.
+ *
+ * Caller is responsible for dropping the source bytes after this returns so
+ * worker memory doesn't carry the parent + every child simultaneously.
+ */
+export async function splitPdfByChunks(
+  sourceBytes: ArrayBuffer,
+  chunks: DocBoundary[],
+): Promise<
+  { pdfBytes: Uint8Array; startPage: number; endPage: number }[]
+> {
+  const { PDFDocument } = await import("pdf-lib");
+  const source = await PDFDocument.load(sourceBytes);
+  const total = source.getPageCount();
+  const result: {
+    pdfBytes: Uint8Array;
+    startPage: number;
+    endPage: number;
+  }[] = [];
+  for (const c of chunks) {
+    // Clamp out-of-range chunks defensively (boundary detector should never
+    // return them, but a hallucination shouldn't crash the whole batch).
+    const start = Math.max(1, c.startPage);
+    const end = Math.min(total, c.endPage);
+    if (end < start) continue;
+    const child = await PDFDocument.create();
+    const pageIdxs: number[] = [];
+    for (let p = start - 1; p <= end - 1; p++) pageIdxs.push(p);
+    const copied = await child.copyPages(source, pageIdxs);
+    for (const p of copied) child.addPage(p);
+    const bytes = await child.save();
+    result.push({ pdfBytes: bytes, startPage: start, endPage: end });
+  }
+  return result;
+}
+
+/**
+ * Read the page count of a PDF without touching its content. Returns 0 on
+ * any parsing failure — caller treats that as "single-page-equivalent"
+ * (skip the split path).
+ */
+export async function getPdfPageCount(bytes: ArrayBuffer): Promise<number> {
+  try {
+    const { PDFDocument } = await import("pdf-lib");
+    const doc = await PDFDocument.load(bytes);
+    return doc.getPageCount();
+  } catch {
+    return 0;
+  }
 }

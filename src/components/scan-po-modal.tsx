@@ -60,7 +60,10 @@ type QueueItem = {
   batchId: string;
   kind: "po" | "supplier";
   fileName: string;
-  status: "queued" | "processing" | "done" | "failed" | "cached";
+  // 'split' = parent of an auto-split multi-doc PDF; children appear as
+  // siblings under the same batchId. The modal strips split parents from
+  // the polled payload so they never render in any list.
+  status: "queued" | "processing" | "done" | "failed" | "cached" | "split";
   rawJson: unknown | null;
   error: string | null;
   cached: boolean;
@@ -85,6 +88,14 @@ type QueueBatchPayload = {
   } | null;
 };
 
+// 'split' = parent row of an auto-split multi-doc PDF. Children appear in
+// the same batch under their own ids; strip parents at the fetch boundary
+// so every downstream consumer (cards, in-flight strip, terminal check)
+// sees only renderable rows.
+function stripSplitParents(items: QueueItem[]): QueueItem[] {
+  return items.filter((i) => i.status !== "split");
+}
+
 async function fetchScanQueueBatch(
   batchId: string,
 ): Promise<{ ok: true; data: QueueBatchPayload } | { ok: false; error: string }> {
@@ -106,7 +117,10 @@ async function fetchScanQueueBatch(
   if (!res.ok || !json.success || !json.data) {
     return { ok: false, error: json.error ?? `HTTP ${res.status}` };
   }
-  return { ok: true, data: json.data };
+  return {
+    ok: true,
+    data: { ...json.data, items: stripSplitParents(json.data.items) },
+  };
 }
 
 async function fetchScanQueuePending(): Promise<QueueBatchPayload | null> {
@@ -126,7 +140,7 @@ async function fetchScanQueuePending(): Promise<QueueBatchPayload | null> {
     return null;
   }
   if (!res.ok || !json.success || !json.data) return null;
-  return json.data;
+  return { ...json.data, items: stripSplitParents(json.data.items) };
 }
 
 // (consume helper moved to src/lib/scan-queue-client.ts so the PO, PI, and

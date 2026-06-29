@@ -110,6 +110,9 @@ type PurchaseInvoiceDetail = {
   // Supplier reference numbers (dual-keyed on read by the backend).
   supplierInvoiceNo?: string | null;
   supplierDoNo?: string | null;
+  // Source supplier document — file_assets row id (set only when the PI
+  // was created from a scan-queue auto-split chunk). Owner 2026-06-30.
+  sourceDocumentFileId?: string | null;
   // Purchase company on this PI (HOOKKA / OHANA / sister co). Read-only here.
   purchaseOrgCode?: string | null;
   // SST breakdown (owner 2026-06-30). Backend projects header subtotal_sen /
@@ -475,6 +478,26 @@ export default function PurchaseInvoiceDetailPage() {
         })()}
         actions={
           <>
+            {!editing && pi.sourceDocumentFileId && (
+              // Owner 2026-06-30: when the PI was created from a scan, link to
+              // the SPECIFIC source PDF chunk (not the original bundle if the
+              // upload was auto-split). Opens /api/files/:id/download in a
+              // new tab — that endpoint 302s to a short-lived presigned URL.
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const url = `/api/files/${encodeURIComponent(
+                    pi.sourceDocumentFileId as string,
+                  )}/download`;
+                  window.open(url, "_blank", "noopener,noreferrer");
+                }}
+                disabled={busy}
+              >
+                <FileText className="h-3.5 w-3.5" /> View source document
+              </Button>
+            )}
             {!editing && (
               <Button type="button" variant="outline" size="sm" onClick={printPdf} disabled={busy}>
                 <Printer className="h-3.5 w-3.5" /> Print

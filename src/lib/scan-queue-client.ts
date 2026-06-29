@@ -44,3 +44,55 @@ export async function postScanQueueConsume(
     return { ok: false, error: e instanceof Error ? e.message : "Network error" };
   }
 }
+
+/**
+ * Upload a scan-queue row's stored PDF (or image) bytes to /api/files so the
+ * resulting PI/GRN can link back to its source supplier document. Owner
+ * ruling 2026-06-30 — for auto-split parents, this is the SPECIFIC chunk's
+ * PDF (not the original 85-page bundle). Returns the file_assets row id
+ * (which the PI POST persists as `sourceDocumentFileId`).
+ *
+ * Best-effort: failures don't block PI creation — the PI just won't have
+ * the "View source document" link surfaced. Caller logs/swallows on null.
+ */
+export async function uploadScanQueueRowAsSourceDoc(
+  rowId: string,
+  resourceType: string,
+  resourceId: string,
+): Promise<string | null> {
+  try {
+    // 1. Fetch the raw bytes from the scan_queue row.
+    const bytesRes = await fetch(
+      `/api/scan-queue/${encodeURIComponent(rowId)}/bytes`,
+      { credentials: "include" },
+    );
+    if (!bytesRes.ok) return null;
+    const blob = await bytesRes.blob();
+    // The bytes endpoint sets Content-Disposition with the row's filename.
+    let filename = "source-document.pdf";
+    const disposition = bytesRes.headers.get("Content-Disposition") || "";
+    const m = disposition.match(/filename="?([^";]+)"?/i);
+    if (m && m[1]) filename = m[1];
+    const contentType =
+      bytesRes.headers.get("Content-Type") || "application/pdf";
+
+    // 2. Upload to /api/files as a multipart POST.
+    const fd = new FormData();
+    fd.append("file", new File([blob], filename, { type: contentType }));
+    fd.append("resourceType", resourceType);
+    fd.append("resourceId", resourceId);
+    const upRes = await fetch("/api/files", {
+      method: "POST",
+      credentials: "include",
+      body: fd,
+    });
+    if (!upRes.ok) return null;
+    const upJson = (await upRes.json().catch(() => null)) as {
+      success?: boolean;
+      data?: { id?: string };
+    } | null;
+    return upJson?.success && upJson.data?.id ? upJson.data.id : null;
+  } catch {
+    return null;
+  }
+}

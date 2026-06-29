@@ -40,7 +40,12 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
-import { runExtract } from "../lib/scan-engine";
+import {
+  runExtract,
+  detectSupplierDocBoundaries,
+  splitPdfByChunks,
+  getPdfPageCount,
+} from "../lib/scan-engine";
 
 const app = new Hono<Env>();
 
@@ -179,7 +184,7 @@ type ScanQueueRow = {
   fileSize: number;
   supplierId: string | null;
   poContext: string | null;
-  status: "queued" | "processing" | "done" | "failed" | "cached";
+  status: "queued" | "processing" | "done" | "failed" | "cached" | "split";
   rawJson: unknown | null;
   error: string | null;
   cacheSourceId: string | null;
@@ -312,6 +317,13 @@ async function processBatch(
     if (!claimed) continue;
 
     let result: { ok: true; data: unknown } | { ok: false; error: string };
+    // When the row was auto-split into N child rows, set this so the result
+    // writer below knows to mark the parent 'split' instead of 'done' and
+    // NOT to write the rawJson (children own that). Stored on the parent's
+    // error column as a JSON marker — keeps the modal's audit trail intact.
+    let splitMarker: {
+      chunks: { startPage: number; endPage: number; childId: string }[];
+    } | null = null;
     try {
       if (!next.fileSize) {
         result = { ok: false, error: "Missing file bytes" };
@@ -330,24 +342,182 @@ async function processBatch(
               "File bytes evicted before processing (re-upload to re-queue)",
           };
         } else {
-          // Direct in-process call into the shared scan engine. No self-fetch,
-          // no shared-secret needed (the previous SCAN_WORKER_TOKEN auth bypass
-          // is gone — owner ruling 2026-06-29 evening). Per-supplier rules +
-          // few-shot examples + sample recording all live in scan-engine.ts and
-          // run the same way whether invoked from the sync /extract endpoint or
-          // here in the background queue.
           const bytes = base64ToArrayBuffer(b64);
-          result = await runExtract(db, env, {
-            kind: next.kind,
-            bytes,
-            mimeType: next.mimeType,
-            fileName: next.fileName,
-            orgId: next.orgId ?? "",
-            createdBy: next.createdBy,
-            supplierId: next.supplierId,
-            poContext: next.poContext ?? undefined,
-            recordSample: true,
-          });
+          // Auto-split branch (owner ruling 2026-06-30). Multi-page PDFs may
+          // bundle N separate supplier docs (e.g. an 85-page file with 16
+          // PIs). Ask Haiku for the page-range boundaries BEFORE the heavy
+          // extractor runs — if it returns >1 chunk we slice the source into
+          // child PDFs and enqueue each as a sibling row. Each child OCR
+          // runs independently and appears in the modal preview the moment
+          // it lands; the 5-10 min monolithic wait is gone.
+          //
+          // Single-page images and ≤2-page PDFs skip detection entirely (no
+          // Haiku call burned). Detector errors / single-chunk results fall
+          // through to the normal extractor path — graceful degradation.
+          const looksLikeImage = next.mimeType.startsWith("image/");
+          let didSplit = false;
+          if (!looksLikeImage) {
+            const pageCount = await getPdfPageCount(bytes);
+            if (pageCount >= 3) {
+              const det = await detectSupplierDocBoundaries(
+                bytes,
+                next.mimeType,
+                env,
+              );
+              if ("chunks" in det && det.chunks.length > 1) {
+                // Multi-document PDF → split + enqueue children.
+                try {
+                  const children = await splitPdfByChunks(bytes, det.chunks);
+                  if (children.length > 1) {
+                    const childRecords: {
+                      startPage: number;
+                      endPage: number;
+                      childId: string;
+                    }[] = [];
+                    const nowChildIso = new Date().toISOString();
+                    for (const child of children) {
+                      const childId = genItemId();
+                      const childBytes = child.pdfBytes.buffer.slice(
+                        child.pdfBytes.byteOffset,
+                        child.pdfBytes.byteOffset + child.pdfBytes.byteLength,
+                      ) as ArrayBuffer;
+                      const childHash = await sha256Hex(childBytes);
+                      // file_hash cache lookup for the CHILD bytes — same
+                      // bytes seen before? reuse rawJson + mark cached so
+                      // the modal renders it instantly.
+                      let cacheSource: {
+                        id: string;
+                        rawJson: string | null;
+                      } | null = null;
+                      try {
+                        cacheSource = await db
+                          .prepare(
+                            `SELECT id, raw_json AS "rawJson"
+                               FROM scan_queue
+                              WHERE file_hash = ?
+                                AND kind = ?
+                                AND status = 'done'
+                                AND (org_id = ? OR org_id IS NULL)
+                              ORDER BY completed_at DESC NULLS LAST, created_at DESC
+                              LIMIT 1`,
+                          )
+                          .bind(
+                            childHash,
+                            next.kind,
+                            next.orgId ?? "",
+                          )
+                          .first<{ id: string; rawJson: string | null }>();
+                      } catch (e) {
+                        console.warn(
+                          "[scan-queue] child cache lookup:",
+                          (e as Error).message,
+                        );
+                      }
+                      const childFileName = `${next.fileName.replace(/\.pdf$/i, "")}-pi-${child.startPage}-${child.endPage}.pdf`;
+                      if (cacheSource && cacheSource.rawJson != null) {
+                        // Cache HIT — insert as 'cached'; keep child bytes
+                        // so the PI link-to-source-doc upload step can grab
+                        // them later via /api/scan-queue/:id/bytes.
+                        const childB64 = toBase64(childBytes);
+                        await db
+                          .prepare(
+                            `INSERT INTO scan_queue
+                               (id, batch_id, kind, file_hash, file_name, mime_type, file_size,
+                                file_bytes_b64, supplier_id, po_context, status, raw_json,
+                                cache_source_id, created_by, created_at, completed_at, org_id)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cached', ?, ?, ?, ?, ?, ?)`,
+                          )
+                          .bind(
+                            childId,
+                            next.batchId,
+                            next.kind,
+                            childHash,
+                            childFileName,
+                            "application/pdf",
+                            childBytes.byteLength,
+                            childB64,
+                            next.supplierId,
+                            next.poContext,
+                            cacheSource.rawJson,
+                            cacheSource.id,
+                            next.createdBy,
+                            nowChildIso,
+                            nowChildIso,
+                            next.orgId ?? "",
+                          )
+                          .run();
+                      } else {
+                        const childB64 = toBase64(childBytes);
+                        await db
+                          .prepare(
+                            `INSERT INTO scan_queue
+                               (id, batch_id, kind, file_hash, file_name, mime_type, file_size,
+                                file_bytes_b64, supplier_id, po_context, status, created_by,
+                                created_at, org_id)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+                          )
+                          .bind(
+                            childId,
+                            next.batchId,
+                            next.kind,
+                            childHash,
+                            childFileName,
+                            "application/pdf",
+                            childBytes.byteLength,
+                            childB64,
+                            next.supplierId,
+                            next.poContext,
+                            next.createdBy,
+                            nowChildIso,
+                            next.orgId ?? "",
+                          )
+                          .run();
+                      }
+                      childRecords.push({
+                        startPage: child.startPage,
+                        endPage: child.endPage,
+                        childId,
+                      });
+                    }
+                    splitMarker = { chunks: childRecords };
+                    didSplit = true;
+                    // Mark the result OK so the result writer below picks
+                    // the 'split' branch (it inspects splitMarker).
+                    result = { ok: true, data: null };
+                  } else {
+                    // The splitter returned ≤1 child (defensive — boundary
+                    // detector said >1 but pdf-lib filtered them out).
+                    // Fall through to the normal single-extract path.
+                  }
+                } catch (e) {
+                  console.warn(
+                    "[scan-queue] split failed, falling back:",
+                    (e as Error).message,
+                  );
+                }
+              }
+              // Detector error or single chunk → fall through (process the
+              // PDF as one document). Best-effort; never block extraction
+              // on detection failure.
+            }
+          }
+          if (!didSplit) {
+            // Normal single-document extract.
+            result = await runExtract(db, env, {
+              kind: next.kind,
+              bytes,
+              mimeType: next.mimeType,
+              fileName: next.fileName,
+              orgId: next.orgId ?? "",
+              createdBy: next.createdBy,
+              supplierId: next.supplierId,
+              poContext: next.poContext ?? undefined,
+              recordSample: true,
+            });
+          } else {
+            // result already set above to { ok:true, data:null } for split path
+            result = result!;
+          }
         }
       }
     } catch (e) {
@@ -356,13 +526,43 @@ async function processBatch(
 
     const completedAt = new Date().toISOString();
     try {
-      if (result.ok) {
+      if (splitMarker) {
+        // Parent of an auto-split — children own the bytes now. NULL the
+        // parent's file_bytes_b64 (children store their own) and stash the
+        // chunks marker in `error` for audit/debug. status='split' is
+        // terminal for the parent; the modal hides it.
+        //
+        // Also stamp `consumed_at` on the parent so the /pending endpoint
+        // doesn't count it as an un-consumed row when deciding whether to
+        // resume the batch. The children carry the real consumed_at state.
+        await db
+          .prepare(
+            `UPDATE scan_queue
+                SET status = 'split',
+                    file_bytes_b64 = NULL,
+                    completed_at = ?,
+                    consumed_at = ?,
+                    error = ?
+              WHERE id = ?`,
+          )
+          .bind(
+            completedAt,
+            completedAt,
+            JSON.stringify({ split: splitMarker.chunks }).slice(0, 2000),
+            next.id,
+          )
+          .run();
+      } else if (result.ok) {
+        // KEEP file_bytes_b64 around — the modal's "Create as DRAFT" step
+        // now uploads the row's bytes to /api/files so the PI can link
+        // back to its source PDF (owner ruling 2026-06-30). Eviction
+        // moves to /:id/consume — once every doc on the row is consumed,
+        // bytes are NULLed.
         await db
           .prepare(
             `UPDATE scan_queue
                 SET status = 'done',
                     raw_json = ?,
-                    file_bytes_b64 = NULL,
                     completed_at = ?,
                     error = NULL
               WHERE id = ?`,
@@ -485,14 +685,17 @@ app.post("/upload", async (c) => {
     const id = genItemId();
     if (cacheSource && cacheSource.rawJson != null) {
       // Cache HIT — store the prior raw_json on this row directly so the
-      // queue page renders it without an extra hop.
+      // queue page renders it without an extra hop. Also keep the bytes
+      // (owner 2026-06-30) so the source-doc upload at PI creation time
+      // can grab them via /api/scan-queue/:id/bytes — consume NULLs them.
+      const b64Cached = toBase64(buf);
       try {
         await c.var.DB.prepare(
           `INSERT INTO scan_queue
              (id, batch_id, kind, file_hash, file_name, mime_type, file_size,
               file_bytes_b64, supplier_id, po_context, status, raw_json,
               cache_source_id, created_by, created_at, completed_at, org_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'cached', ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cached', ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             id,
@@ -502,6 +705,7 @@ app.post("/upload", async (c) => {
             file.name,
             file.type || "application/octet-stream",
             file.size,
+            b64Cached,
             supplierId,
             poContext,
             // raw_json comes back as a string from postgres.js when JSONB
@@ -817,6 +1021,72 @@ app.get("/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/scan-queue/:id/bytes — return the row's stored PDF/image bytes.
+// Used by the supplier scan modal at "Create as DRAFT" time to upload the
+// (possibly chunked) source document to /api/files so the resulting PI
+// links back to its source PDF (owner ruling 2026-06-30).
+//
+// Auth: same gate as upload — purchase-orders/create. Returns 404 once the
+// row has been consumed (bytes were NULLed during the consume step).
+// ---------------------------------------------------------------------------
+app.get("/:id/bytes", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+
+  await ensureScanQueueTable(c.var.DB);
+  const id = c.req.param("id");
+  const orgId = getOrgId(c);
+
+  let row;
+  try {
+    row = await c.var.DB.prepare(
+      `SELECT file_bytes_b64 AS "fileBytesB64",
+              mime_type      AS "mimeType",
+              file_name      AS "fileName"
+         FROM scan_queue
+        WHERE id = ?
+          AND (org_id = ? OR org_id IS NULL)`,
+    )
+      .bind(id, orgId)
+      .first<{
+        fileBytesB64: string | null;
+        mimeType: string | null;
+        fileName: string | null;
+      }>();
+  } catch (e) {
+    return c.json(
+      { success: false, error: `Query failed: ${(e as Error).message}` },
+      500,
+    );
+  }
+  if (!row) {
+    return c.json({ success: false, error: "Scan row not found." }, 404);
+  }
+  if (!row.fileBytesB64) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "File bytes evicted — the row was already consumed or pre-dates the source-doc-link rollout.",
+      },
+      410,
+    );
+  }
+  const bytes = base64ToArrayBuffer(row.fileBytesB64);
+  const mime = row.mimeType || "application/pdf";
+  const filename = row.fileName || "scan.pdf";
+  return new Response(bytes, {
+    status: 200,
+    headers: {
+      "Content-Type": mime,
+      "Content-Length": String(bytes.byteLength),
+      "Content-Disposition": `attachment; filename="${filename.replace(/"/g, "")}"`,
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/scan-queue/:id/retry — flip a 'failed' row back to 'queued'
 // ---------------------------------------------------------------------------
 app.post("/:id/retry", async (c) => {
@@ -913,12 +1183,16 @@ app.post("/:id/consume", async (c) => {
   }
 
   // Whole-row consume — original behaviour. Flip consumed_at directly.
+  // Also NULL file_bytes_b64 — bytes were retained past 'done' so the
+  // create-PI step could upload them to /api/files; now that every doc on
+  // the row has been consumed, the source PDF is no longer needed locally.
   if (docIdx === null) {
     let result;
     try {
       result = await c.var.DB.prepare(
         `UPDATE scan_queue
-            SET consumed_at = ?
+            SET consumed_at = ?,
+                file_bytes_b64 = NULL
           WHERE id = ?
             AND (org_id = ? OR org_id IS NULL)`,
       )
@@ -978,10 +1252,13 @@ app.post("/:id/consume", async (c) => {
 
   try {
     if (shouldFinalise) {
+      // Last doc consumed — also NULL file_bytes_b64 (bytes were retained
+      // past 'done' so the create-PI step could upload to /api/files).
       await c.var.DB.prepare(
         `UPDATE scan_queue
             SET consumed_doc_idxs = ?::jsonb,
-                consumed_at = ?
+                consumed_at = ?,
+                file_bytes_b64 = NULL
           WHERE id = ?
             AND (org_id = ? OR org_id IS NULL)`,
       )

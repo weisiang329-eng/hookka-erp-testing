@@ -47,7 +47,10 @@ import {
   Trash2,
   ChevronRight,
 } from "lucide-react";
-import { postScanQueueConsume } from "@/lib/scan-queue-client";
+import {
+  postScanQueueConsume,
+  uploadScanQueueRowAsSourceDoc,
+} from "@/lib/scan-queue-client";
 
 // ─── Shared types (kept exported for callers) ─────────────────────────────
 
@@ -320,7 +323,10 @@ type QueueItem = {
   batchId: string;
   kind: "po" | "supplier";
   fileName: string;
-  status: "queued" | "processing" | "done" | "failed" | "cached";
+  // 'split' = parent of an auto-split multi-doc PDF; children appear as
+  // siblings under the same batchId. The modal hides split parents from
+  // every render path (preview cards, in-flight strip, failed strip).
+  status: "queued" | "processing" | "done" | "failed" | "cached" | "split";
   rawJson: unknown | null;
   error: string | null;
   cached: boolean;
@@ -347,6 +353,14 @@ type QueueBatchPayload = {
   } | null;
 };
 
+// 'split' = parent row of an auto-split multi-doc PDF. Children appear in
+// the same batch under their own ids; the parent has no preview to show.
+// Strip them once at the fetch boundary so every downstream consumer
+// (cards, in-flight strip, failed strip, completion check) ignores them.
+function stripSplitParents(items: QueueItem[]): QueueItem[] {
+  return items.filter((i) => i.status !== "split");
+}
+
 async function fetchScanQueueBatch(
   batchId: string,
 ): Promise<{ ok: true; data: QueueBatchPayload } | { ok: false; error: string }> {
@@ -368,7 +382,10 @@ async function fetchScanQueueBatch(
   if (!res.ok || !json.success || !json.data) {
     return { ok: false, error: json.error ?? `HTTP ${res.status}` };
   }
-  return { ok: true, data: json.data };
+  return {
+    ok: true,
+    data: { ...json.data, items: stripSplitParents(json.data.items) },
+  };
 }
 
 async function fetchScanQueuePending(
@@ -390,7 +407,7 @@ async function fetchScanQueuePending(
     return null;
   }
   if (!res.ok || !json.success || !json.data) return null;
-  return json.data;
+  return { ...json.data, items: stripSplitParents(json.data.items) };
 }
 
 // Split a queue row's rawJson into N SupplierExtraction docs. Since
@@ -1474,6 +1491,20 @@ function CreatePIWizard({
           // Linked PO → backend runs Convert-from-PO and draws down PO availability.
           if (card.purchaseOrderId) {
             payload.purchaseOrderId = card.purchaseOrderId;
+          }
+          // Source supplier document link (owner 2026-06-30). Upload this
+          // card's chunk PDF (or single-file PDF) to /api/files BEFORE the
+          // PI POST so the new PI can persist the file_assets id. For
+          // auto-split parents, the chunk row carries ONLY its slice of
+          // pages — the PI links to the right one. Best-effort: a failure
+          // here just means no "View source document" link on the PI.
+          if (card.scanQueueRowId) {
+            const fileId = await uploadScanQueueRowAsSourceDoc(
+              card.scanQueueRowId,
+              "purchase-invoice-source",
+              card.scanQueueRowId,
+            );
+            if (fileId) payload.sourceDocumentFileId = fileId;
           }
           const res = await fetch("/api/purchase-invoices", {
             method: "POST",

@@ -72,6 +72,12 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS subtotal_sen INTEGER DEFAULT 0",
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS tax_sen INTEGER DEFAULT 0",
       "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS tax_sen INTEGER DEFAULT 0",
+      // Source supplier document (owner 2026-06-30). When the PI was created
+      // from a scan-queue auto-split chunk, this points to the file_assets
+      // row holding THAT specific chunk's PDF — the operator can re-open the
+      // source supplier document straight from the PI detail page. snake_case
+      // → no column-rename-map.json entry needed.
+      "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS source_document_file_id TEXT",
     ];
     for (const sql of stmts) {
       try {
@@ -317,6 +323,8 @@ function rowToPI(r: PurchaseInvoiceRow) {
     subtotal_sen?: number | null;
     taxSen?: number | null;
     tax_sen?: number | null;
+    sourceDocumentFileId?: string | null;
+    source_document_file_id?: string | null;
   };
   return {
     id: r.id,
@@ -348,6 +356,10 @@ function rowToPI(r: PurchaseInvoiceRow) {
     fxRate: fx.fxRate ?? null,
     foreignAmountSen: fx.foreignAmountSen ?? null,
     payFxRate: fx.payFxRate ?? null,
+    // Source supplier document (owner 2026-06-30). file_assets row id, or
+    // empty string when the PI was created manually (not from a scan).
+    sourceDocumentFileId:
+      fx.sourceDocumentFileId ?? fx.source_document_file_id ?? "",
     created_at: r.created_at ?? "",
     updated_at: r.updated_at ?? "",
   };
@@ -738,6 +750,9 @@ app.post("/", async (c) => {
     items?: PurchaseInvoiceItemInput[];
     currency?: string;
     fxRate?: number;
+    // Source supplier document — file_assets row id of the (possibly chunked)
+    // PDF the scan modal uploaded right before this POST. Owner 2026-06-30.
+    sourceDocumentFileId?: string | null;
     // Kept in the request shape so the FE can keep sending ocrUsed (legacy flag);
     // status is now ALWAYS DRAFT on create regardless of OCR vs manual.
     ocrUsed?: boolean;
@@ -1005,6 +1020,13 @@ app.post("/", async (c) => {
   }
   if (!purchaseOrgCode) purchaseOrgCode = "HOOKKA";
 
+  // Source supplier document file id — owner 2026-06-30. Trimmed; empty → null.
+  const sourceDocumentFileId =
+    body.sourceDocumentFileId == null ||
+    String(body.sourceDocumentFileId).trim() === ""
+      ? null
+      : String(body.sourceDocumentFileId).trim();
+
   const statements: D1PreparedStatement[] = [
     db
       .prepare(
@@ -1014,8 +1036,9 @@ app.post("/", async (c) => {
            supplier_invoice_no, supplier_do_no,
            currency, fxRate, foreignAmountSen,
            purchase_org_code,
+           source_document_file_id,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
@@ -1038,6 +1061,7 @@ app.post("/", async (c) => {
         isForeign ? fxRate : null,
         isForeign ? foreignTotalSen : null,
         purchaseOrgCode,
+        sourceDocumentFileId,
         now,
         now,
       ),
@@ -1164,13 +1188,16 @@ app.post("/", async (c) => {
            id, piNo, purchaseOrderId, poRef, grn_id, supplierId, supplierName,
            invoiceDate, dueDate, amountSen, subtotal_sen, tax_sen, status, remarks,
            supplier_invoice_no, supplier_do_no, purchase_org_code,
+           source_document_file_id,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id, piNo, body.purchaseOrderId ?? null, poRef, sourceGrnId, body.supplierId,
         body.supplierName, piInvoiceDate, piDueDate, amountSen, subtotalSenHome, taxSenHome, status,
-        body.remarks ?? null, supplierInvoiceNo, supplierDoNo, purchaseOrgCode, now, now,
+        body.remarks ?? null, supplierInvoiceNo, supplierDoNo, purchaseOrgCode,
+        sourceDocumentFileId,
+        now, now,
       );
     await db.batch(statements);
   }

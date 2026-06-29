@@ -2339,15 +2339,57 @@ const employeeDetail: DetailConfig = {
     }
     return out;
   },
-  // CHANGELOG K.7 + K.1: Employee Master + admin actions + Log Hours.
-  // Log Hours opens an inline form (logHoursSpec) that POSTs to
-  // /api/working-hour-entries — auto-creates the attendance row.
+  // CHANGELOG K.2 + K.7 + K.1: Office-portal Punch (Clock In/Out, no
+  // selfie/GPS — workers do that on /worker portal) + Edit + admin
+  // actions + Log Hours.
   extraActions: (_d, id) => [
+    {
+      label: "Clock In",
+      icon: "package-check",
+      primary: true,
+      onClick: async () => {
+        if (!window.confirm("Record CLOCK IN for this worker now?")) return;
+        try {
+          const r = await fetch("/api/attendance", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "CLOCK_IN", employeeId: id }),
+          });
+          if (r.ok) window.alert("Clock IN recorded.");
+          else {
+            const j = (await r.json().catch(() => null)) as { error?: string } | null;
+            window.alert(j?.error || "Failed to record Clock IN.");
+          }
+        } catch {
+          window.alert("Network error.");
+        }
+      },
+    },
+    {
+      label: "Clock Out",
+      icon: "package-check",
+      onClick: async () => {
+        if (!window.confirm("Record CLOCK OUT for this worker now?")) return;
+        try {
+          const r = await fetch("/api/attendance", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "CLOCK_OUT", employeeId: id }),
+          });
+          if (r.ok) window.alert("Clock OUT recorded.");
+          else {
+            const j = (await r.json().catch(() => null)) as { error?: string } | null;
+            window.alert(j?.error || "Failed to record Clock OUT.");
+          }
+        } catch {
+          window.alert("Network error.");
+        }
+      },
+    },
     {
       label: "Log Hours",
       icon: "file-text",
       formSpec: () => logHoursSpec(id),
-      primary: true,
     },
     {
       label: "Set Scan PIN",

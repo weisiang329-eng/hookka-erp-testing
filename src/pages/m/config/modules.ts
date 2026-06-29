@@ -2671,6 +2671,93 @@ export const usermgmtConfig: ModuleConfig = {
 };
 
 // ---------------------------------------------------------------------------
+// R&D PROJECTS — dc13 design v13 added an R&D module to mobile. Wires to
+// the existing /api/rd-projects backend (route GET / + GET /:id). Read-only
+// mobile (mutations stay on the desktop /rd page).
+// ---------------------------------------------------------------------------
+const RD_STATUSES = ["DRAFT", "ACTIVE", "ON_HOLD", "COMPLETED", "CANCELLED"];
+const rdSource: DataSource = {
+  url: "/api/rd-projects",
+  select: selectData,
+  toVM: (r): RowVM => ({
+    id: str(r, "id"),
+    code: str(r, "code") || "—",
+    title: str(r, "name") || "—",
+    subLine:
+      [str(r, "projectType"), str(r, "leadName") || str(r, "leadId")]
+        .filter(Boolean)
+        .join(" · ") || undefined,
+    meta1: { label: "Budget", value: money(num(r, "budgetSen")) },
+    meta2: { label: "Order Date", value: dateOnly(r, "createdAt") || "—" },
+    status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
+  }),
+  columns: [
+    textCol("code", "Reference", (r) => str(r, "code")),
+    textCol("name", "Customer", (r) => str(r, "name")),
+    textCol("projectType", "State", (r) => str(r, "projectType")),
+    numCol("budget", "Amount", (r) => num(r, "budgetSen")),
+    dateCol("createdAt", "Order Date", (r) => dateOnly(r, "createdAt")),
+    enumCol("status", "Status", (r) => str(r, "status"), RD_STATUSES),
+  ],
+  defaultSort: { key: "createdAt", dir: "desc" },
+  subTabs: [
+    { key: "all", label: "All", match: () => true },
+    { key: "active", label: "Active", match: (r) => str(r, "status") === "ACTIVE" },
+    { key: "draft", label: "Draft", match: (r) => str(r, "status") === "DRAFT" },
+    { key: "hold", label: "On Hold", match: (r) => str(r, "status") === "ON_HOLD" },
+    { key: "done", label: "Completed", match: (r) => str(r, "status") === "COMPLETED" },
+  ],
+};
+
+const rdDetail: DetailConfig = {
+  url: (id) => `/api/rd-projects/${encodeURIComponent(id)}`,
+  selectDoc: selectDocData,
+  code: (d) => str(d, "code") || "—",
+  title: (d) => str(d, "name") || "—",
+  status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  flow: {
+    steps: flowSteps(["DRAFT", "ACTIVE", "ON_HOLD", "COMPLETED"]),
+    current: (d) => str(d, "status"),
+  },
+  fields: [
+    fld("Code", (d) => str(d, "code")),
+    fld("Project Type", (d) => str(d, "projectType")),
+    fld("Lead", (d) => str(d, "leadName") || str(d, "leadId")),
+    fld("Budget", (d) => money(num(d, "budgetSen"))),
+    fld("Labour Cost (so far)", (d) => money(num(d, "labourCostSen"))),
+    fld("Started", (d) => dateOnly(d, "startedAt")),
+    fld("Target Complete", (d) => dateOnly(d, "targetCompleteAt")),
+    fld("Description", (d) => str(d, "description"), true),
+  ],
+  subDocLists: (d) => {
+    const protos = asArr(d.prototypes);
+    if (protos.length === 0) return [];
+    return [
+      {
+        title: `Prototypes · ${protos.length}`,
+        rows: protos.slice(0, 30).map((p) => ({
+          id: str(p, "id"),
+          title: str(p, "name") || str(p, "code") || "Prototype",
+          subLine: str(p, "status") || undefined,
+          trailing: dateOnly(p, "createdAt") || undefined,
+          icon: "package" as const,
+        })),
+      },
+    ];
+  },
+  attachmentsResource: (id) => ({ type: "RD_PROJECT", id }),
+  hideActionBar: true,
+};
+
+export const rdConfig: ModuleConfig = {
+  slug: "rd",
+  title: "R&D Projects",
+  detailPath: (vm) => `/m/rd/${encodeURIComponent(vm.id)}`,
+  detail: rdDetail,
+  sources: [rdSource],
+};
+
+// ---------------------------------------------------------------------------
 // Registry — slug → config, consumed by MobileLayout's route wiring.
 // ---------------------------------------------------------------------------
 export const MODULE_CONFIGS: ModuleConfig[] = [
@@ -2692,4 +2779,5 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   productsConfig,
   serviceCasesConfig,
   usermgmtConfig,
+  rdConfig,
 ];

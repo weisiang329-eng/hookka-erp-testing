@@ -1883,17 +1883,19 @@ function PICard({
                       className="h-8"
                       inputClassName="h-8 text-xs"
                       placeholder={line.description?.slice(0, 40) || "(pick from catalog)"}
-                      value={line.materialCode ? `${line.materialCode} · ${line.materialName}` : ""}
+                      value={line.materialCode || ""}
                       options={internalCodeOptions}
                       strictPick
                       onPick={(o) => {
                         const reverse = card.supplierId
                           ? resolveBindingForMaterial(card.supplierId, o.itemCode)
                           : null;
+                        const rm = materialByCode.get(o.itemCode.trim().toUpperCase());
                         onPatchLine(i, {
                           materialCode: o.itemCode,
                           materialName: o.description,
                           supplierSku: reverse?.supplierSku ?? line.supplierSku,
+                          uom: rm?.baseUOM || line.uom,
                         });
                       }}
                       onTyped={() => {}}
@@ -1918,6 +1920,7 @@ function PICard({
                           supplierSku: o.itemCode,
                           materialCode: rm?.itemCode ?? binding?.materialCode ?? line.materialCode,
                           materialName: rm?.description ?? line.materialName,
+                          uom: rm?.baseUOM || line.uom,
                         });
                       }}
                       onTyped={() => {}}
@@ -3156,17 +3159,19 @@ function GRNCard({
                       className="h-8"
                       inputClassName="h-8 text-xs"
                       placeholder={line.description?.slice(0, 40) || "(pick from catalog)"}
-                      value={line.materialCode ? `${line.materialCode} · ${line.materialName}` : ""}
+                      value={line.materialCode || ""}
                       options={internalCodeOptions}
                       strictPick
                       onPick={(o) => {
                         const reverse = card.supplierId
                           ? resolveBindingForMaterial(card.supplierId, o.itemCode)
                           : null;
+                        const rm = materialByCode.get(o.itemCode.trim().toUpperCase());
                         onPatchLine(i, {
                           materialCode: o.itemCode,
                           materialName: o.description,
                           supplierSku: reverse?.supplierSku ?? line.supplierSku,
+                          uom: rm?.baseUOM || line.uom,
                         });
                       }}
                       onTyped={() => {}}
@@ -3187,6 +3192,7 @@ function GRNCard({
                           supplierSku: o.itemCode,
                           materialCode: rm?.itemCode ?? binding?.materialCode ?? line.materialCode,
                           materialName: rm?.description ?? line.materialName,
+                          uom: rm?.baseUOM || line.uom,
                         });
                       }}
                       onTyped={() => {}}

@@ -1218,6 +1218,8 @@ const productionDetail: DetailConfig = {
     }
     return out;
   },
+  attachmentsResource: (id) => ({ type: "PRODUCTION_ORDER", id }),
+  lineAttachmentsResource: (_parent, lineId) => ({ type: "JOB_CARD", id: lineId }),
 };
 
 export const productionConfig: ModuleConfig = {
@@ -2653,14 +2655,25 @@ const customerDetail: DetailConfig = {
     fld("Outstanding", (d) => money(num(d, "outstandingSen"))),
     fld("Address", (d) => str(d, "companyAddress"), true),
   ],
-  // Delivery Hubs as a sub-doc list (the design source's "Delivery Hubs · N"
-  // section). Each row condenses the hub: short-name + state + contact + phone
-  // in the sub-line, code right-aligned. Empty array = section omitted.
-  subDocLists: (d) => {
+  // Recent Orders (View History) — sub-fetch SOs for THIS customer to show
+  // recent history below the hubs. CHANGELOG: "导出: Quotation PDF /
+  // Catalogue PDF / View History". /api/sales-orders list is in localStorage
+  // cache (preloaded) so this is fast.
+  extraFetches: {
+    a: { key: "soList", url: () => "/api/sales-orders" },
+    b: { key: "invList", url: () => "/api/invoices" },
+  },
+  // Delivery Hubs + Recent Orders + Invoices. The design source's "Delivery
+  // Hubs · N" sub-list plus a "Recent Orders · N" + "Invoices · N" reverse
+  // lookup. Customer detail is read-only on mobile so these are display only.
+  subDocLists: (d, _resp, extras) => {
+    const cid = str(d, "id");
+    const cname = str(d, "name");
+    const lists: SubDocList[] = [];
+
     const hubs = asArr(d.deliveryHubs);
-    if (hubs.length === 0) return [];
-    return [
-      {
+    if (hubs.length > 0) {
+      lists.push({
         title: `Delivery Hubs · ${hubs.length}`,
         rows: hubs.map((h) => {
           const parts = [
@@ -2676,8 +2689,46 @@ const customerDetail: DetailConfig = {
             icon: "package" as const,
           };
         }),
-      },
-    ];
+      });
+    }
+
+    const soResp = extras?.soList as { data?: RawRow[] } | undefined;
+    const sos = (soResp?.data ?? []).filter((s) =>
+      str(s, "customerId") === cid || str(s, "customerName") === cname,
+    );
+    if (sos.length > 0) {
+      lists.push({
+        title: `Recent Orders · ${sos.length}`,
+        rows: sos.slice(0, 20).map((s) => ({
+          id: str(s, "id", "companySO"),
+          title: str(s, "companySO", "companySOId") || "—",
+          subLine: [shortDate(dateOnly(s, "companySODate")), str(s, "status")].filter(Boolean).join(" · ") || undefined,
+          trailing: money(num(s, "totalSen")),
+          href: `/m/sales/${encodeURIComponent(str(s, "id", "companySO"))}`,
+          icon: "file-text" as const,
+        })),
+      });
+    }
+
+    const invResp = extras?.invList as { data?: RawRow[] } | undefined;
+    const invs = (invResp?.data ?? []).filter((i) =>
+      str(i, "customerId") === cid || str(i, "customerName") === cname,
+    );
+    if (invs.length > 0) {
+      lists.push({
+        title: `Invoices · ${invs.length}`,
+        rows: invs.slice(0, 20).map((i) => ({
+          id: str(i, "id", "invoiceNo"),
+          title: str(i, "invoiceNo") || "—",
+          subLine: [shortDate(dateOnly(i, "dueDate")), str(i, "status")].filter(Boolean).join(" · ") || undefined,
+          trailing: money(num(i, "totalSen")),
+          href: `/m/invoices/${encodeURIComponent(str(i, "id", "invoiceNo"))}`,
+          icon: "file-text" as const,
+        })),
+      });
+    }
+
+    return lists;
   },
   // No status transitions on customers (no Confirm/Close on the desktop
   // record), so no CTA. Hide the action bar since mobile customer edit isn't
@@ -2761,11 +2812,19 @@ const supplierDetail: DetailConfig = {
     fld("Bank Account", (d) => str(d, "bankAccount")),
     fld("Address", (d) => str(d, "address"), true),
   ],
-  subDocLists: (d) => {
+  // Last Purchase Orders + scorecard (v17/CHANGELOG supplier detail). The
+  // PO list is preloaded so this is fast.
+  extraFetches: {
+    a: { key: "poList", url: () => "/api/purchase-orders" },
+  },
+  subDocLists: (d, _resp, extras) => {
+    const sid = str(d, "id");
+    const sname = str(d, "name");
+    const lists: SubDocList[] = [];
+
     const mats = asArr(d.materials);
-    if (mats.length === 0) return [];
-    return [
-      {
+    if (mats.length > 0) {
+      lists.push({
         title: `Materials supplied · ${mats.length}`,
         rows: mats.slice(0, 50).map((m) => ({
           id: str(m, "id"),
@@ -2781,8 +2840,28 @@ const supplierDetail: DetailConfig = {
             num(m, "lastPriceSen") > 0 ? money(num(m, "lastPriceSen")) : undefined,
           icon: "package" as const,
         })),
-      },
-    ];
+      });
+    }
+
+    const poResp = extras?.poList as { data?: RawRow[] } | undefined;
+    const pos = (poResp?.data ?? []).filter((p) =>
+      str(p, "supplierId") === sid || str(p, "supplierName") === sname,
+    );
+    if (pos.length > 0) {
+      lists.push({
+        title: `Last Purchase Orders · ${pos.length}`,
+        rows: pos.slice(0, 20).map((p) => ({
+          id: str(p, "id", "poNo"),
+          title: str(p, "poNo") || "—",
+          subLine: [shortDate(dateOnly(p, "orderDate")), str(p, "status")].filter(Boolean).join(" · ") || undefined,
+          trailing: money(num(p, "totalSen")),
+          href: `/m/procurement/${encodeURIComponent(str(p, "id", "poNo"))}`,
+          icon: "package" as const,
+        })),
+      });
+    }
+
+    return lists;
   },
   hideActionBar: true,
 };
@@ -2984,24 +3063,44 @@ const serviceCaseDetail: DetailConfig = {
   code: (d) => str(d, "caseNo") || "—",
   title: (d) => str(d, "customerName") || "—",
   status: (d) => resolveStatus(str(d, "status"), SERVICE_CASE_STATUS_MAP),
-  // Case lifecycle (design v10): Logged → Investigate → Service Order → Repair
-  // → Closed. The case status enum is coarse (OPEN / IN_PROGRESS / CLOSED /
-  // CANCELLED), so we map it onto the design's 5-step timeline: OPEN = Logged,
-  // IN_PROGRESS = Service Order (work scheduled), CLOSED = Closed. (The
-  // Investigate / Repair mid-steps are the design's narrative; the backend
-  // doesn't store a per-stage status, so they light up implicitly as the
-  // current step advances.) Cancelled cases keep the timeline at Logged.
+  // Case lifecycle — CHANGELOG/v17 specifies 8-stage pipeline:
+  //   Opened → Investigating → Service Order → Repair in progress →
+  //   Repair done → Delivery arranged → Delivered → Closed
+  // Backend status enum stays coarse (OPEN / IN_PROGRESS / CLOSED / CANCELLED).
+  // We surface the 8 visual stages and light them up based on a richer set of
+  // signals the case record carries (has linked service order, repair started,
+  // dispatched, etc) — falls back to status when the signal is absent.
   flow: {
     steps: [
-      { key: "OPEN", label: "Logged" },
-      { key: "INVESTIGATE", label: "Investigate" },
-      { key: "IN_PROGRESS", label: "Service Order" },
-      { key: "REPAIR", label: "Repair" },
+      { key: "OPENED", label: "Opened" },
+      { key: "INVESTIGATING", label: "Investigating" },
+      { key: "SERVICE_ORDER", label: "Service Order" },
+      { key: "REPAIR_IN_PROGRESS", label: "Repair in progress" },
+      { key: "REPAIR_DONE", label: "Repair done" },
+      { key: "DELIVERY_ARRANGED", label: "Delivery arranged" },
+      { key: "DELIVERED", label: "Delivered" },
       { key: "CLOSED", label: "Closed" },
     ],
     current: (d) => {
-      const s = str(d, "status");
-      return s === "CANCELLED" ? "OPEN" : s;
+      // Derive the most-advanced reached stage from the case record + its
+      // linked orders. Status CLOSED → final step; otherwise inspect orders
+      // for repair / delivery signals.
+      const status = str(d, "status");
+      if (status === "CLOSED") return "CLOSED";
+      if (status === "CANCELLED") return "OPENED";
+      const orders = Array.isArray(d.orders) ? (d.orders as RawRow[]) : [];
+      if (orders.length === 0) {
+        // No service order yet — case is in Opened or Investigating
+        return status === "IN_PROGRESS" ? "INVESTIGATING" : "OPENED";
+      }
+      // Look at the most-recent order's status to figure out the stage
+      const latest = orders[orders.length - 1];
+      const orderStatus = str(latest, "status").toUpperCase();
+      if (orderStatus === "DELIVERED" || orderStatus === "SIGNED") return "DELIVERED";
+      if (orderStatus === "DISPATCHED" || orderStatus === "LOADED") return "DELIVERY_ARRANGED";
+      if (orderStatus === "COMPLETED" || orderStatus === "DONE") return "REPAIR_DONE";
+      if (orderStatus === "IN_PROGRESS" || orderStatus === "REPAIR") return "REPAIR_IN_PROGRESS";
+      return "SERVICE_ORDER";
     },
   },
   fields: [

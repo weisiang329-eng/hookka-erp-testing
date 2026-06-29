@@ -13,7 +13,7 @@
 // ===========================================================================
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, SlidersHorizontal, Plus, ScanLine, FileSearch } from "lucide-react";
+import { Search, SlidersHorizontal, Plus, ScanLine, FileSearch, ListChecks, X, Download, Check } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, DocCard, StatusPill, FormSheet, ScanSheet, ScanPOSheet } from "../components";
 import { newSalesOrderSpec, type SOCreatePrefill } from "../config/forms";
@@ -56,6 +56,24 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   // extracts via /api/scan-po/extract, opens a prefilled new-SO form.
   const [scanPOOpen, setScanPOOpen] = useState(false);
   const canScanPO = config.slug === "sales";
+  // Multi-select mode (dc13 v13 SELECT ACTION BAR). UI only — bulk
+  // operations (delete/export/mark) toast for now since no bulk endpoints
+  // exist on the backend yet. Owner can flip these to real calls once the
+  // endpoints land.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  };
   // "+" create form for modules that have one (SO / Delivery / Procure /
   // Invoice / Announcements / Mail). null = this module has no mobile create.
   const [createSpec, setCreateSpec] = useState<FormSpec | null>(null);
@@ -264,6 +282,32 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
           <SlidersHorizontal size={19} strokeWidth={1.75} />
           {fCount > 0 ? fCount : ""}
         </button>
+        {/* Select-mode toggle — dc13 v13 SELECT ACTION BAR */}
+        <button
+          onClick={() => {
+            if (selectMode) {
+              exitSelectMode();
+            } else {
+              setSelectMode(true);
+            }
+          }}
+          aria-label={selectMode ? "Exit select mode" : "Select multiple"}
+          style={{
+            width: 44,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: selectMode ? M.taupe : M.card,
+            border: `1px solid ${selectMode ? M.taupe : M.hairline}`,
+            borderRadius: 12,
+            color: selectMode ? "#fff" : M.ink,
+            cursor: "pointer",
+            flexShrink: 0,
+            WebkitTapHighlightColor: "transparent",
+          }}
+        >
+          <ListChecks size={19} strokeWidth={1.75} />
+        </button>
       </div>
 
       {/* Optional bespoke panel above the list (e.g. Employees → Pending
@@ -295,24 +339,60 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
           visibleRows.map((row) => {
             const vm = source.toVM(row);
             const dest = config.detailPath?.(vm, row) ?? null;
+            const isSelected = selectedIds.has(vm.id);
             return (
-              <DocCard
+              <div
                 key={vm.id}
-                code={vm.code}
-                title={vm.title}
-                subLine={vm.subLine}
-                meta={[vm.meta1, vm.meta2]}
-                pill={
-                  vm.status ? (
-                    <StatusPill
-                      style={vm.status.style}
-                      label={vm.status.label}
-                      size="sm"
-                    />
-                  ) : undefined
-                }
-                onClick={dest ? () => navigate(dest) : undefined}
-              />
+                style={{
+                  position: "relative",
+                  outline: selectMode && isSelected ? `2px solid ${M.taupe}` : "none",
+                  outlineOffset: -1,
+                  borderRadius: 15,
+                }}
+              >
+                <DocCard
+                  code={vm.code}
+                  title={vm.title}
+                  subLine={vm.subLine}
+                  meta={[vm.meta1, vm.meta2]}
+                  pill={
+                    vm.status ? (
+                      <StatusPill
+                        style={vm.status.style}
+                        label={vm.status.label}
+                        size="sm"
+                      />
+                    ) : undefined
+                  }
+                  onClick={
+                    selectMode
+                      ? () => toggleSelect(vm.id)
+                      : dest
+                        ? () => navigate(dest)
+                        : undefined
+                  }
+                />
+                {selectMode ? (
+                  <span
+                    style={{
+                      position: "absolute",
+                      top: 10,
+                      right: 10,
+                      width: 22,
+                      height: 22,
+                      borderRadius: 6,
+                      background: isSelected ? M.taupe : "#fff",
+                      border: `2px solid ${isSelected ? M.taupe : M.hairline}`,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      pointerEvents: "none",
+                    }}
+                  >
+                    {isSelected ? <Check size={14} color="#fff" strokeWidth={3} /> : null}
+                  </span>
+                ) : null}
+              </div>
             );
           })
         )}
@@ -421,6 +501,104 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
           }}
         />
       ) : null}
+      {/* Bulk action bar — dc13 v13 SELECT ACTION BAR. Shows when in
+          select-mode with 1+ rows ticked. Sits above the bottom tab bar.
+          Actions toast for now — real bulk endpoints don't exist on the
+          backend yet (bulk-delete / bulk-export / bulk-mark would need
+          new routes). Cancel exits select-mode and clears the selection. */}
+      {selectMode && selectedIds.size > 0 ? (
+        <div
+          style={{
+            position: "fixed",
+            left: 0,
+            right: 0,
+            bottom: "calc(72px + env(safe-area-inset-bottom))",
+            zIndex: 40,
+            background: M.raisin,
+            color: "#fff",
+            padding: "12px 14px calc(12px + env(safe-area-inset-bottom))",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            boxShadow: "0 -8px 28px rgba(0,0,0,.25)",
+          }}
+        >
+          <button
+            onClick={exitSelectMode}
+            aria-label="Cancel selection"
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: 10,
+              background: "rgba(255,255,255,.12)",
+              border: "none",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              flex: "none",
+            }}
+          >
+            <X size={18} color="#fff" />
+          </button>
+          <span style={{ flex: 1, fontSize: 14, fontWeight: 700, color: "#fff" }}>
+            {selectedIds.size} selected
+          </span>
+          <button
+            onClick={() => {
+              setScanToast(
+                `Export ${selectedIds.size} item${selectedIds.size === 1 ? "" : "s"} — bulk endpoint pending`,
+              );
+              window.setTimeout(() => setScanToast(null), 2200);
+            }}
+            style={{
+              height: 38,
+              padding: "0 14px",
+              borderRadius: 10,
+              background: "#fff",
+              color: M.raisin,
+              border: "none",
+              fontFamily: "inherit",
+              fontSize: 12.5,
+              fontWeight: 700,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <Download size={14} strokeWidth={2} />
+            Export
+          </button>
+          <button
+            onClick={() => {
+              setScanToast(
+                `Mark ${selectedIds.size} as read — bulk endpoint pending`,
+              );
+              window.setTimeout(() => setScanToast(null), 2200);
+            }}
+            style={{
+              height: 38,
+              padding: "0 14px",
+              borderRadius: 10,
+              background: M.taupe,
+              color: "#fff",
+              border: "none",
+              fontFamily: "inherit",
+              fontSize: 12.5,
+              fontWeight: 700,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <Check size={14} strokeWidth={2} />
+            Mark
+          </button>
+        </div>
+      ) : null}
+
       {scanToast ? (
         <div
           style={{

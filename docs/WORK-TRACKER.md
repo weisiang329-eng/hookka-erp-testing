@@ -9,6 +9,63 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-06-29 — ⚪ PARKED for study: Weak-wifi resilience campaign
+
+**Owner (2026-06-29) — factory remote, wifi weak, workers can't punch / can't
+login / white-screen. Asked for the "full campaign" root-cause solution. Decided
+to STUDY first before building — too big to do reactively.**
+
+**Already shipped this session (preventive):**
+- ✅ `SameSite=Strict` → `Lax` on session cookies (`session-cookie.ts`,
+  `auth.ts`, `auth-oauth.ts`) — workers opening ERP from WhatsApp/email no
+  longer arrive without cookie → silent 401 → /login bounce. Industry-standard
+  posture; CSRF defence retained via double-submit `X-CSRF-Token`. Test
+  assertions updated in `tests/session-cookie-remember-me.test.mjs` (NOT yet
+  pushed — owner rejected; pending owner OK).
+- ✅ SPA `<script>`-tag asset-404 recovery (`main.tsx` + earlier
+  `vite:preloadError`) — catches stale chunk after deploy → SW purge + reload
+  (was only catching dynamic `import()` failures before).
+- ✅ Sticker `legsPair` overflow on DIVAN piece (root cause was unrelated to
+  wifi but surfaced same week).
+
+**Studied solution menu (DO NOT START — needs owner go-ahead per item):**
+
+Level 1 — Network infrastructure (most effective, $-cheap, OWNER ACTION):
+- Mesh wifi APs in factory (1 per dept ≈ RM 300-800 each, total ~RM 1.5-3k)
+- 4G/5G failover router (~RM 400) — auto-switch when wifi dies
+- Cat6 to fixed punch stations / total office PC
+
+Level 2 — Software (engineering work, large):
+- **A. Offline-first punch + sync** — IndexedDB queue, UUID idempotency, GPS+selfie
+  captured locally + uploaded on reconnect. 99%+ achievable, NOT 100% (browser
+  cache-clear + reinstall lose unsynced events). 2-3 hours code, 1-2 weeks
+  pilot before full rollout.
+- **B. Pre-cache login page + app shell** — login renders even with wifi flicker
+  on first hit. ~1 hour.
+- **C. Don't kick out on transient 401** — retry once with fresh cookie before
+  redirecting to /login. ~45 min.
+
+Level 3 — Architecture (medium):
+- Split shop-floor view (offline-first) from office view (online-required)
+- Local edge server per dept (Raspberry Pi-style) caching + buffering
+
+Level 4 — Hardware (long-term):
+- Dedicated factory tablets at punch stations (more stable than worker
+  phones) — runs same /worker PWA but fixed location + reliable power + 4G
+
+**Specifically called out risks for A (offline punch):**
+- Worker clears browser cache → unsynced punches LOST
+- Clock manipulation (server must record device-time + sync-time)
+- Late-arriving sync hitting closed payroll day → cron re-run needed
+- Selfie + GPS upload retry logic if first attempt fails
+- Server dedup on (workerId, ts, action) via UUID per event
+
+**Owner's gating decision:** "放进 pending tasks 先, 大工程, 我们需要先 study."
+Plan: revisit AFTER Level 1 network improvements are done, see if pain
+remaining justifies Level 2 work.
+
+---
+
 ## 2026-06-26 (late) — CURRENT STATE (tidy summary; detailed logs below)
 
 **✅ LIVE on prod + staging:** PIC flicker fix · mint+jc sticker · packing-list per-piece racks · Standard Times (#B) · announcement collapse · 2-PIC everywhere · DO-email PDF · schedule Barcode→QR · **PIC2 save fix** (Hyperdrive read-after-write false mismatch).

@@ -3115,22 +3115,132 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  // Label → scene map. When a clicked button/tab/row's text matches one of
+  // these keys, the click navigates to the corresponding scene instead of
+  // just firing a toast. Covers cross-scene tabs (Inventory → Fabrics,
+  // Procurement → GRN, etc.), header CTAs (Create New SO), row-action
+  // labels, and the breadcrumb hops.
+  const navMap = {
+    // Overview
+    "Dashboard": "dashboard",
+    "Hookka Report": "daily-report",
+    "Daily Report": "daily-report",
+    "Notifications": "notifications",
+    "Forecasting": "forecast",
+    "Forecast": "forecast",
+    // Sales
+    "Sales Orders": "sales",
+    "Create New SO": "sales-create",
+    "Scan PO": "sales-create",
+    "Delivery Orders": "delivery",
+    "Delivery": "delivery",
+    "Invoices": "invoices",
+    "Customers": "customers",
+    "Add Customer": "customer-detail",
+    "Consignment Notes": "cn-note",
+    "Consignment Orders": "consignment",
+    "Returns": "cn-return",
+    // Procurement
+    "Purchase Orders": "procurement",
+    "Goods Receipt": "grn",
+    "Purchase Invoice": "pi",
+    "Suppliers": "suppliers",
+    "Add Supplier": "suppliers",
+    // Production
+    "Production": "production",
+    "Production Orders": "production",
+    "Overview": "production",
+    "Fab Cut": "prod-dept",
+    "Fab Sew": "prod-dept",
+    "Foam": "prod-dept",
+    "Wood Cut": "prod-dept",
+    "Framing": "prod-dept",
+    "Webbing": "prod-dept",
+    "Upholstery": "prod-dept",
+    "Packing": "prod-dept",
+    "Scan": "prod-scan",
+    "Folders": "prod-folders",
+    "Planning": "planning",
+    "Capacity": "planning",
+    "MRP": "mrp",
+    "Schedule": "plan-dept",
+    "BOM": "bom",
+    "BOM Master Templates": "bom",
+    "WIP Times": "wip-times",
+    // Products
+    "Products": "products",
+    "Add Product": "products",
+    "CNC Templates": "cnc",
+    "Sofa Combos": "sofa-combos",
+    // Warehouse
+    "Inventory": "inventory",
+    "Finished Products": "inventory",
+    "WIP": "inventory",
+    "Raw Materials": "inventory",
+    "Fabrics": "fabrics",
+    "Stock Value": "stock-value",
+    "Adjustments": "stock-adj",
+    "Stock Adjustments": "stock-adj",
+    "Warehouse": "warehouse",
+    // Service / Quality
+    "Service Cases": "servicecases",
+    "QC": "quality",
+    "Quality": "quality",
+    "Quality Control": "quality",
+    // R&D
+    "R&D Projects": "rd",
+    "R&D": "rd",
+    "R&D Maintenance": "rd-maint",
+    // Comms
+    "Mail Center": "mail",
+    "Mail": "mail",
+    "Compose": "mail",
+    "Announcements": "announcements",
+    "New Announcement": "announcements",
+    // Finance
+    "Accounting": "accounting",
+    "Trial Balance": "accounting",
+    "Journal": "accounting",
+    "P&L": "accounting",
+    "Balance Sheet": "accounting",
+    "AR Aging": "accounting",
+    "AP Aging": "accounting",
+    "Bank Recon": "accounting",
+    "Cash Flow": "cashflow",
+    "e-Invoice": "einvoice",
+    "Reports": "reports",
+    // HR / System
+    "Employees": "employees",
+    "Add Employee": "employees",
+    "User Management": "settings",
+    "Organisations": "orgs",
+    "System Health": "health",
+    "Maintenance": "maintenance",
+  };
+
+  // Within-scene "view detail" navigation — clicking a TR inside a list
+  // scene jumps to that scene's detail variant.
+  const detailMap = {
+    sales: "sales-detail",
+    delivery: "delivery-detail",
+    customers: "customer-detail",
+  };
+
   document.body.addEventListener(
     "click",
     (e) => {
       const t = e.target.closest("button, [role='button'], span[style*='cursor'], tr, a");
       if (!t) return;
       if (t === toast || toast.contains(t)) return;
-      // Don't interfere with already-wired clicks (sidebar nav / scene switcher)
       if (t.hasAttribute("onclick") || t.onclick) return;
       if (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA") return;
       if (t.closest("input, select, textarea")) return;
-      const label =
+      const labelRaw =
         (t.getAttribute("aria-label") || t.textContent || "")
           .trim()
-          .replace(/\s+/g, " ")
-          .slice(0, 60);
-      if (!label) return;
+          .replace(/\s+/g, " ");
+      if (!labelRaw) return;
+      const label = labelRaw.slice(0, 60);
       // Tab-like spans get an active-toggle treatment
       const cs = getComputedStyle(t);
       const isTabLike =
@@ -3145,6 +3255,34 @@ window.addEventListener("DOMContentLoaded", () => {
         try {
           markTabActive(t);
         } catch {}
+      }
+      // Resolve a target scene from the label (exact match, else prefix match)
+      let targetView = null;
+      // Walk labelRaw + each leading word until a match
+      const tryKeys = [label];
+      // The first 1-3 words alone (handles labels like "Add Customer" or "+ New SO")
+      const cleaned = label.replace(/^[+✓✓×·]\s*/, "").trim();
+      tryKeys.push(cleaned);
+      const w = cleaned.split(" ");
+      if (w.length >= 2) tryKeys.push(w.slice(-2).join(" "));
+      if (w.length >= 1) tryKeys.push(w[w.length - 1]);
+      for (const k of tryKeys) {
+        if (navMap[k]) {
+          targetView = navMap[k];
+          break;
+        }
+      }
+      // Row click in a list scene → jump to its detail variant
+      if (!targetView && t.tagName === "TR" && t.closest("tbody")) {
+        const currentView = window.__app && window.__app.state && window.__app.state.view;
+        if (currentView && detailMap[currentView]) {
+          targetView = detailMap[currentView];
+        }
+      }
+      if (targetView && window.__app && typeof window.__app.setView === "function") {
+        window.__app.setView(targetView);
+        showToast("→ " + label);
+        return;
       }
       showToast("✓ " + label);
     },

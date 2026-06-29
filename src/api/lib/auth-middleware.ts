@@ -176,6 +176,24 @@ const SESSION_CACHE_TTL_S = 300;
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const SLIDING_REFRESH_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 1 day
 
+// Constant-time string equality — hashes both sides before comparing so the
+// comparison time depends only on the hash output length, never the secret
+// contents. Same pattern as worker.ts's `constantTimeEqual`. Lives here so
+// the scan-worker bypass above can call it without a circular import.
+async function constantTimeEqualStr(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(a)),
+    crypto.subtle.digest("SHA-256", enc.encode(b)),
+  ]);
+  const va = new Uint8Array(ha);
+  const vb = new Uint8Array(hb);
+  if (va.length !== vb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < va.length; i++) diff |= va[i] ^ vb[i];
+  return diff === 0;
+}
+
 export async function sessionCacheKey(token: string): Promise<string> {
   const buf = await crypto.subtle.digest(
     "SHA-256",
@@ -275,6 +293,39 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
   // Anything outside /api/* is served as a static asset — the middleware is
   // only registered under /api/* in worker.ts, but guard here too.
   if (!path.startsWith("/api/")) return next();
+
+  // Background scan worker bypass (added 2026-06-29 — async scan queue).
+  // The /api/scan-queue/* upload endpoint stores file bytes and returns a
+  // batchId; processBatch() runs under waitUntil() and self-calls the
+  // existing /api/scan-po/extract or /api/scan-supplier/extract endpoint
+  // with the stashed bytes. That fetch carries NO user session (the
+  // operator may have closed their tab), so the only credential is a
+  // shared secret. Same constant-time pattern as MAIL_INBOUND_SECRET /
+  // PUSH_CRON_SECRET — only those two extract paths are eligible.
+  const scanWorkerHeader = c.req.header("x-scan-worker") || "";
+  const scanWorkerSecret = (
+    c.env as unknown as { SCAN_WORKER_TOKEN?: string }
+  ).SCAN_WORKER_TOKEN;
+  if (
+    scanWorkerHeader &&
+    scanWorkerSecret &&
+    scanWorkerSecret.length >= 16 &&
+    (path === "/api/scan-po/extract" || path === "/api/scan-supplier/extract") &&
+    c.req.method === "POST" &&
+    (await constantTimeEqualStr(scanWorkerHeader, scanWorkerSecret))
+  ) {
+    // Stamp a system actor so requirePermission() inside the route allows
+    // through. SUPER_ADMIN bypass is unconditional (see lib/rbac.ts).
+    (c as unknown as { set: (k: string, v: unknown) => void }).set(
+      "userId",
+      "scan-worker",
+    );
+    (c as unknown as { set: (k: string, v: unknown) => void }).set(
+      "userRole",
+      "SUPER_ADMIN",
+    );
+    return next();
+  }
 
   const isPublic = isPublicPath(path, c.req.method);
 

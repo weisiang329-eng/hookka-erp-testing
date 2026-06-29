@@ -23,6 +23,7 @@
 // ---------------------------------------------------------------------------
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
@@ -253,6 +254,52 @@ async function runExtractOnce(
   }
   return { kind: "fail", error: lastErr || "retry exhausted" };
 }
+
+// Background scan queue dispatch (added 2026-06-29). When the operator
+// drops >2 files we punt to the async queue: POST /api/scan-queue/upload
+// returns a batchId immediately and processing continues server-side even
+// if the operator closes the tab. Returns the batchId on success.
+async function enqueueScanBatch(
+  kind: "po" | "supplier",
+  files: File[],
+  opts: { supplierId?: string | null; poContext?: string },
+): Promise<{ ok: true; batchId: string } | { ok: false; error: string }> {
+  const fd = new FormData();
+  fd.append("kind", kind);
+  for (const f of files) fd.append("files", f, f.name);
+  if (opts.supplierId) fd.append("supplierId", opts.supplierId);
+  if (opts.poContext) fd.append("poContext", opts.poContext);
+  // We can't reuse fetchJson here (it forces content-type JSON); CSRF cookie
+  // travels automatically because the browser fetch attaches same-origin
+  // cookies, and api-client.ts globally patches window.fetch to inject the
+  // X-CSRF-Token header on mutating /api/* calls.
+  let res: Response;
+  try {
+    res = await fetch("/api/scan-queue/upload", {
+      method: "POST",
+      body: fd,
+      credentials: "include",
+    });
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Network error" };
+  }
+  const text = await res.text();
+  let json: { success?: boolean; error?: string; data?: { batchId?: string } };
+  try {
+    json = JSON.parse(text) as typeof json;
+  } catch {
+    return { ok: false, error: `Non-JSON response: ${text.slice(0, 120)}` };
+  }
+  if (!res.ok || !json.success || !json.data?.batchId) {
+    return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+  }
+  return { ok: true, batchId: json.data.batchId };
+}
+
+// Threshold above which uploads switch from the synchronous OCR path to the
+// background queue. ≤2 files stays on the fast path so single quick scans
+// don't bounce through the queue page.
+const QUEUE_BATCH_THRESHOLD = 2;
 
 // ─── Top-level dispatcher ─────────────────────────────────────────────────
 
@@ -655,6 +702,7 @@ function CreatePIWizard({
   title = "Scan supplier document",
 }: CreatePIModeProps) {
   const { confirm } = useConfirm();
+  const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState<StepState>("upload");
@@ -949,6 +997,27 @@ function CreatePIWizard({
       setParsing(true);
       setFileProgress(Object.fromEntries(uploaded.map((u) => [u.id, "queued" as const])));
 
+      // BIG-batch path — anything past the threshold goes to the async
+      // background queue so the operator can close the tab and the OCR
+      // continues server-side. ≤2 files stays on the synchronous path
+      // below so a quick single-file scan doesn't bounce through the
+      // queue page. Owner ruling 2026-06-29.
+      if (accepted.length > QUEUE_BATCH_THRESHOLD) {
+        const supplierIdForHint = defaultSupplierId ?? null;
+        const r = await enqueueScanBatch("supplier", accepted, {
+          supplierId: supplierIdForHint,
+        });
+        if (r.ok) {
+          setParsing(false);
+          onClose();
+          navigate(`/scan-queue/${r.batchId}`);
+          return;
+        }
+        setErrors([`Queue upload failed: ${r.error}`]);
+        setParsing(false);
+        return;
+      }
+
       // Kick off all extractions in parallel; one /extract call per file.
       const fanOut = uploaded.map(async (u) => {
         setFileProgress((prev) => ({ ...prev, [u.id]: "scanning" }));
@@ -988,7 +1057,7 @@ function CreatePIWizard({
       setParsing(false);
       setStep("preview");
     },
-    [buildCard, defaultSupplierId, supplierById],
+    [buildCard, defaultSupplierId, supplierById, navigate, onClose],
   );
 
   const handleDrop = useCallback(
@@ -2194,6 +2263,7 @@ function CreateGRNWizard({
   title = "Scan supplier document",
 }: CreateGRNModeProps) {
   const { confirm } = useConfirm();
+  const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState<StepState>("upload");
@@ -2441,6 +2511,24 @@ function CreateGRNWizard({
       setParsing(true);
       setFileProgress(Object.fromEntries(uploaded.map((u) => [u.id, "queued" as const])));
 
+      // BIG-batch path — same gating as CreatePIWizard. >2 files goes to
+      // the async queue so the operator can close the tab. ≤2 stays sync.
+      if (accepted.length > QUEUE_BATCH_THRESHOLD) {
+        const supplierIdForHint = defaultSupplierId ?? null;
+        const r = await enqueueScanBatch("supplier", accepted, {
+          supplierId: supplierIdForHint,
+        });
+        if (r.ok) {
+          setParsing(false);
+          onClose();
+          navigate(`/scan-queue/${r.batchId}`);
+          return;
+        }
+        setErrors([`Queue upload failed: ${r.error}`]);
+        setParsing(false);
+        return;
+      }
+
       const fanOut = uploaded.map(async (u) => {
         setFileProgress((prev) => ({ ...prev, [u.id]: "scanning" }));
         const supplierIdForHint = defaultSupplierId ?? null;
@@ -2479,7 +2567,7 @@ function CreateGRNWizard({
       setParsing(false);
       setStep("preview");
     },
-    [buildCard, defaultSupplierId, supplierById],
+    [buildCard, defaultSupplierId, supplierById, navigate, onClose],
   );
 
   const handleDrop = useCallback(

@@ -91,6 +91,10 @@ const ProductDocuments = lazy(() => import('./pages/products/documents'))
 // cutter, grouped by product code.
 const CncTemplates = lazy(() => import('./pages/cnc-templates'))
 
+// Background scan queue — async OCR progress per batch. Linked to from the
+// scan-supplier / scan-po modals when >2 files are dropped.
+const ScanQueueBatch = lazy(() => import('./pages/scan-queue'))
+
 // Single-page modules
 const Customers = lazy(() => import('./pages/customers'))
 const Employees = lazy(() => import('./pages/employees'))
@@ -371,6 +375,9 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
 
   // CNC Cutting Templates — fabric-cutting file library (BUYI E-DIGIT cutter).
   { path: '/cnc-templates', element: <S><CncTemplates /></S> },
+
+  // Background scan queue — async OCR progress page (one per batchId).
+  { path: '/scan-queue/:batchId', element: <S><ScanQueueBatch /></S> },
 
   // Single-page modules
   { path: '/customers', element: <S><Customers /></S> },

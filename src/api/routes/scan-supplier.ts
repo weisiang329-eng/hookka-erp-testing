@@ -27,7 +27,11 @@ import { distillSupplierRules } from "../lib/ocr-distill";
 const app = new Hono<Env>();
 
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
-const CLAUDE_MODEL = "claude-sonnet-4-6";
+// claude-haiku-4-5 — owner ruling 2026-06-29 evening: scans were timing out
+// on Sonnet (120-180s wall-clock on multi-line invoices). Haiku is 3-4x
+// faster, accuracy is plenty for structured line extraction; gold samples
+// + per-supplier rules pick up the slack on tricky layouts.
+const CLAUDE_MODEL = "claude-haiku-4-5";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 
 function genId(): string {

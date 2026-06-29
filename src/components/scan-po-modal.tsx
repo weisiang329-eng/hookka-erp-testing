@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useId } from "react";
 import { createPortal } from "react-dom";
+import { useNavigate } from "react-router-dom";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -9,6 +10,40 @@ import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { parsePOText, mapDeliveryHub, type ParsedPO, type POParseResult } from "@/lib/po-parser";
 import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles, Star, Plus } from "lucide-react";
+
+// Background scan queue dispatch — shared with scan-supplier-modal. >2-file
+// drops POST to /api/scan-queue/upload + navigate to /scan-queue/<batchId>
+// so the operator can close the tab while Claude vision runs server-side.
+async function enqueuePoBatch(
+  files: File[],
+): Promise<{ ok: true; batchId: string } | { ok: false; error: string }> {
+  const fd = new FormData();
+  fd.append("kind", "po");
+  for (const f of files) fd.append("files", f, f.name);
+  let res: Response;
+  try {
+    res = await fetch("/api/scan-queue/upload", {
+      method: "POST",
+      body: fd,
+      credentials: "include",
+    });
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Network error" };
+  }
+  const text = await res.text();
+  let json: { success?: boolean; error?: string; data?: { batchId?: string } };
+  try {
+    json = JSON.parse(text) as typeof json;
+  } catch {
+    return { ok: false, error: `Non-JSON response: ${text.slice(0, 120)}` };
+  }
+  if (!res.ok || !json.success || !json.data?.batchId) {
+    return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+  }
+  return { ok: true, batchId: json.data.batchId };
+}
+
+const QUEUE_BATCH_THRESHOLD = 2;
 
 type Props = {
   open: boolean;
@@ -141,6 +176,7 @@ function makeUploadId(): string {
 }
 
 export function ScanPOModal({ open, onClose, onCreated }: Props) {
+  const navigate = useNavigate();
   const [step, setStep] = useState<StepState>("upload");
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [parsing, setParsing] = useState(false);
@@ -263,6 +299,25 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     // Seed every file as "queued" so the UploadStep list renders a row per
     // PDF the moment processing starts. Status keyed by stable upload id.
     setFileProgress(Object.fromEntries(uploaded.map((u) => [u.id, "queued" as const])));
+
+    // BIG-batch path — anything past the threshold goes to the async
+    // background scan queue. POST returns immediately with a batchId;
+    // navigate to /scan-queue/<batchId> and let the operator close the
+    // tab while OCR runs server-side. ≤2 files keeps the synchronous
+    // fan-out path below (so single quick scans don't bounce through the
+    // queue page). Owner ruling 2026-06-29.
+    if (pdfFiles.length > QUEUE_BATCH_THRESHOLD) {
+      const r = await enqueuePoBatch(pdfFiles);
+      if (r.ok) {
+        setParsing(false);
+        onClose();
+        navigate(`/scan-queue/${r.batchId}`);
+        return;
+      }
+      setErrors([`Queue upload failed: ${r.error}`]);
+      setParsing(false);
+      return;
+    }
 
     // --- Pass 1: try Claude OCR (per-page parallel) -------------------
     // Phase 4: each multi-page PDF is split client-side into one PDF per
@@ -543,7 +598,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     setSelectedPOs(new Set(Array.from({ length: total }, (_, i) => i)));
     setStep("preview");
     setParsing(false);
-  }, []);
+  }, [navigate, onClose]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();

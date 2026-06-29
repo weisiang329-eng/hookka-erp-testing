@@ -126,6 +126,16 @@ export type Env = {
     // POST /api/push/clock-reminder (server→server, not CSRF). Set via
     // `wrangler secret put PUSH_CRON_SECRET` (>= 16 chars).
     PUSH_CRON_SECRET?: string;
+    // Background scan-queue worker (2026-06-29). The processBatch() helper
+    // in routes/scan-queue.ts re-uploads stashed file bytes to the existing
+    // /api/scan-po/extract / /api/scan-supplier/extract endpoints WITHOUT a
+    // user session (the operator may have closed their tab). It presents
+    // this shared secret as the x-scan-worker header; auth-middleware
+    // bypasses the dashboard gate on a constant-time match. Set via
+    // `wrangler secret put SCAN_WORKER_TOKEN` (>= 16 chars). When unset,
+    // the queue worker cannot drive extractions — uploads still queue but
+    // every row will land in 'failed' with a clear error message.
+    SCAN_WORKER_TOKEN?: string;
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route
@@ -583,6 +593,30 @@ app.post("/api/qc-pending/trigger", async (c) => {
   }
 });
 
+// Background scan-queue sweep — re-queues any 'processing' row older than
+// 5 minutes (worker died mid-batch or Workers killed the isolate before the
+// batch drained). CRON_SECRET-gated; registered BEFORE authMiddleware so an
+// external cron (cron-job.org / GitHub Action every minute) can hit it
+// without a session. Runtime logic in routes/scan-queue.ts.
+app.post("/api/internal/scan-queue-sweep", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[scan-queue-sweep] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  try {
+    const result = await sweepStuckScans(c.var.DB, c.env, c.executionCtx);
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("[scan-queue-sweep] error:", err);
+    return c.json({ ok: false, error: "sweep failed" }, 500);
+  }
+});
+
 // Midnight auto-clockout cron entry. CRON_SECRET-gated, registered BEFORE
 // authMiddleware so the GitHub Actions runner can hit it without a worker
 // session — the same pattern as /api/qc-pending/trigger above. Closes every
@@ -842,6 +876,7 @@ import scheduling from "./routes/scheduling";
 import planningSchedule from "./routes/planning-schedule";
 import scanPo from "./routes/scan-po";
 import scanSupplier from "./routes/scan-supplier";
+import scanQueue, { sweepStuckScans } from "./routes/scan-queue";
 // One-shot historical job_card completion importer (Wei Siang's GS migration).
 // Server-only super-admin tool gated by production-orders:update; see
 // routes/import-completion.ts for the per-row resolution + cascade logic.
@@ -1062,6 +1097,11 @@ app.route("/api/scheduling", scheduling);
 app.route("/api/planning", planningSchedule);
 app.route("/api/scan-po", scanPo);
 app.route("/api/scan-supplier", scanSupplier);
+// Background scan queue (async OCR). Upload returns a batchId IMMEDIATELY;
+// processBatch() drives Claude calls under waitUntil() so the user can
+// close the tab while a 100-file batch processes server-side. Same RBAC
+// gate as /api/scan-po + /api/scan-supplier (purchase-orders:create).
+app.route("/api/scan-queue", scanQueue);
 // One-shot historical job_card completion importer. POST
 // /api/import/job-card-completion drives backfill of pre-ERP orders from a
 // Google Sheets export — see routes/import-completion.ts for body shape +

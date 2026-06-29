@@ -169,6 +169,9 @@ const EXPECTED_PRE_AUTH_ROUTES = [
   "POST /api/internal/replay-audit-dlq",
   "POST /api/internal/distill-ocr-rules",
   "POST /api/internal/auto-clockout",
+  // Background scan-queue sweep (added 2026-06-29). CRON_SECRET-gated like the
+  // rest of /api/internal/*; re-queues 'processing' rows older than 5min.
+  "POST /api/internal/scan-queue-sweep",
   "POST /api/qc-pending/trigger",
   "POST /api/mail-center/inbound",
 ];

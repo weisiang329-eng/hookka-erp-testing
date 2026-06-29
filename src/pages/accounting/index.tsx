@@ -254,6 +254,49 @@ function buildOtherPartyPaymentVoucher(p: PaymentGroup, accounts: ChartOfAccount
   };
 }
 
+// Fund transfer → voucher: a single From/To/Amount line (no line items). The
+// chart of accounts is in scope here, so From/To resolve to "code · name" via
+// accountLabel. VOID-tagged when voided/deleted.
+function buildFundTransferVoucher(t: FtRow, accounts: ChartOfAccount[]): VoucherSpec {
+  const voided = t.lifecycleState === "VOID" || t.lifecycleState === "DELETED";
+  return {
+    title: voided ? "FUND TRANSFER VOUCHER — VOID" : "FUND TRANSFER VOUCHER",
+    company: VOUCHER_COMPANY,
+    docNo: t.no,
+    date: formatDateDMY(t.date),
+    partyLabel: "Description",
+    partyName: t.description ?? "",
+    columns: [{ label: "From" }, { label: "To" }, { label: "Amount", align: "right" }],
+    lines: [{ cells: [accountLabel(accounts, t.fromAccount), accountLabel(accounts, t.toAccount), formatCurrency(t.amountSen)] }],
+    totalCells: ["", "Total", formatCurrency(t.amountSen)],
+    amountWords: amountInWords(t.amountSen),
+    signatures: [{ label: "Prepared by" }, { label: "Approved by" }],
+    printedOn: todayDMY(),
+  };
+}
+
+// Supplier discount (purchase credit note) → voucher: a single
+// reason/amount line (no per-account items). Voided notes carry status
+// "CANCELLED" (see /purchase-credit-notes/:id/void) — VOID-tag those.
+function buildSupplierDiscountVoucher(d: SDHistoryRow): VoucherSpec {
+  const voided = d.status === "CANCELLED" || d.status === "VOID";
+  return {
+    title: voided ? "SUPPLIER DISCOUNT NOTE — VOID" : "SUPPLIER DISCOUNT NOTE",
+    company: VOUCHER_COMPANY,
+    docNo: d.noteNumber,
+    date: formatDateDMY(d.date),
+    partyLabel: "Supplier",
+    partyName: d.supplierName ?? "",
+    columns: [{ label: "Description" }, { label: "Amount", align: "right" }],
+    lines: [{ cells: [d.reason || "Supplier discount", formatCurrency(d.totalAmount)] }],
+    footerNote: d.piNo ? `Against PI: ${d.piNo}` : undefined,
+    totalCells: ["Total", formatCurrency(d.totalAmount)],
+    amountWords: amountInWords(d.totalAmount),
+    signatures: [{ label: "Prepared by" }, { label: "Approved by" }],
+    printedOn: todayDMY(),
+  };
+}
+
 // Phase 2 follow-up (owner) — searchable account combobox: type a keyword
 // (code or name fragment) to filter, click to pick. Headers (isPostable
 // false) are excluded — journals must hit leaf accounts.
@@ -3403,6 +3446,10 @@ function SupplierDiscountTab() {
       .catch(() => {});
   }, []);
 
+  // Hide orphan DRAFTs (a Save whose post leg failed) — the rows actually shown.
+  const visibleHistory = history.filter((n) => n.status !== "DRAFT");
+  const sdSel = useRowSelection(visibleHistory, (d) => d.noteNumber ?? d.id);
+
   useEffect(() => {
     fetch("/api/suppliers")
       .then((r) => r.json() as Promise<{ success?: boolean; data?: SDSupplier[] }>)
@@ -3714,6 +3761,24 @@ function SupplierDiscountTab() {
       <Card>
         <CardContent className="p-4 space-y-3">
           <h3 className="font-semibold text-[#1F1D1B]">History</h3>
+          <BatchActionsBar
+            count={sdSel.count}
+            onClear={sdSel.clear}
+            onPrint={() => printVouchers(sdSel.selectedRows.map(buildSupplierDiscountVoucher))}
+            exportName="supplier-discounts"
+            exportAoa={() => [
+              ["Note No", "Date", "Supplier", "Status", "Against PI", "Reason", "Amount (RM)"],
+              ...sdSel.selectedRows.map((d) => [
+                d.noteNumber,
+                formatDateDMY(d.date),
+                d.supplierName ?? "",
+                d.status ?? "ACTIVE",
+                d.piNo ?? "",
+                d.reason ?? "",
+                (d.totalAmount / 100).toFixed(2),
+              ]),
+            ]}
+          />
           {history.length === 0 ? (
             <div className="py-8 text-center text-[#9CA3AF] text-sm">No supplier discounts yet.</div>
           ) : (
@@ -3721,6 +3786,7 @@ function SupplierDiscountTab() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 w-8"><input type="checkbox" checked={sdSel.allSelected} onChange={sdSel.toggleAll} className="h-3.5 w-3.5 accent-[#6B5C32] align-middle" /></th>
                     <th className="px-3 py-2 text-left">No.</th>
                     <th className="px-3 py-2 text-left">Supplier</th>
                     <th className="px-3 py-2 text-left">Date</th>
@@ -3731,10 +3797,11 @@ function SupplierDiscountTab() {
                   </tr>
                 </thead>
                 <tbody>
-                  {/* Hide orphan DRAFTs (a Save whose post leg failed) — no GL,
-                      not actionable here; only POSTED / voided notes belong. */}
-                  {history.filter((n) => n.status !== "DRAFT").map((n) => (
+                  {visibleHistory.map((n) => (
                     <tr key={n.id} className="border-b border-[#F0ECE9]">
+                      <td className="px-3 py-1.5 w-8">
+                        <input type="checkbox" checked={sdSel.isSelected(n.noteNumber ?? n.id)} onChange={() => sdSel.toggle(n.noteNumber ?? n.id)} className="h-3.5 w-3.5 accent-[#6B5C32] align-middle" />
+                      </td>
                       <td className="px-3 py-1.5 tabular-nums text-xs font-medium">{n.noteNumber}</td>
                       <td className="px-3 py-1.5">{n.supplierName}</td>
                       <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{n.date}</td>
@@ -7140,6 +7207,7 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const [reference, setReference] = useState("");
   const [saving, setSaving] = useState(false);
   const [rows, setRows] = useState<FtRow[] | null>(null);
+  const ftSel = useRowSelection(rows ?? [], (t) => t.no);
 
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
 
@@ -7267,6 +7335,25 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
         </CardContent>
       </Card>
 
+      <BatchActionsBar
+        count={ftSel.count}
+        onClear={ftSel.clear}
+        onPrint={() => printVouchers(ftSel.selectedRows.map((t) => buildFundTransferVoucher(t, accounts)))}
+        exportName="fund-transfers"
+        exportAoa={() => [
+          ["No", "Date", "From", "To", "Status", "Description", "Amount (RM)"],
+          ...ftSel.selectedRows.map((t) => [
+            t.no,
+            formatDateDMY(t.date),
+            accountLabel(accounts, t.fromAccount),
+            accountLabel(accounts, t.toAccount),
+            t.lifecycleState ?? "ACTIVE",
+            t.description ?? "",
+            (t.amountSen / 100).toFixed(2),
+          ]),
+        ]}
+      />
+
       <Card>
         <CardContent className="p-0 overflow-x-auto">
           {rows === null ? (
@@ -7275,6 +7362,7 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 w-8"><input type="checkbox" checked={ftSel.allSelected} onChange={ftSel.toggleAll} className="h-3.5 w-3.5 accent-[#6B5C32] align-middle" /></th>
                   <th className="px-3 py-2 text-left">No</th>
                   <th className="px-3 py-2 text-left">Date</th>
                   <th className="px-3 py-2 text-left">From</th>
@@ -7288,6 +7376,9 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.no} className={`border-b border-[#F0ECE9] ${(r.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? "opacity-50" : ""}`}>
+                    <td className="px-3 py-1.5 w-8">
+                      <input type="checkbox" checked={ftSel.isSelected(r.no)} onChange={() => ftSel.toggle(r.no)} className="h-3.5 w-3.5 accent-[#6B5C32] align-middle" />
+                    </td>
                     <td className="px-3 py-1.5 tabular-nums text-xs">{r.no}</td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.date}</td>
                     <td className="px-3 py-1.5 text-xs">{r.fromAccount} {r.fromName}</td>
@@ -7307,7 +7398,7 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   </tr>
                 ))}
                 {rows.length === 0 && (
-                  <tr><td colSpan={8} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No transfers yet</td></tr>
+                  <tr><td colSpan={9} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No transfers yet</td></tr>
                 )}
               </tbody>
             </table>

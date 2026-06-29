@@ -15,6 +15,8 @@
   ::selection { background: #6B5C32; color: #fff; }
   lucide-icon { display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
   lucide-icon svg { display: block; }
+  [data-hk-theme="dark"] { filter: invert(0.92) hue-rotate(180deg); }
+  [data-hk-theme="dark"] img:not([data-logo]) { filter: invert(1) hue-rotate(180deg); }
   .scrollarea::-webkit-scrollbar { width: 0; height: 0; }
   .scrollarea { scrollbar-width: none; -ms-overflow-style: none; }
   @keyframes hkUp { from { transform: translateY(10px); } to { transform: none; } }
@@ -70,7 +72,7 @@
     <div style="position:absolute; top:0; left:0; right:0; bottom:0; border-radius:54px; box-shadow:inset 0 0 0 11px #1A1A1A; pointer-events:none; z-index:30;"></div>
 
     <!-- SCREEN -->
-    <div style="position:relative; width:100%; height:100%; background:#FAF8F4; border-radius:44px; overflow:hidden;">
+    <div data-hk-theme="{{ themeAttr }}" style="position:relative; width:100%; height:100%; background:#FAF8F4; border-radius:44px; overflow:hidden;">
 
       <!-- status bar -->
       <div style="position:absolute; top:0; left:0; right:0; height:50px; z-index:20; display:flex; align-items:center; justify-content:space-between; padding:0 30px; padding-top:6px; background:{{ statusBg }};">
@@ -135,7 +137,7 @@
         <div style="flex:none; padding:50px 18px 0; background:{{ headerBg }};">
           <sc-if value="{{ isHome }}" hint-placeholder-val="{{ true }}">
           <div style="display:flex; align-items:center; gap:12px; padding:12px 2px 16px;">
-            <img src="hookka-logo.png" alt="Hookka" style="height:24px; width:auto; flex:none;" />
+            <img src="hookka-logo.png" data-logo="1" alt="Hookka" style="height:24px; width:auto; flex:none;" />
             <div style="flex:1; min-width:0;">
               <div style="font-size:12px; color:#9A9082; font-weight:600; letter-spacing:.2px;">Command Center</div>
               <div style="font-size:18px; font-weight:700; color:#1F1D1B; letter-spacing:-.3px;">Wei Siang</div>
@@ -1372,6 +1374,12 @@
               <lucide-icon name="log-out" size="20" color="#C0463A" onClick="{{ logout }}"></lucide-icon>
             </div>
 
+            <div onClick="{{ toggleTheme }}" style="background:#fff; border:1px solid #E7E0D4; border-radius:16px; padding:13px 15px; display:flex; align-items:center; gap:13px; margin-top:14px; cursor:pointer;">
+              <span style="width:34px; height:34px; border-radius:10px; background:#F4EFE6; display:flex; align-items:center; justify-content:center; flex:none;"><lucide-icon name="{{ themeIcon }}" size="18" color="#6B5C32"></lucide-icon></span>
+              <div style="flex:1;"><div style="font-size:14px; font-weight:600; color:#1F1D1B;">Appearance</div><div style="font-size:11.5px; color:#9A9082;">{{ themeLabel }}</div></div>
+              <span style="width:46px; height:26px; border-radius:14px; flex:none; position:relative; background:{{ themeTrack }};"><span style="position:absolute; top:3px; left:{{ themeKnobX }}; width:20px; height:20px; border-radius:50%; background:#fff; transition:left .2s;"></span></span>
+            </div>
+
             <sc-for list="{{ moreGroups }}" as="g" hint-placeholder-count="6">
               <div style="font-size:11px; font-weight:700; letter-spacing:1px; color:#A89F8D; text-transform:uppercase; margin:14px 4px 9px;">{{ g.label }}</div>
               <div style="background:#fff; border:1px solid #E7E0D4; border-radius:16px; overflow:hidden;">
@@ -1648,6 +1656,16 @@
           </sc-for>
         </div>
 
+        <sc-if value="{{ hasEntity }}" hint-placeholder-val="">
+        <div style="font-size:12px; font-weight:700; color:#A89F8D; text-transform:uppercase; letter-spacing:.5px; margin-bottom:10px;">{{ entityLabel }}</div>
+        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:22px;">
+          <sc-for list="{{ entityChips }}" as="c" hint-placeholder-count="4">
+            <span onClick="{{ c.onClick }}" style="{{ c.style }}">{{ c.label }}</span>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <sc-if value="{{ showDateRange }}" hint-placeholder-val="">
         <div style="font-size:12px; font-weight:700; color:#A89F8D; text-transform:uppercase; letter-spacing:.5px; margin-bottom:10px;">Date range</div>
         <div style="display:flex; gap:10px; margin-bottom:26px;">
           <div style="flex:1; background:#fff; border:1px solid #E2DDD8; border-radius:12px; padding:11px 13px;">
@@ -1659,6 +1677,7 @@
             <div style="font-size:13.5px; font-weight:600; color:#1F1D1B; margin-top:3px;">30 Jun 2026</div>
           </div>
         </div>
+        </sc-if>
 
         <button onClick="{{ closeFilter }}" style="width:100%; height:52px; background:#6B5C32; color:#fff; border:none; border-radius:15px; font-family:inherit; font-size:15px; font-weight:700;">Show {{ cardCount }} results</button>
       </div>
@@ -1672,7 +1691,7 @@
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:452,&quot;height&quot;:900}}">
 class Component extends DCLogic {
-  state = { loggedIn: false, view: 'home', module: 'sales', seg: {}, stack: [], prev: 'home', filterOpen: false, sort: 'date', statusSel: {}, q: '', period: 'this', revHide: {}, sbcCat: 'all', deleted: {}, catalogue: { open: false, cat: 'all', cust: '' }, svCopy: { open: false, kind: 'so', q: '' }, custHubs: {}, userDocs: { announcements: [], mailcenter: [] }, ackSet: {}, docData: {}, editor: { open: false, mode: 'create', module: '', code: '', f: {}, items: [] }, whForm: { po: '', rack: '', notes: '', orack: '', reason: '' }, whMoves: [], whHist: 'all', whToast: '', qr: { open: false, title: '', single: 1, sel: '', list: [] }, empEdits: {}, empQ: '', deptFilter: 'all', leaveAppr: {}, caseStatus: {}, caseToast: '', caseEdits: {}, selMode: false, selSet: {}, listToast: '', ocr: { open: false, stage: '', module: '' } };
+  state = { loggedIn: false, dark: false, view: 'home', module: 'sales', seg: {}, stack: [], prev: 'home', filterOpen: false, sort: 'date', statusSel: {}, entitySel: {}, q: '', period: 'this', revHide: {}, sbcCat: 'all', deleted: {}, catalogue: { open: false, cat: 'all', cust: '' }, svCopy: { open: false, kind: 'so', q: '' }, custHubs: {}, userDocs: { announcements: [], mailcenter: [] }, ackSet: {}, docData: {}, editor: { open: false, mode: 'create', module: '', code: '', f: {}, items: [] }, whForm: { po: '', rack: '', notes: '', orack: '', reason: '' }, whMoves: [], whHist: 'all', whToast: '', qr: { open: false, title: '', single: 1, sel: '', list: [] }, empEdits: {}, empQ: '', deptFilter: 'all', leaveAppr: {}, caseStatus: {}, caseToast: '', caseEdits: {}, selMode: false, selSet: {}, listToast: '', ocr: { open: false, stage: '', module: '' } };
 
   S = {
     success: ['#EEF3E4', '#4F7C3A', '#C6DBA8'], warning: ['#FAEFCB', '#9C6F1E', '#E8D597'],
@@ -1684,7 +1703,8 @@ class Component extends DCLogic {
   badge(k) { const c = this.S[this.SK[k] || k] || this.S.neutral; return `display:inline-flex; align-items:center; font-size:10.5px; font-weight:600; padding:2px 9px; border-radius:9999px; background:${c[0]}; color:${c[1]}; border:1px solid ${c[2]}; white-space:nowrap;`; }
 
   componentDidMount() { try { if (localStorage.getItem('hkm_login') === '1') { let v = localStorage.getItem('hkm_view') || 'home'; if (v === 'detail') v = 'home'; this.setState({ loggedIn: true, view: v, module: localStorage.getItem('hkm_module') || 'sales' }); } } catch (e) {}
-    if (!window.qrcode) { const t = setInterval(() => { if (window.qrcode) { clearInterval(t); try { this.forceUpdate(); } catch (e) {} } }, 120); setTimeout(() => clearInterval(t), 8000); } }
+    if (!window.qrcode) { const t = setInterval(() => { if (window.qrcode) { clearInterval(t); try { this.forceUpdate(); } catch (e) {} } }, 120); setTimeout(() => clearInterval(t), 8000); }
+    try { if (localStorage.getItem('hkm_dark') === '1') this.setState({ dark: true }); } catch (e) {} }
   nav(view, extra) { try { localStorage.setItem('hkm_view', view); } catch (e) {} this.setState({ view, ...(extra || {}) }); }
   openModule(mod) { try { localStorage.setItem('hkm_module', mod); localStorage.setItem('hkm_view', 'list'); } catch (e) {} this.setState({ module: mod, view: 'list', prev: 'more', filterOpen: false }); }
 
@@ -2071,6 +2091,10 @@ class Component extends DCLogic {
     let tabCards = allModCards.filter(c => segActive === 'all' ? true : (c.tab ? c.tab === segActive : true));
     const _q = (st.q || '').trim().toLowerCase();
     if (_q) tabCards = tabCards.filter(c => { const hay = [c.code, c.title, c.sub].concat((c.metas || []).map(m => m[1])).join(' ').toLowerCase(); return hay.indexOf(_q) > -1; });
+    const _statusOn = Object.keys(st.statusSel || {}).filter(k => st.statusSel[k]);
+    if (_statusOn.length) tabCards = tabCards.filter(c => _statusOn.indexOf(c.status) > -1);
+    const _entOn = Object.keys(st.entitySel || {}).filter(k => st.entitySel[k]);
+    if (_entOn.length) { const _ff = { sales: 'title', delivery: 'title', invoices: 'title', procurement: 'title', serviceorders: 'title', servicecases: 'title', suppliers: 'title', customers: 'title', logistics: 'meta0', employees: 'subPart0', products: 'subPart0', rnd: 'subPart0', usermgmt: 'meta0' }[st.module]; const ev = (c) => { if (_ff === 'title') return c.title; if (_ff === 'subPart0') return (c.sub || '').split(' · ')[0]; if (_ff === 'meta0') return (c.metas[0] && c.metas[0][1]) || ''; return ''; }; tabCards = tabCards.filter(c => _entOn.indexOf(ev(c)) > -1); }
 
     // ---- employee sub-filters & leave approvals ----
     let empBar = null, empLeave = null, empReport = null;
@@ -2544,10 +2568,33 @@ class Component extends DCLogic {
     const moreGroups = groups.map(g => ({ label: g[0], items: g[1].map(it => ({ label: it[1], icon: it[2], badge: it[3] || '', onClick: () => it[0] === 'dashboard' ? this.nav('home', { prev: 'more' }) : this.openModule(it[0]) })) }));
 
     // ---- filter sheet ----
-    const sortDefs = [['date', 'Date', 'calendar'], ['value', 'Value', 'banknote'], ['name', 'Name', 'a-large-small'], ['status', 'Status', 'tag']];
-    const sortChips = sortDefs.map(s => { const a = st.sort === s[0]; return { label: s[1], icon: s[2], iconColor: a ? '#fff' : '#9A9082', onClick: () => this.setState({ sort: s[0] }), style: `display:inline-flex; align-items:center; gap:6px; padding:9px 14px; border-radius:12px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid ${a ? '#6B5C32' : '#E2DDD8'}; background:${a ? '#6B5C32' : '#fff'}; color:${a ? '#fff' : '#4D4630'};` }; });
+    // ---- filter sheet (module-specific) ----
+    const FCFG = {
+      sales: { sorts: [['date', 'Date', 'calendar'], ['value', 'Value', 'banknote'], ['name', 'Customer', 'a-large-small'], ['status', 'Status', 'tag']], ent: 'Customer', entFrom: 'title', dr: 1 },
+      delivery: { sorts: [['date', 'Date', 'calendar'], ['name', 'Customer', 'a-large-small'], ['status', 'Status', 'tag']], ent: 'Customer', entFrom: 'title', dr: 1 },
+      invoices: { sorts: [['date', 'Due date', 'calendar'], ['value', 'Amount', 'banknote'], ['name', 'Customer', 'a-large-small'], ['status', 'Status', 'tag']], ent: 'Customer', entFrom: 'title', dr: 1 },
+      procurement: { sorts: [['date', 'Date', 'calendar'], ['value', 'Value', 'banknote'], ['name', 'Supplier', 'a-large-small'], ['status', 'Status', 'tag']], ent: 'Supplier', entFrom: 'title', dr: 1 },
+      suppliers: { sorts: [['name', 'Supplier', 'a-large-small'], ['status', 'Status', 'tag']], ent: 'Supplier', entFrom: 'title', dr: 0 },
+      customers: { sorts: [['name', 'Name', 'a-large-small'], ['value', 'AR balance', 'banknote'], ['status', 'Status', 'tag']], ent: 'Customer', entFrom: 'title', dr: 0 },
+      serviceorders: { sorts: [['date', 'Date', 'calendar'], ['value', 'Value', 'banknote'], ['name', 'Customer', 'a-large-small'], ['status', 'Status', 'tag']], ent: 'Customer', entFrom: 'title', dr: 1 },
+      servicecases: { sorts: [['date', 'Date', 'calendar'], ['name', 'Customer', 'a-large-small'], ['status', 'Status', 'tag']], ent: 'Customer', entFrom: 'title', dr: 0 },
+      employees: { sorts: [['name', 'Name', 'a-large-small'], ['status', 'Status', 'tag']], ent: 'Department', entFrom: 'subPart0', dr: 0 },
+      products: { sorts: [['name', 'Name', 'a-large-small'], ['value', 'Price', 'banknote'], ['status', 'Status', 'tag']], ent: 'Category', entFrom: 'subPart0', dr: 0 },
+      rnd: { sorts: [['name', 'Name', 'a-large-small'], ['status', 'Stage', 'tag']], ent: 'Category', entFrom: 'subPart0', dr: 0 },
+      logistics: { sorts: [['name', 'Provider', 'a-large-small'], ['status', 'Status', 'tag']], ent: 'Coverage', entFrom: 'meta0', dr: 0 },
+      usermgmt: { sorts: [['name', 'Name', 'a-large-small'], ['status', 'Status', 'tag']], ent: 'Role', entFrom: 'meta0', dr: 0 },
+      inventory: { sorts: [['name', 'Item', 'a-large-small'], ['value', 'Stock level', 'banknote'], ['status', 'Status', 'tag']], ent: null, dr: 0 },
+      planning: { sorts: [['name', 'Department', 'a-large-small'], ['status', 'Status', 'tag']], ent: null, dr: 0 },
+      announcements: { sorts: [['date', 'Date', 'calendar'], ['status', 'Status', 'tag']], ent: null, dr: 1 },
+      mailcenter: { sorts: [['date', 'Date', 'calendar'], ['name', 'Sender', 'a-large-small']], ent: null, dr: 1 },
+    };
+    const fcfg = FCFG[st.module] || { sorts: [['date', 'Date', 'calendar'], ['value', 'Value', 'banknote'], ['name', 'Name', 'a-large-small'], ['status', 'Status', 'tag']], ent: null, dr: 1 };
+    const sortChips = fcfg.sorts.map(s => { const a = st.sort === s[0]; return { label: s[1], icon: s[2], iconColor: a ? '#fff' : '#9A9082', onClick: () => this.setState({ sort: s[0] }), style: `display:inline-flex; align-items:center; gap:6px; padding:9px 14px; border-radius:12px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid ${a ? '#6B5C32' : '#E2DDD8'}; background:${a ? '#6B5C32' : '#fff'}; color:${a ? '#fff' : '#4D4630'};` }; });
     const statusList = [...new Set(mod.cards.map(c => c.status))];
     const statusChips = statusList.map(s => { const a = !!st.statusSel[s]; const c = S[this.SK[s]] || S.neutral; return { label: s, onClick: () => this.setState(p => ({ statusSel: { ...p.statusSel, [s]: !p.statusSel[s] } })), style: `display:inline-flex; padding:9px 14px; border-radius:12px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid ${a ? c[1] : '#E2DDD8'}; background:${a ? c[0] : '#fff'}; color:${a ? c[1] : '#6B7280'};` }; });
+    const entVal = (c) => { if (fcfg.entFrom === 'title') return c.title; if (fcfg.entFrom === 'subPart0') return (c.sub || '').split(' · ')[0]; if (fcfg.entFrom === 'meta0') return (c.metas[0] && c.metas[0][1]) || ''; return ''; };
+    const entityList = fcfg.ent ? [...new Set(mod.cards.map(entVal).filter(Boolean))].slice(0, 12) : [];
+    const entityChips = entityList.map(s => { const a = !!st.entitySel[s]; return { label: s, onClick: () => this.setState(p => ({ entitySel: { ...p.entitySel, [s]: !p.entitySel[s] } })), style: `display:inline-flex; padding:9px 14px; border-radius:12px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid ${a ? '#6B5C32' : '#E2DDD8'}; background:${a ? '#6B5C32' : '#fff'}; color:${a ? '#fff' : '#6B7280'};` }; });
 
     const statusBg = 'transparent';
     const statusFg = isLogin ? '#F0ECE9' : '#1F1D1B';
@@ -2603,9 +2650,12 @@ class Component extends DCLogic {
       prodDepts, detail,
       moreGroups,
       filterOpen: st.filterOpen, closeFilter: () => this.setState({ filterOpen: false }),
-      clearFilter: () => this.setState({ statusSel: {}, sort: 'date' }),
-      hasActiveFilter: Object.values(st.statusSel).some(Boolean),
-      sortChips, statusChips,
+      themeAttr: st.dark ? 'dark' : 'light', isDark: st.dark ? 1 : 0,
+      themeIcon: st.dark ? 'moon' : 'sun', themeLabel: st.dark ? 'Dark mode' : 'Light mode', themeTrack: st.dark ? '#6B5C32' : '#D8D0C2', themeKnobX: st.dark ? '23px' : '3px',
+      toggleTheme: () => { try { localStorage.setItem('hkm_dark', st.dark ? '0' : '1'); } catch (e) {} this.setState({ dark: !st.dark }); },
+      clearFilter: () => this.setState({ statusSel: {}, entitySel: {}, sort: 'date' }),
+      hasActiveFilter: Object.values(st.statusSel).some(Boolean) || Object.values(st.entitySel || {}).some(Boolean),
+      sortChips, statusChips, entityChips, entityLabel: fcfg.ent, hasEntity: entityChips.length > 0, showDateRange: !!fcfg.dr,
     };
   }
 

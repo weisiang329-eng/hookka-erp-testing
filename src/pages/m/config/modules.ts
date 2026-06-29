@@ -449,21 +449,22 @@ export const salesConfig: ModuleConfig = {
 const deliveryOrdersSource: DataSource = {
   url: "/api/delivery-orders",
   select: selectData,
-  // dc13 card shape (Hookka ERP Mobile.dc.html line ~1730):
-  //   code · customer · items summary · [Cust PO · Cust SO · Hub · Exp Ship]
-  toVM: (r): RowVM => ({
-    id: str(r, "id", "doNo"),
-    code: str(r, "doNo") || "—",
-    title: str(r, "customerName") || "—",
-    items: summariseItems(r),
-    metas: [
-      { label: "Cust PO", value: str(r, "customerPO", "customerPOId") || "—" },
-      { label: "Cust SO", value: str(r, "customerSO", "companySO", "companySOId") || "—" },
-      { label: "Hub", value: str(r, "hubName", "hubShortName") || "—" },
-      { label: "Exp Ship", value: shortDate(dateOnly(r, "deliveryDate", "hookkaExpectedDD")) || "—" },
-    ],
-    status: resolveStatus(str(r, "status"), STATUS_MAPS.delivery),
-  }),
+  // v17 card shape (line ~1744): code · customer · "hub · vehicle/driver" · [Dispatch · SO]
+  toVM: (r): RowVM => {
+    const hub = str(r, "hubName", "hubShortName");
+    const veh = str(r, "vehicleNo", "driverName", "providerName");
+    return {
+      id: str(r, "id", "doNo"),
+      code: str(r, "doNo") || "—",
+      title: str(r, "customerName") || "—",
+      items: [hub, veh].filter(Boolean).join(" · ") || undefined,
+      metas: [
+        { label: "Dispatch", value: shortDate(dateOnly(r, "dispatchDate", "deliveryDate")) || "—" },
+        { label: "SO", value: str(r, "companySO", "companySOId") || "—" },
+      ],
+      status: resolveStatus(str(r, "status"), STATUS_MAPS.delivery),
+    };
+  },
   columns: [
     textCol("doNo", "Customer Delivery", (r) => str(r, "doNo")),
     textCol("companySO", "Company SO", (r) => str(r, "companySO", "companySOId")),
@@ -475,25 +476,67 @@ const deliveryOrdersSource: DataSource = {
     enumCol("status", "Status", (r) => str(r, "status"), DO_STATUSES),
   ],
   defaultSort: { key: "deliveryDate", dir: "desc" },
-  subTabs: [{ key: "do", label: "Delivery Orders", match: () => true }],
+  // v17 (line ~1742): 6 status-based sub-tabs + providers (separate source)
+  subTabs: [
+    { key: "planning", label: "Planning", match: (r) => str(r, "status") === "DRAFT" || !dateOnly(r, "dispatchDate", "deliveryDate") },
+    { key: "pending", label: "Pending Delivery", match: (r) => str(r, "status") === "LOADED" && !str(r, "vehicleNo", "providerName") },
+    { key: "dispatch", label: "Pending Dispatch", match: (r) => str(r, "status") === "LOADED" && !!str(r, "vehicleNo", "providerName") },
+    { key: "dispatched", label: "Dispatched", match: (r) => ["DISPATCHED", "IN_TRANSIT"].includes(str(r, "status")) },
+    { key: "delivered", label: "Delivered", match: (r) => ["DELIVERED", "SIGNED", "INVOICED"].includes(str(r, "status")) },
+  ],
+};
+
+// Packing List source — v17 delivery sub-tab "packing". /api/packing-lists
+// returns packing-list rows with revenueSen + totalM3 + doCount + stops
+// (computed at the list endpoint). Card per v17 line ~1751:
+//   PL-... · "Packing List · KL" · "N DOs · N stops · N units" · [M³ · Revenue]
+const packingListsSource: DataSource = {
+  url: "/api/packing-lists",
+  select: selectData,
+  toVM: (r): RowVM => {
+    const doCount = num(r, "doCount");
+    const stops = num(r, "stopCount", "stops");
+    const units = num(r, "totalUnits");
+    return {
+      id: str(r, "id", "packingNo"),
+      code: str(r, "packingNo") || "—",
+      title: `Packing List · ${str(r, "hubState", "state") || "—"}`,
+      items: `${doCount} DO${doCount === 1 ? "" : "s"} · ${stops} stop${stops === 1 ? "" : "s"} · ${units} unit${units === 1 ? "" : "s"}`,
+      metas: [
+        { label: "M³", value: num(r, "totalM3") > 0 ? num(r, "totalM3").toFixed(2) : "—" },
+        { label: "Revenue", value: money(num(r, "revenueSen")) },
+      ],
+      status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
+    };
+  },
+  columns: [
+    textCol("packingNo", "Reference", (r) => str(r, "packingNo")),
+    numCol("doCount", "Items", (r) => num(r, "doCount")),
+    numCol("revenue", "Amount", (r) => num(r, "revenueSen")),
+  ],
+  defaultSort: { key: "packingNo", dir: "desc" },
+  subTabs: [{ key: "packing", label: "Packing List", match: () => true }],
 };
 
 const threePlSource: DataSource = {
   url: "/api/drivers",
   select: selectData,
-  // dc13 (line ~1864): code · provider · "vehicle type · N vehicles" · [Coverage · Fleet · On-time]
-  toVM: (r): RowVM => ({
-    id: str(r, "id"),
-    code: str(r, "vehicleNo") || str(r, "id"),
-    title: str(r, "name") || "—",
-    items: [str(r, "vehicleType"), str(r, "contactPerson")].filter(Boolean).join(" · ") || undefined,
-    metas: [
-      { label: "Coverage", value: str(r, "coverage", "region") || "—" },
-      { label: "Capacity", value: `${num(r, "capacityM3")} m³` },
-      { label: "Phone", value: str(r, "phone") || "—" },
-    ],
-    status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
-  }),
+  // v17 (line ~1885): code · provider · "on-demand · N vehicles" · [Coverage · Fleet · On-time]
+  toVM: (r): RowVM => {
+    const fleet = num(r, "fleetSize", "vehicleCount") || 1;
+    return {
+      id: str(r, "id"),
+      code: str(r, "vehicleNo") || str(r, "id"),
+      title: str(r, "name") || "—",
+      items: [str(r, "vehicleType", "serviceType"), `${fleet} vehicle${fleet === 1 ? "" : "s"}`].filter(Boolean).join(" · ") || undefined,
+      metas: [
+        { label: "Coverage", value: str(r, "coverage", "region", "state") || "—" },
+        { label: "Fleet", value: String(fleet) },
+        { label: "On-time", value: num(r, "onTimePct") > 0 ? `${num(r, "onTimePct")}%` : "—" },
+      ],
+      status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
+    };
+  },
   columns: [
     textCol("name", "Provider", (r) => str(r, "name")),
     textCol("contact", "Contact", (r) => str(r, "contactPerson")),
@@ -559,7 +602,7 @@ export const deliveryConfig: ModuleConfig = {
   detailPath: (vm, row) =>
     str(row, "doNo") ? `/m/delivery/${encodeURIComponent(vm.id)}` : null,
   detail: deliveryDetail,
-  sources: [deliveryOrdersSource, threePlSource],
+  sources: [deliveryOrdersSource, packingListsSource, threePlSource],
 };
 
 // ---------------------------------------------------------------------------
@@ -1191,50 +1234,160 @@ export const productionConfig: ModuleConfig = {
 // all three to /api/production-orders as the closest live source.
 // TODO: replace MRP with a real MRP endpoint when one exists.
 // ---------------------------------------------------------------------------
-const planningRows = (label: string): SubTabFactory => ({
+// PLANNING — v17 (line ~1795) has 4 distinct sub-tabs, each with its own
+// data source + card metas:
+//   cap    (Capacity Overview)  — per-dept worker count, backlog, utilization
+//   load   (Capacity Loading)   — per-dept past avg hours, plan%
+//   lead   (Lead Times)         — material shortages (Net + Lead time)
+//   master (Master Tracker)     — per-SO progress (DD + Stage)
+// Each maps to an existing endpoint — no new backend.
+
+// cap + load share the same /api/department-performance source; sub-tab
+// label changes + meta labels swap. Capacity = Backlog/Used, Loading =
+// Workers/Plan.
+const planningCapacitySource: DataSource = {
+  url: (() => {
+    const w = thisMonthWindow();
+    return `/api/department-performance?from=${w.from}&to=${w.to}`;
+  })(),
+  select: (resp) => {
+    if (!resp || typeof resp !== "object") return [];
+    const o = resp as { data?: { departments?: unknown }; departments?: unknown };
+    const list = (o.data?.departments ?? o.departments) as unknown;
+    return Array.isArray(list) ? (list as RawRow[]) : [];
+  },
+  toVM: (r): RowVM => {
+    const workers = num(r, "workerCount", "headcount") || 0;
+    const hours = num(r, "totalHours", "hours") || 0;
+    const used = num(r, "utilisationPct", "efficiencyPct") || 0;
+    return {
+      id: str(r, "departmentCode") || str(r, "code") || "—",
+      code: str(r, "departmentName") || str(r, "departmentCode") || "—",
+      title: str(r, "departmentName", "name") || str(r, "departmentCode") || "—",
+      items: `${workers} worker${workers === 1 ? "" : "s"} · ${hours.toFixed(1)}h`,
+      metas: [
+        { label: "Backlog", value: num(r, "backlogDays") > 0 ? `${num(r, "backlogDays").toFixed(1)} d` : "—" },
+        { label: "Used", value: used > 0 ? `${used.toFixed(0)}%` : "—" },
+      ],
+      status: resolveStatus("Occupied", PAYMENT_STATUS_MAP),
+    };
+  },
+  columns: [
+    textCol("dept", "Reference", (r) => str(r, "departmentCode")),
+    numCol("workers", "Qty", (r) => num(r, "workerCount")),
+    numCol("used", "Amount", (r) => num(r, "utilisationPct", "efficiencyPct")),
+  ],
+  defaultSort: { key: "used", dir: "desc" },
+  subTabs: [{ key: "cap", label: "Capacity", match: () => true }],
+};
+
+const planningLoadSource: DataSource = {
+  url: (() => {
+    const w = thisMonthWindow();
+    return `/api/department-performance?from=${w.from}&to=${w.to}`;
+  })(),
+  select: (resp) => {
+    if (!resp || typeof resp !== "object") return [];
+    const o = resp as { data?: { departments?: unknown }; departments?: unknown };
+    const list = (o.data?.departments ?? o.departments) as unknown;
+    return Array.isArray(list) ? (list as RawRow[]) : [];
+  },
+  toVM: (r): RowVM => {
+    const workers = num(r, "workerCount", "headcount") || 0;
+    const hours = num(r, "totalHours", "hours") || 0;
+    const plan = num(r, "plannedPct", "planUtilPct") || 0;
+    return {
+      id: `load-${str(r, "departmentCode") || str(r, "code")}`,
+      code: `LOAD-${str(r, "departmentCode", "code") || "—"}`,
+      title: str(r, "departmentName", "name") || str(r, "departmentCode") || "—",
+      items: `Past avg ${hours.toFixed(1)}h`,
+      metas: [
+        { label: "Workers", value: String(workers) },
+        { label: "Plan", value: plan > 0 ? `${plan.toFixed(0)}%` : "0%" },
+      ],
+      status: resolveStatus("Active", PAYMENT_STATUS_MAP),
+    };
+  },
+  columns: [
+    textCol("dept", "Reference", (r) => str(r, "departmentCode")),
+    numCol("workers", "Qty", (r) => num(r, "workerCount")),
+    numCol("hours", "Amount", (r) => num(r, "totalHours")),
+  ],
+  defaultSort: { key: "hours", dir: "desc" },
+  subTabs: [{ key: "load", label: "Loading", match: () => true }],
+};
+
+// Lead Times — material shortages from /api/raw-materials. Items with
+// balance < min stock or Low/Critical status surface as "shortage" rows.
+const planningLeadSource: DataSource = {
+  url: "/api/raw-materials",
+  select: selectData,
+  toVM: (r): RowVM => {
+    const onHand = num(r, "balanceQty");
+    const minStock = num(r, "minStock");
+    const net = onHand - minStock;
+    return {
+      id: `lead-${str(r, "id", "itemCode")}`,
+      code: `LT-${str(r, "itemCode", "code") || "—"}`,
+      title: str(r, "description", "itemCode") || "—",
+      items: `Required ${minStock} · on-hand ${onHand} ${str(r, "baseUOM") || ""}`.trim(),
+      metas: [
+        { label: "Net", value: `${net > 0 ? "+" : ""}${net} ${str(r, "baseUOM") || ""}`.trim() },
+        { label: "Lead", value: num(r, "leadTimeDays") > 0 ? `${num(r, "leadTimeDays")} d` : "—" },
+      ],
+      status: resolveStatus(net < 0 ? "Shortage" : "Covered", PAYMENT_STATUS_MAP),
+    };
+  },
+  columns: [
+    textCol("code", "Reference", (r) => str(r, "itemCode")),
+    textCol("desc", "Customer", (r) => str(r, "description")),
+    numCol("net", "Qty", (r) => num(r, "balanceQty") - num(r, "minStock")),
+  ],
+  defaultSort: { key: "net", dir: "asc" },
+  subTabs: [{ key: "lead", label: "Lead Times", match: (r) => num(r, "balanceQty") < num(r, "minStock") }],
+};
+
+// Master Tracker — per-SO row showing stage progress (which dept is
+// currently working on it + DD). /api/production-orders carries this.
+const planningMasterSource: DataSource = {
   url: "/api/production-orders",
   select: selectData,
-  // dc13 (line ~1777): code · product · dept · [Qty · Due]
-  toVM: (r): RowVM => ({
-    id: str(r, "id", "poNo"),
-    code: str(r, "poNo") || "—",
-    title: str(r, "productName", "productCode") || "—",
-    items: str(r, "currentDepartment") || str(r, "customerName") || undefined,
-    metas: [
-      { label: "Qty", value: num(r, "quantity") },
-      { label: "Due", value: shortDate(dateOnly(r, "targetEndDate")) || "—" },
-    ],
-    status: resolveStatus(str(r, "status"), STATUS_MAPS.production),
-  }),
+  toVM: (r): RowVM => {
+    const dept = str(r, "currentDepartment");
+    const product = str(r, "productName", "productCode");
+    const items = [product, dept].filter(Boolean).join(" · ");
+    return {
+      id: str(r, "id", "poNo"),
+      code: str(r, "companySO", "companySOId", "poNo") || "—",
+      title: str(r, "customerName") || "—",
+      items: items || undefined,
+      metas: [
+        { label: "DD", value: shortDate(dateOnly(r, "targetEndDate")) || "—" },
+        { label: "Stage", value: dept ? dept : "—" },
+      ],
+      status: resolveStatus(str(r, "status"), STATUS_MAPS.production),
+    };
+  },
   columns: [
-    textCol("poNo", "Reference", (r) => str(r, "poNo")),
-    textCol("product", "Customer", (r) => str(r, "productName", "productCode")),
-    numCol("qty", "Qty", (r) => num(r, "quantity")),
-    dateCol("startDate", "Order Date", (r) => dateOnly(r, "startDate")),
+    textCol("companySO", "Reference", (r) => str(r, "companySO", "companySOId")),
+    textCol("customer", "Customer", (r) => str(r, "customerName")),
     dateCol("targetEndDate", "Expected DD", (r) => dateOnly(r, "targetEndDate")),
     enumCol("status", "Status", (r) => str(r, "status"), PROD_STATUSES),
   ],
   defaultSort: { key: "targetEndDate", dir: "asc" },
-  label,
-});
-
-type SubTabFactory = Omit<DataSource, "subTabs"> & { label: string };
-function planningSource(key: string, label: string): DataSource {
-  const base = planningRows(label);
-  return {
-    ...base,
-    subTabs: [{ key, label, match: () => true }],
-  };
-}
+  subTabs: [{ key: "master", label: "Master Tracker", match: () => true }],
+};
 
 export const planningConfig: ModuleConfig = {
   slug: "planning",
   title: "Planning",
   detailPath: (vm) => `/m/production/${encodeURIComponent(vm.id)}`,
+  // v17 (line ~1795): Capacity / Loading / Lead Times / Master Tracker
   sources: [
-    planningSource("capacity", "Capacity"),
-    planningSource("mrp", "MRP"),
-    planningSource("schedule", "Schedule"),
+    planningCapacitySource,
+    planningLoadSource,
+    planningLeadSource,
+    planningMasterSource,
   ],
 };
 
@@ -1245,27 +1398,36 @@ export const planningConfig: ModuleConfig = {
 // rows as the closest live data. TODO: wire a movements list endpoint if one
 // is added.
 // ---------------------------------------------------------------------------
+// Rack overview — v17 (line ~1815): code · "item name" · customer · [Items · Zone]
 function warehouseSource(key: string, label: string): DataSource {
   return {
     url: "/api/warehouse",
     select: selectData,
-    toVM: (r): RowVM => ({
-      id: str(r, "id"),
-      code: [str(r, "rack"), str(r, "position")].filter(Boolean).join("-") || str(r, "id"),
-      title:
-        (Array.isArray(r.items) && (r.items as unknown[]).length
-          ? str((r.items as RawRow[])[0], "productName", "productCode")
-          : "Empty") || "Empty",
-      subLine: str(r, "zone", "area") || undefined,
-      meta1: { label: "Items", value: Array.isArray(r.items) ? (r.items as unknown[]).length : 0 },
-      status: resolveStatus(str(r, "status"), {
-        EMPTY: PAYMENT_STATUS_MAP.ACTIVE,
-        OCCUPIED: PAYMENT_STATUS_MAP.SUBMITTED,
-        RESERVED: PAYMENT_STATUS_MAP.PARTIAL,
-      }),
-    }),
+    toVM: (r): RowVM => {
+      const firstItem = Array.isArray(r.items) && (r.items as unknown[]).length
+        ? (r.items as RawRow[])[0]
+        : null;
+      const itemName = firstItem ? str(firstItem, "productName", "productCode") : "";
+      const customer = firstItem ? str(firstItem, "customerName") : "";
+      return {
+        id: str(r, "id"),
+        code: [str(r, "rack"), str(r, "position")].filter(Boolean).join("-") || str(r, "id"),
+        title: itemName || "Empty",
+        items: customer || (itemName ? "" : "No items stocked") || undefined,
+        metas: [
+          { label: "Items", value: Array.isArray(r.items) ? (r.items as unknown[]).length : 0 },
+          { label: "Zone", value: str(r, "zone", "area") || "—" },
+        ],
+        status: resolveStatus(str(r, "status"), {
+          EMPTY: PAYMENT_STATUS_MAP.ACTIVE,
+          OCCUPIED: PAYMENT_STATUS_MAP.SUBMITTED,
+          RESERVED: PAYMENT_STATUS_MAP.PARTIAL,
+        }),
+      };
+    },
     columns: [
       textCol("rack", "Reference", (r) => [str(r, "rack"), str(r, "position")].filter(Boolean).join("-")),
+      textCol("zone", "State", (r) => str(r, "zone", "area")),
       numCol("items", "Items", (r) => (Array.isArray(r.items) ? (r.items as unknown[]).length : 0)),
       enumCol("status", "Status", (r) => str(r, "status"), ["EMPTY", "OCCUPIED", "RESERVED"]),
     ],
@@ -1273,6 +1435,70 @@ function warehouseSource(key: string, label: string): DataSource {
     subTabs: [{ key, label, match: () => true }],
   };
 }
+
+// Stock In/Out source (v17 line ~1819) — backed by /api/stock-movements
+// which is the same table the warehouse detail surface uses. Cards:
+//   IO-... · item · "IN/OUT · ref · customer" · [Qty · When]
+const stockInOutSource: DataSource = {
+  url: "/api/stock-movements",
+  select: selectData,
+  toVM: (r): RowVM => {
+    const dir = str(r, "direction", "moveType").toUpperCase();
+    return {
+      id: str(r, "id"),
+      code: str(r, "movementNo", "code") || `IO-${str(r, "id").slice(0, 8)}`,
+      title: str(r, "productName", "productCode", "itemCode") || "—",
+      items: [dir, str(r, "referenceNo", "soNo", "doNo"), str(r, "customerName", "supplierName")].filter(Boolean).join(" · ") || undefined,
+      metas: [
+        { label: "Qty", value: num(r, "quantity", "qty") },
+        { label: "When", value: shortDate(dateOnly(r, "movedAt", "createdAt")) || "—" },
+      ],
+      status: resolveStatus(dir === "IN" ? "IN" : "OUT", PAYMENT_STATUS_MAP),
+    };
+  },
+  columns: [
+    textCol("code", "Reference", (r) => str(r, "movementNo", "code")),
+    textCol("product", "Customer", (r) => str(r, "productName", "productCode")),
+    numCol("qty", "Qty", (r) => num(r, "quantity", "qty")),
+    dateCol("when", "Order Date", (r) => dateOnly(r, "movedAt", "createdAt")),
+  ],
+  defaultSort: { key: "when", dir: "desc" },
+  subTabs: [
+    { key: "io", label: "Stock In/Out", match: (r) => ["IN", "OUT"].includes(str(r, "direction", "moveType").toUpperCase()) },
+  ],
+};
+
+// Movement source (v17 line ~1821) — rack-to-rack moves (same endpoint,
+// different direction filter). Cards: MV-... · item · "Rack X ← Y · who" · [Qty · When]
+const stockMovementSource: DataSource = {
+  url: "/api/stock-movements",
+  select: selectData,
+  toVM: (r): RowVM => {
+    const fromRack = str(r, "fromRack");
+    const toRack = str(r, "toRack");
+    const who = str(r, "movedByName", "doneBy");
+    return {
+      id: str(r, "id"),
+      code: str(r, "movementNo", "code") || `MV-${str(r, "id").slice(0, 8)}`,
+      title: str(r, "productName", "productCode", "itemCode") || "—",
+      items: [fromRack && toRack ? `${toRack} ← ${fromRack}` : "", who].filter(Boolean).join(" · ") || undefined,
+      metas: [
+        { label: "Qty", value: num(r, "quantity", "qty") },
+        { label: "When", value: shortDate(dateOnly(r, "movedAt", "createdAt")) || "—" },
+      ],
+      status: resolveStatus("Active", PAYMENT_STATUS_MAP),
+    };
+  },
+  columns: [
+    textCol("code", "Reference", (r) => str(r, "movementNo", "code")),
+    textCol("product", "Customer", (r) => str(r, "productName", "productCode")),
+    numCol("qty", "Qty", (r) => num(r, "quantity", "qty")),
+  ],
+  defaultSort: { key: "movementNo", dir: "desc" },
+  subTabs: [
+    { key: "move", label: "Movement", match: (r) => str(r, "moveType", "direction").toUpperCase() === "MOVE" || (!!str(r, "fromRack") && !!str(r, "toRack")) },
+  ],
+};
 
 // Warehouse rack detail — GET /api/warehouse/:id/details returns
 // { data: { rack, contents[], movements[] } }. The whole `data` object is the
@@ -1387,10 +1613,11 @@ export const warehouseConfig: ModuleConfig = {
   // valid detail target.
   detailPath: (vm) => `/m/warehouse/${encodeURIComponent(vm.id)}`,
   detail: warehouseDetail,
+  // v17 (line ~1813): Rack Overview / Stock In-Out / Movement (each its own source)
   sources: [
-    warehouseSource("racks", "Rack Overview"),
-    warehouseSource("stock_io", "Stock In-Out"),
-    warehouseSource("movement", "Movement"),
+    warehouseSource("rack", "Rack Overview"),
+    stockInOutSource,
+    stockMovementSource,
   ],
 };
 
@@ -2967,12 +3194,13 @@ const rdSource: DataSource = {
     enumCol("status", "Status", (r) => str(r, "status"), RD_STATUSES),
   ],
   defaultSort: { key: "createdAt", dir: "desc" },
+  // v17 (line ~1907): [All, Drafts, Projects, Pipeline, Completed]
   subTabs: [
     { key: "all", label: "All", match: () => true },
-    { key: "active", label: "Active", match: (r) => str(r, "status") === "ACTIVE" },
-    { key: "draft", label: "Draft", match: (r) => str(r, "status") === "DRAFT" },
-    { key: "hold", label: "On Hold", match: (r) => str(r, "status") === "ON_HOLD" },
-    { key: "done", label: "Completed", match: (r) => str(r, "status") === "COMPLETED" },
+    { key: "draft", label: "Drafts", match: (r) => str(r, "status") === "DRAFT" },
+    { key: "active", label: "Projects", match: (r) => ["ACTIVE", "PROTOTYPING", "COSTING", "DESIGN"].includes(str(r, "status")) },
+    { key: "pipeline", label: "Pipeline", match: (r) => ["PIPELINE", "ON_HOLD", "CONCEPT", "AT_RISK"].includes(str(r, "status")) },
+    { key: "done", label: "Completed", match: (r) => ["COMPLETED", "LAUNCHED"].includes(str(r, "status")) },
   ],
 };
 

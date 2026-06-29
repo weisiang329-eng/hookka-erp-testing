@@ -750,11 +750,15 @@ function CreatePIWizard({
           : todayISO();
 
       const lines: PreviewLine[] = (ex.lines ?? []).map((ln) => {
-        const sku = (ln.supplierCode ?? "").trim();
-        const binding = sId ? resolveBindingFor(sId, sku) : null;
+        const rawSku = (ln.supplierCode ?? "").trim();
+        const binding = sId ? resolveBindingFor(sId, rawSku) : null;
         const rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
           : null;
+        // Use the binding's canonical supplier SKU once we resolved it, so
+        // "SL.27" (OCR drift) snaps to "SL 27" (how supplier_material_bindings
+        // records it). Falls back to OCR text otherwise.
+        const sku = binding?.supplierSku ?? rawSku;
         const qty = Number(ln.qty) || 0;
         const unitPriceRM =
           ln.unitPrice == null || Number.isNaN(Number(ln.unitPrice))

@@ -2804,15 +2804,31 @@ const supplierDetail: DetailConfig = {
     fld("Bank Account", (d) => str(d, "bankAccount")),
     fld("Address", (d) => str(d, "address"), true),
   ],
-  // Last Purchase Orders + scorecard (v17/CHANGELOG supplier detail). The
-  // PO list is preloaded so this is fast.
+  // Last Purchase Orders + Scorecard (v17/CHANGELOG D.2 supplier detail).
+  // The PO list is preloaded so this is fast; scorecard fetched per-supplier.
   extraFetches: {
     a: { key: "poList", url: () => "/api/purchase-orders" },
+    b: { key: "scorecard", url: (id) => `/api/supplier-scorecards/${encodeURIComponent(id)}` },
   },
   subDocLists: (d, _resp, extras) => {
     const sid = str(d, "id");
     const sname = str(d, "name");
     const lists: SubDocList[] = [];
+
+    // Scorecard — single-row "metrics" sub-list (overall · on-time · quality · lead).
+    const sc = (extras?.scorecard as { data?: { onTimeRate?: number; qualityRate?: number; leadTimeAccuracy?: number; overallRating?: number; lastUpdated?: string } } | undefined)?.data;
+    if (sc) {
+      const fmt = (v: number | undefined) => (typeof v === "number" ? `${Math.round(v * 100)}%` : "—");
+      lists.push({
+        title: `Scorecard`,
+        rows: [
+          { id: "overall", title: "Overall Rating", trailing: fmt(sc.overallRating), icon: "file-text" as const },
+          { id: "ontime", title: "On-Time Rate", trailing: fmt(sc.onTimeRate), icon: "file-text" as const },
+          { id: "quality", title: "Quality Rate", trailing: fmt(sc.qualityRate), icon: "file-text" as const },
+          { id: "lead", title: "Lead Time Accuracy", trailing: fmt(sc.leadTimeAccuracy), icon: "file-text" as const },
+        ],
+      });
+    }
 
     const mats = asArr(d.materials);
     if (mats.length > 0) {

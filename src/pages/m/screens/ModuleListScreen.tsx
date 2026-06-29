@@ -13,7 +13,7 @@
 // ===========================================================================
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, SlidersHorizontal, Plus, ScanLine, FileSearch, ListChecks, X, Download, Check } from "lucide-react";
+import { Search, SlidersHorizontal, Plus, ScanLine, FileSearch, ListChecks, X, Download, Check, PackageCheck } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, DocCard, StatusPill, FormSheet, ScanSheet, ScanPOSheet } from "../components";
 import { newSalesOrderSpec, type SOCreatePrefill } from "../config/forms";
@@ -114,6 +114,52 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
     },
   };
   const bulkCfg = bulkMarkConfig[config.slug];
+  /** Procurement-only bulk Convert to GRN. Mirrors desktop pattern in
+   * src/pages/procurement/index.tsx:1186 — for each PO id, fetch the PO,
+   * build full-receipt items from outstanding qty per line, POST /api/grn,
+   * then PUT GRN status=POSTED to fire the cascade. Sequential to avoid
+   * deadlock. */
+  async function runBulkConvertToGrn() {
+    if (selectedIds.size === 0) return;
+    setBulkBusy(true);
+    const ids = Array.from(selectedIds);
+    let ok = 0, failed = 0;
+    for (const id of ids) {
+      try {
+        const poRes = await fetch(`/api/purchase-orders/${encodeURIComponent(id)}`);
+        if (!poRes.ok) { failed++; continue; }
+        const poJson = (await poRes.json()) as { data?: { id: string; poNo?: string; items?: { quantity: number; receivedQty?: number }[] } };
+        const po = poJson.data;
+        if (!po?.items) { failed++; continue; }
+        const items = po.items
+          .map((it, idx) => {
+            const outstanding = Math.max(0, it.quantity - (it.receivedQty ?? 0));
+            return outstanding > 0
+              ? { poItemIndex: idx, receivedQty: outstanding, acceptedQty: outstanding, rejectedQty: 0, rejectionReason: null }
+              : null;
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null);
+        if (items.length === 0) { failed++; continue; }
+        const create = await fetch(`/api/grn`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ poId: po.id, items, receivedBy: "Bulk Convert", notes: `Auto-created from /m bulk Convert (${po.poNo ?? ""})`, qcStatus: "PENDING" }),
+        });
+        const cb = (await create.json().catch(() => ({}))) as { success?: boolean; data?: { id?: string } };
+        if (!create.ok || !cb.success || !cb.data?.id) { failed++; continue; }
+        const post = await fetch(`/api/grn/${cb.data.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "POSTED" }),
+        });
+        if (post.ok) ok++; else failed++;
+      } catch { failed++; }
+    }
+    setBulkBusy(false);
+    setScanToast(`Converted ${ok} PO${ok === 1 ? "" : "s"} to GRN${failed > 0 ? ` · ${failed} failed` : ""}`);
+    window.setTimeout(() => setScanToast(null), 3000);
+    exitSelectMode();
+  }
   /** Sequential per-doc PUT — matches desktop's "avoid deadlock" pattern in
    * delivery bulk-dispatch (src/pages/delivery/index.tsx:2851). One at a
    * time, count successes, toast the result. */
@@ -643,6 +689,25 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
             <Download size={14} strokeWidth={2} />
             Export
           </button>
+          {/* Procurement-only Convert to GRN — mirrors desktop bulk Convert
+              (src/pages/procurement/index.tsx:1186). One GRN per selected PO. */}
+          {config.slug === "procurement" ? (
+            <button
+              onClick={() => { if (!bulkBusy) void runBulkConvertToGrn(); }}
+              disabled={bulkBusy}
+              style={{
+                height: 38, padding: "0 14px", borderRadius: 10,
+                background: "#3E6570", color: "#fff", border: "none",
+                fontFamily: "inherit", fontSize: 12.5, fontWeight: 700,
+                cursor: bulkBusy ? "wait" : "pointer",
+                opacity: bulkBusy ? 0.7 : 1,
+                display: "flex", alignItems: "center", gap: 6,
+              }}
+            >
+              <PackageCheck size={14} strokeWidth={2} />
+              {bulkBusy ? "…" : "→ GRN"}
+            </button>
+          ) : null}
           <button
             onClick={() => {
               if (bulkCfg && !bulkBusy) {

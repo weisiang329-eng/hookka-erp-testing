@@ -43,7 +43,10 @@ async function enqueuePoBatch(
   return { ok: true, batchId: json.data.batchId };
 }
 
-const QUEUE_BATCH_THRESHOLD = 2;
+// Owner ruling 2026-06-29 evening: ALL uploads go through the background
+// queue. Sync path was timing out on multi-page PDFs; queue path is async
+// + each result becomes reviewable the moment it lands.
+const QUEUE_BATCH_THRESHOLD = 0;
 
 type Props = {
   open: boolean;

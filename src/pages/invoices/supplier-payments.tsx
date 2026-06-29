@@ -37,6 +37,7 @@ type SupplierOption = {
 type OpenPI = {
   id: string;
   piNo: string;
+  supplierInvoiceNo?: string; // the supplier's own invoice number (their reference)
   amountSen: number;
   paidAmountSen: number;
   status: string;
@@ -592,6 +593,7 @@ export default function SupplierPaymentsPage() {
                     <thead className="bg-gray-50">
                       <tr>
                         <th className="text-left px-3 py-2 font-medium text-gray-600">PI No.</th>
+                        <th className="text-left px-3 py-2 font-medium text-gray-600">Supplier Inv No</th>
                         <th className="text-left px-3 py-2 font-medium text-gray-600">Date</th>
                         <th className="text-left px-3 py-2 font-medium text-gray-600">Ccy</th>
                         <th className="text-right px-3 py-2 font-medium text-gray-600">Amount</th>
@@ -616,6 +618,7 @@ export default function SupplierPaymentsPage() {
                         return (
                           <tr key={pi.id} className="border-t hover:bg-gray-50 align-top">
                             <td className="px-3 py-2 font-mono">{pi.piNo}</td>
+                            <td className="px-3 py-2 font-mono text-gray-600">{pi.supplierInvoiceNo || "—"}</td>
                             <td className="px-3 py-2 text-gray-600">{formatDateDMY(pi.invoiceDate)}</td>
                             <td className="px-3 py-2">{ccy}</td>
                             <td className="px-3 py-2 text-right">{formatCurrency(pi.amountSen, ccy)}</td>

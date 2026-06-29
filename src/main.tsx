@@ -56,15 +56,14 @@ window.addEventListener('vite:preloadError', () => {
 window.addEventListener('error', (e) => {
   const t = e.target as HTMLElement | null
   if (!t) return
-  const tag = t.tagName
   // Only act on resource errors for our own JS chunks. Skip random IMG/IFRAME
   // failures (those are content errors, not deploy artefacts).
-  if ((tag === 'SCRIPT' || tag === 'LINK') && 'src' in t) {
-    const src = (t as HTMLScriptElement | HTMLLinkElement & { src?: string }).src ||
-      (t as HTMLLinkElement).href || ''
-    if (src.includes('/assets/') && src.includes(location.origin)) {
-      recoverFromStaleChunk(`script-error: ${src.split('/').pop()}`)
-    }
+  let src = ''
+  if (t instanceof HTMLScriptElement) src = t.src
+  else if (t instanceof HTMLLinkElement) src = t.href
+  else return
+  if (src.includes('/assets/') && src.includes(location.origin)) {
+    recoverFromStaleChunk(`script-error: ${src.split('/').pop()}`)
   }
 }, true) // capture = true → catch events on non-bubbling targets
 

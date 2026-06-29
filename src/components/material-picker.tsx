@@ -34,6 +34,7 @@ export function MaterialPicker({
   placeholder = "Search code or name…",
   className,
   inputClassName,
+  strictPick = false,
 }: {
   /** The text shown in the input (the parent decides whether this is the code or the name). */
   value: string;
@@ -49,11 +50,21 @@ export function MaterialPicker({
    * legitimate off-catalog item. The parent keeps the typed value as-is; this
    * component never rejects or rewrites it. (If the typed text happens to match
    * a catalog code exactly, onPick fires instead so both fields fill.)
+   *
+   * Ignored when `strictPick=true`: free text is discarded on commit.
    */
   onTyped: (text: string) => void;
   placeholder?: string;
   className?: string;
   inputClassName?: string;
+  /**
+   * Strict-pick mode (owner ruling 2026-06-29 for PI/GRN scan wizards):
+   * the field MUST be a catalog pick — custom items are not allowed. The
+   * input still accepts typing for SEARCH only; if the operator commits
+   * without picking, the field resets to its prior value. The "kept as a
+   * custom item" hint is hidden. Default false (back-compat).
+   */
+  strictPick?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   // `draft === null` means "not editing" → the input mirrors the parent's
@@ -120,8 +131,11 @@ export function MaterialPicker({
       (o) => o.itemCode.toLowerCase() === typed.toLowerCase(),
     );
     if (hit) onPick(hit);
-    else onTyped(typed);
-  }, [draft, options, onPick, onTyped]);
+    else if (!strictPick) onTyped(typed);
+    // strictPick + no exact match → discard the typed text entirely. The
+    // input snaps back to the parent value (via setDraft(null) above) so
+    // the operator clearly sees their typing didn't take.
+  }, [draft, options, onPick, onTyped, strictPick]);
 
   // Measure the input's on-screen rect for the portaled dropdown's fixed position.
   const measure = useCallback(() => {
@@ -203,7 +217,9 @@ export function MaterialPicker({
           >
           {suggestions.length === 0 ? (
             <div className="px-3 py-2 text-xs text-[#9CA3AF]">
-              No catalog match — “{query.trim()}” will be kept as a custom item.
+              {strictPick
+                ? `No catalog match for “${query.trim()}”. Pick an existing item — custom items aren’t allowed here.`
+                : `No catalog match — “${query.trim()}” will be kept as a custom item.`}
             </div>
           ) : (
             <>
@@ -227,7 +243,7 @@ export function MaterialPicker({
                   </span>
                 </button>
               ))}
-              {query.trim() && !exactMatch && (
+              {query.trim() && !exactMatch && !strictPick && (
                 <div className="border-t border-[#E2DDD8] px-3 py-1.5 text-[11px] text-[#9CA3AF]">
                   Not in catalog? “{query.trim()}” is kept as a custom item.
                 </div>

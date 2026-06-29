@@ -26,7 +26,7 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency } from "@/lib/utils";
-import type { Supplier, RawMaterial, SupplierMaterialBinding } from "@/types";
+import type { Supplier, RawMaterial, SupplierMaterialBinding, PurchaseOrder } from "@/types";
 import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
 import { ArrowLeft, Plus, Save, Trash2, FolderInput } from "lucide-react";
 import { ScanSupplierModal } from "@/components/scan-supplier-modal";
@@ -126,6 +126,16 @@ function CreatePurchaseInvoicePage() {
   >("/api/supplier-materials");
   // Purchase Company registry — feeds the per-PI buying-company dropdown.
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code: string; name: string; isActive?: boolean }> }>("/api/organisations");
+  // Purchase Orders — for the Linked PO dropdown on each scanned PI card.
+  // Filtered to open POs (anything not CLOSED/CANCELLED) inside the modal.
+  const { data: poResp } = useCachedJson<{
+    success?: boolean;
+    data?: PurchaseOrder[];
+  }>("/api/purchase-orders");
+  const allPurchaseOrders: PurchaseOrder[] = useMemo(
+    () => poResp?.data ?? [],
+    [poResp],
+  );
 
   const suppliers: Supplier[] = useMemo(
     () => supResp?.data ?? [],
@@ -906,6 +916,7 @@ function CreatePurchaseInvoicePage() {
         bindings={supplierMaterialBindings}
         organisations={activeOrgs}
         defaultSupplierId={supplier?.id ?? null}
+        purchaseOrders={allPurchaseOrders}
         onCreated={(ids) => {
           if (ids.length > 0) {
             invalidateCachePrefix("/api/purchase-invoices");

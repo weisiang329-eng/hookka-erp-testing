@@ -22,14 +22,15 @@
 // as gold" toggle on each preview card re-distils on confirm.
 // ---------------------------------------------------------------------------
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
-import type { Supplier, RawMaterial, SupplierMaterialBinding } from "@/types";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import type { Supplier, RawMaterial, SupplierMaterialBinding, PurchaseOrder } from "@/types";
 import {
   X,
   Upload,
@@ -95,8 +96,14 @@ type CreatePIModeProps = {
   bindings: SupplierMaterialBinding[];
   /** Purchase company registry (caller already fetched /api/organisations). */
   organisations: Organisation[];
+  /** Open purchase orders (caller already fetched /api/purchase-orders). The
+      modal filters this list per-card by supplier + non-terminal status when
+      rendering the Linked PO picker. */
+  purchaseOrders: PurchaseOrder[];
   /** Optional default supplier (e.g. when host already has one selected). */
   defaultSupplierId?: string | null;
+  /** Optional source PO id — when present, every created PI pre-fills it. */
+  defaultPurchaseOrderId?: string | null;
   /** Called after at least one PI is created (host can refresh + navigate). */
   onCreated: (piIds: string[]) => void;
   title?: string;
@@ -114,9 +121,11 @@ type CreateGRNModeProps = {
   bindings: SupplierMaterialBinding[];
   /** Purchase company registry (caller already fetched /api/organisations). */
   organisations: Organisation[];
+  /** Open purchase orders (caller already fetched /api/purchase-orders). */
+  purchaseOrders: PurchaseOrder[];
   /** Optional default supplier (e.g. when host already has one selected). */
   defaultSupplierId?: string | null;
-  /** Optional source PO id — when present, every created GRN links to it. */
+  /** Optional source PO id — when present, every created GRN pre-fills it. */
   defaultPurchaseOrderId?: string | null;
   /** Called after at least one GRN is created (host can refresh + navigate). */
   onCreated: (grnIds: string[]) => void;
@@ -221,11 +230,7 @@ async function runExtractOnce(
 
 export function ScanSupplierModal(props: Props) {
   if (props.mode === "create-pi") return <CreatePIWizard {...props} />;
-  // create-grn mode is reserved in the type union but CreateGRNWizard is not
-  // yet implemented (another dev's WIP). Nothing in the codebase currently
-  // invokes this mode — falling through to ApplyModeModal is harmless for the
-  // type contract and keeps CI build:strict green so other unrelated deploys
-  // can land. Replace with <CreateGRNWizard /> once it's defined.
+  if (props.mode === "create-grn") return <CreateGRNWizard {...props} />;
   return <ApplyModeModal {...(props as ApplyModeProps)} />;
 }
 
@@ -577,6 +582,9 @@ type PreviewCard = {
   // Editable header.
   supplierId: string;
   purchaseOrgCode: string;
+  // Linked PO (optional). When set, the POST body carries purchaseOrderId so
+  // the backend does Convert-from-PO (decrements PO availability) on save.
+  purchaseOrderId: string | null;
   invoiceDate: string;
   supplierInvoiceNo: string;
   supplierDoNo: string;
@@ -612,7 +620,9 @@ function CreatePIWizard({
   rawMaterials,
   bindings,
   organisations,
+  purchaseOrders,
   defaultSupplierId,
+  defaultPurchaseOrderId,
   onCreated,
   title = "Scan supplier document",
 }: CreatePIModeProps) {
@@ -697,6 +707,29 @@ function CreatePIWizard({
       return bindingsBySupplierSku.get(`${supplierId}__${sku}`) ?? null;
     },
     [bindingsBySupplierSku],
+  );
+
+  // Reverse lookup: (supplierId, materialCode) → binding. Lets us fill the
+  // Supplier SKU when the operator picks Internal Code first.
+  const normCode = (s: string | null | undefined) =>
+    (s || "").trim().toUpperCase();
+  const bindingsByMaterial = useMemo(() => {
+    const m = new Map<string, SupplierMaterialBinding>();
+    for (const b of bindings) {
+      const k = normCode(b.materialCode);
+      if (!k || !b.supplierId) continue;
+      m.set(`${b.supplierId}__${k}`, b);
+    }
+    return m;
+  }, [bindings]);
+
+  const resolveBindingForMaterial = useCallback(
+    (supplierId: string, materialCode: string): SupplierMaterialBinding | null => {
+      const code = normCode(materialCode);
+      if (!code || !supplierId) return null;
+      return bindingsByMaterial.get(`${supplierId}__${code}`) ?? null;
+    },
+    [bindingsByMaterial],
   );
 
   const materialByCode = useMemo(() => {
@@ -816,6 +849,7 @@ function CreatePIWizard({
         createError: null,
         supplierId: sId,
         purchaseOrgCode: orgCode,
+        purchaseOrderId: defaultPurchaseOrderId ?? null,
         invoiceDate: docDate,
         supplierInvoiceNo: supInvNo,
         supplierDoNo: supDoNo,
@@ -824,7 +858,7 @@ function CreatePIWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, defaultSupplierId, supplierById, activeOrgs, resolveBindingFor, materialByCode],
+    [suppliers, defaultSupplierId, defaultPurchaseOrderId, supplierById, activeOrgs, resolveBindingFor, materialByCode],
   );
 
   // ─── Drag-drop + multi-file extract ────────────────────────────────────
@@ -1038,6 +1072,18 @@ function CreatePIWizard({
             });
             return;
           }
+          // Strict-pick rule (owner 2026-06-29): every saved line MUST be
+          // bound to a catalog item. Custom / off-catalog rows are rejected
+          // BEFORE we POST — the UI separately blocks the Create button so
+          // this is a belt-and-braces guard.
+          const unbound = validLines.filter((l) => !l.materialCode.trim());
+          if (unbound.length > 0) {
+            patchCard(card.id, {
+              creating: false,
+              createError: `${unbound.length} line${unbound.length !== 1 ? "s" : ""} not bound to catalog — pick from dropdown`,
+            });
+            return;
+          }
           const payload: Record<string, unknown> = {
             supplierId: sup.id,
             supplierName: sup.name,
@@ -1057,6 +1103,10 @@ function CreatePIWizard({
               grnItemId: null,
             })),
           };
+          // Linked PO → backend runs Convert-from-PO and draws down PO availability.
+          if (card.purchaseOrderId) {
+            payload.purchaseOrderId = card.purchaseOrderId;
+          }
           const res = await fetch("/api/purchase-invoices", {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -1159,9 +1209,11 @@ function CreatePIWizard({
               cards={cards}
               suppliers={suppliers}
               activeOrgs={activeOrgs}
+              purchaseOrders={purchaseOrders}
               materialOptions={materialOptionsAll}
               supplierSkuOptionsBy={supplierSkuOptionsBy}
               resolveBindingFor={resolveBindingFor}
+              resolveBindingForMaterial={resolveBindingForMaterial}
               materialByCode={materialByCode}
               errors={errors}
               onPatchCard={patchCard}
@@ -1384,9 +1436,11 @@ function PreviewStep({
   cards,
   suppliers,
   activeOrgs,
+  purchaseOrders,
   materialOptions,
   supplierSkuOptionsBy,
   resolveBindingFor,
+  resolveBindingForMaterial,
   materialByCode,
   errors,
   onPatchCard,
@@ -1402,9 +1456,11 @@ function PreviewStep({
   cards: PreviewCard[];
   suppliers: Supplier[];
   activeOrgs: Organisation[];
+  purchaseOrders: PurchaseOrder[];
   materialOptions: MaterialOption[];
   supplierSkuOptionsBy: Map<string, MaterialOption[]>;
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
+  resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
   materialByCode: Map<string, RawMaterial>;
   errors: string[];
   onPatchCard: (id: string, patch: Partial<PreviewCard>) => void;
@@ -1417,6 +1473,15 @@ function PreviewStep({
   onConfirm: () => void;
   includedCount: number;
 }) {
+  // Strict-pick guard (owner 2026-06-29): any line on an INCLUDED card that
+  // isn't bound to a catalog item blocks Create. The button is disabled and
+  // the offending lines render a per-card inline error.
+  const isLineUnbound = (l: PreviewLine) =>
+    (l.materialName || l.description).trim() !== "" && !l.materialCode.trim();
+  const blockingCards = cards.filter(
+    (c) => c.include && !c.createdPiNo && c.lines.some(isLineUnbound),
+  );
+  const hasBlocking = blockingCards.length > 0;
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -1450,9 +1515,11 @@ function PreviewStep({
             card={card}
             suppliers={suppliers}
             activeOrgs={activeOrgs}
+            purchaseOrders={purchaseOrders}
             materialOptions={materialOptions}
             supplierSkuOptions={supplierSkuOptionsBy.get(card.supplierId) ?? []}
             resolveBindingFor={resolveBindingFor}
+            resolveBindingForMaterial={resolveBindingForMaterial}
             materialByCode={materialByCode}
             onPatch={(patch) => onPatchCard(card.id, patch)}
             onPatchLine={(idx, patch) => onPatchLine(card.id, idx, patch)}
@@ -1468,14 +1535,26 @@ function PreviewStep({
         <Button variant="outline" onClick={onBack}>
           Back
         </Button>
-        <Button
-          variant="primary"
-          onClick={onConfirm}
-          disabled={includedCount === 0}
-        >
-          <CheckCircle className="h-4 w-4" />
-          Create {includedCount} PI{includedCount !== 1 ? "s" : ""} as DRAFT
-        </Button>
+        <div className="flex items-center gap-3">
+          {hasBlocking && (
+            <span className="text-xs text-[#9A3A2D]">
+              {blockingCards.length} card{blockingCards.length !== 1 ? "s have" : " has"} unbound line{blockingCards.length !== 1 ? "s" : ""} — pick from catalog
+            </span>
+          )}
+          <Button
+            variant="primary"
+            onClick={onConfirm}
+            disabled={includedCount === 0 || hasBlocking}
+            title={
+              hasBlocking
+                ? "One or more lines aren't bound to a catalog item — pick from the dropdown before creating"
+                : undefined
+            }
+          >
+            <CheckCircle className="h-4 w-4" />
+            Create {includedCount} PI{includedCount !== 1 ? "s" : ""} as DRAFT
+          </Button>
+        </div>
       </div>
     </div>
   );
@@ -1485,9 +1564,11 @@ function PICard({
   card,
   suppliers,
   activeOrgs,
+  purchaseOrders,
   materialOptions,
   supplierSkuOptions,
   resolveBindingFor,
+  resolveBindingForMaterial,
   materialByCode,
   onPatch,
   onPatchLine,
@@ -1499,9 +1580,11 @@ function PICard({
   card: PreviewCard;
   suppliers: Supplier[];
   activeOrgs: Organisation[];
+  purchaseOrders: PurchaseOrder[];
   materialOptions: MaterialOption[];
   supplierSkuOptions: MaterialOption[];
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
+  resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
   materialByCode: Map<string, RawMaterial>;
   onPatch: (patch: Partial<PreviewCard>) => void;
   onPatchLine: (idx: number, patch: Partial<PreviewLine>) => void;
@@ -1515,6 +1598,22 @@ function PICard({
     (s, l) => s + (Number(l.qty) || 0) * (Number(l.unitPriceRM) || 0),
     0,
   );
+
+  // Linked-PO picker options: this supplier's POs in non-terminal status.
+  const linkedPoOptions = useMemo(
+    () =>
+      purchaseOrders
+        .filter(
+          (po) =>
+            po.supplierId === card.supplierId &&
+            !["CLOSED", "CANCELLED", "CANCELED"].includes(
+              (po.status || "").toUpperCase(),
+            ),
+        )
+        .map((po) => ({ value: po.id, label: po.poNo })),
+    [purchaseOrders, card.supplierId],
+  );
+  const linkedPo = purchaseOrders.find((p) => p.id === card.purchaseOrderId) ?? null;
 
   return (
     <Card
@@ -1604,8 +1703,8 @@ function PICard({
           </button>
         </div>
 
-        {/* Second row — supplier invoice no + DO no */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pl-7">
+        {/* Second row — supplier invoice no + DO no + Linked PO */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pl-7">
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-0.5">Supplier Invoice No.</label>
             <Input
@@ -1626,6 +1725,24 @@ function PICard({
               disabled={!!card.createdPiNo}
             />
           </div>
+          <div>
+            <label className="block text-xs text-[#9CA3AF] mb-0.5">
+              Linked PO {!card.supplierId && <span className="text-[#D1D5DB]">(pick supplier first)</span>}
+            </label>
+            <SearchableSelect
+              value={card.purchaseOrderId ?? ""}
+              onChange={(poId) => onPatch({ purchaseOrderId: poId || null })}
+              options={linkedPoOptions}
+              placeholder={
+                !card.supplierId
+                  ? "Select supplier first"
+                  : linkedPoOptions.length === 0
+                    ? "No open POs for this supplier"
+                    : "Search PO no..."
+              }
+              disabled={!!card.createdPiNo || !card.supplierId}
+            />
+          </div>
         </div>
 
         {/* File chip + totals */}
@@ -1633,6 +1750,11 @@ function PICard({
           <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
             <FileText className="h-3 w-3 inline mr-0.5" /> {card.fileName}
           </Badge>
+          {linkedPo && (
+            <Badge className="bg-blue-50 text-blue-700 border border-blue-200">
+              PO {linkedPo.poNo}
+            </Badge>
+          )}
           <span>{card.lines.length} lines · {totalQty} qty</span>
           <span className="text-[#1F1D1B] font-medium">RM {totalRM.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
           {card.creating && (
@@ -1672,9 +1794,24 @@ function PICard({
               </tr>
             </thead>
             <tbody>
-              {card.lines.map((line, i) => (
-                <tr key={i} className="border-t border-[#EFEAE6] align-top">
-                  {/* Internal Code — badge if bound, picker affordance if not */}
+              {card.lines.map((line, i) => {
+                // Strict-pick rule: a line that has Description content but no
+                // bound materialCode is INVALID. Inline error shown below.
+                const lineUnbound =
+                  (line.materialName || line.description).trim() !== "" &&
+                  !line.materialCode.trim();
+                // Bidirectional binding hint: when Internal Code is picked but
+                // there's no supplier binding for (supplierId, materialCode),
+                // tell the operator to add it under Suppliers > Materials.
+                const codeBoundNoSku =
+                  !!line.materialCode &&
+                  !!card.supplierId &&
+                  !line.supplierSku &&
+                  !resolveBindingForMaterial(card.supplierId, line.materialCode);
+                return (
+                <React.Fragment key={i}>
+                <tr className="border-t border-[#EFEAE6] align-top">
+                  {/* Internal Code — badge if bound, strict picker if not */}
                   <td className="px-2 py-1">
                     {line.materialCode ? (
                       <span
@@ -1698,23 +1835,33 @@ function PICard({
                       <MaterialPicker
                         className="h-8"
                         inputClassName="h-8 text-xs"
-                        placeholder="(pick)"
+                        placeholder="(pick from catalog)"
                         value={line.materialName || line.description}
                         options={materialOptions}
-                        onPick={(o) =>
+                        strictPick
+                        onPick={(o) => {
+                          // Bidirectional: when picking Internal Code, also
+                          // fill Supplier SKU via reverse-binding lookup. If
+                          // no binding exists for this (supplier, material)
+                          // pair, leave the SKU blank — the row shows a
+                          // "binding missing" hint and the operator can
+                          // either add the binding (Suppliers > Materials)
+                          // or pick the Supplier SKU manually.
+                          const reverse = card.supplierId
+                            ? resolveBindingForMaterial(card.supplierId, o.itemCode)
+                            : null;
                           onPatchLine(i, {
                             materialCode: o.itemCode,
                             materialName: o.description,
-                          })
-                        }
-                        onTyped={(text) => onPatchLine(i, { materialName: text })}
+                            supplierSku: reverse?.supplierSku ?? line.supplierSku,
+                          });
+                        }}
+                        onTyped={() => {}}
                       />
                     )}
                   </td>
-                  {/* Supplier SKU — owner 2026-06-29 evening: must be a
-                      picker from this supplier's bindings, not free text.
-                      Picking auto-fills the Internal Code + material name
-                      via the same supplier_material_bindings lookup. */}
+                  {/* Supplier SKU — strict picker from this supplier's bindings.
+                      Picking auto-fills Internal Code + name via binding lookup. */}
                   <td className="px-1 py-1">
                     <MaterialPicker
                       className="h-8"
@@ -1722,6 +1869,7 @@ function PICard({
                       placeholder="SKU"
                       value={line.supplierSku}
                       options={supplierSkuOptions}
+                      strictPick
                       onPick={(o) => {
                         const binding = resolveBindingFor(card.supplierId, o.itemCode);
                         const rm = binding ? materialByCode.get(binding.materialCode.trim().toUpperCase()) : null;
@@ -1731,7 +1879,7 @@ function PICard({
                           materialName: rm?.description ?? line.materialName,
                         });
                       }}
-                      onTyped={(text) => onPatchLine(i, { supplierSku: text })}
+                      onTyped={() => {}}
                     />
                   </td>
                   <td className="px-1 py-1">
@@ -1795,7 +1943,25 @@ function PICard({
                     </button>
                   </td>
                 </tr>
-              ))}
+                {(lineUnbound || codeBoundNoSku) && (
+                  <tr className="bg-[#FFF5F0]">
+                    <td colSpan={8} className="px-3 py-1">
+                      {lineUnbound && (
+                        <div className="text-[11px] text-[#9A3A2D]">
+                          Pick from catalog — this line can&apos;t be saved as a custom item.
+                        </div>
+                      )}
+                      {codeBoundNoSku && (
+                        <div className="text-[11px] text-[#9A3A2D]">
+                          No Supplier SKU binding for this material — add it under Suppliers &gt; Materials, or pick a SKU manually.
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
+              );
+              })}
             </tbody>
           </table>
           <div className="px-2 py-1 bg-[#FAFAF9] border-t border-[#E2DDD8] flex justify-between items-center">
@@ -1908,6 +2074,1277 @@ function serialiseCardAsExtraction(card: PreviewCard): SupplierExtraction {
       unitPrice: Number(l.unitPriceRM) || null,
       amount:
         (Number(l.qty) || 0) * (Number(l.unitPriceRM) || 0) || null,
+    })),
+    subtotal: card.originalExtraction.subtotal ?? null,
+    tax: card.originalExtraction.tax ?? null,
+    total: card.originalExtraction.total ?? null,
+  };
+}
+
+// ─── create-grn wizard (NEW, mirrors create-pi shell) ─────────────────────
+//
+// Same 3-step shell as CreatePIWizard (Upload → Preview → Create), but each
+// preview card is a GRN draft. Differences vs PI:
+//   • Line table has no unit price / amount columns — GRNs record accepted
+//     quantity, not invoice prices. Columns: Internal Code | Supplier SKU |
+//     Description | Received | Accepted | Rejected | UoM.
+//   • Header has Supplier DO No. only — no Supplier Invoice No.
+//   • Date label = "Receive Date".
+//   • POSTs to /api/grn with ocrUsed:true → backend lands the GRN as DRAFT.
+//   • Same 4 owner rules applied (strict-pick, bidirectional binding,
+//     unbound-line block, Linked PO picker + chip + body).
+
+type GRNPreviewLine = {
+  materialCode: string;
+  materialName: string;
+  supplierSku: string;
+  description: string;
+  receivedQty: number;
+  acceptedQty: number;
+  rejectedQty: number;
+  uom: string;
+};
+
+type GRNPreviewCard = {
+  id: string;
+  fileName: string;
+  sampleId: string | null;
+  include: boolean;
+  creating: boolean;
+  createdGrnNo: string | null;
+  createError: string | null;
+  supplierId: string;
+  purchaseOrgCode: string;
+  purchaseOrderId: string | null;
+  receiveDate: string;
+  supplierDoNo: string;
+  markedGold: boolean;
+  lines: GRNPreviewLine[];
+  originalExtraction: SupplierExtraction;
+};
+
+function makeBlankGRNLine(): GRNPreviewLine {
+  return {
+    materialCode: "",
+    materialName: "",
+    supplierSku: "",
+    description: "",
+    receivedQty: 1,
+    acceptedQty: 1,
+    rejectedQty: 0,
+    uom: "",
+  };
+}
+
+function CreateGRNWizard({
+  open,
+  onClose,
+  suppliers,
+  rawMaterials,
+  bindings,
+  organisations,
+  purchaseOrders,
+  defaultSupplierId,
+  defaultPurchaseOrderId,
+  onCreated,
+  title = "Scan supplier document",
+}: CreateGRNModeProps) {
+  const { confirm } = useConfirm();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [step, setStep] = useState<StepState>("upload");
+  const [files, setFiles] = useState<{ id: string; file: File }[]>([]);
+  const [parsing, setParsing] = useState(false);
+  const [fileProgress, setFileProgress] = useState<
+    Record<string, "queued" | "scanning" | "done" | "failed">
+  >({});
+  const [errors, setErrors] = useState<string[]>([]);
+  const [cards, setCards] = useState<GRNPreviewCard[]>([]);
+
+  const activeOrgs = useMemo(
+    () => organisations.filter((o) => o.isActive !== false),
+    [organisations],
+  );
+
+  const reset = useCallback(() => {
+    setStep("upload");
+    setFiles([]);
+    setParsing(false);
+    setFileProgress({});
+    setErrors([]);
+    setCards([]);
+  }, []);
+
+  const handleClose = useCallback(() => {
+    reset();
+    onClose();
+  }, [reset, onClose]);
+
+  const isBusy = parsing || step === "creating";
+
+  const requestClose = async () => {
+    if (
+      isBusy &&
+      !(await confirm({
+        title: "Discard scan in progress?",
+        message:
+          "A scan is still in progress. Close and discard the work in progress?",
+        danger: true,
+      }))
+    ) {
+      return;
+    }
+    handleClose();
+  };
+
+  const supplierById = useCallback(
+    (id: string) => suppliers.find((s) => s.id === id) ?? null,
+    [suppliers],
+  );
+
+  const normSkuG = (s: string | null | undefined) =>
+    (s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const bindingsBySupplierSku = useMemo(() => {
+    const m = new Map<string, SupplierMaterialBinding>();
+    for (const b of bindings) {
+      const k = normSkuG(b.supplierSku);
+      if (!k || !b.supplierId) continue;
+      m.set(`${b.supplierId}__${k}`, b);
+    }
+    return m;
+  }, [bindings]);
+
+  const resolveBindingFor = useCallback(
+    (supplierId: string, supplierSku: string): SupplierMaterialBinding | null => {
+      const sku = normSkuG(supplierSku);
+      if (!sku || !supplierId) return null;
+      return bindingsBySupplierSku.get(`${supplierId}__${sku}`) ?? null;
+    },
+    [bindingsBySupplierSku],
+  );
+
+  const normCodeG = (s: string | null | undefined) =>
+    (s || "").trim().toUpperCase();
+  const bindingsByMaterial = useMemo(() => {
+    const m = new Map<string, SupplierMaterialBinding>();
+    for (const b of bindings) {
+      const k = normCodeG(b.materialCode);
+      if (!k || !b.supplierId) continue;
+      m.set(`${b.supplierId}__${k}`, b);
+    }
+    return m;
+  }, [bindings]);
+
+  const resolveBindingForMaterial = useCallback(
+    (supplierId: string, materialCode: string): SupplierMaterialBinding | null => {
+      const code = normCodeG(materialCode);
+      if (!code || !supplierId) return null;
+      return bindingsByMaterial.get(`${supplierId}__${code}`) ?? null;
+    },
+    [bindingsByMaterial],
+  );
+
+  const materialByCode = useMemo(() => {
+    const m = new Map<string, RawMaterial>();
+    for (const rm of rawMaterials) {
+      m.set(rm.itemCode.trim().toUpperCase(), rm);
+    }
+    return m;
+  }, [rawMaterials]);
+
+  const materialOptionsAll: MaterialOption[] = useMemo(
+    () =>
+      rawMaterials.map((rm) => ({
+        itemCode: rm.itemCode,
+        description: rm.description,
+      })),
+    [rawMaterials],
+  );
+
+  const supplierSkuOptionsBy: Map<string, MaterialOption[]> = useMemo(() => {
+    const map = new Map<string, MaterialOption[]>();
+    for (const b of bindings) {
+      if (!b.supplierId || !b.supplierSku) continue;
+      const rm = materialByCode.get(b.materialCode.trim().toUpperCase());
+      const opt: MaterialOption = {
+        itemCode: b.supplierSku,
+        description: rm
+          ? `${rm.itemCode} · ${rm.description}`
+          : b.materialCode,
+      };
+      const arr = map.get(b.supplierId) ?? [];
+      arr.push(opt);
+      map.set(b.supplierId, arr);
+    }
+    return map;
+  }, [bindings, materialByCode]);
+
+  const buildCard = useCallback(
+    (
+      fileName: string,
+      ex: SupplierExtraction,
+      sampleId: string | null,
+    ): GRNPreviewCard => {
+      const guessName = (ex.supplierName ?? "").trim().toUpperCase();
+      const matched = guessName
+        ? suppliers.find(
+            (s) =>
+              s.name.trim().toUpperCase() === guessName ||
+              s.code.trim().toUpperCase() === guessName,
+          )
+        : null;
+      const sId = matched?.id ?? defaultSupplierId ?? "";
+      const sup = supplierById(sId);
+      const orgCode = sup?.purchaseOrgCode ?? activeOrgs[0]?.code ?? "HOOKKA";
+
+      const docNo = (ex.docNo ?? "").trim();
+      const supDoNo = docNo;
+
+      const docDate =
+        ex.docDate && /^\d{4}-\d{2}-\d{2}$/.test(ex.docDate)
+          ? ex.docDate
+          : todayISO();
+
+      const lines: GRNPreviewLine[] = (ex.lines ?? []).map((ln) => {
+        const rawSku = (ln.supplierCode ?? "").trim();
+        const binding = sId ? resolveBindingFor(sId, rawSku) : null;
+        const rm = binding
+          ? materialByCode.get(binding.materialCode.trim().toUpperCase())
+          : null;
+        const sku = binding?.supplierSku ?? rawSku;
+        const qty = Number(ln.qty) || 0;
+        const receivedQty = qty > 0 ? qty : 1;
+        return {
+          materialCode: rm?.itemCode ?? binding?.materialCode ?? "",
+          materialName: rm?.description ?? ln.description ?? "",
+          supplierSku: sku,
+          description: ln.description ?? "",
+          receivedQty,
+          acceptedQty: receivedQty,
+          rejectedQty: 0,
+          uom: ln.uom ?? "",
+        };
+      });
+
+      return {
+        id: `card-${makeUploadId()}`,
+        fileName,
+        sampleId,
+        include: true,
+        creating: false,
+        createdGrnNo: null,
+        createError: null,
+        supplierId: sId,
+        purchaseOrgCode: orgCode,
+        purchaseOrderId: defaultPurchaseOrderId ?? null,
+        receiveDate: docDate,
+        supplierDoNo: supDoNo,
+        markedGold: false,
+        lines: lines.length > 0 ? lines : [makeBlankGRNLine()],
+        originalExtraction: ex,
+      };
+    },
+    [suppliers, defaultSupplierId, defaultPurchaseOrderId, supplierById, activeOrgs, resolveBindingFor, materialByCode],
+  );
+
+  const handleFiles = useCallback(
+    async (fileList: FileList | null) => {
+      if (!fileList || fileList.length === 0) return;
+      const accepted = Array.from(fileList).filter((f) => {
+        if (f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf")) return true;
+        if (f.type.startsWith("image/")) return true;
+        const ext = f.name.toLowerCase();
+        return /\.(jpe?g|png|webp)$/.test(ext);
+      });
+      if (accepted.length === 0) {
+        setErrors(["Please upload PDF or image files."]);
+        return;
+      }
+      const tooBig = accepted.find((f) => f.size > 32 * 1024 * 1024);
+      if (tooBig) {
+        setErrors([`${tooBig.name} is over the 32MB limit.`]);
+        return;
+      }
+
+      const uploaded = accepted.map((f) => ({ id: makeUploadId(), file: f }));
+      setFiles(uploaded);
+      setErrors([]);
+      setParsing(true);
+      setFileProgress(Object.fromEntries(uploaded.map((u) => [u.id, "queued" as const])));
+
+      const fanOut = uploaded.map(async (u) => {
+        setFileProgress((prev) => ({ ...prev, [u.id]: "scanning" }));
+        const supplierIdForHint = defaultSupplierId ?? null;
+        const supplierForHint = supplierIdForHint
+          ? supplierById(supplierIdForHint)
+          : null;
+        const r = await runExtractOnce(u.file, {
+          supplierId: supplierIdForHint,
+          supplierName: supplierForHint?.name ?? null,
+        });
+        return { upload: u, result: r };
+      });
+
+      const results = await Promise.all(fanOut);
+
+      const newCards: GRNPreviewCard[] = [];
+      const errs: string[] = [];
+      const nextProgress: Record<string, "done" | "failed"> = {};
+      for (const { upload, result } of results) {
+        if (result.kind === "ok") {
+          nextProgress[upload.id] = "done";
+          newCards.push(buildCard(upload.file.name, result.data, result.sampleId));
+        } else {
+          nextProgress[upload.id] = "failed";
+          errs.push(`${upload.file.name}: ${result.error}`);
+        }
+      }
+      setFileProgress((prev) => ({ ...prev, ...nextProgress }));
+      if (newCards.length === 0) {
+        setErrors(errs.length > 0 ? errs : ["Could not extract any documents."]);
+        setParsing(false);
+        return;
+      }
+      setCards(newCards);
+      setErrors(errs);
+      setParsing(false);
+      setStep("preview");
+    },
+    [buildCard, defaultSupplierId, supplierById],
+  );
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      handleFiles(e.dataTransfer.files);
+    },
+    [handleFiles],
+  );
+
+  const patchCard = (id: string, patch: Partial<GRNPreviewCard>) =>
+    setCards((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+
+  const patchLine = (cardId: string, idx: number, patch: Partial<GRNPreviewLine>) =>
+    setCards((prev) =>
+      prev.map((c) => {
+        if (c.id !== cardId) return c;
+        const lines = c.lines.map((l, i) => {
+          if (i !== idx) return l;
+          const merged = { ...l, ...patch };
+          if (
+            (patch.receivedQty != null || patch.rejectedQty != null) &&
+            patch.acceptedQty == null
+          ) {
+            const recv = Number(merged.receivedQty) || 0;
+            const rej = Number(merged.rejectedQty) || 0;
+            merged.acceptedQty = Math.max(0, recv - rej);
+          }
+          return merged;
+        });
+        return { ...c, lines };
+      }),
+    );
+
+  const addLine = (cardId: string) =>
+    setCards((prev) =>
+      prev.map((c) =>
+        c.id === cardId ? { ...c, lines: [...c.lines, makeBlankGRNLine()] } : c,
+      ),
+    );
+
+  const removeLine = (cardId: string, idx: number) =>
+    setCards((prev) =>
+      prev.map((c) => {
+        if (c.id !== cardId) return c;
+        const next = c.lines.filter((_, i) => i !== idx);
+        return { ...c, lines: next.length > 0 ? next : [makeBlankGRNLine()] };
+      }),
+    );
+
+  const removeCard = (cardId: string) =>
+    setCards((prev) => prev.filter((c) => c.id !== cardId));
+
+  const onCardSupplierChange = (cardId: string, newSupplierId: string) => {
+    setCards((prev) =>
+      prev.map((c) => {
+        if (c.id !== cardId) return c;
+        const sup = suppliers.find((s) => s.id === newSupplierId);
+        const orgCode =
+          sup?.purchaseOrgCode ?? c.purchaseOrgCode ?? activeOrgs[0]?.code ?? "HOOKKA";
+        const newLines = c.lines.map((l) => {
+          const binding = resolveBindingFor(newSupplierId, l.supplierSku);
+          if (binding) {
+            const rm = materialByCode.get(binding.materialCode.trim().toUpperCase());
+            return {
+              ...l,
+              materialCode: rm?.itemCode ?? binding.materialCode,
+              materialName: l.materialName.trim() ? l.materialName : (rm?.description ?? l.materialName),
+            };
+          }
+          return l;
+        });
+        const poStillValid =
+          !!c.purchaseOrderId &&
+          purchaseOrders.some((p) => p.id === c.purchaseOrderId && p.supplierId === newSupplierId);
+        return {
+          ...c,
+          supplierId: newSupplierId,
+          purchaseOrgCode: orgCode,
+          purchaseOrderId: poStillValid ? c.purchaseOrderId : null,
+          lines: newLines,
+        };
+      }),
+    );
+  };
+
+  const includedCards = cards.filter((c) => c.include && !c.createdGrnNo);
+  const includedCount = includedCards.length;
+
+  const handleCreateAll = async () => {
+    if (includedCount === 0) return;
+    setStep("creating");
+    setCards((prev) =>
+      prev.map((c) =>
+        c.include && !c.createdGrnNo
+          ? { ...c, creating: true, createError: null }
+          : c,
+      ),
+    );
+
+    const createdIds: string[] = [];
+
+    await Promise.all(
+      includedCards.map(async (card) => {
+        try {
+          if (card.sampleId) {
+            const edited =
+              JSON.stringify(card.originalExtraction) !==
+              JSON.stringify(serialiseGRNCardAsExtraction(card));
+            if (edited || card.markedGold) {
+              fetch(`/api/scan-supplier/samples/${card.sampleId}/confirm`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  correctedJson: serialiseGRNCardAsExtraction(card),
+                  gold: card.markedGold,
+                }),
+              }).catch(() => {});
+            }
+          }
+
+          const sup = supplierById(card.supplierId);
+          if (!sup) {
+            patchCard(card.id, {
+              creating: false,
+              createError: "Pick a supplier before creating",
+            });
+            return;
+          }
+          const validLines = card.lines.filter(
+            (l) =>
+              (l.materialName || l.description).trim() !== "" &&
+              (Number(l.receivedQty) || 0) > 0,
+          );
+          if (validLines.length === 0) {
+            patchCard(card.id, {
+              creating: false,
+              createError: "Add at least one line with a received quantity",
+            });
+            return;
+          }
+          const unbound = validLines.filter((l) => !l.materialCode.trim());
+          if (unbound.length > 0) {
+            patchCard(card.id, {
+              creating: false,
+              createError: `${unbound.length} line${unbound.length !== 1 ? "s" : ""} not bound to catalog`,
+            });
+            return;
+          }
+          const payload: Record<string, unknown> = {
+            supplierId: sup.id,
+            supplierName: sup.name,
+            purchaseOrgCode: card.purchaseOrgCode,
+            receivedBy: "Scanned",
+            notes: `Scanned: ${card.fileName}`,
+            supplier_do_no: card.supplierDoNo.trim() || null,
+            ocrUsed: true,
+            items: validLines.map((l) => ({
+              materialName: (l.materialName || l.description).trim(),
+              materialCode: l.materialCode.trim(),
+              receivedQty: Number(l.receivedQty) || 0,
+              acceptedQty: Number(l.acceptedQty) || 0,
+              rejectedQty: Number(l.rejectedQty) || 0,
+              rejectionReason: null,
+              unitPriceSen: 0,
+            })),
+          };
+          if (card.purchaseOrderId) {
+            payload.poId = card.purchaseOrderId;
+          }
+          const res = await fetch("/api/grn", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const j = (await res.json().catch(() => null)) as
+            | { success?: boolean; error?: string; data?: { grnNumber?: string; grnNo?: string; id?: string } }
+            | null;
+          if (!res.ok || !j?.success) {
+            patchCard(card.id, {
+              creating: false,
+              createError: j?.error || `HTTP ${res.status}`,
+            });
+            return;
+          }
+          const grnNo = j.data?.grnNumber ?? j.data?.grnNo ?? "(created)";
+          patchCard(card.id, {
+            creating: false,
+            createdGrnNo: grnNo,
+            createError: null,
+          });
+          if (j.data?.id) createdIds.push(j.data.id);
+          else if (grnNo !== "(created)") createdIds.push(grnNo);
+        } catch (err) {
+          patchCard(card.id, {
+            creating: false,
+            createError: err instanceof Error ? err.message : "Network error",
+          });
+        }
+      }),
+    );
+
+    setStep("done");
+    if (createdIds.length > 0) onCreated(createdIds);
+  };
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+    if (!open) reset();
+  }, [open, reset]);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+      <div
+        className="bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[92vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 rounded-lg bg-[#F5F0EB] flex items-center justify-center">
+              <ScanLine className="h-5 w-5 text-[#6B5C32]" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-[#1F1D1B]">{title}</h2>
+              <p className="text-sm text-[#6B7280]">
+                Upload supplier delivery notes to auto-create Goods Receipt Notes
+              </p>
+            </div>
+          </div>
+          <Button variant="ghost" size="sm" onClick={requestClose}>
+            <X className="h-5 w-5" />
+          </Button>
+        </div>
+
+        <div className="px-6 py-3 bg-[#FAFAF9] border-b border-[#E2DDD8]">
+          <div className="flex items-center gap-2 text-sm">
+            <StepDot active={step === "upload"} done={step !== "upload"} label="1. Upload" />
+            <div className="h-px w-8 bg-[#D1D5DB]" />
+            <StepDot
+              active={step === "preview"}
+              done={step === "creating" || step === "done"}
+              label="2. Preview"
+            />
+            <div className="h-px w-8 bg-[#D1D5DB]" />
+            <StepDot active={step === "creating" || step === "done"} done={step === "done"} label="3. Create" />
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-6">
+          {step === "upload" && (
+            <UploadStep
+              files={files}
+              parsing={parsing}
+              fileProgress={fileProgress}
+              errors={errors}
+              fileInputRef={fileInputRef}
+              onFiles={handleFiles}
+              onDrop={handleDrop}
+            />
+          )}
+
+          {step === "preview" && (
+            <GRNPreviewStep
+              cards={cards}
+              suppliers={suppliers}
+              activeOrgs={activeOrgs}
+              purchaseOrders={purchaseOrders}
+              materialOptions={materialOptionsAll}
+              supplierSkuOptionsBy={supplierSkuOptionsBy}
+              resolveBindingFor={resolveBindingFor}
+              resolveBindingForMaterial={resolveBindingForMaterial}
+              materialByCode={materialByCode}
+              errors={errors}
+              onPatchCard={patchCard}
+              onPatchLine={patchLine}
+              onAddLine={addLine}
+              onRemoveLine={removeLine}
+              onRemoveCard={removeCard}
+              onSupplierChange={onCardSupplierChange}
+              onBack={() => {
+                setStep("upload");
+                setCards([]);
+              }}
+              onConfirm={handleCreateAll}
+              includedCount={includedCount}
+            />
+          )}
+
+          {step === "creating" && (
+            <div className="flex flex-col items-center justify-center py-16 gap-4">
+              <Loader2 className="h-12 w-12 text-[#6B5C32] animate-spin" />
+              <p className="text-lg font-medium text-[#1F1D1B]">Creating Goods Receipt Notes...</p>
+              <p className="text-sm text-[#6B7280]">Processing {includedCount} document{includedCount !== 1 ? "s" : ""}</p>
+            </div>
+          )}
+
+          {step === "done" && (
+            <GRNDoneStep
+              cards={cards}
+              onClose={handleClose}
+              onScanMore={() => reset()}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GRNPreviewStep({
+  cards,
+  suppliers,
+  activeOrgs,
+  purchaseOrders,
+  materialOptions,
+  supplierSkuOptionsBy,
+  resolveBindingFor,
+  resolveBindingForMaterial,
+  materialByCode,
+  errors,
+  onPatchCard,
+  onPatchLine,
+  onAddLine,
+  onRemoveLine,
+  onRemoveCard,
+  onSupplierChange,
+  onBack,
+  onConfirm,
+  includedCount,
+}: {
+  cards: GRNPreviewCard[];
+  suppliers: Supplier[];
+  activeOrgs: Organisation[];
+  purchaseOrders: PurchaseOrder[];
+  materialOptions: MaterialOption[];
+  supplierSkuOptionsBy: Map<string, MaterialOption[]>;
+  resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
+  resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
+  materialByCode: Map<string, RawMaterial>;
+  errors: string[];
+  onPatchCard: (id: string, patch: Partial<GRNPreviewCard>) => void;
+  onPatchLine: (cardId: string, idx: number, patch: Partial<GRNPreviewLine>) => void;
+  onAddLine: (cardId: string) => void;
+  onRemoveLine: (cardId: string, idx: number) => void;
+  onRemoveCard: (cardId: string) => void;
+  onSupplierChange: (cardId: string, newSupplierId: string) => void;
+  onBack: () => void;
+  onConfirm: () => void;
+  includedCount: number;
+}) {
+  const isLineUnbound = (l: GRNPreviewLine) =>
+    (l.materialName || l.description).trim() !== "" && !l.materialCode.trim();
+  const blockingCards = cards.filter(
+    (c) => c.include && !c.createdGrnNo && c.lines.some(isLineUnbound),
+  );
+  const hasBlocking = blockingCards.length > 0;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="font-semibold text-[#1F1D1B] flex items-center gap-2">
+            Found {cards.length} document{cards.length !== 1 ? "s" : ""}
+            <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
+              <Sparkles className="h-3 w-3 inline mr-1" /> AI
+            </Badge>
+          </h3>
+          <p className="text-sm text-[#6B7280]">
+            {includedCount} selected — edit any field, then create
+          </p>
+        </div>
+      </div>
+
+      {errors.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
+          {errors.map((err, i) => (
+            <p key={i} className="text-sm text-amber-700 flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" /> {err}
+            </p>
+          ))}
+        </div>
+      )}
+
+      <div className="space-y-3 max-h-[65vh] overflow-y-auto">
+        {cards.map((card) => (
+          <GRNCard
+            key={card.id}
+            card={card}
+            suppliers={suppliers}
+            activeOrgs={activeOrgs}
+            purchaseOrders={purchaseOrders}
+            materialOptions={materialOptions}
+            supplierSkuOptions={supplierSkuOptionsBy.get(card.supplierId) ?? []}
+            resolveBindingFor={resolveBindingFor}
+            resolveBindingForMaterial={resolveBindingForMaterial}
+            materialByCode={materialByCode}
+            onPatch={(patch) => onPatchCard(card.id, patch)}
+            onPatchLine={(idx, patch) => onPatchLine(card.id, idx, patch)}
+            onAddLine={() => onAddLine(card.id)}
+            onRemoveLine={(idx) => onRemoveLine(card.id, idx)}
+            onRemoveCard={() => onRemoveCard(card.id)}
+            onSupplierChange={(newId) => onSupplierChange(card.id, newId)}
+          />
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between pt-4 border-t border-[#E2DDD8] sticky bottom-0 bg-white">
+        <Button variant="outline" onClick={onBack}>
+          Back
+        </Button>
+        <div className="flex items-center gap-3">
+          {hasBlocking && (
+            <span className="text-xs text-[#9A3A2D]">
+              {blockingCards.length} card{blockingCards.length !== 1 ? "s have" : " has"} unbound line{blockingCards.length !== 1 ? "s" : ""} — pick from catalog
+            </span>
+          )}
+          <Button
+            variant="primary"
+            onClick={onConfirm}
+            disabled={includedCount === 0 || hasBlocking}
+            title={
+              hasBlocking
+                ? "One or more lines aren't bound to a catalog item — pick from the dropdown before creating"
+                : undefined
+            }
+          >
+            <CheckCircle className="h-4 w-4" />
+            Create {includedCount} GRN{includedCount !== 1 ? "s" : ""} as DRAFT
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GRNCard({
+  card,
+  suppliers,
+  activeOrgs,
+  purchaseOrders,
+  materialOptions,
+  supplierSkuOptions,
+  resolveBindingFor,
+  resolveBindingForMaterial,
+  materialByCode,
+  onPatch,
+  onPatchLine,
+  onAddLine,
+  onRemoveLine,
+  onRemoveCard,
+  onSupplierChange,
+}: {
+  card: GRNPreviewCard;
+  suppliers: Supplier[];
+  activeOrgs: Organisation[];
+  purchaseOrders: PurchaseOrder[];
+  materialOptions: MaterialOption[];
+  supplierSkuOptions: MaterialOption[];
+  resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
+  resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
+  materialByCode: Map<string, RawMaterial>;
+  onPatch: (patch: Partial<GRNPreviewCard>) => void;
+  onPatchLine: (idx: number, patch: Partial<GRNPreviewLine>) => void;
+  onAddLine: () => void;
+  onRemoveLine: (idx: number) => void;
+  onRemoveCard: () => void;
+  onSupplierChange: (newId: string) => void;
+}) {
+  const totalReceived = card.lines.reduce((s, l) => s + (Number(l.receivedQty) || 0), 0);
+  const totalAccepted = card.lines.reduce((s, l) => s + (Number(l.acceptedQty) || 0), 0);
+  const totalRejected = card.lines.reduce((s, l) => s + (Number(l.rejectedQty) || 0), 0);
+
+  const linkedPoOptions = useMemo(
+    () =>
+      purchaseOrders
+        .filter(
+          (po) =>
+            po.supplierId === card.supplierId &&
+            !["CLOSED", "CANCELLED", "CANCELED"].includes(
+              (po.status || "").toUpperCase(),
+            ),
+        )
+        .map((po) => ({ value: po.id, label: po.poNo })),
+    [purchaseOrders, card.supplierId],
+  );
+  const linkedPo = purchaseOrders.find((p) => p.id === card.purchaseOrderId) ?? null;
+
+  return (
+    <Card
+      className={`border-2 transition-colors ${
+        card.include ? "border-[#6B5C32] bg-[#FAFAF9]" : "border-[#E2DDD8]"
+      }`}
+    >
+      <CardContent className="p-4 space-y-3">
+        <div className="flex flex-wrap items-start gap-3">
+          <input
+            type="checkbox"
+            checked={card.include}
+            onChange={(e) => onPatch({ include: e.target.checked })}
+            disabled={!!card.createdGrnNo}
+            className="mt-2 h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
+          />
+          <div className="flex-1 min-w-0 grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div>
+              <label className="block text-xs text-[#9CA3AF] mb-0.5">Supplier *</label>
+              <select
+                className="w-full px-2 py-1.5 text-sm border border-[#E2DDD8] rounded bg-white focus:border-[#6B5C32] focus:outline-none"
+                value={card.supplierId}
+                onChange={(e) => onSupplierChange(e.target.value)}
+                disabled={!!card.createdGrnNo}
+              >
+                <option value="">— Select —</option>
+                {suppliers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.code} - {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-[#9CA3AF] mb-0.5">Purchase company *</label>
+              <select
+                className="w-full px-2 py-1.5 text-sm border border-[#E2DDD8] rounded bg-white focus:border-[#6B5C32] focus:outline-none"
+                value={card.purchaseOrgCode}
+                onChange={(e) => onPatch({ purchaseOrgCode: e.target.value })}
+                disabled={!!card.createdGrnNo}
+              >
+                {activeOrgs.length === 0 ? (
+                  <option value="HOOKKA">HOOKKA</option>
+                ) : (
+                  activeOrgs.map((o) => (
+                    <option key={o.code} value={o.code}>
+                      {o.name}
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-[#9CA3AF] mb-0.5">Receive Date *</label>
+              <Input
+                type="date"
+                className="h-8"
+                value={card.receiveDate}
+                onChange={(e) => onPatch({ receiveDate: e.target.value })}
+                disabled={!!card.createdGrnNo}
+              />
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onPatch({ markedGold: !card.markedGold })}
+            disabled={!!card.createdGrnNo}
+            className={`mt-5 text-[10px] px-2 py-1 rounded border transition-colors flex items-center gap-1 ${
+              card.markedGold
+                ? "bg-amber-100 text-amber-800 border-amber-300"
+                : "bg-white text-[#6B7280] border-[#D1D5DB] hover:border-amber-300"
+            } disabled:opacity-50`}
+            title="Mark this extraction as a gold reference"
+          >
+            <Star className={`h-3 w-3 ${card.markedGold ? "fill-amber-500 text-amber-500" : ""}`} />
+            {card.markedGold ? "Gold" : "Mark gold"}
+          </button>
+          <button
+            type="button"
+            onClick={onRemoveCard}
+            disabled={!!card.createdGrnNo}
+            className="mt-5 text-[#9CA3AF] hover:text-[#9A3A2D] disabled:opacity-30"
+            title="Remove this card"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Second row — supplier DO no + Linked PO (no Supplier Invoice on a GRN) */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pl-7">
+          <div>
+            <label className="block text-xs text-[#9CA3AF] mb-0.5">Supplier DO No.</label>
+            <Input
+              className="h-8"
+              value={card.supplierDoNo}
+              onChange={(e) => onPatch({ supplierDoNo: e.target.value })}
+              placeholder="Supplier's delivery order number"
+              disabled={!!card.createdGrnNo}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-[#9CA3AF] mb-0.5">
+              Linked PO {!card.supplierId && <span className="text-[#D1D5DB]">(pick supplier first)</span>}
+            </label>
+            <SearchableSelect
+              value={card.purchaseOrderId ?? ""}
+              onChange={(poId) => onPatch({ purchaseOrderId: poId || null })}
+              options={linkedPoOptions}
+              placeholder={
+                !card.supplierId
+                  ? "Select supplier first"
+                  : linkedPoOptions.length === 0
+                    ? "No open POs for this supplier"
+                    : "Search PO no..."
+              }
+              disabled={!!card.createdGrnNo || !card.supplierId}
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap text-xs text-[#6B7280] pl-7">
+          <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
+            <FileText className="h-3 w-3 inline mr-0.5" /> {card.fileName}
+          </Badge>
+          {linkedPo && (
+            <Badge className="bg-blue-50 text-blue-700 border border-blue-200">
+              PO {linkedPo.poNo}
+            </Badge>
+          )}
+          <span>{card.lines.length} lines</span>
+          <span className="text-[#1F1D1B] font-medium">Received {totalReceived}</span>
+          <span className="text-[#4F7C3A] font-medium">Accepted {totalAccepted}</span>
+          {totalRejected > 0 && (
+            <span className="text-[#9A3A2D] font-medium">Rejected {totalRejected}</span>
+          )}
+          {card.creating && (
+            <span className="flex items-center gap-1 text-[#6B5C32]">
+              <Loader2 className="h-3 w-3 animate-spin" /> Creating...
+            </span>
+          )}
+          {card.createdGrnNo && (
+            <Badge className="bg-green-100 text-green-800 border border-green-300">
+              <CheckCircle className="h-3 w-3 inline mr-0.5" /> Created {card.createdGrnNo}
+            </Badge>
+          )}
+          {card.createError && (
+            <Badge className="bg-red-100 text-red-800 border border-red-300">
+              <AlertTriangle className="h-3 w-3 inline mr-0.5" /> {card.createError}
+            </Badge>
+          )}
+        </div>
+
+        {/* Line items table — GRN columns: no unit price / amount */}
+        <div className="border border-[#E2DDD8] rounded-lg overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-[#F0ECE9] text-[#6B7280]">
+              <tr>
+                <th className="text-left px-2 py-1.5 font-medium" style={{ minWidth: 110 }}>
+                  Internal Code
+                </th>
+                <th className="text-left px-2 py-1.5 font-medium" style={{ minWidth: 130 }}>
+                  Supplier SKU
+                </th>
+                <th className="text-left px-2 py-1.5 font-medium">Description</th>
+                <th className="text-right px-2 py-1.5 font-medium w-20">Received</th>
+                <th className="text-right px-2 py-1.5 font-medium w-20">Accepted</th>
+                <th className="text-right px-2 py-1.5 font-medium w-20">Rejected</th>
+                <th className="text-left px-2 py-1.5 font-medium w-16">UoM</th>
+                <th className="w-8" />
+              </tr>
+            </thead>
+            <tbody>
+              {card.lines.map((line, i) => {
+                const lineUnbound =
+                  (line.materialName || line.description).trim() !== "" &&
+                  !line.materialCode.trim();
+                const codeBoundNoSku =
+                  !!line.materialCode &&
+                  !!card.supplierId &&
+                  !line.supplierSku &&
+                  !resolveBindingForMaterial(card.supplierId, line.materialCode);
+                return (
+                <React.Fragment key={i}>
+                <tr className="border-t border-[#EFEAE6] align-top">
+                  <td className="px-2 py-1">
+                    {line.materialCode ? (
+                      <span
+                        className="inline-flex items-center px-2 py-1 rounded text-xs font-mono bg-[#F0ECE9] text-[#1F1D1B]"
+                        title="Bound to catalog item"
+                      >
+                        {line.materialCode}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onPatchLine(i, { materialCode: "", materialName: line.description || line.materialName })
+                          }
+                          disabled={!!card.createdGrnNo}
+                          className="ml-1 text-[#9CA3AF] hover:text-[#9A3A2D]"
+                          title="Unbind"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ) : (
+                      <MaterialPicker
+                        className="h-8"
+                        inputClassName="h-8 text-xs"
+                        placeholder="(pick from catalog)"
+                        value={line.materialName || line.description}
+                        options={materialOptions}
+                        strictPick
+                        onPick={(o) => {
+                          const reverse = card.supplierId
+                            ? resolveBindingForMaterial(card.supplierId, o.itemCode)
+                            : null;
+                          onPatchLine(i, {
+                            materialCode: o.itemCode,
+                            materialName: o.description,
+                            supplierSku: reverse?.supplierSku ?? line.supplierSku,
+                          });
+                        }}
+                        onTyped={() => {}}
+                      />
+                    )}
+                  </td>
+                  <td className="px-1 py-1">
+                    <MaterialPicker
+                      className="h-8"
+                      inputClassName="h-8 text-xs"
+                      placeholder="SKU"
+                      value={line.supplierSku}
+                      options={supplierSkuOptions}
+                      strictPick
+                      onPick={(o) => {
+                        const binding = resolveBindingFor(card.supplierId, o.itemCode);
+                        const rm = binding ? materialByCode.get(binding.materialCode.trim().toUpperCase()) : null;
+                        onPatchLine(i, {
+                          supplierSku: o.itemCode,
+                          materialCode: rm?.itemCode ?? binding?.materialCode ?? line.materialCode,
+                          materialName: rm?.description ?? line.materialName,
+                        });
+                      }}
+                      onTyped={() => {}}
+                    />
+                  </td>
+                  <td className="px-1 py-1">
+                    <Input
+                      className="h-8 text-xs"
+                      value={line.materialName || line.description}
+                      onChange={(e) => onPatchLine(i, { materialName: e.target.value })}
+                      disabled={!!card.createdGrnNo}
+                    />
+                  </td>
+                  <td className="px-1 py-1">
+                    <Input
+                      type="number"
+                      className="h-8 text-xs text-right"
+                      value={num(line.receivedQty)}
+                      onChange={(e) =>
+                        onPatchLine(i, {
+                          receivedQty: e.target.value === "" ? 0 : Number(e.target.value),
+                        })
+                      }
+                      onFocus={(e) => e.currentTarget.select()}
+                      disabled={!!card.createdGrnNo}
+                    />
+                  </td>
+                  <td className="px-1 py-1">
+                    <Input
+                      type="number"
+                      className="h-8 text-xs text-right"
+                      value={num(line.acceptedQty)}
+                      onChange={(e) =>
+                        onPatchLine(i, {
+                          acceptedQty: e.target.value === "" ? 0 : Number(e.target.value),
+                        })
+                      }
+                      onFocus={(e) => e.currentTarget.select()}
+                      disabled={!!card.createdGrnNo}
+                    />
+                  </td>
+                  <td className="px-1 py-1">
+                    <Input
+                      type="number"
+                      className="h-8 text-xs text-right"
+                      value={num(line.rejectedQty)}
+                      onChange={(e) =>
+                        onPatchLine(i, {
+                          rejectedQty: e.target.value === "" ? 0 : Number(e.target.value),
+                        })
+                      }
+                      onFocus={(e) => e.currentTarget.select()}
+                      disabled={!!card.createdGrnNo}
+                    />
+                  </td>
+                  <td className="px-1 py-1">
+                    <Input
+                      className="h-8 text-xs"
+                      value={line.uom}
+                      onChange={(e) => onPatchLine(i, { uom: e.target.value })}
+                      disabled={!!card.createdGrnNo}
+                    />
+                  </td>
+                  <td className="px-1 py-1 text-center">
+                    <button
+                      type="button"
+                      onClick={() => onRemoveLine(i)}
+                      disabled={!!card.createdGrnNo}
+                      className="text-[#9CA3AF] hover:text-[#9A3A2D] disabled:opacity-30"
+                      title="Remove line"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </td>
+                </tr>
+                {(lineUnbound || codeBoundNoSku) && (
+                  <tr className="bg-[#FFF5F0]">
+                    <td colSpan={8} className="px-3 py-1">
+                      {lineUnbound && (
+                        <div className="text-[11px] text-[#9A3A2D]">
+                          Pick from catalog — this line can&apos;t be saved as a custom item.
+                        </div>
+                      )}
+                      {codeBoundNoSku && (
+                        <div className="text-[11px] text-[#9A3A2D]">
+                          No Supplier SKU binding for this material — add it under Suppliers &gt; Materials, or pick a SKU manually.
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
+              );
+              })}
+            </tbody>
+          </table>
+          <div className="px-2 py-1 bg-[#FAFAF9] border-t border-[#E2DDD8] flex justify-between items-center">
+            <button
+              type="button"
+              onClick={onAddLine}
+              disabled={!!card.createdGrnNo}
+              className="text-xs text-[#6B5C32] hover:underline flex items-center gap-1 disabled:opacity-50"
+            >
+              <Plus className="h-3 w-3" /> Add line
+            </button>
+            <span className="text-[10px] text-[#9CA3AF]">
+              Internal Code auto-resolves from supplier bindings · click (pick) to bind manually
+            </span>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function GRNDoneStep({
+  cards,
+  onClose,
+  onScanMore,
+}: {
+  cards: GRNPreviewCard[];
+  onClose: () => void;
+  onScanMore: () => void;
+}) {
+  const created = cards.filter((c) => c.createdGrnNo);
+  const failed = cards.filter((c) => c.createError);
+  return (
+    <div className="space-y-6 py-4">
+      {created.length > 0 && (
+        <div className="text-center">
+          <div className="mx-auto h-16 w-16 bg-green-100 rounded-full flex items-center justify-center mb-4">
+            <CheckCircle className="h-8 w-8 text-green-600" />
+          </div>
+          <h3 className="text-xl font-bold text-[#1F1D1B]">
+            {created.length} Goods Receipt Note{created.length !== 1 ? "s" : ""} Created!
+          </h3>
+          <p className="text-sm text-[#6B7280] mt-1">
+            All created as DRAFT — review and post from the GRN detail page
+          </p>
+        </div>
+      )}
+
+      {created.length > 0 && (
+        <div className="space-y-2">
+          {created.map((c) => {
+            const totalReceived = c.lines.reduce((s, l) => s + (Number(l.receivedQty) || 0), 0);
+            return (
+              <div
+                key={c.id}
+                className="flex items-center justify-between bg-green-50 rounded-lg px-4 py-3"
+              >
+                <div>
+                  <span className="font-bold text-green-800">{c.createdGrnNo}</span>
+                  <span className="text-sm text-green-600 ml-2">from {c.fileName}</span>
+                </div>
+                <Badge className="text-green-700 border border-green-300">
+                  {c.lines.length} lines · {totalReceived} received
+                </Badge>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {failed.length > 0 && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 space-y-2">
+          <p className="font-medium text-red-800">
+            {failed.length} document{failed.length !== 1 ? "s" : ""} failed:
+          </p>
+          {failed.map((c) => (
+            <p key={c.id} className="text-sm text-red-700">
+              <span className="font-medium">{c.fileName}:</span> {c.createError}
+            </p>
+          ))}
+        </div>
+      )}
+
+      <div className="flex items-center justify-center gap-3 pt-4">
+        <Button variant="outline" onClick={onScanMore}>
+          Scan more
+        </Button>
+        <Button variant="primary" onClick={onClose}>
+          Done
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function serialiseGRNCardAsExtraction(card: GRNPreviewCard): SupplierExtraction {
+  return {
+    supplierName: card.originalExtraction.supplierName ?? null,
+    docType: card.originalExtraction.docType ?? null,
+    docNo:
+      card.supplierDoNo.trim() ||
+      card.originalExtraction.docNo ||
+      null,
+    docDate: card.receiveDate || card.originalExtraction.docDate || null,
+    currency: card.originalExtraction.currency ?? null,
+    lines: card.lines.map((l) => ({
+      supplierCode: l.supplierSku || null,
+      description: (l.materialName || l.description) || null,
+      qty: Number(l.receivedQty) || null,
+      uom: l.uom || null,
+      unitPrice: null,
+      amount: null,
     })),
     subtotal: card.originalExtraction.subtotal ?? null,
     tax: card.originalExtraction.tax ?? null,

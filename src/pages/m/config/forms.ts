@@ -1317,6 +1317,61 @@ export function editEmployeeSpec(doc: Record<string, unknown>, id: string): Form
 }
 
 // ===========================================================================
+// SERVICE CASE — Add Affected Product. CHANGELOG #12 / G.3. Mirrors desktop
+// service-cases/detail.tsx inline editor. PUT /api/service-cases/:id with
+// affectedProducts: [...existing, {productId, code, name, qty, components}].
+// ===========================================================================
+export function addAffectedProductSpec(
+  serviceCase: Record<string, unknown>,
+  caseId: string,
+): FormSpec {
+  return {
+    title: "Add Affected Product",
+    submitLabel: "Add",
+    fields: [
+      { name: "code", label: "Product Code", kind: "text" as const, required: true, full: true, placeholder: "e.g. ASP-3S" },
+      { name: "name", label: "Product Name", kind: "text" as const, full: true },
+      { name: "qty", label: "Qty Affected", kind: "number" as const, required: true, full: true },
+      { name: "componentsCsv", label: "Damaged Parts (comma-separated)", kind: "text" as const, full: true, placeholder: "e.g. cushion, leg, fabric" },
+    ],
+    initial: { code: "", name: "", qty: 1, componentsCsv: "" },
+    submit: async (v) => {
+      const existing = arr(serviceCase.affectedProducts);
+      const parts = s(v.componentsCsv)
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .map((label) => ({ key: label.toUpperCase().replace(/\s+/g, "_"), label, qty: 1 }));
+      const newProduct = {
+        productId: s(v.code),
+        code: s(v.code),
+        name: s(v.name) || s(v.code),
+        qty: n(v.qty) || 1,
+        components: parts.length > 0 ? parts : undefined,
+      };
+      // Backend PUT expects the FULL case body. Pass existing fields through
+      // unchanged + the new affectedProducts array.
+      const body: Record<string, unknown> = {};
+      // Spread case top-level keys we want to preserve unchanged
+      for (const k of [
+        "customerId", "customerName", "customerState", "sourceType", "sourceId",
+        "sourceNo", "issueDescription", "rootCauseCategory", "rootCauseNotes",
+        "preventionAction", "preventionStatus", "preventionOwner", "responsibleUnit",
+        "actionLog", "issuePhotos", "rootCauses", "status",
+      ]) {
+        if (serviceCase[k] !== undefined) body[k] = serviceCase[k];
+      }
+      body.affectedProducts = [...existing, newProduct];
+      const res = await mutateJson(`/api/service-cases/${encodeURIComponent(caseId)}`, "PUT", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshOne(`/api/service-cases/${encodeURIComponent(caseId)}`);
+      refreshList("/api/service-cases");
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
 // WORKING HOURS — log a per-day entry for a worker. CHANGELOG K.1 "可编辑
 // 行". Backend POST /api/working-hour-entries auto-creates the attendance
 // row if needed (working-hour-entries.ts:898). Mobile keeps it simple:

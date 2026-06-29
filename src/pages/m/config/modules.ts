@@ -3370,10 +3370,17 @@ const serviceCaseDetail: DetailConfig = {
     if (s === "IN_PROGRESS") return "Close Case";
     return "Status";
   },
-  // Affected products + replacement parts are edited INLINE on the desktop
-  // case detail (no standalone button). Mobile mirrors that — the parts
-  // surface as the existing "Affected products" kvSection. A future round
-  // can add an inline picker if the operator needs to edit on mobile.
+  // CHANGELOG #12 — Add Affected Product inline. PUT /api/service-cases/:id
+  // appends to affectedProducts[] (which carries optional components[]).
+  // Matches desktop service-cases/detail.tsx inline editor pattern.
+  extraActions: (d, id) => [
+    {
+      label: "Add Part",
+      icon: "package-check",
+      formSpec: () => addAffectedProductSpec(d, id),
+      primary: true,
+    },
+  ],
 };
 
 export const serviceCasesConfig: ModuleConfig = {

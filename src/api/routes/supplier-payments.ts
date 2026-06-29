@@ -51,6 +51,7 @@ type SupplierPaymentRow = {
 type PaymentLine = {
   purchaseInvoiceId: string;
   piNo?: string;
+  supplierInvoiceNo?: string;
   amountSen: number;
   bookedSen: number;
 };
@@ -83,6 +84,7 @@ app.get("/", async (c) => {
             sp.amount_sen   AS amount_sen,
             sp.booked_sen   AS booked_sen,
             pi.pi_no        AS pi_no,
+            pi.supplier_invoice_no AS supplier_invoice_no,
             dl.state        AS lifecycleState
        FROM supplier_payments sp
        LEFT JOIN purchase_invoices pi ON pi.id = sp.purchase_invoice_id
@@ -95,7 +97,13 @@ app.get("/", async (c) => {
       ORDER BY sp.date DESC, sp.payment_no DESC, sp.id DESC`,
   )
     .bind(orgId)
-    .all<SupplierPaymentRow & { pi_no: string | null; lifecycleState: string | null }>();
+    .all<
+      SupplierPaymentRow & {
+        pi_no: string | null;
+        supplier_invoice_no: string | null;
+        lifecycleState: string | null;
+      }
+    >();
 
   const groups = new Map<string, PaymentGroup>();
   for (const row of res.results ?? []) {
@@ -122,6 +130,7 @@ app.get("/", async (c) => {
     g.lines.push({
       purchaseInvoiceId: row.purchase_invoice_id ?? "",
       piNo: row.pi_no ?? undefined,
+      supplierInvoiceNo: row.supplier_invoice_no ?? "",
       amountSen,
       bookedSen,
     });

@@ -65,6 +65,7 @@ const isMyr = (currency: string) => !currency || currency.toUpperCase() === "MYR
 type PaymentLine = {
   purchaseInvoiceId: string;
   piNo: string;
+  supplierInvoiceNo?: string;
   amountSen: number;
   bookedSen: number;
 };
@@ -96,7 +97,7 @@ const VOUCHER_COMPANY: VoucherSpec["company"] = {
 function buildSupplierPaymentVoucher(p: PaymentGroup): VoucherSpec {
   const active = (p.lifecycleState ?? "ACTIVE") === "ACTIVE";
   const lines: VoucherLine[] = p.lines.map((l) => ({
-    cells: [l.piNo, formatCurrency(l.amountSen)],
+    cells: [l.piNo, l.supplierInvoiceNo || "—", formatCurrency(l.amountSen)],
   }));
   return {
     title: active ? "SUPPLIER PAYMENT VOUCHER" : "SUPPLIER PAYMENT VOUCHER — VOID",
@@ -105,9 +106,9 @@ function buildSupplierPaymentVoucher(p: PaymentGroup): VoucherSpec {
     date: formatDateDMY(p.date),
     partyLabel: "Paid To",
     partyName: p.supplierName ?? "",
-    columns: [{ label: "Purchase Invoice" }, { label: "Amount", align: "right" }],
+    columns: [{ label: "Purchase Invoice" }, { label: "Supplier Inv No" }, { label: "Amount", align: "right" }],
     lines,
-    totalCells: ["Total", formatCurrency(p.totalBankSen)],
+    totalCells: ["Total", "", formatCurrency(p.totalBankSen)],
     amountWords: amountInWords(p.totalBankSen),
     signatures: [{ label: "Prepared by" }, { label: "Approved by" }, { label: "Received by" }],
     printedOn: formatDateDMY(new Date()),
@@ -711,7 +712,7 @@ export default function SupplierPaymentsPage() {
             onPrint={() => printVouchers(sel.selectedRows.map(buildSupplierPaymentVoucher))}
             exportName="supplier-payments"
             exportAoa={() => [
-              ["Payment #", "Date", "Supplier", "Status", "Voucher Total (RM)", "PI No", "Amount (RM)"],
+              ["Payment #", "Date", "Supplier", "Status", "Voucher Total (RM)", "PI No", "Supplier Inv No", "Amount (RM)"],
               ...sel.selectedRows.flatMap((p) =>
                 p.lines.map((l) => [
                   p.paymentNo,
@@ -720,6 +721,7 @@ export default function SupplierPaymentsPage() {
                   p.lifecycleState ?? "ACTIVE",
                   (Number(p.totalBankSen ?? 0) / 100).toFixed(2),
                   l.piNo,
+                  l.supplierInvoiceNo || "",
                   (Number(l.amountSen ?? 0) / 100).toFixed(2),
                 ]),
               ),

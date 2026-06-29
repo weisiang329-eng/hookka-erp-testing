@@ -1028,6 +1028,7 @@ const grnDetail: DetailConfig = {
   },
   primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Post to Stock" : "Status"),
   attachmentsResource: (id) => ({ type: "GRN", id }),
+  auditResource: () => "grn",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "GRN_LINE", id: lineId }),
 };
 
@@ -1077,6 +1078,7 @@ const piDetail: DetailConfig = {
   },
   primaryCta: (d) => (str(d, "status") === "PAID" ? "Status" : "Record Payment"),
   attachmentsResource: (id) => ({ type: "PI", id }),
+  auditResource: () => "purchase-invoices",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "PI_LINE", id: lineId }),
 };
 
@@ -1223,6 +1225,7 @@ const productionDetail: DetailConfig = {
     return out;
   },
   attachmentsResource: (id) => ({ type: "PRODUCTION_ORDER", id }),
+  auditResource: () => "production-orders",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "JOB_CARD", id: lineId }),
 };
 
@@ -3491,6 +3494,7 @@ const serviceOrderDetail: DetailConfig = {
     return out;
   },
   attachmentsResource: (id) => ({ type: "SERVICE_ORDER", id }),
+  auditResource: () => "service-orders",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "SERVICE_ORDER_LINE", id: lineId }),
 };
 

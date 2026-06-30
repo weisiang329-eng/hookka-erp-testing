@@ -651,7 +651,7 @@ export default function PurchaseInvoiceDetailPage() {
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
                       <th className="h-10 px-3 text-left font-medium text-[#374151]">#</th>
                       <th className="h-10 px-3 text-left font-medium text-[#374151]">Description</th>
-                      <th className="h-10 px-3 text-left font-medium text-[#374151]">Material Code</th>
+                      <th className="h-10 px-3 text-left font-medium text-[#374151]">Internal Code</th>
                       <th className="h-10 px-3 text-left font-medium text-[#374151]">Supplier SKU</th>
                       <th className="h-10 px-3 text-right font-medium text-[#374151]">Qty</th>
                       <th className="h-10 px-3 text-right font-medium text-[#374151]">Unit Price</th>
@@ -802,7 +802,7 @@ export default function PurchaseInvoiceDetailPage() {
                   <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
                     <th className="h-10 px-2 text-left font-medium text-[#374151]">#</th>
                     <th className="h-10 px-2 text-left font-medium text-[#374151]">Description</th>
-                    <th className="h-10 px-2 text-left font-medium text-[#374151]">Material Code</th>
+                    <th className="h-10 px-2 text-left font-medium text-[#374151]">Internal Code</th>
                     <th className="h-10 px-2 text-left font-medium text-[#374151]">Supplier SKU</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] w-20">Qty</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] w-28">Unit Price (RM)</th>

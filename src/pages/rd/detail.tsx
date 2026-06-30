@@ -2250,7 +2250,7 @@ export default function RDProjectDetailPage() {
                 <thead>
                   <tr className="border-b border-[#E2DDD8]">
                     <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Date</th>
-                    <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Material Code</th>
+                    <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Internal Code</th>
                     <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Material Name</th>
                     <th className="text-right py-2 px-2 text-xs font-semibold text-gray-500">Qty</th>
                     <th className="text-center py-2 px-2 text-xs font-semibold text-gray-500">Unit</th>

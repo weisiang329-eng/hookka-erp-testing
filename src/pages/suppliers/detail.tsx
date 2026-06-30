@@ -831,7 +831,7 @@ export default function SupplierDetailPage() {
                         [
                           { key: "poNo" as const, label: "PO No.", align: "left" },
                           { key: "orderDate" as const, label: "Order Date", align: "left" },
-                          { key: "materialCode" as const, label: "Material Code", align: "left" },
+                          { key: "materialCode" as const, label: "Internal Code", align: "left" },
                           { key: "materialName" as const, label: "Description", align: "left" },
                           { key: "qty" as const, label: "Qty", align: "right" },
                           { key: "unitPriceSen" as const, label: "Unit Price", align: "right" },

@@ -345,7 +345,7 @@ const PO_LINE = {
   priceKey: "unitPriceSen",
   blank: blankPOItem,
   fields: [
-    { name: "materialCode", label: "Material Code", kind: "text" as const, required: true },
+    { name: "materialCode", label: "Internal Code", kind: "text" as const, required: true },
     { name: "materialName", label: "Material Name", kind: "text" as const },
     { name: "unit", label: "Unit", kind: "text" as const, placeholder: "pcs" },
     { name: "quantity", label: "Qty", kind: "number" as const, required: true },

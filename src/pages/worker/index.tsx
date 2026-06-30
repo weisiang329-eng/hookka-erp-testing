@@ -227,6 +227,34 @@ async function getPunchLocation(
 // ---------- announcements "seen" tracking (localStorage, v1) ----------
 // We don't keep a per-worker read table server-side; the unread dot is purely
 // a phone-local memory of which announcement ids this device has opened.
+// ---------------------------------------------------------------------------
+// Worker-portal READ caches (perf 2026-06-30). The home tab used to show a
+// blank "Loading…" + full refetch on every visit; on weak factory wifi that's
+// the laggy feel the owner reported. These cache ONLY the read/display data
+// (/today, /announcements) for instant paint, then revalidate in the
+// background. CRITICAL: punch / scan / selfie upload are POSTs that NEVER go
+// through this — and the punch handler already calls refreshToday() right after
+// a successful punch, which overwrites BOTH state and this cache, so a worker
+// always sees their own fresh punch, never a stale "not clocked in".
+const TODAY_CACHE_KEY = "hookka.worker.todayCache";
+const ANN_CACHE_KEY = "hookka.worker.annCache";
+function readCache<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) return JSON.parse(raw) as T;
+  } catch {
+    /* ignore corrupt/unavailable storage */
+  }
+  return null;
+}
+function writeCache(key: string, val: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+  } catch {
+    /* ignore quota / private-mode */
+  }
+}
+
 const SEEN_ANN_KEY = "hookka.worker.seenAnnouncements";
 function readSeenAnnouncements(): Set<string> {
   try {
@@ -438,8 +466,15 @@ export default function WorkerHomePage() {
   // Worker's chosen portal language — drives which translation of each
   // announcement we show (localizeAnnouncement falls back to the original).
   const lang = useWorkerLang();
-  const [data, setData] = useState<TodayData | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Seed from cache for instant paint; only show the full-page spinner when we
+  // have nothing cached yet. refreshToday() (on mount + after every punch)
+  // revalidates and rewrites the cache.
+  const [data, setData] = useState<TodayData | null>(() =>
+    readCache<TodayData>(TODAY_CACHE_KEY),
+  );
+  const [loading, setLoading] = useState(
+    () => readCache<TodayData>(TODAY_CACHE_KEY) === null,
+  );
   const [clocking, setClocking] = useState(false);
   // Inline punch feedback (e.g. "take a photo first"). Cleared on next attempt.
   const [clockErr, setClockErr] = useState<string | null>(null);
@@ -456,7 +491,9 @@ export default function WorkerHomePage() {
   const [openShare, setOpenShare] = useState<string | null>(null);
 
   // ---- Announcements (Feature A) ----
-  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [announcements, setAnnouncements] = useState<Announcement[]>(
+    () => readCache<Announcement[]>(ANN_CACHE_KEY) ?? [],
+  );
   // Per-announcement collapse (owner 2026-06-26: long announcements eat the
   // screen — tap the header to fold/unfold, same as the Standard Times card).
   // Holds the COLLAPSED ids; default is expanded (id absent → open).
@@ -491,7 +528,10 @@ export default function WorkerHomePage() {
       const res = await workerFetch("/api/worker/today");
       const raw = await res.json();
       const j = TodayEnvelope.parse(raw);
-      if (j.success) setData(j.data as TodayData);
+      if (j.success) {
+        setData(j.data as TodayData);
+        writeCache(TODAY_CACHE_KEY, j.data);
+      }
     } finally {
       setLoading(false);
     }
@@ -540,6 +580,7 @@ export default function WorkerHomePage() {
       if (j.success && Array.isArray(j.data)) {
         const list = j.data as Announcement[];
         setAnnouncements(list);
+        writeCache(ANN_CACHE_KEY, list);
         const serverAcked = (j as { ackedIds?: unknown }).ackedIds;
         if (Array.isArray(serverAcked)) {
           const serverIds = serverAcked.filter(

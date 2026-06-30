@@ -30,7 +30,7 @@ import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import type { Supplier, RawMaterial, SupplierMaterialBinding, PurchaseOrder } from "@/types";
+import type { Supplier, RawMaterial, SupplierMaterialBinding, PurchaseOrder, POItem } from "@/types";
 import {
   X,
   Upload,
@@ -179,6 +179,88 @@ function autoLinkPoId(
     }
   }
   return fallback ?? null;
+}
+
+// Fix B (owner 2026-06-30): pick a Supplier off the OCR'd supplierName.
+// Layered match so real-world drift ("SUNMAT INDUSTRIES SDN. BHD." vs
+// "SUNMAT INDUSTRIES SDN BHD") still resolves:
+//   1) exact case-insensitive name OR code match
+//   2) normalised match (strip punctuation/spacing, uppercase)
+//   3) endsWith / startsWith on the normalised form
+// Returns the matched Supplier ONLY when exactly one candidate survives —
+// 0 or >1 matches leave it null so the operator picks manually.
+function pickSupplierFromName(
+  rawName: string | null | undefined,
+  suppliers: Supplier[],
+): Supplier | null {
+  const guess = (rawName ?? "").trim();
+  if (!guess) return null;
+  const guessUpper = guess.toUpperCase();
+  // 1) exact name/code
+  const exact = suppliers.filter(
+    (s) =>
+      s.name.trim().toUpperCase() === guessUpper ||
+      s.code.trim().toUpperCase() === guessUpper,
+  );
+  if (exact.length === 1) return exact[0];
+  const norm = (s: string) => s.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+  const guessNorm = norm(guess);
+  if (!guessNorm) return null;
+  // 2) normalised equality
+  const normEq = suppliers.filter((s) => norm(s.name) === guessNorm);
+  if (normEq.length === 1) return normEq[0];
+  // 3) endsWith / startsWith on normalised form
+  const containing = suppliers.filter((s) => {
+    const sNorm = norm(s.name);
+    if (!sNorm) return false;
+    return (
+      sNorm.endsWith(guessNorm) ||
+      guessNorm.endsWith(sNorm) ||
+      sNorm.startsWith(guessNorm) ||
+      guessNorm.startsWith(sNorm)
+    );
+  });
+  if (containing.length === 1) return containing[0];
+  return null;
+}
+
+// Fix A (owner 2026-06-30): when a line came back with unitPrice 0 (supplier
+// sent a Delivery Note with no prices) BUT the card has a Linked PO, pull the
+// price off the matching PO line. Match preference: materialCode exact →
+// materialName case-insensitive trimmed match. Returns the lines array with
+// prices filled (and amountRM recomputed) — leaves valid prices alone.
+function applyPoPriceFill<L extends {
+  materialCode: string;
+  materialName: string;
+  qty: number;
+  unitPriceRM: number;
+  amountRM: number;
+}>(
+  lines: L[],
+  po: PurchaseOrder | null | undefined,
+): L[] {
+  if (!po || !Array.isArray(po.items) || po.items.length === 0) return lines;
+  const byCode = new Map<string, POItem>();
+  const byName = new Map<string, POItem>();
+  for (const it of po.items) {
+    const c = (it.materialCode ?? "").trim().toUpperCase();
+    if (c) byCode.set(c, it);
+    const n = (it.materialName ?? "").trim().toUpperCase();
+    if (n) byName.set(n, it);
+  }
+  return lines.map((l) => {
+    if ((Number(l.unitPriceRM) || 0) > 0) return l;
+    const codeKey = (l.materialCode ?? "").trim().toUpperCase();
+    const nameKey = (l.materialName ?? "").trim().toUpperCase();
+    const hit =
+      (codeKey ? byCode.get(codeKey) : undefined) ??
+      (nameKey ? byName.get(nameKey) : undefined);
+    if (!hit) return l;
+    const unitPriceRM = (Number(hit.unitPriceSen) || 0) / 100;
+    if (unitPriceRM <= 0) return l;
+    const qty = Number(l.qty) || 0;
+    return { ...l, unitPriceRM, amountRM: qty * unitPriceRM };
+  });
 }
 
 async function runExtractOnce(
@@ -1053,16 +1135,13 @@ function CreatePIWizard({
       scanQueueRowId: string | null = null,
       scanQueueDocIdx: number = 0,
     ): PreviewCard => {
-      // Try to match the extracted supplierName to a real supplier in the
-      // catalog. Failing that, fall back to the host-supplied default.
-      const guessName = (ex.supplierName ?? "").trim().toUpperCase();
-      const matched = guessName
-        ? suppliers.find(
-            (s) =>
-              s.name.trim().toUpperCase() === guessName ||
-              s.code.trim().toUpperCase() === guessName,
-          )
-        : null;
+      // Fix B (owner 2026-06-30): auto-resolve supplier from OCR'd name with
+      // a layered match (exact → normalised → contains). Owner ruling: if
+      // OCR returns a supplierName that CONFLICTS with the host's default
+      // (a different supplier matched), trust the OCR — the operator opened
+      // the modal from one supplier's context but scanned a different
+      // supplier's doc, the OCR is the authoritative signal.
+      const matched = pickSupplierFromName(ex.supplierName, suppliers);
       const sId = matched?.id ?? defaultSupplierId ?? "";
       const sup = supplierById(sId);
       const orgCode = sup?.purchaseOrgCode ?? activeOrgs[0]?.code ?? "HOOKKA";
@@ -1084,7 +1163,16 @@ function CreatePIWizard({
 
       const lines: PreviewLine[] = (ex.lines ?? []).map((ln) => {
         const rawSku = (ln.supplierCode ?? "").trim();
-        const binding = sId ? resolveBindingFor(sId, rawSku) : null;
+        // Fix B (owner 2026-06-30): with supplierId now auto-picked, ALWAYS
+        // try to resolve every line's binding. SKU → binding fills the
+        // internal materialCode + name. If SKU was blank but the OCR
+        // description happens to be an internal materialCode, try the
+        // reverse path so Supplier SKU also gets filled.
+        let binding = sId ? resolveBindingFor(sId, rawSku) : null;
+        if (!binding && sId && !rawSku) {
+          const desc = (ln.description ?? "").trim();
+          if (desc) binding = resolveBindingForMaterial(sId, desc);
+        }
         const rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
           : null;
@@ -1113,6 +1201,16 @@ function CreatePIWizard({
         };
       });
 
+      const purchaseOrderId = autoLinkPoId(ex, purchaseOrders, defaultPurchaseOrderId);
+      // Fix A (owner 2026-06-30): if a PO got auto-linked AND any line came
+      // back with no price (DN-only doc), fill those lines' unitPriceRM off
+      // the matching PO line. Preview shows real prices BEFORE Create.
+      const linkedPo = purchaseOrderId
+        ? purchaseOrders.find((p) => p.id === purchaseOrderId) ?? null
+        : null;
+      const linesWithPriceFill =
+        lines.length > 0 ? applyPoPriceFill(lines, linkedPo) : [makeBlankLine()];
+
       return {
         id: `card-${makeUploadId()}`,
         fileName,
@@ -1132,16 +1230,16 @@ function CreatePIWizard({
         // Auto-link to an existing PO when the supplier wrote our PO ref
         // on their doc (their "Customer P.O.", "B.O. NO.", etc.). Falls
         // back to the host-supplied default if no match.
-        purchaseOrderId: autoLinkPoId(ex, purchaseOrders, defaultPurchaseOrderId),
+        purchaseOrderId,
         invoiceDate: docDate,
         supplierInvoiceNo: supInvNo,
         supplierDoNo: supDoNo,
         markedGold: false,
-        lines: lines.length > 0 ? lines : [makeBlankLine()],
+        lines: linesWithPriceFill,
         originalExtraction: ex,
       };
     },
-    [suppliers, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, materialByCode],
+    [suppliers, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
   );
 
   // ─── Drag-drop + multi-file extract ────────────────────────────────────
@@ -1442,6 +1540,14 @@ function CreatePIWizard({
             });
             return;
           }
+          // Fix A (owner 2026-06-30): final price-fill sweep before POST.
+          // Catches the case where the operator picked / changed the Linked
+          // PO after buildCard ran, OR where a price was still missing on
+          // a few lines. Lines that already carry a price are untouched.
+          const linkedPoForCreate = card.purchaseOrderId
+            ? purchaseOrders.find((p) => p.id === card.purchaseOrderId) ?? null
+            : null;
+          const pricedLines = applyPoPriceFill(validLines, linkedPoForCreate);
           // Per-line SST distribution (owner 2026-06-30). Suppliers print a
           // single footer SST total (rarely per-line). At Create time we
           // distribute the footer tax pro-rata across goods lines by line
@@ -1450,16 +1556,16 @@ function CreatePIWizard({
           // (originalExtraction.tax null/0) all lines persist with taxSen=0
           // and the operator can fill it in later via the PI detail editor.
           const footerTaxRM = Number(card.originalExtraction.tax) || 0;
-          const lineAmtsSen = validLines.map(
+          const lineAmtsSen = pricedLines.map(
             (l) => Math.round((Number(l.qty) || 0) * (Number(l.unitPriceRM) || 0) * 100),
           );
           const subTotalSen = lineAmtsSen.reduce((s, v) => s + v, 0);
           const footerTaxSen = Math.max(0, Math.round(footerTaxRM * 100));
           let allocated = 0;
-          const itemsWithTax = validLines.map((l, idx) => {
+          const itemsWithTax = pricedLines.map((l, idx) => {
             let lineTaxSen = 0;
             if (footerTaxSen > 0 && subTotalSen > 0) {
-              if (idx === validLines.length - 1) {
+              if (idx === pricedLines.length - 1) {
                 lineTaxSen = footerTaxSen - allocated;
               } else {
                 lineTaxSen = Math.round((footerTaxSen * lineAmtsSen[idx]) / subTotalSen);
@@ -2541,7 +2647,20 @@ function PICard({
             </label>
             <SearchableSelect
               value={card.purchaseOrderId ?? ""}
-              onChange={(poId) => onPatch({ purchaseOrderId: poId || null })}
+              onChange={(poId) => {
+                // Fix A (owner 2026-06-30): when the operator picks a
+                // Linked PO, immediately walk the lines and auto-fill any
+                // 0-priced rows off the matching PO line. Live preview
+                // shows real prices BEFORE Create.
+                const nextPoId = poId || null;
+                const linkedPoNext = nextPoId
+                  ? purchaseOrders.find((p) => p.id === nextPoId) ?? null
+                  : null;
+                const nextLines = linkedPoNext
+                  ? applyPoPriceFill(card.lines, linkedPoNext)
+                  : card.lines;
+                onPatch({ purchaseOrderId: nextPoId, lines: nextLines });
+              }}
               options={linkedPoOptions}
               placeholder={
                 !card.supplierId
@@ -3149,14 +3268,10 @@ function CreateGRNWizard({
       scanQueueRowId: string | null = null,
       scanQueueDocIdx: number = 0,
     ): GRNPreviewCard => {
-      const guessName = (ex.supplierName ?? "").trim().toUpperCase();
-      const matched = guessName
-        ? suppliers.find(
-            (s) =>
-              s.name.trim().toUpperCase() === guessName ||
-              s.code.trim().toUpperCase() === guessName,
-          )
-        : null;
+      // Fix B (owner 2026-06-30): auto-resolve supplier from OCR'd name
+      // using the shared layered matcher (exact → normalised → contains).
+      // OCR signal trumps host default when they disagree.
+      const matched = pickSupplierFromName(ex.supplierName, suppliers);
       const sId = matched?.id ?? defaultSupplierId ?? "";
       const sup = supplierById(sId);
       const orgCode = sup?.purchaseOrgCode ?? activeOrgs[0]?.code ?? "HOOKKA";
@@ -3171,7 +3286,14 @@ function CreateGRNWizard({
 
       const lines: GRNPreviewLine[] = (ex.lines ?? []).map((ln) => {
         const rawSku = (ln.supplierCode ?? "").trim();
-        const binding = sId ? resolveBindingFor(sId, rawSku) : null;
+        // Fix B: with supplierId now auto-picked, run both directions of
+        // binding resolution so a line where OCR returned only a SKU OR
+        // only a description-that-is-an-internal-code still binds.
+        let binding = sId ? resolveBindingFor(sId, rawSku) : null;
+        if (!binding && sId && !rawSku) {
+          const desc = (ln.description ?? "").trim();
+          if (desc) binding = resolveBindingForMaterial(sId, desc);
+        }
         const rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
           : null;
@@ -3215,7 +3337,7 @@ function CreateGRNWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, materialByCode],
+    [suppliers, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
   );
 
   const handleFiles = useCallback(

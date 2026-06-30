@@ -26,11 +26,25 @@ Entries themselves stay newest-first.
 - `delivery-orders` (11) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
 - `sales-orders` (7) — [BUG-2026-04-26-021](#bug-2026-04-26-021-fixsales-drop-wrong-mattress-label-on-sofa-category-option)
 - `pricing-products` (6) — [BUG-2026-04-24-029](#bug-2026-04-24-029-fixcustomers-sofa-seat-prices-now-render-in-customer-products-panel)
-- `data-migration` (8) — [BUG-2026-06-10-001](#bug-2026-06-10-001--punch-selfie-photo-endpoint-500d-an-explicit-camelcase-select-projection-isnt-translated-by-the-d1-compat-adapter) · camelCase/rename-map class recurs — see BUG-2026-06-18-001/-002
+- `data-migration` (8) — [BUG-2026-06-10-001](#bug-2026-06-10-001--punch-selfie-photo-endpoint-500d-an-explicit-camelcase-select-projection-isnt-translated-by-the-d1-compat-adapter) · camelCase/rename-map class recurs — see BUG-2026-06-18-001/-002, BUG-2026-06-30-001 (read-side, P&L historical)
 - `data-integrity` (4) — [BUG-2026-04-25-008](#bug-2026-04-25-008-stability-add-timeout-abort-propagation-to-fetchjson)
 - `auth-rbac` (3) — [BUG-2026-06-12-010](#bug-2026-06-12-010--any-admin-could-disable-or-delete-other-peoples-accounts-no-admin-tier-below-super-admin)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
+## BUG-2026-06-30-001 — Historical P&L months (pre-opening Apr'25–Apr'26) all showed 0 despite 39 `pnl_historical` rows loaded — adapter camelCased `window_json` → `windowJson`, reader used snake_case → every row silently skipped
+
+🟢 **Fixed** · `data-migration` (camelCase/rename-map class — recurs, see BUG-2026-06-10-001 / -06-18-001/-002) · owner-reported
+
+**Symptom (owner, live prod):** the Monthly P&L pre-opening columns (Apr 2025 – Apr 2026, before the 2026-05-22 opening date) all rendered **0.00**, even though the owner had loaded all 39 `pnl_historical` rows (13 months × all/sofa/bedframe). Diagnostic SQL on prod confirmed every input was correct: `count=39`, `org_id='hookka'`, range `2025-04..2026-04`, `kv_config.opening_date='2026-05-22'`, `users.org_id='hookka'`. The page rendered with no 500 — so the read ran but produced an empty map. (This burned a full cycle chasing a staging-vs-prod data-placement red herring; the data was in prod all along.)
+
+**Root cause:** `loadHistoricalPnl` (`src/api/routes/accounting.ts`) read `row.window_json`. The Postgres adapter (`src/api/lib/db-pg.ts`, `transform: { column: { from: columnFrom } }`) camelCases EVERY result column; `window_json` is **not** in `column-rename-map.json`, so it falls back to `postgres.toCamel` → the field arrives as **`windowJson`**. `row.window_json` was therefore `undefined` → `JSON.parse(undefined)` threw → the `catch { continue; }` silently skipped all 39 rows → empty map → `selectHistoricalWindow` returned null for every month → every pre-opening column fell through to `computePnlWindow` (0 pre-opening). Same camelCase/rename-map class as the read-side D1-compat bugs above. **The unit test masked it:** it hand-rolled a `groupRows` replica that read `window_json` and fed snake_case keys, so it passed while prod failed.
+
+**Fix:** extracted the grouping into a pure, exported `buildHistoricalMap(rows)` in `src/lib/pnl-historical.ts` that reads the value **dual-keyed** (`row.windowJson ?? row.window_json`) per the repo gotcha; `loadHistoricalPnl` now delegates to it (`src/api/routes/accounting.ts:5468`). Regression test rewritten (`tests/pnl-historical.test.mjs`) to feed the camelCase `windowJson` key the adapter actually produces — it fails under the old logic and passes now.
+
+**Verified:** `tsc -p tsconfig.app.json --noEmit` clean; eslint clean on both changed files; `npm test` 1272/1273 (1 pre-existing skip), including the new camelCase regression case. Shipped to `main` → prod; the 39 rows are already in prod, so pre-opening months populate on the next deploy — owner to confirm on erp.hookka.com.
 
 ---
 

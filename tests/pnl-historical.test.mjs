@@ -16,47 +16,49 @@ const W = (over = {}) => ({
 });
 
 // ---------------------------------------------------------------------------
-// 1. loadHistoricalPnl — groups rows by ym into {all,sofa,bedframe}
-// We test via a mock DB object; no real D1 needed.
+// 1. buildHistoricalMap — groups rows by ym into {all,sofa,bedframe}.
+//
+// REGRESSION (prod bug 2026-06-30): the db-pg adapter camelCases result
+// columns (transform.column.from), so the `window_json` column arrives as
+// `windowJson`. The original reader read only `row.window_json` → undefined
+// → JSON.parse threw → every row silently skipped → empty map → the 39
+// loaded historical rows displayed as zero. buildHistoricalMap now reads the
+// value dual-keyed; this test feeds the camelCase key the adapter actually
+// produces, so it fails under the old logic.
 // ---------------------------------------------------------------------------
-test("loadHistoricalPnl — imports exist", () => {
-  // The function lives in accounting.ts (requires D1); we test it via a
-  // mock DB stub here to verify grouping logic.
-  // Since loadHistoricalPnl is not re-exported from pnl-historical.ts,
-  // we replicate the grouping logic test with a hand-rolled function
-  // matching the contract the brief specifies.
-  function groupRows(rows) {
-    const map = new Map();
-    for (const row of rows) {
-      let parsed;
-      try { parsed = JSON.parse(row.window_json); } catch { continue; }
-      const existing = map.get(row.ym) ?? {};
-      if (row.line === "all" || row.line === "sofa" || row.line === "bedframe") {
-        existing[row.line] = parsed;
-      }
-      map.set(row.ym, existing);
-    }
-    return map;
-  }
-
+test("buildHistoricalMap — reads windowJson (the PG adapter camelCases the column)", () => {
   const wA = W({ netSalesSen: 100 });
   const wS = W({ netSalesSen: 60 });
   const rows = [
-    { ym: "2025-12", line: "all",   window_json: JSON.stringify(wA) },
-    { ym: "2025-12", line: "sofa",  window_json: JSON.stringify(wS) },
-    { ym: "2025-11", line: "all",   window_json: JSON.stringify(W({ netSalesSen: 50 })) },
-    { ym: "2025-11", line: "other", window_json: JSON.stringify(W()) }, // unknown line → ignored
-    { ym: "2025-10", line: "all",   window_json: "not-json" }, // bad JSON → skipped
+    { ym: "2025-12", line: "all",  windowJson: JSON.stringify(wA) },
+    { ym: "2025-12", line: "sofa", windowJson: JSON.stringify(wS) },
+    { ym: "2025-11", line: "all",  windowJson: JSON.stringify(W({ netSalesSen: 50 })) },
   ];
 
-  const map = groupRows(rows);
+  const map = m.buildHistoricalMap(rows);
 
-  assert.equal(map.size, 2, "2025-10 (bad JSON) should be skipped; unknown line: no entry");
+  assert.equal(map.size, 2, "camelCased windowJson MUST populate the map (regression guard)");
   assert.deepEqual(map.get("2025-12")?.all, wA);
   assert.deepEqual(map.get("2025-12")?.sofa, wS);
   assert.equal(map.get("2025-12")?.bedframe, undefined);
   assert.equal(map.get("2025-11")?.all?.netSalesSen, 50);
-  assert.equal(map.get("2025-10"), undefined, "bad JSON row: no ym entry");
+});
+
+test("buildHistoricalMap — tolerates snake_case window_json; skips bad/missing JSON + unknown line", () => {
+  const wA = W({ netSalesSen: 100 });
+  const rows = [
+    { ym: "2025-12", line: "all",   window_json: JSON.stringify(wA) },       // snake_case fallback
+    { ym: "2025-11", line: "other", windowJson: JSON.stringify(W()) },       // unknown line → no line entry
+    { ym: "2025-10", line: "all",   windowJson: "not-json" },                // unparseable → skipped
+    { ym: "2025-09", line: "all" },                                          // no window at all → skipped
+  ];
+
+  const map = m.buildHistoricalMap(rows);
+
+  assert.deepEqual(map.get("2025-12")?.all, wA, "snake_case key must still be read");
+  assert.deepEqual(map.get("2025-11"), {}, "unknown line: ym entry exists but no recognised line");
+  assert.equal(map.get("2025-10"), undefined, "bad JSON -> no entry");
+  assert.equal(map.get("2025-09"), undefined, "missing window -> no entry");
 });
 
 // ---------------------------------------------------------------------------

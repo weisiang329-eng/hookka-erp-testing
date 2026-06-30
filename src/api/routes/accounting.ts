@@ -53,7 +53,7 @@ import {
 } from "../../lib/other-party-payment";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
-import { selectHistoricalWindow, sumPnlWindows } from "../../lib/pnl-historical";
+import { selectHistoricalWindow, sumPnlWindows, buildHistoricalMap } from "../../lib/pnl-historical";
 import { rmScale } from "../../lib/product-line-rm";
 import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
@@ -5468,18 +5468,15 @@ async function loadHistoricalPnl(
   const res = await db
     .prepare("SELECT ym, line, window_json FROM pnl_historical WHERE org_id = ?")
     .bind(orgId)
-    .all<{ ym: string; line: string; window_json: string }>();
-  const map = new Map<string, Partial<Record<"all" | "sofa" | "bedframe", PnlWindow>>>();
-  for (const row of res.results ?? []) {
-    let parsed: PnlWindow;
-    try { parsed = JSON.parse(row.window_json) as PnlWindow; } catch { continue; }
-    const existing = map.get(row.ym) ?? {};
-    if (row.line === "all" || row.line === "sofa" || row.line === "bedframe") {
-      existing[row.line] = parsed;
-    }
-    map.set(row.ym, existing);
-  }
-  return map;
+    .all<{ ym: string; line: string; windowJson?: string; window_json?: string }>();
+  // window_json arrives camelCased as `windowJson` via the db-pg adapter's
+  // transform.column.from; buildHistoricalMap reads it dual-keyed. Reading
+  // row.window_json directly gave undefined → JSON.parse threw → every row
+  // skipped → empty map → no injection (prod bug 2026-06-30).
+  return buildHistoricalMap(res.results ?? []) as Map<
+    string,
+    Partial<Record<"all" | "sofa" | "bedframe", PnlWindow>>
+  >;
 }
 
 async function computePnlWindow(

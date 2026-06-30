@@ -19,6 +19,53 @@ export type HistoricalPnlWindow = PnlWindowLike;
 export type PnlProductLine = "all" | "sofa" | "bedframe";
 
 /**
+ * Raw pnl_historical row shape as returned by the DB layer.
+ *
+ * The Postgres adapter (src/api/lib/db-pg.ts) camelCases every result column
+ * via `transform.column.from`, so the `window_json` column arrives as
+ * `windowJson`. Accept BOTH keys so the reader is robust to either casing
+ * (repo rule: read rows dual-keyed `r.camelCase ?? r.snake_case`).
+ */
+export type HistoricalPnlRow = {
+  ym: string;
+  line: string;
+  windowJson?: string | null;
+  window_json?: string | null;
+};
+
+/**
+ * Group raw pnl_historical rows into Map<ym, {all?,sofa?,bedframe?}>.
+ *
+ * Reads window_json dual-keyed (windowJson ?? window_json). The Postgres
+ * adapter returns it camelCased as `windowJson`; reading only `window_json`
+ * yields undefined → JSON.parse throws → every row is silently skipped → the
+ * map comes back empty → no historical P&L is injected. That was the
+ * 2026-06-30 prod bug (39 rows present, nothing displayed). Rows with an
+ * unrecognised `line` or unparseable / missing JSON are skipped.
+ */
+export function buildHistoricalMap(
+  rows: HistoricalPnlRow[],
+): Map<string, Partial<Record<PnlProductLine, HistoricalPnlWindow>>> {
+  const map = new Map<string, Partial<Record<PnlProductLine, HistoricalPnlWindow>>>();
+  for (const row of rows) {
+    const raw = row.windowJson ?? row.window_json;
+    if (!raw) continue;
+    let parsed: HistoricalPnlWindow;
+    try {
+      parsed = JSON.parse(raw) as HistoricalPnlWindow;
+    } catch {
+      continue;
+    }
+    const existing = map.get(row.ym) ?? {};
+    if (row.line === "all" || row.line === "sofa" || row.line === "bedframe") {
+      existing[row.line] = parsed;
+    }
+    map.set(row.ym, existing);
+  }
+  return map;
+}
+
+/**
  * Pure column-selection predicate.
  *
  * Returns the stored historical window if `ym` is strictly before

@@ -463,16 +463,24 @@ app.get("/", async (c) => {
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
-  const [orderRes, itemRes] = await Promise.all([
-    c.var.DB.prepare(
-      `SELECT * FROM consignment_orders ${where} ORDER BY created_at DESC`,
-    )
-      .bind(...params)
-      .all<ConsignmentOrderRow>(),
-    c.var.DB.prepare("SELECT * FROM consignment_order_items").all<ConsignmentOrderItemRow>(),
-  ]);
+  const orderRes = await c.var.DB
+    .prepare(`SELECT * FROM consignment_orders ${where} ORDER BY created_at DESC`)
+    .bind(...params)
+    .all<ConsignmentOrderRow>();
+  const orderRows = orderRes.results ?? [];
+  // Scope items to the COs we return — was a whole-table `SELECT * FROM
+  // consignment_order_items` on every list render. Guard the "IN ()" case.
+  const coIds = orderRows.map((r) => r.id);
+  const itemRes = coIds.length
+    ? await c.var.DB
+        .prepare(
+          `SELECT * FROM consignment_order_items WHERE consignmentOrderId IN (${coIds.map(() => "?").join(", ")})`,
+        )
+        .bind(...coIds)
+        .all<ConsignmentOrderItemRow>()
+    : { results: [] as ConsignmentOrderItemRow[] };
   const items = itemRes.results ?? [];
-  const data = (orderRes.results ?? []).map((r) => rowToCOList(r, items));
+  const data = orderRows.map((r) => rowToCOList(r, items));
   return c.json({ success: true, data, total: data.length });
 });
 

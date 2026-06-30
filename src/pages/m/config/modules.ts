@@ -22,7 +22,7 @@ import {
   type RowVM,
 } from "./types";
 import { PendingLeaveRequests } from "../components/PendingLeaveRequests";
-import { logHoursSpec, hubFormSpec, deleteHub, addAffectedProductSpec } from "./forms";
+import { logHoursSpec, hubFormSpec, addAffectedProductSpec } from "./forms";
 import {
   type DetailConfig,
   type FlowStep,
@@ -1138,7 +1138,12 @@ const DEPT_TABS: { key: string; label: string; code: string }[] = [
 ];
 
 const productionSource: DataSource = {
-  url: "/api/production-orders",
+  // fields=minimal drops the heavy piece_pics tree + ~20 unused PO fields
+  // (halves the payload to the phone); include=jobCards keeps the per-dept
+  // job cards the dept sub-tabs filter on (hasDept). Same rows + same fields
+  // this config reads — purely a smaller payload. Mirrors dept.tsx / the
+  // bespoke ProductionScreen, which already fetch this way.
+  url: "/api/production-orders?fields=minimal&include=jobCards",
   select: selectData,
   // dc13 (line ~1765): code · product · "customer · SO-..." · [Our SO · Cust PO · Cust SO · Ref]
   toVM: (r): RowVM => {

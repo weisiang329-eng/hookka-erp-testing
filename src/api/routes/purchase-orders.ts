@@ -192,19 +192,23 @@ app.get("/", async (c) => {
   const denied = await requirePermission(c, "purchase-orders", "read");
   if (denied) return denied;
   const orgId = getOrgId(c);
-  const [pos, items] = await Promise.all([
-    c.var.DB.prepare(
-      "SELECT * FROM purchase_orders WHERE orgId = ? ORDER BY created_at DESC, id DESC",
-    )
-      .bind(orgId)
-      .all<PurchaseOrderRow>(),
-    c.var.DB.prepare(
-      "SELECT * FROM purchase_order_items WHERE orgId = ?",
-    )
-      .bind(orgId)
-      .all<PurchaseOrderItemRow>(),
-  ]);
-  const data = (pos.results ?? []).map((p) =>
+  const pos = await c.var.DB
+    .prepare("SELECT * FROM purchase_orders WHERE orgId = ? ORDER BY created_at DESC, id DESC")
+    .bind(orgId)
+    .all<PurchaseOrderRow>();
+  const poRows = pos.results ?? [];
+  // Scope items to the POs we return — was `WHERE orgId` with no LIMIT, loading
+  // every item for the org on each render. Guard the "IN ()" case.
+  const poIds = poRows.map((p) => p.id);
+  const items = poIds.length
+    ? await c.var.DB
+        .prepare(
+          `SELECT * FROM purchase_order_items WHERE purchaseOrderId IN (${poIds.map(() => "?").join(", ")})`,
+        )
+        .bind(...poIds)
+        .all<PurchaseOrderItemRow>()
+    : { results: [] as PurchaseOrderItemRow[] };
+  const data = poRows.map((p) =>
     rowToPO(p, items.results ?? []),
   );
   return c.json({ success: true, data });

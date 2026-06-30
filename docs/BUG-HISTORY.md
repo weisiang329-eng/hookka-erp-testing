@@ -34,6 +34,85 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-30-006 — Weak-wifi: login showed "Timed out… 500" and the app kept force-logging people out; lists could blank on a transient blip
+
+`infrastructure` · 🟢 **Fixed** (shipped)
+
+**Symptom (owner):** on weak factory wifi the ERP was effectively unusable —
+login 3–30 s + a 500, and workers "一直被登出". Reproduced from a GOOD connection
+(so it's server-side, not the wifi): `POST /api/auth/login` took 3–30 s on prod.
+
+**Root cause:** every request opens a fresh `postgres` client; under Supabase
+Supavisor pooler contention the FIRST statement fails with "Timed out while
+creating a new server connection" → a raw 500. And `auth-middleware` returned
+**401** when the session-verify query threw → the frontend (`api-client.ts:168`)
+treats any 401 as "logged out" → force-bounce to `/login` on a momentary DB blip.
+
+**Fix:** (a) `supabase-compat.ts` `withConnRetry` wraps every query + batch and
+retries ONCE, ONLY on connection-ESTABLISHMENT errors (fire before any SQL is
+sent → side-effect-free even for writes; a real query error / mid-statement drop
+is NOT matched). (b) `auth.ts` login + `auth-middleware.ts` session-verify return
+a retriable **503** (not 500/401) when the DB is unreachable, so a transient blip
+no longer logs the user out. (c) `keep-warm.yml` pings `/api/pg-ping` so the
+connection path doesn't go cold. Capacity (Supabase compute → Small) is the
+owner-side lever still pending. See `docs/INFRA-RESILIENCE-PLAYBOOK.md`.
+
+**Verify:** build:strict + 1286 tests green; login page + lists verified live on
+staging (load + numbers correct). Keep-warm cron confirmed running.
+
+---
+
+## BUG-2026-06-30-005 — Scan/OCR: a heavy (12.6MB) multi-invoice PDF stalled on "Reading 1 document… scanning" and never split into its N invoices
+
+`scan-ocr` · 🟢 **Fixed** (shipped — live-verify pending)
+
+**Symptom (owner):** a 31-page / 12.6 MB supplier PI (13 invoices) sat on
+"Reading 1 document… scanning" forever and never split into the 13 PIs.
+
+**Root cause:** 31 pages at 12.6 MB = high-res scanned images (~400 KB/page).
+The pipeline sent the FULL 12.6 MB (≈16.8 MB base64) to the AI uncompressed; the
+boundary-detection step (reads the whole PDF to find the per-invoice splits)
+choked on the payload and timed out, so the split never ran and it fell back to
+"1 document" which also choked. (Separate from BUG-…-003's stuck-row issue.)
+
+**Fix:** new `src/lib/compress-scan-pdf.ts` — client-side, re-renders each PDF
+page (or big image) to a compact ~150-DPI JPEG via pdfjs + pdf-lib BEFORE upload
+(typically 5–8× smaller), so OCR text stays readable but the upload + AI split +
+per-invoice OCR all run. Falls back to the original file on ANY error (never
+blocks a scan). Wired into `scan-supplier-modal` (both upload paths). Boundary
+timeout 60 s → 120 s so a slow-but-working split isn't cut off. ⚠️ Watch: if the
+~150 DPI / 0.7-quality compression renders prices unreadable, the AI may
+misclassify an INVOICE as a DELIVERY_NOTE — raise quality if it recurs.
+
+**Verify:** build:strict + eslint clean; pdf.worker present. Live-verify pending:
+owner to re-upload the 12.6 MB PDF on staging and confirm it splits into 13 PIs.
+
+---
+
+## BUG-2026-06-30-004 — Service worker hard-failed a navigation into a dead white screen ("Failed to convert value to 'Response'")
+
+`infrastructure` · 🟢 **Fixed** (shipped)
+
+**Symptom (owner console):** `FetchEvent for /inventory/fabrics → network error;
+Uncaught TypeError: Failed to convert value to 'Response'` (sw.js).
+
+**Root cause:** the SW navigation handler's network-fail fallback was
+`caches.match(req).then(hit => hit || caches.match('/worker'))`. When neither the
+requested page NOR the `/worker` shell is cached (just-installed SW / failed
+precache / a non-worker route), `caches.match('/worker')` resolves to
+**undefined** → `respondWith(undefined)` throws → the navigation HARD-FAILS into
+a white screen. On weak wifi (where the navigation fetch rejects) this turned a
+recoverable blip into the exact white-screen we're fixing elsewhere.
+
+**Fix (`public/sw.js`):** the catch now always yields a Response — cached page →
+cached `/worker` → cached `/dashboard` → a tiny self-reloading "Reconnecting…"
+placeholder (reloads in 2 s) so the page recovers the moment the network returns.
+RULE 4 (icons/manifest) guarded the same way (`hit || 504 Response`).
+
+**Verify:** `node --check` clean; shipped to prod + staging.
+
+---
+
 ## BUG-2026-06-30-003 — Scan/OCR: some pages of a multi-page document "loaded forever" (>30 min) and never came out — stuck `scan_queue` rows with no timeout, no retry, and no recovery
 
 `scan-ocr` · 🟢 **Fixed** (code shipped — live-verify pending)

@@ -5039,6 +5039,11 @@ type MaterialCostData = {
   lastYm: string;
   groups: string[];
   groupCum: Map<string, Map<string, CheckpointCum>>;
+  // PI-driven purchase (owner rule 2026-06-30): cumulative supplier-invoice
+  // purchase per group per ym (by PI invoice date, post-cutover). materialWindow
+  // uses this for the trading-account PURCHASE line INSTEAD of GRN receipts;
+  // OPENING/CLOSING stay GRN/FIFO and CONSUMED re-balances. See materialWindow.
+  piPurchaseCum: Map<string, Map<string, number>>;
   wipByYm: Map<string, number>;
   fgByYm: Map<string, number>;
   warnings: {
@@ -5405,11 +5410,56 @@ async function loadMaterialCostData(
   applyOpeningSeed(wipByYm, invSeed.wipSen, invSeed.asOfDate);
   applyOpeningSeed(fgByYm, invSeed.fgSen, invSeed.asOfDate);
 
+  // --- PI-driven purchase (owner rule 2026-06-30) -------------------------------
+  // The trading-account PURCHASE line is the purchase ledger (supplier invoices),
+  // NOT GRN receipts. Aggregate STOCKED PI lines by material group and PI invoice
+  // month (same post-cutover floor as the FIFO receipts), then make cumulative-by-
+  // ym so materialWindow can take cum(end)−cum(prev) exactly like the checkpoints.
+  // OPENING/CLOSING stay GRN/FIFO; CONSUMED re-balances (opening+purchase−closing).
+  // A PI with no matching GRN in its month therefore lands in CONSUMED that month
+  // (invoiced-not-yet-received) — by design, per the owner. STOCKED + non-DRAFT/
+  // CANCELLED matches the creditor-ledger / GL purchase-recognition set.
+  const piPurchaseByGroupYm = new Map<string, Map<string, number>>();
+  const piPurchaseRes = await db
+    .prepare(
+      `SELECT pi.invoiceDate AS invoiceDate, pii.materialCode AS materialCode, pii.lineTotalSen AS lineTotalSen
+         FROM purchase_invoice_items pii
+         JOIN purchase_invoices pi ON pi.id = pii.piId
+        WHERE pi.orgId = ? AND pi.status NOT IN ('DRAFT','CANCELLED') AND pii.lineType = 'STOCKED'
+          AND pii.materialCode IS NOT NULL`,
+    )
+    .bind(orgId)
+    .all<{ invoiceDate: string | null; materialCode: string | null; lineTotalSen: number | null }>();
+  for (const r of piPurchaseRes.results ?? []) {
+    const date = (r.invoiceDate ?? "").slice(0, 10);
+    if (!date || date <= cutoverIso || date > matEndIso) continue;
+    const code = r.materialCode ?? "";
+    const rmId = code ? rmIdByCode.get(code) : undefined;
+    const g = rmId ? groupOf.get(rmId) : undefined;
+    if (!g) { if (code) flagUnresolved("pi_items", code); continue; }
+    const ym = date.slice(0, 7);
+    const sen = Math.round(Number(r.lineTotalSen) || 0);
+    let m = piPurchaseByGroupYm.get(g);
+    if (!m) { m = new Map(); piPurchaseByGroupYm.set(g, m); }
+    m.set(ym, (m.get(ym) ?? 0) + sen);
+    allGroups.add(g); // a group that only ever appears via PIs still needs a row
+  }
+  // Cumulative-by-ym across the same monthsYm axis the checkpoints use, so every
+  // ym (even PI-less months) carries the running total → cum(end)−cum(prev) works.
+  const piPurchaseCum = new Map<string, Map<string, number>>();
+  for (const [g, perYm] of piPurchaseByGroupYm) {
+    const cum = new Map<string, number>();
+    let run = 0;
+    for (const ym of monthsYm) { run += perYm.get(ym) ?? 0; cum.set(ym, run); }
+    piPurchaseCum.set(g, cum);
+  }
+
   return {
     globalFirstYm,
     lastYm,
     groups: [...allGroups],
     groupCum,
+    piPurchaseCum,
     wipByYm,
     fgByYm,
     warnings: { negatives, unresolved },
@@ -5430,7 +5480,18 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
     const end = gm?.get(endKey) ?? ZERO;
     const prev = prevKey ? (gm?.get(prevKey) ?? ZERO) : null;
     const w = windowFromCheckpoints(end, prev);
-    return { itemGroup: g, openingSen: w.openingSen, purchaseSen: w.purchaseSen, closingSen: w.closingSen, consumedSen: w.consumedSen };
+    // Owner rule (2026-06-30): the trading-account PURCHASE line comes from the
+    // purchase ledger (PI), NOT the GRN receipts (w.purchaseSen). OPENING and
+    // CLOSING stay GRN/FIFO (the perpetual stock valuation — unchanged), and
+    // CONSUMED re-balances to opening+purchase−closing so the section still ties.
+    // When a period's PI ≠ its GRN receipts (e.g. invoiced-not-yet-received), the
+    // gap lands in CONSUMED by design (see loadMaterialCostData / BUG-HISTORY).
+    const piCum = data.piPurchaseCum.get(g);
+    const piEnd = piCum?.get(endKey) ?? 0;
+    const piPrev = prevKey ? (piCum?.get(prevKey) ?? 0) : 0;
+    const purchaseSen = piEnd - piPrev;
+    const consumedSen = w.openingSen + purchaseSen - w.closingSen;
+    return { itemGroup: g, openingSen: w.openingSen, purchaseSen, closingSen: w.closingSen, consumedSen };
   });
   const wipCloseSen = data.wipByYm.get(endKey) ?? 0;
   const wipOpenSen = prevKey ? (data.wipByYm.get(prevKey) ?? 0) : 0;

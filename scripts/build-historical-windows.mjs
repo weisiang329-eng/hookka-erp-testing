@@ -150,6 +150,25 @@ function scale(sen, R) {
   return Math.round(sen * R);
 }
 
+/**
+ * Classify a raw-material group code to its product line (identical rule to
+ * product-line-rm.ts#rmLineOf — keep in sync).
+ * B.* → bedframe-only, S.* / S- → sofa-only, everything else → shared.
+ */
+function rmLineOf(code) {
+  const c = (code ?? "").trim().toUpperCase();
+  if (c.startsWith("B.")) return "bedframe";
+  if (c.startsWith("S.") || c.startsWith("S-")) return "sofa";
+  return "shared";
+}
+
+/** Scale factor for an RM group code in a given line view. */
+function rmScaleFor(code, productLine, R) {
+  const rl = rmLineOf(code);
+  if (rl === "shared") return R;
+  return rl === productLine ? 1 : 0;
+}
+
 /** Build the split (sofa or bedframe) PnlWindow from the `all` window. */
 function buildSplitWindow(allW, m, productLine) {
   const totalSales = m.salesSofaSen + m.salesBedframeSen;
@@ -202,13 +221,17 @@ function buildSplitWindow(allW, m, productLine) {
   const returnSplit = scale(m.returnInwardSen, R);
   const netSalesSen = salesThisLine - returnSplit + discountSplit;
 
-  // Scale RM groups
-  const rmGroups = allW.rmGroups.map((g) => ({
-    ...g,
-    openingSen: scale(g.openingSen, R),
-    purchasesSen: scale(g.purchasesSen, R),
-    closingSen: scale(g.closingSen, R),
-  }));
+  // Scale RM groups: B.* → 100% bedframe (0 sofa), S.*/S- → 100% sofa (0 bedframe),
+  // shared groups → pro-rated by R.
+  const rmGroups = allW.rmGroups.map((g) => {
+    const sc = rmScaleFor(g.group, productLine, R);
+    return {
+      ...g,
+      openingSen: scale(g.openingSen, sc),
+      purchasesSen: scale(g.purchasesSen, sc),
+      closingSen: scale(g.closingSen, sc),
+    };
+  });
   const rmConsumedSen = rmGroups.reduce(
     (sum, g) => sum + g.openingSen + g.purchasesSen - g.closingSen,
     0,

@@ -54,6 +54,7 @@ import {
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
 import { selectHistoricalWindow, sumPnlWindows } from "../../lib/pnl-historical";
+import { rmScale } from "../../lib/product-line-rm";
 import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
@@ -5545,15 +5546,19 @@ async function computePnlWindow(
   // From the FIFO engine (loadMaterialCost). The engine guarantees
   // opening + purchase − closing === consumed per group, so rmConsumedSen
   // (still derived as opening+purchases−closing for the downstream row tree)
-  // ties out to the engine's consumed exactly. Line-share scaling (R) is
-  // applied the same way the old cost-ledger figures were.
-  const rmGroups = mat.rmGroups.map((r) => ({
-    group: r.itemGroup,
-    description: GROUP_DESCRIPTIONS[r.itemGroup] ?? r.itemGroup,
-    openingSen: isAll ? r.openingSen : Math.round(r.openingSen * R),
-    purchasesSen: isAll ? r.purchaseSen : Math.round(r.purchaseSen * R),
-    closingSen: isAll ? r.closingSen : Math.round(r.closingSen * R),
-  }));
+  // ties out to the engine's consumed exactly. Line-share scaling uses
+  // rmScale: B.* groups go 100% to bedframe view (0 in sofa), S.* / S- groups
+  // go 100% to sofa view (0 in bedframe), shared groups are pro-rated by R.
+  const rmGroups = mat.rmGroups.map((r) => {
+    const sc = rmScale(r.itemGroup, line, R);
+    return {
+      group: r.itemGroup,
+      description: GROUP_DESCRIPTIONS[r.itemGroup] ?? r.itemGroup,
+      openingSen: Math.round(r.openingSen * sc),
+      purchasesSen: Math.round(r.purchaseSen * sc),
+      closingSen: Math.round(r.closingSen * sc),
+    };
+  });
   const rmConsumedSen = rmGroups.reduce((s, g) => s + g.openingSen + g.purchasesSen - g.closingSen, 0);
 
   // --- Carriage (700-1015), SST (706-0000) ---

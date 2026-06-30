@@ -2,9 +2,10 @@
 // Payment terms — owner rule: term is a fixed 1 MONTH, by calendar MONTH not
 // by day. An invoice issued in month M is due "next month" (M+1) — the whole
 // of next month is the payment window, so due date = last day of M+1. It is
-// "current" through the end of M+1 and becomes 1 month overdue once we're in
-// M+2. Same rule for sales invoices and purchase invoices (AR + AP aging,
-// and the due date stamped on the document).
+// "current" through the end of M+1 for DUE-DATE purposes. AGING, however, is
+// reported by CALENDAR month (owner rule 2026-06-30): this month = current,
+// last month = 1 month, etc. — see monthsOverdue below. The same 1-month term
+// governs the due date stamped on both sales invoices and purchase invoices.
 //
 // Single source of truth — imported by invoices.ts / purchase-invoices.ts
 // (stamp dueDate) and accounting.ts (aging buckets) so the rule can't drift.
@@ -32,16 +33,20 @@ export function nextMonthDueDate(invoiceDate: string | null | undefined): string
 }
 
 /**
- * Whole months an invoice is overdue under the 1-month month-based term.
- * = (current month − invoice month) − 1.  ≤0 = current (still within the
- * term / next-month window); 1 = one month overdue; etc. Based on the
- * invoice MONTH, the day is irrelevant.
+ * Aging-bucket index by the invoice's CALENDAR month (owner rule, 2026-06-30):
+ * THIS month = 0 (Current), last month = 1, two months ago = 2, … i.e. how many
+ * whole calendar months ago the invoice was issued — the day is irrelevant.
+ * The aging is independent of the payment term: the 1-month term still governs
+ * the DUE DATE (nextMonthDueDate), but a last-month invoice ages into "1 month"
+ * even though it is not yet past its due date.
  */
-export function monthsOverdue(invoiceDate: string | null | undefined): number {
+export function monthsOverdue(
+  invoiceDate: string | null | undefined,
+  now: Date = new Date(),
+): number {
   const p = ym(invoiceDate);
   if (!p) return 0;
-  const now = new Date();
   const nowMonths = now.getFullYear() * 12 + (now.getMonth() + 1);
   const invMonths = p.y * 12 + p.m;
-  return nowMonths - invMonths - 1;
+  return nowMonths - invMonths;
 }

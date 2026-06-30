@@ -5135,7 +5135,7 @@ async function loadMaterialCostData(
                 pii.qty AS qty, pii.lineTotalSen AS lineTotalSen
            FROM purchase_invoice_items pii
            JOIN purchase_invoices pi ON pi.id = pii.piId
-          WHERE pi.orgId = ? AND pi.status = 'APPROVED' AND pii.lineType = 'STOCKED'
+          WHERE pi.orgId = ? AND pi.status IN ('CONFIRMED','APPROVED') AND pii.lineType = 'STOCKED'
             AND pii.materialCode IS NOT NULL AND pi.purchaseOrderId IS NOT NULL`,
       )
       .bind(orgId)

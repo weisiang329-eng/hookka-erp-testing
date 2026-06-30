@@ -53,6 +53,7 @@ import {
 } from "../../lib/other-party-payment";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
+import { selectHistoricalWindow, sumPnlWindows } from "../../lib/pnl-historical";
 import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
@@ -5421,6 +5422,65 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
 
 type PnlWindow = Awaited<ReturnType<typeof computePnlWindow>>;
 
+// ---------------------------------------------------------------------------
+// Task 3.1 — pnl_historical table + reader
+// Stores owner-provided PnlWindow JSON for months BEFORE the accounting
+// opening date. Runtime self-apply pattern mirrors ensureMaterialOpeningStock.
+// Pure helpers (selectHistoricalWindow, sumPnlWindows) live in
+// src/lib/pnl-historical.ts so they can be tested without Worker deps.
+// ---------------------------------------------------------------------------
+
+let _pendingPnlHistMigrations: Promise<void> | null = null;
+function ensurePnlHistorical(db: D1Database): Promise<void> {
+  if (_pendingPnlHistMigrations) return _pendingPnlHistMigrations;
+  _pendingPnlHistMigrations = (async () => {
+    const stmts = [
+      `CREATE TABLE IF NOT EXISTS pnl_historical (
+         id          TEXT PRIMARY KEY,
+         org_id      TEXT NOT NULL DEFAULT 'hookka',
+         ym          TEXT NOT NULL,
+         line        TEXT NOT NULL,
+         window_json TEXT NOT NULL,
+         updated_at  TEXT
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_pnl_hist_key ON pnl_historical (org_id, ym, line)`,
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[accounting.pnl-historical] DDL skipped", {
+          sql: sql.split("\n")[0],
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return _pendingPnlHistMigrations;
+}
+
+/** Load all historical P&L rows for an org, grouped by ym. */
+async function loadHistoricalPnl(
+  db: D1Database,
+  orgId: string,
+): Promise<Map<string, Partial<Record<"all" | "sofa" | "bedframe", PnlWindow>>>> {
+  const res = await db
+    .prepare("SELECT ym, line, window_json FROM pnl_historical WHERE org_id = ?")
+    .bind(orgId)
+    .all<{ ym: string; line: string; window_json: string }>();
+  const map = new Map<string, Partial<Record<"all" | "sofa" | "bedframe", PnlWindow>>>();
+  for (const row of res.results ?? []) {
+    let parsed: PnlWindow;
+    try { parsed = JSON.parse(row.window_json) as PnlWindow; } catch { continue; }
+    const existing = map.get(row.ym) ?? {};
+    if (row.line === "all" || row.line === "sofa" || row.line === "bedframe") {
+      existing[row.line] = parsed;
+    }
+    map.set(row.ym, existing);
+  }
+  return map;
+}
+
 async function computePnlWindow(
   db: Env["Variables"]["DB"],
   orgId: string,
@@ -5876,6 +5936,8 @@ app.get("/pl-trend", async (c) => {
 app.get("/pl-statement", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
+  // Task 3.1 — ensure table exists before first read.
+  await ensurePnlHistorical(c.var.DB);
   const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
   const lineParam = (c.req.query("line") || "all").toLowerCase();
   const line: "all" | "sofa" | "bedframe" = lineParam === "sofa" ? "sofa" : lineParam === "bedframe" ? "bedframe" : "all";
@@ -5892,8 +5954,23 @@ app.get("/pl-statement", async (c) => {
   // FIFO checkpoints once — period end is the latest month either window needs.
   const matData = await loadMaterialCostData(c.var.DB, orgId, endYm ?? new Date().toISOString().slice(0, 7));
   const dc = await loadDocDateResolver(c.var.DB); // once per request
+  // Task 3.2 — load historical and check if the period window should be swapped.
+  const [historical, openingDateRaw] = await Promise.all([
+    loadHistoricalPnl(c.var.DB, orgId),
+    getOpeningDate(c.var.DB),
+  ]);
+  const openingMonth = openingDateRaw ? openingDateRaw.slice(0, 7) : null;
+  // For the period window: only single-month periods (startYm === endYm) can be
+  // swapped from historical; a multi-month range spans both sides so we fall back
+  // to computePnlWindow.
+  const historicalP = startYm && startYm === endYm
+    ? selectHistoricalWindow(historical, openingMonth, startYm, line)
+    : null;
+  const EMPTY_WARNINGS: PnlWindow["materialWarnings"] = { negatives: [], unresolved: [] };
   const [p, y] = await Promise.all([
-    computePnlWindow(c.var.DB, orgId, startYm, endYm, line, matData, dc, pnlOverride),
+    historicalP
+      ? Promise.resolve({ ...historicalP, materialWarnings: EMPTY_WARNINGS } as PnlWindow)
+      : computePnlWindow(c.var.DB, orgId, startYm, endYm, line, matData, dc, pnlOverride),
     computePnlWindow(c.var.DB, orgId, fyStartYm, endYm, line, matData, dc, pnlOverride),
   ]);
   // Material warnings are material-wide (whole-timeline), not period-specific —
@@ -5926,6 +6003,8 @@ app.get("/pl-statement", async (c) => {
 app.get("/pl-monthly", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
+  // Task 3.1 — ensure table exists before first read.
+  await ensurePnlHistorical(c.var.DB);
   const lineParam = c.req.query("line");
   const line: "all" | "sofa" | "bedframe" = lineParam === "sofa" || lineParam === "bedframe" ? lineParam : "all";
   const anchor = c.req.query("anchor");
@@ -5951,12 +6030,40 @@ app.get("/pl-monthly", async (c) => {
   // FIFO checkpoints once for the whole FY matrix (lastYm is the latest column).
   const matData = await loadMaterialCostData(c.var.DB, orgId, lastYm);
   const dc = await loadDocDateResolver(c.var.DB); // once per request — threaded into every month window
+
+  // Task 3.2 — load historical P&L rows once per request.
+  const [historical, openingDateRaw] = await Promise.all([
+    loadHistoricalPnl(c.var.DB, orgId),
+    getOpeningDate(c.var.DB),
+  ]);
+  const openingMonth = openingDateRaw ? openingDateRaw.slice(0, 7) : null;
+
+  // Build each month's window, swapping in historical data for pre-opening months.
+  const EMPTY_WARNINGS_M: PnlWindow["materialWarnings"] = { negatives: [], unresolved: [] };
   const cols: PnlMatrixCol[] = [];
-  cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, orgId, fyStartYm, lastYm, line, matData, dc, override) });
+  const perMonthWindows: PnlWindow[] = [];
   // Months newest-first (after Accumulated) per owner layout (F4 #7).
   for (const ym of [...months].reverse()) {
-    cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, orgId, ym, ym, line, matData, dc, override) });
+    const hist = selectHistoricalWindow(historical, openingMonth, ym, line);
+    const window: PnlWindow = hist
+      ? { ...hist, materialWarnings: EMPTY_WARNINGS_M }
+      : await computePnlWindow(c.var.DB, orgId, ym, ym, line, matData, dc, override);
+    perMonthWindows.push(window);
+    cols.push({ key: ym, label: monthLabel(ym), accum: false, window });
   }
+
+  // Accumulated column: sum all per-month windows (historical + computed) so
+  // pre-opening months contribute their owner-provided figures. Then merge the
+  // computed windows' materialWarnings into the accumulated result.
+  const computedAccWindow = await computePnlWindow(c.var.DB, orgId, fyStartYm, lastYm, line, matData, dc, override);
+  // Determine if any month in range is pre-opening (historical might be absent
+  // for that month, but we always use sumPnlWindows when historical rows exist).
+  const hasHistoricalMonths = months.some((ym) => selectHistoricalWindow(historical, openingMonth, ym, line) !== null);
+  const accWindow: PnlWindow = hasHistoricalMonths
+    ? { ...sumPnlWindows(perMonthWindows), materialWarnings: computedAccWindow.materialWarnings }
+    : computedAccWindow;
+
+  cols.unshift({ key: "acc", label: "Accumulated", accum: true, window: accWindow });
 
   const matrix = buildPnlMatrix(cols);
   return c.json({ success: true, data: { fyLabel: fy.label, line, anchor: anchorYm, columns: matrix.columns, rows: matrix.rows } });

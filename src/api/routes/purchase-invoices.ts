@@ -794,6 +794,56 @@ app.post("/", async (c) => {
       ? null
       : String(body.supplierDoNo).trim();
 
+  // Duplicate-document guard (owner 2026-07). A supplier invoice/DO number that
+  // already lives on a non-cancelled PI for this supplier is almost always a
+  // re-scan or double-entry — block it with a clear message so the operator can
+  // never silently create duplicate PIs (the "scanned the same bundle twice"
+  // incident). Checks BOTH number fields because the OCR sometimes files the
+  // invoice no under the DO field (and vice versa).
+  {
+    const dupNums = [supplierInvoiceNo, supplierDoNo].filter(
+      (n): n is string => !!n,
+    );
+    // Skip for the one-time historical import (body.piNo supplied) — those
+    // preserve original numbers and must not be blocked by dup detection.
+    const isHistoricalImport =
+      typeof (body as { piNo?: unknown }).piNo === "string";
+    if (dupNums.length > 0 && !isHistoricalImport) {
+      const ph = dupNums.map(() => "?").join(", ");
+      const dup = await db
+        .prepare(
+          `SELECT piNo,
+                  supplier_invoice_no AS "supplierInvoiceNo",
+                  supplier_do_no AS "supplierDoNo"
+             FROM purchase_invoices
+            WHERE supplierId = ?
+              AND status <> 'CANCELLED'
+              AND (supplier_invoice_no IN (${ph}) OR supplier_do_no IN (${ph}))
+            LIMIT 1`,
+        )
+        .bind(body.supplierId, ...dupNums, ...dupNums)
+        .first<{
+          piNo: string;
+          supplierInvoiceNo: string | null;
+          supplierDoNo: string | null;
+        }>();
+      if (dup) {
+        const matched =
+          dupNums.find(
+            (n) => n === dup.supplierInvoiceNo || n === dup.supplierDoNo,
+          ) ?? dupNums[0];
+        return c.json(
+          {
+            success: false,
+            error: `Supplier document "${matched}" is already on ${dup.piNo} for this supplier — looks like a duplicate. Void that PI first, or change the number if it's genuinely a different document.`,
+            duplicateOf: dup.piNo,
+          },
+          409,
+        );
+      }
+    }
+  }
+
   // Validate items[] up-front so we can fail before any insert.
   let normalizedItems: ReturnType<typeof normalizeItems> | null = null;
   if (body.items !== undefined) {

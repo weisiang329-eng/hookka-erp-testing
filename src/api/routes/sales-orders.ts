@@ -1920,6 +1920,51 @@ app.post("/", async (c) => {
       return c.json({ success: false, error: "Customer not found" }, 400);
     }
 
+    // Duplicate-document guard (owner 2026-07): a customer PO/SO reference
+    // already on a non-cancelled sales order for THIS customer is almost always
+    // a re-scan or double-entry — block it with a clear message. (One customer
+    // PO = one SO; partial deliveries are handled by multiple DOs off the same
+    // SO, not multiple SOs, so a repeat reference is a duplicate.)
+    {
+      const soRefs = [body.customerPOId, body.customerSOId]
+        .map((v) => (v == null ? "" : String(v).trim()))
+        .filter(Boolean);
+      if (soRefs.length > 0) {
+        const ph = soRefs.map(() => "?").join(", ");
+        const dup = await c.var.DB
+          .prepare(
+            `SELECT company_so_id AS "companySOId",
+                    customer_po_id AS "customerPOId",
+                    customer_so_id AS "customerSOId"
+               FROM sales_orders
+              WHERE customer_id = ?
+                AND status <> 'CANCELLED'
+                AND (customer_po_id IN (${ph}) OR customer_so_id IN (${ph}))
+              LIMIT 1`,
+          )
+          .bind(customer.id, ...soRefs, ...soRefs)
+          .first<{
+            companySOId: string | null;
+            customerPOId: string | null;
+            customerSOId: string | null;
+          }>();
+        if (dup) {
+          const matched =
+            soRefs.find(
+              (r) => r === dup.customerPOId || r === dup.customerSOId,
+            ) ?? soRefs[0];
+          return c.json(
+            {
+              success: false,
+              error: `Customer reference "${matched}" is already on sales order ${dup.companySOId ?? "(an existing SO)"} for this customer — looks like a duplicate. Open that SO, or change the reference if it's genuinely a different order.`,
+              duplicateOf: dup.companySOId,
+            },
+            409,
+          );
+        }
+      }
+    }
+
     // Resolve hub (optional)
     const hubIdField: string = body.hubId || body.deliveryHubId || "";
     let chosenHub: { id: string; state: string | null; shortName: string } | null = null;

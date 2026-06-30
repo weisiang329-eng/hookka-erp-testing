@@ -1,0 +1,50 @@
+name: Keep DB warm
+
+# Weak-wifi resilience (2026-06-30). Pings the public GET /api/pg-ping every
+# ~5 min so the Hyperdrive -> Supabase connection path never goes fully cold.
+# The first real user after a quiet spell then doesn't pay the 20-30s
+# cold-connection cost (the "login 30s / 500" symptom). See
+# docs/INFRA-RESILIENCE-PLAYBOOK.md (Tier 1 — Keep-warm).
+#
+# Notes:
+#   * /api/pg-ping is PUBLIC (no auth) — it reveals only NOW() + a table count,
+#     kept open precisely for uptime monitors. So no CRON_SECRET is needed.
+#   * GitHub schedule granularity is 5 min and runs can be DELAYED several
+#     minutes under load. For tighter, more reliable warming, add a free
+#     UptimeRobot monitor on the same URL at 1-min interval (it doubles as
+#     uptime alerting).
+#   * Best-effort: a failed ping does NOT fail the job (warm-up, not
+#     monitoring) — we don't want CI-failure noise. Alerting is a separate
+#     lever (UptimeRobot / Sentry).
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # every 5 minutes (GitHub minimum)
+  workflow_dispatch:
+
+# Never overlap — if a tick is still warming, skip; the next is 5 min away.
+concurrency:
+  group: keep-db-warm
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping /api/pg-ping to keep the Supabase connection warm
+        run: |
+          URL='https://hookka-erp-testing.pages.dev/api/pg-ping'
+          for attempt in 1 2 3; do
+            code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              --max-time 30 "$URL" || echo "000")
+            echo "attempt $attempt: HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "DB warm ✔"
+              exit 0
+            fi
+            sleep 8
+          done
+          # Best-effort: warming failed this tick (could be the very cold-start
+          # we're trying to prevent, or a transient blip). Do NOT fail the job —
+          # warm-up is not the alerting path.
+          echo "::warning::pg-ping did not return 200 after 3 attempts (warm-up best-effort)"

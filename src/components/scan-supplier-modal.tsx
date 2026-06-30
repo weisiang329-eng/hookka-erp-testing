@@ -51,6 +51,7 @@ import {
   postScanQueueConsume,
   uploadScanQueueRowAsSourceDoc,
 } from "@/lib/scan-queue-client";
+import { compressScanFile } from "@/lib/compress-scan-pdf";
 
 // ─── Shared types (kept exported for callers) ─────────────────────────────
 
@@ -1271,10 +1272,20 @@ function CreatePIWizard({
         return;
       }
 
-      const uploaded = accepted.map((f) => ({ id: makeUploadId(), file: f }));
-      setFiles(uploaded);
+      // Compress heavy scanned PDFs/images BEFORE upload (see compressScanFile).
+      // A multi-invoice PI is often a 10-30MB stack of high-res scans; sent
+      // as-is the AI can't even finish the split, so the operator sees "1
+      // document scanning" forever and the N invoices never appear. Re-rendering
+      // pages to compact JPEGs (falls back to the original on any error) makes
+      // the upload fast AND lets the split + per-invoice OCR run.
       setErrors([]);
       setParsing(true);
+      const prepared = await Promise.all(
+        accepted.map((f) => compressScanFile(f)),
+      );
+
+      const uploaded = prepared.map((f) => ({ id: makeUploadId(), file: f }));
+      setFiles(uploaded);
       setFileProgress(Object.fromEntries(uploaded.map((u) => [u.id, "queued" as const])));
 
       // BIG-batch path — anything past the threshold goes to the async
@@ -1284,7 +1295,7 @@ function CreatePIWizard({
       // populate as each row finishes scanning, in-place.
       if (accepted.length > QUEUE_BATCH_THRESHOLD) {
         const supplierIdForHint = defaultSupplierId ?? null;
-        const r = await enqueueScanBatch("supplier", accepted, {
+        const r = await enqueueScanBatch("supplier", prepared, {
           supplierId: supplierIdForHint,
         });
         if (r.ok) {
@@ -3396,10 +3407,20 @@ function CreateGRNWizard({
         return;
       }
 
-      const uploaded = accepted.map((f) => ({ id: makeUploadId(), file: f }));
-      setFiles(uploaded);
+      // Compress heavy scanned PDFs/images BEFORE upload (see compressScanFile).
+      // A multi-invoice PI is often a 10-30MB stack of high-res scans; sent
+      // as-is the AI can't even finish the split, so the operator sees "1
+      // document scanning" forever and the N invoices never appear. Re-rendering
+      // pages to compact JPEGs (falls back to the original on any error) makes
+      // the upload fast AND lets the split + per-invoice OCR run.
       setErrors([]);
       setParsing(true);
+      const prepared = await Promise.all(
+        accepted.map((f) => compressScanFile(f)),
+      );
+
+      const uploaded = prepared.map((f) => ({ id: makeUploadId(), file: f }));
+      setFiles(uploaded);
       setFileProgress(Object.fromEntries(uploaded.map((u) => [u.id, "queued" as const])));
 
       // BIG-batch path — same gating as CreatePIWizard. Owner ruling
@@ -3408,7 +3429,7 @@ function CreateGRNWizard({
       // /api/scan-queue/pending resumes them right back here.
       if (accepted.length > QUEUE_BATCH_THRESHOLD) {
         const supplierIdForHint = defaultSupplierId ?? null;
-        const r = await enqueueScanBatch("supplier", accepted, {
+        const r = await enqueueScanBatch("supplier", prepared, {
           supplierId: supplierIdForHint,
         });
         if (r.ok) {

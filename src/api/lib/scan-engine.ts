@@ -77,7 +77,12 @@ const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 //     server call under that.
 //   • Boundary detector: 60s — it returns only page ranges, never line items.
 const EXTRACT_TIMEOUT_MS = 150_000;
-const BOUNDARY_TIMEOUT_MS = 60_000;
+// 120s (was 60s) — boundary detection reads the WHOLE PDF to find document
+// splits, so a heavy/many-page scan legitimately takes longer; 60s was cutting
+// off slow-but-working detections and dropping the split to "1 document". The
+// client now compresses heavy scans before upload (compress-scan-pdf.ts), so
+// this is mostly headroom for any un-compressed edge case.
+const BOUNDARY_TIMEOUT_MS = 120_000;
 
 // Maps to a Cloudflare D1Database-shaped surface — the SupabaseAdapter the
 // worker installs satisfies this. Routes type their `c.var.DB` as

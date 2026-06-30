@@ -4383,6 +4383,7 @@ function MonthlyPlTab() {
 
   const cols = data?.columns ?? [];
   const rows = data?.rows ?? [];
+  const allGroupIds = rows.filter((r) => r.kind === "group" && r.groupId).map((r) => r.groupId!);
   const visible: PlMatrixRow[] = [];
   {
     let hideDepth = Infinity;
@@ -4421,6 +4422,12 @@ function MonthlyPlTab() {
           <select value={line} onChange={(e) => setLine(e.target.value as "all" | "sofa" | "bedframe")} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm">
             <option value="all">All</option><option value="sofa">Sofa</option><option value="bedframe">Bedframe</option>
           </select>
+          {data && allGroupIds.length > 0 && (
+            <div className="flex items-center gap-1">
+              <button onClick={() => setCollapsed(new Set(allGroupIds))} title="Collapse every parent account to the top level" className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">Collapse all</button>
+              <button onClick={() => setCollapsed(new Set())} title="Expand every account" className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">Expand all</button>
+            </div>
+          )}
           {data && <ExportButtons build={buildExport} filenameBase={`monthly-pl-${data.anchor}-${line}`} title="Monthly P&L" subtitle={`${data.fyLabel} · ${line}`} />}
         </div>
       </div>

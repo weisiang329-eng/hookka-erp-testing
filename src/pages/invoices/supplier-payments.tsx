@@ -142,6 +142,9 @@ export default function SupplierPaymentsPage() {
   const today = new Date().toISOString().slice(0, 10);
   const [date, setDate] = useState(today);
   const [reference, setReference] = useState("");
+  // Supplier advance / prepayment (RM string). Pay a supplier BEFORE any invoice;
+  // posts to Trade Creditors (400-0000) as a prepayment to knock off later.
+  const [advanceStr, setAdvanceStr] = useState("");
 
   // payFrom — SBK/SCH bank/cash account the money leaves from (same COA source
   // + filter as payments.tsx's bankAccount picker).
@@ -246,11 +249,17 @@ export default function SupplierPaymentsPage() {
     return Math.round(foreign * rate * 100);
   };
 
+  // Advance is create-only (editing / knock-off goes through /restate — part 3),
+  // so it's zeroed in edit mode and the input is hidden below.
+  const advanceSen = editingNo
+    ? 0
+    : Math.max(0, Math.round((parseFloat(advanceStr) || 0) * 100));
+
   const totalBankSen = useMemo(
-    () => openPIs.reduce((sum, pi) => sum + rowBankSen(pi), 0),
-    // rowBankSen reads rows; recompute whenever rows or the PI set changes.
+    () => openPIs.reduce((sum, pi) => sum + rowBankSen(pi), 0) + advanceSen,
+    // rowBankSen reads rows; recompute whenever rows / PI set / advance changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [openPIs, rows]
+    [openPIs, rows, advanceSen]
   );
 
   // Toggle a foreign row's "Full": fills the remaining foreign amount
@@ -280,6 +289,7 @@ export default function SupplierPaymentsPage() {
   const resetForm = () => {
     setSelectedSupplierId("");
     setReference("");
+    setAdvanceStr("");
     setOpenPIs([]);
     setRows({});
     setDate(today);
@@ -318,8 +328,8 @@ export default function SupplierPaymentsPage() {
       })
       .filter((a): a is NonNullable<typeof a> => a !== null);
 
-    if (allocations.length === 0) {
-      toast.error("Enter at least one payment amount");
+    if (allocations.length === 0 && advanceSen <= 0) {
+      toast.error("Enter a payment amount or an advance");
       return;
     }
 
@@ -342,6 +352,7 @@ export default function SupplierPaymentsPage() {
           date,
           reference: reference || undefined,
           allocations,
+          ...(advanceSen > 0 ? { advanceSen } : {}),
         }),
       });
       const j = (await res.json()) as { success?: boolean; error?: string; data?: { paymentNo?: string; totalBankSen?: number } };
@@ -421,6 +432,7 @@ export default function SupplierPaymentsPage() {
     setRows({});
     setOpenPIs([]);
     setReference("");
+    setAdvanceStr("");
   };
 
   const canPost = !!selectedSupplierId && !!payFrom && totalBankSen > 0 && !posting;
@@ -579,6 +591,27 @@ export default function SupplierPaymentsPage() {
               </div>
             </div>
           </div>
+
+          {/* Supplier advance / prepayment — create-only. Pay before any invoice. */}
+          {!editingNo && (
+            <div>
+              <label className="block text-sm font-medium text-[#6B7280] mb-1">
+                Advance / Prepayment (RM)
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                className="w-full md:w-1/3 border border-[#E2DDD8] rounded-md px-3 py-2 text-sm text-right tabular-nums"
+                value={advanceStr}
+                onChange={(e) => setAdvanceStr(e.target.value)}
+                placeholder="0.00"
+              />
+              <p className="text-xs text-[#6B7280] mt-1">
+                Pay a supplier <strong>before any invoice</strong> — posts to Trade Creditors (400-0000) as a prepayment you can knock off invoices later. Leave blank for a normal payment.
+              </p>
+            </div>
+          )}
 
           {/* Open-PI allocation table */}
           {selectedSupplierId && (

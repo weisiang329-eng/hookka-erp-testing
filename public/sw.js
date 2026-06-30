@@ -160,11 +160,30 @@ self.addEventListener('fetch', (event) => {
           }
           return res;
         })
-        .catch(() =>
-          caches
-            .match(req)
-            .then((hit) => hit || caches.match('/worker')),
-        ),
+        .catch(async () => {
+          // The network fetch failed (offline / weak wifi). NEVER resolve
+          // respondWith to undefined — that throws "Failed to convert value
+          // to 'Response'" and the navigation HARD-FAILS into a dead white
+          // screen, the exact weak-wifi symptom we're trying to kill (was a
+          // real bug: caches.match('/worker') is undefined when the shell
+          // isn't cached yet). Fall back cached-page → cached-shell → a tiny
+          // self-reloading placeholder so the page recovers the moment the
+          // network returns instead of stranding the user.
+          return (
+            (await caches.match(req)) ||
+            (await caches.match('/worker')) ||
+            (await caches.match('/dashboard')) ||
+            new Response(
+              '<!doctype html><meta charset="utf-8">' +
+                '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+                '<body style="font-family:system-ui,sans-serif;display:grid;place-items:center;' +
+                'height:100vh;margin:0;color:#6B5C32;background:#FAF9F7">' +
+                '<div style="text-align:center"><p>Reconnecting…</p>' +
+                '<script>setTimeout(function(){location.reload()},2000)</script></div></body>',
+              { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+            )
+          );
+        }),
     );
     return;
   }
@@ -198,7 +217,9 @@ self.addEventListener('fetch', (event) => {
           }
           return res;
         })
-        .catch(() => hit);
+        // Both cache miss + network fail must still yield a Response (never
+        // undefined → "Failed to convert value to 'Response'").
+        .catch(() => hit || new Response('', { status: 504 }));
       return hit || network;
     }),
   );

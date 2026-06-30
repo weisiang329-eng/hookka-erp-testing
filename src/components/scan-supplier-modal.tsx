@@ -1655,7 +1655,19 @@ function CreatePIWizard({
           });
         }
         if (additions.length === 0) return prev;
-        const combined = [...prev, ...additions];
+        // Owner ruling 2026-06-30: cards must follow the source PDF page
+        // order — auto-split children are created sequentially so the
+        // earliest queue row = earliest PDF page. Sort by the row's
+        // createdAt, then by docIdx within the row, so a slow chunk that
+        // lands late still appears in its original position.
+        const rowCreated = new Map<string, string>();
+        for (const item of r.data.items) rowCreated.set(item.id, item.createdAt);
+        const combined = [...prev, ...additions].sort((a, b) => {
+          const aC = a.scanQueueRowId ? rowCreated.get(a.scanQueueRowId) ?? "" : "";
+          const bC = b.scanQueueRowId ? rowCreated.get(b.scanQueueRowId) ?? "" : "";
+          if (aC !== bC) return aC < bC ? -1 : 1;
+          return (a.scanQueueDocIdx ?? 0) - (b.scanQueueDocIdx ?? 0);
+        });
         // Apply the collapse rule across the WHOLE combined set: ≥5 → only
         // the very first card stays expanded; <5 → all expanded. We only
         // restamp `expanded` on the new additions so cards the operator
@@ -3634,7 +3646,15 @@ function CreateGRNWizard({
           });
         }
         if (additions.length === 0) return prev;
-        const combined = [...prev, ...additions];
+        // Owner ruling 2026-06-30: PDF-order — same sort as PI wizard.
+        const rowCreated = new Map<string, string>();
+        for (const item of r.data.items) rowCreated.set(item.id, item.createdAt);
+        const combined = [...prev, ...additions].sort((a, b) => {
+          const aC = a.scanQueueRowId ? rowCreated.get(a.scanQueueRowId) ?? "" : "";
+          const bC = b.scanQueueRowId ? rowCreated.get(b.scanQueueRowId) ?? "" : "";
+          if (aC !== bC) return aC < bC ? -1 : 1;
+          return (a.scanQueueDocIdx ?? 0) - (b.scanQueueDocIdx ?? 0);
+        });
         if (combined.length >= 5) {
           let firstSeen = false;
           return combined.map((c) => {

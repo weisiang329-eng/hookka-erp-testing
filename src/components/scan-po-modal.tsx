@@ -1208,7 +1208,17 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           });
         }
         if (additions.length === 0) return prev;
-        const combined = [...prev, ...additions];
+        // Owner ruling 2026-06-30: cards must follow source PDF page order.
+        // Auto-split children are created sequentially so the earliest
+        // queue row = earliest PDF page. Sort by row's createdAt then docIdx.
+        const rowCreated = new Map<string, string>();
+        for (const item of r.data.items) rowCreated.set(item.id, item.createdAt);
+        const combined = [...prev, ...additions].sort((a, b) => {
+          const aC = a.scanQueueRowId ? rowCreated.get(a.scanQueueRowId) ?? "" : "";
+          const bC = b.scanQueueRowId ? rowCreated.get(b.scanQueueRowId) ?? "" : "";
+          if (aC !== bC) return aC < bC ? -1 : 1;
+          return (a.scanQueueDocIdx ?? 0) - (b.scanQueueDocIdx ?? 0);
+        });
         // Apply collapse rule across the combined set, only restamping
         // new additions so cards the operator toggled keep their state.
         if (combined.length >= 5) {

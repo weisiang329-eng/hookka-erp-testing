@@ -5240,6 +5240,47 @@ async function loadMaterialCostData(
     }
   }
 
+  // 5c. PI-only receipts (owner rule 2026-06-30; see docs/superpowers/specs/
+  //     2026-06-30-pi-driven-stock-in-closing-design.md). A PI STOCKED line NOT
+  //     linked to a GRN (grn_item_id IS NULL) brought goods into stock directly →
+  //     it IS a receipt. A converted PI carries grn_item_id → its GRN receipt (5a)
+  //     already counts → skip it here (read-only dedup: no qty math, no writes).
+  //     Separately, EVERY PI STOCKED line feeds the purchase total (= whole purchase
+  //     ledger), cumulated after the replay into piPurchaseCum.
+  const piPurchaseByGroupYm = new Map<string, Map<string, number>>();
+  const piRowsRes = await db
+    .prepare(
+      `SELECT pi.invoiceDate AS invoiceDate, pii.materialCode AS materialCode,
+              pii.qty AS qty, pii.lineTotalSen AS lineTotalSen, pii.grn_item_id
+         FROM purchase_invoice_items pii
+         JOIN purchase_invoices pi ON pi.id = pii.piId
+        WHERE pi.orgId = ? AND pi.status NOT IN ('DRAFT','CANCELLED') AND pii.lineType = 'STOCKED'
+          AND pii.materialCode IS NOT NULL`,
+    )
+    .bind(orgId)
+    .all<{ invoiceDate: string | null; materialCode: string | null; qty: number | null; lineTotalSen: number | null; grnItemId?: string | null; grn_item_id?: string | null }>();
+  for (const r of piRowsRes.results ?? []) {
+    const date = (r.invoiceDate ?? "").slice(0, 10);
+    if (!date || date <= cutoverIso || date > matEndIso) continue;
+    const code = r.materialCode ?? "";
+    const rmId = code ? rmIdByCode.get(code) : undefined;
+    const g = rmId ? groupOf.get(rmId) : undefined;
+    if (!rmId || !g) { if (code) flagUnresolved("pi_items", code); continue; }
+    const ym = date.slice(0, 7);
+    const lineSen = Math.round(Number(r.lineTotalSen) || 0);
+    // purchase = ALL PI STOCKED lines.
+    let m = piPurchaseByGroupYm.get(g);
+    if (!m) { m = new Map(); piPurchaseByGroupYm.set(g, m); }
+    m.set(ym, (m.get(ym) ?? 0) + lineSen);
+    // stock-in receipt ONLY for PI-only lines (grn_item_id NULL → no GRN to dedup).
+    const grnRaw = r.grnItemId ?? r.grn_item_id ?? null;
+    const grnLink = grnRaw == null || String(grnRaw).trim() === "" ? null : String(grnRaw).trim();
+    const qty = Number(r.qty) || 0;
+    if (!grnLink && qty > 0) {
+      pushEvent(rmId, { kind: "receipt", date, qty, unitCostSen: Math.round(lineSen / qty) });
+    }
+  }
+
   // 6. Earliest month to checkpoint from: the first real movement (or the
   //    cutover seed if it has a real date). Bounded below at year 2000 so a
   //    "0000-01-01" sentinel (opening with no as-of date) can't explode the range.
@@ -5410,40 +5451,14 @@ async function loadMaterialCostData(
   applyOpeningSeed(wipByYm, invSeed.wipSen, invSeed.asOfDate);
   applyOpeningSeed(fgByYm, invSeed.fgSen, invSeed.asOfDate);
 
-  // --- PI-driven purchase (owner rule 2026-06-30) -------------------------------
-  // The trading-account PURCHASE line is the purchase ledger (supplier invoices),
-  // NOT GRN receipts. Aggregate STOCKED PI lines by material group and PI invoice
-  // month (same post-cutover floor as the FIFO receipts), then make cumulative-by-
-  // ym so materialWindow can take cum(end)−cum(prev) exactly like the checkpoints.
-  // OPENING/CLOSING stay GRN/FIFO; CONSUMED re-balances (opening+purchase−closing).
-  // A PI with no matching GRN in its month therefore lands in CONSUMED that month
-  // (invoiced-not-yet-received) — by design, per the owner. STOCKED + non-DRAFT/
-  // CANCELLED matches the creditor-ledger / GL purchase-recognition set.
-  const piPurchaseByGroupYm = new Map<string, Map<string, number>>();
-  const piPurchaseRes = await db
-    .prepare(
-      `SELECT pi.invoiceDate AS invoiceDate, pii.materialCode AS materialCode, pii.lineTotalSen AS lineTotalSen
-         FROM purchase_invoice_items pii
-         JOIN purchase_invoices pi ON pi.id = pii.piId
-        WHERE pi.orgId = ? AND pi.status NOT IN ('DRAFT','CANCELLED') AND pii.lineType = 'STOCKED'
-          AND pii.materialCode IS NOT NULL`,
-    )
-    .bind(orgId)
-    .all<{ invoiceDate: string | null; materialCode: string | null; lineTotalSen: number | null }>();
-  for (const r of piPurchaseRes.results ?? []) {
-    const date = (r.invoiceDate ?? "").slice(0, 10);
-    if (!date || date <= cutoverIso || date > matEndIso) continue;
-    const code = r.materialCode ?? "";
-    const rmId = code ? rmIdByCode.get(code) : undefined;
-    const g = rmId ? groupOf.get(rmId) : undefined;
-    if (!g) { if (code) flagUnresolved("pi_items", code); continue; }
-    const ym = date.slice(0, 7);
-    const sen = Math.round(Number(r.lineTotalSen) || 0);
-    let m = piPurchaseByGroupYm.get(g);
-    if (!m) { m = new Map(); piPurchaseByGroupYm.set(g, m); }
-    m.set(ym, (m.get(ym) ?? 0) + sen);
-    allGroups.add(g); // a group that only ever appears via PIs still needs a row
-  }
+  // --- PI purchase → cumulative-by-ym (owner rule 2026-06-30) --------------------
+  // piPurchaseByGroupYm (per-group per-ym PI purchase) AND the PI-only receipt
+  // events were built in step 5c, before the replay. Here: ensure any group seen
+  // ONLY via PIs (e.g. all-converted, no GRN/issue/opening) still gets a row, then
+  // cumulate by ym so materialWindow can take cum(end)−cum(prev) like the
+  // checkpoints. Purchase = whole purchase ledger; OPENING/CLOSING stay GRN/FIFO;
+  // CONSUMED re-balances (opening+purchase−closing).
+  for (const g of piPurchaseByGroupYm.keys()) allGroups.add(g);
   // Cumulative-by-ym across the same monthsYm axis the checkpoints use, so every
   // ym (even PI-less months) carries the running total → cum(end)−cum(prev) works.
   const piPurchaseCum = new Map<string, Map<string, number>>();

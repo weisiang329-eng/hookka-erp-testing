@@ -65,6 +65,20 @@ const PO_MODEL = "claude-sonnet-4-6";
 const BOUNDARY_MODEL = "claude-haiku-4-5-20251001";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 
+// Hard ceiling on a single Anthropic call. WITHOUT this, a request the model
+// never finishes (a page it chokes on, an upstream stall) hangs the fetch
+// forever — the scan_queue row stays 'processing' and is never reclaimed
+// (other workers only pick up 'queued'), so that page "loads for >30 min and
+// never comes out" (owner 2026-06-30). On timeout the AbortSignal makes fetch
+// throw → the queue worker's try/catch marks the row 'failed' (retriable) +
+// frees its slot, instead of the page hanging indefinitely.
+//   • Extractors: 150s — a dense multi-page chunk on Haiku/Sonnet can be slow,
+//     but the client modal already aborts its own request at 180s, so keep the
+//     server call under that.
+//   • Boundary detector: 60s — it returns only page ranges, never line items.
+const EXTRACT_TIMEOUT_MS = 150_000;
+const BOUNDARY_TIMEOUT_MS = 60_000;
+
 // Maps to a Cloudflare D1Database-shaped surface — the SupabaseAdapter the
 // worker installs satisfies this. Routes type their `c.var.DB` as
 // `D1Database` and pass through; we declare a structural alias here so the
@@ -865,6 +879,7 @@ async function runSupplierExtract(
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
+      signal: AbortSignal.timeout(EXTRACT_TIMEOUT_MS),
       body: JSON.stringify({
         model: SUPPLIER_MODEL,
         max_tokens: 8192,
@@ -1061,6 +1076,7 @@ async function runPoExtract(
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
+      signal: AbortSignal.timeout(EXTRACT_TIMEOUT_MS),
       body: JSON.stringify({
         model: PO_MODEL,
         max_tokens: 8192,
@@ -1253,6 +1269,7 @@ export async function detectSupplierDocBoundaries(
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
+      signal: AbortSignal.timeout(BOUNDARY_TIMEOUT_MS),
       body: JSON.stringify({
         model: BOUNDARY_MODEL,
         max_tokens: 4096,

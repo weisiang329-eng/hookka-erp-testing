@@ -51,6 +51,11 @@ const app = new Hono<Env>();
 
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const STUCK_MS = 5 * 60 * 1000;
+// How many OCR attempts a single row gets before it's declared 'failed'.
+// A timed-out / dead-worker row is re-queued for another go (the claim bumps
+// `attempts`); only after this many misses does it surface as failed so a
+// genuinely-bad page stops re-running (and re-billing the AI) forever.
+const MAX_OCR_ATTEMPTS = 3;
 
 // ---------- IDs --------------------------------------------------------
 function genBatchId(): string {
@@ -114,6 +119,7 @@ async function ensureScanQueueTable(
            status          TEXT NOT NULL,
            raw_json        JSONB,
            error           TEXT,
+           attempts        INTEGER NOT NULL DEFAULT 0,
            cache_source_id TEXT,
            created_by      TEXT,
            created_at      TEXT NOT NULL,
@@ -159,6 +165,16 @@ async function ensureScanQueueTable(
         "ALTER TABLE scan_queue ADD COLUMN IF NOT EXISTS consumed_doc_idxs JSONB DEFAULT '[]'::jsonb",
       )
       .run();
+    // Per-row OCR attempt counter (2026-06-30). A transient failure (AI call
+    // timed out, worker isolate killed mid-OCR) re-queues the row for an
+    // automatic retry instead of failing it on the first miss; after
+    // MAX_OCR_ATTEMPTS the row is marked 'failed' so a genuinely bad page
+    // surfaces to the operator instead of re-running (and re-billing) forever.
+    await db
+      .prepare(
+        "ALTER TABLE scan_queue ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0",
+      )
+      .run();
     await db
       .prepare(
         "CREATE INDEX IF NOT EXISTS scan_queue_pending_idx ON scan_queue (created_by, created_at) WHERE consumed_at IS NULL",
@@ -187,6 +203,7 @@ type ScanQueueRow = {
   status: "queued" | "processing" | "done" | "failed" | "cached" | "split";
   rawJson: unknown | null;
   error: string | null;
+  attempts: number;
   cacheSourceId: string | null;
   createdBy: string | null;
   createdAt: string;
@@ -251,6 +268,7 @@ function hydrateRow(r: Record<string, unknown>): ScanQueueRow {
     status: String(r.status ?? "queued") as ScanQueueRow["status"],
     rawJson,
     error: (r.error ?? null) as string | null,
+    attempts: Number(r.attempts ?? 0),
     cacheSourceId: (r.cacheSourceId ?? r.cache_source_id ?? null) as
       | string
       | null,
@@ -325,7 +343,9 @@ async function processOneAtATime(
       const upd = await db
         .prepare(
           `UPDATE scan_queue
-              SET status = 'processing', started_at = ?
+              SET status = 'processing',
+                  started_at = ?,
+                  attempts = COALESCE(attempts, 0) + 1
             WHERE id = ? AND status = 'queued'`,
         )
         .bind(nowIso, next.id)
@@ -335,6 +355,11 @@ async function processOneAtATime(
       console.error("[scan-queue] claim failed:", (e as Error).message);
     }
     if (!claimed) continue;
+
+    // Which attempt this is (1-based). The claim above bumped the stored
+    // counter; `next` was read pre-bump, so add 1. Drives the retry-vs-fail
+    // decision in the result writer below.
+    const attemptNo = (next.attempts ?? 0) + 1;
 
     let result: { ok: true; data: unknown } | { ok: false; error: string };
     // When the row was auto-split into N child rows, set this so the result
@@ -589,7 +614,29 @@ async function processOneAtATime(
           )
           .bind(JSON.stringify(result.data), completedAt, next.id)
           .run();
+      } else if (attemptNo < MAX_OCR_ATTEMPTS) {
+        // Transient miss (AI call timed out, bad page, isolate hiccup) — put
+        // the row back in the queue for another automatic go instead of
+        // failing it on the first try. started_at=NULL so a sweeper never
+        // treats the re-queued row as stuck; the next claim bumps attempts.
+        // The loop re-polls 'queued' rows, so this same worker picks it up
+        // again shortly.
+        await db
+          .prepare(
+            `UPDATE scan_queue
+                SET status = 'queued',
+                    started_at = NULL,
+                    error = ?
+              WHERE id = ?`,
+          )
+          .bind(
+            `retry ${attemptNo}/${MAX_OCR_ATTEMPTS}: ${result.error.slice(0, 1900)}`,
+            next.id,
+          )
+          .run();
       } else {
+        // Out of retries — surface it to the operator (the modal shows a
+        // Retry button on 'failed' rows for a manual re-run).
         await db
           .prepare(
             `UPDATE scan_queue
@@ -598,7 +645,11 @@ async function processOneAtATime(
                     completed_at = ?
               WHERE id = ?`,
           )
-          .bind(result.error.slice(0, 2000), completedAt, next.id)
+          .bind(
+            `failed after ${MAX_OCR_ATTEMPTS} attempts: ${result.error.slice(0, 1900)}`,
+            completedAt,
+            next.id,
+          )
           .run();
       }
     } catch (e) {
@@ -803,6 +854,10 @@ app.get("/batch/:batchId", async (c) => {
   const batchId = c.req.param("batchId");
   const orgId = getOrgId(c);
 
+  // Self-heal before reading: re-queue + re-kick any row stuck 'processing'
+  // past STUCK_MS so a dead-worker page recovers on this poll tick.
+  await sweepStuckBatch(c.var.DB, c.env, c.executionCtx, batchId);
+
   let rows;
   try {
     rows = await c.var.DB.prepare(
@@ -928,6 +983,10 @@ app.get("/pending", async (c) => {
   if (!latest?.batchId) {
     return c.json({ success: true, data: { batchId: null, items: [], summary: null } });
   }
+
+  // Self-heal the resumed batch: re-queue + re-kick any row stuck 'processing'
+  // past STUCK_MS (see sweepStuckBatch) before returning it to the modal.
+  await sweepStuckBatch(c.var.DB, c.env, c.executionCtx, latest.batchId);
 
   // Now pull every row for that batch (including ones already consumed, so
   // the modal can show the full audit). The modal filters out consumed
@@ -1154,7 +1213,7 @@ app.post("/:id/retry", async (c) => {
     await c.var.DB.prepare(
       `UPDATE scan_queue
           SET status = 'queued', started_at = NULL, completed_at = NULL,
-              error = NULL
+              error = NULL, attempts = 0
         WHERE id = ?`,
     )
       .bind(id)
@@ -1329,6 +1388,26 @@ export async function sweepStuckScans(
 ): Promise<{ requeued: number; batches: string[] }> {
   await ensureScanQueueTable(db);
   const cutoff = new Date(Date.now() - STUCK_MS).toISOString();
+  const nowIso = new Date().toISOString();
+  try {
+    // Exhausted stuck rows (worker died MAX_OCR_ATTEMPTS times) → fail them so
+    // they stop being re-kicked forever.
+    await db
+      .prepare(
+        `UPDATE scan_queue
+            SET status = 'failed',
+                completed_at = ?,
+                error = COALESCE(error, 'worker died before completing OCR')
+          WHERE status = 'processing'
+            AND (started_at IS NULL OR started_at < ?)
+            AND COALESCE(attempts, 0) >= ?`,
+      )
+      .bind(nowIso, cutoff, MAX_OCR_ATTEMPTS)
+      .run();
+  } catch (e) {
+    console.error("[scan-queue sweep] fail-exhausted failed:", (e as Error).message);
+  }
+  // Re-queue the still-retriable stuck rows and re-kick their batches.
   let stuck;
   try {
     stuck = await db
@@ -1336,9 +1415,10 @@ export async function sweepStuckScans(
         `SELECT id, batch_id AS "batchId"
            FROM scan_queue
           WHERE status = 'processing'
-            AND (started_at IS NULL OR started_at < ?)`,
+            AND (started_at IS NULL OR started_at < ?)
+            AND COALESCE(attempts, 0) < ?`,
       )
-      .bind(cutoff)
+      .bind(cutoff, MAX_OCR_ATTEMPTS)
       .all<{ id: string; batchId: string }>();
   } catch (e) {
     console.error("[scan-queue sweep] select failed:", (e as Error).message);
@@ -1368,6 +1448,64 @@ export async function sweepStuckScans(
     ctx?.waitUntil(processBatch(db, env, bId));
   }
   return { requeued: rows.length, batches: batchIds };
+}
+
+// ---------------------------------------------------------------------------
+// sweepStuckBatch — scoped self-heal for a SINGLE batch, called from the poll
+// endpoints (/batch/:batchId, /pending) so an open modal recovers a stuck row
+// on its very next poll tick, WITHOUT depending on an external cron. This is
+// the primary recovery path on Cloudflare Pages, which can't schedule the
+// CRON_SECRET sweeper (see wrangler.toml — Pages has no [triggers] crons).
+//
+// Re-queues any 'processing' row in this batch older than STUCK_MS (its worker
+// died / the isolate was killed mid-OCR) and re-kicks processBatch only if
+// something was actually freed. Best-effort: a sweep failure is swallowed so
+// it can never break the poll response the modal depends on.
+// ---------------------------------------------------------------------------
+async function sweepStuckBatch(
+  db: Env["Variables"]["DB"],
+  env: Env["Bindings"],
+  ctx: ExecutionContext | undefined,
+  batchId: string,
+): Promise<void> {
+  const cutoff = new Date(Date.now() - STUCK_MS).toISOString();
+  const nowIso = new Date().toISOString();
+  try {
+    // Exhausted stuck rows — their worker died MAX_OCR_ATTEMPTS times over
+    // (the caught-failure retry path never runs when the isolate is killed,
+    // so the cap has to be enforced here too). Give up instead of re-kicking
+    // forever.
+    await db
+      .prepare(
+        `UPDATE scan_queue
+            SET status = 'failed',
+                completed_at = ?,
+                error = COALESCE(error, 'worker died before completing OCR')
+          WHERE batch_id = ?
+            AND status = 'processing'
+            AND (started_at IS NULL OR started_at < ?)
+            AND COALESCE(attempts, 0) >= ?`,
+      )
+      .bind(nowIso, batchId, cutoff, MAX_OCR_ATTEMPTS)
+      .run();
+    // Still-retriable stuck rows → back to the queue for another go.
+    const upd = await db
+      .prepare(
+        `UPDATE scan_queue
+            SET status = 'queued', started_at = NULL
+          WHERE batch_id = ?
+            AND status = 'processing'
+            AND (started_at IS NULL OR started_at < ?)
+            AND COALESCE(attempts, 0) < ?`,
+      )
+      .bind(batchId, cutoff, MAX_OCR_ATTEMPTS)
+      .run();
+    if ((upd.meta?.changes ?? 0) > 0) {
+      ctx?.waitUntil(processBatch(db, env, batchId));
+    }
+  } catch (e) {
+    console.error("[scan-queue] batch sweep failed:", (e as Error).message);
+  }
 }
 
 export default app;

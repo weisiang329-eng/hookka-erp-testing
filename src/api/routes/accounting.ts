@@ -2130,7 +2130,7 @@ app.post("/purchase-credit-notes/:id/void", async (c) => {
           `UPDATE purchase_invoices
              SET paid_amount_sen = GREATEST(0, paid_amount_sen - ?),
                  status = CASE
-                   WHEN paid_amount_sen - ? <= 0 THEN 'APPROVED'
+                   WHEN paid_amount_sen - ? <= 0 THEN 'CONFIRMED'
                    WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID'
                    ELSE 'PAID'
                  END
@@ -2198,13 +2198,13 @@ app.get("/ap-control", async (c) => {
     piRes = await c.var.DB.prepare(
       `SELECT supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
-        WHERE status IN ('APPROVED', 'PARTIAL_PAID')`,
+        WHERE status IN ('CONFIRMED', 'APPROVED', 'PARTIAL_PAID')`,
     ).all<PiAgingRow>();
   } catch {
     piRes = await c.var.DB.prepare(
       `SELECT supplierId, supplierName, piNo, amountSen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
-        WHERE status = 'APPROVED'`,
+        WHERE status IN ('CONFIRMED', 'APPROVED')`,
     ).all<PiAgingRow>();
   }
   // Posted purchase CNs reduce what we owe (the control account already absorbed
@@ -2336,7 +2336,7 @@ app.get("/supplier-statement", async (c) => {
       // amount is a credit here, the payment a debit; omitting it would drop
       // the credit leg and unbalance the statement). Matches /creditor-ledger.
       `SELECT piNo, invoiceDate, amountSen, status, isOpening FROM purchase_invoices
-        WHERE supplierId = ? AND status IN ('APPROVED','PARTIAL_PAID','PAID')`,
+        WHERE supplierId = ? AND status IN ('CONFIRMED','APPROVED','PARTIAL_PAID','PAID')`,
     )
       .bind(supplierId)
       .all<{ piNo: string; invoiceDate: string; amountSen: number; status: string; isOpening: number | null }>(),
@@ -2484,7 +2484,7 @@ app.get("/creditor-ledger", async (c) => {
   const to = c.req.query("to") || "9999-12-31";
   const [supRes, piRes, payRes, pcnRes] = await Promise.all([
     c.var.DB.prepare("SELECT id, name, code FROM suppliers").all<{ id: string; name: string; code: string | null }>(),
-    c.var.DB.prepare(`SELECT supplierId, piNo, invoiceDate, amountSen, isOpening FROM purchase_invoices WHERE status IN ('APPROVED','PARTIAL_PAID','PAID')`).all<{ supplierId: string; piNo: string; invoiceDate: string; amountSen: number; isOpening: number | null }>(),
+    c.var.DB.prepare(`SELECT supplierId, piNo, invoiceDate, amountSen, isOpening FROM purchase_invoices WHERE status IN ('CONFIRMED','APPROVED','PARTIAL_PAID','PAID')`).all<{ supplierId: string; piNo: string; invoiceDate: string; amountSen: number; isOpening: number | null }>(),
     c.var.DB.prepare(`SELECT supplierId, paymentNo, date, amountSen FROM supplier_payments WHERE COALESCE(method,'') <> 'CREDIT_NOTE' AND paymentNo NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'supplier_payment' AND state IN ('VOID','DELETED'))`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
     c.var.DB.prepare(`SELECT supplierId, noteNumber, date, totalAmount FROM purchase_credit_notes WHERE status = 'POSTED'`).all<{ supplierId: string; noteNumber: string; date: string; totalAmount: number }>(),
   ]);
@@ -7375,7 +7375,7 @@ app.get("/contra/candidates", async (c) => {
   if (supplierId) {
     const pis = await c.var.DB.prepare(
       `SELECT id, piNo, invoiceDate, amountSen FROM purchase_invoices
-        WHERE supplierId = ? AND status = 'APPROVED'
+        WHERE supplierId = ? AND status IN ('CONFIRMED', 'APPROVED')
         ORDER BY invoiceDate, piNo`,
     )
       .bind(supplierId)

@@ -34,6 +34,22 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-30-002 — Confirmed purchase invoices vanished from the Creditor Ledger / AP aging / supplier statement (stale `'APPROVED'` status filters after the PI status model collapsed APPROVED→CONFIRMED)
+
+🟢 **Fixed** · `data-migration` (status-model drift) · owner-reported
+
+**Symptom (owner, live prod):** the Creditor Ledger (Purchase Ledger) showed **"No activity"** despite 116 CONFIRMED purchase invoices; AP aging and the supplier statement were likewise empty. The GL/P&L were NOT affected (CONFIRMED PIs do post journal entries) — this was purely the AP subledger reports.
+
+**Root cause:** the PI lifecycle was collapsed to DRAFT→CONFIRMED→PAID on 2026-06-29/30 (`purchase-invoices.ts` `ensurePiMigrations`: `UPDATE purchase_invoices SET status='CONFIRMED' WHERE status IN ('PENDING_APPROVAL','APPROVED')`), CONFIRMED replacing APPROVED. But the AP-subledger reads — which query `purchase_invoices` directly — still filtered `status IN ('APPROVED','PARTIAL_PAID','PAID')` / `status = 'APPROVED'`, none of which match the now-CONFIRMED rows → every confirmed PI silently excluded. The migration changed the data but didn't sweep the readers. (`purchase_invoices` is a pure AP subledger; GL/P&L/trial-balance read only `ledger_journal_entries`, so they were unaffected — confirmed via the PI posting at `purchase-invoices.ts:1505`, which fires on the CONFIRMED transition, DR purchase/inventory CR 400-0000, idempotent.)
+
+**Fix:** added `'CONFIRMED'` to every PI-status read (kept the legacy values for un-migrated rows): creditor ledger (`accounting.ts:2487`), supplier statement (`:2339`), AP aging + fallback (`:2201`, `:2207`), supplier panel / opening-reversal (`:7378`). Changed the three payment-reversal writes that reset a fully-unpaid PI back to the legacy `'APPROVED'` → `'CONFIRMED'` (`accounting.ts:2133`, `supplier-payments.ts:484`, `:556`). **Held back** `accounting.ts:5138` (the PI-weighted-average receipt cost in `loadMaterialCostData`, line 5177-5193) — adding CONFIRMED there would revalue GRN receipts at invoiced PI prices and move the just-verified material P&L; that's a separate owner decision, flagged.
+
+**Verified:** tsc clean; eslint clean; `npm test` 1279/1280 (1 pre-existing skip). Owner to confirm the creditor ledger now lists the CONFIRMED PIs on prod.
+
+**Follow-up:** the legacy values are still inserted by opening-balance / bulk-import (`accounting.ts:9315`, `import-completion.ts:8506`) relying on `ensurePiMigrations` to backfill, and the reads now tolerate both. A shared `PI_OWED_STATUSES` constant (single source of truth) would prevent this status drift from recurring.
+
+---
+
 ## BUG-2026-06-30-001 — Historical P&L months (pre-opening Apr'25–Apr'26) all showed 0 despite 39 `pnl_historical` rows loaded — adapter camelCased `window_json` → `windowJson`, reader used snake_case → every row silently skipped
 
 🟢 **Fixed** · `data-migration` (camelCase/rename-map class — recurs, see BUG-2026-06-10-001 / -06-18-001/-002) · owner-reported

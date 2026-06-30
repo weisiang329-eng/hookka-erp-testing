@@ -481,7 +481,7 @@ async function buildSupplierPaymentLifecycle(
               `UPDATE purchase_invoices
                  SET paid_amount_sen = GREATEST(0, paid_amount_sen - ?),
                      status = CASE
-                       WHEN paid_amount_sen - ? <= 0 THEN 'APPROVED'
+                       WHEN paid_amount_sen - ? <= 0 THEN 'CONFIRMED'
                        WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID'
                        ELSE 'PAID'
                      END
@@ -553,7 +553,7 @@ async function buildSupplierPaymentRestate(
       db
         .prepare(
           `UPDATE purchase_invoices SET paid_amount_sen = GREATEST(0, paid_amount_sen - ?),
-             status = CASE WHEN paid_amount_sen - ? <= 0 THEN 'APPROVED' WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID' ELSE 'PAID' END
+             status = CASE WHEN paid_amount_sen - ? <= 0 THEN 'CONFIRMED' WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID' ELSE 'PAID' END
            WHERE id = ?`,
         )
         .bind(b, b, b, r.purchaseInvoiceId),

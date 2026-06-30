@@ -3539,6 +3539,49 @@ app.put("/:id", async (c) => {
       // OCR back-door closure (BUG-001 fix): catalog wins on every PUT just
       // like POST. Loaded once here, reused for every line via snapItemToCatalog.
       const productByCodeForPut = await loadProductCatalog(c.var.DB);
+      // Pre-resolve the two per-line price lookups ONCE per distinct product
+      // instead of per line (was a 3N query storm on a multi-line SO edit).
+      // Safe-by-construction: customerId + priceAsOf are constant for this
+      // request, so resolveCustomerPriceAsOf(productId) is memoizable, and the
+      // products read is the same rows via one WHERE id IN (...). Values are
+      // byte-identical to the per-line path — only the query count changes.
+      const uniqProductIds = [
+        ...new Set(
+          rawItems.map((it) => (it.productId as string) || "").filter(Boolean),
+        ),
+      ];
+      const productMap = new Map<
+        string,
+        { basePriceSen: number | null; seatHeightPrices: unknown }
+      >();
+      if (uniqProductIds.length) {
+        const ph = uniqProductIds.map(() => "?").join(", ");
+        const prodRows = await c.var.DB.prepare(
+          `SELECT * FROM products WHERE id IN (${ph})`,
+        )
+          .bind(...uniqProductIds)
+          .all<{ id: string; basePriceSen: number | null; seatHeightPrices: unknown }>();
+        for (const r of prodRows.results ?? []) productMap.set(r.id, r);
+      }
+      const customerPriceMap = new Map<
+        string,
+        Awaited<ReturnType<typeof resolveCustomerPriceAsOf>>
+      >();
+      if (customerId && !mergedIsServiceOrder && uniqProductIds.length) {
+        await Promise.all(
+          uniqProductIds.map(async (pid) => {
+            try {
+              customerPriceMap.set(
+                pid,
+                await resolveCustomerPriceAsOf(c.var.DB, pid, customerId, priceAsOf),
+              );
+            } catch {
+              customerPriceMap.set(pid, null);
+            }
+          }),
+        );
+      }
+
       const newItems = await Promise.all(rawItems.map(async (item, idx) => {
         const incomingBase = Number(item.basePriceSen) || 0;
         // SOFA lines ALWAYS re-derive their base from the price list, ignoring
@@ -3569,12 +3612,7 @@ app.put("/:id", async (c) => {
         const productIdForLookup = (item.productId as string) || "";
         if (!mergedIsServiceOrder && basePriceSen === 0 && productIdForLookup && customerId) {
           try {
-            const cp = await resolveCustomerPriceAsOf(
-              c.var.DB,
-              productIdForLookup,
-              customerId,
-              priceAsOf,
-            );
+            const cp = customerPriceMap.get(productIdForLookup) ?? null;
             if (cp) {
               if (cp.seatHeightPrices && cp.seatHeightPrices.length > 0 && seatHeightForPrice) {
                 const shp = cp.seatHeightPrices.find(
@@ -3593,14 +3631,7 @@ app.put("/:id", async (c) => {
         // whose customer price didn't resolve silently zeroed basePriceSen.
         if (!mergedIsServiceOrder && basePriceSen === 0 && productIdForLookup) {
           try {
-            const prod = await c.var.DB.prepare(
-              "SELECT * FROM products WHERE id = ?",
-            )
-              .bind(productIdForLookup)
-              .first<{
-                basePriceSen: number | null;
-                seatHeightPrices: unknown;
-              }>();
+            const prod = productMap.get(productIdForLookup) ?? null;
             if (prod) {
               let shp: Array<{ height: string; priceSen: number }> = [];
               if (Array.isArray(prod.seatHeightPrices)) {

@@ -991,15 +991,21 @@ app.get("/", async (c) => {
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const grnsSql = `SELECT * FROM grns ${where} ORDER BY grnNumber DESC`;
 
-  const [grnsRes, itemsRes] = await Promise.all([
-    c.var.DB.prepare(grnsSql)
-      .bind(...binds)
-      .all<GRNRow>(),
-    c.var.DB.prepare("SELECT * FROM grn_items").all<GRNItemRow>(),
-  ]);
-  const data = (grnsRes.results ?? []).map((g) =>
-    rowToGRN(g, itemsRes.results ?? []),
-  );
+  const grnsRes = await c.var.DB.prepare(grnsSql).bind(...binds).all<GRNRow>();
+  const grnRows = grnsRes.results ?? [];
+  // Scope grn_items to just the GRNs we return — the old `SELECT * FROM
+  // grn_items` loaded the ENTIRE (forever-growing) items table on every list
+  // render. Postgres rejects "IN ()", so guard the empty case.
+  const grnIds = grnRows.map((g) => g.id);
+  const itemsRes = grnIds.length
+    ? await c.var.DB
+        .prepare(
+          `SELECT * FROM grn_items WHERE grnId IN (${grnIds.map(() => "?").join(", ")})`,
+        )
+        .bind(...grnIds)
+        .all<GRNItemRow>()
+    : { results: [] as GRNItemRow[] };
+  const data = grnRows.map((g) => rowToGRN(g, itemsRes.results ?? []));
   return c.json({ success: true, data });
 });
 

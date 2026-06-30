@@ -115,13 +115,28 @@ app.get("/", async (c) => {
   // api/lib/cn-value.ts. These ADD fields only; existing columns
   // (status / M³ / carrier / items) are untouched.
   const orgId = getOrgId(c);
-  const [notesRes, itemsRes, valueMap, custRefMap] = await Promise.all([
-    c.var.DB.prepare(listSql).bind(...listParams).all<ConsignmentNoteRow>(),
-    c.var.DB.prepare("SELECT * FROM consignment_items").all<ConsignmentItemRow>(),
+  const notesRes = await c.var.DB
+    .prepare(listSql)
+    .bind(...listParams)
+    .all<ConsignmentNoteRow>();
+  const noteRows = notesRes.results ?? [];
+  // Scope items to the page's notes — the old `SELECT * FROM consignment_items`
+  // loaded the whole table and defeated the notes pagination above.
+  // valueMap/custRefMap stay parallel with the (now scoped) items read.
+  const noteIds = noteRows.map((r) => r.id);
+  const [itemsRes, valueMap, custRefMap] = await Promise.all([
+    noteIds.length
+      ? c.var.DB
+          .prepare(
+            `SELECT * FROM consignment_items WHERE consignmentNoteId IN (${noteIds.map(() => "?").join(", ")})`,
+          )
+          .bind(...noteIds)
+          .all<ConsignmentItemRow>()
+      : Promise.resolve({ results: [] as ConsignmentItemRow[] }),
     loadCnValueMap(c.var.DB, orgId),
     loadCnCustomerRefMap(c.var.DB, orgId),
   ]);
-  const data = (notesRes.results ?? []).map((r) => {
+  const data = noteRows.map((r) => {
     const ref = custRefMap.get(r.id);
     return {
       ...rowToConsignmentNote(r, itemsRes.results ?? []),

@@ -34,6 +34,53 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-30-003 — Scan/OCR: some pages of a multi-page document "loaded forever" (>30 min) and never came out — stuck `scan_queue` rows with no timeout, no retry, and no recovery
+
+`scan-ocr` · 🟢 **Fixed** (code shipped — live-verify pending)
+
+**Symptom (owner 2026-06-30):** scanning a ~10-page supplier document, 7 pages
+extracted fine but the remaining 3 spun forever (>30 min) and never produced a
+result. Which pages stuck was effectively random (not content-driven).
+
+**Root cause (3 compounding gaps):**
+1. **No server-side timeout on the Anthropic call.** `scan-engine.ts` `fetch`ed
+   the extractor/boundary calls with no AbortSignal — a request the model never
+   finished hung the fetch indefinitely, so the `scan_queue` row stayed
+   `'processing'`.
+2. **Stuck `'processing'` rows were never reclaimed.** The 6 parallel queue
+   workers only claim `status='queued'` (`scan-queue.ts` `processOneAtATime`);
+   a row orphaned in `'processing'` (AI hang OR Cloudflare killed the isolate
+   mid-OCR) had no path back.
+3. **The recovery sweeper was never triggered.** `sweepStuckScans` (requeues
+   `'processing'` > 5 min) is only reachable via `/api/internal/scan-queue-sweep`,
+   which needs a cron — but Cloudflare Pages can't schedule one (`wrangler.toml`
+   documents this) and no GitHub Action called it. So stuck = stuck forever.
+
+**Fix:**
+- **Hard timeout** on every Anthropic call (`scan-engine.ts`): extractors 150s,
+  boundary detector 60s, via `AbortSignal.timeout`. A hang now throws → the queue
+  worker's catch marks the row failed/retriable instead of hanging.
+- **3-strike auto-retry** (`scan-queue.ts`): new `attempts` column (runtime
+  self-apply + CREATE TABLE). The claim bumps `attempts`; a caught failure
+  re-queues the row (`'queued'`) for another automatic go while `attemptNo <
+  MAX_OCR_ATTEMPTS` (3), else marks `'failed'`. Manual Retry resets `attempts=0`.
+- **Self-heal on poll** (`scan-queue.ts` `sweepStuckBatch`): the `/batch/:batchId`
+  and `/pending` poll endpoints now re-queue + re-kick any `'processing'` row
+  stuck > 5 min — so an open modal recovers a dead-worker page within one poll
+  tick, with NO external cron. Both sweepers respect the 3-attempt cap (fail the
+  exhausted, requeue the rest) so a genuinely-bad page stops re-running forever.
+
+**Why pages failed at all:** mostly transient (worker killed / API hiccup) — the
+page was fine, just orphaned with nothing to rescue it → auto-retry resolves it.
+A minority are deterministic (too many line items → 8192-token output truncated →
+JSON parse fail; poor scan quality) — those surface as `'failed'` after 3 tries
+with the reason in the row's `error` (`retry N/3:` / `failed after N attempts:`).
+
+**Verify:** build:strict (app+base) + eslint clean. Live-verify pending: scan a
+real 10+ page doc on prod, confirm no page hangs; inspect any failed row's error.
+
+---
+
 ## BUG-2026-06-30-002 — Confirmed purchase invoices vanished from the Creditor Ledger / AP aging / supplier statement (stale `'APPROVED'` status filters after the PI status model collapsed APPROVED→CONFIRMED)
 
 🟢 **Fixed** · `data-migration` (status-model drift) · owner-reported

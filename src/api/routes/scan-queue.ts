@@ -272,7 +272,27 @@ function hydrateRow(r: Record<string, unknown>): ScanQueueRow {
 // 30K tokens/min tier-1 budget. The batch worker iterates queued rows in
 // insertion order; the cron sweeper handles re-kicking stuck batches.
 // ---------------------------------------------------------------------------
+// Owner ruling 2026-06-30: auto-split already chops a 130-page PDF into ~30
+// children, but a SINGLE serial worker still processed them one-at-a-time
+// (30 children × ~30-60s each = 15-30 min wait). Run N processOneRow loops
+// in parallel — each claims a queued row, processes it, loops for the next.
+// 6 concurrent fits comfortably under Cloudflare Workers memory (each row
+// holds ~1-2MB bytes + a Sonnet call's in-flight state). The atomic UPDATE
+// claim guards against two workers grabbing the same row.
+const PROCESS_BATCH_CONCURRENCY = 6;
+
 async function processBatch(
+  db: Env["Variables"]["DB"],
+  env: Env["Bindings"],
+  batchId: string,
+): Promise<void> {
+  const workers = Array.from({ length: PROCESS_BATCH_CONCURRENCY }, () =>
+    processOneAtATime(db, env, batchId),
+  );
+  await Promise.allSettled(workers);
+}
+
+async function processOneAtATime(
   db: Env["Variables"]["DB"],
   env: Env["Bindings"],
   batchId: string,

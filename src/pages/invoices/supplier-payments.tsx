@@ -182,7 +182,7 @@ export default function SupplierPaymentsPage() {
     setLoadingPIs(true);
     // In edit mode include PAID PIs so the ones this payment settled still show;
     // their paid amount is rolled back for display so they're re-allocatable.
-    const status = editLines ? "APPROVED,PARTIAL_PAID,PAID" : "APPROVED,PARTIAL_PAID";
+    const status = editLines ? "CONFIRMED,APPROVED,PARTIAL_PAID,PAID" : "CONFIRMED,APPROVED,PARTIAL_PAID";
     fetch(`/api/purchase-invoices?supplierId=${encodeURIComponent(supplierId)}&status=${status}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: OpenPI[] } | OpenPI[]>)
       .then((j) => {

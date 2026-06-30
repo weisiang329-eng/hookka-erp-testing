@@ -3465,7 +3465,7 @@ function SupplierDiscountTab() {
     setAllocRows({});
     if (!id) { setOpenPIs([]); return; }
     setLoadingPIs(true);
-    fetch(`/api/purchase-invoices?supplierId=${encodeURIComponent(id)}&status=APPROVED,PARTIAL_PAID`)
+    fetch(`/api/purchase-invoices?supplierId=${encodeURIComponent(id)}&status=CONFIRMED,APPROVED,PARTIAL_PAID`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: SDOpenPI[] } | SDOpenPI[]>)
       .then((j) => {
         const raw = Array.isArray(j) ? j : j?.success ? j.data ?? [] : [];

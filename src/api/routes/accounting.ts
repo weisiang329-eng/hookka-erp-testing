@@ -1983,7 +1983,7 @@ app.put("/purchase-credit-notes/:id", async (c) => {
           return c.json({ success: false, error: `Invoice ${a.piId} is not this supplier's` }, 400);
         }
         const st = String(pi.status ?? "");
-        if (st !== "APPROVED" && st !== "PARTIAL_PAID") {
+        if (st !== "CONFIRMED" && st !== "APPROVED" && st !== "PARTIAL_PAID") {
           return c.json({ success: false, error: `Invoice ${a.piId} is not in a payable status` }, 400);
         }
         const amount = Number(pi.amountSen ?? pi.amount_sen) || 0;
@@ -7425,8 +7425,8 @@ app.post("/contra", async (c) => {
     if (pis.length !== piIds.length) {
       return c.json({ success: false, error: "Some PIs were not found" }, 400);
     }
-    if (pis.some((p) => p.status !== "APPROVED")) {
-      return c.json({ success: false, error: "Only APPROVED (unpaid) PIs can be contra'd" }, 400);
+    if (pis.some((p) => p.status !== "CONFIRMED" && p.status !== "APPROVED")) {
+      return c.json({ success: false, error: "Only CONFIRMED/APPROVED (unpaid) PIs can be contra'd" }, 400);
     }
     const totalSen = pis.reduce((s, p) => s + (Number(p.amountSen) || 0), 0);
     if (totalSen <= 0) {

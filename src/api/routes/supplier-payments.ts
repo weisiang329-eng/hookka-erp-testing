@@ -252,7 +252,7 @@ app.post("/", async (c) => {
           .first<PiRow>();
         if (
           !pi ||
-          (pi.status !== "APPROVED" && pi.status !== "PARTIAL_PAID")
+          (pi.status !== "CONFIRMED" && pi.status !== "APPROVED" && pi.status !== "PARTIAL_PAID")
         ) {
           return c.json(
             {
@@ -576,7 +576,7 @@ async function buildSupplierPaymentRestate(
       )
       .bind(piId)
       .first<PiRow>();
-    if (!pi || (pi.status !== "APPROVED" && pi.status !== "PARTIAL_PAID")) {
+    if (!pi || (pi.status !== "CONFIRMED" && pi.status !== "APPROVED" && pi.status !== "PARTIAL_PAID")) {
       throw new Error(`PI ${piId} not found or not in a payable status (APPROVED / PARTIAL_PAID)`);
     }
     const outstandingBookedSen = (Number(pi.amount_sen) || 0) - (Number(pi.paid_amount_sen) || 0);

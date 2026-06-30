@@ -343,7 +343,11 @@ test("createCnPackingListCore: a CN already in another list is rejected (at most
 test("createCnPackingListCore: CNs free of any list create cleanly alongside an unrelated existing list", async () => {
   const seed = twoCnSeed();
   // An existing list holds some OTHER CN; cn-1 + cn-2 are still free.
-  seed.existingLists = [{ packingNo: "CPL-2606-001", cnIds: ["cn-other"] }];
+  // Seed in the CURRENT month: genNextPackingNo resets the running number each
+  // month, so a hard-coded prior-month record makes the next number -001 (not
+  // -002) on a month rollover (the 2026-07-01 flake). Same-month → next is -002.
+  const yymm = `${String(new Date().getFullYear()).slice(2)}${String(new Date().getMonth() + 1).padStart(2, "0")}`;
+  seed.existingLists = [{ packingNo: `CPL-${yymm}-001`, cnIds: ["cn-other"] }];
   const { db, inserted } = makeDb(seed);
   const res = await createCnPackingListCore(makeCtx(db), "hookka", {
     cnIds: ["cn-1", "cn-2"],

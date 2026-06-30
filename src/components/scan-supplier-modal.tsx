@@ -1510,8 +1510,14 @@ function CreatePIWizard({
 
     const createdIds: string[] = [];
 
-    await Promise.all(
-      includedCards.map(async (card) => {
+    // Create SEQUENTIALLY, not in parallel: piNo is auto-generated server-side
+    // as (current max + 1), so N parallel POSTs read the SAME max → compute the
+    // SAME PI number → all but one collide on the unique piNo and fail. That is
+    // the "20+ cards but only 8 created" bug (owner 2026-06-30). One-at-a-time
+    // gives each PI a fresh number. The IIFE preserves the body's early
+    // `return`s as skip-this-card (a bare `for` would abort the whole loop).
+    for (const card of includedCards) {
+      await (async () => {
         try {
           // Fire-and-forget gold/correction sample save (best-effort).
           if (card.sampleId) {
@@ -1672,8 +1678,8 @@ function CreatePIWizard({
             createError: err instanceof Error ? err.message : "Network error",
           });
         }
-      }),
-    );
+      })();
+    }
 
     // Consume queue rows ONLY when every card produced from that row is
     // successfully created. A single uploaded PDF can carry N supplier docs
@@ -3630,8 +3636,11 @@ function CreateGRNWizard({
 
     const createdIds: string[] = [];
 
-    await Promise.all(
-      includedCards.map(async (card) => {
+    // Sequential, not parallel — same reason as the PI create above: the
+    // doc number is auto-generated as (max + 1), so parallel POSTs collide on
+    // the unique number and all but one fail. One-at-a-time avoids that.
+    for (const card of includedCards) {
+      await (async () => {
         try {
           if (card.sampleId) {
             const edited =
@@ -3727,8 +3736,8 @@ function CreateGRNWizard({
             createError: err instanceof Error ? err.message : "Network error",
           });
         }
-      }),
-    );
+      })();
+    }
 
     // Consume queue rows ONLY when every card from that row was saved (a row
     // can fan out to N cards via rawJson.docs[]). Mirrors CreatePIWizard —

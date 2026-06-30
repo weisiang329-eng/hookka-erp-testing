@@ -1262,6 +1262,79 @@ app.get("/outbox/:id", async (c) => {
   }
 });
 
+// GET /api/mail-center/outbox/:id/attachments/:idx/download — stream ONE
+// stored attachment back as a binary download. The base64 blob lives in
+// outbox_emails.attachments_json (see EnqueueEmailArgs.attachments). Owner
+// asked for proof of what was actually sent — the existing detail endpoint
+// returns names only; this endpoint returns the actual bytes. Scope follows
+// the same admin/own-mailbox gate as the rest of the outbox views.
+app.get("/outbox/:id/attachments/:idx/download", async (c) => {
+  const orgId = getOrgId(c);
+  const scope = await getMailScope(c, orgId);
+  if (!scope.isAdmin && scope.addresses.length === 0) {
+    return c.json({ error: "not found" }, 404);
+  }
+  const id = c.req.param("id");
+  const idx = Number.parseInt(c.req.param("idx") ?? "", 10);
+  if (!Number.isFinite(idx) || idx < 0) {
+    return c.json({ error: "invalid idx" }, 400);
+  }
+  try {
+    const r = await c.var.DB.prepare(
+      `SELECT attachments_json AS "attachmentsJson"
+         FROM outbox_emails
+        WHERE org_id = ? AND id = ? LIMIT 1`,
+    )
+      .bind(orgId, id)
+      .first<{ attachmentsJson: string | null }>();
+    if (!r?.attachmentsJson) return c.json({ error: "not found" }, 404);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(r.attachmentsJson);
+    } catch {
+      return c.json({ error: "not found" }, 404);
+    }
+    if (!Array.isArray(parsed) || idx >= parsed.length) {
+      return c.json({ error: "not found" }, 404);
+    }
+    const att = parsed[idx] as {
+      filename?: string;
+      contentBase64?: string;
+    };
+    const filename = String(att?.filename || "attachment").replace(
+      /[^A-Za-z0-9._-]/g,
+      "_",
+    );
+    const b64 = String(att?.contentBase64 || "");
+    if (!b64) return c.json({ error: "not found" }, 404);
+    // Decode base64 to bytes. atob is built-in in Workers; chunk to stay
+    // within the arg limit of String.fromCharCode for big PDFs.
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const ext = filename.toLowerCase().split(".").pop();
+    const mime =
+      ext === "pdf"
+        ? "application/pdf"
+        : ext === "png"
+        ? "image/png"
+        : ext === "jpg" || ext === "jpeg"
+        ? "image/jpeg"
+        : "application/octet-stream";
+    return new Response(bytes, {
+      status: 200,
+      headers: {
+        "Content-Type": mime,
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch (e) {
+    console.error("[mail-center] outbox attachment download failed:", e);
+    return c.json({ error: "not found" }, 404);
+  }
+});
+
 // GET /api/mail-center/addresses — our @hookka.com addresses / aliases.
 // The mailbox list MUST match the thread scope at every visibility level, so a
 // non-admin gets exactly the rows whose lower(address) is in scope.addresses

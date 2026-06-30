@@ -2301,10 +2301,12 @@ function OutboxDetailView({
                     </pre>
                   )}
 
-                  {/* Attachments — auto-sent emails only carry the file NAMES
-                      (no signed URL on the outbox log), so they list as
-                      non-clickable chips, matching the inbox attachment chip
-                      styling. */}
+                  {/* Attachments — owner 2026-06-30: need to download what
+                      was actually sent (customer complained the fallback PDF
+                      was too plain). Each chip is now an <a> hitting
+                      /api/mail-center/outbox/:id/attachments/:idx/download
+                      which streams the base64 blob from outbox_emails.
+                      attachments_json back as a binary file. */}
                   {data.attachmentNames.length > 0 && (
                     <div className="mt-3 border-t border-border/60 pt-2">
                       <div className="mb-1.5 flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
@@ -2314,14 +2316,18 @@ function OutboxDetailView({
                       </div>
                       <div className="flex flex-wrap gap-2">
                         {data.attachmentNames.map((name, i) => (
-                          <span
+                          <a
                             key={`${name}-${i}`}
-                            className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2.5 py-1 text-xs text-foreground/90"
-                            title={name}
+                            href={`/api/mail-center/outbox/${encodeURIComponent(
+                              id,
+                            )}/attachments/${i}/download`}
+                            download={name}
+                            className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2.5 py-1 text-xs text-foreground/90 hover:bg-muted/70 hover:text-foreground"
+                            title={`Download ${name}`}
                           >
                             <Paperclip className="h-3 w-3 shrink-0 text-muted-foreground" />
                             <span className="truncate">{name}</span>
-                          </span>
+                          </a>
                         ))}
                       </div>
                     </div>

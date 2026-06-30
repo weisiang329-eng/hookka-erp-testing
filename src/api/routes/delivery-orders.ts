@@ -55,6 +55,10 @@ import {
   fmtEmailDate,
 } from "../lib/customer-notify";
 import { buildSimpleTablePdf } from "../lib/assistant-exports";
+import {
+  buildBrandedDeliveryOrderPdf,
+  buildBrandedInvoicePdf,
+} from "../lib/branded-fallback-pdf";
 import { getOrCreateQrToken, qrScanUrl } from "../lib/do-qr-token";
 // Company office number — the driver-contact fallback on dispatch notices
 // (owner rule: no driver phone on file → give the company's number).
@@ -5227,9 +5231,12 @@ export async function queueDoCustomerNotice(
         // Server-rendered fallback DO PDF. The dispatch notice usually fires
         // from the backend transition choke-point (queueDoCustomerNotice({kind}))
         // which has NO client-rendered branded PDF — so without this the customer
-        // got the DO email with NOTHING attached (owner 2026-06-26). Mirrors the
-        // invoice fallback below: a clean simple-table DO via buildSimpleTablePdf.
-        // Best-effort — a render failure must not kill the notice.
+        // got the DO email with NOTHING attached (owner 2026-06-26). 2026-06-30
+        // upgrade: customer complained "this is not the proper DO" — the old
+        // buildSimpleTablePdf has no letterhead, no customer block, no doc info.
+        // We now render a BRANDED Workers-compatible PDF (pdf-lib, jsPDF can't
+        // run on Workers) via buildBrandedDeliveryOrderPdf, with the simple
+        // table as ULTIMATE fallback so a render bug never kills the notice.
         try {
           const itRes = await c.var.DB.prepare(
             `SELECT productCode, productName, quantity, rackingNumber
@@ -5242,19 +5249,53 @@ export async function queueDoCustomerNotice(
               quantity: number;
               rackingNumber: string | null;
             }>();
-          const lineRows = (itRes.results ?? []).map((it) => [
-            it.productCode || "-",
-            it.productName || "-",
-            String(it.quantity ?? 0),
-            it.rackingNumber || "-",
-          ]);
-          const bytes = await buildSimpleTablePdf({
-            title: `Delivery Order ${doRow.doNo}`,
-            subtitle: `${doRow.customerName} · Dispatched ${fmtEmailDate(doRow.dispatchedAt)}`,
-            columns: ["Product Code", "Description", "Qty", "Rack"],
-            rows: lineRows,
-            footer: `HOOKKA INDUSTRIES SDN BHD · Delivery Order ${doRow.doNo}`,
-          });
+          const lineRows = (itRes.results ?? []).map((it) => ({
+            productCode: it.productCode || "-",
+            productName: it.productName || "-",
+            quantity: Number(it.quantity ?? 0),
+            rackingNumber: it.rackingNumber || null,
+          }));
+          // Pull customer's billing address for the Bill To block.
+          const custRow = await c.var.DB.prepare(
+            "SELECT company_address AS \"companyAddress\" FROM customers WHERE id = ?",
+          )
+            .bind(doRow.customerId)
+            .first<{ companyAddress: string | null }>();
+          let bytes: Uint8Array;
+          try {
+            bytes = await buildBrandedDeliveryOrderPdf({
+              doNo: doRow.doNo,
+              customerName: doRow.customerName,
+              customerAddress: custRow?.companyAddress ?? null,
+              deliverTo: deliverTo || null,
+              dispatchDate: fmtEmailDate(doRow.dispatchedAt),
+              customerPO: customerPOIds.join(", ") || null,
+              customerSO: doRow.customerSO ?? null,
+              driver: doRow.driverName ?? null,
+              contactNo: (doRow.driverPhone ?? "").trim() || null,
+              items: lineRows,
+            });
+          } catch (brandedErr) {
+            console.warn(
+              `[delivery-orders] ${doRow.doNo}: branded DO fallback failed, using simple table`,
+              brandedErr instanceof Error ? brandedErr.message : brandedErr,
+            );
+            // ULTIMATE fallback — bare table, but the customer still gets
+            // SOMETHING attached. Same shape/content as the pre-2026-06-30
+            // fallback so behaviour only IMPROVES, never regresses.
+            bytes = await buildSimpleTablePdf({
+              title: `Delivery Order ${doRow.doNo}`,
+              subtitle: `${doRow.customerName} · Dispatched ${fmtEmailDate(doRow.dispatchedAt)}`,
+              columns: ["Product Code", "Description", "Qty", "Rack"],
+              rows: lineRows.map((it) => [
+                it.productCode,
+                it.productName,
+                String(it.quantity),
+                it.rackingNumber || "-",
+              ]),
+              footer: `HOOKKA INDUSTRIES SDN BHD · Delivery Order ${doRow.doNo}`,
+            });
+          }
           attachments = [
             {
               filename: `${doRow.doNo}.pdf`,
@@ -5340,9 +5381,12 @@ export async function queueDoCustomerNotice(
         ];
       } else {
         // Server-rendered fallback (frontend couldn't produce the branded
-        // PDF): a clean simple-table invoice via the shared
-        // buildSimpleTablePdf helper. Best-effort — a fallback-render
-        // failure must not kill the notice.
+        // PDF). 2026-06-30 upgrade: customer complained the simple-table
+        // fallback "is not a proper invoice" — no letterhead, no Bill To,
+        // no totals block. We now render a BRANDED Workers-compatible PDF
+        // (pdf-lib; jsPDF can't run on Workers) via buildBrandedInvoicePdf,
+        // with the simple table kept as ULTIMATE fallback so a render bug
+        // never kills the notice.
         try {
           const itRes = await c.var.DB.prepare(
             `SELECT productCode, productName, quantity, unitPriceSen, totalSen
@@ -5356,32 +5400,67 @@ export async function queueDoCustomerNotice(
               unitPriceSen: number;
               totalSen: number;
             }>();
-          const rm = (sen: number) =>
-            ((Number(sen) || 0) / 100).toLocaleString("en-MY", {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
+          const items = (itRes.results ?? []).map((it) => ({
+            productCode: it.productCode || "-",
+            productName: it.productName || "-",
+            quantity: Number(it.quantity ?? 0),
+            unitPriceSen: Number(it.unitPriceSen ?? 0),
+            lineTotalSen: Number(it.totalSen ?? 0),
+          }));
+          const subtotalSen = items.reduce((s, it) => s + it.lineTotalSen, 0);
+          const totalSen = Number(inv.totalSen) || subtotalSen;
+          const taxSen = Math.max(0, totalSen - subtotalSen);
+          // Pull customer's billing address for the Bill To block.
+          const custRow = await c.var.DB.prepare(
+            "SELECT company_address AS \"companyAddress\" FROM customers WHERE id = ?",
+          )
+            .bind(doRow.customerId)
+            .first<{ companyAddress: string | null }>();
+          let bytes: Uint8Array;
+          try {
+            bytes = await buildBrandedInvoicePdf({
+              invoiceNo: inv.invoiceNo,
+              customerName: doRow.customerName,
+              customerAddress: custRow?.companyAddress ?? null,
+              invoiceDate: fmtEmailDate(inv.invoiceDate),
+              dueDate: null,
+              customerPO: customerPOIds.join(", ") || null,
+              items,
+              subtotalSen,
+              taxSen,
+              totalSen,
             });
-          const lineRows = (itRes.results ?? []).map((it) => [
-            it.productCode || "-",
-            it.productName || "-",
-            String(it.quantity ?? 0),
-            rm(it.unitPriceSen),
-            rm(it.totalSen),
-          ]);
-          const bytes = await buildSimpleTablePdf({
-            title: `Invoice ${inv.invoiceNo}`,
-            subtitle: `${doRow.customerName} · Delivery Order ${doRow.doNo} · ${fmtEmailDate(inv.invoiceDate)}`,
-            columns: [
-              "Product Code",
-              "Description",
-              "Qty",
-              "Unit Price (RM)",
-              "Amount (RM)",
-            ],
-            rows: lineRows,
-            totals: ["", "", "", "TOTAL (RM)", rm(inv.totalSen)],
-            footer: `HOOKKA INDUSTRIES SDN BHD · Computer-generated invoice ${inv.invoiceNo}`,
-          });
+          } catch (brandedErr) {
+            console.warn(
+              `[delivery-orders] ${doRow.doNo}: branded invoice fallback failed, using simple table`,
+              brandedErr instanceof Error ? brandedErr.message : brandedErr,
+            );
+            const rm = (sen: number) =>
+              ((Number(sen) || 0) / 100).toLocaleString("en-MY", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              });
+            bytes = await buildSimpleTablePdf({
+              title: `Invoice ${inv.invoiceNo}`,
+              subtitle: `${doRow.customerName} · Delivery Order ${doRow.doNo} · ${fmtEmailDate(inv.invoiceDate)}`,
+              columns: [
+                "Product Code",
+                "Description",
+                "Qty",
+                "Unit Price (RM)",
+                "Amount (RM)",
+              ],
+              rows: items.map((it) => [
+                it.productCode,
+                it.productName,
+                String(it.quantity),
+                rm(it.unitPriceSen),
+                rm(it.lineTotalSen),
+              ]),
+              totals: ["", "", "", "TOTAL (RM)", rm(totalSen)],
+              footer: `HOOKKA INDUSTRIES SDN BHD · Computer-generated invoice ${inv.invoiceNo}`,
+            });
+          }
           attachments = [
             {
               filename: `INV-${inv.invoiceNo}.pdf`,

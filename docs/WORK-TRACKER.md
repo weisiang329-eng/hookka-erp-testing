@@ -9,6 +9,34 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-06-30 — 🔵 "全部强化掉" — SRE / infra resilience + perf + OCR (owner directive)
+
+Owner authorized hardening the whole reliability layer. Playbook written:
+[`docs/INFRA-RESILIENCE-PLAYBOOK.md`](INFRA-RESILIENCE-PLAYBOOK.md) (reusable
+across sibling projects). Goals in owner's words: entering the system must not
+white-screen / be slow / lag; DB fetch fast; EVERY operation incl. the Workers
+mobile (`/worker`, `/m`) must not lag (currently laggy). Plus OCR + research.
+
+**Asks logged (so none drop):**
+1. ✅ Pool size 50 (owner set in Supabase). ⏳ Compute → Small blocked by a
+   Supabase platform incident (project resizing failing globally). Re-do once
+   status.supabase.com clears; verify it lands on prod `vpwdqtsxexpiqxzweivd`.
+2. 🔵 **B — DB connection retry + graceful 503 login** (`supabase-compat.ts`,
+   `auth.ts`) — written, shipping now.
+3. ⬜ **Keep-warm heartbeat** — ping `/api/pg-ping` every 1–5 min (GitHub Action
+   or UptimeRobot; Pages can't cron).
+4. ⬜ **Don't logout on transient failure** — session-verify returns 503 (not
+   401/500) when DB errors; frontend retries once before `clearAuth()`.
+5. ⬜ **Monitoring** — set `SENTRY_DSN`; UptimeRobot on `/health`.
+6. ⬜ **Perf diagnosis** — white-screen / slow mobile (`/worker`, `/m`) — needs
+   real diagnosis, not a blind switch.
+7. ⬜ **OCR** — confirm/enhance: upload 100 imgs → auto-split (by SO / by GRN),
+   done docs show first + rest "loading", non-blocking (mostly shipped in
+   BUG-2026-06-30-003; verify the grouping matches the ask).
+8. ⬜ **Research** — what else normal ERPs do for SRE/infra → add to playbook.
+
+---
+
 ## 2026-06-29 — ⚪ PARKED for study: Weak-wifi resilience campaign
 
 **Owner (2026-06-29) — factory remote, wifi weak, workers can't punch / can't

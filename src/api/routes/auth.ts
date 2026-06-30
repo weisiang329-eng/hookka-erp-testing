@@ -157,11 +157,30 @@ app.post("/login", async (c) => {
   const rlDenied = await checkLoginRateLimit(c, rlKey);
   if (rlDenied) return rlDenied;
 
-  const user = await c.var.DB.prepare(
-    "SELECT * FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
-  )
-    .bind(email.trim())
-    .first<UserRow>();
+  // The adapter retries a transient connection-create failure once; if it
+  // STILL throws here the DB is genuinely unreachable — return a friendly,
+  // retriable 503 instead of letting it surface as a raw 500 (the "login can't
+  // load" the operator sees on weak-wifi days). See HANDOFF-ERP-PERFORMANCE.md.
+  let user: UserRow | null;
+  try {
+    user = await c.var.DB.prepare(
+      "SELECT * FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
+    )
+      .bind(email.trim())
+      .first<UserRow>();
+  } catch (err) {
+    console.warn(
+      "[auth/login] user lookup failed (DB connection):",
+      err instanceof Error ? err.message : String(err),
+    );
+    return c.json(
+      {
+        success: false,
+        error: "Login service is busy right now — please try again in a moment.",
+      },
+      503,
+    );
+  }
   if (!user) {
     // P6.3 — count failed logins. We deliberately do NOT include the email
     // in the metric blob (PII / brute-force enumeration) — just the count.

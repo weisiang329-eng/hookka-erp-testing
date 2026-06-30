@@ -372,16 +372,34 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
   }
 
   if (!row) {
-    row = await c.var.DB.prepare(
-      `SELECT s.userId AS userId, s.expiresAt AS expiresAt,
-              u.role AS role, u.isActive AS isActive
-         FROM user_sessions s
-         JOIN users u ON u.id = s.userId
-        WHERE s.token = ?
-        LIMIT 1`,
-    )
-      .bind(token)
-      .first<SessionJoinRow>();
+    try {
+      row = await c.var.DB.prepare(
+        `SELECT s.userId AS userId, s.expiresAt AS expiresAt,
+                u.role AS role, u.isActive AS isActive
+           FROM user_sessions s
+           JOIN users u ON u.id = s.userId
+          WHERE s.token = ?
+          LIMIT 1`,
+      )
+        .bind(token)
+        .first<SessionJoinRow>();
+    } catch (err) {
+      // DB unreachable while verifying the session (the adapter already
+      // retried a transient connection-create failure once). This is NOT a
+      // "logged out" condition — returning 401 here would force-bounce an
+      // authenticated user to /login on a momentary DB blip (the weak-wifi
+      // "一直被登出"). Return a retriable 503 instead; the client keeps its
+      // session and retries. Public routes still fall through to next().
+      if (isPublic) return next();
+      console.warn(
+        "[auth] session verify failed (DB):",
+        err instanceof Error ? err.message : String(err),
+      );
+      return c.json(
+        { success: false, error: "Auth service busy — please retry." },
+        503,
+      );
+    }
     if (row && kv) {
       // expirationTtl capped at the session expiry to avoid serving a stale
       // session past its real expiry.  min(300s, remaining-lifetime).

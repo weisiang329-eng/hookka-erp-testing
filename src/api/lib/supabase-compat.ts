@@ -191,6 +191,46 @@ const emptyMeta: D1Meta = {
   size_after: 0,
 }
 
+// ---------------------------------------------------------------------------
+// Transient connection-ESTABLISHMENT retry.
+//
+// On Cloudflare Workers a fresh postgres client is created per request; under
+// Supabase Supavisor pooler contention the FIRST statement of a request can
+// fail with "Timed out while creating a new server connection" — a hard 500
+// the operator sees as "login can't load / lists blank" on weak-wifi days
+// (the network just amplifies an already server-side problem — see
+// docs/HANDOFF-ERP-PERFORMANCE.md).
+//
+// That error fires BEFORE any SQL bytes reach the server, so retrying once is
+// side-effect-free even for an INSERT/UPDATE. We match ONLY the
+// connection-CREATE signatures (message + postgres.js err.code) — a real query
+// error or a mid-statement "connection terminated" is NOT matched, so a
+// half-applied write can never be silently re-run. This is the SAFE lever the
+// 2026-06-04 connect_timeout revert pointed to: a retry, never a tight global
+// timeout that fast-fails slow-but-working heavy lists.
+const CONN_CREATE_RE =
+  /creating a new server connection|connect[_ ]?timeout|connection timed out/i
+
+function isConnCreateError(e: unknown): boolean {
+  const code = (e as { code?: string } | null)?.code ?? ''
+  if (code === 'CONNECT_TIMEOUT') return true
+  const msg = e instanceof Error ? e.message : String(e)
+  return CONN_CREATE_RE.test(msg)
+}
+
+async function withConnRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (e) {
+    if (!isConnCreateError(e)) throw e
+    // Short backoff, then ONE retry — the pooler usually has a warm slot by
+    // the second attempt. If it fails again the error propagates as before.
+    // eslint-disable-next-line no-restricted-syntax -- backend Worker module, not React; a one-shot backoff delay
+    await new Promise((r) => setTimeout(r, 200))
+    return await fn()
+  }
+}
+
 export class PgBoundStatement {
   readonly pgSql: string
   readonly params: unknown[]
@@ -207,13 +247,17 @@ export class PgBoundStatement {
     return this
   }
   async raw<T = unknown>(): Promise<T[]> {
-    const rows = (await this.sql.unsafe(this.pgSql, this.params as never)) as unknown as T[]
+    const rows = (await withConnRetry(() =>
+      this.sql.unsafe(this.pgSql, this.params as never),
+    )) as unknown as T[]
     return rows
   }
 
   async all<T = unknown>(): Promise<{ results: T[]; success: true; meta: D1Meta }> {
     const t0 = Date.now()
-    const rows = (await this.sql.unsafe(this.pgSql, this.params as never)) as unknown as T[]
+    const rows = (await withConnRetry(() =>
+      this.sql.unsafe(this.pgSql, this.params as never),
+    )) as unknown as T[]
     return {
       results: rows,
       success: true,
@@ -222,13 +266,17 @@ export class PgBoundStatement {
   }
 
   async first<T = unknown>(): Promise<T | null> {
-    const rows = (await this.sql.unsafe(this.pgSql, this.params as never)) as unknown as T[]
+    const rows = (await withConnRetry(() =>
+      this.sql.unsafe(this.pgSql, this.params as never),
+    )) as unknown as T[]
     return rows[0] ?? null
   }
 
   async run(): Promise<{ success: true; meta: D1Meta; results: [] }> {
     const t0 = Date.now()
-    const res = (await this.sql.unsafe(this.pgSql, this.params as never)) as unknown as {
+    const res = (await withConnRetry(() =>
+      this.sql.unsafe(this.pgSql, this.params as never),
+    )) as unknown as {
       count?: number
     }
     const changes = typeof res.count === 'number' ? res.count : 0
@@ -290,7 +338,8 @@ export class SupabaseAdapter {
   async batch<T = unknown>(
     stmts: (PgBoundStatement | PgPreparedStatement | D1PreparedStatement)[],
   ): Promise<{ results: T[]; success: true; meta: D1Meta }[]> {
-    return await this.sql.begin(async (tx) => {
+    return await withConnRetry(() =>
+      this.sql.begin(async (tx) => {
       const out: { results: T[]; success: true; meta: D1Meta }[] = []
       for (const s of stmts) {
         // D1PreparedStatement from routes that still type-annotate locally —
@@ -316,6 +365,7 @@ export class SupabaseAdapter {
         })
       }
       return out
-    })
+      }),
+    )
   }
 }

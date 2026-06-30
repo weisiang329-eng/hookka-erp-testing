@@ -55,6 +55,7 @@ import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
 import { selectHistoricalWindow, sumPnlWindows, buildHistoricalMap } from "../../lib/pnl-historical";
 import { rmScale } from "../../lib/product-line-rm";
+import { buildInventoryOpeningSeed, applyOpeningSeed, type InventoryOpeningRow } from "../../lib/inventory-opening";
 import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
@@ -5055,8 +5056,9 @@ async function loadMaterialCostData(
   // monthly checkpoints. matEndIso = end of lastYm; events after it can't affect
   // any window ending <= lastYm, so they're dropped while assembling.
   const matEndIso = monthEndIso(lastYm);
-  // 0. Ensure the opening-stock table exists (deploys don't run migrations).
+  // 0. Ensure the opening-stock tables exist (deploys don't run migrations).
   await ensureMaterialOpeningStock(db);
+  await ensureInventoryOpening(db);
 
   // 0a. Cutover day: global kv `material_opening_date`, else the earliest
   //     as_of_date on file. Only GRN/issue movements strictly AFTER the cutover
@@ -5387,6 +5389,22 @@ async function loadMaterialCostData(
     fgByYm.set(monthsYm[i], fgAsOf(monthEnds[i]));
   }
 
+  // Task 2.2 — inject the owner's pre-opening WIP/FG stock seed (30/04 stock-
+  // take) at the cutover month-end so it surfaces as the FIRST system month's
+  // OPENING and is absorbed into that month's COGS. value_sen / as_of_date come
+  // back camelCased from the PG adapter → buildInventoryOpeningSeed reads them
+  // dual-keyed. See src/lib/inventory-opening.ts + design §3b.
+  const invSeed = buildInventoryOpeningSeed(
+    (
+      await db
+        .prepare("SELECT layer, value_sen, as_of_date FROM inventory_opening WHERE org_id = ?")
+        .bind(orgId)
+        .all<InventoryOpeningRow>()
+    ).results ?? [],
+  );
+  applyOpeningSeed(wipByYm, invSeed.wipSen, invSeed.asOfDate);
+  applyOpeningSeed(fgByYm, invSeed.fgSen, invSeed.asOfDate);
+
   return {
     globalFirstYm,
     lastYm,
@@ -5458,6 +5476,37 @@ function ensurePnlHistorical(db: D1Database): Promise<void> {
     }
   })();
   return _pendingPnlHistMigrations;
+}
+
+// Task 2.2 — inventory_opening (WIP/FG opening-stock seed). Runtime self-apply
+// mirrors ensurePnlHistorical / ensureMaterialOpeningStock.
+let _pendingInventoryOpeningMigrations: Promise<void> | null = null;
+function ensureInventoryOpening(db: D1Database): Promise<void> {
+  if (_pendingInventoryOpeningMigrations) return _pendingInventoryOpeningMigrations;
+  _pendingInventoryOpeningMigrations = (async () => {
+    const stmts = [
+      `CREATE TABLE IF NOT EXISTS inventory_opening (
+         id         TEXT PRIMARY KEY,
+         org_id     TEXT NOT NULL DEFAULT 'hookka',
+         layer      TEXT NOT NULL,
+         value_sen  INTEGER NOT NULL DEFAULT 0,
+         as_of_date TEXT,
+         updated_at TEXT
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_opening_key ON inventory_opening (org_id, layer)`,
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[accounting.inventory-opening] DDL skipped", {
+          sql: sql.split("\n")[0],
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return _pendingInventoryOpeningMigrations;
 }
 
 /** Load all historical P&L rows for an org, grouped by ym. */

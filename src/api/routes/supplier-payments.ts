@@ -188,15 +188,21 @@ app.post("/", async (c) => {
         ? body.allocations
         : [];
 
+      // Supplier advance / prepayment: an amount paid that ISN'T allocated to a
+      // PI. Booked as a debit to AP control (400-0000) under the supplier, so it
+      // shows as a prepaid (negative) balance on the creditor ledger. The owner
+      // knocks it off against invoices MANUALLY later — never auto-applied.
+      const advanceSen = Math.max(0, Math.round(Number(body.advanceSen) || 0));
+
       if (!supplierId || !payFrom || !date) {
         return c.json(
           { success: false, error: "supplierId, payFrom, and date are required" },
           400,
         );
       }
-      if (allocations.length === 0) {
+      if (allocations.length === 0 && advanceSen <= 0) {
         return c.json(
-          { success: false, error: "at least one allocation is required" },
+          { success: false, error: "at least one allocation or an advance amount is required" },
           400,
         );
       }
@@ -327,6 +333,39 @@ app.post("/", async (c) => {
         totalBooked += r.bookedSen;
         totalBank += r.bankSen;
         totalFx += r.fxDiffSen;
+      }
+
+      // 4b. Supplier advance — one unallocated row (no PI). Flows into the GL
+      // totals below (DR 400-0000 / CR bank), so it lands on the supplier's
+      // creditor ledger as a prepaid (debit) balance to knock off manually later.
+      if (advanceSen > 0) {
+        const supRow = await c.var.DB
+          .prepare("SELECT name FROM suppliers WHERE id = ?")
+          .bind(supplierId)
+          .first<{ name: string }>();
+        statements.push(
+          c.var.DB.prepare(
+            `INSERT INTO supplier_payments (
+               id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
+               date, amountSen, bookedSen, foreignSen, payFxRate,
+               method, reference, notes, orgId
+             ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+          ).bind(
+            `sp-${crypto.randomUUID().slice(0, 8)}`,
+            payNo,
+            supplierId,
+            supRow?.name ?? "",
+            date,
+            advanceSen,
+            advanceSen,
+            "BANK_TRANSFER",
+            reference ?? "",
+            `Advance ${payNo}`,
+            orgId,
+          ),
+        );
+        totalBooked += advanceSen;
+        totalBank += advanceSen;
       }
 
       // 5. Nothing to pay (every allocation resolved to 0).

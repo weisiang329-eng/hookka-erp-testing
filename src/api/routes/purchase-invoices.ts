@@ -1227,6 +1227,107 @@ app.post("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/purchase-invoices/backfill-gl-postings — one-time GL repost.
+//
+// Posts CONFIRMED PIs that never got their GL legs (created/confirmed before the
+// create-as-CONFIRMED posting fix — BUG-2026-06-23-007 — or bulk-imported, so they
+// fed AP aging + the P&L but never ledger_journal_entries → 400-0000 drifted from
+// its subsidiary). Reuses the EXACT same leg path as create/transition
+// (mapPurchaseLinesToAccounts → buildPiApprovalLegs → buildJournalEntryStatements)
+// off the STORED items (already home MYR — toHome applied at create), and
+// ledgerHasSource for idempotency, so re-running can NEVER double-post. Opening-AP
+// PIs (is_opening) carry NO GL entry by design and are skipped. Read-safe knobs:
+//   ?dry=1   → report what WOULD post, write nothing.
+//   ?limit=N → post at most N new PIs (incremental verification).
+// ---------------------------------------------------------------------------
+app.post("/backfill-gl-postings", async (c) => {
+  const denied = await requirePermission(c, "purchase-invoices", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+  const limitRaw = parseInt(c.req.query("limit") ?? "", 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : Infinity;
+
+  const pisRes = await db
+    .prepare(
+      `SELECT id, piNo, supplierName, amountSen, is_opening
+         FROM purchase_invoices
+        WHERE orgId = ? AND status NOT IN ('DRAFT','CANCELLED')
+        ORDER BY invoiceDate ASC, id ASC`,
+    )
+    .bind(orgId)
+    .all<{ id: string; piNo: string | null; supplierName: string | null; amountSen: number | null; isOpening?: number | boolean | null; is_opening?: number | boolean | null }>();
+  const pis = pisRes.results ?? [];
+
+  let scanned = 0, alreadyPosted = 0, openingSkipped = 0, posted = 0, postedSen = 0, failed = 0;
+  const samples: { piNo: string; rm: number }[] = [];
+  const failures: { piNo: string; error: string }[] = [];
+  const statements: D1PreparedStatement[] = [];
+
+  for (const pi of pis) {
+    scanned++;
+    if (pi.isOpening ?? pi.is_opening) { openingSkipped++; continue; }
+    if (posted >= limit) break;
+    try {
+      if (await ledgerHasSource(db, orgId, "purchase_invoice", pi.id)) { alreadyPosted++; continue; }
+      const items = await loadItemsForPI(db, pi.id);
+      // Stored items are ALREADY home MYR (toHome at create) → no conversion here.
+      const lines = items.map((it) => ({
+        mc: it.materialCode,
+        amt: it.lineTotalSen,
+        lt: it.lineType,
+        taxAmt: it.taxSen,
+      }));
+      const { bucket, pdefault } = await mapPurchaseLinesToAccounts(db, lines);
+      const apTotalSen = Math.round(Number(pi.amountSen) || 0);
+      const legs: Parameters<typeof buildJournalEntryStatements>[2] = buildPiApprovalLegs({
+        piNo: pi.piNo ?? pi.id,
+        supplierName: pi.supplierName ?? "",
+        apTotalSen,
+        drBucket: bucket,
+        pdefault,
+      }).map((leg) => ({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "purchase_invoice",
+        sourceId: pi.id,
+        legNo: leg.legNo,
+        accountCode: leg.accountCode,
+        debitSen: leg.debitSen,
+        creditSen: leg.creditSen,
+        description: leg.description,
+        actorUserId,
+        orgId,
+      }));
+      const { statements: ls } = await buildJournalEntryStatements(db, orgId, legs);
+      if (!dry) statements.push(...ls);
+      posted++;
+      postedSen += apTotalSen;
+      if (samples.length < 8) samples.push({ piNo: pi.piNo ?? pi.id, rm: apTotalSen / 100 });
+    } catch (e) {
+      failed++;
+      if (failures.length < 8) failures.push({ piNo: pi.piNo ?? pi.id, error: String((e as Error)?.message ?? e) });
+    }
+  }
+  if (!dry && statements.length) await db.batch(statements);
+
+  return c.json({
+    success: true,
+    dry,
+    scanned,
+    alreadyPosted,
+    openingSkipped,
+    posted,
+    postedRm: Math.round(postedSen) / 100,
+    failed,
+    samples,
+    failures,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PUT /api/purchase-invoices/:id — update fields + status (with transition
 // guard). Body: { status?, remarks?, invoiceDate?, dueDate?, amountSen? }
 // ---------------------------------------------------------------------------

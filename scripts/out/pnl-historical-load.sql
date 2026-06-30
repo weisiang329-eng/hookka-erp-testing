@@ -1,4 +1,4 @@
-﻿-- pnl_historical: table + historical P&L data (run once in Supabase SQL editor)
+-- pnl_historical: table + historical P&L data (run once in Supabase SQL editor)
 -- ============================================================================
 -- HOOKKA ERP — pnl_historical (Task 3.1: historical P&L injection).
 -- Stores owner-provided P&L window JSON for months before the accounting

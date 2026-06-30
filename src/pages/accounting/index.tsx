@@ -3465,7 +3465,7 @@ function SupplierDiscountTab() {
     setAllocRows({});
     if (!id) { setOpenPIs([]); return; }
     setLoadingPIs(true);
-    fetch(`/api/purchase-invoices?supplierId=${encodeURIComponent(id)}&status=APPROVED,PARTIAL_PAID`)
+    fetch(`/api/purchase-invoices?supplierId=${encodeURIComponent(id)}&status=CONFIRMED,APPROVED,PARTIAL_PAID`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: SDOpenPI[] } | SDOpenPI[]>)
       .then((j) => {
         const raw = Array.isArray(j) ? j : j?.success ? j.data ?? [] : [];
@@ -4368,6 +4368,7 @@ function MonthlyPlTab() {
   const [anchor, setAnchor] = useState(thisMonth);
   const [data, setData] = useState<PlMonthlyData | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [level, setLevel] = useState<number | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -4383,6 +4384,14 @@ function MonthlyPlTab() {
 
   const cols = data?.columns ?? [];
   const rows = data?.rows ?? [];
+  // Detail-level control (AutoCount-style): "show level L" = collapse every
+  // group at depth >= L-1 so rows deeper than L are hidden. maxLevel = deepest
+  // row depth + 1 (P&L: depth 0..3 → L1..L4, L4 = fully expanded).
+  const maxLevel = rows.reduce((m, r) => Math.max(m, r.depth), 0) + 1;
+  const applyLevel = (L: number) => {
+    setLevel(L);
+    setCollapsed(new Set(rows.filter((r) => r.kind === "group" && r.groupId && r.depth >= L - 1).map((r) => r.groupId!)));
+  };
   const visible: PlMatrixRow[] = [];
   {
     let hideDepth = Infinity;
@@ -4393,7 +4402,7 @@ function MonthlyPlTab() {
       if (r.kind === "group" && r.groupId && collapsed.has(r.groupId)) hideDepth = r.depth;
     }
   }
-  const toggle = (gid: string) => setCollapsed((s) => { const n = new Set(s); if (n.has(gid)) n.delete(gid); else n.add(gid); return n; });
+  const toggle = (gid: string) => { setLevel(null); setCollapsed((s) => { const n = new Set(s); if (n.has(gid)) n.delete(gid); else n.add(gid); return n; }); };
 
   const buildExport = (): (string | number)[][] => {
     // Each column → two cells: RM amount + % of net sales (beside, not below).
@@ -4421,6 +4430,14 @@ function MonthlyPlTab() {
           <select value={line} onChange={(e) => setLine(e.target.value as "all" | "sofa" | "bedframe")} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm">
             <option value="all">All</option><option value="sofa">Sofa</option><option value="bedframe">Bedframe</option>
           </select>
+          {data && maxLevel > 1 && (
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-[#9CA3AF] mr-0.5">DETAIL</span>
+              {Array.from({ length: maxLevel }, (_, i) => i + 1).map((L) => (
+                <button key={L} onClick={() => applyLevel(L)} title={`Expand to level ${L}`} className={`rounded-md border px-2.5 py-1.5 text-xs cursor-pointer ${level === L ? "border-[#3E6570] bg-[#3E6570] text-white" : "border-[#E2DDD8] bg-white text-[#4B5563] hover:bg-[#F0ECE9]"}`}>L{L}</button>
+              ))}
+            </div>
+          )}
           {data && <ExportButtons build={buildExport} filenameBase={`monthly-pl-${data.anchor}-${line}`} title="Monthly P&L" subtitle={`${data.fyLabel} · ${line}`} />}
         </div>
       </div>

@@ -1,0 +1,83 @@
+{
+  "asOf": "2026-04-30",
+  "rmByCategory": [
+    {
+      "category": "Plywood",
+      "code": "PLYWOOD",
+      "closingSen": 419133
+    },
+    {
+      "category": "WD",
+      "code": "WD STRIP",
+      "closingSen": 289200
+    },
+    {
+      "category": "Filler",
+      "code": "B.FILLER",
+      "closingSen": 677015
+    },
+    {
+      "category": "S.Filler",
+      "code": "S.FILLER",
+      "closingSen": 871250
+    },
+    {
+      "category": "Others",
+      "code": "B.OTHERS",
+      "closingSen": 352660
+    },
+    {
+      "category": "S.Others",
+      "code": "S.OTHERS",
+      "closingSen": 23000
+    },
+    {
+      "category": "Acc",
+      "code": "B.ACCE",
+      "closingSen": 66180
+    },
+    {
+      "category": "ACC",
+      "code": "B.ACCE",
+      "closingSen": 436980
+    },
+    {
+      "category": "s.Mech",
+      "code": "S.MECH",
+      "closingSen": 86000
+    },
+    {
+      "category": "Webb",
+      "code": "B.WEBB",
+      "closingSen": 122700
+    },
+    {
+      "category": "S.Webbing",
+      "code": "S.WEBB",
+      "closingSen": 61800
+    },
+    {
+      "category": "Packing",
+      "code": "PACKING",
+      "closingSen": 393560
+    },
+    {
+      "category": "SFabric",
+      "code": "S-FABRIC",
+      "closingSen": 47500
+    },
+    {
+      "category": "Mfabric",
+      "code": "B.M-FABR",
+      "closingSen": 6155725
+    },
+    {
+      "category": "S.MFabric",
+      "code": "S.M-FABR",
+      "closingSen": 724110
+    }
+  ],
+  "wipSen": 1016170,
+  "fgSen": 648673,
+  "grandTotalSen": 12391656
+}

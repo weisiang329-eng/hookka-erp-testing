@@ -34,6 +34,8 @@ import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
+import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
+import { costAsOfByPo } from "../../lib/cost-attribution";
 import { DOC_DATE_FAMILIES, stripLegSuffix, parseSourceIdDate } from "../../lib/doc-date";
 import {
   prefixForPartyType,
@@ -51,16 +53,17 @@ import {
 } from "../../lib/other-party-payment";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
+import { selectHistoricalWindow, sumPnlWindows, buildHistoricalMap } from "../../lib/pnl-historical";
+import { rmScale } from "../../lib/product-line-rm";
+import { buildInventoryOpeningSeed, applyOpeningSeed, type InventoryOpeningRow } from "../../lib/inventory-opening";
 import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import {
-  valueIssues,
   computeMaterialCheckpoints,
   windowFromCheckpoints,
   type MaterialInput,
   type FifoEvent,
-  type IssueCost,
   type CheckpointCum,
 } from "../../lib/material-cost-fifo";
 
@@ -1980,7 +1983,7 @@ app.put("/purchase-credit-notes/:id", async (c) => {
           return c.json({ success: false, error: `Invoice ${a.piId} is not this supplier's` }, 400);
         }
         const st = String(pi.status ?? "");
-        if (st !== "APPROVED" && st !== "PARTIAL_PAID") {
+        if (st !== "CONFIRMED" && st !== "APPROVED" && st !== "PARTIAL_PAID") {
           return c.json({ success: false, error: `Invoice ${a.piId} is not in a payable status` }, 400);
         }
         const amount = Number(pi.amountSen ?? pi.amount_sen) || 0;
@@ -2127,7 +2130,7 @@ app.post("/purchase-credit-notes/:id/void", async (c) => {
           `UPDATE purchase_invoices
              SET paid_amount_sen = GREATEST(0, paid_amount_sen - ?),
                  status = CASE
-                   WHEN paid_amount_sen - ? <= 0 THEN 'APPROVED'
+                   WHEN paid_amount_sen - ? <= 0 THEN 'CONFIRMED'
                    WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID'
                    ELSE 'PAID'
                  END
@@ -2195,13 +2198,13 @@ app.get("/ap-control", async (c) => {
     piRes = await c.var.DB.prepare(
       `SELECT supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
-        WHERE status IN ('APPROVED', 'PARTIAL_PAID')`,
+        WHERE status IN ('CONFIRMED', 'APPROVED', 'PARTIAL_PAID')`,
     ).all<PiAgingRow>();
   } catch {
     piRes = await c.var.DB.prepare(
       `SELECT supplierId, supplierName, piNo, amountSen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
-        WHERE status = 'APPROVED'`,
+        WHERE status IN ('CONFIRMED', 'APPROVED')`,
     ).all<PiAgingRow>();
   }
   // Posted purchase CNs reduce what we owe (the control account already absorbed
@@ -2333,7 +2336,7 @@ app.get("/supplier-statement", async (c) => {
       // amount is a credit here, the payment a debit; omitting it would drop
       // the credit leg and unbalance the statement). Matches /creditor-ledger.
       `SELECT piNo, invoiceDate, amountSen, status, isOpening FROM purchase_invoices
-        WHERE supplierId = ? AND status IN ('APPROVED','PARTIAL_PAID','PAID')`,
+        WHERE supplierId = ? AND status IN ('CONFIRMED','APPROVED','PARTIAL_PAID','PAID')`,
     )
       .bind(supplierId)
       .all<{ piNo: string; invoiceDate: string; amountSen: number; status: string; isOpening: number | null }>(),
@@ -2481,7 +2484,7 @@ app.get("/creditor-ledger", async (c) => {
   const to = c.req.query("to") || "9999-12-31";
   const [supRes, piRes, payRes, pcnRes] = await Promise.all([
     c.var.DB.prepare("SELECT id, name, code FROM suppliers").all<{ id: string; name: string; code: string | null }>(),
-    c.var.DB.prepare(`SELECT supplierId, piNo, invoiceDate, amountSen, isOpening FROM purchase_invoices WHERE status IN ('APPROVED','PARTIAL_PAID','PAID')`).all<{ supplierId: string; piNo: string; invoiceDate: string; amountSen: number; isOpening: number | null }>(),
+    c.var.DB.prepare(`SELECT supplierId, piNo, invoiceDate, amountSen, isOpening FROM purchase_invoices WHERE status IN ('CONFIRMED','APPROVED','PARTIAL_PAID','PAID')`).all<{ supplierId: string; piNo: string; invoiceDate: string; amountSen: number; isOpening: number | null }>(),
     c.var.DB.prepare(`SELECT supplierId, paymentNo, date, amountSen FROM supplier_payments WHERE COALESCE(method,'') <> 'CREDIT_NOTE' AND paymentNo NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'supplier_payment' AND state IN ('VOID','DELETED'))`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
     c.var.DB.prepare(`SELECT supplierId, noteNumber, date, totalAmount FROM purchase_credit_notes WHERE status = 'POSTED'`).all<{ supplierId: string; noteNumber: string; date: string; totalAmount: number }>(),
   ]);
@@ -4957,14 +4960,20 @@ async function glWindowSigned(
 // being fed after 2026-03) with a from-source FIFO replay, for the three
 // inventory layers the manufacturing P&L needs:
 //   · RM  — opening + GRN purchases − closing, per item_group (FIFO consumption)
-//   · WIP — per in-progress production_order: FIFO material issued + labour
-//   · FG  — per completed-not-delivered fg_batch: undelivered qty × FIFO unit cost
+//   · WIP — per in-progress production_order: Σ RM_ISSUE.total_cost_sen (material
+//           actually booked) + Σ LABOR_POSTED.total_cost_sen, both as-of-date
+//   · FG  — per completed-not-delivered fg_batch: undelivered qty × the
+//           cascade-maintained fg_batches.unit_cost_sen
 //
 // The pure FIFO maths live in src/lib/material-cost-fifo.ts; here we only
-// assemble the events from the operational tables and feed the engine. The
-// engine guarantees  Σ valueIssues(m).fifoCostSen in [a,b] === consumedSen
-// for the same window, so WIP/FG (which sum per-issue costs) and RM (which use
-// consumed) stay coherent to the sen.
+// assemble the events from the operational tables and feed the engine for the RM
+// layer (opening/purchase/closing/consumed via monthly checkpoints). WIP material
+// and FG are NOT taken from the replay's per-issue costs: that re-valuation was
+// ~15× too high on live prod because the replay's per-layer issue costs for a PO
+// did not reconcile to Σ RM_ISSUE.total_cost_sen booked to it. WIP/FG now read the
+// actual booked cost_ledger totals (and FG's cascade unit cost) instead — see
+// BUG-2026-06-29-001. The RM checkpoint path (computeMaterialCheckpoints) is
+// unaffected and stays coherent to the sen.
 //
 // As-of-date reconstruction (the hard part — owner accepts pre-cutover /
 // transitional imperfection, but the CURRENT period, whose closing date is
@@ -5047,8 +5056,9 @@ async function loadMaterialCostData(
   // monthly checkpoints. matEndIso = end of lastYm; events after it can't affect
   // any window ending <= lastYm, so they're dropped while assembling.
   const matEndIso = monthEndIso(lastYm);
-  // 0. Ensure the opening-stock table exists (deploys don't run migrations).
+  // 0. Ensure the opening-stock tables exist (deploys don't run migrations).
   await ensureMaterialOpeningStock(db);
+  await ensureInventoryOpening(db);
 
   // 0a. Cutover day: global kv `material_opening_date`, else the earliest
   //     as_of_date on file. Only GRN/issue movements strictly AFTER the cutover
@@ -5125,7 +5135,7 @@ async function loadMaterialCostData(
                 pii.qty AS qty, pii.lineTotalSen AS lineTotalSen
            FROM purchase_invoice_items pii
            JOIN purchase_invoices pi ON pi.id = pii.piId
-          WHERE pi.orgId = ? AND pi.status = 'APPROVED' AND pii.lineType = 'STOCKED'
+          WHERE pi.orgId = ? AND pi.status IN ('CONFIRMED','APPROVED') AND pii.lineType = 'STOCKED'
             AND pii.materialCode IS NOT NULL AND pi.purchaseOrderId IS NOT NULL`,
       )
       .bind(orgId)
@@ -5145,13 +5155,23 @@ async function loadMaterialCostData(
       .bind(orgId)
       .all<{ id: string; startDate: string | null; completedDate: string | null; status: string | null }>(),
     db
-      .prepare("SELECT id, productionOrderId, completedDate, originalQty FROM fg_batches WHERE orgId = ?")
+      .prepare("SELECT id, productionOrderId, completedDate, originalQty, unitCostSen FROM fg_batches WHERE orgId = ?")
       .bind(orgId)
-      .all<{ id: string; productionOrderId: string | null; completedDate: string | null; originalQty: number | null }>(),
+      .all<{ id: string; productionOrderId: string | null; completedDate: string | null; originalQty: number | null; unitCostSen: number | null }>(),
+    // FG relief signal: cost_ledger FG_DELIVERED rows. consumeFGBatchesForDO
+    // (do-cost-cascade.ts) emits one row per layer-slice on every DO→DELIVERED
+    // with (date, qty, batchId), where qty is the SAME quantity decremented
+    // from fg_batches.remainingQty — i.e. the SAME unit as fg_batches.originalQty
+    // (which is piece-level when a product has >1 piece). This replaces the old
+    // `fg_units.batchId` count, which was always 0 because fg_units.batchId is
+    // never written (fg-units.ts INSERT omits it) → FG closing accumulated
+    // without bound. Keyed by batchId = fg_batches.id (real, non-null here).
     db
-      .prepare("SELECT batchId, deliveredAt FROM fg_units WHERE orgId = ? AND deliveredAt IS NOT NULL")
+      .prepare(
+        "SELECT batchId, date, qty FROM cost_ledger WHERE orgId = ? AND type = 'FG_DELIVERED' AND batchId IS NOT NULL",
+      )
       .bind(orgId)
-      .all<{ batchId: string | null; deliveredAt: string | null }>(),
+      .all<{ batchId: string | null; date: string | null; qty: number | null }>(),
   ]);
 
   // 3. PI-weighted-average layer cost, batched into one map keyed PO+material.
@@ -5225,13 +5245,13 @@ async function loadMaterialCostData(
   const monthsYm = monthsBetweenYm(globalFirstYm, lastYm); // [] when first > last
   const monthEnds = monthsYm.map(monthEndIso);
 
-  // Replay each item ONCE; sum its monthly checkpoints into its item-group, and
-  // collect per-PO issue costs (for WIP/FG) from the same pass. No per-window
-  // re-replay — that repetition was the prod P&L hang.
+  // Replay each item ONCE and sum its monthly checkpoints into its item-group.
+  // No per-window re-replay — that repetition was the prod P&L hang. (Per-PO
+  // material cost for WIP comes from cost_ledger RM_ISSUE totals below, NOT this
+  // replay — see materialAsOf / BUG-2026-06-29-001.)
   const rank = (e: FifoEvent) => (e.kind === "receipt" ? 0 : 1);
   const groupCum = new Map<string, Map<string, CheckpointCum>>(); // group → ym → cumulative
   const allGroups = new Set<string>();
-  const issuesByRef = new Map<string, IssueCost[]>(); // ref(PO) → its issues
   const negatives: { rmId: string; itemCode: string; units: number }[] = [];
   const openByRm = new Map<string, { rmId: string; qty: number | null; unitCostSen: number | null; asOfDate: string | null }>();
   for (const r of openingRows) openByRm.set(r.rmId, r);
@@ -5272,52 +5292,42 @@ async function loadMaterialCostData(
       acc.cumConsumedSen += cp.cumConsumedSen;
       acc.cumNegativeUnits += cp.cumNegativeUnits;
     }
-    // Per-issue FIFO costs (full timeline ≤ matEndIso) — grouped by PO for WIP/FG.
-    for (const ic of valueIssues(m)) {
-      if (!ic.ref) continue;
-      let arr = issuesByRef.get(ic.ref);
-      if (!arr) { arr = []; issuesByRef.set(ic.ref, arr); }
-      arr.push(ic);
-    }
     // Whole-range negative-stock flag (fractional qty → rounded; diagnostic only).
     const lastCp = cps.length ? cps[cps.length - 1] : null;
     const negUnits = lastCp ? lastCp.cumNegativeUnits : 0;
     if (negUnits > 1e-9) negatives.push({ rmId, itemCode: codeOf.get(rmId) ?? rmId, units: Math.round(negUnits * 1000) / 1000 });
   }
 
-  // 6a. Per-PO FIFO material cost as of a date D = Σ issue.fifoCostSen for that
-  //     PO with date <= D. Computed on demand from the grouped issues.
-  const fifoMaterialAsOf = (poId: string, dIso: string): number => {
-    const arr = issuesByRef.get(poId);
-    if (!arr) return 0;
-    let s = 0;
-    for (const ic of arr) if (ic.date <= dIso) s += ic.fifoCostSen;
-    return s;
-  };
+  // 6a. Per-PO material cost as of a date D = Σ RM_ISSUE.total_cost_sen for that
+  //     PO with date <= D — the material ACTUALLY booked to the PO. ATTRIBUTION
+  //     (locked by cost-attribution.test): for RM_ISSUE the PO is in `refId`
+  //     (itemId is the raw-material id). Built the SAME way as the labour
+  //     accessor below, via costAsOfByPo.
+  //
+  //     NOT re-valued from the FIFO replay (the old `fifoMaterialAsOf` = Σ of the
+  //     replay's per-issue costs for the PO): that re-valuation came out ~15× too
+  //     high on live prod (WIP-CLOSING RM 267,721 vs the owner's real ~RM 10k)
+  //     because the replay's per-layer issue costs for a PO did NOT reconcile to
+  //     Σ RM_ISSUE.total_cost_sen booked to that PO. The same defect inflated FG
+  //     (worked around there by valuing FG at fg_batches.unit_cost_sen, which is
+  //     floor((ΣRM_ISSUE+ΣLABOR)/originalQty) — i.e. this same RM_ISSUE total).
+  //     WIP has no per-batch unit cost to fall back to, so the material basis is
+  //     fixed at source here. See BUG-2026-06-29-001.
+  const materialAsOf = costAsOfByPo(clRes.results ?? [], "RM_ISSUE");
 
   // 6b. Per-PO labour cost as of a date D = Σ LABOR_POSTED.total_cost_sen for
-  //     that PO (cost_ledger.ref_id = PO) with date <= D.
-  const laborByPo = new Map<string, { date: string; sen: number }[]>();
-  for (const l of clRes.results ?? []) {
-    if (l.type !== "LABOR_POSTED") continue;
-    const ref = l.refId;
-    if (!ref) continue;
-    const date = (l.date ?? "").slice(0, 10);
-    if (!date) continue;
-    let arr = laborByPo.get(ref);
-    if (!arr) { arr = []; laborByPo.set(ref, arr); }
-    arr.push({ date, sen: Number(l.totalCostSen) || 0 });
-  }
-  const laborAsOf = (poId: string, dIso: string): number => {
-    const arr = laborByPo.get(poId);
-    if (!arr) return 0;
-    let s = 0;
-    for (const e of arr) if (e.date <= dIso) s += e.sen;
-    return s;
-  };
+  //     that PO with date <= D. ATTRIBUTION (locked by cost-attribution.test):
+  //     for LABOR_POSTED the PO is in `itemId` — postJobCardLabor
+  //     (po-cost-cascade.ts) writes itemId=productionOrderId, refType='JOB_CARD',
+  //     refId=jobCardId. (RM_ISSUE is the opposite: refId=PO.) The previous code
+  //     bucketed by refId (the JOB CARD id) but looked up by poId, so every
+  //     lookup missed and labour was silently 0 in WIP & FG.
+  const laborAsOf = costAsOfByPo(clRes.results ?? [], "LABOR_POSTED");
 
   // 7. WIP as of D = Σ over production_orders in progress at D of
-  //    (FIFO material issued so far + labour posted so far).
+  //    (material issued so far + labour posted so far) — both the ACTUAL booked
+  //    cost_ledger totals (Σ RM_ISSUE.total_cost_sen + Σ LABOR_POSTED.total_cost_sen
+  //    ≤ D for that PO), matching what the cascade rolls into fg_batches.unit_cost_sen.
   const pos = poRes.results ?? [];
   const wipAsOf = (dIso: string): number => {
     let s = 0;
@@ -5326,49 +5336,49 @@ async function loadMaterialCostData(
       const completed = (p.completedDate ?? "").slice(0, 10);
       if (!start || start > dIso) continue;            // not started yet
       if (completed && completed <= dIso) continue;    // already completed by D
-      s += fifoMaterialAsOf(p.id, dIso) + laborAsOf(p.id, dIso);
+      s += materialAsOf(p.id, dIso) + laborAsOf(p.id, dIso);
     }
     return s;
   };
 
-  // 8. FG as of D = Σ over batches completed by D, of undelivered qty × FIFO
-  //    unit cost. Unit cost = (PO FIFO material@completion + PO labour@completion)
-  //    / original_qty — re-valued from the engine, NOT fg_batches.unit_cost_sen.
-  //    Undelivered qty = original_qty − COUNT(fg_units of this batch delivered<=D).
-  const deliveredByBatch = new Map<string, { date: string }[]>();
-  for (const u of fguRes.results ?? []) {
-    if (!u.batchId) continue;
-    const date = (u.deliveredAt ?? "").slice(0, 10);
-    if (!date) continue;
-    let arr = deliveredByBatch.get(u.batchId);
-    if (!arr) { arr = []; deliveredByBatch.set(u.batchId, arr); }
-    arr.push({ date });
-  }
-  const deliveredAsOf = (batchId: string, dIso: string): number => {
-    const arr = deliveredByBatch.get(batchId);
-    if (!arr) return 0;
-    let n = 0;
-    for (const e of arr) if (e.date <= dIso) n += 1;
-    return n;
-  };
+  // 8. FG as of D = Σ over batches completed by D, of undelivered qty ×
+  //    fg_batches.unit_cost_sen (the cascade-maintained per-unit cost).
+  //    Undelivered qty = original_qty − Σ FG_DELIVERED.qty for this batch (date<=D).
+  //
+  //    NOT re-valued from the FIFO engine: a (PO FIFO material + labour)/qty
+  //    re-valuation came out ~15× too high on live prod (FG closing RM 595k vs
+  //    the real RM 39k) because the replay's per-layer issue costs for a PO did
+  //    not reconcile to the material booked to that PO. unit_cost_sen is the
+  //    figure backfillFGBatchCost rolls up from the same RM_ISSUE+LABOR rows and
+  //    is what every other FG surface uses — sane and authoritative.
+  //
+  //    Relief signal = cost_ledger FG_DELIVERED rows (fguRes), summed per batch
+  //    up to D. This is the only as-of-date, qty-correct, real-batchId signal:
+  //    its qty is the exact quantity decremented from fg_batches.remainingQty,
+  //    so it is in the SAME unit as originalQty by construction. (The old
+  //    fg_units.batchId count was always 0 — batchId is never written — so FG
+  //    closing accumulated without bound. A raw COUNT(fg_units) would also be
+  //    wrong: fg_units is piece-level (units×pieces rows per PO).)
+  const deliveredAsOf = buildDeliveredAsOf(fguRes.results ?? []);
   const batches = fgbRes.results ?? [];
-  const fgAsOf = (dIso: string): number => {
-    let s = 0;
-    for (const b of batches) {
-      const completed = (b.completedDate ?? "").slice(0, 10);
-      if (!completed || completed > dIso) continue;        // not completed by D
-      const origQty = Number(b.originalQty) || 0;
-      if (origQty <= 0) continue;
-      const undelivered = origQty - deliveredAsOf(b.id, dIso);
-      if (undelivered <= 0) continue;                       // fully shipped by D
-      const poId = b.productionOrderId;
-      if (!poId) continue;
-      // FIFO unit cost at completion (material + labour) / original_qty.
-      const unitCostSen = (fifoMaterialAsOf(poId, completed) + laborAsOf(poId, completed)) / origQty;
-      s += Math.round(undelivered * unitCostSen);
-    }
-    return s;
-  };
+  // Opening-date floor: finished-goods batches completed BEFORE the accounting
+  // opening date are pre-opening stock (represented by the seeded opening
+  // inventory), NOT the system's batch-by-batch computation. Without this floor
+  // every historical batch ever completed accumulates into FG closing — the
+  // ~RM 1.35M legacy over-statement the owner reported. (Relief by FG_DELIVERED
+  // only clears batches that were delivered via a DO; pre-opening / pre-cascade
+  // legacy batches have no FG_DELIVERED rows and would otherwise pile up.)
+  const fgOpeningIso = await getOpeningDate(db);
+  // fgClosingSen values each batch's undelivered qty at its stored
+  // fg_batches.unit_cost_sen (cascade-maintained), clamps relief at 0, and floors
+  // out pre-opening batches.
+  const fgAsOf = (dIso: string): number =>
+    fgClosingSen({
+      batches,
+      asOfIso: dIso,
+      deliveredAsOf,
+      openingIso: fgOpeningIso,
+    });
 
   // Precompute WIP/FG stock value as of EACH month-end so a window's open/close
   // are O(1) lookups (open of a window = value at the end of the prior month).
@@ -5378,6 +5388,22 @@ async function loadMaterialCostData(
     wipByYm.set(monthsYm[i], wipAsOf(monthEnds[i]));
     fgByYm.set(monthsYm[i], fgAsOf(monthEnds[i]));
   }
+
+  // Task 2.2 — inject the owner's pre-opening WIP/FG stock seed (30/04 stock-
+  // take) at the cutover month-end so it surfaces as the FIRST system month's
+  // OPENING and is absorbed into that month's COGS. value_sen / as_of_date come
+  // back camelCased from the PG adapter → buildInventoryOpeningSeed reads them
+  // dual-keyed. See src/lib/inventory-opening.ts + design §3b.
+  const invSeed = buildInventoryOpeningSeed(
+    (
+      await db
+        .prepare("SELECT layer, value_sen, as_of_date FROM inventory_opening WHERE org_id = ?")
+        .bind(orgId)
+        .all<InventoryOpeningRow>()
+    ).results ?? [],
+  );
+  applyOpeningSeed(wipByYm, invSeed.wipSen, invSeed.asOfDate);
+  applyOpeningSeed(fgByYm, invSeed.fgSen, invSeed.asOfDate);
 
   return {
     globalFirstYm,
@@ -5414,6 +5440,93 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
 }
 
 type PnlWindow = Awaited<ReturnType<typeof computePnlWindow>>;
+
+// ---------------------------------------------------------------------------
+// Task 3.1 — pnl_historical table + reader
+// Stores owner-provided PnlWindow JSON for months BEFORE the accounting
+// opening date. Runtime self-apply pattern mirrors ensureMaterialOpeningStock.
+// Pure helpers (selectHistoricalWindow, sumPnlWindows) live in
+// src/lib/pnl-historical.ts so they can be tested without Worker deps.
+// ---------------------------------------------------------------------------
+
+let _pendingPnlHistMigrations: Promise<void> | null = null;
+function ensurePnlHistorical(db: D1Database): Promise<void> {
+  if (_pendingPnlHistMigrations) return _pendingPnlHistMigrations;
+  _pendingPnlHistMigrations = (async () => {
+    const stmts = [
+      `CREATE TABLE IF NOT EXISTS pnl_historical (
+         id          TEXT PRIMARY KEY,
+         org_id      TEXT NOT NULL DEFAULT 'hookka',
+         ym          TEXT NOT NULL,
+         line        TEXT NOT NULL,
+         window_json TEXT NOT NULL,
+         updated_at  TEXT
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_pnl_hist_key ON pnl_historical (org_id, ym, line)`,
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[accounting.pnl-historical] DDL skipped", {
+          sql: sql.split("\n")[0],
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return _pendingPnlHistMigrations;
+}
+
+// Task 2.2 — inventory_opening (WIP/FG opening-stock seed). Runtime self-apply
+// mirrors ensurePnlHistorical / ensureMaterialOpeningStock.
+let _pendingInventoryOpeningMigrations: Promise<void> | null = null;
+function ensureInventoryOpening(db: D1Database): Promise<void> {
+  if (_pendingInventoryOpeningMigrations) return _pendingInventoryOpeningMigrations;
+  _pendingInventoryOpeningMigrations = (async () => {
+    const stmts = [
+      `CREATE TABLE IF NOT EXISTS inventory_opening (
+         id         TEXT PRIMARY KEY,
+         org_id     TEXT NOT NULL DEFAULT 'hookka',
+         layer      TEXT NOT NULL,
+         value_sen  INTEGER NOT NULL DEFAULT 0,
+         as_of_date TEXT,
+         updated_at TEXT
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_opening_key ON inventory_opening (org_id, layer)`,
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[accounting.inventory-opening] DDL skipped", {
+          sql: sql.split("\n")[0],
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return _pendingInventoryOpeningMigrations;
+}
+
+/** Load all historical P&L rows for an org, grouped by ym. */
+async function loadHistoricalPnl(
+  db: D1Database,
+  orgId: string,
+): Promise<Map<string, Partial<Record<"all" | "sofa" | "bedframe", PnlWindow>>>> {
+  const res = await db
+    .prepare("SELECT ym, line, window_json FROM pnl_historical WHERE org_id = ?")
+    .bind(orgId)
+    .all<{ ym: string; line: string; windowJson?: string; window_json?: string }>();
+  // window_json arrives camelCased as `windowJson` via the db-pg adapter's
+  // transform.column.from; buildHistoricalMap reads it dual-keyed. Reading
+  // row.window_json directly gave undefined → JSON.parse threw → every row
+  // skipped → empty map → no injection (prod bug 2026-06-30).
+  return buildHistoricalMap(res.results ?? []) as Map<
+    string,
+    Partial<Record<"all" | "sofa" | "bedframe", PnlWindow>>
+  >;
+}
 
 async function computePnlWindow(
   db: Env["Variables"]["DB"],
@@ -5479,15 +5592,19 @@ async function computePnlWindow(
   // From the FIFO engine (loadMaterialCost). The engine guarantees
   // opening + purchase − closing === consumed per group, so rmConsumedSen
   // (still derived as opening+purchases−closing for the downstream row tree)
-  // ties out to the engine's consumed exactly. Line-share scaling (R) is
-  // applied the same way the old cost-ledger figures were.
-  const rmGroups = mat.rmGroups.map((r) => ({
-    group: r.itemGroup,
-    description: GROUP_DESCRIPTIONS[r.itemGroup] ?? r.itemGroup,
-    openingSen: isAll ? r.openingSen : Math.round(r.openingSen * R),
-    purchasesSen: isAll ? r.purchaseSen : Math.round(r.purchaseSen * R),
-    closingSen: isAll ? r.closingSen : Math.round(r.closingSen * R),
-  }));
+  // ties out to the engine's consumed exactly. Line-share scaling uses
+  // rmScale: B.* groups go 100% to bedframe view (0 in sofa), S.* / S- groups
+  // go 100% to sofa view (0 in bedframe), shared groups are pro-rated by R.
+  const rmGroups = mat.rmGroups.map((r) => {
+    const sc = rmScale(r.itemGroup, line, R);
+    return {
+      group: r.itemGroup,
+      description: GROUP_DESCRIPTIONS[r.itemGroup] ?? r.itemGroup,
+      openingSen: Math.round(r.openingSen * sc),
+      purchasesSen: Math.round(r.purchaseSen * sc),
+      closingSen: Math.round(r.closingSen * sc),
+    };
+  });
   const rmConsumedSen = rmGroups.reduce((s, g) => s + g.openingSen + g.purchasesSen - g.closingSen, 0);
 
   // --- Carriage (700-1015), SST (706-0000) ---
@@ -5870,6 +5987,8 @@ app.get("/pl-trend", async (c) => {
 app.get("/pl-statement", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
+  // Task 3.1 — ensure table exists before first read.
+  await ensurePnlHistorical(c.var.DB);
   const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
   const lineParam = (c.req.query("line") || "all").toLowerCase();
   const line: "all" | "sofa" | "bedframe" = lineParam === "sofa" ? "sofa" : lineParam === "bedframe" ? "bedframe" : "all";
@@ -5886,8 +6005,23 @@ app.get("/pl-statement", async (c) => {
   // FIFO checkpoints once — period end is the latest month either window needs.
   const matData = await loadMaterialCostData(c.var.DB, orgId, endYm ?? new Date().toISOString().slice(0, 7));
   const dc = await loadDocDateResolver(c.var.DB); // once per request
+  // Task 3.2 — load historical and check if the period window should be swapped.
+  const [historical, openingDateRaw] = await Promise.all([
+    loadHistoricalPnl(c.var.DB, orgId),
+    getOpeningDate(c.var.DB),
+  ]);
+  const openingMonth = openingDateRaw ? openingDateRaw.slice(0, 7) : null;
+  // For the period window: only single-month periods (startYm === endYm) can be
+  // swapped from historical; a multi-month range spans both sides so we fall back
+  // to computePnlWindow.
+  const historicalP = startYm && startYm === endYm
+    ? selectHistoricalWindow(historical, openingMonth, startYm, line)
+    : null;
+  const EMPTY_WARNINGS: PnlWindow["materialWarnings"] = { negatives: [], unresolved: [] };
   const [p, y] = await Promise.all([
-    computePnlWindow(c.var.DB, orgId, startYm, endYm, line, matData, dc, pnlOverride),
+    historicalP
+      ? Promise.resolve({ ...historicalP, materialWarnings: EMPTY_WARNINGS } as PnlWindow)
+      : computePnlWindow(c.var.DB, orgId, startYm, endYm, line, matData, dc, pnlOverride),
     computePnlWindow(c.var.DB, orgId, fyStartYm, endYm, line, matData, dc, pnlOverride),
   ]);
   // Material warnings are material-wide (whole-timeline), not period-specific —
@@ -5920,6 +6054,8 @@ app.get("/pl-statement", async (c) => {
 app.get("/pl-monthly", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
+  // Task 3.1 — ensure table exists before first read.
+  await ensurePnlHistorical(c.var.DB);
   const lineParam = c.req.query("line");
   const line: "all" | "sofa" | "bedframe" = lineParam === "sofa" || lineParam === "bedframe" ? lineParam : "all";
   const anchor = c.req.query("anchor");
@@ -5945,12 +6081,40 @@ app.get("/pl-monthly", async (c) => {
   // FIFO checkpoints once for the whole FY matrix (lastYm is the latest column).
   const matData = await loadMaterialCostData(c.var.DB, orgId, lastYm);
   const dc = await loadDocDateResolver(c.var.DB); // once per request — threaded into every month window
+
+  // Task 3.2 — load historical P&L rows once per request.
+  const [historical, openingDateRaw] = await Promise.all([
+    loadHistoricalPnl(c.var.DB, orgId),
+    getOpeningDate(c.var.DB),
+  ]);
+  const openingMonth = openingDateRaw ? openingDateRaw.slice(0, 7) : null;
+
+  // Build each month's window, swapping in historical data for pre-opening months.
+  const EMPTY_WARNINGS_M: PnlWindow["materialWarnings"] = { negatives: [], unresolved: [] };
   const cols: PnlMatrixCol[] = [];
-  cols.push({ key: "acc", label: "Accumulated", accum: true, window: await computePnlWindow(c.var.DB, orgId, fyStartYm, lastYm, line, matData, dc, override) });
+  const perMonthWindows: PnlWindow[] = [];
   // Months newest-first (after Accumulated) per owner layout (F4 #7).
   for (const ym of [...months].reverse()) {
-    cols.push({ key: ym, label: monthLabel(ym), accum: false, window: await computePnlWindow(c.var.DB, orgId, ym, ym, line, matData, dc, override) });
+    const hist = selectHistoricalWindow(historical, openingMonth, ym, line);
+    const window: PnlWindow = hist
+      ? { ...hist, materialWarnings: EMPTY_WARNINGS_M }
+      : await computePnlWindow(c.var.DB, orgId, ym, ym, line, matData, dc, override);
+    perMonthWindows.push(window);
+    cols.push({ key: ym, label: monthLabel(ym), accum: false, window });
   }
+
+  // Accumulated column: sum all per-month windows (historical + computed) so
+  // pre-opening months contribute their owner-provided figures. Then merge the
+  // computed windows' materialWarnings into the accumulated result.
+  const computedAccWindow = await computePnlWindow(c.var.DB, orgId, fyStartYm, lastYm, line, matData, dc, override);
+  // Determine if any month in range is pre-opening (historical might be absent
+  // for that month, but we always use sumPnlWindows when historical rows exist).
+  const hasHistoricalMonths = months.some((ym) => selectHistoricalWindow(historical, openingMonth, ym, line) !== null);
+  const accWindow: PnlWindow = hasHistoricalMonths
+    ? { ...sumPnlWindows(perMonthWindows), materialWarnings: computedAccWindow.materialWarnings }
+    : computedAccWindow;
+
+  cols.unshift({ key: "acc", label: "Accumulated", accum: true, window: accWindow });
 
   const matrix = buildPnlMatrix(cols);
   return c.json({ success: true, data: { fyLabel: fy.label, line, anchor: anchorYm, columns: matrix.columns, rows: matrix.rows } });
@@ -7211,7 +7375,7 @@ app.get("/contra/candidates", async (c) => {
   if (supplierId) {
     const pis = await c.var.DB.prepare(
       `SELECT id, piNo, invoiceDate, amountSen FROM purchase_invoices
-        WHERE supplierId = ? AND status = 'APPROVED'
+        WHERE supplierId = ? AND status IN ('CONFIRMED', 'APPROVED')
         ORDER BY invoiceDate, piNo`,
     )
       .bind(supplierId)
@@ -7261,8 +7425,8 @@ app.post("/contra", async (c) => {
     if (pis.length !== piIds.length) {
       return c.json({ success: false, error: "Some PIs were not found" }, 400);
     }
-    if (pis.some((p) => p.status !== "APPROVED")) {
-      return c.json({ success: false, error: "Only APPROVED (unpaid) PIs can be contra'd" }, 400);
+    if (pis.some((p) => p.status !== "CONFIRMED" && p.status !== "APPROVED")) {
+      return c.json({ success: false, error: "Only CONFIRMED/APPROVED (unpaid) PIs can be contra'd" }, 400);
     }
     const totalSen = pis.reduce((s, p) => s + (Number(p.amountSen) || 0), 0);
     if (totalSen <= 0) {

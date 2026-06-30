@@ -1,0 +1,3252 @@
+[
+  {
+    "ym": "2025-04",
+    "salesBedframeSen": 0,
+    "salesSofaSen": 0,
+    "returnInwardSen": 0,
+    "discountAllowedSen": 0,
+    "openingFGSen": 0,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 26540,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 85000,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 255000
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 4200
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 86390
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 241140
+      }
+    ],
+    "wipOpenSen": 0,
+    "wipCloseSen": 0,
+    "closingFGSen": 0,
+    "otherIncomeSen": 0,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 0
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 0
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 218600
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 0
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 12599
+      },
+      {
+        "name": "Research & Development",
+        "sen": 26400
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 0
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 1311667
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 15930
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 160600
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 1820
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 13117
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 0
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 74400
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 0
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": -2533403
+  },
+  {
+    "ym": "2025-05",
+    "salesBedframeSen": 0,
+    "salesSofaSen": 0,
+    "returnInwardSen": 0,
+    "discountAllowedSen": 0,
+    "openingFGSen": 0,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 94560,
+        "closingSen": 0
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 0,
+        "purchaseSen": 26250,
+        "closingSen": 0
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 0,
+        "purchaseSen": 41300,
+        "closingSen": 0
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 285869,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 32810,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 0,
+        "purchaseSen": 9900,
+        "closingSen": 0
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 175500,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 17550
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 3900
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 4609
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 6005
+      }
+    ],
+    "wipOpenSen": 0,
+    "wipCloseSen": 0,
+    "closingFGSen": 0,
+    "otherIncomeSen": 0,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 0
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 0
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 12000
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 0
+      },
+      {
+        "name": "Research & Development",
+        "sen": 17600
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 0
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 1544500
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 19950
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 186000
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 2280
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 15500
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 0
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 4230
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 7200
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": -2507513
+  },
+  {
+    "ym": "2025-06",
+    "salesBedframeSen": 0,
+    "salesSofaSen": 0,
+    "returnInwardSen": 0,
+    "discountAllowedSen": 0,
+    "openingFGSen": 0,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 82080,
+        "closingSen": 0
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 0,
+        "purchaseSen": 1556092,
+        "closingSen": 0
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 7600,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 214210,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 0,
+        "purchaseSen": 30250,
+        "closingSen": 0
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 0,
+        "purchaseSen": 96118,
+        "closingSen": 0
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 255000,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 54390
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 16860
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 765550
+      }
+    ],
+    "wipOpenSen": 0,
+    "wipCloseSen": 0,
+    "closingFGSen": 0,
+    "otherIncomeSen": 0,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 5000
+      },
+      {
+        "name": "Design Fees",
+        "sen": 171138
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 0
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 0
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 19360
+      },
+      {
+        "name": "Research & Development",
+        "sen": 99020
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1200000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 0
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 1550000
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 19950
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 186000
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 2280
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 15500
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 0
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 218800
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 140000
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 0
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": -6705198
+  },
+  {
+    "ym": "2025-07",
+    "salesBedframeSen": 4745000,
+    "salesSofaSen": 0,
+    "returnInwardSen": 0,
+    "discountAllowedSen": 0,
+    "openingFGSen": 0,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 3703964,
+        "closingSen": 2305695
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 0,
+        "purchaseSen": 78750,
+        "closingSen": 0
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 0,
+        "purchaseSen": 517000,
+        "closingSen": 246494
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 95000
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 471613,
+        "closingSen": 175479
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 343750,
+        "closingSen": 279850
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 0,
+        "purchaseSen": 40500,
+        "closingSen": 59710
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 0,
+        "purchaseSen": 194550,
+        "closingSen": 163000
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 1332901,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 212689
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 237005
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 13730
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 71530
+      }
+    ],
+    "wipOpenSen": 0,
+    "wipCloseSen": 239990,
+    "closingFGSen": 537398,
+    "otherIncomeSen": 144475,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 100
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 45000
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 12220
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 33210
+      },
+      {
+        "name": "Research & Development",
+        "sen": 102300
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1300000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 0
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 1673694
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 22315
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 203700
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 2550
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 19685
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 10000
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 5000
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 20101
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 4440
+      },
+      {
+        "name": "Website & Software",
+        "sen": 54000
+      }
+    ],
+    "netProfitSen": -1734206
+  },
+  {
+    "ym": "2025-08",
+    "salesBedframeSen": 10914940,
+    "salesSofaSen": 0,
+    "returnInwardSen": 0,
+    "discountAllowedSen": -194000,
+    "openingFGSen": 537398,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 2305695,
+        "purchaseSen": 2345773,
+        "closingSen": 1294460
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 0,
+        "purchaseSen": 166250,
+        "closingSen": 71250
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 246494,
+        "purchaseSen": 1146200,
+        "closingSen": 386261
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 95000,
+        "purchaseSen": 547506,
+        "closingSen": 190000
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 175479,
+        "purchaseSen": 1228968,
+        "closingSen": 441358
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 279850,
+        "purchaseSen": 149000,
+        "closingSen": 215670
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 59710,
+        "purchaseSen": 122100,
+        "closingSen": 54650
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 10500,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 163000,
+        "purchaseSen": 440546,
+        "closingSen": 183666
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 2525318,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 142241
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 59250
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 0
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 101180
+      }
+    ],
+    "wipOpenSen": 239990,
+    "wipCloseSen": 793495,
+    "closingFGSen": 525166,
+    "otherIncomeSen": 7500,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 150
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 45000
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 8350
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 12594
+      },
+      {
+        "name": "Research & Development",
+        "sen": 52800
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1250000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 0
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 1803065
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 24585
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 220100
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 2810
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 0
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 0
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 16200
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 77000
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 760
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 102502
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": -1818948
+  },
+  {
+    "ym": "2025-09",
+    "salesBedframeSen": 13315500,
+    "salesSofaSen": 0,
+    "returnInwardSen": 0,
+    "discountAllowedSen": 0,
+    "openingFGSen": 525166,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 1294460,
+        "purchaseSen": 3309282,
+        "closingSen": 1309680
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 71250,
+        "purchaseSen": 145700,
+        "closingSen": 23750
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 386261,
+        "purchaseSen": 1489800,
+        "closingSen": 241761
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 190000,
+        "purchaseSen": 1093500,
+        "closingSen": 549018
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 441358,
+        "purchaseSen": 1061240,
+        "closingSen": 494750
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 215670,
+        "purchaseSen": 231800,
+        "closingSen": 246830
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 54650,
+        "purchaseSen": 95800,
+        "closingSen": 24000
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 183666,
+        "purchaseSen": 457358,
+        "closingSen": 64248
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 2981751,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 50000
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 25980
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 0
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 213560
+      }
+    ],
+    "wipOpenSen": 793495,
+    "wipCloseSen": 983709,
+    "closingFGSen": 555542,
+    "otherIncomeSen": 0,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 150
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 0
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 4400
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 5760
+      },
+      {
+        "name": "Research & Development",
+        "sen": 76800
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1250000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 120000
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 1822414
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 24765
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 221400
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 2830
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 0
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 0
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 48600
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 295368
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 1140000
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 0
+      },
+      {
+        "name": "Website & Software",
+        "sen": 153800
+      }
+    ],
+    "netProfitSen": -2669246
+  },
+  {
+    "ym": "2025-10",
+    "salesBedframeSen": 22803500,
+    "salesSofaSen": 0,
+    "returnInwardSen": 0,
+    "discountAllowedSen": -156000,
+    "openingFGSen": 555542,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 1309680,
+        "purchaseSen": 3382862,
+        "closingSen": 2008700
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 23750,
+        "purchaseSen": 237500,
+        "closingSen": 47500
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 241761,
+        "purchaseSen": 3143900,
+        "closingSen": 536888
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 549018,
+        "purchaseSen": 544914,
+        "closingSen": 270000
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 494750,
+        "purchaseSen": 1467475,
+        "closingSen": 442100
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 246830,
+        "purchaseSen": 449650,
+        "closingSen": 184010
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 24000,
+        "purchaseSen": 405570,
+        "closingSen": 31850
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 1500,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 43000,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 17800,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 64248,
+        "purchaseSen": 965504,
+        "closingSen": 62400
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 4225491,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 593115
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 58859
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 4970
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 254550
+      }
+    ],
+    "wipOpenSen": 983709,
+    "wipCloseSen": 864564,
+    "closingFGSen": 578034,
+    "otherIncomeSen": 0,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 416
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 90000
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 0
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 9423
+      },
+      {
+        "name": "Research & Development",
+        "sen": 288792
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1250000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 120000
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 1742184
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 20565
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 190700
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 2350
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 0
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 0
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 1020488
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 302558
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": 2346122
+  },
+  {
+    "ym": "2025-11",
+    "salesBedframeSen": 21042000,
+    "salesSofaSen": 0,
+    "returnInwardSen": 0,
+    "discountAllowedSen": 0,
+    "openingFGSen": 578034,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 2008700,
+        "purchaseSen": 3919496,
+        "closingSen": 2385320
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 47500,
+        "purchaseSen": 325150,
+        "closingSen": 118750
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 536888,
+        "purchaseSen": 3057200,
+        "closingSen": 563533
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 270000,
+        "purchaseSen": 1050180,
+        "closingSen": 270000
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 442100,
+        "purchaseSen": 1719294,
+        "closingSen": 832670
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 184010,
+        "purchaseSen": 695455,
+        "closingSen": 81040
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 31850,
+        "purchaseSen": 556800,
+        "closingSen": 452950
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 10800,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 43000,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 62400,
+        "purchaseSen": 949652,
+        "closingSen": 442916
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 4282459,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 107310
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 123695
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 1880
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 639134
+      }
+    ],
+    "wipOpenSen": 864564,
+    "wipCloseSen": 868705,
+    "closingFGSen": 664486,
+    "otherIncomeSen": 48900,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 100
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 45000
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 14500
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 0
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 19318
+      },
+      {
+        "name": "Research & Development",
+        "sen": 1003200
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1250000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 120000
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 1801692
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 24415
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 218500
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 2790
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 0
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 9800
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 1072060
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 193780
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": -511436
+  },
+  {
+    "ym": "2025-12",
+    "salesBedframeSen": 26041500,
+    "salesSofaSen": 0,
+    "returnInwardSen": 0,
+    "discountAllowedSen": -1443000,
+    "openingFGSen": 664486,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 2385320,
+        "purchaseSen": 4816335,
+        "closingSen": 1782000
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 118750,
+        "purchaseSen": 427500,
+        "closingSen": 190000
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 563533,
+        "purchaseSen": 3180000,
+        "closingSen": 754479
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 270000,
+        "purchaseSen": 1379701,
+        "closingSen": 450000
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 832670,
+        "purchaseSen": 1791041,
+        "closingSen": 778505
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 81040,
+        "purchaseSen": 451300,
+        "closingSen": 333880
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 452950,
+        "purchaseSen": 491950,
+        "closingSen": 783350
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 14300,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 257000,
+        "closingSen": 257000
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 442916,
+        "purchaseSen": 965768,
+        "closingSen": 317360
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 5923064,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 140500
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 111240
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 18648
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 280300
+      }
+    ],
+    "wipOpenSen": 868705,
+    "wipCloseSen": 626687,
+    "closingFGSen": 820519,
+    "otherIncomeSen": 9464,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 50
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 45000
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 0
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 25718
+      },
+      {
+        "name": "Research & Development",
+        "sen": 576060
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1250000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 120000
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 1914467
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 25285
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 221100
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 2890
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 0
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 52581
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 5581
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 1380230
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 840
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 152290
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": -999365
+  },
+  {
+    "ym": "2026-01",
+    "salesBedframeSen": 29611000,
+    "salesSofaSen": 2826600,
+    "returnInwardSen": 0,
+    "discountAllowedSen": 0,
+    "openingFGSen": 820519,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 1782000,
+        "purchaseSen": 14345001,
+        "closingSen": 13080400
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 0,
+        "purchaseSen": 2454480,
+        "closingSen": 884500
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 190000,
+        "purchaseSen": 118750,
+        "closingSen": 14660
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 754479,
+        "purchaseSen": 3816600,
+        "closingSen": 520079
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 450000,
+        "purchaseSen": 1731442,
+        "closingSen": 564960
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 778505,
+        "purchaseSen": 1874071,
+        "closingSen": 504918
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 0,
+        "purchaseSen": 863480,
+        "closingSen": 220950
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 333880,
+        "purchaseSen": 695000,
+        "closingSen": 598810
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 21000,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 783350,
+        "purchaseSen": 1225362,
+        "closingSen": 1436100
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 257000,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 0,
+        "purchaseSen": 44000,
+        "closingSen": 93100
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 36500,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 29240,
+        "closingSen": 9150
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 317360,
+        "purchaseSen": 1259836,
+        "closingSen": 633044
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 7245619,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 192231
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 38265
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 28013
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 233462
+      }
+    ],
+    "wipOpenSen": 626687,
+    "wipCloseSen": 1484565,
+    "closingFGSen": 832115,
+    "otherIncomeSen": 0,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 50
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 45000
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 0
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 5021
+      },
+      {
+        "name": "Research & Development",
+        "sen": 65800
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1250000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 120000
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 1971784
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 26411
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 237300
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 3018
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 1044
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 0
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 984838
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 213175
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": 5045378
+  },
+  {
+    "ym": "2026-02",
+    "salesBedframeSen": 13494700,
+    "salesSofaSen": 5521800,
+    "returnInwardSen": 197000,
+    "discountAllowedSen": 10000,
+    "openingFGSen": 832115,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 13080400,
+        "purchaseSen": 309396,
+        "closingSen": 10276730
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 884500,
+        "purchaseSen": 2326520,
+        "closingSen": 1297900
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 14660,
+        "purchaseSen": 240000,
+        "closingSen": 118750
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 520079,
+        "purchaseSen": 1250100,
+        "closingSen": 653694
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 564960,
+        "purchaseSen": 562345,
+        "closingSen": 287280
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 504918,
+        "purchaseSen": 1168494,
+        "closingSen": 593834
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 220950,
+        "purchaseSen": 1290130,
+        "closingSen": 381900
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 598810,
+        "purchaseSen": 337000,
+        "closingSen": 421710
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 1436100,
+        "purchaseSen": 223800,
+        "closingSen": 1160470
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 93100,
+        "purchaseSen": 299000,
+        "closingSen": 131100
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 0,
+        "purchaseSen": 198040,
+        "closingSen": 115000
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 9150,
+        "purchaseSen": 0,
+        "closingSen": 56950
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 633044,
+        "purchaseSen": 515584,
+        "closingSen": 195716
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 5234427,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 204360
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 0
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 56280
+      }
+    ],
+    "wipOpenSen": 1484565,
+    "wipCloseSen": 1243383,
+    "closingFGSen": 1128783,
+    "otherIncomeSen": 0,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 10602
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 45000
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 0
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 0
+      },
+      {
+        "name": "Research & Development",
+        "sen": 0
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1250000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 120000
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 2271032
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 29230
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 254800
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 3340
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 0
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 0
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 510000
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 0
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": -2694131
+  },
+  {
+    "ym": "2026-03",
+    "salesBedframeSen": 15673000,
+    "salesSofaSen": 5001500,
+    "returnInwardSen": 0,
+    "discountAllowedSen": 0,
+    "openingFGSen": 1128783,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 10276730,
+        "purchaseSen": 437826,
+        "closingSen": 7694255
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 1297900,
+        "purchaseSen": 1293400,
+        "closingSen": 1041230
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 118750,
+        "purchaseSen": 126600,
+        "closingSen": 95000
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 653694,
+        "purchaseSen": 1731740,
+        "closingSen": 615091
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 287280,
+        "purchaseSen": 1495252,
+        "closingSen": 388800
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 593834,
+        "purchaseSen": 763880,
+        "closingSen": 584400
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 381900,
+        "purchaseSen": 728451,
+        "closingSen": 366345
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 421710,
+        "purchaseSen": 296570,
+        "closingSen": 490300
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 55500,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 1160470,
+        "purchaseSen": 73500,
+        "closingSen": 1043240
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 2800,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 131100,
+        "purchaseSen": 209500,
+        "closingSen": 128000
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 115000,
+        "purchaseSen": 124000,
+        "closingSen": 120500
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 56950,
+        "purchaseSen": 311540,
+        "closingSen": 51250
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 195716,
+        "purchaseSen": 624468,
+        "closingSen": 381828
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 5444901,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 100000
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 0
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 119800
+      }
+    ],
+    "wipOpenSen": 1243383,
+    "wipCloseSen": 1072188,
+    "closingFGSen": 634636,
+    "otherIncomeSen": 0,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 5100
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 0
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 1950
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 6450
+      },
+      {
+        "name": "Research & Development",
+        "sen": 0
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1250000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 0
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 2214715
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 27830
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 250900
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 3180
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 0
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 0
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 1060000
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 0
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": -1441490
+  },
+  {
+    "ym": "2026-04",
+    "salesBedframeSen": 12476700,
+    "salesSofaSen": 8249300,
+    "returnInwardSen": 0,
+    "discountAllowedSen": -528500,
+    "openingFGSen": 634636,
+    "rmCategories": [
+      {
+        "name": "B.M Fabric",
+        "code": "B.M-FABR",
+        "openingSen": 7694255,
+        "purchaseSen": 314960,
+        "closingSen": 6155725
+      },
+      {
+        "name": "S.M Fabric",
+        "code": "S.M-FABR",
+        "openingSen": 1041230,
+        "purchaseSen": 1775890,
+        "closingSen": 724110
+      },
+      {
+        "name": "S Fabric",
+        "code": "S-FABRIC",
+        "openingSen": 95000,
+        "purchaseSen": 120400,
+        "closingSen": 47500
+      },
+      {
+        "name": "Plywood",
+        "code": "PLYWOOD",
+        "openingSen": 615091,
+        "purchaseSen": 747000,
+        "closingSen": 419133
+      },
+      {
+        "name": "WD Strip",
+        "code": "WD STRIP",
+        "openingSen": 388800,
+        "purchaseSen": 55020,
+        "closingSen": 289200
+      },
+      {
+        "name": "B.Filler",
+        "code": "B.FILLER",
+        "openingSen": 584400,
+        "purchaseSen": 1230551,
+        "closingSen": 677015
+      },
+      {
+        "name": "S.Filler",
+        "code": "S.FILLER",
+        "openingSen": 366345,
+        "purchaseSen": 2533421,
+        "closingSen": 871250
+      },
+      {
+        "name": "B.Others",
+        "code": "B.OTHERS",
+        "openingSen": 490300,
+        "purchaseSen": 264280,
+        "closingSen": 375660
+      },
+      {
+        "name": "S.Others",
+        "code": "S.OTHERS",
+        "openingSen": 0,
+        "purchaseSen": 214000,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Accessories",
+        "code": "B.ACCE",
+        "openingSen": 1043240,
+        "purchaseSen": 398600,
+        "closingSen": 503160
+      },
+      {
+        "name": "Maintenance",
+        "code": "MAINTENA",
+        "openingSen": 0,
+        "purchaseSen": 2800,
+        "closingSen": 0
+      },
+      {
+        "name": "B.Mechanism",
+        "code": "B.MECHAN",
+        "openingSen": 0,
+        "purchaseSen": 0,
+        "closingSen": 0
+      },
+      {
+        "name": "S.Mechanism",
+        "code": "S.MECH",
+        "openingSen": 128000,
+        "purchaseSen": 369500,
+        "closingSen": 86000
+      },
+      {
+        "name": "B.Webbing",
+        "code": "B.WEBB",
+        "openingSen": 120500,
+        "purchaseSen": 85740,
+        "closingSen": 122700
+      },
+      {
+        "name": "S.Webbing",
+        "code": "S.WEBB",
+        "openingSen": 51250,
+        "purchaseSen": 0,
+        "closingSen": 61800
+      },
+      {
+        "name": "Packing",
+        "code": "PACKING",
+        "openingSen": 381828,
+        "purchaseSen": 602520,
+        "closingSen": 393560
+      }
+    ],
+    "carriageSen": 0,
+    "sstSen": 0,
+    "labourSen": 5395307,
+    "overheadLines": [
+      {
+        "name": "Warehouse - Rental",
+        "sen": 0
+      },
+      {
+        "name": "Upkeep of Factory",
+        "sen": 261000
+      },
+      {
+        "name": "Upkeep of Factory Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Factory General Requistion",
+        "sen": 0
+      },
+      {
+        "name": "Factory Small Equipment",
+        "sen": 133800
+      }
+    ],
+    "wipOpenSen": 1072188,
+    "wipCloseSen": 1016170,
+    "closingFGSen": 648673,
+    "otherIncomeSen": 0,
+    "expenseLines": [
+      {
+        "name": "Bank Charges",
+        "sen": 50
+      },
+      {
+        "name": "Design Fees",
+        "sen": 0
+      },
+      {
+        "name": "Hostel & Accomodation",
+        "sen": 0
+      },
+      {
+        "name": "Incorporation Expense Written Off",
+        "sen": 0
+      },
+      {
+        "name": "Medical Fee",
+        "sen": 0
+      },
+      {
+        "name": "Postage & Stamps",
+        "sen": 0
+      },
+      {
+        "name": "Printing & Stationery",
+        "sen": 7850
+      },
+      {
+        "name": "Research & Development",
+        "sen": 35200
+      },
+      {
+        "name": "Factory - Rental",
+        "sen": 1250000
+      },
+      {
+        "name": "Equipment - Rental (Forklift)",
+        "sen": 0
+      },
+      {
+        "name": "Staff Salaries & Overtime",
+        "sen": 2398586
+      },
+      {
+        "name": "E'yer SOCSO",
+        "sen": 29220
+      },
+      {
+        "name": "E'yerEPF",
+        "sen": 257100
+      },
+      {
+        "name": "E'yer EIS",
+        "sen": 3340
+      },
+      {
+        "name": "Staff's HRDF",
+        "sen": 0
+      },
+      {
+        "name": "Part time worker/wages",
+        "sen": 0
+      },
+      {
+        "name": "Staff Refershment",
+        "sen": 0
+      },
+      {
+        "name": "Secretarial Fees",
+        "sen": 0
+      },
+      {
+        "name": "Stamping Fees",
+        "sen": 0
+      },
+      {
+        "name": "Travelling Expense",
+        "sen": 0
+      },
+      {
+        "name": "Transport Expense",
+        "sen": 270000
+      },
+      {
+        "name": "Upkeep of Office Equipment",
+        "sen": 0
+      },
+      {
+        "name": "Water & Electricity",
+        "sen": 535110
+      },
+      {
+        "name": "Website & Software",
+        "sen": 0
+      }
+    ],
+    "netProfitSen": -1409152
+  }
+]

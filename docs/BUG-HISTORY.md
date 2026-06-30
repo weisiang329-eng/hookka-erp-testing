@@ -26,13 +26,125 @@ Entries themselves stay newest-first.
 - `delivery-orders` (11) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
 - `sales-orders` (7) — [BUG-2026-04-26-021](#bug-2026-04-26-021-fixsales-drop-wrong-mattress-label-on-sofa-category-option)
 - `pricing-products` (6) — [BUG-2026-04-24-029](#bug-2026-04-24-029-fixcustomers-sofa-seat-prices-now-render-in-customer-products-panel)
-- `data-migration` (8) — [BUG-2026-06-10-001](#bug-2026-06-10-001--punch-selfie-photo-endpoint-500d-an-explicit-camelcase-select-projection-isnt-translated-by-the-d1-compat-adapter) · camelCase/rename-map class recurs — see BUG-2026-06-18-001/-002
+- `data-migration` (8) — [BUG-2026-06-10-001](#bug-2026-06-10-001--punch-selfie-photo-endpoint-500d-an-explicit-camelcase-select-projection-isnt-translated-by-the-d1-compat-adapter) · camelCase/rename-map class recurs — see BUG-2026-06-18-001/-002, BUG-2026-06-30-001 (read-side, P&L historical)
 - `data-integrity` (4) — [BUG-2026-04-25-008](#bug-2026-04-25-008-stability-add-timeout-abort-propagation-to-fetchjson)
 - `auth-rbac` (3) — [BUG-2026-06-12-010](#bug-2026-06-12-010--any-admin-could-disable-or-delete-other-peoples-accounts-no-admin-tier-below-super-admin)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
 
 ---
+
+## BUG-2026-06-30-002 — Confirmed purchase invoices vanished from the Creditor Ledger / AP aging / supplier statement (stale `'APPROVED'` status filters after the PI status model collapsed APPROVED→CONFIRMED)
+
+🟢 **Fixed** · `data-migration` (status-model drift) · owner-reported
+
+**Symptom (owner, live prod):** the Creditor Ledger (Purchase Ledger) showed **"No activity"** despite 116 CONFIRMED purchase invoices; AP aging and the supplier statement were likewise empty. The GL/P&L were NOT affected (CONFIRMED PIs do post journal entries) — this was purely the AP subledger reports.
+
+**Root cause:** the PI lifecycle was collapsed to DRAFT→CONFIRMED→PAID on 2026-06-29/30 (`purchase-invoices.ts` `ensurePiMigrations`: `UPDATE purchase_invoices SET status='CONFIRMED' WHERE status IN ('PENDING_APPROVAL','APPROVED')`), CONFIRMED replacing APPROVED. But the AP-subledger reads — which query `purchase_invoices` directly — still filtered `status IN ('APPROVED','PARTIAL_PAID','PAID')` / `status = 'APPROVED'`, none of which match the now-CONFIRMED rows → every confirmed PI silently excluded. The migration changed the data but didn't sweep the readers. (`purchase_invoices` is a pure AP subledger; GL/P&L/trial-balance read only `ledger_journal_entries`, so they were unaffected — confirmed via the PI posting at `purchase-invoices.ts:1505`, which fires on the CONFIRMED transition, DR purchase/inventory CR 400-0000, idempotent.)
+
+**Fix:** added `'CONFIRMED'` to every PI-status read (kept the legacy values for un-migrated rows): creditor ledger (`accounting.ts:2487`), supplier statement (`:2339`), AP aging + fallback (`:2201`, `:2207`), supplier panel / opening-reversal (`:7378`). Changed the three payment-reversal writes that reset a fully-unpaid PI back to the legacy `'APPROVED'` → `'CONFIRMED'` (`accounting.ts:2133`, `supplier-payments.ts:484`, `:556`). `accounting.ts:5138` (the PI-weighted-average receipt cost in `loadMaterialCostData`, line 5177-5193) was initially held back — adding CONFIRMED there revalues GRN receipts at invoiced PI prices and moves the material P&L. **Owner approved 2026-06-30** (the P&L wasn't showing the invoiced material cost because GRN receipts fell back to their estimate price) → 5138 now also reads `CONFIRMED`, so received materials value at the invoiced PI price.
+
+**Verified:** tsc clean; eslint clean; `npm test` 1279/1280 (1 pre-existing skip). Owner to confirm the creditor ledger now lists the CONFIRMED PIs on prod.
+
+**Follow-up:** the legacy values are still inserted by opening-balance / bulk-import (`accounting.ts:9315`, `import-completion.ts:8506`) relying on `ensurePiMigrations` to backfill, and the reads now tolerate both. A shared `PI_OWED_STATUSES` constant (single source of truth) would prevent this status drift from recurring.
+
+---
+
+## BUG-2026-06-30-001 — Historical P&L months (pre-opening Apr'25–Apr'26) all showed 0 despite 39 `pnl_historical` rows loaded — adapter camelCased `window_json` → `windowJson`, reader used snake_case → every row silently skipped
+
+🟢 **Fixed** · `data-migration` (camelCase/rename-map class — recurs, see BUG-2026-06-10-001 / -06-18-001/-002) · owner-reported
+
+**Symptom (owner, live prod):** the Monthly P&L pre-opening columns (Apr 2025 – Apr 2026, before the 2026-05-22 opening date) all rendered **0.00**, even though the owner had loaded all 39 `pnl_historical` rows (13 months × all/sofa/bedframe). Diagnostic SQL on prod confirmed every input was correct: `count=39`, `org_id='hookka'`, range `2025-04..2026-04`, `kv_config.opening_date='2026-05-22'`, `users.org_id='hookka'`. The page rendered with no 500 — so the read ran but produced an empty map. (This burned a full cycle chasing a staging-vs-prod data-placement red herring; the data was in prod all along.)
+
+**Root cause:** `loadHistoricalPnl` (`src/api/routes/accounting.ts`) read `row.window_json`. The Postgres adapter (`src/api/lib/db-pg.ts`, `transform: { column: { from: columnFrom } }`) camelCases EVERY result column; `window_json` is **not** in `column-rename-map.json`, so it falls back to `postgres.toCamel` → the field arrives as **`windowJson`**. `row.window_json` was therefore `undefined` → `JSON.parse(undefined)` threw → the `catch { continue; }` silently skipped all 39 rows → empty map → `selectHistoricalWindow` returned null for every month → every pre-opening column fell through to `computePnlWindow` (0 pre-opening). Same camelCase/rename-map class as the read-side D1-compat bugs above. **The unit test masked it:** it hand-rolled a `groupRows` replica that read `window_json` and fed snake_case keys, so it passed while prod failed.
+
+**Fix:** extracted the grouping into a pure, exported `buildHistoricalMap(rows)` in `src/lib/pnl-historical.ts` that reads the value **dual-keyed** (`row.windowJson ?? row.window_json`) per the repo gotcha; `loadHistoricalPnl` now delegates to it (`src/api/routes/accounting.ts:5468`). Regression test rewritten (`tests/pnl-historical.test.mjs`) to feed the camelCase `windowJson` key the adapter actually produces — it fails under the old logic and passes now.
+
+**Verified:** `tsc -p tsconfig.app.json --noEmit` clean; eslint clean on both changed files; `npm test` 1272/1273 (1 pre-existing skip), including the new camelCase regression case. Shipped to `main` → prod; the 39 rows are already in prod, so pre-opening months populate on the next deploy — owner to confirm on erp.hookka.com.
+
+---
+
+## BUG-2026-06-29-001 — P&L "Closing Stock – Finished Goods" ~15× too high (RM 595k vs the real RM 39k), and WIP/FG labour silently dropped to 0
+
+🟢 **Fixed (FG + WIP material + labour)** · `accounting` · owner-reported
+
+**Symptom (owner, live prod, post-opening completed_date ≥ 2026-05-22):** the P&L
+finished-goods CLOSING line showed **RM 595,379**, while the real undelivered FG is
+**RM 39,099** (`Σ fg_batches.remaining_qty × unit_cost_sen` — cascade-maintained, ties
+to reality). Total FG ever produced post-opening is only RM 72,743, so the figure
+exceeded everything produced. Delivery relief (FG_DELIVERED) and the opening-date
+floor were already correct (prior fixes `2b8dc9ba`, `2976fc4d`); the defect was the
+per-unit **cost** used to value undelivered stock.
+
+**Root cause:** `loadMaterialCostData` (`src/api/routes/accounting.ts`) valued each
+undelivered FG unit by RE-DERIVING the cost from the FIFO engine:
+`unitCostResolver(po,c) = fifoMaterialAsOf(po,c) + laborAsOf(po,c)`, then
+`/ originalQty` (in `fgClosingSen`). Two independent defects:
+1. **Material over-statement (the ~15×).** `fifoMaterialAsOf(po)` = Σ of the FIFO
+   replay's per-issue costs for the PO. Both `fgClosingSen` and the
+   cascade's `backfillFGBatchCost` divide by the SAME `originalQty`, so the
+   inflation can only come from the numerator: the replay's per-layer issue costs
+   for a PO did NOT reconcile to the material actually booked to that PO
+   (`Σ RM_ISSUE.total_cost_sen`) — a layer-pricing discrepancy in the replay that
+   inflates EVERY post-opening batch. (RM closing stock looked fine because
+   over-costing an issue shows up as inflated CONSUMPTION, not inflated on-hand.)
+   The attribution KEYS are correct (`RM_ISSUE.refId` = PO, bucketed by ref), so
+   this is a re-valuation/pricing problem, not a mis-bucketing one — hence the
+   re-valuation is unsalvageable for FG without prod-data layer-pricing repair.
+2. **Labour silently 0 in WIP & FG.** `laborAsOf` bucketed LABOR_POSTED rows by
+   `refId`, but for LABOR_POSTED `refId` is the **JOB CARD** id and the PO is in
+   **`itemId`** (`postJobCardLabor` writes `itemId=productionOrderId`,
+   `refType='JOB_CARD'`, `refId=jobCardId`; same split `costByLineWindow` uses at
+   accounting.ts ~4738). The map was keyed by job-card id but looked up by PO id →
+   every lookup missed → labour contributed 0 to both WIP and FG re-valuation.
+
+**Fix:**
+- **FG (fallback, money-correct):** value undelivered FG directly at the
+  cascade-maintained `fg_batches.unit_cost_sen`. Added `unitCostSen` to the
+  `fg_batches` SELECT; `fgClosingSen` (`src/lib/fg-closing.ts`) now sums
+  `undelivered × unit_cost_sen` (relief + opening floor unchanged). This yields the
+  verified RM 39k. `unit_cost_sen` is the same figure every other FG surface uses.
+- **Labour attribution (root cause):** extracted `costAsOfByPo` +
+  `poKeyForLedgerType` into `src/lib/cost-attribution.ts` (LABOR_POSTED→itemId,
+  RM_ISSUE/ADJUSTMENT→refId) and use it for the per-PO labour accessor. WIP labour
+  is now correctly attributed (was 0).
+
+**WIP material — RESOLVED (2026-06-29, commit `<see below>`).** The same ~15×
+inflation hit WIP material on live prod: WIP-CLOSING showed **RM 267,721** vs the
+owner's real **~RM 10k**. Root cause was identical — `wipAsOf` valued each
+in-progress PO's material via `fifoMaterialAsOf(po,D)` (Σ of the FIFO replay's
+per-issue costs), whose per-layer issue costs for a PO do NOT reconcile to the
+material actually booked to that PO (`Σ RM_ISSUE.total_cost_sen`). WIP has no
+per-batch unit cost to fall back to (in-progress POs have no FG batch), so the
+material basis was fixed at source:
+- `loadMaterialCostData` now builds a per-PO material accessor the SAME way as
+  labour: `const materialAsOf = costAsOfByPo(clRes.results ?? [], "RM_ISSUE")`
+  (sums `RM_ISSUE.total_cost_sen` by `refId`=PO, as-of-date) — the authoritative
+  sane per-PO material cost, exactly what `backfillFGBatchCost` rolls into
+  `fg_batches.unit_cost_sen = floor((ΣRM_ISSUE+ΣLABOR)/originalQty)`.
+- `wipAsOf` per in-progress PO is now `materialAsOf(po,D) + laborAsOf(po,D)`
+  (material issued so far + labour posted so far) — matching the real booked cost
+  (`accounting.ts` ~L5343).
+- The buggy re-valuation was REMOVED from the production path: deleted
+  `fifoMaterialAsOf` and the `issuesByRef` / `valueIssues(m)` accumulation that fed
+  only it, and dropped the now-unused `valueIssues`/`IssueCost` imports from
+  `accounting.ts`, so the inflating attribution cannot be reused. (The pure
+  `valueIssues`/`computeMaterialPeriod` functions in `src/lib/material-cost-fifo.ts`
+  are LEFT intact — they are unit-tested public FIFO-library functions and
+  `computeMaterialPeriod` is the proven slow-path reference that fuzz-tests the RM
+  checkpoint engine; only the per-PO *re-valuation* in accounting.ts was the bug.)
+  The RM-group checkpoint engine (`computeMaterialCheckpoints`/`windowFromCheckpoints`)
+  is untouched.
+
+**Verify:** `tsc -p tsconfig.app.json --noEmit` 0 errors; `tsc -b` 0; eslint on the
+3 files 0; `npm test` 1260 pass / 1 skip. `tests/cost-attribution.test.mjs` locks
+the per-PO attribution (LABOR by itemId, RM by refId, no cross-PO leakage) AND now
+WIP-per-PO = Σ its own (RM_ISSUE + LABOR_POSTED) `total_cost_sen` as-of-date — the
+booked cost, NOT a FIFO replay (4 added tests); `tests/fg-closing-relief.test.mjs`
+locks FG = `undelivered × unit_cost_sen`. FG figure proven against the owner's own
+`Σ remaining_qty × unit_cost_sen = RM 39,099`; WIP now ties to `Σ RM_ISSUE +
+Σ LABOR_POSTED` booked per in-progress PO (the owner's ~RM 10k basis) rather than the
+inflated replay. Live-prod re-check left to the owner's review of the diff.
 
 ## BUG-2026-06-26-004 — Production sheet: setting PIC 2 fails with a false "verify-readback mismatch — pic2Id … db has null" (PIC 1 saves fine; retry works)
 

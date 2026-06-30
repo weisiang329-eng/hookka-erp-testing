@@ -34,6 +34,8 @@ import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
+import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
+import { costAsOfByPo } from "../../lib/cost-attribution";
 import { DOC_DATE_FAMILIES, stripLegSuffix, parseSourceIdDate } from "../../lib/doc-date";
 import {
   prefixForPartyType,
@@ -55,12 +57,10 @@ import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import {
-  valueIssues,
   computeMaterialCheckpoints,
   windowFromCheckpoints,
   type MaterialInput,
   type FifoEvent,
-  type IssueCost,
   type CheckpointCum,
 } from "../../lib/material-cost-fifo";
 
@@ -4957,14 +4957,20 @@ async function glWindowSigned(
 // being fed after 2026-03) with a from-source FIFO replay, for the three
 // inventory layers the manufacturing P&L needs:
 //   · RM  — opening + GRN purchases − closing, per item_group (FIFO consumption)
-//   · WIP — per in-progress production_order: FIFO material issued + labour
-//   · FG  — per completed-not-delivered fg_batch: undelivered qty × FIFO unit cost
+//   · WIP — per in-progress production_order: Σ RM_ISSUE.total_cost_sen (material
+//           actually booked) + Σ LABOR_POSTED.total_cost_sen, both as-of-date
+//   · FG  — per completed-not-delivered fg_batch: undelivered qty × the
+//           cascade-maintained fg_batches.unit_cost_sen
 //
 // The pure FIFO maths live in src/lib/material-cost-fifo.ts; here we only
-// assemble the events from the operational tables and feed the engine. The
-// engine guarantees  Σ valueIssues(m).fifoCostSen in [a,b] === consumedSen
-// for the same window, so WIP/FG (which sum per-issue costs) and RM (which use
-// consumed) stay coherent to the sen.
+// assemble the events from the operational tables and feed the engine for the RM
+// layer (opening/purchase/closing/consumed via monthly checkpoints). WIP material
+// and FG are NOT taken from the replay's per-issue costs: that re-valuation was
+// ~15× too high on live prod because the replay's per-layer issue costs for a PO
+// did not reconcile to Σ RM_ISSUE.total_cost_sen booked to it. WIP/FG now read the
+// actual booked cost_ledger totals (and FG's cascade unit cost) instead — see
+// BUG-2026-06-29-001. The RM checkpoint path (computeMaterialCheckpoints) is
+// unaffected and stays coherent to the sen.
 //
 // As-of-date reconstruction (the hard part — owner accepts pre-cutover /
 // transitional imperfection, but the CURRENT period, whose closing date is
@@ -5145,13 +5151,23 @@ async function loadMaterialCostData(
       .bind(orgId)
       .all<{ id: string; startDate: string | null; completedDate: string | null; status: string | null }>(),
     db
-      .prepare("SELECT id, productionOrderId, completedDate, originalQty FROM fg_batches WHERE orgId = ?")
+      .prepare("SELECT id, productionOrderId, completedDate, originalQty, unitCostSen FROM fg_batches WHERE orgId = ?")
       .bind(orgId)
-      .all<{ id: string; productionOrderId: string | null; completedDate: string | null; originalQty: number | null }>(),
+      .all<{ id: string; productionOrderId: string | null; completedDate: string | null; originalQty: number | null; unitCostSen: number | null }>(),
+    // FG relief signal: cost_ledger FG_DELIVERED rows. consumeFGBatchesForDO
+    // (do-cost-cascade.ts) emits one row per layer-slice on every DO→DELIVERED
+    // with (date, qty, batchId), where qty is the SAME quantity decremented
+    // from fg_batches.remainingQty — i.e. the SAME unit as fg_batches.originalQty
+    // (which is piece-level when a product has >1 piece). This replaces the old
+    // `fg_units.batchId` count, which was always 0 because fg_units.batchId is
+    // never written (fg-units.ts INSERT omits it) → FG closing accumulated
+    // without bound. Keyed by batchId = fg_batches.id (real, non-null here).
     db
-      .prepare("SELECT batchId, deliveredAt FROM fg_units WHERE orgId = ? AND deliveredAt IS NOT NULL")
+      .prepare(
+        "SELECT batchId, date, qty FROM cost_ledger WHERE orgId = ? AND type = 'FG_DELIVERED' AND batchId IS NOT NULL",
+      )
       .bind(orgId)
-      .all<{ batchId: string | null; deliveredAt: string | null }>(),
+      .all<{ batchId: string | null; date: string | null; qty: number | null }>(),
   ]);
 
   // 3. PI-weighted-average layer cost, batched into one map keyed PO+material.
@@ -5225,13 +5241,13 @@ async function loadMaterialCostData(
   const monthsYm = monthsBetweenYm(globalFirstYm, lastYm); // [] when first > last
   const monthEnds = monthsYm.map(monthEndIso);
 
-  // Replay each item ONCE; sum its monthly checkpoints into its item-group, and
-  // collect per-PO issue costs (for WIP/FG) from the same pass. No per-window
-  // re-replay — that repetition was the prod P&L hang.
+  // Replay each item ONCE and sum its monthly checkpoints into its item-group.
+  // No per-window re-replay — that repetition was the prod P&L hang. (Per-PO
+  // material cost for WIP comes from cost_ledger RM_ISSUE totals below, NOT this
+  // replay — see materialAsOf / BUG-2026-06-29-001.)
   const rank = (e: FifoEvent) => (e.kind === "receipt" ? 0 : 1);
   const groupCum = new Map<string, Map<string, CheckpointCum>>(); // group → ym → cumulative
   const allGroups = new Set<string>();
-  const issuesByRef = new Map<string, IssueCost[]>(); // ref(PO) → its issues
   const negatives: { rmId: string; itemCode: string; units: number }[] = [];
   const openByRm = new Map<string, { rmId: string; qty: number | null; unitCostSen: number | null; asOfDate: string | null }>();
   for (const r of openingRows) openByRm.set(r.rmId, r);
@@ -5272,52 +5288,42 @@ async function loadMaterialCostData(
       acc.cumConsumedSen += cp.cumConsumedSen;
       acc.cumNegativeUnits += cp.cumNegativeUnits;
     }
-    // Per-issue FIFO costs (full timeline ≤ matEndIso) — grouped by PO for WIP/FG.
-    for (const ic of valueIssues(m)) {
-      if (!ic.ref) continue;
-      let arr = issuesByRef.get(ic.ref);
-      if (!arr) { arr = []; issuesByRef.set(ic.ref, arr); }
-      arr.push(ic);
-    }
     // Whole-range negative-stock flag (fractional qty → rounded; diagnostic only).
     const lastCp = cps.length ? cps[cps.length - 1] : null;
     const negUnits = lastCp ? lastCp.cumNegativeUnits : 0;
     if (negUnits > 1e-9) negatives.push({ rmId, itemCode: codeOf.get(rmId) ?? rmId, units: Math.round(negUnits * 1000) / 1000 });
   }
 
-  // 6a. Per-PO FIFO material cost as of a date D = Σ issue.fifoCostSen for that
-  //     PO with date <= D. Computed on demand from the grouped issues.
-  const fifoMaterialAsOf = (poId: string, dIso: string): number => {
-    const arr = issuesByRef.get(poId);
-    if (!arr) return 0;
-    let s = 0;
-    for (const ic of arr) if (ic.date <= dIso) s += ic.fifoCostSen;
-    return s;
-  };
+  // 6a. Per-PO material cost as of a date D = Σ RM_ISSUE.total_cost_sen for that
+  //     PO with date <= D — the material ACTUALLY booked to the PO. ATTRIBUTION
+  //     (locked by cost-attribution.test): for RM_ISSUE the PO is in `refId`
+  //     (itemId is the raw-material id). Built the SAME way as the labour
+  //     accessor below, via costAsOfByPo.
+  //
+  //     NOT re-valued from the FIFO replay (the old `fifoMaterialAsOf` = Σ of the
+  //     replay's per-issue costs for the PO): that re-valuation came out ~15× too
+  //     high on live prod (WIP-CLOSING RM 267,721 vs the owner's real ~RM 10k)
+  //     because the replay's per-layer issue costs for a PO did NOT reconcile to
+  //     Σ RM_ISSUE.total_cost_sen booked to that PO. The same defect inflated FG
+  //     (worked around there by valuing FG at fg_batches.unit_cost_sen, which is
+  //     floor((ΣRM_ISSUE+ΣLABOR)/originalQty) — i.e. this same RM_ISSUE total).
+  //     WIP has no per-batch unit cost to fall back to, so the material basis is
+  //     fixed at source here. See BUG-2026-06-29-001.
+  const materialAsOf = costAsOfByPo(clRes.results ?? [], "RM_ISSUE");
 
   // 6b. Per-PO labour cost as of a date D = Σ LABOR_POSTED.total_cost_sen for
-  //     that PO (cost_ledger.ref_id = PO) with date <= D.
-  const laborByPo = new Map<string, { date: string; sen: number }[]>();
-  for (const l of clRes.results ?? []) {
-    if (l.type !== "LABOR_POSTED") continue;
-    const ref = l.refId;
-    if (!ref) continue;
-    const date = (l.date ?? "").slice(0, 10);
-    if (!date) continue;
-    let arr = laborByPo.get(ref);
-    if (!arr) { arr = []; laborByPo.set(ref, arr); }
-    arr.push({ date, sen: Number(l.totalCostSen) || 0 });
-  }
-  const laborAsOf = (poId: string, dIso: string): number => {
-    const arr = laborByPo.get(poId);
-    if (!arr) return 0;
-    let s = 0;
-    for (const e of arr) if (e.date <= dIso) s += e.sen;
-    return s;
-  };
+  //     that PO with date <= D. ATTRIBUTION (locked by cost-attribution.test):
+  //     for LABOR_POSTED the PO is in `itemId` — postJobCardLabor
+  //     (po-cost-cascade.ts) writes itemId=productionOrderId, refType='JOB_CARD',
+  //     refId=jobCardId. (RM_ISSUE is the opposite: refId=PO.) The previous code
+  //     bucketed by refId (the JOB CARD id) but looked up by poId, so every
+  //     lookup missed and labour was silently 0 in WIP & FG.
+  const laborAsOf = costAsOfByPo(clRes.results ?? [], "LABOR_POSTED");
 
   // 7. WIP as of D = Σ over production_orders in progress at D of
-  //    (FIFO material issued so far + labour posted so far).
+  //    (material issued so far + labour posted so far) — both the ACTUAL booked
+  //    cost_ledger totals (Σ RM_ISSUE.total_cost_sen + Σ LABOR_POSTED.total_cost_sen
+  //    ≤ D for that PO), matching what the cascade rolls into fg_batches.unit_cost_sen.
   const pos = poRes.results ?? [];
   const wipAsOf = (dIso: string): number => {
     let s = 0;
@@ -5326,49 +5332,49 @@ async function loadMaterialCostData(
       const completed = (p.completedDate ?? "").slice(0, 10);
       if (!start || start > dIso) continue;            // not started yet
       if (completed && completed <= dIso) continue;    // already completed by D
-      s += fifoMaterialAsOf(p.id, dIso) + laborAsOf(p.id, dIso);
+      s += materialAsOf(p.id, dIso) + laborAsOf(p.id, dIso);
     }
     return s;
   };
 
-  // 8. FG as of D = Σ over batches completed by D, of undelivered qty × FIFO
-  //    unit cost. Unit cost = (PO FIFO material@completion + PO labour@completion)
-  //    / original_qty — re-valued from the engine, NOT fg_batches.unit_cost_sen.
-  //    Undelivered qty = original_qty − COUNT(fg_units of this batch delivered<=D).
-  const deliveredByBatch = new Map<string, { date: string }[]>();
-  for (const u of fguRes.results ?? []) {
-    if (!u.batchId) continue;
-    const date = (u.deliveredAt ?? "").slice(0, 10);
-    if (!date) continue;
-    let arr = deliveredByBatch.get(u.batchId);
-    if (!arr) { arr = []; deliveredByBatch.set(u.batchId, arr); }
-    arr.push({ date });
-  }
-  const deliveredAsOf = (batchId: string, dIso: string): number => {
-    const arr = deliveredByBatch.get(batchId);
-    if (!arr) return 0;
-    let n = 0;
-    for (const e of arr) if (e.date <= dIso) n += 1;
-    return n;
-  };
+  // 8. FG as of D = Σ over batches completed by D, of undelivered qty ×
+  //    fg_batches.unit_cost_sen (the cascade-maintained per-unit cost).
+  //    Undelivered qty = original_qty − Σ FG_DELIVERED.qty for this batch (date<=D).
+  //
+  //    NOT re-valued from the FIFO engine: a (PO FIFO material + labour)/qty
+  //    re-valuation came out ~15× too high on live prod (FG closing RM 595k vs
+  //    the real RM 39k) because the replay's per-layer issue costs for a PO did
+  //    not reconcile to the material booked to that PO. unit_cost_sen is the
+  //    figure backfillFGBatchCost rolls up from the same RM_ISSUE+LABOR rows and
+  //    is what every other FG surface uses — sane and authoritative.
+  //
+  //    Relief signal = cost_ledger FG_DELIVERED rows (fguRes), summed per batch
+  //    up to D. This is the only as-of-date, qty-correct, real-batchId signal:
+  //    its qty is the exact quantity decremented from fg_batches.remainingQty,
+  //    so it is in the SAME unit as originalQty by construction. (The old
+  //    fg_units.batchId count was always 0 — batchId is never written — so FG
+  //    closing accumulated without bound. A raw COUNT(fg_units) would also be
+  //    wrong: fg_units is piece-level (units×pieces rows per PO).)
+  const deliveredAsOf = buildDeliveredAsOf(fguRes.results ?? []);
   const batches = fgbRes.results ?? [];
-  const fgAsOf = (dIso: string): number => {
-    let s = 0;
-    for (const b of batches) {
-      const completed = (b.completedDate ?? "").slice(0, 10);
-      if (!completed || completed > dIso) continue;        // not completed by D
-      const origQty = Number(b.originalQty) || 0;
-      if (origQty <= 0) continue;
-      const undelivered = origQty - deliveredAsOf(b.id, dIso);
-      if (undelivered <= 0) continue;                       // fully shipped by D
-      const poId = b.productionOrderId;
-      if (!poId) continue;
-      // FIFO unit cost at completion (material + labour) / original_qty.
-      const unitCostSen = (fifoMaterialAsOf(poId, completed) + laborAsOf(poId, completed)) / origQty;
-      s += Math.round(undelivered * unitCostSen);
-    }
-    return s;
-  };
+  // Opening-date floor: finished-goods batches completed BEFORE the accounting
+  // opening date are pre-opening stock (represented by the seeded opening
+  // inventory), NOT the system's batch-by-batch computation. Without this floor
+  // every historical batch ever completed accumulates into FG closing — the
+  // ~RM 1.35M legacy over-statement the owner reported. (Relief by FG_DELIVERED
+  // only clears batches that were delivered via a DO; pre-opening / pre-cascade
+  // legacy batches have no FG_DELIVERED rows and would otherwise pile up.)
+  const fgOpeningIso = await getOpeningDate(db);
+  // fgClosingSen values each batch's undelivered qty at its stored
+  // fg_batches.unit_cost_sen (cascade-maintained), clamps relief at 0, and floors
+  // out pre-opening batches.
+  const fgAsOf = (dIso: string): number =>
+    fgClosingSen({
+      batches,
+      asOfIso: dIso,
+      deliveredAsOf,
+      openingIso: fgOpeningIso,
+    });
 
   // Precompute WIP/FG stock value as of EACH month-end so a window's open/close
   // are O(1) lookups (open of a window = value at the end of the prior month).

@@ -61,6 +61,7 @@ export type ExtractedSupplierLine = {
   uom?: string | null;
   unitPrice?: number | null;
   amount?: number | null;
+  tax?: number | null;
 };
 export type SupplierExtraction = {
   supplierName?: string | null;
@@ -857,6 +858,11 @@ type PreviewLine = {
   uom: string;
   unitPriceRM: number;
   amountRM: number; // display-only; recomputed from qty * unitPrice on edit
+  // Per-line SST in RM (owner 2026-06-30). Edited inline. When ANY line has
+  // a non-zero taxRM, handleCreateAll uses those values verbatim (operator
+  // truth). When ALL lines are 0 AND the OCR captured a footer tax, that
+  // footer is distributed pro-rata across goods lines (existing behavior).
+  taxRM: number;
 };
 
 type PreviewCard = {
@@ -915,6 +921,7 @@ function makeBlankLine(): PreviewLine {
     uom: "",
     unitPriceRM: 0,
     amountRM: 0,
+    taxRM: 0,
   };
 }
 
@@ -1189,6 +1196,7 @@ function CreatePIWizard({
           ln.amount == null || Number.isNaN(Number(ln.amount))
             ? qty * unitPriceRM
             : Number(ln.amount);
+        const taxRM = ln.tax == null || Number.isNaN(Number(ln.tax)) ? 0 : Number(ln.tax);
         return {
           materialCode: rm?.itemCode ?? binding?.materialCode ?? "",
           materialName: rm?.description ?? ln.description ?? "",
@@ -1198,6 +1206,7 @@ function CreatePIWizard({
           uom: ln.uom ?? "",
           unitPriceRM,
           amountRM,
+          taxRM,
         };
       });
 
@@ -1555,6 +1564,16 @@ function CreatePIWizard({
           // footer tax in sen. When the OCR didn't pick up a tax footer
           // (originalExtraction.tax null/0) all lines persist with taxSen=0
           // and the operator can fill it in later via the PI detail editor.
+          // Per-line SST source-of-truth rule (owner 2026-06-30):
+          //  - If ANY line has taxRM > 0, the operator has filled per-line
+          //    SST. Use those values verbatim.
+          //  - Else if OCR captured a footer tax total, distribute pro-rata
+          //    across goods lines by line amount with last-line drift
+          //    absorption so Σ taxSen === footer in sen.
+          //  - Else everything saves with taxSen = 0.
+          const operatorSetLineTax = pricedLines.some(
+            (l) => (Number(l.taxRM) || 0) > 0,
+          );
           const footerTaxRM = Number(card.originalExtraction.tax) || 0;
           const lineAmtsSen = pricedLines.map(
             (l) => Math.round((Number(l.qty) || 0) * (Number(l.unitPriceRM) || 0) * 100),
@@ -1564,7 +1583,9 @@ function CreatePIWizard({
           let allocated = 0;
           const itemsWithTax = pricedLines.map((l, idx) => {
             let lineTaxSen = 0;
-            if (footerTaxSen > 0 && subTotalSen > 0) {
+            if (operatorSetLineTax) {
+              lineTaxSen = Math.max(0, Math.round((Number(l.taxRM) || 0) * 100));
+            } else if (footerTaxSen > 0 && subTotalSen > 0) {
               if (idx === pricedLines.length - 1) {
                 lineTaxSen = footerTaxSen - allocated;
               } else {
@@ -2718,6 +2739,7 @@ function PICard({
                 <th className="text-right px-2 py-1.5 font-medium w-20">Qty</th>
                 <th className="text-left px-2 py-1.5 font-medium w-16">UoM</th>
                 <th className="text-right px-2 py-1.5 font-medium w-24">Unit Price</th>
+                <th className="text-right px-2 py-1.5 font-medium w-20">SST</th>
                 <th className="text-right px-2 py-1.5 font-medium w-24">Amount</th>
                 <th className="w-8" />
               </tr>
@@ -2830,6 +2852,21 @@ function PICard({
                       onChange={(e) =>
                         onPatchLine(i, {
                           unitPriceRM: e.target.value === "" ? 0 : Number(e.target.value),
+                        })
+                      }
+                      onFocus={(e) => e.currentTarget.select()}
+                      disabled={!!card.createdPiNo}
+                    />
+                  </td>
+                  <td className="px-1 py-1">
+                    <Input
+                      type="number"
+                      step="0.01"
+                      className="h-8 text-xs text-right"
+                      value={num(line.taxRM)}
+                      onChange={(e) =>
+                        onPatchLine(i, {
+                          taxRM: e.target.value === "" ? 0 : Number(e.target.value),
                         })
                       }
                       onFocus={(e) => e.currentTarget.select()}

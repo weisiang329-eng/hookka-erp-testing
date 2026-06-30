@@ -1250,15 +1250,18 @@ app.post("/backfill-gl-postings", async (c) => {
   const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
   const limitRaw = parseInt(c.req.query("limit") ?? "", 10);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : Infinity;
+  // Optional floor: only post PIs dated >= from (the owner's opening cutoff —
+  // anything earlier is carried by opening balances and must NOT be re-posted).
+  const from = (c.req.query("from") ?? "").trim();
 
   const pisRes = await db
     .prepare(
       `SELECT id, piNo, supplierName, amountSen, is_opening
          FROM purchase_invoices
-        WHERE orgId = ? AND status NOT IN ('DRAFT','CANCELLED')
+        WHERE orgId = ? AND status NOT IN ('DRAFT','CANCELLED')${from ? " AND invoiceDate >= ?" : ""}
         ORDER BY invoiceDate ASC, id ASC`,
     )
-    .bind(orgId)
+    .bind(...(from ? [orgId, from] : [orgId]))
     .all<{ id: string; piNo: string | null; supplierName: string | null; amountSen: number | null; isOpening?: number | boolean | null; is_opening?: number | boolean | null }>();
   const pis = pisRes.results ?? [];
 
@@ -1316,6 +1319,7 @@ app.post("/backfill-gl-postings", async (c) => {
   return c.json({
     success: true,
     dry,
+    from: from || null,
     scanned,
     alreadyPosted,
     openingSkipped,

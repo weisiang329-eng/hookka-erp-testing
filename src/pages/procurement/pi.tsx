@@ -57,6 +57,17 @@ type PurchaseInvoice = {
   purchaseOrgCode?: string;
 };
 
+// Result of POST /purchase-invoices/backfill-gl-postings — admin maintenance
+// response, read defensively (all fields optional).
+type BackfillResult = {
+  success?: boolean;
+  error?: string;
+  posted?: number;
+  postedRm?: number;
+  alreadyPosted?: number;
+  failed?: number;
+};
+
 // Fold legacy PENDING_APPROVAL / APPROVED rows into CONFIRMED so the UI
 // shows one active state. The backend may still emit either value until
 // migrated — read-side only normalization, never written back.
@@ -83,6 +94,40 @@ export default function PurchaseInvoicesPage() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const navigate = useNavigate();
+
+  // One-time maintenance: post CONFIRMED PIs that are missing from the general
+  // ledger (POST /backfill-gl-postings). Dry-run → confirm with the totals →
+  // post. from = the opening cutoff (earlier PIs are carried by opening
+  // balances, never re-posted). Idempotent — already-posted PIs are skipped.
+  const [postingGl, setPostingGl] = useState(false);
+  const runGlBackfill = useCallback(async () => {
+    setPostingGl(true);
+    try {
+      const dry: BackfillResult = await (
+        await fetch("/api/purchase-invoices/backfill-gl-postings?dry=1&from=2026-05-22", { method: "POST" })
+      ).json();
+      if (!dry?.success) { toast.error(dry?.error || "Preview failed"); return; }
+      if (!dry.posted) { toast.success(`All caught up — ${dry.alreadyPosted ?? 0} invoice(s) already on the GL.`); return; }
+      const ok = await confirm({
+        title: "Post invoices to GL",
+        message: `Post ${dry.posted} purchase invoice(s) totalling RM ${Number(dry.postedRm ?? 0).toLocaleString()} to the general ledger? Already-posted invoices are skipped — safe to re-run.`,
+        danger: false,
+      });
+      if (!ok) return;
+      const real: BackfillResult = await (
+        await fetch("/api/purchase-invoices/backfill-gl-postings?from=2026-05-22", { method: "POST" })
+      ).json();
+      if (real?.success) {
+        toast.success(`Posted ${real.posted} invoice(s) · RM ${Number(real.postedRm ?? 0).toLocaleString()}${real.failed ? ` · ${real.failed} failed` : ""}`);
+      } else {
+        toast.error(real?.error || "Posting failed");
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Posting failed");
+    } finally {
+      setPostingGl(false);
+    }
+  }, [confirm, toast]);
 
   // Tabs — single "Purchase Invoices" tab, same skeleton as Sales Invoice list
   const [activeTab] = useState<"list">("list");
@@ -462,6 +507,14 @@ export default function PurchaseInvoicesPage() {
           <p className="text-xs text-[#6B7280]">Track supplier invoices and payment status</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant="outline"
+            onClick={runGlBackfill}
+            disabled={postingGl}
+            title="Post confirmed purchase invoices missing from the general ledger (one-time fix; safe to re-run — already-posted are skipped)"
+          >
+            <RefreshCw className={cn("h-4 w-4", postingGl && "animate-spin")} /> Post to GL
+          </Button>
           <Button
             variant="outline"
             onClick={() => navigate("/procurement/pi/create?scan=1")}

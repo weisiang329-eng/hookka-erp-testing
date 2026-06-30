@@ -121,6 +121,7 @@ type SupplierExtractedLine = {
   uom?: string | null;
   unitPrice?: number | null;
   amount?: number | null;
+  tax?: number | null;
 };
 // One supplier-side document (DO or invoice). A single uploaded PDF can carry
 // many of these — see the multi-doc rule in SUPPLIER_SYSTEM_PROMPT.
@@ -160,6 +161,7 @@ export function sanitizeSupplierDoc(
       uom: str(l?.uom),
       unitPrice: num(l?.unitPrice),
       amount: num(l?.amount),
+      tax: num(l?.tax),
     }))
     .filter((l) => l.description || l.supplierCode || l.qty != null);
   return {
@@ -223,12 +225,13 @@ PER-DOCUMENT EXTRACTION RULES
     - uom: unit of measure as printed (PCS, ROLL, M, MTR, KG, SET, UNIT...). null if absent.
     - unitPrice: numeric unit price if shown (invoices), else null (delivery notes usually omit price).
     - amount: numeric line amount if shown, else null.
-- subtotal / tax / total: the document's footer figures if present, else null. tax = SST/GST amount.
+    - tax: per-line SST/GST amount IF the supplier printed a dedicated tax column per line (e.g. "SST" / "Tax" / "GST" column next to Amount). null when there is no per-line tax column (most Malaysian SST invoices print only ONE footer tax — in that case leave EVERY line's tax null and put the figure in the footer "tax" below).
+- subtotal / tax / total: the document's footer figures if present, else null. tax = the single footer SST/GST total when no per-line column exists.
 
 NUMBERS: plain numbers, no currency symbol, no commas. Use a dot decimal. If a field is genuinely absent, use null — never guess.
 
 OUTPUT: VALID JSON ONLY, this exact shape, no preamble, no markdown, no chain-of-thought. First character '{', last character '}':
-{"docs": [{"supplierName": string|null, "docType": "DELIVERY_NOTE"|"INVOICE"|"OTHER", "docNo": string|null, "docDate": string|null, "currency": string|null, "customerPoRef": string|null, "lines": [{"supplierCode": string|null, "description": string|null, "qty": number|null, "uom": string|null, "unitPrice": number|null, "amount": number|null}], "subtotal": number|null, "tax": number|null, "total": number|null}]}`;
+{"docs": [{"supplierName": string|null, "docType": "DELIVERY_NOTE"|"INVOICE"|"OTHER", "docNo": string|null, "docDate": string|null, "currency": string|null, "customerPoRef": string|null, "lines": [{"supplierCode": string|null, "description": string|null, "qty": number|null, "uom": string|null, "unitPrice": number|null, "amount": number|null, "tax": number|null}], "subtotal": number|null, "tax": number|null, "total": number|null}]}`;
 
 function formatSupplierRules(
   supplierName: string | null,

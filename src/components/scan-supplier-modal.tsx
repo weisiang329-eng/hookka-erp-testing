@@ -1799,14 +1799,24 @@ function CreatePIWizard({
           });
         }
         if (additions.length === 0) return prev;
-        // Owner ruling 2026-06-30: cards must follow the source PDF page
-        // order — auto-split children are created sequentially so the
-        // earliest queue row = earliest PDF page. Sort by the row's
-        // createdAt, then by docIdx within the row, so a slow chunk that
-        // lands late still appears in its original position.
+        // Owner ruling 2026-07-01: cards must follow the source PDF PAGE order
+        // so the operator's tally matches the physical stack. Auto-split
+        // children are named "<base>-pi-<startPage>-<endPage>.pdf", so the page
+        // is right there in the filename — sort by it. (createdAt was
+        // unreliable: children are enqueued in a tight loop with near-identical
+        // timestamps and the 6 workers finish them OUT of page order, so a
+        // page-28 chunk could land before page-9.) Fall back to enqueue time
+        // then docIdx for non-split files that carry no page suffix.
+        const pageOf = (fileName: string): number => {
+          const m = /-pi-(\d+)-\d+\.pdf$/i.exec(fileName || "");
+          return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+        };
         const rowCreated = new Map<string, string>();
         for (const item of r.data.items) rowCreated.set(item.id, item.createdAt);
         const combined = [...prev, ...additions].sort((a, b) => {
+          const aP = pageOf(a.fileName);
+          const bP = pageOf(b.fileName);
+          if (aP !== bP) return aP - bP;
           const aC = a.scanQueueRowId ? rowCreated.get(a.scanQueueRowId) ?? "" : "";
           const bC = b.scanQueueRowId ? rowCreated.get(b.scanQueueRowId) ?? "" : "";
           if (aC !== bC) return aC < bC ? -1 : 1;
@@ -2400,8 +2410,24 @@ function PreviewStep({
         </Button>
         <div className="flex items-center gap-3">
           {hasBlocking && (
-            <span className="text-xs text-[#9A3A2D]">
-              {blockingCards.length} card{blockingCards.length !== 1 ? "s have" : " has"} unbound line{blockingCards.length !== 1 ? "s" : ""} — pick from catalog
+            <span className="text-xs text-[#9A3A2D] max-w-md text-right">
+              Pick a catalog code on {blockingCards.length} card
+              {blockingCards.length !== 1 ? "s" : ""}:{" "}
+              <span className="font-medium">
+                {blockingCards
+                  .slice(0, 6)
+                  .map(
+                    (c) =>
+                      c.supplierInvoiceNo?.trim() ||
+                      c.supplierDoNo?.trim() ||
+                      c.fileName ||
+                      "(unnamed)",
+                  )
+                  .join(", ")}
+                {blockingCards.length > 6
+                  ? ` +${blockingCards.length - 6} more`
+                  : ""}
+              </span>
             </span>
           )}
           <Button

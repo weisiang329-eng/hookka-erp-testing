@@ -47,6 +47,40 @@ Entries themselves stay newest-first.
 **Fix:** per `docs/PLAYBOOKS.md` P2, dual-keyed every affected read (`r.camelCase ?? r.snake_case`) rather than touching the SQL. Extracted the repeated logic into pure, exported, unit-tested helpers in `src/lib/supplier-payment-alloc.ts`: `piOutstandingSen(pi)` (was duplicated 3×, in `POST /`, the restate flow, and the Knock-off endpoint), `readBookedSen(row)` (was duplicated 3×, in the GET list, void/unvoid, and restate), and `groupSupplierPaymentRows(rows)` (the GET list's row→group mapping, now directly testable against the adapter's real camelCase-only row shape — mirrors the `buildHistoricalMap` fix pattern from BUG-2026-06-30-001). `src/api/routes/supplier-payments.ts` now delegates to all three instead of inlining the reads.
 
 **Verified:** `tsc -p tsconfig.app.json --noEmit` clean (only the pre-existing, unrelated `scan-supplier-modal.tsx` errors from a concurrent session remain); `npm test` 1321/1322 (1 pre-existing skip), including 6 new regression tests in `tests/supplier-payment-alloc.test.mjs` that feed the camelCase-only row shape the live adapter actually produces (they fail under the old snake_case-read logic, pass now). Shipped to `main`; owner to confirm the payment now appears in the All Payments list on erp.hookka.com, and to use the Knock-off feature to re-attribute HPV-2607-002's advance to PI-2606-037 (the payment itself is GL-correct; only the subsidiary attribution needs fixing).
+---
+
+## BUG-2026-07-01-004 — A COMPLETED accessory/pillow never appeared in Consignment's "ready to ship" list `consignment` `production-orders`
+
+**Symptom:** owner: "为什么 pillow complete 了没有在 consignment 那边?" Confirmed on
+prod — `CO-2606-003-01` "LONG PILLOW", status COMPLETED (FAB_CUT + FAB_SEW +
+PACKING all done), yet absent from the Consignment ready list. Of the accessory
+POs on a CO, 0 had an UPHOLSTERY card and 1 (this one) was completed-but-hidden.
+
+**Root cause:** the Consignment page's ready-derivation (`consignment/note.tsx`
+~L1217) had inlined the OLD pre-accessory-fix predicate: `const uphCards =
+cards.filter(dept === "UPHOLSTERY"); if (uphCards.length === 0) return false;`.
+Pillows/cushions are ACCESSORY — they finish FAB_CUT → FAB_SEW → PACKING and
+never get an UPHOLSTERY card, so `uphCards.length === 0` hard-dropped them
+regardless of completion. This is the CO twin of the DO-side
+`BUG-2026-06-20-001` (16 sofa-pillow POs un-shippable), which was already fixed
+in `delivery-pipeline.ts` `poReadyForDelivery` — but the Consignment page never
+got that fallback.
+
+**Fix:** added `poReadyForConsignment(po, linkedPOIds)` to `delivery-pipeline.ts`
+— an explicit CO mirror of `poReadyForDelivery` (requires a consignmentOrderId)
+carrying the IDENTICAL no-UPHOLSTERY fallback: when there are no upholstery
+cards, a PO is ready if `status === "COMPLETED"` (backend only flips COMPLETED
+when every relevant dept is done, so a half-made sofa can't slip through) and
+all its cards are done — plus the repair-scope-excludes-UPH branch. Wired into
+`note.tsx` replacing the inline filter. Sofa behaviour byte-identical; only the
+no-UPHOLSTERY branch is new. Kept as a separate mirror so the live SO-origin
+delivery path is untouched. 7 new tests in `delivery-pipeline.test.mjs` (incl.
+the completed-pillow-no-upholstery case).
+
+**Verified:** `tsc` clean; delivery-pipeline tests 47/47 pass; the fix's logic
+matches the confirmed prod record exactly (COMPLETED + all cards done + no UPH →
+now ready). LIVE-VERIFY after deploy: the LONG PILLOW appears in CO-2606-003-01's
+ready list.
 
 ---
 

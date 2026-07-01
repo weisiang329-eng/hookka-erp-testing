@@ -36,7 +36,7 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { MALAYSIA_STATES, resolveStateCode } from "@/lib/malaysia-states";
 import { aggregateRacksFromPackingCards } from "@/lib/rack-format";
-import { isHbOnlySpecial } from "@/lib/delivery-pipeline";
+import { isHbOnlySpecial, poReadyForConsignment } from "@/lib/delivery-pipeline";
 import {
   Package,
   PackageCheck,
@@ -1214,19 +1214,15 @@ export default function ConsignmentNotePage() {
       // Pending CN: CO-origin POs with all upholstery done, no CN yet
       // for that customer. Mirrors DO's "Ready for DO" — see dedup
       // caveat above.
+      // Ready-for-CN gate now shared with Delivery via poReadyForConsignment,
+      // which carries the accessory/pillow no-UPHOLSTERY fallback (a COMPLETED
+      // pillow finishes FAB_CUT -> FAB_SEW -> PACKING with no UPHOLSTERY card;
+      // the old inline filter's `uphCards.length === 0 -> drop` hard-excluded it
+      // — BUG-2026-07-01-003). Sofa behaviour is unchanged; the helper also
+      // absorbs the linked-PO dedup, so only the legacy-customer dedup stays.
       const ready = allPOs
-        .filter((po) => {
-          if (po.status === "CANCELLED") return false;
-          if (!po.consignmentOrderId) return false;
-          const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
-          if (uphCards.length === 0) return false;
-          return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
-        })
-        .filter(
-          (po) =>
-            !cnLinkedPOIds.has(po.id) &&
-            !cnLinkedCustomersLegacy.has(po.customerId || ""),
-        )
+        .filter((po) => poReadyForConsignment(po, cnLinkedPOIds))
+        .filter((po) => !cnLinkedCustomersLegacy.has(po.customerId || ""))
         .map(mapPO);
       setReadyPOs(ready);
     }

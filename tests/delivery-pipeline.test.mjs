@@ -485,3 +485,64 @@ test("buildLinkedPOIds: dedupes a PO id appearing on two DOs", () => {
   assert.equal(set.size, 1);
   assert.equal(set.has("pord-1"), true);
 });
+
+// ---------------------------------------------------------------------------
+// poReadyForConsignment(po, linkedPOIds) — CO mirror. Same upholstery gate as
+// delivery + the accessory/pillow no-UPHOLSTERY fallback (BUG-2026-07-01-003:
+// completed LONG PILLOW on CO-2606-003-01 was hard-dropped by the old inline
+// filter). Requires a consignmentOrderId (SO-origin POs belong to Delivery).
+// ---------------------------------------------------------------------------
+const NONE = new Set();
+
+test("poReadyForConsignment: SO-origin PO (no CO) -> false", () => {
+  const p = po({ consignmentOrderId: undefined, jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED" }] });
+  assert.equal(dp.poReadyForConsignment(p, NONE), false);
+});
+
+test("poReadyForConsignment: CO sofa, all upholstery done -> true", () => {
+  const p = po({ consignmentOrderId: "co-1", jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED" }] });
+  assert.equal(dp.poReadyForConsignment(p, NONE), true);
+});
+
+test("poReadyForConsignment: CO sofa, upholstery still in progress -> false", () => {
+  const p = po({ consignmentOrderId: "co-1", jobCards: [{ departmentCode: "UPHOLSTERY", status: "IN_PROGRESS" }] });
+  assert.equal(dp.poReadyForConsignment(p, NONE), false);
+});
+
+test("poReadyForConsignment: COMPLETED accessory pillow, no UPHOLSTERY card -> true (the fix)", () => {
+  const p = po({
+    consignmentOrderId: "co-1",
+    itemCategory: "ACCESSORY",
+    status: "COMPLETED",
+    jobCards: [
+      { departmentCode: "FAB_CUT", status: "COMPLETED" },
+      { departmentCode: "FAB_SEW", status: "COMPLETED" },
+      { departmentCode: "PACKING", status: "COMPLETED" },
+    ],
+  });
+  assert.equal(dp.poReadyForConsignment(p, NONE), true);
+});
+
+test("poReadyForConsignment: accessory pillow NOT yet complete (packing pending) -> false", () => {
+  const p = po({
+    consignmentOrderId: "co-1",
+    itemCategory: "ACCESSORY",
+    status: "IN_PRODUCTION",
+    jobCards: [
+      { departmentCode: "FAB_CUT", status: "COMPLETED" },
+      { departmentCode: "FAB_SEW", status: "COMPLETED" },
+      { departmentCode: "PACKING", status: "IN_PROGRESS" },
+    ],
+  });
+  assert.equal(dp.poReadyForConsignment(p, NONE), false);
+});
+
+test("poReadyForConsignment: already linked to a CN -> false", () => {
+  const p = po({ id: "pord-x", consignmentOrderId: "co-1", jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED" }] });
+  assert.equal(dp.poReadyForConsignment(p, new Set(["pord-x"])), false);
+});
+
+test("poReadyForConsignment: CANCELLED -> false", () => {
+  const p = po({ consignmentOrderId: "co-1", status: "CANCELLED", jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED" }] });
+  assert.equal(dp.poReadyForConsignment(p, NONE), false);
+});

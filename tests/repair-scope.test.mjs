@@ -767,10 +767,12 @@ test("delivery-pipeline: no-UPH fallback is gated on COMPLETED status / scope, n
   // (IN_PROGRESS) non-upholstered PO can't slip through.
   assert.match(pipelineSrc, /if \(po\.status === "COMPLETED"\) return allDone;/);
   assert.match(pipelineSrc, /if \(repairScopeExcludesUph\(po\)\) return allDone;/);
-  // Zero job cards never qualifies (both predicates).
+  // Zero job cards never qualifies (all three predicates: poInPlanning,
+  // poReadyForDelivery, and the CO mirror poReadyForConsignment added in
+  // BUG-2026-07-01-003).
   assert.equal(
     (pipelineSrc.match(/if \(jcs\.length === 0\) return false;/g) ?? []).length,
-    2,
+    3,
   );
 });
 

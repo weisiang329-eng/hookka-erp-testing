@@ -110,6 +110,35 @@ export function poReadyForDelivery(po: PipelinePO, linkedPOIds: Set<string>): bo
   return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
 }
 
+// Consignment mirror (CO-origin). The Consignment page classifies CO-origin
+// POs exactly like Delivery does for SO-origin POs — same upholstery gate + the
+// accessory/scoped no-UPHOLSTERY fallback. It had inlined the OLD, pre-accessory
+// -fix predicate, so a COMPLETED pillow (ACCESSORY: FAB_CUT -> FAB_SEW ->
+// PACKING, no UPHOLSTERY card) never reached the CN ready list — confirmed on
+// prod: CO-2606-003-01 "LONG PILLOW", COMPLETED yet absent (BUG-2026-07-01-003,
+// the CO twin of the DO-side BUG-2026-06-20-001). This reuses the IDENTICAL
+// fallback poReadyForDelivery got. Kept as an explicit mirror (not a refactor of
+// the live SO-origin predicate) so the delivery path is untouched; differs only
+// by requiring a consignmentOrderId. Sofa behaviour is byte-identical to the old
+// inline CN filter — only the no-UPHOLSTERY branch is new.
+export function poReadyForConsignment(po: PipelinePO, linkedPOIds: Set<string>): boolean {
+  if (po.status === "CANCELLED") return false;
+  if (!po.consignmentOrderId) return false;
+  if (linkedPOIds.has(po.id)) return false;
+  const uphCards = pickRelevantUphCards(po);
+  if (uphCards.length === 0) {
+    const jcs = po.jobCards || [];
+    if (jcs.length === 0) return false;
+    const allDone = jcs.every(
+      (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
+    );
+    if (po.status === "COMPLETED") return allDone;
+    if (repairScopeExcludesUph(po)) return allDone;
+    return false;
+  }
+  return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
+}
+
 // Set of PO IDs already carried on a non-cancelled, non-virtual DO. Built
 // from the delivery_order_items array (DO stores only one representative
 // salesOrderId, so SO-level matching misses siblings — BUG-2026-04-27).

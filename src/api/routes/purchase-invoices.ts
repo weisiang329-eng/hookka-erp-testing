@@ -1277,7 +1277,10 @@ app.post("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/purchase-invoices/backfill-gl-postings — one-time GL repost.
+// backfillPiGlPostings — core GL-repost logic shared by the owner-facing
+// button (POST /backfill-gl-postings below) AND the nightly cron
+// (POST /api/internal/nightly-pi-gl-backfill in worker.ts) so the two paths
+// can NEVER drift apart.
 //
 // Posts CONFIRMED PIs that never got their GL legs (created/confirmed before the
 // create-as-CONFIRMED posting fix — BUG-2026-06-23-007 — or bulk-imported, so they
@@ -1286,23 +1289,20 @@ app.post("/", async (c) => {
 // (mapPurchaseLinesToAccounts → buildPiApprovalLegs → buildJournalEntryStatements)
 // off the STORED items (already home MYR — toHome applied at create), and
 // ledgerHasSource for idempotency, so re-running can NEVER double-post. Opening-AP
-// PIs (is_opening) carry NO GL entry by design and are skipped. Read-safe knobs:
-//   ?dry=1   → report what WOULD post, write nothing.
-//   ?limit=N → post at most N new PIs (incremental verification).
-// ---------------------------------------------------------------------------
-app.post("/backfill-gl-postings", async (c) => {
-  const denied = await requirePermission(c, "purchase-invoices", "update");
-  if (denied) return denied;
-  const db = c.var.DB;
-  const orgId = getOrgId(c);
-  const actorUserId =
-    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
-  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
-  const limitRaw = parseInt(c.req.query("limit") ?? "", 10);
-  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : Infinity;
-  // Optional floor: only post PIs dated >= from (the owner's opening cutoff —
-  // anything earlier is carried by opening balances and must NOT be re-posted).
-  const from = (c.req.query("from") ?? "").trim();
+// PIs (is_opening) carry NO GL entry by design and are skipped.
+export async function backfillPiGlPostings(
+  db: D1Database,
+  orgId: string,
+  opts: { dry?: boolean; limit?: number; from?: string; actorUserId?: string | null } = {},
+): Promise<{
+  dry: boolean; from: string | null; scanned: number; alreadyPosted: number; openingSkipped: number;
+  posted: number; postedRm: number; failed: number;
+  samples: { piNo: string; rm: number }[]; failures: { piNo: string; error: string }[];
+}> {
+  const dry = !!opts.dry;
+  const limit = opts.limit && opts.limit > 0 ? opts.limit : Infinity;
+  const from = (opts.from ?? "").trim();
+  const actorUserId = opts.actorUserId ?? null;
 
   const pisRes = await db
     .prepare(
@@ -1366,8 +1366,7 @@ app.post("/backfill-gl-postings", async (c) => {
   }
   if (!dry && statements.length) await db.batch(statements);
 
-  return c.json({
-    success: true,
+  return {
     dry,
     from: from || null,
     scanned,
@@ -1378,7 +1377,27 @@ app.post("/backfill-gl-postings", async (c) => {
     failed,
     samples,
     failures,
-  });
+  };
+}
+
+// POST /api/purchase-invoices/backfill-gl-postings — owner-facing button
+// (Purchase Invoices page "Post to GL"). Read-safe knobs:
+//   ?dry=1   → report what WOULD post, write nothing.
+//   ?limit=N → post at most N new PIs (incremental verification).
+// ---------------------------------------------------------------------------
+app.post("/backfill-gl-postings", async (c) => {
+  const denied = await requirePermission(c, "purchase-invoices", "update");
+  if (denied) return denied;
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+  const limitRaw = parseInt(c.req.query("limit") ?? "", 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : Infinity;
+  // Optional floor: only post PIs dated >= from (the owner's opening cutoff —
+  // anything earlier is carried by opening balances and must NOT be re-posted).
+  const from = (c.req.query("from") ?? "").trim();
+  const result = await backfillPiGlPostings(c.var.DB, getOrgId(c), { dry, limit, from, actorUserId });
+  return c.json({ success: true, ...result });
 });
 
 // ---------------------------------------------------------------------------

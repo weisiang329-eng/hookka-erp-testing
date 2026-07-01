@@ -487,6 +487,38 @@ app.post("/api/internal/replay-audit-dlq", async (c) => {
   }
 });
 
+// Nightly PI→GL backfill (owner rule 2026-07-01). New CONFIRMED PIs are already
+// posted to the GL at creation/confirmation (purchase-invoices.ts, since
+// BUG-2026-06-23-007), so this is a safety net for whatever slips through
+// (a bulk import, a future edge case) — the owner-facing "Post to GL" button
+// on the Purchase Invoices page does the same thing on demand; this just runs
+// it automatically so nobody has to remember to click it. Same CRON_SECRET
+// pattern as the internal endpoints above; delegates to backfillPiGlPostings
+// (purchase-invoices.ts) so the button and the cron can never drift apart —
+// idempotent (ledgerHasSource-gated), never double-posts. The cron workflow at
+// .github/workflows/nightly-pi-gl-backfill.yml hits this once nightly.
+app.post("/api/internal/nightly-pi-gl-backfill", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[nightly-pi-gl-backfill] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  try {
+    const result = await backfillPiGlPostings(c.var.DB, "hookka", {});
+    if (result.failed > 0) {
+      console.error("[nightly-pi-gl-backfill] some PIs failed to post:", result.failures);
+    }
+    return c.json({ ok: true, ...result });
+  } catch (e) {
+    console.error("[nightly-pi-gl-backfill] error:", e);
+    return c.json({ ok: false, error: "backfill failed" }, 500);
+  }
+});
+
 // Weekly OCR rule-distill cron entry. Same CRON_SECRET pattern as the
 // internal endpoints above. The cron workflow at
 // .github/workflows/distill-ocr-rules.yml hits this every Sunday night; the
@@ -749,7 +781,7 @@ import sofaCombos from "./routes/sofa-combos";
 import organisations from "./routes/organisations";
 import salesOrders from "./routes/sales-orders";
 import purchaseOrders from "./routes/purchase-orders";
-import purchaseInvoices from "./routes/purchase-invoices";
+import purchaseInvoices, { backfillPiGlPostings } from "./routes/purchase-invoices";
 import creditNotes from "./routes/credit-notes";
 import debitNotes from "./routes/debit-notes";
 import eInvoices from "./routes/e-invoices";

@@ -151,7 +151,10 @@ test("invite preflight prefix is still public", () => {
 // /api/internal/distill-ocr-rules (weekly cron, gated by CRON_SECRET —
 // regenerates per-customer OCR rules from gold-marked scan samples),
 // /api/internal/auto-clockout (midnight cron, gated by CRON_SECRET — closes
-// prior-day forgotten clock-outs at shift end), /api/qc-pending/trigger (cron,
+// prior-day forgotten clock-outs at shift end), /api/internal/nightly-pi-gl-backfill
+// (nightly cron, gated by CRON_SECRET — reposts any CONFIRMED PI missing its GL
+// legs; delegates to the same backfillPiGlPostings the owner-facing "Post to GL"
+// button uses, idempotent), /api/qc-pending/trigger (cron,
 // gated by CRON_SECRET), /api/mail-center/inbound (Mail Center inbound email
 // ingestion — the standalone Cloudflare Email Worker POSTs parsed messages
 // here; gated by MAIL_INBOUND_SECRET via the x-mail-secret header, same
@@ -172,6 +175,10 @@ const EXPECTED_PRE_AUTH_ROUTES = [
   // Background scan-queue sweep (added 2026-06-29). CRON_SECRET-gated like the
   // rest of /api/internal/*; re-queues 'processing' rows older than 5min.
   "POST /api/internal/scan-queue-sweep",
+  // Nightly PI->GL backfill safety net (added 2026-07-01). CRON_SECRET-gated
+  // like the rest of /api/internal/*; idempotent re-run of the owner's
+  // "Post to GL" button so 400-0000 can't silently drift again.
+  "POST /api/internal/nightly-pi-gl-backfill",
   "POST /api/qc-pending/trigger",
   "POST /api/mail-center/inbound",
 ];

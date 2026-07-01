@@ -1,0 +1,64 @@
+name: Nightly PI->GL backfill
+
+# Hits POST /api/internal/nightly-pi-gl-backfill once nightly (02:00 SGT) as a
+# safety net: new CONFIRMED purchase invoices are already posted to the GL at
+# creation/confirmation (purchase-invoices.ts, BUG-2026-06-23-007), so this
+# should normally find nothing to do. It exists to catch whatever slips
+# through (a bulk import, a future edge case) automatically, so 400-0000
+# never silently drifts from its subsidiary again -- the owner previously had
+# to notice and click "Post to GL" on the Purchase Invoices page by hand.
+#
+# Delegates to the SAME backfillPiGlPostings core the owner-facing button
+# uses (src/api/routes/purchase-invoices.ts), so the two paths can never
+# drift apart. Idempotent (ledgerHasSource-gated) -- never double-posts, so
+# re-running (manually or on schedule) is always safe.
+#
+# Protected by the same CRON_SECRET + x-cron-secret header pattern as
+# replay-audit-dlq.yml / process-email-outbox.yml / refresh-mvs.yml. The
+# Pages worker rejects with 503 if CRON_SECRET is missing server-side, and
+# 403 if the header doesn't match.
+#
+# Bootstrap: same as the sibling crons -- set CRON_SECRET as both a repo
+# secret AND a Cloudflare Pages env var, then re-deploy Pages.
+on:
+  schedule:
+    # 02:00 SGT daily (18:00 UTC the prior day) -- same off-peak window as
+    # rebuild-dashboard-snapshot.yml.
+    - cron: '0 18 * * *'
+  # Manual trigger for ops (e.g. to verify right after a bulk PI import).
+  workflow_dispatch:
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/internal/nightly-pi-gl-backfill
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty. See refresh-mvs.yml header for setup."
+            exit 1
+          fi
+
+          # 60s timeout -- a full scan + repost of every PI is one SELECT plus
+          # one D1 batch per un-posted PI; comfortably under that even for a
+          # large backlog. Cold start can stretch this.
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 60 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-cron-secret: $CRON_SECRET" \
+            --data '{}' \
+            'https://hookka-erp-testing.pages.dev/api/internal/nightly-pi-gl-backfill')
+
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+
+          echo "Status: $status"
+          echo "Body: $body"
+
+          if [ "$status" -ne 200 ]; then
+            echo "::error::nightly-pi-gl-backfill failed with HTTP $status"
+            exit 1
+          fi

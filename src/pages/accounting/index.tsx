@@ -1448,6 +1448,7 @@ const STOCK_TAKE_IGNORE_VALUE = "__IGNORE__";
 // for the group list; saves via PUT /stock-take.
 function StockTakeTab() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [groups, setGroups] = useState<string[] | null>(null);
   const [entries, setEntries] = useState<{ itemGroup: string; ym: string; valueSen: number }[]>([]);
   const [ym, setYm] = useState(() => new Date().toISOString().slice(0, 7));
@@ -1518,6 +1519,41 @@ function StockTakeTab() {
     const next = { ...rawImportResolutions, [itemKey]: group };
     setRawImportResolutions(next);
     applyRawResolutions(rawImportItems, next);
+  };
+
+  // One-time seed: loads the ~230 (item -> group) pairs already confirmed with
+  // the owner this session (derived from their 30/05/2026 file) so day-one raw
+  // imports need no manual mapping. Dry-run -> confirm -> real POST, same
+  // pattern as the Purchase Invoices "Post to GL" button. Safe to click more
+  // than once (idempotent; existing aliases are left alone unless overwritten).
+  const [seeding, setSeeding] = useState(false);
+  const runAliasSeed = async () => {
+    setSeeding(true);
+    try {
+      const dry = (await (await fetch("/api/accounting/stock-take-item-alias-seed?dry=1", { method: "POST" })).json()) as {
+        success?: boolean; error?: string; inserted?: number; skippedAlreadyPresent?: number; totalSeedPairs?: number;
+      };
+      if (!dry?.success) { toast.error(dry?.error || "Preview failed"); return; }
+      if (!dry.inserted) {
+        toast.success(`Already up to date — all ${dry.totalSeedPairs ?? 0} seeded item mappings are already remembered.`);
+        return;
+      }
+      const ok = await confirm({
+        title: "Load remembered item mappings",
+        message: `Load ${dry.inserted} item->group mapping(s) confirmed this session (of ${dry.totalSeedPairs ?? 0} total; ${dry.skippedAlreadyPresent ?? 0} already known)? This is one-time setup so future raw stock-take imports resolve automatically.`,
+        danger: false,
+      });
+      if (!ok) return;
+      const real = (await (await fetch("/api/accounting/stock-take-item-alias-seed", { method: "POST" })).json()) as {
+        success?: boolean; error?: string; inserted?: number;
+      };
+      if (real?.success) toast.success(`Loaded ${real.inserted ?? 0} item mapping(s).`);
+      else toast.error(real?.error || "Failed to load mappings");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to load mappings");
+    } finally {
+      setSeeding(false);
+    }
   };
 
   // Excel round trip (owner 2026-07-01): "upload it, but still be able to
@@ -1688,6 +1724,15 @@ function StockTakeTab() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={runAliasSeed}
+            disabled={seeding}
+            title="One-time setup: loads the item->group mappings already confirmed this session, so raw stock-take imports resolve automatically from day one. Safe to click more than once."
+          >
+            {seeding ? "Loading…" : "Load Item Mappings"}
+          </Button>
           <Button variant="outline" size="sm" onClick={handleExportTemplate} disabled={!allRowGroups}>
             <Download className="h-4 w-4 mr-1.5" /> Export Excel
           </Button>

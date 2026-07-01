@@ -1920,6 +1920,51 @@ app.post("/", async (c) => {
       return c.json({ success: false, error: "Customer not found" }, 400);
     }
 
+    // Duplicate-document guard (owner 2026-07): a customer PO/SO reference
+    // already on a non-cancelled sales order for THIS customer is almost always
+    // a re-scan or double-entry — block it with a clear message. (One customer
+    // PO = one SO; partial deliveries are handled by multiple DOs off the same
+    // SO, not multiple SOs, so a repeat reference is a duplicate.)
+    {
+      const soRefs = [body.customerPOId, body.customerSOId]
+        .map((v) => (v == null ? "" : String(v).trim()))
+        .filter(Boolean);
+      if (soRefs.length > 0) {
+        const ph = soRefs.map(() => "?").join(", ");
+        const dup = await c.var.DB
+          .prepare(
+            `SELECT company_so_id AS "companySOId",
+                    customer_po_id AS "customerPOId",
+                    customer_so_id AS "customerSOId"
+               FROM sales_orders
+              WHERE customer_id = ?
+                AND status <> 'CANCELLED'
+                AND (customer_po_id IN (${ph}) OR customer_so_id IN (${ph}))
+              LIMIT 1`,
+          )
+          .bind(customer.id, ...soRefs, ...soRefs)
+          .first<{
+            companySOId: string | null;
+            customerPOId: string | null;
+            customerSOId: string | null;
+          }>();
+        if (dup) {
+          const matched =
+            soRefs.find(
+              (r) => r === dup.customerPOId || r === dup.customerSOId,
+            ) ?? soRefs[0];
+          return c.json(
+            {
+              success: false,
+              error: `Customer reference "${matched}" is already on sales order ${dup.companySOId ?? "(an existing SO)"} for this customer — looks like a duplicate. Open that SO, or change the reference if it's genuinely a different order.`,
+              duplicateOf: dup.companySOId,
+            },
+            409,
+          );
+        }
+      }
+    }
+
     // Resolve hub (optional)
     const hubIdField: string = body.hubId || body.deliveryHubId || "";
     let chosenHub: { id: string; state: string | null; shortName: string } | null = null;
@@ -3539,6 +3584,49 @@ app.put("/:id", async (c) => {
       // OCR back-door closure (BUG-001 fix): catalog wins on every PUT just
       // like POST. Loaded once here, reused for every line via snapItemToCatalog.
       const productByCodeForPut = await loadProductCatalog(c.var.DB);
+      // Pre-resolve the two per-line price lookups ONCE per distinct product
+      // instead of per line (was a 3N query storm on a multi-line SO edit).
+      // Safe-by-construction: customerId + priceAsOf are constant for this
+      // request, so resolveCustomerPriceAsOf(productId) is memoizable, and the
+      // products read is the same rows via one WHERE id IN (...). Values are
+      // byte-identical to the per-line path — only the query count changes.
+      const uniqProductIds = [
+        ...new Set(
+          rawItems.map((it) => (it.productId as string) || "").filter(Boolean),
+        ),
+      ];
+      const productMap = new Map<
+        string,
+        { basePriceSen: number | null; seatHeightPrices: unknown }
+      >();
+      if (uniqProductIds.length) {
+        const ph = uniqProductIds.map(() => "?").join(", ");
+        const prodRows = await c.var.DB.prepare(
+          `SELECT * FROM products WHERE id IN (${ph})`,
+        )
+          .bind(...uniqProductIds)
+          .all<{ id: string; basePriceSen: number | null; seatHeightPrices: unknown }>();
+        for (const r of prodRows.results ?? []) productMap.set(r.id, r);
+      }
+      const customerPriceMap = new Map<
+        string,
+        Awaited<ReturnType<typeof resolveCustomerPriceAsOf>>
+      >();
+      if (customerId && !mergedIsServiceOrder && uniqProductIds.length) {
+        await Promise.all(
+          uniqProductIds.map(async (pid) => {
+            try {
+              customerPriceMap.set(
+                pid,
+                await resolveCustomerPriceAsOf(c.var.DB, pid, customerId, priceAsOf),
+              );
+            } catch {
+              customerPriceMap.set(pid, null);
+            }
+          }),
+        );
+      }
+
       const newItems = await Promise.all(rawItems.map(async (item, idx) => {
         const incomingBase = Number(item.basePriceSen) || 0;
         // SOFA lines ALWAYS re-derive their base from the price list, ignoring
@@ -3569,12 +3657,7 @@ app.put("/:id", async (c) => {
         const productIdForLookup = (item.productId as string) || "";
         if (!mergedIsServiceOrder && basePriceSen === 0 && productIdForLookup && customerId) {
           try {
-            const cp = await resolveCustomerPriceAsOf(
-              c.var.DB,
-              productIdForLookup,
-              customerId,
-              priceAsOf,
-            );
+            const cp = customerPriceMap.get(productIdForLookup) ?? null;
             if (cp) {
               if (cp.seatHeightPrices && cp.seatHeightPrices.length > 0 && seatHeightForPrice) {
                 const shp = cp.seatHeightPrices.find(
@@ -3593,14 +3676,7 @@ app.put("/:id", async (c) => {
         // whose customer price didn't resolve silently zeroed basePriceSen.
         if (!mergedIsServiceOrder && basePriceSen === 0 && productIdForLookup) {
           try {
-            const prod = await c.var.DB.prepare(
-              "SELECT * FROM products WHERE id = ?",
-            )
-              .bind(productIdForLookup)
-              .first<{
-                basePriceSen: number | null;
-                seatHeightPrices: unknown;
-              }>();
+            const prod = productMap.get(productIdForLookup) ?? null;
             if (prod) {
               let shp: Array<{ height: string; priceSen: number }> = [];
               if (Array.isArray(prod.seatHeightPrices)) {

@@ -1073,6 +1073,32 @@ app.post("/", async (c) => {
       );
     }
 
+    // Duplicate-document guard (owner 2026-07): a supplier DO number already on a
+    // GRN for this supplier is almost always a re-scan / double-receipt — block
+    // it with a clear message so we never silently create a duplicate GRN.
+    const grnSupplierDoNo =
+      body.supplierDoNo == null || String(body.supplierDoNo).trim() === ""
+        ? null
+        : String(body.supplierDoNo).trim();
+    if (grnSupplierDoNo && bodySupplierId) {
+      const dup = await c.var.DB
+        .prepare(
+          "SELECT grnNumber FROM grns WHERE supplierId = ? AND supplier_do_no = ? LIMIT 1",
+        )
+        .bind(bodySupplierId, grnSupplierDoNo)
+        .first<{ grnNumber: string }>();
+      if (dup) {
+        return c.json(
+          {
+            success: false,
+            error: `Supplier DO "${grnSupplierDoNo}" is already on ${dup.grnNumber} for this supplier — looks like a duplicate. Delete that GRN first, or change the number if it's genuinely a different document.`,
+            duplicateOf: dup.grnNumber,
+          },
+          409,
+        );
+      }
+    }
+
     const grnId = genGrnId();
     const grnNumber = await generateGrnNumber(c.var.DB);
     const receiveDate =

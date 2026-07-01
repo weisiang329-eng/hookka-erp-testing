@@ -9,6 +9,33 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-06-30 (late) — ⚪ Supplier-PI OCR quality QA (owner batch, after the compression fix)
+
+Owner scanned a real 13-PI bundle (compression fix WORKED — it split + extracted).
+Found 7 issues to triage/fix:
+1. 🔴 **Price = 0 on some PIs** — NHL invoice (IV-91176) shows 99.40 / total 757.68
+   but the PI line came out Unit Price 0 / RM 0.00. Haiku missed the price on a
+   faint/messy scan; existing "Fix A" backfills unitPrice from supplier price
+   bindings only (no binding → stays 0). ⚠️ check if the ~150-DPI compression
+   hurt price legibility (raise quality?). Money path — highest priority.
+2. 🟡 **Preview cards NOT in upload/page order** — children named pi-9-10 / pi-28-29
+   (split works) but cards aren't sorted by page range → owner tallies manually.
+3. **Ensure INVOICE-type docs convert as Purchase Invoice** (vs DO/GRN) — confirm
+   docType=INVOICE → PI flow holds.
+4. **Dup detection — same PI scanned twice:** only EXACT same file bytes are
+   deduped (file-hash). A re-scan/re-photo of the same invoice = different bytes
+   → NOT caught. GAP: detect by supplier invoice number.
+5. **Different invoice numbers (451 vs 450)** — each doc's invoice no is extracted
+   separately (treated as distinct ✓); relates to #4 (dupe-by-number).
+6. **Discount:** PI DETAIL supports a DISCOUNT line type (exists), but the scan
+   preview doesn't capture the invoice's discount → manual add today. Could
+   extract discount in OCR + surface on the preview card.
+7. **Sponge density + thickness** (3rd photo) — density (NLY22GH) + thickness
+   (25MM) are critical for matching the right Internal Code; ensure OCR extracts
+   + uses them.
+
+---
+
 ## 2026-06-30 — 🔵 "全部强化掉" — SRE / infra resilience + perf + OCR (owner directive)
 
 Owner authorized hardening the whole reliability layer. Playbook written:

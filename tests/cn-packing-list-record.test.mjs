@@ -342,14 +342,20 @@ test("createCnPackingListCore: a CN already in another list is rejected (at most
 
 test("createCnPackingListCore: CNs free of any list create cleanly alongside an unrelated existing list", async () => {
   const seed = twoCnSeed();
-  // An existing list holds some OTHER CN; cn-1 + cn-2 are still free.
-  seed.existingLists = [{ packingNo: "CPL-2606-001", cnIds: ["cn-other"] }];
+  // An existing list holds some OTHER CN; cn-1 + cn-2 are still free. genNextPackingNo
+  // scopes its "highest existing number" scan to the CURRENT real-clock month (it
+  // takes no injectable `now` in production — see packing-list-shared.ts), so the
+  // seeded existing list must be dated THIS month, not a hardcoded one, or the
+  // fixture rots the moment the wall clock crosses a month boundary.
+  const now = new Date();
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
+  seed.existingLists = [{ packingNo: `CPL-${yymm}-001`, cnIds: ["cn-other"] }];
   const { db, inserted } = makeDb(seed);
   const res = await createCnPackingListCore(makeCtx(db), "hookka", {
     cnIds: ["cn-1", "cn-2"],
   });
   assert.equal(res.ok, true, "free CNs must still group even when other lists exist");
-  // genNextPackingNo sees the existing CPL-...-001 ⇒ next is 002.
-  assert.match(res.packingNo, /^CPL-\d{4}-002$/, "running number increments past the existing list");
+  // genNextPackingNo sees the existing CPL-<this month>-001 ⇒ next is 002.
+  assert.equal(res.packingNo, `CPL-${yymm}-002`, "running number increments past the existing list");
   assert.equal(inserted.length, 1);
 });

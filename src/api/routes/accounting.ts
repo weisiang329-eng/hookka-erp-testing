@@ -5044,6 +5044,9 @@ type MaterialCostData = {
   // uses this for the trading-account PURCHASE line INSTEAD of GRN receipts;
   // OPENING/CLOSING stay GRN/FIFO and CONSUMED re-balances. See materialWindow.
   piPurchaseCum: Map<string, Map<string, number>>;
+  // Month-end stock-take (owner periodic option): group → ym → closing value sen.
+  // materialWindow uses it as the period closing (override FIFO) where present.
+  stockTakeByGroupYm: Map<string, Map<string, number>>;
   wipByYm: Map<string, number>;
   fgByYm: Map<string, number>;
   warnings: {
@@ -5064,6 +5067,7 @@ async function loadMaterialCostData(
   // 0. Ensure the opening-stock tables exist (deploys don't run migrations).
   await ensureMaterialOpeningStock(db);
   await ensureInventoryOpening(db);
+  await ensureStockTake(db);
 
   // 0a. Cutover day: global kv `material_opening_date`, else the earliest
   //     as_of_date on file. Only GRN/issue movements strictly AFTER the cutover
@@ -5469,12 +5473,34 @@ async function loadMaterialCostData(
     piPurchaseCum.set(g, cum);
   }
 
+  // Month-end stock-take (owner periodic-inventory option): group → ym → closing
+  // value sen. materialWindow uses it as the period closing (and the prior month
+  // as opening) INSTEAD of the FIFO value, where present. Read-only override.
+  const stockTakeByGroupYm = new Map<string, Map<string, number>>();
+  {
+    const stRes = await db
+      .prepare("SELECT item_group, ym, value_sen FROM stock_take WHERE org_id = ?")
+      .bind(orgId)
+      .all<{ item_group?: string | null; itemGroup?: string | null; ym: string | null; value_sen?: number | null; valueSen?: number | null }>();
+    for (const r of stRes.results ?? []) {
+      const g = String(r.itemGroup ?? r.item_group ?? "").trim();
+      const ym = String(r.ym ?? "").slice(0, 7);
+      if (!g || !/^\d{4}-\d{2}$/.test(ym)) continue;
+      const sen = Math.round(Number(r.valueSen ?? r.value_sen) || 0);
+      let m = stockTakeByGroupYm.get(g);
+      if (!m) { m = new Map(); stockTakeByGroupYm.set(g, m); }
+      m.set(ym, sen);
+      allGroups.add(g);
+    }
+  }
+
   return {
     globalFirstYm,
     lastYm,
     groups: [...allGroups],
     groupCum,
     piPurchaseCum,
+    stockTakeByGroupYm,
     wipByYm,
     fgByYm,
     warnings: { negatives, unresolved },
@@ -5505,8 +5531,15 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
     const piEnd = piCum?.get(endKey) ?? 0;
     const piPrev = prevKey ? (piCum?.get(prevKey) ?? 0) : 0;
     const purchaseSen = piEnd - piPrev;
-    const consumedSen = w.openingSen + purchaseSen - w.closingSen;
-    return { itemGroup: g, openingSen: w.openingSen, purchaseSen, closingSen: w.closingSen, consumedSen };
+    // Month-end stock-take override (owner periodic option, 2026-06-30): a manually
+    // entered count at a month-end becomes the period CLOSING (and the prior month's
+    // the OPENING) instead of the FIFO value, for groups that have one. Groups with
+    // no stock-take keep the FIFO/BOM closing exactly as before. CONSUMED rebalances.
+    const st = data.stockTakeByGroupYm.get(g);
+    const openingSen = (prevKey && st?.has(prevKey)) ? (st.get(prevKey) as number) : w.openingSen;
+    const closingSen = st?.has(endKey) ? (st.get(endKey) as number) : w.closingSen;
+    const consumedSen = openingSen + purchaseSen - closingSen;
+    return { itemGroup: g, openingSen, purchaseSen, closingSen, consumedSen };
   });
   const wipCloseSen = data.wipByYm.get(endKey) ?? 0;
   const wipOpenSen = prevKey ? (data.wipByYm.get(prevKey) ?? 0) : 0;
@@ -5583,6 +5616,40 @@ function ensureInventoryOpening(db: D1Database): Promise<void> {
     }
   })();
   return _pendingInventoryOpeningMigrations;
+}
+
+// Month-end stock-take (owner periodic-inventory option, 2026-06-30). Per-group
+// closing value the owner enters at each month-end; materialWindow uses it as the
+// period CLOSING (and the prior month's as OPENING) INSTEAD of the FIFO value, for
+// groups that have one. Coexists with BOM/FIFO — a group with no stock-take keeps
+// the FIFO closing exactly as before. Runtime self-apply mirrors ensureInventoryOpening.
+let _pendingStockTakeMigrations: Promise<void> | null = null;
+function ensureStockTake(db: D1Database): Promise<void> {
+  if (_pendingStockTakeMigrations) return _pendingStockTakeMigrations;
+  _pendingStockTakeMigrations = (async () => {
+    const stmts = [
+      `CREATE TABLE IF NOT EXISTS stock_take (
+         id         TEXT PRIMARY KEY,
+         org_id     TEXT NOT NULL DEFAULT 'hookka',
+         item_group TEXT NOT NULL,
+         ym         TEXT NOT NULL,
+         value_sen  INTEGER NOT NULL DEFAULT 0,
+         updated_at TEXT
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_take_key ON stock_take (org_id, item_group, ym)`,
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[accounting.stock-take] DDL skipped", {
+          sql: sql.split("\n")[0],
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return _pendingStockTakeMigrations;
 }
 
 /** Load all historical P&L rows for an org, grouped by ym. */
@@ -9578,6 +9645,72 @@ app.post("/opening-balance/post", async (c) => {
       success: true,
       data: { openingDate, lines: cleaned.length, totalSen: totalDr },
     });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// MONTH-END STOCK-TAKE (owner periodic-inventory option, 2026-06-30)
+//
+// Per material-group closing value the owner enters at each month-end. The P&L
+// material engine (materialWindow) uses it as that period's CLOSING (and the
+// prior month's as OPENING) instead of the FIFO/BOM value, for groups that have
+// one — so material cost works without a complete BOM. Coexists with FIFO: a
+// group with no stock-take keeps the FIFO closing. Table self-applied via
+// ensureStockTake. ym = 'YYYY-MM' (the month it closes).
+// ---------------------------------------------------------------------------
+app.get("/stock-take", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  await ensureStockTake(c.var.DB);
+  const res = await c.var.DB
+    .prepare("SELECT item_group, ym, value_sen FROM stock_take WHERE org_id = ? ORDER BY ym DESC, item_group ASC")
+    .bind(orgId)
+    .all<{ item_group?: string | null; itemGroup?: string | null; ym: string | null; value_sen?: number | null; valueSen?: number | null }>();
+  const data = (res.results ?? []).map((r) => ({
+    itemGroup: String(r.itemGroup ?? r.item_group ?? ""),
+    ym: String(r.ym ?? ""),
+    valueSen: Math.round(Number(r.valueSen ?? r.value_sen) || 0),
+  }));
+  return c.json({ success: true, data, total: data.length });
+});
+
+// PUT /api/accounting/stock-take
+// Body: { ym: 'YYYY-MM', rows: [{ itemGroup, valueSen }] } — upserts one month's
+// per-group closing values (ON CONFLICT (org_id, item_group, ym)).
+app.put("/stock-take", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  await ensureStockTake(c.var.DB);
+  try {
+    const body = (await c.req.json()) as { ym?: unknown; rows?: { itemGroup?: unknown; valueSen?: unknown }[] };
+    const ym = String(body.ym ?? "").slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(ym)) return c.json({ success: false, error: "ym must be 'YYYY-MM'" }, 400);
+    if (!Array.isArray(body.rows)) return c.json({ success: false, error: "rows[] is required" }, 400);
+    const now = new Date().toISOString();
+    const seen = new Set<string>();
+    const stmts: D1PreparedStatement[] = [];
+    for (const raw of body.rows) {
+      const g = typeof raw?.itemGroup === "string" ? raw.itemGroup.trim() : "";
+      if (!g || seen.has(g)) continue;
+      seen.add(g);
+      const sen = Math.max(0, Math.round(Number(raw?.valueSen) || 0));
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `INSERT INTO stock_take (id, org_id, item_group, ym, value_sen, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (org_id, item_group, ym)
+             DO UPDATE SET value_sen = excluded.value_sen, updated_at = excluded.updated_at`,
+          )
+          .bind(`st-${crypto.randomUUID().slice(0, 12)}`, orgId, g, ym, sen, now),
+      );
+    }
+    if (stmts.length) await c.var.DB.batch(stmts);
+    return c.json({ success: true, saved: stmts.length, ym });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

@@ -56,7 +56,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "supplier-discount" | "debtorledger" | "creditorledger" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "opening" | "audit" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "supplier-discount" | "debtorledger" | "creditorledger" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "stocktake" | "opening" | "audit" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -471,6 +471,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   { key: "stock", label: "Stock", icon: <List className="h-4 w-4" />, group: "Maintenance" },
   { key: "stockmap", label: "Stock Mapping", icon: <List className="h-4 w-4" />, group: "Maintenance" },
   { key: "openstock", label: "Opening Stock", icon: <Scale className="h-4 w-4" />, group: "Maintenance" },
+  { key: "stocktake", label: "Stock Take", icon: <Scale className="h-4 w-4" />, group: "Maintenance" },
   { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" />, group: "Maintenance" },
   { key: "audit", label: "Audit Log", icon: <FileText className="h-4 w-4" />, group: "Maintenance" },
   { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" />, group: "Maintenance" },
@@ -706,6 +707,7 @@ export default function AccountingPage() {
             </div>
           )}
           {tab === "openstock" && <OpeningStockTab />}
+          {tab === "stocktake" && <StockTakeTab />}
           {tab === "maint" && (
             <div className="space-y-4">
               <h2 className="text-lg font-semibold text-[#1F1D1B]">Account Maintenance</h2>
@@ -1423,6 +1425,140 @@ type OpeningStockApiRow = {
   unitCostSen: number | null;
   asOfDate: string | null;
 };
+
+// Month-end stock-take entry (owner periodic-inventory option). Per material-group
+// closing value at a month-end → the P&L uses it as that month's closing (and the
+// next month's opening) instead of the FIFO/BOM value. Reuses /material-opening-stock
+// for the group list; saves via PUT /stock-take.
+function StockTakeTab() {
+  const { toast } = useToast();
+  const [groups, setGroups] = useState<string[] | null>(null);
+  const [entries, setEntries] = useState<{ itemGroup: string; ym: string; valueSen: number }[]>([]);
+  const [ym, setYm] = useState(() => new Date().toISOString().slice(0, 7));
+  // Edits keyed by `${ym}::${itemGroup}` (not by group alone) so switching the
+  // month never needs an effect to reset stale values from another month — the
+  // displayed value is derived straight from state + `entries` on every render.
+  const [edits, setEdits] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let stale = false;
+    Promise.all([
+      fetch("/api/accounting/material-opening-stock").then((r) => r.json() as Promise<{ data?: { itemGroup: string }[] }>),
+      fetch("/api/accounting/stock-take").then((r) => r.json() as Promise<{ data?: { itemGroup: string; ym: string; valueSen: number }[] }>),
+    ])
+      .then(([mos, st]) => {
+        if (stale) return;
+        setGroups([...new Set((mos.data ?? []).map((r) => r.itemGroup).filter(Boolean))].sort());
+        setEntries(st.data ?? []);
+      })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, []);
+
+  const key = (g: string) => `${ym}::${g}`;
+  const savedFor = (g: string) => entries.find((e) => e.ym === ym && e.itemGroup === g);
+  const valueFor = (g: string): string => {
+    const edited = edits[key(g)];
+    if (edited != null) return edited;
+    const saved = savedFor(g);
+    return saved ? (saved.valueSen / 100).toFixed(2) : "";
+  };
+  const setValueFor = (g: string, v: string) => setEdits((p) => ({ ...p, [key(g)]: v }));
+
+  const save = async () => {
+    if (!groups) return;
+    if (!/^\d{4}-\d{2}$/.test(ym)) { toast.error("Pick a month first"); return; }
+    const rows = groups
+      .filter((g) => valueFor(g).trim() !== "")
+      .map((g) => ({ itemGroup: g, valueSen: Math.round((parseFloat(valueFor(g)) || 0) * 100) }));
+    setSaving(true);
+    try {
+      const res = await fetch("/api/accounting/stock-take", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ym, rows }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string; saved?: number };
+      if (j?.success) {
+        toast.success(`Stock-take saved for ${ym} (${j.saved ?? rows.length} group${(j.saved ?? rows.length) === 1 ? "" : "s"})`);
+        setEntries((prev) => [...prev.filter((e) => e.ym !== ym), ...rows.map((r) => ({ ...r, ym }))]);
+      } else toast.error(j?.error || "Failed to save stock-take");
+    } catch {
+      toast.error("Failed to save stock-take");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">Month-End Stock Take</h2>
+          <p className="text-xs text-[#6B7280] max-w-3xl">
+            Enter the closing stock value per material group at each month-end. The P&amp;L
+            uses it as that month&apos;s closing (and the next month&apos;s opening), so material
+            cost works without a full BOM. Leave a group blank to keep the system&apos;s
+            automatic (FIFO) figure.
+          </p>
+        </div>
+        <Button variant="primary" size="sm" onClick={save} disabled={saving || !groups}>
+          {saving ? "Saving…" : "Save"}
+        </Button>
+      </div>
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex flex-wrap items-end gap-4">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-[#6B7280]">Month (closes at month-end)</label>
+              <input
+                type="month"
+                className="border border-[#E2DDD8] rounded-md px-3 py-2 text-sm"
+                value={ym}
+                onChange={(e) => setYm(e.target.value)}
+              />
+            </div>
+          </div>
+          {!groups ? (
+            <p className="text-sm text-gray-400 italic">Loading…</p>
+          ) : groups.length === 0 ? (
+            <p className="text-sm text-gray-400 italic">No material groups found.</p>
+          ) : (
+            <div className="border rounded-md overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="text-left px-3 py-2 font-medium text-gray-600">Material Group</th>
+                    <th className="text-right px-3 py-2 font-medium text-gray-600">Closing Stock (RM)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groups.map((g) => (
+                    <tr key={g} className="border-t">
+                      <td className="px-3 py-1.5">{g}</td>
+                      <td className="px-3 py-1.5 text-right">
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          className="w-40 border border-[#E2DDD8] rounded-md px-2 py-1 text-sm text-right tabular-nums"
+                          value={valueFor(g)}
+                          onChange={(e) => setValueFor(g, e.target.value)}
+                          placeholder="(auto / FIFO)"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
 
 function OpeningStockTab() {
   const { toast } = useToast();

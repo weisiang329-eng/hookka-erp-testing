@@ -9,6 +9,25 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-01 — ✅ Supplier Payment list showed empty despite a real, GL-posted payment (BUG-2026-07-01-003)
+
+Owner recorded HPV-2607-002 (ADD WOORD TRADING, RM 11,476.00) via the normal Record
+Payment form — visible in Supplier Statement + Creditor Ledger, but the Supplier
+Payment page's own All Payments list + summary cards showed all-zero/empty, even
+after a hard refresh. Root cause: `GET /api/supplier-payments` read `row.payment_no`
+(snake_case) but the Postgres adapter camelCases every result column regardless of
+SQL alias text — same class as BUG-2026-06-30-001. Second, independent bug found
+in the same sweep: `purchase_invoices.amount_sen` / `paid_amount_sen` misreads made
+PI-targeted allocations (POST /, restate, and today's own Knock-off feature) always
+see outstanding=0 — likely why the owner ended up using the Advance field for this
+payment instead of paying PI-2606-037 directly. Fixed both (dual-keyed reads,
+extracted to tested pure helpers in `src/lib/supplier-payment-alloc.ts`); shipped to
+`main`. **Owner follow-up needed:** use the Knock-off feature to re-attribute
+HPV-2607-002's advance to PI-2606-037 (GL is correct; only the subsidiary
+attribution is off). See `docs/BUG-HISTORY.md` BUG-2026-07-01-003 for full detail.
+
+---
+
 ## 2026-06-30 (late) — ⚪ Supplier-PI OCR quality QA (owner batch, after the compression fix)
 
 Owner scanned a real 13-PI bundle (compression fix WORKED — it split + extracted).

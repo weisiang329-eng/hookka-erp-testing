@@ -32,3 +32,118 @@ export function computeAlloc(a: AllocInput): AllocResult {
   const bank = Math.round(foreign * payRate);
   return { ok: true, bookedSen: booked, bankSen: bank, fxDiffSen: booked - bank };
 }
+
+// ---------------------------------------------------------------------------
+// Dual-keyed row field readers (BUG-2026-07-01-003).
+//
+// The Postgres adapter camelCases every result column (src/api/lib/db-pg.ts
+// `transform: { column: { from: columnFrom } }`) regardless of how the SQL
+// referenced or aliased it — a snake_case column reference/alias round-trips
+// back into JS as its camelCase original (via column-rename-map.json or a
+// postgres.toCamel fallback). A row field typed/read as snake_case is
+// therefore only ever populated via its camelCase twin at runtime. Every
+// reader of a `purchase_invoices` / `supplier_payments` row in
+// src/api/routes/supplier-payments.ts must go through these instead of a
+// bare `row.snake_case_field`.
+// ---------------------------------------------------------------------------
+export type DualKeyPiRow = {
+  amountSen?: number | null;
+  amount_sen?: number | null;
+  paidAmountSen?: number | null;
+  paid_amount_sen?: number | null;
+};
+
+/** PI's remaining booked MYR: amountSen − paidAmountSen, dual-keyed. */
+export function piOutstandingSen(pi: DualKeyPiRow): number {
+  const amountSen = Number(pi.amountSen ?? pi.amount_sen) || 0;
+  const paidAmountSen = Number(pi.paidAmountSen ?? pi.paid_amount_sen) || 0;
+  return amountSen - paidAmountSen;
+}
+
+export type DualKeyBookedRow = {
+  bookedSen?: number | null;
+  booked_sen?: number | null;
+};
+
+/** A supplier_payments row's bookedSen, dual-keyed. */
+export function readBookedSen(row: DualKeyBookedRow): number {
+  return Number(row.bookedSen ?? row.booked_sen) || 0;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/supplier-payments row grouping — pure so it's directly testable
+// with the camelCase-only shape the live adapter actually produces (see
+// BUG-2026-07-01-003: the old inline loop read snake_case and silently
+// dropped every row via `if (!payNo) continue`).
+// ---------------------------------------------------------------------------
+export type RawSupplierPaymentRow = {
+  id: string;
+  paymentNo?: string | null; payment_no?: string | null;
+  supplierId?: string | null; supplier_id?: string | null;
+  supplierName?: string | null; supplier_name?: string | null;
+  purchaseInvoiceId?: string | null; purchase_invoice_id?: string | null;
+  date?: string | null;
+  amountSen?: number | null; amount_sen?: number | null;
+  bookedSen?: number | null; booked_sen?: number | null;
+  piNo?: string | null; pi_no?: string | null;
+  supplierInvoiceNo?: string | null; supplier_invoice_no?: string | null;
+  lifecycleState?: string | null;
+};
+
+export type SupplierPaymentLine = {
+  id: string;
+  purchaseInvoiceId: string;
+  piNo?: string;
+  supplierInvoiceNo?: string;
+  amountSen: number;
+  bookedSen: number;
+};
+
+export type SupplierPaymentGroup = {
+  paymentNo: string;
+  supplierId: string;
+  supplierName: string;
+  date: string;
+  totalBankSen: number;
+  totalBookedSen: number;
+  lines: SupplierPaymentLine[];
+  lifecycleState: string;
+};
+
+/** Groups flat (payment × PI-line) rows into one entry per payment_no. */
+export function groupSupplierPaymentRows(
+  rows: RawSupplierPaymentRow[],
+): SupplierPaymentGroup[] {
+  const groups = new Map<string, SupplierPaymentGroup>();
+  for (const row of rows) {
+    const payNo = row.paymentNo ?? row.payment_no ?? "";
+    if (!payNo) continue;
+    let g = groups.get(payNo);
+    if (!g) {
+      g = {
+        paymentNo: payNo,
+        supplierId: row.supplierId ?? row.supplier_id ?? "",
+        supplierName: row.supplierName ?? row.supplier_name ?? "",
+        date: row.date ?? "",
+        totalBankSen: 0,
+        totalBookedSen: 0,
+        lines: [],
+        lifecycleState: row.lifecycleState ?? "ACTIVE",
+      };
+      groups.set(payNo, g);
+    }
+    const amountSen = Number(row.amountSen ?? row.amount_sen) || 0;
+    const bookedSen = readBookedSen(row);
+    g.totalBankSen += amountSen;
+    g.totalBookedSen += bookedSen;
+    g.lines.push({
+      id: row.id,
+      purchaseInvoiceId: row.purchaseInvoiceId ?? row.purchase_invoice_id ?? "",
+      piNo: row.piNo ?? row.pi_no ?? undefined,
+      supplierInvoiceNo: row.supplierInvoiceNo ?? row.supplier_invoice_no ?? "",
+      amountSen,
+      bookedSen,
+    });
+  }
+  return [...groups.values()];
+}

@@ -23,7 +23,13 @@ import {
   buildJournalEntryStatements,
   ledgerHasSource,
 } from "../lib/journal-hash";
-import { computeAlloc } from "../../lib/supplier-payment-alloc";
+import {
+  computeAlloc,
+  piOutstandingSen,
+  readBookedSen,
+  groupSupplierPaymentRows,
+  type RawSupplierPaymentRow,
+} from "../../lib/supplier-payment-alloc";
 import { issueDocNumber } from "../lib/doc-number-service";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { applyLifecycle } from "../lib/document-lifecycle";
@@ -37,44 +43,19 @@ const app = new Hono<Env>();
 // ---------------------------------------------------------------------------
 // GET / — list supplier payments grouped by payment_no (newest first).
 // ---------------------------------------------------------------------------
-type SupplierPaymentRow = {
-  id: string;
-  payment_no: string | null;
-  supplier_id: string | null;
-  supplier_name: string | null;
-  purchase_invoice_id: string | null;
-  date: string | null;
-  amount_sen: number | null;
-  booked_sen: number | null;
-};
-
-type PaymentLine = {
-  id: string;
-  purchaseInvoiceId: string;
-  piNo?: string;
-  supplierInvoiceNo?: string;
-  amountSen: number;
-  bookedSen: number;
-};
-
-type PaymentGroup = {
-  paymentNo: string;
-  supplierId: string;
-  supplierName: string;
-  date: string;
-  totalBankSen: number;
-  totalBookedSen: number;
-  lines: PaymentLine[];
-  lifecycleState: string;
-};
-
 app.get("/", async (c) => {
   const denied = await requirePermission(c, "invoices", "read");
   if (denied) return denied;
 
   const orgId = getOrgId(c);
-  // Join purchase_invoices for the pi_no (cheap LEFT JOIN). Column names are
-  // surfaced snake_case by the d1-compat adapter on read.
+  // Join purchase_invoices for the pi_no (cheap LEFT JOIN). BUG-2026-07-01-003:
+  // Postgres adapter camelCases every result column (db-pg.ts
+  // transform.column.from) regardless of this SQL's snake_case aliases, so a
+  // bare `row.payment_no` read was ALWAYS undefined — GET /api/supplier-payments
+  // always returned an empty list on Postgres. Fixed per docs/PLAYBOOKS.md P2:
+  // dual-key the reads (`r.camelCase ?? r.snake_case`), extracted to
+  // groupSupplierPaymentRows so it's unit-testable against the adapter's real
+  // (camelCase-only) row shape.
   const res = await c.var.DB.prepare(
     `SELECT sp.id           AS id,
             sp.payment_no   AS payment_no,
@@ -98,49 +79,11 @@ app.get("/", async (c) => {
       ORDER BY sp.date DESC, sp.payment_no DESC, sp.id DESC`,
   )
     .bind(orgId)
-    .all<
-      SupplierPaymentRow & {
-        pi_no: string | null;
-        supplier_invoice_no: string | null;
-        lifecycleState: string | null;
-      }
-    >();
+    .all<RawSupplierPaymentRow>();
 
-  const groups = new Map<string, PaymentGroup>();
-  for (const row of res.results ?? []) {
-    const payNo = row.payment_no ?? "";
-    if (!payNo) continue;
-    let g = groups.get(payNo);
-    if (!g) {
-      g = {
-        paymentNo: payNo,
-        supplierId: row.supplier_id ?? "",
-        supplierName: row.supplier_name ?? "",
-        date: row.date ?? "",
-        totalBankSen: 0,
-        totalBookedSen: 0,
-        lines: [],
-        lifecycleState: row.lifecycleState ?? "ACTIVE",
-      };
-      groups.set(payNo, g);
-    }
-    const amountSen = Number(row.amount_sen) || 0;
-    const bookedSen = Number(row.booked_sen) || 0;
-    g.totalBankSen += amountSen;
-    g.totalBookedSen += bookedSen;
-    g.lines.push({
-      id: row.id,
-      purchaseInvoiceId: row.purchase_invoice_id ?? "",
-      piNo: row.pi_no ?? undefined,
-      supplierInvoiceNo: row.supplier_invoice_no ?? "",
-      amountSen,
-      bookedSen,
-    });
-  }
-
-  // Map iteration order preserves first-seen, which (given the ORDER BY) is
-  // already newest-first.
-  return c.json({ success: true, data: [...groups.values()] });
+  // Map iteration order (inside groupSupplierPaymentRows) preserves
+  // first-seen, which (given the ORDER BY) is already newest-first.
+  return c.json({ success: true, data: groupSupplierPaymentRows(res.results ?? []) });
 });
 
 // ---------------------------------------------------------------------------
@@ -156,13 +99,19 @@ type CreateAllocation = {
 
 type PiRow = {
   id: string;
+  piNo: string | null;
   pi_no: string | null;
+  amountSen: number | null;
   amount_sen: number | null;
+  paidAmountSen: number | null;
   paid_amount_sen: number | null;
   status: string | null;
   currency: string | null;
+  fxRate: number | null;
   fx_rate: number | null;
+  supplierId: string | null;
   supplier_id: string | null;
+  supplierName: string | null;
   supplier_name: string | null;
 };
 
@@ -271,11 +220,10 @@ app.post("/", async (c) => {
           );
         }
 
-        const outstandingBookedSen =
-          (Number(pi.amount_sen) || 0) - (Number(pi.paid_amount_sen) || 0);
+        const outstandingBookedSen = piOutstandingSen(pi);
         const currency = pi.currency ? String(pi.currency) : "MYR";
         const isForeign = !!pi.currency && currency.toUpperCase() !== "MYR";
-        const fxRate = Number(pi.fx_rate) || 1;
+        const fxRate = Number(pi.fxRate ?? pi.fx_rate) || 1;
 
         const r = computeAlloc({
           outstandingBookedSen,
@@ -304,8 +252,8 @@ app.post("/", async (c) => {
           ).bind(
             spId,
             payNo,
-            pi.supplier_id ?? supplierId,
-            pi.supplier_name ?? "",
+            pi.supplierId ?? pi.supplier_id ?? supplierId,
+            pi.supplierName ?? pi.supplier_name ?? "",
             piId,
             date,
             r.bankSen,
@@ -510,16 +458,19 @@ app.post("/knock-off", async (c) => {
       )
       .bind(piId)
       .first<{
-        id: string; pi_no: string | null; amount_sen: number | null; paid_amount_sen: number | null;
-        status: string | null; supplier_id: string | null; supplier_name: string | null;
+        id: string; piNo: string | null; pi_no: string | null;
+        amountSen: number | null; amount_sen: number | null;
+        paidAmountSen: number | null; paid_amount_sen: number | null;
+        status: string | null; supplierId: string | null; supplier_id: string | null;
+        supplierName: string | null; supplier_name: string | null;
       }>();
     if (!pi || (pi.status !== "CONFIRMED" && pi.status !== "APPROVED" && pi.status !== "PARTIAL_PAID")) {
       return c.json({ success: false, error: "Purchase invoice not found or not in a payable status" }, 400);
     }
-    if (pi.supplier_id !== advance.supplierId) {
+    if ((pi.supplierId ?? pi.supplier_id) !== advance.supplierId) {
       return c.json({ success: false, error: "That invoice belongs to a different supplier" }, 400);
     }
-    const outstandingSen = (Number(pi.amount_sen) || 0) - (Number(pi.paid_amount_sen) || 0);
+    const outstandingSen = piOutstandingSen(pi);
     if (amountSen > outstandingSen) {
       return c.json({ success: false, error: `Amount exceeds the invoice's outstanding balance (RM ${(outstandingSen / 100).toFixed(2)})` }, 400);
     }
@@ -565,7 +516,7 @@ app.post("/knock-off", async (c) => {
 
     return c.json({
       success: true,
-      data: { remainingAdvanceSen: remainingAdvanceSen - amountSen, piNo: pi.pi_no },
+      data: { remainingAdvanceSen: remainingAdvanceSen - amountSen, piNo: pi.piNo ?? pi.pi_no },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -603,7 +554,7 @@ async function buildSupplierPaymentLifecycle(
           "SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'",
         )
         .bind(paymentNo)
-        .all<{ purchaseInvoiceId: string | null; booked_sen: number | null }>()
+        .all<{ purchaseInvoiceId: string | null; bookedSen: number | null; booked_sen: number | null }>()
     ).results ?? [];
   if (rows.length === 0) throw new Error("PAYMENT_NOT_FOUND");
 
@@ -636,7 +587,7 @@ async function buildSupplierPaymentLifecycle(
     for (const row of rows) {
       const piId = row.purchaseInvoiceId;
       if (!piId) continue;
-      const bookedSen = Number(row.booked_sen) || 0;
+      const bookedSen = readBookedSen(row);
       if (deactivated) {
         // Roll back the PI to its pre-payment paid_amount_sen + status (same
         // SQL the legacy void used).
@@ -699,7 +650,7 @@ async function buildSupplierPaymentRestate(
         // rollback set — defensive against a future payment_no collision.
         .prepare("SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'")
         .bind(paymentNo)
-        .all<{ purchaseInvoiceId: string | null; booked_sen: number | null }>()
+        .all<{ purchaseInvoiceId: string | null; bookedSen: number | null; booked_sen: number | null }>()
     ).results ?? [];
   if (oldRows.length === 0) throw new Error("PAYMENT_NOT_FOUND");
 
@@ -713,7 +664,7 @@ async function buildSupplierPaymentRestate(
   // 1. Roll the OLD PI paid amounts back.
   for (const r of oldRows) {
     if (!r.purchaseInvoiceId) continue;
-    const b = Number(r.booked_sen) || 0;
+    const b = readBookedSen(r);
     statements.push(
       db
         .prepare(
@@ -744,10 +695,10 @@ async function buildSupplierPaymentRestate(
     if (!pi || (pi.status !== "CONFIRMED" && pi.status !== "APPROVED" && pi.status !== "PARTIAL_PAID")) {
       throw new Error(`PI ${piId} not found or not in a payable status (APPROVED / PARTIAL_PAID)`);
     }
-    const outstandingBookedSen = (Number(pi.amount_sen) || 0) - (Number(pi.paid_amount_sen) || 0);
+    const outstandingBookedSen = piOutstandingSen(pi);
     const currency = pi.currency ? String(pi.currency) : "MYR";
     const isForeign = !!pi.currency && currency.toUpperCase() !== "MYR";
-    const fxRate = Number(pi.fx_rate) || 1;
+    const fxRate = Number(pi.fxRate ?? pi.fx_rate) || 1;
     const r = computeAlloc({
       outstandingBookedSen, isForeign, fxRate,
       payMyrSen: a.payMyrSen, foreignSen: a.foreignSen, payRate: a.payRate, full: !!a.full,
@@ -763,7 +714,7 @@ async function buildSupplierPaymentRestate(
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
-          `sp-${crypto.randomUUID().slice(0, 8)}`, paymentNo, pi.supplier_id ?? supplierId, pi.supplier_name ?? "",
+          `sp-${crypto.randomUUID().slice(0, 8)}`, paymentNo, pi.supplierId ?? pi.supplier_id ?? supplierId, pi.supplierName ?? pi.supplier_name ?? "",
           piId, date, r.bankSen, r.bookedSen, isForeign ? (Number(a.foreignSen) || 0) : null,
           isForeign ? (Number(a.payRate) || 0) : null, "BANK_TRANSFER", reference ?? "", `Payment ${paymentNo}`, orgId,
         ),

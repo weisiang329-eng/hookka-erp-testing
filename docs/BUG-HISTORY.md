@@ -34,6 +34,28 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-01-002 — Scanned PI line came out Unit Price RM 0 when the faint scan showed the line total but not the unit-price cell `scan` `ocr` `pricing-products`
+
+**Symptom:** owner scanned a real supplier invoice (NHL IV-91176 — 99.40 / total
+757.68) and the PI line came out **Unit Price 0 / RM 0.00**. The existing "Fix A"
+only backfills unitPrice from a supplier price binding — no binding → stays 0.
+
+**Root cause:** on a faint/messy scan the OCR reads the bold line TOTAL (amount)
+but misses the small unit-price cell → `unitPrice` returns null/0. Nothing derived
+the obvious value from the amount that WAS read.
+
+**Fix:** `sanitizeSupplierDoc` (scan-engine.ts) now backs the unit price out of
+`amount ÷ qty` (rounded to sen) whenever unitPrice is blank/0 AND amount+qty are
+present. Only fills a hole — never overwrites a real price, never divides by zero.
+Feeds the DRAFT the owner reviews, so an approximate recovered price beats a
+silent 0. Regression test `tests/scan-price-derive.test.mjs` (5 cases incl. the
+NHL case, the never-overwrite guard, and the qty=0 guard).
+
+**Verified:** `tsc` clean; test 5/5 pass. LIVE-VERIFY pending: owner re-scans the
+NHL invoice and confirms the line shows ~99.40 instead of 0.
+
+---
+
 ## BUG-2026-07-01-001 — Scan customer PO → SO hard-failed "Customer not in catalog" for a REAL, existing customer (legal-suffix mismatch) `sales-orders` `scan`
 
 **Symptom:** 6 Houzs Century POs (PO-009403…009410) all failed on the scan Create

@@ -173,15 +173,34 @@ export function sanitizeSupplierDoc(
       ? raw.items
       : [];
   const lines: SupplierExtractedLine[] = rawLines
-    .map((l) => ({
-      supplierCode: str(l?.supplierCode),
-      description: str(l?.description),
-      qty: num(l?.qty),
-      uom: str(l?.uom),
-      unitPrice: num(l?.unitPrice),
-      amount: num(l?.amount),
-      tax: num(l?.tax),
-    }))
+    .map((l) => {
+      const qty = num(l?.qty);
+      const amount = num(l?.amount);
+      let unitPrice = num(l?.unitPrice);
+      // Derive a missing unit price from the line amount (BUG price=0): a faint
+      // scan often reads the bold line TOTAL but misses the small unit-price
+      // cell, so the PI line came out RM 0. When unit price is blank/0 but the
+      // amount + qty are present, back it out (amount ÷ qty) — far better than 0
+      // for the draft the owner reviews, and it NEVER overwrites a real price.
+      if (
+        (unitPrice == null || unitPrice === 0) &&
+        amount != null &&
+        amount !== 0 &&
+        qty != null &&
+        qty > 0
+      ) {
+        unitPrice = Math.round((amount / qty) * 100) / 100;
+      }
+      return {
+        supplierCode: str(l?.supplierCode),
+        description: str(l?.description),
+        qty,
+        uom: str(l?.uom),
+        unitPrice,
+        amount,
+        tax: num(l?.tax),
+      };
+    })
     .filter((l) => l.description || l.supplierCode || l.qty != null);
   return {
     supplierName: str(raw.supplierName),

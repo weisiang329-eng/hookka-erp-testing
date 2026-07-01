@@ -39,3 +39,24 @@ test("no divide-by-zero when qty is 0/absent", () => {
   const lNoQty = line({ lines: [{ description: "Y", amount: 100 }] });
   assert.equal(lNoQty.unitPrice, null);
 });
+
+// OCR now also captures discount (line + doc) and foam density/thickness
+// (owner 2026-07-01) — sanitize must pass them through cleanly.
+test("passes through line discount, density, thickness", () => {
+  const l = line({
+    lines: [
+      { description: "Sponge", qty: 2, unitPrice: 50, discount: 5, density: "NLY22GH", thickness: "25MM" },
+    ],
+  });
+  assert.equal(l.discount, 5);
+  assert.equal(l.density, "NLY22GH");
+  assert.equal(l.thickness, "25MM");
+});
+
+test("passes through document-level discount; absent spec stays null", () => {
+  const doc = sanitizeSupplierDoc({ discount: 30, lines: [{ description: "Legs", qty: 4 }] });
+  assert.equal(doc.discount, 30);
+  assert.equal(doc.lines[0].density, null);
+  assert.equal(doc.lines[0].thickness, null);
+  assert.equal(doc.lines[0].discount, null);
+});

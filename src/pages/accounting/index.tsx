@@ -5636,7 +5636,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   const [openBill, setOpenBill] = useState<string | null>(null);
   const today = new Date().toISOString().slice(0, 10);
   const blankLine = (): BillLineDraft => ({ counterAccount: "", amountStr: "", description: "" });
-  const [form, setForm] = useState({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()] });
+  const [form, setForm] = useState({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()], isOpening: false });
 
   const load = () => {
     fetch(`/api/accounting/other-party-bills?type=${side}`)
@@ -5666,12 +5666,12 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
     const res = await fetch("/api/accounting/other-party-bills", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ partyId: form.partyId, billDate: form.billDate, referenceNo: form.referenceNo, description: form.description, taxSen: toSen(form.taxStr), items }),
+      body: JSON.stringify({ partyId: form.partyId, billDate: form.billDate, referenceNo: form.referenceNo, description: form.description, taxSen: toSen(form.taxStr), items, isOpening: form.isOpening }),
     });
     const j = asMutationResponse(await res.json());
     if (j?.success) {
       setShowForm(false);
-      setForm({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()] });
+      setForm({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()], isOpening: false });
       load();
     } else toast.error(j?.error || "Failed to create bill");
   };
@@ -5688,6 +5688,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
       lines: b.items.length
         ? b.items.map((it) => ({ counterAccount: it.counterAccount, amountStr: (it.amountSen / 100).toString(), description: it.description ?? "" }))
         : [blankLine()],
+      isOpening: false,
     });
     setShowForm(true);
   };
@@ -5726,7 +5727,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
 
       {showForm && (
         <Card><CardContent className="p-4 space-y-3">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <div>
               <label className="text-xs font-medium text-[#6B7280] mb-1 block">{side === "CREDITOR" ? "Creditor" : "Debtor"}</label>
               <select value={form.partyId} onChange={(e) => setForm({ ...form, partyId: e.target.value })}
@@ -5744,6 +5745,16 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
               <label className="text-xs font-medium text-[#6B7280] mb-1 block">Reference No</label>
               <input type="text" value={form.referenceNo} onChange={(e) => setForm({ ...form, referenceNo: e.target.value })}
                 placeholder="their invoice / DO no" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">&nbsp;</label>
+              <label
+                className="flex items-center gap-2 h-[38px] px-3 rounded-md border border-[#E2DDD8] text-sm cursor-pointer"
+                title="Check for a bill dated BEFORE the accounting opening date — it still shows correctly in aging instead of being floored out. Pick a Balance-Sheet counter account below (e.g. Retained Earnings), not a P&L expense."
+              >
+                <input type="checkbox" checked={form.isOpening} onChange={(e) => setForm({ ...form, isOpening: e.target.checked })} className="h-3.5 w-3.5 accent-[#6B5C32]" />
+                Opening balance
+              </label>
             </div>
           </div>
 

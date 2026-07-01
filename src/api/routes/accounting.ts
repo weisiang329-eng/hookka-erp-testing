@@ -2780,6 +2780,7 @@ app.delete("/other-parties/:id", async (c) => {
 app.post("/other-party-bills", async (c) => {
   const denied = await requirePermission(c, "accounting", "create");
   if (denied) return denied;
+  await ensureOtherPartyBillOpening(c.var.DB);
   try {
     const body = (await c.req.json()) as {
       partyId?: string;
@@ -2788,8 +2789,10 @@ app.post("/other-party-bills", async (c) => {
       description?: string;
       taxSen?: number;
       items?: { counterAccount?: string; amountSen?: number; description?: string }[];
+      isOpening?: boolean;
     };
     const orgId = getOrgId(c);
+    const isOpening = body.isOpening ? 1 : 0;
 
     const party = await c.var.DB.prepare(
       "SELECT * FROM other_parties WHERE id = ? AND orgId = ?",
@@ -2839,8 +2842,8 @@ app.post("/other-party-bills", async (c) => {
       c.var.DB.prepare(
         `INSERT INTO other_party_bills
            (id, billNo, partyId, partyType, partyName, billDate, referenceNo, description,
-            subtotalSen, taxSen, totalSen, paidAmountSen, status, orgId, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?)`,
+            subtotalSen, taxSen, totalSen, paidAmountSen, status, orgId, createdAt, is_opening)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
       ).bind(
         billId,
         billNo,
@@ -2855,6 +2858,7 @@ app.post("/other-party-bills", async (c) => {
         totalSen,
         orgId,
         now,
+        isOpening,
       ),
     ];
     items.forEach((it, idx) => {
@@ -3273,6 +3277,7 @@ app.get("/audit-log", async (c) => {
 app.get("/other-party-aging", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
+  await ensureOtherPartyBillOpening(c.var.DB);
   const orgId = getOrgId(c);
   const type = c.req.query("type");
   if (type !== "DEBTOR" && type !== "CREDITOR") {
@@ -3282,7 +3287,7 @@ app.get("/other-party-aging", async (c) => {
     (
       await c.var.DB.prepare(
         `SELECT b.partyId AS partyId, b.partyName AS partyName, b.billNo AS billNo, b.billDate AS billDate,
-                (b.totalSen - b.paidAmountSen) AS amt
+                (b.totalSen - b.paidAmountSen) AS amt, b.is_opening AS is_opening
            FROM other_party_bills b
            LEFT JOIN document_lifecycle dl
              ON dl.orgId = b.orgId AND dl.sourceType = 'other_party_bill' AND dl.sourceId = b.billNo
@@ -3291,11 +3296,11 @@ app.get("/other-party-aging", async (c) => {
           ORDER BY b.billDate ASC`,
       )
         .bind(orgId, type)
-        .all<{ partyId: string; partyName: string; billNo: string; billDate: string; amt: number }>()
+        .all<{ partyId: string; partyName: string; billNo: string; billDate: string; amt: number; is_opening?: number | null; isOpening?: number | null }>()
     ).results ?? [];
   const obDateOpa = await getOpeningDate(c.var.DB);
   const bills = rows
-    .filter((r) => !rowBeforeOpening(r.billDate, obDateOpa)) // pre-opening: not extracted (Other bills have no opening seed)
+    .filter((r) => !rowBeforeOpening(r.billDate, obDateOpa, r.isOpening ?? r.is_opening)) // opening bills (is_opening=1) bypass the floor — owner rule 2026-07-01
     .map((r) => ({ partyId: r.partyId, partyName: r.partyName, billNo: r.billNo, billDate: r.billDate, outstandingSen: r.amt }));
   const today = new Date().toISOString().slice(0, 10);
   return c.json({ success: true, data: { aging: bucketAging(bills, today), bills } });
@@ -5684,6 +5689,39 @@ function ensureStockTakeItemAlias(db: D1Database): Promise<void> {
     }
   })();
   return _pendingStockTakeItemAliasMigrations;
+}
+
+// Other Party Bill opening support (owner rule 2026-07-01). Mirrors migration
+// 0158's is_opening column on invoices/purchase_invoices (same name, same
+// floor-bypass semantics via rowBeforeOpening — see opening-floor.ts), but as a
+// RUNTIME self-apply (CLAUDE.md: a migration file alone is inert) since
+// other_party_bills predates any is_opening support. A bill flagged is_opening
+// still posts its OWN balanced GL entry immediately at creation (DR the chosen
+// counterAccount, CR 405-0000/305-0000 — see buildBillLegs) exactly like any
+// other bill; is_opening ONLY changes whether the aging report floors it out
+// for being dated before the opening cutoff. The owner picks a BALANCE-SHEET
+// counterAccount (e.g. Retained Earnings) for an opening bill, not a P&L
+// expense, so a prior period's expense isn't re-recognised.
+let _pendingOtherPartyBillOpeningMigrations: Promise<void> | null = null;
+function ensureOtherPartyBillOpening(db: D1Database): Promise<void> {
+  if (_pendingOtherPartyBillOpeningMigrations) return _pendingOtherPartyBillOpeningMigrations;
+  _pendingOtherPartyBillOpeningMigrations = (async () => {
+    const stmts = [
+      `ALTER TABLE other_party_bills ADD COLUMN IF NOT EXISTS is_opening INTEGER NOT NULL DEFAULT 0`,
+      `CREATE INDEX IF NOT EXISTS idx_other_party_bills_is_opening ON other_party_bills (is_opening) WHERE is_opening = 1`,
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[accounting.other-party-bill-opening] DDL skipped", {
+          sql: sql.split("\n")[0],
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return _pendingOtherPartyBillOpeningMigrations;
 }
 
 /** Load all historical P&L rows for an org, grouped by ym. */

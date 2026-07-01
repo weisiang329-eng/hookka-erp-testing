@@ -55,6 +55,32 @@ export function normalizeItemKey(identityValues: unknown[]): string {
   return identityValues.map(normalizeText).join("||");
 }
 
+/**
+ * Extracts an implied "YYYY-MM" from a stock-take filename, for the "does this
+ * file's month match what's selected on screen" safety check (owner rule
+ * 2026-07-01 — a May-dated file was once saved under July because the Month
+ * picker still showed today's month, not the file's). Supports the date
+ * shapes seen in the owner's actual filenames: "STOCK TAKE 30.05.2026.xlsx"
+ * (DD.MM.YYYY), "STOCK_TAKE_30_05_2026_categorized.xlsx" (DD_MM_YYYY), and
+ * this page's own "stock-take-2026-05.xlsx" (YYYY-MM). DD.MM.YYYY order is
+ * assumed (matches every file seen) — not disambiguated from MM.DD.YYYY.
+ * Returns null if no date is recognised — callers must treat that as
+ * "can't check", not "no mismatch".
+ */
+export function impliedYmFromFilename(filename: string): string | null {
+  const iso = filename.match(/(\d{4})-(\d{2})(?:-\d{2})?/);
+  if (iso) {
+    const m = Number(iso[2]);
+    if (m >= 1 && m <= 12) return `${iso[1]}-${iso[2]}`;
+  }
+  const dmy = filename.match(/(\d{1,2})[._](\d{1,2})[._](\d{4})/);
+  if (dmy) {
+    const month = Number(dmy[2]);
+    if (month >= 1 && month <= 12) return `${dmy[3]}-${String(month).padStart(2, "0")}`;
+  }
+  return null;
+}
+
 export type ParsedRawItem = { key: string; description: string; totalSen: number };
 
 /**

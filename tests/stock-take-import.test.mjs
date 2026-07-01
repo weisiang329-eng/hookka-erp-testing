@@ -6,6 +6,29 @@ import { resolve } from "node:path";
 try { register("tsx/esm", pathToFileURL("./")); } catch { /* native strip */ }
 const m = await import(pathToFileURL(resolve(process.cwd(), "src/lib/stock-take-import.ts")).href);
 
+test("impliedYmFromFilename — DD.MM.YYYY (owner's real filename)", () => {
+  assert.equal(m.impliedYmFromFilename("STOCK TAKE 30.05.2026.xlsx"), "2026-05");
+  assert.equal(m.impliedYmFromFilename("STOCK TAKE 31.03.2026 (2).xlsx"), "2026-03");
+});
+
+test("impliedYmFromFilename — DD_MM_YYYY (owner's categorized filename)", () => {
+  assert.equal(m.impliedYmFromFilename("STOCK_TAKE_30_05_2026_categorized (1).xlsx"), "2026-05");
+});
+
+test("impliedYmFromFilename — YYYY-MM (this page's own Export Excel filename)", () => {
+  assert.equal(m.impliedYmFromFilename("stock-take-2026-05.xlsx"), "2026-05");
+  assert.equal(m.impliedYmFromFilename("stock-take-2026-05-ready-to-upload-v2.xlsx"), "2026-05");
+});
+
+test("impliedYmFromFilename — no recognisable date -> null (not a false mismatch)", () => {
+  assert.equal(m.impliedYmFromFilename("stocktake.xlsx"), null);
+  assert.equal(m.impliedYmFromFilename("Book1.xlsx"), null);
+});
+
+test("impliedYmFromFilename — rejects an out-of-range month", () => {
+  assert.equal(m.impliedYmFromFilename("STOCK TAKE 30.13.2026.xlsx"), null);
+});
+
 test("isCleanImportShape — recognises the Material Group / Closing Stock (RM) header", () => {
   assert.equal(m.isCleanImportShape(["Material Group", "Closing Stock (RM)"]), true);
   assert.equal(m.isCleanImportShape(["material group", "closing stock (rm)"]), true); // case-insensitive

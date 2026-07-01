@@ -15,7 +15,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { MoneyInput } from "@/components/ui/money-input";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa } from "@/lib/export-report";
-import { isCleanImportShape, detectRawShape, parseRawStockTakeRows, type ParsedRawItem } from "@/lib/stock-take-import";
+import { isCleanImportShape, detectRawShape, parseRawStockTakeRows, impliedYmFromFilename, type ParsedRawItem } from "@/lib/stock-take-import";
 import { printVoucher, printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
 import { useRowSelection } from "@/lib/use-row-selection";
 import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
@@ -1584,6 +1584,27 @@ function StockTakeTab() {
       const aoa = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[sheetName], { header: 1 });
       if (aoa.length < 2) { toast.error("No data rows after the header"); return; }
       const headerRow = aoa[0] as unknown[];
+
+      // Safety check (owner 2026-07-01): a May-dated file was once saved under July
+      // because the Month picker still showed today's month, not the file's. If the
+      // filename names a different month than what's selected, stop and ask BEFORE
+      // touching anything. On confirm, switch the month and ask for a re-import
+      // (rather than continuing this same call) — `ym` is a state value, so it
+      // wouldn't actually reflect the new month until next render if we pressed on.
+      const impliedYm = impliedYmFromFilename(file.name);
+      if (impliedYm && impliedYm !== ym) {
+        const switchMonth = await confirm({
+          title: "Check the month",
+          message: `"${file.name}" looks like it's for ${impliedYm}, but Month is set to ${ym}. Switch to ${impliedYm}?`,
+          danger: false,
+        });
+        if (switchMonth) {
+          setYm(impliedYm);
+          toast.success(`Switched to ${impliedYm} — click Import Excel again to load into the correct month.`);
+          return;
+        }
+        // Owner explicitly chose to keep the currently-selected month — proceed below.
+      }
 
       // Shape 1: the clean "Material Group" / "Closing Stock (RM)" template (this
       // page's own Export Excel round trip) — unchanged from before.

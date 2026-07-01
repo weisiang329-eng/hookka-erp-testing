@@ -1428,6 +1428,15 @@ type OpeningStockApiRow = {
   asOfDate: string | null;
 };
 
+// WIP / Finished Goods use the SAME stock_take table + override semantics as the
+// material groups (owner 2026-07-01: "wip 和fg 有两种性质...按save 的时候时0，那么他
+// 就根据我之前的逻辑去算（用消耗），如果我save时有amount,那么他就根据我提供的数额录入") —
+// item_group = the literal string "WIP" / "FG" (materialWindow reads them the same
+// way as any material-group override). Rendered as a separate small section so the
+// owner doesn't mistake them for material groups.
+const WIP_FG_KEYS = ["WIP", "FG"] as const;
+const WIP_FG_LABELS: Record<string, string> = { WIP: "Work-in-Progress (WIP)", FG: "Finished Goods (FG)" };
+
 // Month-end stock-take entry (owner periodic-inventory option). Per material-group
 // closing value at a month-end → the P&L uses it as that month's closing (and the
 // next month's opening) instead of the FIFO/BOM value. Reuses /material-opening-stock
@@ -1467,6 +1476,10 @@ function StockTakeTab() {
     return saved ? (saved.valueSen / 100).toFixed(2) : "";
   };
   const setValueFor = (g: string, v: string) => setEdits((p) => ({ ...p, [key(g)]: v }));
+  // Material groups + WIP/FG together — the set save()/Export/Import actually operate
+  // over. The JSX renders them as two visually separate tables, but they share one
+  // Save action and one Excel round trip.
+  const allRowGroups = groups ? [...groups, ...WIP_FG_KEYS] : null;
 
   // Excel round trip (owner 2026-07-01): "upload it, but still be able to
   // manually adjust" — Export downloads the current on-screen values as a
@@ -1475,17 +1488,17 @@ function StockTakeTab() {
   // lookup is by header NAME (not position) so reordering columns in Excel
   // doesn't break the import — same pattern as WIP Times' bulk import.
   const handleExportTemplate = async () => {
-    if (!groups) return;
+    if (!allRowGroups) return;
     const aoa: (string | number)[][] = [
       ["Material Group", "Closing Stock (RM)"],
-      ...groups.map((g) => [g, valueFor(g)] as (string | number)[]),
+      ...allRowGroups.map((g) => [g, valueFor(g)] as (string | number)[]),
     ];
     await exportReportXlsx(`stock-take-${ym}.xlsx`, "Stock Take", aoa);
   };
 
   const [importing, setImporting] = useState(false);
   const handleImportFile = async (file: File) => {
-    if (!groups) return;
+    if (!allRowGroups) return;
     setImporting(true);
     try {
       const XLSX = await import("xlsx");
@@ -1506,7 +1519,7 @@ function StockTakeTab() {
         toast.error(`Missing required columns. Need "Material Group" and "Closing Stock (RM)". Found: ${headers.filter(Boolean).join(", ") || "no headers"}.`);
         return;
       }
-      const byGroupLower = new Map(groups.map((g) => [g.toLowerCase(), g]));
+      const byGroupLower = new Map(allRowGroups.map((g) => [g.toLowerCase(), g]));
       let filled = 0;
       const unmatched: string[] = [];
       for (let i = 1; i < aoa.length; i++) {
@@ -1537,9 +1550,9 @@ function StockTakeTab() {
   };
 
   const save = async () => {
-    if (!groups) return;
+    if (!allRowGroups) return;
     if (!/^\d{4}-\d{2}$/.test(ym)) { toast.error("Pick a month first"); return; }
-    const rows = groups
+    const rows = allRowGroups
       .filter((g) => valueFor(g).trim() !== "")
       .map((g) => ({ itemGroup: g, valueSen: Math.round((parseFloat(valueFor(g)) || 0) * 100) }));
     setSaving(true);
@@ -1584,7 +1597,7 @@ function StockTakeTab() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={handleExportTemplate} disabled={!groups}>
+          <Button variant="outline" size="sm" onClick={handleExportTemplate} disabled={!allRowGroups}>
             <Download className="h-4 w-4 mr-1.5" /> Export Excel
           </Button>
           <label
@@ -1605,7 +1618,7 @@ function StockTakeTab() {
               }}
             />
           </label>
-          <Button variant="primary" size="sm" onClick={save} disabled={saving || !groups}>
+          <Button variant="primary" size="sm" onClick={save} disabled={saving || !allRowGroups}>
             {saving ? "Saving…" : "Save"}
           </Button>
         </div>
@@ -1657,6 +1670,48 @@ function StockTakeTab() {
               </table>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* WIP / FG — same override semantics, kept visually separate from material
+          groups since they're distinct P&L lines, not material groups. */}
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold text-[#1F1D1B]">Work-in-Progress / Finished Goods</h3>
+            <p className="text-xs text-[#6B7280]">
+              Same rule: blank or 0 = the system&apos;s automatic figure (from production
+              consumption); a positive amount overrides it for this month.
+            </p>
+          </div>
+          <div className="border rounded-md overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="text-left px-3 py-2 font-medium text-gray-600">Line</th>
+                  <th className="text-right px-3 py-2 font-medium text-gray-600">Closing Value (RM)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {WIP_FG_KEYS.map((g) => (
+                  <tr key={g} className="border-t">
+                    <td className="px-3 py-1.5">{WIP_FG_LABELS[g]}</td>
+                    <td className="px-3 py-1.5 text-right">
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        className="w-40 border border-[#E2DDD8] rounded-md px-2 py-1 text-sm text-right tabular-nums"
+                        value={valueFor(g)}
+                        onChange={(e) => setValueFor(g, e.target.value)}
+                        placeholder="(auto)"
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </CardContent>
       </Card>
     </div>

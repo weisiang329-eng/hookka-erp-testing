@@ -5490,7 +5490,9 @@ async function loadMaterialCostData(
       let m = stockTakeByGroupYm.get(g);
       if (!m) { m = new Map(); stockTakeByGroupYm.set(g, m); }
       m.set(ym, sen);
-      allGroups.add(g);
+      // "WIP" / "FG" are pseudo-groups (see materialWindow) — NOT real material
+      // groups, so they must never surface as an extra RAW MATERIALS row.
+      if (g !== "WIP" && g !== "FG") allGroups.add(g);
     }
   }
 
@@ -5541,10 +5543,20 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
     const consumedSen = openingSen + purchaseSen - closingSen;
     return { itemGroup: g, openingSen, purchaseSen, closingSen, consumedSen };
   });
-  const wipCloseSen = data.wipByYm.get(endKey) ?? 0;
-  const wipOpenSen = prevKey ? (data.wipByYm.get(prevKey) ?? 0) : 0;
-  const fgCloseSen = data.fgByYm.get(endKey) ?? 0;
-  const fgOpenSen = prevKey ? (data.fgByYm.get(prevKey) ?? 0) : 0;
+  const wipCloseSenAuto = data.wipByYm.get(endKey) ?? 0;
+  const wipOpenSenAuto = prevKey ? (data.wipByYm.get(prevKey) ?? 0) : 0;
+  const fgCloseSenAuto = data.fgByYm.get(endKey) ?? 0;
+  const fgOpenSenAuto = prevKey ? (data.fgByYm.get(prevKey) ?? 0) : 0;
+  // WIP/FG month-end stock-take override (owner rule 2026-07-01): same mechanism as
+  // the material groups above, keyed by the pseudo-group "WIP" / "FG" in the SAME
+  // stock_take table. Blank/0 (no row — see PUT /stock-take) keeps the automatic
+  // (consumption-based) figure; a positive entry overrides it for that month-end.
+  const wipSt = data.stockTakeByGroupYm.get("WIP");
+  const wipOpenSen = (prevKey && wipSt?.has(prevKey)) ? (wipSt.get(prevKey) as number) : wipOpenSenAuto;
+  const wipCloseSen = wipSt?.has(endKey) ? (wipSt.get(endKey) as number) : wipCloseSenAuto;
+  const fgSt = data.stockTakeByGroupYm.get("FG");
+  const fgOpenSen = (prevKey && fgSt?.has(prevKey)) ? (fgSt.get(prevKey) as number) : fgOpenSenAuto;
+  const fgCloseSen = fgSt?.has(endKey) ? (fgSt.get(endKey) as number) : fgCloseSenAuto;
   return { rmGroups, wipOpenSen, wipCloseSen, fgOpenSen, fgCloseSen, warnings: data.warnings };
 }
 

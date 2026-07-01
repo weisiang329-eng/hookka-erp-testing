@@ -1549,10 +1549,20 @@ function StockTakeTab() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ym, rows }),
       });
-      const j = (await res.json()) as { success?: boolean; error?: string; saved?: number };
+      const j = (await res.json()) as { success?: boolean; error?: string; saved?: number; cleared?: number };
       if (j?.success) {
-        toast.success(`Stock-take saved for ${ym} (${j.saved ?? rows.length} group${(j.saved ?? rows.length) === 1 ? "" : "s"})`);
-        setEntries((prev) => [...prev.filter((e) => e.ym !== ym), ...rows.map((r) => ({ ...r, ym }))]);
+        const saved = j.saved ?? rows.filter((r) => r.valueSen > 0).length;
+        const cleared = j.cleared ?? 0;
+        toast.success(
+          `Stock-take saved for ${ym}: ${saved} group${saved === 1 ? "" : "s"} set` +
+            (cleared ? `, ${cleared} reverted to automatic` : ""),
+        );
+        // Zero-valued rows were DELETED server-side (= automatic) — drop them from
+        // the local cache too so a re-render shows blank, not a stale "0.00".
+        setEntries((prev) => [
+          ...prev.filter((e) => e.ym !== ym),
+          ...rows.filter((r) => r.valueSen > 0).map((r) => ({ ...r, ym })),
+        ]);
       } else toast.error(j?.error || "Failed to save stock-take");
     } catch {
       toast.error("Failed to save stock-take");
@@ -1569,8 +1579,8 @@ function StockTakeTab() {
           <p className="text-xs text-[#6B7280] max-w-3xl">
             Enter the closing stock value per material group at each month-end. The P&amp;L
             uses it as that month&apos;s closing (and the next month&apos;s opening), so material
-            cost works without a full BOM. Leave a group blank to keep the system&apos;s
-            automatic (FIFO) figure.
+            cost works without a full BOM. Leave a group blank OR enter 0 to keep the
+            system&apos;s automatic (FIFO) figure — only a positive amount overrides it.
           </p>
         </div>
         <div className="flex items-center gap-2">

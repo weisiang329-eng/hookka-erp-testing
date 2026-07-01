@@ -9680,6 +9680,13 @@ app.get("/stock-take", async (c) => {
 // PUT /api/accounting/stock-take
 // Body: { ym: 'YYYY-MM', rows: [{ itemGroup, valueSen }] } — upserts one month's
 // per-group closing values (ON CONFLICT (org_id, item_group, ym)).
+//
+// valueSen === 0 means "use the system's automatic (FIFO/BOM) figure" — same as
+// leaving the group blank — NOT "override closing stock to zero" (owner rule,
+// 2026-07-01: "如果我放0就用系统算的，如果我放数额就根据我的"). A 0 row therefore
+// DELETES any existing override for that group+month instead of storing a zero,
+// so materialWindow's stockTakeByGroupYm.has() check correctly falls back to
+// automatic. Positive values upsert as before.
 app.put("/stock-take", async (c) => {
   const denied = await requirePermission(c, "accounting", "update");
   if (denied) return denied;
@@ -9693,11 +9700,19 @@ app.put("/stock-take", async (c) => {
     const now = new Date().toISOString();
     const seen = new Set<string>();
     const stmts: D1PreparedStatement[] = [];
+    let cleared = 0;
     for (const raw of body.rows) {
       const g = typeof raw?.itemGroup === "string" ? raw.itemGroup.trim() : "";
       if (!g || seen.has(g)) continue;
       seen.add(g);
       const sen = Math.max(0, Math.round(Number(raw?.valueSen) || 0));
+      if (sen === 0) {
+        cleared++;
+        stmts.push(
+          c.var.DB.prepare(`DELETE FROM stock_take WHERE org_id = ? AND item_group = ? AND ym = ?`).bind(orgId, g, ym),
+        );
+        continue;
+      }
       stmts.push(
         c.var.DB
           .prepare(
@@ -9710,7 +9725,7 @@ app.put("/stock-take", async (c) => {
       );
     }
     if (stmts.length) await c.var.DB.batch(stmts);
-    return c.json({ success: true, saved: stmts.length, ym });
+    return c.json({ success: true, saved: stmts.length - cleared, cleared, ym });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

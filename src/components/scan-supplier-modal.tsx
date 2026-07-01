@@ -1198,11 +1198,25 @@ function CreatePIWizard({
             ? qty * unitPriceRM
             : Number(ln.amount);
         const taxRM = ln.tax == null || Number.isNaN(Number(ln.tax)) ? 0 : Number(ln.tax);
+        // Foam/sponge spec — surface the density + thickness the OCR pulled so
+        // the operator sees "…(NLY22GH 25MM)" on the card and it carries into
+        // the material name for internal-code matching (owner 2026-07-01).
+        // Appended to the OUTPUT text only — the binding lookup above used the
+        // raw description, so matching is unaffected.
+        const spec = [ln.density, ln.thickness]
+          .map((x) => (x ?? "").toString().trim())
+          .filter(Boolean)
+          .join(" ");
+        const baseDesc = ln.description ?? "";
+        const descOut =
+          spec && !baseDesc.toUpperCase().includes(spec.toUpperCase())
+            ? `${baseDesc}${baseDesc ? " " : ""}(${spec})`.trim()
+            : baseDesc;
         return {
           materialCode: rm?.itemCode ?? binding?.materialCode ?? "",
-          materialName: rm?.description ?? ln.description ?? "",
+          materialName: rm?.description ?? descOut,
           supplierSku: sku,
-          description: ln.description ?? "",
+          description: descOut,
           qty: qty > 0 ? qty : 1,
           uom: ln.uom ?? "",
           unitPriceRM,
@@ -3380,11 +3394,23 @@ function CreateGRNWizard({
         const sku = binding?.supplierSku ?? rawSku;
         const qty = Number(ln.qty) || 0;
         const receivedQty = qty > 0 ? qty : 1;
+        // Foam/sponge spec — surface density + thickness on the GRN line too
+        // (owner 2026-07-01). Output-only append; binding lookup above used the
+        // raw description, so matching is unaffected.
+        const spec = [ln.density, ln.thickness]
+          .map((x) => (x ?? "").toString().trim())
+          .filter(Boolean)
+          .join(" ");
+        const baseDesc = ln.description ?? "";
+        const descOut =
+          spec && !baseDesc.toUpperCase().includes(spec.toUpperCase())
+            ? `${baseDesc}${baseDesc ? " " : ""}(${spec})`.trim()
+            : baseDesc;
         return {
           materialCode: rm?.itemCode ?? binding?.materialCode ?? "",
-          materialName: rm?.description ?? ln.description ?? "",
+          materialName: rm?.description ?? descOut,
           supplierSku: sku,
-          description: ln.description ?? "",
+          description: descOut,
           receivedQty,
           acceptedQty: receivedQty,
           rejectedQty: 0,

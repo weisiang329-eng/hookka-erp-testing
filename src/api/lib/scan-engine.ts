@@ -141,6 +141,16 @@ type SupplierExtractedLine = {
   unitPrice?: number | null;
   amount?: number | null;
   tax?: number | null;
+  // Per-line discount amount, when the supplier prints a discount column/value
+  // for this line (owner 2026-07-01 — scan should capture the invoice discount,
+  // not make the operator re-key it). null when no line-level discount shown.
+  discount?: number | null;
+  // Foam / sponge spec — the density grade (e.g. "NLY22GH", "D22", "22GH") and
+  // thickness (e.g. "25MM", "3INCH") printed on the line. Both are critical for
+  // matching the correct internal material code (owner 2026-07-01). null when
+  // not a foam item / not printed.
+  density?: string | null;
+  thickness?: string | null;
 };
 // One supplier-side document (DO or invoice). A single uploaded PDF can carry
 // many of these — see the multi-doc rule in SUPPLIER_SYSTEM_PROMPT.
@@ -155,6 +165,9 @@ export type SupplierDoc = {
   subtotal?: number | null;
   tax?: number | null;
   total?: number | null;
+  // Document-level discount (a "Less: Discount" / "Discount" line the supplier
+  // subtracts before/around the subtotal). null when none printed.
+  discount?: number | null;
 };
 // Engine-level supplier return. ALWAYS multi-doc since 2026-06-30 — a PDF can
 // contain N supplier docs (each with its own letterhead / docNo). Legacy
@@ -173,15 +186,37 @@ export function sanitizeSupplierDoc(
       ? raw.items
       : [];
   const lines: SupplierExtractedLine[] = rawLines
-    .map((l) => ({
-      supplierCode: str(l?.supplierCode),
-      description: str(l?.description),
-      qty: num(l?.qty),
-      uom: str(l?.uom),
-      unitPrice: num(l?.unitPrice),
-      amount: num(l?.amount),
-      tax: num(l?.tax),
-    }))
+    .map((l) => {
+      const qty = num(l?.qty);
+      const amount = num(l?.amount);
+      let unitPrice = num(l?.unitPrice);
+      // Derive a missing unit price from the line amount (BUG price=0): a faint
+      // scan often reads the bold line TOTAL but misses the small unit-price
+      // cell, so the PI line came out RM 0. When unit price is blank/0 but the
+      // amount + qty are present, back it out (amount ÷ qty) — far better than 0
+      // for the draft the owner reviews, and it NEVER overwrites a real price.
+      if (
+        (unitPrice == null || unitPrice === 0) &&
+        amount != null &&
+        amount !== 0 &&
+        qty != null &&
+        qty > 0
+      ) {
+        unitPrice = Math.round((amount / qty) * 100) / 100;
+      }
+      return {
+        supplierCode: str(l?.supplierCode),
+        description: str(l?.description),
+        qty,
+        uom: str(l?.uom),
+        unitPrice,
+        amount,
+        tax: num(l?.tax),
+        discount: num(l?.discount),
+        density: str(l?.density),
+        thickness: str(l?.thickness),
+      };
+    })
     .filter((l) => l.description || l.supplierCode || l.qty != null);
   return {
     supplierName: str(raw.supplierName),
@@ -194,6 +229,7 @@ export function sanitizeSupplierDoc(
     subtotal: num(raw.subtotal),
     tax: num(raw.tax),
     total: num(raw.total),
+    discount: num(raw.discount),
   };
 }
 
@@ -245,12 +281,16 @@ PER-DOCUMENT EXTRACTION RULES
     - unitPrice: numeric unit price if shown (invoices), else null (delivery notes usually omit price).
     - amount: numeric line amount if shown, else null.
     - tax: per-line SST/GST amount IF the supplier printed a dedicated tax column per line (e.g. "SST" / "Tax" / "GST" column next to Amount). null when there is no per-line tax column (most Malaysian SST invoices print only ONE footer tax — in that case leave EVERY line's tax null and put the figure in the footer "tax" below).
+    - discount: the per-line discount AMOUNT (in currency) if the supplier prints a discount column/value for this line. If a discount is shown only as a percentage (e.g. "10%"), convert it to the amount off this line (qty×unitPrice×pct). null when no line-level discount is shown.
+    - density: foam/sponge DENSITY grade printed for this line, verbatim (e.g. "NLY22GH", "22GH", "D22", "N28"). This is the firmness/density code, usually near the description. null for non-foam items or when not printed.
+    - thickness: foam/sponge/mattress THICKNESS printed for this line, verbatim WITH its unit (e.g. "25MM", "75MM", "3INCH", "4\\""). null when not a thickness item / not printed.
 - subtotal / tax / total: the document's footer figures if present, else null. tax = the single footer SST/GST total when no per-line column exists.
+- discount (document level): a "Less: Discount" / "Discount" / "Trade Discount" figure the supplier subtracts around the subtotal (an AMOUNT, not a per-line one). Convert a document-level percentage to its amount if only a percent is shown. null when none printed.
 
 NUMBERS: plain numbers, no currency symbol, no commas. Use a dot decimal. If a field is genuinely absent, use null — never guess.
 
 OUTPUT: VALID JSON ONLY, this exact shape, no preamble, no markdown, no chain-of-thought. First character '{', last character '}':
-{"docs": [{"supplierName": string|null, "docType": "DELIVERY_NOTE"|"INVOICE"|"OTHER", "docNo": string|null, "docDate": string|null, "currency": string|null, "customerPoRef": string|null, "lines": [{"supplierCode": string|null, "description": string|null, "qty": number|null, "uom": string|null, "unitPrice": number|null, "amount": number|null, "tax": number|null}], "subtotal": number|null, "tax": number|null, "total": number|null}]}`;
+{"docs": [{"supplierName": string|null, "docType": "DELIVERY_NOTE"|"INVOICE"|"OTHER", "docNo": string|null, "docDate": string|null, "currency": string|null, "customerPoRef": string|null, "lines": [{"supplierCode": string|null, "description": string|null, "qty": number|null, "uom": string|null, "unitPrice": number|null, "amount": number|null, "tax": number|null, "discount": number|null, "density": string|null, "thickness": string|null}], "subtotal": number|null, "tax": number|null, "total": number|null, "discount": number|null}]}`;
 
 function formatSupplierRules(
   supplierName: string | null,

@@ -44,6 +44,8 @@ import {
   Scale,
   Wallet,
   Printer,
+  Upload,
+  Download,
 } from "lucide-react";
 import type {
   ChartOfAccount,
@@ -1466,6 +1468,74 @@ function StockTakeTab() {
   };
   const setValueFor = (g: string, v: string) => setEdits((p) => ({ ...p, [key(g)]: v }));
 
+  // Excel round trip (owner 2026-07-01): "upload it, but still be able to
+  // manually adjust" — Export downloads the current on-screen values as a
+  // template; Import parses a file back into `edits` (prefilling the grid,
+  // NOT auto-saving) so the owner reviews/tweaks before hitting Save. Column
+  // lookup is by header NAME (not position) so reordering columns in Excel
+  // doesn't break the import — same pattern as WIP Times' bulk import.
+  const handleExportTemplate = async () => {
+    if (!groups) return;
+    const aoa: (string | number)[][] = [
+      ["Material Group", "Closing Stock (RM)"],
+      ...groups.map((g) => [g, valueFor(g)] as (string | number)[]),
+    ];
+    await exportReportXlsx(`stock-take-${ym}.xlsx`, "Stock Take", aoa);
+  };
+
+  const [importing, setImporting] = useState(false);
+  const handleImportFile = async (file: File) => {
+    if (!groups) return;
+    setImporting(true);
+    try {
+      const XLSX = await import("xlsx");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const sheetName = wb.SheetNames[0];
+      if (!sheetName) { toast.error("Workbook has no sheets"); return; }
+      const aoa = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[sheetName], { header: 1 });
+      if (aoa.length < 2) { toast.error("No data rows after the header"); return; }
+      const headers = (aoa[0] as unknown[]).map((h) => (typeof h === "string" ? h.trim().toLowerCase() : ""));
+      const findCol = (...names: string[]) => {
+        for (const n of names) { const i = headers.indexOf(n.toLowerCase()); if (i >= 0) return i; }
+        return -1;
+      };
+      const colGroup = findCol("Material Group", "Group", "Item Group");
+      const colValue = findCol("Closing Stock (RM)", "Closing Stock", "RM", "Value");
+      if (colGroup < 0 || colValue < 0) {
+        toast.error(`Missing required columns. Need "Material Group" and "Closing Stock (RM)". Found: ${headers.filter(Boolean).join(", ") || "no headers"}.`);
+        return;
+      }
+      const byGroupLower = new Map(groups.map((g) => [g.toLowerCase(), g]));
+      let filled = 0;
+      const unmatched: string[] = [];
+      for (let i = 1; i < aoa.length; i++) {
+        const row = aoa[i] as unknown[];
+        if (!row || row.length === 0) continue;
+        const rawGroup = typeof row[colGroup] === "string" ? (row[colGroup] as string).trim() : "";
+        if (!rawGroup) continue;
+        const raw = row[colValue];
+        const n = typeof raw === "number" ? raw : Number(String(raw ?? "").trim());
+        if (typeof raw === "string" && raw.trim() === "") continue; // blank = no change intended
+        if (!Number.isFinite(n)) continue;
+        const g = byGroupLower.get(rawGroup.toLowerCase());
+        if (!g) { unmatched.push(rawGroup); continue; }
+        setValueFor(g, n.toFixed(2));
+        filled++;
+      }
+      if (filled === 0) {
+        toast.error(unmatched.length ? `No matching material groups found (unrecognised: ${unmatched.slice(0, 5).join(", ")}).` : "No rows with a value to import.");
+        return;
+      }
+      toast.success(`Filled ${filled} group${filled === 1 ? "" : "s"} from ${file.name} — review and Save.`);
+      if (unmatched.length) toast.error(`${unmatched.length} row(s) didn't match a known material group: ${unmatched.slice(0, 5).join(", ")}${unmatched.length > 5 ? "…" : ""}`);
+    } catch (err) {
+      toast.error(humanizeError(err, "Import failed. Please check the file and try again."));
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const save = async () => {
     if (!groups) return;
     if (!/^\d{4}-\d{2}$/.test(ym)) { toast.error("Pick a month first"); return; }
@@ -1503,9 +1573,32 @@ function StockTakeTab() {
             automatic (FIFO) figure.
           </p>
         </div>
-        <Button variant="primary" size="sm" onClick={save} disabled={saving || !groups}>
-          {saving ? "Saving…" : "Save"}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleExportTemplate} disabled={!groups}>
+            <Download className="h-4 w-4 mr-1.5" /> Export Excel
+          </Button>
+          <label
+            className="inline-flex items-center h-8 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm text-[#1F1D1B] hover:bg-[#F0ECE9] cursor-pointer"
+            title='Fill "Closing Stock (RM)" in the exported Excel, then upload it back here — it fills the grid below (nothing is saved yet), so you can still review or adjust before hitting Save.'
+          >
+            <Upload className="h-4 w-4 mr-1.5" />
+            {importing ? "Importing…" : "Import Excel"}
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              className="sr-only"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                // Reset so re-picking the same filename (edited + re-saved) still fires onChange.
+                e.target.value = "";
+                if (f) void handleImportFile(f);
+              }}
+            />
+          </label>
+          <Button variant="primary" size="sm" onClick={save} disabled={saving || !groups}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
       </div>
       <Card>
         <CardContent className="p-4 space-y-3">

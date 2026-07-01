@@ -23,6 +23,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { distillCustomerRules } from "../lib/ocr-distill";
+import { matchByCompanyName } from "../../lib/company-name-match";
 import {
   runExtract,
   loadCatalog,
@@ -304,6 +305,36 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
   }
   if (!matchedCustomer && po.customerName) {
     matchedCustomer = customerByName.get(po.customerName.toUpperCase());
+  }
+  // Tolerant fallback (BUG-2026-07-01): a PO printed with the full legal name
+  // ("Houzs Century Sdn Bhd") must still match the catalog's short form
+  // ("Houzs Century"). Ignores the Sdn Bhd / Berhad / PLT suffix + spacing +
+  // punctuation, and only auto-matches when the normalized name is UNIQUE —
+  // never guesses between two same-normalizing companies. Runs AFTER the exact
+  // code/name matches so an exact hit always wins.
+  if (!matchedCustomer && po.customerName) {
+    matchedCustomer =
+      matchByCompanyName(catalog.customers, po.customerName) ?? undefined;
+  }
+  // Last resort — resolve the customer from a delivery hub printed on the PO.
+  // A hub short name ("Houzs KL") is OUR identifier, so it ties the scanned
+  // document back to our records even when the company name differs (owner
+  // 2026-07-01: "原本就是 documentation match 回我们的东西"). Unique-guarded:
+  // if two customers own a same-named hub, stay unmatched rather than guess.
+  if (!matchedCustomer && po.deliveryHub) {
+    const hubTarget = po.deliveryHub.trim().toUpperCase();
+    let hubHit: Catalog["customers"][number] | undefined;
+    let ambiguous = false;
+    for (const cust of catalog.customers) {
+      if (cust.hubs.some((h) => h.shortName.toUpperCase() === hubTarget)) {
+        if (hubHit) {
+          ambiguous = true;
+          break;
+        }
+        hubHit = cust;
+      }
+    }
+    if (hubHit && !ambiguous) matchedCustomer = hubHit;
   }
   if (matchedCustomer) {
     po.customerId = matchedCustomer.id;

@@ -34,6 +34,44 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-01-001 — Scan customer PO → SO hard-failed "Customer not in catalog" for a REAL, existing customer (legal-suffix mismatch) `sales-orders` `scan`
+
+**Symptom:** 6 Houzs Century POs (PO-009403…009410) all failed on the scan Create
+step: *"Customer 'Houzs Century Sdn Bhd' not in catalog. Add the customer first,
+then re-scan."* — even though the customer IS in the catalog (Houzs Century,
+code 300-H, active, RM 733k outstanding). Owner: *"之前可以为什么现在不可以… 原本
+就是 documentation match 回我们的东西,不是抓顾客名字。"*
+
+**Root cause:** the scan customer-match only did EXACT (uppercase) string match on
+name or code (`scan-po.ts` validateAndEnrichPO). The catalog stores the short
+form "Houzs Century"; the PO prints the full legal name "Houzs Century **Sdn
+Bhd**". One-suffix difference → no match → `customerId=null` → the modal's hard
+Create gate (`scan-po-modal.tsx`) blocked every line. Products & fabric codes
+already had tolerant matching (`normalizeForMatch`); customers/suppliers never
+did. Not a code regression — the two strings simply drifted apart (short catalog
+name vs full legal name on the doc); exact-match had no tolerance to absorb it.
+There is also NO manual customer-picker in the preview, so the operator couldn't
+override → fully stuck.
+
+**Fix:** new shared `src/lib/company-name-match.ts` — `normalizeCompanyName`
+(strips Sdn Bhd / Berhad / PLT + punctuation/spacing/case, keeps distinguishing
+trade words) + `matchByCompanyName` (unique-guarded — never guesses between two
+same-normalizing companies). Wired as a fallback AFTER exact code/name match in
+BOTH the backend (`scan-po.ts:~305`) and the FE create gate
+(`scan-po-modal.tsx:~957`, so POs already on the preview resolve WITHOUT a
+re-scan). Also added a last-resort **delivery-hub → customer** resolve (a hub
+short name like "Houzs KL" is OUR identifier on the doc = the owner's
+"documentation match回我们的东西"). Regression test `tests/company-name-match.test.mjs`
+(6 cases incl. ambiguity guard + trade-word non-strip). PI/GRN supplier side to
+follow (same helper).
+
+**Verified:** `tsc -p tsconfig.app.json` clean; new test 6/6 pass; live prod data
+confirmed the customer exists as "Houzs Century" 300-H via `/api/customers`.
+LIVE-VERIFY pending: owner re-opens the 6 POs on the preview and Creates (should
+now succeed without re-scan).
+
+---
+
 ## BUG-2026-06-30-006 — Weak-wifi: login showed "Timed out… 500" and the app kept force-logging people out; lists could blank on a transient blip
 
 `infrastructure` · 🟢 **Fixed** (shipped)

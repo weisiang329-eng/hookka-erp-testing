@@ -36,7 +36,7 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { MALAYSIA_STATES, resolveStateCode } from "@/lib/malaysia-states";
 import { aggregateRacksFromPackingCards } from "@/lib/rack-format";
-import { isHbOnlySpecial, poReadyForConsignment } from "@/lib/delivery-pipeline";
+import { isHbOnlySpecial, poReadyForConsignment, poInPlanningConsignment } from "@/lib/delivery-pipeline";
 import {
   Package,
   PackageCheck,
@@ -1199,15 +1199,11 @@ export default function ConsignmentNotePage() {
       };
 
       // Planning: CO-origin POs still in production (upholstery not yet
-      // complete). Mirrors DO's "planning" filter but on consignmentOrderId.
+      // complete). Now shares poInPlanningConsignment with Delivery so it can't
+      // drift from the ready gate again — the old inline copy used the raw
+      // UPHOLSTERY filter and missed pickRelevantUphCards' HB-only DIVAN drop.
       const planning = allPOs
-        .filter((po) => {
-          if (po.status === "COMPLETED" || po.status === "CANCELLED") return false;
-          if (!po.consignmentOrderId) return false; // SO-origin POs go to DO page
-          const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
-          if (uphCards.length === 0) return false;
-          return uphCards.some((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED");
-        })
+        .filter(poInPlanningConsignment)
         .map(mapPO);
       setPlanningPOs(planning);
 

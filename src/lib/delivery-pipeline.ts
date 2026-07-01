@@ -123,6 +123,12 @@ export function poReadyForDelivery(po: PipelinePO, linkedPOIds: Set<string>): bo
 // inline CN filter — only the no-UPHOLSTERY branch is new.
 export function poReadyForConsignment(po: PipelinePO, linkedPOIds: Set<string>): boolean {
   if (po.status === "CANCELLED") return false;
+  // Parity with poReadyForDelivery: a held PO is paused work — it belongs in
+  // Outstanding, not the CN ready list, even if its cards happened to complete
+  // before the hold. The inline CN filter this replaced lacked the guard, so a
+  // held CO-PO could surface as ready-to-consign (DO side has excluded ON_HOLD
+  // since the Pending-Delivery fix; CN had drifted).
+  if (po.status === "ON_HOLD") return false;
   if (!po.consignmentOrderId) return false;
   if (linkedPOIds.has(po.id)) return false;
   const uphCards = pickRelevantUphCards(po);
@@ -137,6 +143,26 @@ export function poReadyForConsignment(po: PipelinePO, linkedPOIds: Set<string>):
     return false;
   }
   return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
+}
+
+// Consignment "Planning" mirror of poInPlanning (CO-origin). The CN page's
+// Planning tab had hand-inlined the raw `departmentCode === "UPHOLSTERY"`
+// filter + `uphCards.length === 0 -> drop`, so it (a) missed pickRelevantUphCards'
+// HB-only DIVAN drop and (b) diverged from the shared predicate — the same
+// copy-drift class that hid completed pillows from the ready list. This is the
+// exact poInPlanning body with the origin guard inverted (requires a CO link).
+// Common sofa/bedframe behaviour is unchanged.
+export function poInPlanningConsignment(po: PipelinePO): boolean {
+  if (po.status === "COMPLETED" || po.status === "CANCELLED") return false;
+  if (!po.consignmentOrderId) return false; // SO-origin POs go to the Delivery page
+  const uphCards = pickRelevantUphCards(po);
+  if (uphCards.length === 0) {
+    if (!repairScopeExcludesUph(po)) return false;
+    const jcs = po.jobCards || [];
+    if (jcs.length === 0) return false;
+    return jcs.some((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED");
+  }
+  return uphCards.some((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED");
 }
 
 // Set of PO IDs already carried on a non-cancelled, non-virtual DO. Built

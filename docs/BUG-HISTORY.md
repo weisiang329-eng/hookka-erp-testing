@@ -49,6 +49,42 @@ Entries themselves stay newest-first.
 **Verified:** `tsc -p tsconfig.app.json --noEmit` clean (only the pre-existing, unrelated `scan-supplier-modal.tsx` errors from a concurrent session remain); `npm test` 1321/1322 (1 pre-existing skip), including 6 new regression tests in `tests/supplier-payment-alloc.test.mjs` that feed the camelCase-only row shape the live adapter actually produces (they fail under the old snake_case-read logic, pass now). Shipped to `main`; owner to confirm the payment now appears in the All Payments list on erp.hookka.com, and to use the Knock-off feature to re-attribute HPV-2607-002's advance to PI-2606-037 (the payment itself is GL-correct; only the subsidiary attribution needs fixing).
 ---
 
+## BUG-2026-07-01-005 — Whole-system sweep after the pillow fix: two more Consignment↔Delivery parity gaps from the same copy-drift `consignment` `production-orders`
+
+**Context:** after fixing BUG-2026-07-01-004 the owner asked "如果还有其他的种类呢?…
+consignment 就是 D/O 来的,你检查看全套系统 — consignment 和 D/O 漏掉了什么?" So I
+audited every readiness surface (delivery, consignment, mobile Home, dashboard-b,
+public-do-qr, backend). Findings:
+- The `-004` ready-list fix is **category-agnostic**, not pillow-specific: the gate
+  is now "no UPHOLSTERY card + PO COMPLETED + all cards done", so EVERY accessory
+  type (pillow, cushion, armrest, headrest) and any non-upholstered route is
+  covered by that one fix. Pillow was just the example.
+- Backend imposes **no** readiness gate (it only dedups linked PO ids); readiness
+  is FE-only, so the FE fix is sufficient — the backend accepts an accessory PO
+  onto a CN.
+
+**Two residual gaps found (both = Consignment inlined an older/looser copy than Delivery):**
+1. **ON_HOLD leaked into the CN ready list.** `poReadyForDelivery` excludes
+   `status === "ON_HOLD"` (a held PO is paused work → Outstanding, not ready), but
+   the new `poReadyForConsignment` mirror had omitted that guard, so a held CO-PO
+   whose cards finished before the hold could surface as ready-to-consign.
+2. **CN "Planning" tab used a hand-inlined raw filter.** `note.tsx` ~L1203 did
+   `cards.filter(dept === "UPHOLSTERY"); if (len === 0) return false;` instead of
+   the shared predicate — so it missed `pickRelevantUphCards`' HB-only DIVAN drop
+   (a CO bedframe "Headboard Only" whose HB was done would sit in Planning forever
+   waiting on the never-completing DIVAN card) and was one more copy free to drift.
+
+**Fix:** (1) added the `ON_HOLD` guard to `poReadyForConsignment`; (2) added
+`poInPlanningConsignment` — the exact `poInPlanning` body with the origin guard
+inverted (requires a CO link) — and wired it into `note.tsx`'s Planning filter,
+deleting the inline copy. Common sofa/bedframe behaviour unchanged. 6 new tests
+in `delivery-pipeline.test.mjs`.
+
+**Verified:** `tsc` clean; delivery-pipeline tests 53/53 pass. LIVE-VERIFY after
+deploy alongside -004.
+
+---
+
 ## BUG-2026-07-01-004 — A COMPLETED accessory/pillow never appeared in Consignment's "ready to ship" list `consignment` `production-orders`
 
 **Symptom:** owner: "为什么 pillow complete 了没有在 consignment 那边?" Confirmed on

@@ -546,3 +546,53 @@ test("poReadyForConsignment: CANCELLED -> false", () => {
   const p = po({ consignmentOrderId: "co-1", status: "CANCELLED", jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED" }] });
   assert.equal(dp.poReadyForConsignment(p, NONE), false);
 });
+
+test("poReadyForConsignment: ON_HOLD CO-PO with cards done -> false (parity with Delivery)", () => {
+  // A held CO-PO is paused work — must NOT surface as ready-to-consign even if
+  // its cards completed before the hold. DO excluded ON_HOLD; CN had drifted.
+  const p = po({ consignmentOrderId: "co-1", status: "ON_HOLD", jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED" }] });
+  assert.equal(dp.poReadyForConsignment(p, NONE), false);
+});
+
+// ---------------------------------------------------------------------------
+// poInPlanningConsignment — CO mirror of poInPlanning. Requires a CO link;
+// shares pickRelevantUphCards + the scoped-repair fallback so it can't drift
+// from the ready gate (the CN Planning tab had a hand-inlined raw filter).
+// ---------------------------------------------------------------------------
+test("poInPlanningConsignment: CO sofa, upholstery in progress -> true", () => {
+  const p = po({ consignmentOrderId: "co-1", jobCards: [{ departmentCode: "UPHOLSTERY", status: "IN_PROGRESS" }] });
+  assert.equal(dp.poInPlanningConsignment(p), true);
+});
+
+test("poInPlanningConsignment: SO-origin PO (no CO) -> false", () => {
+  const p = po({ consignmentOrderId: undefined, jobCards: [{ departmentCode: "UPHOLSTERY", status: "IN_PROGRESS" }] });
+  assert.equal(dp.poInPlanningConsignment(p), false);
+});
+
+test("poInPlanningConsignment: CO sofa, all upholstery done -> false (production done)", () => {
+  const p = po({ consignmentOrderId: "co-1", jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED" }] });
+  assert.equal(dp.poInPlanningConsignment(p), false);
+});
+
+test("poInPlanningConsignment: CO COMPLETED/CANCELLED -> false", () => {
+  const done = po({ consignmentOrderId: "co-1", status: "COMPLETED", jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED" }] });
+  assert.equal(dp.poInPlanningConsignment(done), false);
+  const cancelled = po({ consignmentOrderId: "co-1", status: "CANCELLED", jobCards: [{ departmentCode: "UPHOLSTERY", status: "IN_PROGRESS" }] });
+  assert.equal(dp.poInPlanningConsignment(cancelled), false);
+});
+
+test("poInPlanningConsignment: BEDFRAME HB-only — stranded DIVAN in progress ignored, HB done -> false", () => {
+  // pickRelevantUphCards drops the never-completing DIVAN card, so an HB-only
+  // CO-BF whose headboard is done is NOT still in planning (the raw inline
+  // filter would have kept waiting on the DIVAN card forever).
+  const p = po({
+    consignmentOrderId: "co-1",
+    itemCategory: "BEDFRAME",
+    specialOrder: "Headboard Only",
+    jobCards: [
+      { departmentCode: "UPHOLSTERY", status: "IN_PROGRESS", wipType: "DIVAN" },
+      { departmentCode: "UPHOLSTERY", status: "COMPLETED", wipType: "HEADBOARD" },
+    ],
+  });
+  assert.equal(dp.poInPlanningConsignment(p), false);
+});

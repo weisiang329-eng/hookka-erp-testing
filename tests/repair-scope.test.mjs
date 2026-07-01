@@ -755,11 +755,12 @@ test("cascade: material filter runs before consumption, keyed off the PO's stamp
 
 test("delivery-pipeline: no-UPH fallback is gated on COMPLETED status / scope, not card absence", () => {
   assert.match(pipelineSrc, /function repairScopeExcludesUph\(/);
-  // poInPlanning still gates its no-UPH fallback on the repair scope.
+  // poInPlanning + poInPlanningConsignment (CO mirror, BUG-2026-07-01-005) both
+  // gate their no-UPH fallback on the repair scope.
   assert.equal(
     (pipelineSrc.match(/if \(!repairScopeExcludesUph\(po\)\) return false;/g) ?? []).length,
-    1,
-    "poInPlanning must still gate its no-UPH fallback on the scope",
+    2,
+    "poInPlanning + poInPlanningConsignment must still gate the no-UPH fallback on the scope",
   );
   // poReadyForDelivery's no-UPH fallback (BUG-2026-06-20-001: ACCESSORY
   // pillows have no upholstery card) is gated on the PO's own COMPLETED status
@@ -767,12 +768,12 @@ test("delivery-pipeline: no-UPH fallback is gated on COMPLETED status / scope, n
   // (IN_PROGRESS) non-upholstered PO can't slip through.
   assert.match(pipelineSrc, /if \(po\.status === "COMPLETED"\) return allDone;/);
   assert.match(pipelineSrc, /if \(repairScopeExcludesUph\(po\)\) return allDone;/);
-  // Zero job cards never qualifies (all three predicates: poInPlanning,
-  // poReadyForDelivery, and the CO mirror poReadyForConsignment added in
-  // BUG-2026-07-01-003).
+  // Zero job cards never qualifies (all four predicates: poInPlanning,
+  // poReadyForDelivery, the CO mirror poReadyForConsignment (BUG-2026-07-01-004),
+  // and the CO planning mirror poInPlanningConsignment (BUG-2026-07-01-005)).
   assert.equal(
     (pipelineSrc.match(/if \(jcs\.length === 0\) return false;/g) ?? []).length,
-    3,
+    4,
   );
 });
 

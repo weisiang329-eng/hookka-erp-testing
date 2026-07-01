@@ -4457,6 +4457,7 @@ type StockGroupRow = {
 
 async function stockSummary(
   db: Env["Variables"]["DB"],
+  orgId: string,
   period?: string,
 ): Promise<{
   rows: StockGroupRow[];
@@ -4464,12 +4465,25 @@ async function stockSummary(
   fg: { openingSen: number; closingSen: number };
   totals: { openingSen: number; purchasesSen: number; consumptionSen: number; closingSen: number };
 }> {
-  return stockSummaryRange(db, periodStartYm(period), periodEndYm(period));
+  return stockSummaryRange(db, orgId, periodStartYm(period), periodEndYm(period));
 }
 
 // Window form (FY-YTD and arbitrary spans for the Phase-5 statement).
+//
+// Stage 2 (owner rule 2026-07-01; design doc
+// docs/superpowers/specs/2026-06-30-pi-driven-stock-in-closing-design.md): this
+// used to independently re-derive opening/purchases/consumption/closing from
+// cost_ledger RM_RECEIPT/RM_ISSUE (GRN-only, no PI, no month-end stock-take
+// override) — a SEPARATE pipeline from the P&L's material engine
+// (loadMaterialCostData/materialWindow), which is why the GL/Balance-Sheet
+// stock could disagree with the P&L closing the moment PI-only receipts or a
+// stock-take override entered the picture. Now delegates to that SAME engine
+// so the two can never diverge again — this drives BOTH the GL closing-stock
+// posting (buildClosingStockLegs) AND the Stock Summary display, from one
+// source of truth.
 async function stockSummaryRange(
   db: Env["Variables"]["DB"],
+  orgId: string,
   startYm: string | null,
   endYm: string | null,
 ): Promise<{
@@ -4478,60 +4492,31 @@ async function stockSummaryRange(
   fg: { openingSen: number; closingSen: number };
   totals: { openingSen: number; purchasesSen: number; consumptionSen: number; closingSen: number };
 }> {
-  const openCut = prevYm(startYm); // null when window starts at the beginning
-  const [clRes, rmRes] = await Promise.all([
-    db
-      .prepare(
-        "SELECT type, itemType, itemId, direction, totalCostSen, date FROM cost_ledger",
-      )
-      .all<{ type: string; itemType: string; itemId: string; direction: string; totalCostSen: number; date: string }>(),
-    db.prepare("SELECT id, itemGroup FROM raw_materials").all<{ id: string; itemGroup: string }>(),
-  ]);
-  const grp = new Map<string, string>();
-  for (const r of rmRes.results ?? []) grp.set(r.id, r.itemGroup || "OTHER");
-  const rows = new Map<string, StockGroupRow>();
-  const ensure = (g: string) => {
-    let r = rows.get(g);
-    if (!r) { r = { group: g, openingSen: 0, purchasesSen: 0, consumptionSen: 0, closingSen: 0 }; rows.set(g, r); }
-    return r;
-  };
-  const wip = { openingSen: 0, closingSen: 0 };
-  const fg = { openingSen: 0, closingSen: 0 };
-  for (const l of clRes.results ?? []) {
-    const ym = String(l.date ?? "").slice(0, 7);
-    if (endYm && ym > endYm) continue; // beyond the period end — ignore entirely
-    const v = Number(l.totalCostSen) || 0;
-    const signed = l.direction === "IN" ? v : -v;
-    const inOpening = !openCut || ym <= openCut;
-    const inPeriod = (!startYm || ym >= startYm) && (!endYm || ym <= endYm);
-    if (l.itemType === "RM") {
-      const g = grp.get(l.itemId) || "OTHER";
-      const row = ensure(g);
-      if (inOpening) row.openingSen += signed;
-      row.closingSen += signed; // cumulative to period end (endYm filter above)
-      if (inPeriod) {
-        if (l.type === "RM_RECEIPT") row.purchasesSen += v;
-        else if (l.type === "RM_ISSUE") row.consumptionSen += v;
-        else row.purchasesSen += signed; // ADJUSTMENT etc. — net into purchases line
-      }
-    }
-    // WIP / FG cumulative balances (opening vs closing).
-    const wipDelta = l.type === "RM_ISSUE" || l.type === "LABOR_POSTED" ? v : l.type === "FG_COMPLETED" ? -v : 0;
-    const fgDelta = l.type === "FG_COMPLETED" ? v : l.type === "FG_DELIVERED" ? -v : 0;
-    if (inOpening) { wip.openingSen += wipDelta; fg.openingSen += fgDelta; }
-    wip.closingSen += wipDelta;
-    fg.closingSen += fgDelta;
-  }
-  const list = [...rows.values()]
-    .filter((r) => r.openingSen !== 0 || r.purchasesSen !== 0 || r.consumptionSen !== 0 || r.closingSen !== 0)
+  const lastYm = endYm ?? new Date().toISOString().slice(0, 7);
+  const data = await loadMaterialCostData(db, orgId, lastYm);
+  const w = materialWindow(data, startYm, endYm);
+  const rows: StockGroupRow[] = w.rmGroups
+    .filter((g) => g.openingSen !== 0 || g.purchaseSen !== 0 || g.consumedSen !== 0 || g.closingSen !== 0)
+    .map((g) => ({
+      group: g.itemGroup,
+      openingSen: g.openingSen,
+      purchasesSen: g.purchaseSen,
+      consumptionSen: g.consumedSen,
+      closingSen: g.closingSen,
+    }))
     .sort((a, b) => a.group.localeCompare(b.group));
   const totals = {
-    openingSen: list.reduce((s, r) => s + r.openingSen, 0),
-    purchasesSen: list.reduce((s, r) => s + r.purchasesSen, 0),
-    consumptionSen: list.reduce((s, r) => s + r.consumptionSen, 0),
-    closingSen: list.reduce((s, r) => s + r.closingSen, 0),
+    openingSen: rows.reduce((s, r) => s + r.openingSen, 0),
+    purchasesSen: rows.reduce((s, r) => s + r.purchasesSen, 0),
+    consumptionSen: rows.reduce((s, r) => s + r.consumptionSen, 0),
+    closingSen: rows.reduce((s, r) => s + r.closingSen, 0),
   };
-  return { rows: list, wip, fg, totals };
+  return {
+    rows,
+    wip: { openingSen: w.wipOpenSen, closingSen: w.wipCloseSen },
+    fg: { openingSen: w.fgOpenSen, closingSen: w.fgCloseSen },
+    totals,
+  };
 }
 
 // Build the closing-stock journal legs for a month (shared by preview +
@@ -4549,7 +4534,7 @@ async function buildClosingStockLegs(
   actorUserId: string | null,
   sourceId: string,
 ): Promise<{ legs: LedgerEntryInput[]; closingTotalSen: number }> {
-  const { rows, wip, fg } = await stockSummary(db, month);
+  const { rows, wip, fg } = await stockSummary(db, orgId, month);
   const map = await getStockMap(db);
   const legs: LedgerEntryInput[] = [];
   let legNo = 1;
@@ -4651,13 +4636,13 @@ app.post("/stock/close-post", async (c) => {
 app.get("/stock-summary", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
+  const orgId = getOrgId(c);
   const period = c.req.query("period") || undefined;
-  const { rows, wip, fg, totals } = await stockSummary(c.var.DB, period);
+  const { rows, wip, fg, totals } = await stockSummary(c.var.DB, orgId, period);
   // Has this month's closing stock been posted? (informational for the UI)
   let posted = false;
   if (period && /^\d{4}-\d{2}$/.test(period)) {
     try {
-      const orgId = getOrgId(c);
       const row = await c.var.DB.prepare(
         `SELECT 1 AS x FROM ledger_journal_entries
           WHERE sourceType = 'closing_stock' AND sourceId LIKE ? AND orgId = ? LIMIT 1`,

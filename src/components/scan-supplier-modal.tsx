@@ -63,6 +63,11 @@ export type ExtractedSupplierLine = {
   unitPrice?: number | null;
   amount?: number | null;
   tax?: number | null;
+  // Foam/sponge spec the OCR pulled (scan-engine.ts extracts + populates
+  // these already) — density grade (e.g. "NLY22GH") and thickness with unit
+  // (e.g. "25MM"). null for non-foam items or when not printed.
+  density?: string | null;
+  thickness?: string | null;
 };
 export type SupplierExtraction = {
   supplierName?: string | null;

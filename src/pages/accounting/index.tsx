@@ -15,6 +15,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { MoneyInput } from "@/components/ui/money-input";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa } from "@/lib/export-report";
+import { isCleanImportShape, detectRawShape, parseRawStockTakeRows, type ParsedRawItem } from "@/lib/stock-take-import";
 import { printVoucher, printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
 import { useRowSelection } from "@/lib/use-row-selection";
 import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
@@ -1437,6 +1438,10 @@ type OpeningStockApiRow = {
 const WIP_FG_KEYS = ["WIP", "FG"] as const;
 const WIP_FG_LABELS: Record<string, string> = { WIP: "Work-in-Progress (WIP)", FG: "Finished Goods (FG)" };
 
+// <select> values are always strings, so "ignore this line" (item_group = null in
+// stock_take_item_alias) needs a sentinel string in the "needs mapping" picker.
+const STOCK_TAKE_IGNORE_VALUE = "__IGNORE__";
+
 // Month-end stock-take entry (owner periodic-inventory option). Per material-group
 // closing value at a month-end → the P&L uses it as that month's closing (and the
 // next month's opening) instead of the FIFO/BOM value. Reuses /material-opening-stock
@@ -1481,6 +1486,40 @@ function StockTakeTab() {
   // Save action and one Excel round trip.
   const allRowGroups = groups ? [...groups, ...WIP_FG_KEYS] : null;
 
+  // Raw (uncategorized) monthly stock-count import (owner rule 2026-07-01; design
+  // doc docs/superpowers/specs/2026-07-01-stock-take-item-alias-import-design.md).
+  // rawImportItems = every physical line parsed from the LAST raw import (whether
+  // resolved or not); rawImportResolutions maps item_key -> assigned group (or
+  // null = "ignore this line"), seeded from the fetched alias table and grown as
+  // the owner assigns any unrecognised lines below. A key ABSENT from this record
+  // still needs a decision — that's what blocks Save and what the "needs mapping"
+  // panel lists.
+  const [rawImportItems, setRawImportItems] = useState<ParsedRawItem[] | null>(null);
+  const [rawImportResolutions, setRawImportResolutions] = useState<Record<string, string | null>>({});
+  const rawNeedsMapping = rawImportItems ? rawImportItems.filter((it) => !(it.key in rawImportResolutions)) : [];
+
+  // Re-derives each touched group's grid value from scratch (SUM of every
+  // resolved-non-ignored item mapping to it) — never additive — so re-resolving
+  // one item, or re-importing, can never double-count. Returns how many distinct
+  // groups this import actually touches.
+  const applyRawResolutions = (items: ParsedRawItem[], resolutions: Record<string, string | null>) => {
+    const sumsByGroup = new Map<string, number>();
+    for (const it of items) {
+      const g = resolutions[it.key];
+      if (g == null) continue; // unresolved (absent) or explicitly ignored (null)
+      sumsByGroup.set(g, (sumsByGroup.get(g) ?? 0) + it.totalSen);
+    }
+    for (const [g, sen] of sumsByGroup) setValueFor(g, (sen / 100).toFixed(2));
+    return sumsByGroup.size;
+  };
+
+  const resolveRawItem = (itemKey: string, group: string | null) => {
+    if (!rawImportItems) return;
+    const next = { ...rawImportResolutions, [itemKey]: group };
+    setRawImportResolutions(next);
+    applyRawResolutions(rawImportItems, next);
+  };
+
   // Excel round trip (owner 2026-07-01): "upload it, but still be able to
   // manually adjust" — Export downloads the current on-screen values as a
   // template; Import parses a file back into `edits` (prefilling the grid,
@@ -1508,40 +1547,79 @@ function StockTakeTab() {
       if (!sheetName) { toast.error("Workbook has no sheets"); return; }
       const aoa = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[sheetName], { header: 1 });
       if (aoa.length < 2) { toast.error("No data rows after the header"); return; }
-      const headers = (aoa[0] as unknown[]).map((h) => (typeof h === "string" ? h.trim().toLowerCase() : ""));
-      const findCol = (...names: string[]) => {
-        for (const n of names) { const i = headers.indexOf(n.toLowerCase()); if (i >= 0) return i; }
-        return -1;
+      const headerRow = aoa[0] as unknown[];
+
+      // Shape 1: the clean "Material Group" / "Closing Stock (RM)" template (this
+      // page's own Export Excel round trip) — unchanged from before.
+      if (isCleanImportShape(headerRow)) {
+        setRawImportItems(null);
+        setRawImportResolutions({});
+        const headers = headerRow.map((h) => (typeof h === "string" ? h.trim().toLowerCase() : ""));
+        const findCol = (...names: string[]) => {
+          for (const n of names) { const i = headers.indexOf(n.toLowerCase()); if (i >= 0) return i; }
+          return -1;
+        };
+        const colGroup = findCol("Material Group", "Group", "Item Group");
+        const colValue = findCol("Closing Stock (RM)", "Closing Stock", "RM", "Value");
+        const byGroupLower = new Map(allRowGroups.map((g) => [g.toLowerCase(), g]));
+        let filled = 0;
+        const unmatched: string[] = [];
+        for (let i = 1; i < aoa.length; i++) {
+          const row = aoa[i] as unknown[];
+          if (!row || row.length === 0) continue;
+          const rawGroup = typeof row[colGroup] === "string" ? (row[colGroup] as string).trim() : "";
+          if (!rawGroup) continue;
+          const raw = row[colValue];
+          const n = typeof raw === "number" ? raw : Number(String(raw ?? "").trim());
+          if (typeof raw === "string" && raw.trim() === "") continue; // blank = no change intended
+          if (!Number.isFinite(n)) continue;
+          const g = byGroupLower.get(rawGroup.toLowerCase());
+          if (!g) { unmatched.push(rawGroup); continue; }
+          setValueFor(g, n.toFixed(2));
+          filled++;
+        }
+        if (filled === 0) {
+          toast.error(unmatched.length ? `No matching material groups found (unrecognised: ${unmatched.slice(0, 5).join(", ")}).` : "No rows with a value to import.");
+          return;
+        }
+        toast.success(`Filled ${filled} group${filled === 1 ? "" : "s"} from ${file.name} — review and Save.`);
+        if (unmatched.length) toast.error(`${unmatched.length} row(s) didn't match a known material group: ${unmatched.slice(0, 5).join(", ")}${unmatched.length > 5 ? "…" : ""}`);
+        return;
+      }
+
+      // Shape 2: the owner's raw monthly stock-count file (no category column,
+      // layout varies) — resolve each physical line against the remembered
+      // item-alias table; anything unrecognised goes to the "needs mapping" panel
+      // below instead of being silently guessed (design doc 2026-07-01).
+      const shape = detectRawShape(headerRow);
+      if (!shape) {
+        toast.error(
+          `Missing required columns. Need either "Material Group" + "Closing Stock (RM)", ` +
+            `or a "Total" column (your raw monthly stock-count file). Found: ${headerRow.filter(Boolean).join(", ") || "no headers"}.`,
+        );
+        return;
+      }
+      const items = parseRawStockTakeRows(aoa, shape);
+      if (items.length === 0) { toast.error("No item rows found in this file."); return; }
+
+      const aliasJson = (await (await fetch("/api/accounting/stock-take-item-aliases")).json()) as {
+        data?: { itemKey: string; itemGroup: string | null }[];
       };
-      const colGroup = findCol("Material Group", "Group", "Item Group");
-      const colValue = findCol("Closing Stock (RM)", "Closing Stock", "RM", "Value");
-      if (colGroup < 0 || colValue < 0) {
-        toast.error(`Missing required columns. Need "Material Group" and "Closing Stock (RM)". Found: ${headers.filter(Boolean).join(", ") || "no headers"}.`);
-        return;
+      const aliasMap = new Map((aliasJson.data ?? []).map((a) => [a.itemKey, a.itemGroup]));
+      const resolutions: Record<string, string | null> = {};
+      for (const it of items) if (aliasMap.has(it.key)) resolutions[it.key] = aliasMap.get(it.key) ?? null;
+
+      const touchedGroups = applyRawResolutions(items, resolutions);
+      setRawImportItems(items);
+      setRawImportResolutions(resolutions);
+
+      const unresolvedCount = items.filter((it) => !(it.key in resolutions)).length;
+      toast.success(
+        `Recognised ${items.length - unresolvedCount} of ${items.length} items from ${file.name} across ${touchedGroups} group(s) — review and Save.`,
+      );
+      if (unresolvedCount) {
+        toast.error(`${unresolvedCount} item${unresolvedCount === 1 ? "" : "s"} need mapping below before you can Save.`);
       }
-      const byGroupLower = new Map(allRowGroups.map((g) => [g.toLowerCase(), g]));
-      let filled = 0;
-      const unmatched: string[] = [];
-      for (let i = 1; i < aoa.length; i++) {
-        const row = aoa[i] as unknown[];
-        if (!row || row.length === 0) continue;
-        const rawGroup = typeof row[colGroup] === "string" ? (row[colGroup] as string).trim() : "";
-        if (!rawGroup) continue;
-        const raw = row[colValue];
-        const n = typeof raw === "number" ? raw : Number(String(raw ?? "").trim());
-        if (typeof raw === "string" && raw.trim() === "") continue; // blank = no change intended
-        if (!Number.isFinite(n)) continue;
-        const g = byGroupLower.get(rawGroup.toLowerCase());
-        if (!g) { unmatched.push(rawGroup); continue; }
-        setValueFor(g, n.toFixed(2));
-        filled++;
-      }
-      if (filled === 0) {
-        toast.error(unmatched.length ? `No matching material groups found (unrecognised: ${unmatched.slice(0, 5).join(", ")}).` : "No rows with a value to import.");
-        return;
-      }
-      toast.success(`Filled ${filled} group${filled === 1 ? "" : "s"} from ${file.name} — review and Save.`);
-      if (unmatched.length) toast.error(`${unmatched.length} row(s) didn't match a known material group: ${unmatched.slice(0, 5).join(", ")}${unmatched.length > 5 ? "…" : ""}`);
     } catch (err) {
       toast.error(humanizeError(err, "Import failed. Please check the file and try again."));
     } finally {
@@ -1552,23 +1630,34 @@ function StockTakeTab() {
   const save = async () => {
     if (!allRowGroups) return;
     if (!/^\d{4}-\d{2}$/.test(ym)) { toast.error("Pick a month first"); return; }
+    if (rawNeedsMapping.length > 0) {
+      toast.error(`${rawNeedsMapping.length} imported item${rawNeedsMapping.length === 1 ? "" : "s"} still need${rawNeedsMapping.length === 1 ? "s" : ""} a group below before you can Save.`);
+      return;
+    }
     const rows = allRowGroups
       .filter((g) => valueFor(g).trim() !== "")
       .map((g) => ({ itemGroup: g, valueSen: Math.round((parseFloat(valueFor(g)) || 0) * 100) }));
+    // Every resolution from the last raw import (fetched-known + newly picked)
+    // round-trips back so next month's import of the SAME items is automatic.
+    // Re-upserting an already-known pair is a harmless no-op (idempotent).
+    const newAliases = rawImportItems
+      ? Object.entries(rawImportResolutions).map(([itemKey, itemGroup]) => ({ itemKey, itemGroup }))
+      : undefined;
     setSaving(true);
     try {
       const res = await fetch("/api/accounting/stock-take", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ym, rows }),
+        body: JSON.stringify({ ym, rows, ...(newAliases ? { newAliases } : {}) }),
       });
-      const j = (await res.json()) as { success?: boolean; error?: string; saved?: number; cleared?: number };
+      const j = (await res.json()) as { success?: boolean; error?: string; saved?: number; cleared?: number; aliasesSaved?: number };
       if (j?.success) {
         const saved = j.saved ?? rows.filter((r) => r.valueSen > 0).length;
         const cleared = j.cleared ?? 0;
         toast.success(
           `Stock-take saved for ${ym}: ${saved} group${saved === 1 ? "" : "s"} set` +
-            (cleared ? `, ${cleared} reverted to automatic` : ""),
+            (cleared ? `, ${cleared} reverted to automatic` : "") +
+            (j.aliasesSaved ? `, ${j.aliasesSaved} item mapping${j.aliasesSaved === 1 ? "" : "s"} remembered` : ""),
         );
         // Zero-valued rows were DELETED server-side (= automatic) — drop them from
         // the local cache too so a re-render shows blank, not a stale "0.00".
@@ -1576,6 +1665,8 @@ function StockTakeTab() {
           ...prev.filter((e) => e.ym !== ym),
           ...rows.filter((r) => r.valueSen > 0).map((r) => ({ ...r, ym })),
         ]);
+        setRawImportItems(null);
+        setRawImportResolutions({});
       } else toast.error(j?.error || "Failed to save stock-take");
     } catch {
       toast.error("Failed to save stock-take");
@@ -1714,6 +1805,68 @@ function StockTakeTab() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Raw-import "needs mapping" review (owner rule 2026-07-01): items parsed
+          from an uncategorized monthly file with no remembered group yet. Save
+          is blocked while this list is non-empty. Assigning a group here fills
+          the grid above immediately AND is remembered for every future import
+          of the same physical item. */}
+      {rawNeedsMapping.length > 0 && (
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <div>
+              <h3 className="text-sm font-semibold text-[#9A3A2D]">
+                {rawNeedsMapping.length} item{rawNeedsMapping.length === 1 ? "" : "s"} need mapping
+              </h3>
+              <p className="text-xs text-[#6B7280]">
+                These lines weren&apos;t recognised from a previous import. Pick a group (or
+                Ignore for a non-stock line, e.g. a subtotal row) — remembered for every
+                future month automatically. Save is blocked until all are resolved.
+              </p>
+            </div>
+            <div className="border rounded-md overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="text-left px-3 py-2 font-medium text-gray-600">Item</th>
+                    <th className="text-right px-3 py-2 font-medium text-gray-600">Amount (RM)</th>
+                    <th className="text-left px-3 py-2 font-medium text-gray-600">Assign to</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rawNeedsMapping.map((it) => (
+                    <tr key={it.key} className="border-t">
+                      <td className="px-3 py-1.5">{it.description || "(blank)"}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{(it.totalSen / 100).toFixed(2)}</td>
+                      <td className="px-3 py-1.5">
+                        <select
+                          className="w-56 border border-[#E2DDD8] rounded-md px-2 py-1 text-sm"
+                          value=""
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (!v) return;
+                            resolveRawItem(it.key, v === STOCK_TAKE_IGNORE_VALUE ? null : v);
+                          }}
+                        >
+                          <option value="" disabled>
+                            — choose —
+                          </option>
+                          <option value={STOCK_TAKE_IGNORE_VALUE}>Ignore (not a stock line)</option>
+                          {allRowGroups?.map((g) => (
+                            <option key={g} value={g}>
+                              {g}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

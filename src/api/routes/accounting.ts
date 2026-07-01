@@ -36,6 +36,7 @@ import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
 import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
 import { costAsOfByPo } from "../../lib/cost-attribution";
+import { STOCK_TAKE_ITEM_ALIAS_SEED_2026_05 } from "../lib/stock-take-item-alias-seed-2026-05";
 import { DOC_DATE_FAMILIES, stripLegSuffix, parseSourceIdDate } from "../../lib/doc-date";
 import {
   prefixForPartyType,
@@ -5664,6 +5665,42 @@ function ensureStockTake(db: D1Database): Promise<void> {
   return _pendingStockTakeMigrations;
 }
 
+// Stock-take ITEM alias (owner rule 2026-07-01; design doc
+// docs/superpowers/specs/2026-07-01-stock-take-item-alias-import-design.md). The
+// owner's monthly raw stock-count file has no category column and its layout
+// varies month to month, so grouping comes from each physical line's own
+// identity (item_key = normalized identity columns), not a label. item_group is
+// nullable: NULL means "deliberately not a stock line" (e.g. a GRAND TOTAL
+// trailer row), set via "Ignore this line" so a recurring non-item row is
+// skipped silently forever after, instead of re-prompting every month.
+let _pendingStockTakeItemAliasMigrations: Promise<void> | null = null;
+function ensureStockTakeItemAlias(db: D1Database): Promise<void> {
+  if (_pendingStockTakeItemAliasMigrations) return _pendingStockTakeItemAliasMigrations;
+  _pendingStockTakeItemAliasMigrations = (async () => {
+    const stmts = [
+      `CREATE TABLE IF NOT EXISTS stock_take_item_alias (
+         id         TEXT PRIMARY KEY,
+         org_id     TEXT NOT NULL DEFAULT 'hookka',
+         item_key   TEXT NOT NULL,
+         item_group TEXT,
+         updated_at TEXT
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_take_item_alias_key ON stock_take_item_alias (org_id, item_key)`,
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[accounting.stock-take-item-alias] DDL skipped", {
+          sql: sql.split("\n")[0],
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return _pendingStockTakeItemAliasMigrations;
+}
+
 /** Load all historical P&L rows for an org, grouped by ym. */
 async function loadHistoricalPnl(
   db: D1Database,
@@ -9689,9 +9726,30 @@ app.get("/stock-take", async (c) => {
   return c.json({ success: true, data, total: data.length });
 });
 
+// GET /api/accounting/stock-take-item-aliases
+// Lists every remembered (item_key -> item_group) mapping for the raw
+// stock-take import (item_group null = "ignore this line forever").
+app.get("/stock-take-item-aliases", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  await ensureStockTakeItemAlias(c.var.DB);
+  const res = await c.var.DB
+    .prepare("SELECT item_key, item_group FROM stock_take_item_alias WHERE org_id = ?")
+    .bind(orgId)
+    .all<{ item_key?: string | null; itemKey?: string | null; item_group?: string | null; itemGroup?: string | null }>();
+  const data = (res.results ?? []).map((r) => ({
+    itemKey: String(r.itemKey ?? r.item_key ?? ""),
+    itemGroup: (r.itemGroup ?? r.item_group) ?? null,
+  }));
+  return c.json({ success: true, data, total: data.length });
+});
+
 // PUT /api/accounting/stock-take
-// Body: { ym: 'YYYY-MM', rows: [{ itemGroup, valueSen }] } — upserts one month's
-// per-group closing values (ON CONFLICT (org_id, item_group, ym)).
+// Body: { ym: 'YYYY-MM', rows: [{ itemGroup, valueSen }], newAliases?: [{ itemKey,
+// itemGroup }] } — upserts one month's per-group closing values (ON CONFLICT
+// (org_id, item_group, ym)) AND any newly-resolved raw-import item aliases, in
+// one atomic write (design doc 2026-07-01-stock-take-item-alias-import-design.md).
 //
 // valueSen === 0 means "use the system's automatic (FIFO/BOM) figure" — same as
 // leaving the group blank — NOT "override closing stock to zero" (owner rule,
@@ -9703,9 +9761,13 @@ app.put("/stock-take", async (c) => {
   const denied = await requirePermission(c, "accounting", "update");
   if (denied) return denied;
   const orgId = getOrgId(c);
-  await ensureStockTake(c.var.DB);
+  await Promise.all([ensureStockTake(c.var.DB), ensureStockTakeItemAlias(c.var.DB)]);
   try {
-    const body = (await c.req.json()) as { ym?: unknown; rows?: { itemGroup?: unknown; valueSen?: unknown }[] };
+    const body = (await c.req.json()) as {
+      ym?: unknown;
+      rows?: { itemGroup?: unknown; valueSen?: unknown }[];
+      newAliases?: { itemKey?: unknown; itemGroup?: unknown }[];
+    };
     const ym = String(body.ym ?? "").slice(0, 7);
     if (!/^\d{4}-\d{2}$/.test(ym)) return c.json({ success: false, error: "ym must be 'YYYY-MM'" }, 400);
     if (!Array.isArray(body.rows)) return c.json({ success: false, error: "rows[] is required" }, 400);
@@ -9736,11 +9798,89 @@ app.put("/stock-take", async (c) => {
           .bind(`st-${crypto.randomUUID().slice(0, 12)}`, orgId, g, ym, sen, now),
       );
     }
+    let aliasesSaved = 0;
+    if (Array.isArray(body.newAliases)) {
+      const seenKeys = new Set<string>();
+      for (const raw of body.newAliases) {
+        const key = typeof raw?.itemKey === "string" ? raw.itemKey.trim() : "";
+        if (!key || seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        const group = typeof raw?.itemGroup === "string" && raw.itemGroup.trim() ? raw.itemGroup.trim() : null;
+        stmts.push(
+          c.var.DB
+            .prepare(
+              `INSERT INTO stock_take_item_alias (id, org_id, item_key, item_group, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT (org_id, item_key)
+               DO UPDATE SET item_group = excluded.item_group, updated_at = excluded.updated_at`,
+            )
+            .bind(`sta-${crypto.randomUUID().slice(0, 12)}`, orgId, key, group, now),
+        );
+        aliasesSaved++;
+      }
+    }
     if (stmts.length) await c.var.DB.batch(stmts);
-    return c.json({ success: true, saved: stmts.length - cleared, cleared, ym });
+    return c.json({ success: true, saved: stmts.length - cleared - aliasesSaved, cleared, aliasesSaved, ym });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// POST /api/accounting/stock-take-item-alias-seed — one-time load of the ~230
+// (item_key -> item_group) pairs confirmed with the owner this session, derived
+// from their 30/05/2026 stock-count file (see
+// src/api/lib/stock-take-item-alias-seed-2026-05.ts). Idempotent (ON CONFLICT
+// DO UPDATE, safe to re-run) and dry-run-able, mirroring the PI->GL backfill
+// pattern in purchase-invoices.ts. Existing aliases with a DIFFERENT group are
+// left alone unless overwrite=1 is passed, so a manual correction already made
+// via the review panel is never silently clobbered by re-running the seed.
+app.post("/stock-take-item-alias-seed", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+  await ensureStockTakeItemAlias(db);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+  const overwrite = c.req.query("overwrite") === "1" || c.req.query("overwrite") === "true";
+  const now = new Date().toISOString();
+
+  const existingRes = await db
+    .prepare("SELECT item_key, item_group FROM stock_take_item_alias WHERE org_id = ?")
+    .bind(orgId)
+    .all<{ item_key?: string | null; itemKey?: string | null; item_group?: string | null; itemGroup?: string | null }>();
+  const existing = new Map((existingRes.results ?? []).map((r) => [String(r.itemKey ?? r.item_key ?? ""), (r.itemGroup ?? r.item_group) ?? null]));
+
+  let inserted = 0, skippedAlreadyPresent = 0, overwritten = 0;
+  const stmts: D1PreparedStatement[] = [];
+  for (const [key, group] of STOCK_TAKE_ITEM_ALIAS_SEED_2026_05) {
+    if (existing.has(key)) {
+      if (!overwrite) { skippedAlreadyPresent++; continue; }
+      if (existing.get(key) === group) { skippedAlreadyPresent++; continue; }
+      overwritten++;
+    } else {
+      inserted++;
+    }
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO stock_take_item_alias (id, org_id, item_key, item_group, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (org_id, item_key)
+           DO UPDATE SET item_group = excluded.item_group, updated_at = excluded.updated_at`,
+        )
+        .bind(`sta-${crypto.randomUUID().slice(0, 12)}`, orgId, key, group, now),
+    );
+  }
+  if (!dry && stmts.length) await db.batch(stmts);
+  return c.json({
+    success: true,
+    dry,
+    overwrite,
+    totalSeedPairs: STOCK_TAKE_ITEM_ALIAS_SEED_2026_05.length,
+    inserted,
+    overwritten,
+    skippedAlreadyPresent,
+  });
 });
 
 // ---------------------------------------------------------------------------

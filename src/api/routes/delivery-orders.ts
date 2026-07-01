@@ -105,6 +105,19 @@ export function fireCustomerNoticeBestEffort(
 ): void {
   const run = (async () => {
     try {
+      // Yield the idempotency claim to the browser first (owner 2026-07:
+      // customers complained they kept getting the plain server-rendered
+      // fallback PDF instead of the real branded DO/Invoice). A browser-driven
+      // transition ALSO fires POST /:id/notify-customer with the REAL client
+      // PDF a second or two later; without this wait the backend choke-point
+      // claims the stamp first and sends the fallback, so the client's real
+      // PDF is idempotency-skipped. Waiting ~10s lets the browser's real-PDF
+      // send win; non-browser paths (driver QR scan, cron, bulk) have no such
+      // send, so after the wait THIS still fires the fallback and the customer
+      // is still notified. The wait runs inside waitUntil — it doesn't slow the
+      // transition response at all.
+      // eslint-disable-next-line no-restricted-syntax -- backend Worker, deferred fallback send
+      await new Promise((r) => setTimeout(r, 10_000));
       const res = await queueDoCustomerNotice(c, deliveryOrderId, { kind });
       // Consume the body so the Response object never leaks.
       await res.json().catch(() => undefined);

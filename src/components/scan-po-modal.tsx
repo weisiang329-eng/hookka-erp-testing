@@ -1959,11 +1959,63 @@ function ClaudePOCard({
               </div>
               <div>
                 <label className="block text-xs text-[#9CA3AF]">Customer</label>
-                <input
-                  className="w-full px-2 py-1 border border-[#E2DDD8] rounded"
-                  value={po.customerName}
-                  onChange={e => onUpdate({ customerName: e.target.value })}
-                />
+                {catalog?.customers ? (() => {
+                  // Manual customer picker (parity with the supplier scan, owner
+                  // 2026-07-01). Pre-selects the auto-match (exact → tolerant
+                  // name → delivery hub), mirroring the create-time resolve, so
+                  // the operator SEES the match and can override — a genuinely
+                  // new/unmatched customer is no longer a dead end.
+                  let matchId = po.customerId;
+                  if (!matchId) {
+                    let hit = matchByCompanyName(catalog.customers, po.customerName);
+                    if (!hit && po.deliveryHub) {
+                      const t = po.deliveryHub.trim().toUpperCase();
+                      const hm = catalog.customers.filter((c) =>
+                        c.hubs.some((h) => h.shortName.toUpperCase() === t),
+                      );
+                      if (hm.length === 1) hit = hm[0];
+                    }
+                    if (hit) matchId = hit.id;
+                  }
+                  return (
+                    <>
+                      <select
+                        className={`w-full px-2 py-1 border rounded bg-white ${
+                          matchId ? "border-[#E2DDD8]" : "border-red-300 bg-red-50"
+                        }`}
+                        value={matchId ?? ""}
+                        onChange={(e) => {
+                          const c = catalog.customers.find(
+                            (x) => x.id === e.target.value,
+                          );
+                          onUpdate(
+                            c
+                              ? { customerId: c.id, customerName: c.name, customerCode: c.code }
+                              : { customerId: null },
+                          );
+                        }}
+                      >
+                        <option value="">— pick customer —</option>
+                        {catalog.customers.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                      {po.customerName && (
+                        <span className="block text-[10px] text-[#9CA3AF] truncate mt-0.5">
+                          read: {po.customerName}
+                        </span>
+                      )}
+                    </>
+                  );
+                })() : (
+                  <input
+                    className="w-full px-2 py-1 border border-[#E2DDD8] rounded"
+                    value={po.customerName}
+                    onChange={e => onUpdate({ customerName: e.target.value })}
+                  />
+                )}
               </div>
               <div>
                 <label className="block text-xs text-[#9CA3AF]">State</label>

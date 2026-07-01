@@ -62,8 +62,13 @@ BOTH the backend (`scan-po.ts:~305`) and the FE create gate
 re-scan). Also added a last-resort **delivery-hub → customer** resolve (a hub
 short name like "Houzs KL" is OUR identifier on the doc = the owner's
 "documentation match回我们的东西"). Regression test `tests/company-name-match.test.mjs`
-(6 cases incl. ambiguity guard + trade-word non-strip). PI/GRN supplier side to
-follow (same helper).
+(6 cases incl. ambiguity guard + trade-word non-strip). Also added a **manual
+customer picker** to the SO scan preview (parity with the supplier scan, which
+already had one) so a genuinely-unmatched customer is no longer a dead end.
+NOTE: the PI/GRN supplier side was ALREADY tolerant (`pickSupplierFromName`:
+exact → normalized → startsWith/endsWith, unique-guarded) AND already had a
+manual supplier dropdown — only the customer (SO) side was strict + picker-less,
+which is why only it hard-blocked. No supplier-side change needed.
 
 **Verified:** `tsc -p tsconfig.app.json` clean; new test 6/6 pass; live prod data
 confirmed the customer exists as "Houzs Century" 300-H via `/api/customers`.

@@ -49,6 +49,7 @@ type SupplierPaymentRow = {
 };
 
 type PaymentLine = {
+  id: string;
   purchaseInvoiceId: string;
   piNo?: string;
   supplierInvoiceNo?: string;
@@ -128,6 +129,7 @@ app.get("/", async (c) => {
     g.totalBankSen += amountSen;
     g.totalBookedSen += bookedSen;
     g.lines.push({
+      id: row.id,
       purchaseInvoiceId: row.purchase_invoice_id ?? "",
       piNo: row.pi_no ?? undefined,
       supplierInvoiceNo: row.supplier_invoice_no ?? "",
@@ -446,6 +448,130 @@ app.post("/", async (c) => {
       );
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// POST /knock-off — manually apply part (or all) of an unapplied supplier
+// ADVANCE against an open purchase invoice (owner rule 2026-06-30: "可以，我
+// 要手动去knock off啊，不是自动knock off"). The advance's cash already moved
+// and its AP-control (400-0000) debit already posted at creation time — this
+// is a pure SUBSIDIARY reattribution (which invoice the debit is "for"), so it
+// writes NO new GL journal entry: it only (a) reduces the advance row's own
+// amount, (b) inserts a new supplier_payments row tying that amount to the
+// chosen PI (mirrors the normal allocation row shape exactly, so it shows up
+// identically in the creditor ledger / PI history), and (c) bumps the PI's
+// paid_amount_sen + status, same as a normal payment allocation.
+// ---------------------------------------------------------------------------
+app.post("/knock-off", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  try {
+    const body = (await c.req.json()) as {
+      advanceRowId?: unknown;
+      purchaseInvoiceId?: unknown;
+      amountSen?: unknown;
+    };
+    const advanceRowId = String(body.advanceRowId ?? "").trim();
+    const piId = String(body.purchaseInvoiceId ?? "").trim();
+    const amountSen = Math.round(Number(body.amountSen) || 0);
+    if (!advanceRowId || !piId) {
+      return c.json({ success: false, error: "advanceRowId and purchaseInvoiceId are required" }, 400);
+    }
+    if (!Number.isFinite(amountSen) || amountSen <= 0) {
+      return c.json({ success: false, error: "amountSen must be a positive amount" }, 400);
+    }
+
+    await ensurePartialPaymentColumns(c.var.DB);
+
+    const advance = await c.var.DB
+      .prepare(
+        `SELECT id, paymentNo, supplierId, supplierName, date, amountSen, purchaseInvoiceId
+           FROM supplier_payments WHERE id = ? AND orgId = ?`,
+      )
+      .bind(advanceRowId, orgId)
+      .first<{
+        id: string; paymentNo: string; supplierId: string; supplierName: string;
+        date: string; amountSen: number; purchaseInvoiceId: string | null;
+      }>();
+    if (!advance) return c.json({ success: false, error: "Advance row not found" }, 404);
+    if (advance.purchaseInvoiceId) {
+      return c.json({ success: false, error: "This row is already tied to an invoice — not an unapplied advance" }, 400);
+    }
+    const remainingAdvanceSen = Number(advance.amountSen) || 0;
+    if (amountSen > remainingAdvanceSen) {
+      return c.json({ success: false, error: `Amount exceeds the unapplied advance balance (RM ${(remainingAdvanceSen / 100).toFixed(2)})` }, 400);
+    }
+
+    const pi = await c.var.DB
+      .prepare(
+        `SELECT id, pi_no, amount_sen, paid_amount_sen, status, supplier_id, supplier_name
+           FROM purchase_invoices WHERE id = ?`,
+      )
+      .bind(piId)
+      .first<{
+        id: string; pi_no: string | null; amount_sen: number | null; paid_amount_sen: number | null;
+        status: string | null; supplier_id: string | null; supplier_name: string | null;
+      }>();
+    if (!pi || (pi.status !== "CONFIRMED" && pi.status !== "APPROVED" && pi.status !== "PARTIAL_PAID")) {
+      return c.json({ success: false, error: "Purchase invoice not found or not in a payable status" }, 400);
+    }
+    if (pi.supplier_id !== advance.supplierId) {
+      return c.json({ success: false, error: "That invoice belongs to a different supplier" }, 400);
+    }
+    const outstandingSen = (Number(pi.amount_sen) || 0) - (Number(pi.paid_amount_sen) || 0);
+    if (amountSen > outstandingSen) {
+      return c.json({ success: false, error: `Amount exceeds the invoice's outstanding balance (RM ${(outstandingSen / 100).toFixed(2)})` }, 400);
+    }
+
+    const statements: D1PreparedStatement[] = [
+      c.var.DB
+        .prepare(`UPDATE supplier_payments SET amountSen = amountSen - ?, bookedSen = bookedSen - ? WHERE id = ?`)
+        .bind(amountSen, amountSen, advanceRowId),
+      c.var.DB.prepare(
+        `INSERT INTO supplier_payments (
+           id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
+           date, amountSen, bookedSen, foreignSen, payFxRate,
+           method, reference, notes, orgId
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+      ).bind(
+        `sp-${crypto.randomUUID().slice(0, 8)}`,
+        advance.paymentNo,
+        advance.supplierId,
+        advance.supplierName,
+        piId,
+        advance.date,
+        amountSen,
+        amountSen,
+        "BANK_TRANSFER",
+        "",
+        `Knock-off from advance ${advance.paymentNo}`,
+        orgId,
+      ),
+      c.var.DB
+        .prepare(
+          `UPDATE purchase_invoices
+             SET paid_amount_sen = paid_amount_sen + ?,
+                 status = CASE
+                   WHEN paid_amount_sen + ? >= amount_sen THEN 'PAID'
+                   WHEN paid_amount_sen + ? > 0 THEN 'PARTIAL_PAID'
+                   ELSE status
+                 END
+           WHERE id = ?`,
+        )
+        .bind(amountSen, amountSen, amountSen, piId),
+    ];
+    await c.var.DB.batch(statements);
+
+    return c.json({
+      success: true,
+      data: { remainingAdvanceSen: remainingAdvanceSen - amountSen, piNo: pi.pi_no },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/supplier-payments/knock-off] failed:", msg, err);
+    return c.json({ success: false, error: msg || "Internal error applying the advance" }, 500);
+  }
 });
 
 // ---------------------------------------------------------------------------

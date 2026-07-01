@@ -63,6 +63,7 @@ const emptyRow = (): RowState => ({ amountStr: "", foreignStr: "", rateStr: "", 
 const isMyr = (currency: string) => !currency || currency.toUpperCase() === "MYR";
 
 type PaymentLine = {
+  id: string;
   purchaseInvoiceId: string;
   piNo: string;
   supplierInvoiceNo?: string;
@@ -72,6 +73,7 @@ type PaymentLine = {
 
 type PaymentGroup = {
   paymentNo: string;
+  supplierId: string;
   supplierName: string;
   date: string;
   totalBankSen: number;
@@ -79,6 +81,13 @@ type PaymentGroup = {
   lifecycleState?: string;
   lines: PaymentLine[];
 };
+
+// An advance/prepayment line has no PI attached. Once fully knocked off (via
+// the Knock Off action below) its remaining amountSen reaches 0 -- so "still
+// unapplied" is BOTH conditions, not just "no purchaseInvoiceId" (owner rule
+// 2026-06-30: unapplied advances show in blue in the All Payments list).
+const isUnappliedAdvanceLine = (l: PaymentLine) => !l.purchaseInvoiceId && l.amountSen > 0;
+const hasUnappliedAdvance = (p: PaymentGroup) => p.lines.some(isUnappliedAdvanceLine);
 
 // COMPANY.HOOKKA → the VoucherSpec.company shape (single source of truth);
 // mirrors VOUCHER_COMPANY in accounting/index.tsx.
@@ -439,6 +448,63 @@ export default function SupplierPaymentsPage() {
   const [histQ, setHistQ] = useState("");
   const [detail, setDetail] = useState<PaymentGroup | null>(null);
 
+  // Manual knock-off (owner rule 2026-06-30: "我要手动去knock off，不是自动knock
+  // off") — apply part/all of an unapplied advance line against an open PI for
+  // the SAME supplier. Scoped state, separate from the main form's openPIs/rows,
+  // so it can't clash with whatever the main form is doing while this modal is
+  // open.
+  const [koForAdvanceId, setKoForAdvanceId] = useState<string | null>(null);
+  const [koOpenPIs, setKoOpenPIs] = useState<OpenPI[]>([]);
+  const [koLoadingPIs, setKoLoadingPIs] = useState(false);
+  const [koPiId, setKoPiId] = useState("");
+  const [koAmountStr, setKoAmountStr] = useState("");
+  const [koSubmitting, setKoSubmitting] = useState(false);
+
+  const openKnockOff = (advanceLine: PaymentLine, supplierId: string) => {
+    setKoForAdvanceId(advanceLine.id);
+    setKoPiId("");
+    setKoAmountStr((advanceLine.amountSen / 100).toFixed(2));
+    setKoOpenPIs([]);
+    setKoLoadingPIs(true);
+    fetch(`/api/purchase-invoices?supplierId=${encodeURIComponent(supplierId)}&status=CONFIRMED,APPROVED,PARTIAL_PAID`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: OpenPI[] } | OpenPI[]>)
+      .then((j) => {
+        const raw = Array.isArray(j) ? j : j?.success ? j.data ?? [] : [];
+        setKoOpenPIs(raw.filter((pi) => pi.amountSen - pi.paidAmountSen > 0));
+      })
+      .catch(() => toast.error("Failed to load open invoices for this supplier"))
+      .finally(() => setKoLoadingPIs(false));
+  };
+
+  const submitKnockOff = async () => {
+    if (!koForAdvanceId || !koPiId) return;
+    const amountSen = Math.round((parseFloat(koAmountStr) || 0) * 100);
+    if (amountSen <= 0) { toast.error("Enter an amount to apply"); return; }
+    setKoSubmitting(true);
+    try {
+      const res = await fetch("/api/supplier-payments/knock-off", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ advanceRowId: koForAdvanceId, purchaseInvoiceId: koPiId, amountSen }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string; data?: { piNo?: string } };
+      if (res.ok && j.success) {
+        toast.success(`Applied RM ${(amountSen / 100).toFixed(2)} to ${j.data?.piNo ?? "the invoice"}`);
+        setKoForAdvanceId(null);
+        setDetail(null); // its snapshot is now stale — reopen the row to see the fresh split
+        invalidateCachePrefix("/api/supplier-payments");
+        invalidateCachePrefix("/api/purchase-invoices");
+        refreshHistory();
+      } else {
+        toast.error(j?.error || "Failed to apply the advance");
+      }
+    } catch {
+      toast.error("Failed to apply the advance");
+    } finally {
+      setKoSubmitting(false);
+    }
+  };
+
   // Summary across active (non-void) payments — mirrors the customer page cards.
   const activePayments = history.filter((p) => (p.lifecycleState ?? "ACTIVE") === "ACTIVE");
   const totalPaidSen = activePayments.reduce((s, p) => s + (p.totalBankSen || 0), 0);
@@ -794,8 +860,10 @@ export default function SupplierPaymentsPage() {
                           className="h-3.5 w-3.5 accent-[#6B5C32] align-middle"
                         />
                       </td>
-                      <td className="px-3 py-2 font-mono font-medium">{p.paymentNo}</td>
-                      <td className="px-3 py-2">{p.supplierName}</td>
+                      <td className={`px-3 py-2 font-mono font-medium ${hasUnappliedAdvance(p) ? "text-blue-600" : ""}`} title={hasUnappliedAdvance(p) ? "Has an unapplied advance — click to knock it off against an invoice" : undefined}>
+                        {p.paymentNo}
+                      </td>
+                      <td className={`px-3 py-2 ${hasUnappliedAdvance(p) ? "text-blue-600" : ""}`}>{p.supplierName}</td>
                       <td className="px-3 py-2 text-gray-600">{formatDateDMY(p.date)}</td>
                       <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{formatRM(p.totalBankSen)}</td>
                       <td className="px-3 py-2 text-right text-gray-600">{p.lines?.length ?? 0}</td>
@@ -839,17 +907,76 @@ export default function SupplierPaymentsPage() {
                 <p className="text-gray-500 mb-1">Invoices paid</p>
                 <div className="border rounded-md overflow-hidden">
                   <table className="w-full text-sm">
-                    <thead className="bg-gray-50"><tr><th className="text-left px-3 py-1.5 font-medium text-gray-600">PI No</th><th className="text-right px-3 py-1.5 font-medium text-gray-600">Amount (RM)</th></tr></thead>
+                    <thead className="bg-gray-50"><tr><th className="text-left px-3 py-1.5 font-medium text-gray-600">PI No</th><th className="text-right px-3 py-1.5 font-medium text-gray-600">Amount (RM)</th><th></th></tr></thead>
                     <tbody>
                       {detail.lines.map((l) => (
-                        <tr key={l.purchaseInvoiceId} className="border-t">
-                          <td className="px-3 py-1.5 font-mono">{l.piNo}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums">{formatRM(l.amountSen)}</td>
+                        <tr key={l.id} className="border-t">
+                          {isUnappliedAdvanceLine(l) ? (
+                            <td className="px-3 py-1.5 font-medium text-blue-600" colSpan={1}>Advance (unapplied)</td>
+                          ) : (
+                            <td className="px-3 py-1.5 font-mono">{l.piNo}</td>
+                          )}
+                          <td className={`px-3 py-1.5 text-right tabular-nums ${isUnappliedAdvanceLine(l) ? "text-blue-600" : ""}`}>{formatRM(l.amountSen)}</td>
+                          <td className="px-3 py-1.5 text-right">
+                            {isUnappliedAdvanceLine(l) && koForAdvanceId !== l.id && (
+                              <button
+                                onClick={() => openKnockOff(l, detail.supplierId)}
+                                className="text-xs text-[#3E6570] hover:underline whitespace-nowrap"
+                              >
+                                Knock off
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+                {detail.lines.map(
+                  (l) =>
+                    koForAdvanceId === l.id && (
+                      <div key={`ko-${l.id}`} className="mt-3 p-3 border rounded-md bg-[#FAF8F5] space-y-2">
+                        <p className="text-xs text-gray-500">
+                          Apply part or all of this RM {formatRM(l.amountSen)} advance to an open invoice — no new
+                          payment is made, this just re-attributes it (manual only, per your rule).
+                        </p>
+                        <div className="flex flex-wrap items-end gap-2">
+                          <div className="flex-1 min-w-[10rem]">
+                            <label className="block text-xs text-gray-500 mb-0.5">Invoice</label>
+                            <select
+                              value={koPiId}
+                              onChange={(e) => setKoPiId(e.target.value)}
+                              className="w-full border border-[#E2DDD8] rounded-md px-2 py-1.5 text-sm"
+                              disabled={koLoadingPIs}
+                            >
+                              <option value="">{koLoadingPIs ? "Loading…" : "Select an invoice"}</option>
+                              {koOpenPIs.map((pi) => (
+                                <option key={pi.id} value={pi.id}>
+                                  {pi.piNo} — outstanding {formatCurrency(pi.amountSen - pi.paidAmountSen)}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="w-32">
+                            <label className="block text-xs text-gray-500 mb-0.5">Amount (RM)</label>
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={koAmountStr}
+                              onChange={(e) => setKoAmountStr(e.target.value)}
+                              className="w-full border border-[#E2DDD8] rounded-md px-2 py-1.5 text-sm text-right"
+                            />
+                          </div>
+                          <Button size="sm" onClick={submitKnockOff} disabled={koSubmitting || !koPiId}>
+                            {koSubmitting ? "Applying…" : "Apply"}
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => setKoForAdvanceId(null)} disabled={koSubmitting}>
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    ),
+                )}
               </div>
             </div>
           </div>

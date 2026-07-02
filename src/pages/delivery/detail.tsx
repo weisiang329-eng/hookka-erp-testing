@@ -30,7 +30,6 @@ import {
 // jspdf vendor chunk only ships when the user actually downloads a PDF.
 import PODDialog from "@/components/delivery/POD-dialog";
 import DoQrDialog from "@/components/delivery/do-qr-dialog";
-import { fetchDoQrDataUrl } from "@/lib/do-qr";
 import type { ProofOfDelivery } from "@/types";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
@@ -468,7 +467,7 @@ export default function DeliveryDetailPage() {
               variant="outline"
               size="sm"
               onClick={async () => {
-                const { generateDOPdf } = await import("@/lib/generate-do-pdf");
+                const { downloadUnifiedDoPdf } = await import("@/lib/unified-doc-download");
                 // Best-effort print enrichment (customerSO / customerRef /
                 // bedframe build params). Never block the download.
                 let extras: import("@/lib/generate-do-pdf").DOPrintExtras = {};
@@ -486,13 +485,7 @@ export default function DeliveryDetailPage() {
                 } catch {
                   /* graceful — PDF still renders without extras */
                 }
-                // Delivery-status QR onto the printed DO (best-effort, print
-                // flow only — never on the customer-email PDF).
-                extras.qrDataUrl = await fetchDoQrDataUrl("DO", order.id);
-                generateDOPdf(
-                  order as unknown as import("@/types").DeliveryOrder,
-                  extras,
-                );
+                await downloadUnifiedDoPdf(order, extras);
               }}
             >
               <Download className="h-4 w-4" /> Download DO PDF

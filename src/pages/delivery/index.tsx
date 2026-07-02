@@ -704,11 +704,8 @@ async function sendCustomerNotice(
       itemsBreakdown = buildDoComponentBreakdown(row.items, extras);
       customerPOIds = collectCustomerPOIds(row.items, extras, row.customerPOId);
       try {
-        const { generateDoPdfBase64 } = await import("@/lib/generate-do-pdf");
-        pdfBase64 = generateDoPdfBase64(
-          row as unknown as import("@/types").DeliveryOrder,
-          extras,
-        );
+        const { renderUnifiedDoBase64 } = await import("@/lib/unified-doc-download");
+        pdfBase64 = await renderUnifiedDoBase64(row, extras);
         pdfFilename = `${row.doNo.startsWith("DO-") ? row.doNo : `DO-${row.doNo}`}.pdf`;
       } catch {
         /* graceful — backend sends the notice without the attachment */
@@ -757,10 +754,10 @@ async function sendCustomerNotice(
           };
           const invoice = ij?.success ? ij.data : undefined;
           if (invoice) {
-            const { generateInvoicePdfBase64 } = await import(
-              "@/lib/generate-invoice-pdf"
+            const { renderUnifiedInvoiceBase64 } = await import(
+              "@/lib/unified-doc-download"
             );
-            pdfBase64 = generateInvoicePdfBase64(
+            pdfBase64 = await renderUnifiedInvoiceBase64(
               invoice,
               ej?.success ? ej.data : undefined,
             );

@@ -6,6 +6,7 @@
 // The row/grouping/ref logic mirrors renderDoInto in generate-do-pdf.ts.
 // ---------------------------------------------------------------------------
 import { catRank, catLabel, fmtPieces, buildSpec, uomOf, type BuildSpecExtra } from "./doc-line-format";
+import { amountInWords } from "./amount-in-words";
 import type { UnifiedDocData, UnifiedDocGroup } from "../api/lib/unified-do-invoice-pdf";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -238,7 +239,7 @@ export function buildUnifiedInvoiceData(input: UnifiedInvoiceInput, logoPngBase6
     subtotalSen: input.subtotalSen,
     taxSen: input.taxSen,
     totalSen: input.totalSen,
-    amountInWords: input.amountInWords,
+    amountInWords: input.amountInWords || amountInWords(input.totalSen),
     logoPngBase64,
   };
 }

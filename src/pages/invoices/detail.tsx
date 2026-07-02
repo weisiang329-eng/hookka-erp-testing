@@ -214,8 +214,9 @@ export default function InvoiceDetailPage() {
     } catch {
       /* graceful — PDF still renders without extras */
     }
-    const { generateInvoicePdf } = await import("@/lib/generate-invoice-pdf");
-    generateInvoicePdf(invoice, extras, mode);
+    const { downloadUnifiedInvoicePdf } = await import("@/lib/unified-doc-download");
+    void mode; // unified generator saves the file; "view" no longer applicable
+    await downloadUnifiedInvoicePdf(invoice, extras);
   };
 
   const sendInvoice = async () => {

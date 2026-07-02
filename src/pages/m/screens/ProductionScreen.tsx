@@ -22,6 +22,7 @@ import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, StatusPill } from "../components";
 import { M, M_ACCENT } from "../theme";
 import { resolveStatus, STATUS_MAPS, str, num, dateOnly } from "../config/helpers";
+import { useDebounced } from "../lib/use-debounced";
 
 type JobCard = { id?: string; departmentCode?: string; status?: string };
 type PO = {
@@ -67,11 +68,12 @@ export function ProductionScreen() {
     "/api/production-orders?fields=minimal&include=jobCards",
   );
   const [query, setQuery] = useState("");
+  const dquery = useDebounced(query);
   const [chip, setChip] = useState("all");
 
   const rows = useMemo(() => {
     const all = data?.success ? data.data ?? [] : [];
-    const q = query.trim().toLowerCase();
+    const q = dquery.trim().toLowerCase();
     return all.filter((po) => {
       const s = str(po, "status");
       // Live board — exclude terminal work (matches the desktop plant view).
@@ -91,12 +93,12 @@ export function ProductionScreen() {
         .toLowerCase();
       return hay.includes(q);
     });
-  }, [data, query, chip]);
+  }, [data, dquery, chip]);
 
   // Per-chip counts (over the live, searched set — ignoring the dept filter).
   const counts = useMemo(() => {
     const all = data?.success ? data.data ?? [] : [];
-    const q = query.trim().toLowerCase();
+    const q = dquery.trim().toLowerCase();
     const live = all.filter((po) => {
       const s = str(po, "status");
       if (s === "COMPLETED" || s === "CANCELLED") return false;
@@ -108,12 +110,13 @@ export function ProductionScreen() {
       return hay.includes(q);
     });
     const c: Record<string, number> = { all: live.length };
+    // (counts recompute on the debounced query — see dep array below)
     for (const po of live) {
       const d = str(po, "currentDepartment") || "";
       c[d] = (c[d] ?? 0) + 1;
     }
     return c;
-  }, [data, query]);
+  }, [data, dquery]);
 
   return (
     <>

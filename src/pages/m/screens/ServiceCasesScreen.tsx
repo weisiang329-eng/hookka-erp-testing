@@ -22,6 +22,7 @@ import { M, M_ACCENT } from "../theme";
 import { serviceCasesConfig } from "../config/modules";
 import { type ActiveFilter } from "../config/types";
 import { str, applyFilters, applySort, activeFilterCount } from "../config/helpers";
+import { useDebounced } from "../lib/use-debounced";
 
 type Sort = { key: string; dir: "asc" | "desc" } | null;
 
@@ -38,6 +39,7 @@ export function ServiceCasesScreen() {
   const source = serviceCasesConfig.sources[0];
   const { data, loading, error } = useCachedJson<unknown>(source.url);
   const [q, setQ] = useState("");
+  const dq = useDebounced(q);
   const [chip, setChip] = useState("all");
   const [filterOpen, setFilterOpen] = useState(false);
   const [filters, setFilters] = useState<Record<string, ActiveFilter>>({});
@@ -47,18 +49,18 @@ export function ServiceCasesScreen() {
 
   const rows = useMemo(() => {
     const byChip = allRows.filter((r) => chip === "all" || str(r, "status") === chip);
-    return applySort(applyFilters(byChip, source.columns, filters, q), source.columns, sort);
-  }, [allRows, chip, source, filters, q, sort]);
+    return applySort(applyFilters(byChip, source.columns, filters, dq), source.columns, sort);
+  }, [allRows, chip, source, filters, dq, sort]);
 
   const counts = useMemo(() => {
-    const searched = applyFilters(allRows, source.columns, filters, q);
+    const searched = applyFilters(allRows, source.columns, filters, dq);
     const c: Record<string, number> = { all: searched.length };
     for (const r of searched) {
       const s = str(r, "status");
       c[s] = (c[s] ?? 0) + 1;
     }
     return c;
-  }, [allRows, source, filters, q]);
+  }, [allRows, source, filters, dq]);
 
   const fCount = activeFilterCount(filters);
 

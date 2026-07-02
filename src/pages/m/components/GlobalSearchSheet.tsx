@@ -22,6 +22,7 @@ import { StatusPill } from "./StatusPill";
 import { M } from "../theme";
 import { cachedFetchJson, peekCache } from "@/lib/cached-fetch";
 import { MODULE_CONFIGS } from "../config/modules";
+import { useDebounced } from "../lib/use-debounced";
 import type { DataSource, ModuleConfig, RawRow, RowVM } from "../config/types";
 
 type Hit = {
@@ -138,8 +139,11 @@ export function GlobalSearchSheet({ open, onClose }: Props) {
     };
   }, [open]);
 
+  // Debounce the fan-out: searching EVERY module on each keystroke is the
+  // heaviest search in the app, so run it only after the user pauses.
+  const dq = useDebounced(q);
   const groups: Group[] = useMemo(() => {
-    const ql = q.trim().toLowerCase();
+    const ql = dq.trim().toLowerCase();
     if (!open || !ql) return [];
     const out: Group[] = [];
     for (const cfg of MODULE_CONFIGS) {
@@ -149,7 +153,7 @@ export function GlobalSearchSheet({ open, onClose }: Props) {
     return out;
     // warmTick is an intentional dep: re-run as cold endpoints finish warming.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, q, warmTick]);
+  }, [open, dq, warmTick]);
 
   const totalHits = useMemo(
     () => groups.reduce((n, g) => n + g.results.length, 0),

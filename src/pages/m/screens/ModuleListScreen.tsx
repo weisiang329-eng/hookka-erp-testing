@@ -21,6 +21,7 @@ import { SubTabs } from "../components/SubTabs";
 import { FilterSheet } from "../components/FilterSheet";
 import { M } from "../theme";
 import { type ModuleConfig, type ActiveFilter } from "../config/types";
+import { useDebounced } from "../lib/use-debounced";
 import { type FormSpec } from "../config/form-types";
 import { createSpecFor } from "../config/forms";
 import {
@@ -48,6 +49,9 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   );
   const [activeTab, setActiveTab] = useState(allTabs[0]?.key ?? "");
   const [search, setSearch] = useState("");
+  // Debounced query drives the (heavy) filter over the full list; the <input>
+  // stays bound to `search` so typing is instant even on 900–1,800-row lists.
+  const debouncedSearch = useDebounced(search);
   const [filterOpen, setFilterOpen] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
   // Sticky one-shot scan-result toast — clears after 2.5s.
@@ -226,16 +230,16 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
 
   const rows = useMemo(() => {
     const byTab = sourceRows.filter((r) => tab.match(r));
-    const filtered = applyFilters(byTab, source.columns, filters, search);
+    const filtered = applyFilters(byTab, source.columns, filters, debouncedSearch);
     return applySort(filtered, source.columns, sort);
-  }, [sourceRows, source, tab, filters, search, sort]);
+  }, [sourceRows, source, tab, filters, debouncedSearch, sort]);
 
   // How many rows are painted. Reset to the first page whenever the visible set
   // changes (tab / source / filters / search / sort) so "Show more" never
   // strands the list mid-scroll on a different dataset. Render-time state reset
   // (the codebase's endorsed alternative to setState-in-effect).
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
-  const resetKey = `${source.url}|${activeTab}|${search}|${JSON.stringify(
+  const resetKey = `${source.url}|${activeTab}|${debouncedSearch}|${JSON.stringify(
     filters,
   )}|${sort ? sort.key + sort.dir : ""}`;
   const [lastResetKey, setLastResetKey] = useState(resetKey);

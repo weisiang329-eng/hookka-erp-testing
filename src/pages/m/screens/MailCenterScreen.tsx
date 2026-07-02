@@ -20,6 +20,7 @@ import { mailConfig } from "../config/modules";
 import { newMailSpec } from "../config/forms";
 import { type FormSpec } from "../config/form-types";
 import { str, num, dateOnly, shortDate } from "../config/helpers";
+import { useDebounced } from "../lib/use-debounced";
 
 const AV = ["#6B5C32", "#3E6570", "#4F7C3A", "#9A3A2D", "#6B4A6D"];
 const avColor = (s: string) => AV[(s || "?").charCodeAt(0) % 5];
@@ -38,11 +39,12 @@ export function MailCenterScreen() {
   const { data, loading, error } = useCachedJson<unknown>(source.url);
   const [folder, setFolder] = useState<"inbox" | "sent">("inbox");
   const [q, setQ] = useState("");
+  const dq = useDebounced(q);
   const [composeSpec, setComposeSpec] = useState<FormSpec | null>(null);
 
   const rows = useMemo(() => {
     const all = data ? source.select(data) : [];
-    const n = q.trim().toLowerCase();
+    const n = dq.trim().toLowerCase();
     return all.filter((r) => {
       const inFolder = folder === "sent" ? r.hasOutbound === true : r.trashedAt == null;
       if (!inFolder) return false;
@@ -53,7 +55,7 @@ export function MailCenterScreen() {
         return false;
       return true;
     });
-  }, [data, source, folder, q]);
+  }, [data, source, folder, dq]);
 
   return (
     <>

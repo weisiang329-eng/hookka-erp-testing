@@ -33,7 +33,7 @@ import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/
 import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "../lib/doc-number-service";
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
-import { legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
+import { apRowBeforeOpening, legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
 import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
 import { costAsOfByPo } from "../../lib/cost-attribution";
 import { STOCK_TAKE_ITEM_ALIAS_SEED_2026_05 } from "../lib/stock-take-item-alias-seed-2026-05";
@@ -374,8 +374,9 @@ app.get("/aging", async (c) => {
           isOpening: number | null;
         }>(),
         c.var.DB.prepare(
-          "SELECT supplierId, supplierName, amountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices",
+          "SELECT id, supplierId, supplierName, amountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices",
         ).all<{
+          id: string;
           supplierId: string;
           supplierName: string;
           amountSen: number;
@@ -386,6 +387,7 @@ app.get("/aging", async (c) => {
         }>(),
       ]);
       const obDateAg = await getOpeningDate(c.var.DB);
+      const apExclAg = await loadOpeningApExcludes(c.var.DB);
 
       const arMap = new Map<string, ArAgingRow>();
       for (const i of invRes.results ?? []) {
@@ -412,7 +414,8 @@ app.get("/aging", async (c) => {
 
       const apMap = new Map<string, ApAgingRow>();
       for (const p of piRes.results ?? []) {
-        if (rowBeforeOpening(p.invoiceDate, obDateAg, p.isOpening)) continue; // pre-opening: not extracted
+        // Pre-opening PIs count as opening by default; only excluded ones drop.
+        if (apRowBeforeOpening({ id: p.id, date: p.invoiceDate, isOpening: p.isOpening }, obDateAg, apExclAg)) continue;
         if (["DRAFT", "CANCELLED", "PAID"].includes(p.status)) continue;
         const outstanding = Number(p.amountSen) || 0;
         if (outstanding <= 0) continue;
@@ -2184,6 +2187,7 @@ app.get("/ap-control", async (c) => {
   // PARTIAL_PAID); if paid_amount_sen is STILL absent (ALTER couldn't run), fall
   // back to the original (APPROVED only, paid=0) so the panel always renders.
   type PiAgingRow = {
+    id: string;
     supplierId: string;
     supplierName: string;
     piNo: string;
@@ -2197,13 +2201,13 @@ app.get("/ap-control", async (c) => {
   let piRes: { results?: PiAgingRow[] };
   try {
     piRes = await c.var.DB.prepare(
-      `SELECT supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate, invoiceDate, isOpening
+      `SELECT id, supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
         WHERE status IN ('CONFIRMED', 'APPROVED', 'PARTIAL_PAID')`,
     ).all<PiAgingRow>();
   } catch {
     piRes = await c.var.DB.prepare(
-      `SELECT supplierId, supplierName, piNo, amountSen, status, dueDate, invoiceDate, isOpening
+      `SELECT id, supplierId, supplierName, piNo, amountSen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
         WHERE status IN ('CONFIRMED', 'APPROVED')`,
     ).all<PiAgingRow>();
@@ -2260,9 +2264,11 @@ app.get("/ap-control", async (c) => {
     totalSen: number;
   };
   const bySupplier = new Map<string, ApAging>();
+  const apExclCtl = await loadOpeningApExcludes(c.var.DB);
   let piOutstandingSen = 0;
   for (const pi of piRes.results ?? []) {
-    if (rowBeforeOpening(pi.invoiceDate, obDateAp, pi.isOpening)) continue; // pre-opening: not extracted
+    // Pre-opening PIs count as opening by default; only excluded ones drop.
+    if (apRowBeforeOpening({ id: pi.id, date: pi.invoiceDate, isOpening: pi.isOpening }, obDateAp, apExclCtl)) continue;
     // Net outstanding = face − paid (paid includes cash payments AND allocated
     // CN credits), so a knocked-off discount drops the subledger exactly once.
     const amt = (Number(pi.amountSen) || 0) - (Number(pi.paid_amount_sen) || 0);
@@ -2336,11 +2342,11 @@ app.get("/supplier-statement", async (c) => {
       // Include PARTIAL_PAID (a partly-paid PI still owes money — its full
       // amount is a credit here, the payment a debit; omitting it would drop
       // the credit leg and unbalance the statement). Matches /creditor-ledger.
-      `SELECT piNo, invoiceDate, amountSen, status, isOpening FROM purchase_invoices
+      `SELECT id, piNo, invoiceDate, amountSen, status, isOpening FROM purchase_invoices
         WHERE supplierId = ? AND status IN ('CONFIRMED','APPROVED','PARTIAL_PAID','PAID')`,
     )
       .bind(supplierId)
-      .all<{ piNo: string; invoiceDate: string; amountSen: number; status: string; isOpening: number | null }>(),
+      .all<{ id: string; piNo: string; invoiceDate: string; amountSen: number; status: string; isOpening: number | null }>(),
     c.var.DB.prepare(
       // Exclude #6 supplier-discount markers (method='CREDIT_NOTE', amountSen=0,
       // no GL leg) — they'd render as 0.00 PAYMENT noise rows; the CN itself
@@ -2368,6 +2374,10 @@ app.get("/supplier-statement", async (c) => {
     isOpening?: number | null;
   };
   const lines: Line[] = [];
+  // Pre-opening PIs count as opening by default (owner rule 2026-07-02) — mark
+  // every non-excluded PI floor-exempt here. Harmless for post-opening rows
+  // (the floor only consults the flag for pre-opening dates).
+  const apExclSs = await loadOpeningApExcludes(c.var.DB);
   for (const pi of piRes.results ?? [])
     lines.push({
       date: pi.invoiceDate ?? "",
@@ -2375,7 +2385,7 @@ app.get("/supplier-statement", async (c) => {
       type: "PURCHASE_INVOICE",
       debitSen: 0,
       creditSen: Number(pi.amountSen) || 0,
-      isOpening: pi.isOpening,
+      isOpening: pi.isOpening || (apExclSs.has(pi.id) ? 0 : 1),
     });
   for (const p of payRes.results ?? [])
     lines.push({
@@ -2485,13 +2495,16 @@ app.get("/creditor-ledger", async (c) => {
   const to = c.req.query("to") || "9999-12-31";
   const [supRes, piRes, payRes, pcnRes] = await Promise.all([
     c.var.DB.prepare("SELECT id, name, code FROM suppliers").all<{ id: string; name: string; code: string | null }>(),
-    c.var.DB.prepare(`SELECT supplierId, piNo, invoiceDate, amountSen, isOpening FROM purchase_invoices WHERE status IN ('CONFIRMED','APPROVED','PARTIAL_PAID','PAID')`).all<{ supplierId: string; piNo: string; invoiceDate: string; amountSen: number; isOpening: number | null }>(),
+    c.var.DB.prepare(`SELECT id, supplierId, piNo, invoiceDate, amountSen, isOpening FROM purchase_invoices WHERE status IN ('CONFIRMED','APPROVED','PARTIAL_PAID','PAID')`).all<{ id: string; supplierId: string; piNo: string; invoiceDate: string; amountSen: number; isOpening: number | null }>(),
     c.var.DB.prepare(`SELECT supplierId, paymentNo, date, amountSen FROM supplier_payments WHERE COALESCE(method,'') <> 'CREDIT_NOTE' AND paymentNo NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'supplier_payment' AND state IN ('VOID','DELETED'))`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
     c.var.DB.prepare(`SELECT supplierId, noteNumber, date, totalAmount FROM purchase_credit_notes WHERE status = 'POSTED'`).all<{ supplierId: string; noteNumber: string; date: string; totalAmount: number }>(),
   ]);
   const byParty = new Map<string, LedgerLine[]>();
   const push = (id: string, l: LedgerLine) => { if (!id) return; const arr = byParty.get(id) ?? []; arr.push(l); byParty.set(id, arr); };
-  for (const pi of piRes.results ?? []) push(pi.supplierId, { date: pi.invoiceDate ?? "", ref: pi.piNo, type: "PURCHASE_INVOICE", debitSen: 0, creditSen: Number(pi.amountSen) || 0, isOpening: pi.isOpening });
+  // Pre-opening PIs count as opening by default — non-excluded rows are marked
+  // floor-exempt at load (no effect on post-opening rows).
+  const apExclCl = await loadOpeningApExcludes(c.var.DB);
+  for (const pi of piRes.results ?? []) push(pi.supplierId, { date: pi.invoiceDate ?? "", ref: pi.piNo, type: "PURCHASE_INVOICE", debitSen: 0, creditSen: Number(pi.amountSen) || 0, isOpening: pi.isOpening || (apExclCl.has(pi.id) ? 0 : 1) });
   for (const p of payRes.results ?? []) push(p.supplierId, { date: p.date ?? "", ref: p.paymentNo, type: "PAYMENT", debitSen: Number(p.amountSen) || 0, creditSen: 0 });
   for (const n of pcnRes.results ?? []) push(n.supplierId, { date: n.date ?? "", ref: n.noteNumber, type: "PURCHASE_CN", debitSen: Number(n.totalAmount) || 0, creditSen: 0 });
 
@@ -9261,6 +9274,41 @@ async function loadDocDateResolver(
 // Per-control-account sums of the opening invoices: AR per parseDebtorCode
 // control (300-x / 305-x), AP all into 400-0000. These become the locked
 // control legs of the GL opening batch.
+// ---------------------------------------------------------------------------
+// Mid-year opening include rule (owner rule 2026-07-02): PIs entered BEFORE the
+// opening date count as opening seeds BY DEFAULT — without touching the rows
+// (iron rule: never edit existing entries). Exceptions (wrong/phantom entries
+// that must stay hidden) live in `opening_ap_excludes`. Runtime self-applied —
+// no manual migration required.
+// ---------------------------------------------------------------------------
+async function ensureOpeningApExcludes(db: Env["Variables"]["DB"]): Promise<void> {
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS opening_ap_excludes (
+         pi_id TEXT PRIMARY KEY,
+         org_id TEXT,
+         created_at TEXT
+       )`,
+    )
+    .run();
+}
+
+async function loadOpeningApExcludes(db: Env["Variables"]["DB"]): Promise<Set<string>> {
+  try {
+    await ensureOpeningApExcludes(db);
+    const res = await db
+      .prepare("SELECT pi_id FROM opening_ap_excludes")
+      .all<{ piId?: string; pi_id?: string }>();
+    return new Set(
+      (res.results ?? [])
+        .map((r) => String(r.piId ?? r.pi_id ?? ""))
+        .filter(Boolean),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
 async function openingControlSums(db: Env["Variables"]["DB"]): Promise<{
   arByControl: Map<string, number>;
   arTotalSen: number;
@@ -9293,6 +9341,28 @@ async function openingControlSums(db: Env["Variables"]["DB"]): Promise<{
     apTotalSen = Number(pi?.s) || 0;
   } catch {
     /* isOpening column missing — migration 0158 not applied yet */
+  }
+  // Mid-year opening: pre-opening PIs count as opening by default (see
+  // ensureOpeningApExcludes above) — add their face value to the 400-0000
+  // control leg alongside the explicitly-keyed opening PIs.
+  try {
+    const od = await getOpeningDate(db);
+    if (od) {
+      await ensureOpeningApExcludes(db);
+      const inc = await db
+        .prepare(
+          `SELECT COALESCE(SUM(amountSen),0) AS s FROM purchase_invoices
+            WHERE COALESCE(isOpening, 0) = 0
+              AND status NOT IN ('DRAFT','CANCELLED')
+              AND invoiceDate < ?
+              AND id NOT IN (SELECT pi_id FROM opening_ap_excludes)`,
+        )
+        .bind(od)
+        .first<{ s: number }>();
+      apTotalSen += Number(inc?.s) || 0;
+    }
+  } catch {
+    /* opening date not set or excludes table unavailable — no auto-include */
   }
   return { arByControl, arTotalSen, apTotalSen };
 }
@@ -9358,6 +9428,29 @@ app.get("/opening-balance", async (c) => {
   } catch {
     migrationMissing = true;
   }
+  // Mid-year opening: PIs entered before the opening date count as opening by
+  // default (rows untouched); the owner can exclude wrong/phantom entries.
+  let preExistingAp: unknown[] = [];
+  try {
+    if (openingDate) {
+      await ensureOpeningApExcludes(db);
+      const pe = await db
+        .prepare(
+          `SELECT id, piNo, supplierName, invoiceDate, amountSen, status,
+                  CASE WHEN id IN (SELECT pi_id FROM opening_ap_excludes) THEN 1 ELSE 0 END AS excluded
+             FROM purchase_invoices
+            WHERE COALESCE(isOpening, 0) = 0
+              AND status NOT IN ('DRAFT','CANCELLED')
+              AND invoiceDate < ?
+            ORDER BY supplierName, invoiceDate, piNo`,
+        )
+        .bind(openingDate)
+        .all();
+      preExistingAp = pe.results ?? [];
+    }
+  } catch {
+    /* excludes table unavailable — list stays empty */
+  }
   const sums = await openingControlSums(db);
   return c.json({
     success: true,
@@ -9368,11 +9461,66 @@ app.get("/opening-balance", async (c) => {
       glRows,
       arInvoices,
       apInvoices,
+      preExistingAp,
       arByControl: Object.fromEntries(sums.arByControl),
       arTotalSen: sums.arTotalSen,
       apTotalSen: sums.apTotalSen,
     },
   });
+});
+
+// Toggle a pre-opening PI's opening exclusion. Excluded PIs (wrong/phantom
+// entries) stay hidden behind the opening floor; everything else counts as
+// opening by default. Writes ONLY the exclude table — the PI row is untouched.
+app.post("/opening-balance/ap-exclude", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { piId?: string; excluded?: boolean };
+  const piId = String(body.piId ?? "").trim();
+  if (!piId) {
+    return c.json({ success: false, error: "piId is required" }, 400);
+  }
+  const db = c.var.DB;
+  const pi = await db
+    .prepare("SELECT id, piNo FROM purchase_invoices WHERE id = ?")
+    .bind(piId)
+    .first<{ id: string; piNo: string }>();
+  if (!pi) {
+    return c.json({ success: false, error: "Purchase invoice not found" }, 404);
+  }
+  await ensureOpeningApExcludes(db);
+  const excluded = body.excluded !== false;
+  if (excluded) {
+    await db
+      .prepare(
+        `INSERT INTO opening_ap_excludes (pi_id, org_id, created_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(pi_id) DO NOTHING`,
+      )
+      .bind(piId, getOrgId(c), new Date().toISOString())
+      .run();
+  } else {
+    await db.prepare("DELETE FROM opening_ap_excludes WHERE pi_id = ?").bind(piId).run();
+  }
+  // Bump kv_config so the aging snapshot (sourced on kv_config) rebuilds with
+  // the new include set.
+  await db
+    .prepare(
+      `INSERT INTO kv_config (key, value, updated_at)
+         VALUES ('opening_ap_excludes_rev', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           value = excluded.value,
+           updated_at = excluded.updated_at`,
+    )
+    .bind(JSON.stringify(Date.now()), new Date().toISOString())
+    .run();
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: piId,
+    action: "update",
+    after: { openingExcluded: excluded, piNo: pi.piNo },
+  });
+  return c.json({ success: true, data: { piId, excluded } });
 });
 
 // Add ONE opening invoice (AR). Subledger only — no GL legs, no SST.
@@ -9606,12 +9754,10 @@ app.post("/opening-balance/post", async (c) => {
       if (!acct) {
         return c.json({ success: false, error: `Account ${r.code} not found` }, 400);
       }
-      if (!["ASSET", "LIABILITY", "EQUITY"].includes(acct.type)) {
-        return c.json(
-          { success: false, error: `${r.code} is a P&L account — opening balances cover BALANCE SHEET accounts only (P&L history belongs to prior years' retained earnings)` },
-          400,
-        );
-      }
+      // Mid-year opening (owner rule 2026-07-02): P&L accounts ARE accepted —
+      // the opening date sits inside the financial year (FYE 31 Aug), so the
+      // old books' YTD sales/purchases/expenses belong in THIS year's P&L,
+      // not in prior-year retained earnings.
       if (acct.specialAccountType === "SDC" || acct.specialAccountType === "SCC") {
         return c.json(
           { success: false, error: `${r.code} is a debtor/creditor control account — its opening comes from the per-customer/supplier opening invoices automatically` },

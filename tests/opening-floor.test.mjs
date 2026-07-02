@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  apRowBeforeOpening,
   isOpeningSourceType,
   legBeforeOpening,
   rowBeforeOpening,
@@ -64,4 +65,35 @@ test("rowBeforeOpening — opening-seed invoice ALWAYS kept, even dated before",
 test("rowBeforeOpening — row ON / after opening day → kept", () => {
   assert.equal(rowBeforeOpening("2026-05-22", OPEN, 0), false);
   assert.equal(rowBeforeOpening("2026-06-01", OPEN, 0), false);
+});
+
+// --- apRowBeforeOpening: mid-year default-include rule (owner 2026-07-02) ---
+// Pre-opening PIs count as opening BY DEFAULT; only excluded ids are floored.
+
+const EXCL = new Set(['pi-bad1', 'pi-bad2']);
+
+test('apRowBeforeOpening — pre-opening + NOT excluded → kept (counted as opening)', () => {
+  assert.equal(apRowBeforeOpening({ id: 'pi-keep', date: '2026-05-05', isOpening: 0 }, OPEN, EXCL), false);
+});
+
+test('apRowBeforeOpening — pre-opening + excluded → floored (hidden)', () => {
+  assert.equal(apRowBeforeOpening({ id: 'pi-bad1', date: '2026-05-21', isOpening: 0 }, OPEN, EXCL), true);
+});
+
+test('apRowBeforeOpening — explicit opening seed never floored, even if excluded by mistake', () => {
+  assert.equal(apRowBeforeOpening({ id: 'pi-bad1', date: '2026-05-21', isOpening: 1 }, OPEN, EXCL), false);
+});
+
+test('apRowBeforeOpening — post-opening rows never floored, excluded or not', () => {
+  assert.equal(apRowBeforeOpening({ id: 'pi-bad2', date: '2026-06-10', isOpening: 0 }, OPEN, EXCL), false);
+  assert.equal(apRowBeforeOpening({ id: 'pi-new', date: '2026-05-22', isOpening: 0 }, OPEN, EXCL), false);
+});
+
+test('apRowBeforeOpening — no opening date → never floored', () => {
+  assert.equal(apRowBeforeOpening({ id: 'pi-bad1', date: '2026-05-01', isOpening: 0 }, null, EXCL), false);
+});
+
+test('apRowBeforeOpening — null id / missing date handled safely', () => {
+  assert.equal(apRowBeforeOpening({ id: null, date: null, isOpening: 0 }, OPEN, EXCL), false);
+  assert.equal(apRowBeforeOpening({ id: null, date: '2026-05-01', isOpening: 0 }, OPEN, new Set([''])), true);
 });

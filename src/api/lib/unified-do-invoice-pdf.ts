@@ -94,21 +94,34 @@ function money(sen: number): string {
   });
 }
 
-// Truncate to fit maxW with a trailing ellipsis — the guard that keeps any
-// single-line cell (order refs, code, qty breakdown, grand total) from bleeding
-// into the next column when real data runs long. Binary-search the cut point.
-function clip(font: PDFFont, text: string, maxW: number, size: number): string {
-  if (!text) return "";
-  if (font.widthOfTextAtSize(text, size) <= maxW) return text;
-  const ell = "…";
-  let lo = 0;
-  let hi = text.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (font.widthOfTextAtSize(text.slice(0, mid) + ell, size) <= maxW) lo = mid;
-    else hi = mid - 1;
+// Wrap text to fit maxW, matching how the original jsPDF-autotable documents
+// handle overflow (`overflow: "linebreak"`): word-wrap, and break any single
+// token that is itself wider than the column by character. The row grows to fit
+// the wrapped lines — nothing is ever truncated or pushed under the next column
+// (owner 2026-07-02: "照我們的怎麼處理就怎麼處理" — wrap, don't ellipsis).
+function wrapHard(font: PDFFont, text: string, maxW: number, size: number, maxLines = 12): string[] {
+  if (!text) return [];
+  const fits = (s: string) => font.widthOfTextAtSize(s, size) <= maxW;
+  const out: string[] = [];
+  let cur = "";
+  const flush = () => { if (cur) { out.push(cur); cur = ""; } };
+  for (let w of text.split(/\s+/).filter(Boolean)) {
+    // A single token wider than the column: break it by character.
+    while (!fits(w) && out.length < maxLines) {
+      flush();
+      let i = 1;
+      while (i < w.length && fits(w.slice(0, i + 1))) i++;
+      out.push(w.slice(0, i));
+      w = w.slice(i);
+    }
+    if (out.length >= maxLines) break;
+    const cand = cur ? `${cur} ${w}` : w;
+    if (fits(cand)) cur = cand;
+    else { flush(); cur = w; }
+    if (out.length >= maxLines) break;
   }
-  return (text.slice(0, lo).trimEnd() || text.slice(0, 1)) + ell;
+  flush();
+  return out.slice(0, maxLines);
 }
 
 function wrap(font: PDFFont, text: string, maxW: number, size: number, maxLines = 4): string[] {
@@ -236,31 +249,38 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
     y -= 16;
 
     for (const it of g.items) {
-      const refLines = it.orderRefs.slice(0, 4);
+      // Every column wraps within its width (row grows to fit the tallest) —
+      // exactly how the autotable original handles long data. The Quantity
+      // column is the gap between the Set number and its right edge.
+      const qtyColW = xCol4Right - (xSet + 18);
+      const refWrapped: string[] = [];
+      for (const r of it.orderRefs.slice(0, 4)) refWrapped.push(...wrapHard(fonts.helv, r, wOrder - 2, 7.5, 3));
+      const codeWrapped = wrapHard(fonts.bold, it.code, wDesc, 8, 2);
+      const nameWrapped = wrapHard(fonts.helv, it.name, wDesc, 7.5, 3);
       const specWrapped: string[] = [];
-      for (const s of it.specLines) specWrapped.push(...wrap(fonts.helv, s, wDesc, 7.5, 3));
-      const nameWrapped = wrap(fonts.helv, it.name, wDesc, 7.5, 2);
-      const descLineCount = 1 + nameWrapped.length + specWrapped.length; // code + name + spec
-      const rowH = Math.max(refLines.length, descLineCount) * 9.3 + 6;
+      for (const s of it.specLines) specWrapped.push(...wrapHard(fonts.helv, s, wDesc, 7.5, 3));
+      const qtyWrapped = isDO ? wrapHard(fonts.helv, it.qtyBreakdown || "-", qtyColW, 7.5, 4) : [];
+      const descLineCount = codeWrapped.length + nameWrapped.length + specWrapped.length;
+      const rowLines = Math.max(refWrapped.length, descLineCount, qtyWrapped.length, 1);
+      const rowH = rowLines * 9.3 + 6;
       ensureSpace(rowH);
 
-      refLines.forEach((r, i) => {
-        // Clip each ref to the Order column so a long PO/SO/REF can't run under
-        // the Description text.
-        page.drawText(clip(fonts.helv, r, wOrder - 2, 7.5), { x: xOrder, y: y - i * 9.3, size: 7.5, font: fonts.helv, color: INK });
+      refWrapped.forEach((r, i) => {
+        page.drawText(r, { x: xOrder, y: y - i * 9.3, size: 7.5, font: fonts.helv, color: INK });
       });
-      // Description: code (bold, clipped to the column) then name then spec
-      page.drawText(clip(fonts.bold, it.code, wDesc, 8), { x: xDesc, y, size: 8, font: fonts.bold, color: INK });
-      let dl = 1;
+      // Description: code (bold) then name then spec, each wrapped to the column.
+      let dl = 0;
+      for (const ln of codeWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 8, font: fonts.bold, color: INK }); dl++; }
       for (const ln of nameWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 7.5, font: fonts.helv, color: INK }); dl++; }
       for (const ln of specWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 7.5, font: fonts.helv, color: MUTED }); dl++; }
 
       page.drawText(String(it.set), { x: xSet, y, size: 8, font: fonts.helv, color: INK });
       if (isDO) {
-        // Clip the pieces breakdown to its column (xSet..xCol4Right) so a
-        // multi-component repair line ("3 HB + 6 Divan + 3 R Arm + …") can't
-        // spill left across the row.
-        rightText(page, clip(fonts.helv, it.qtyBreakdown || "-", xCol4Right - xSet - 16, 7.5), xCol4Right, y, 7.5, fonts.helv, INK);
+        // Pieces breakdown wraps within the Quantity column (a multi-component
+        // repair line stacks over several lines instead of spilling across).
+        (qtyWrapped.length ? qtyWrapped : ["-"]).forEach((ln, i) => {
+          rightText(page, ln, xCol4Right, y - i * 9.3, 7.5, fonts.helv, INK);
+        });
         rightText(page, String(it.totalQty ?? ""), xCol5Right, y, 8, fonts.helv, INK);
       } else {
         rightText(page, money(it.priceSen ?? 0), xCol4Right, y, 8, fonts.helv, INK);
@@ -275,20 +295,25 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
   }
 
   // ── Totals row ──────────────────────────────────────────────────────────
-  // Reserve the WHOLE tail (totals + DO breakdown / invoice summary + the
-  // signature block) so it never crosses the footer — if it won't fit, push
-  // the entire block to a fresh page (no table header on that page).
-  ensureSpace(isDO ? 88 : 138, false);
+  // The DO grand breakdown gets its OWN full-width wrapping row (like the
+  // original's colSpan-5 footer row) so a many-component total wraps across the
+  // page instead of being squeezed off the Quantity cell (owner "被擠出去" fix).
+  const gbLines =
+    isDO && data.grandBreakdown
+      ? wrapHard(fonts.helv, data.grandBreakdown, PAGE_W - MARGIN * 2, 8, 4)
+      : [];
+  // Reserve the WHOLE tail (totals + breakdown / invoice summary + signature
+  // block) so it never crosses the footer — else push it to a fresh page.
+  ensureSpace((isDO ? 70 + gbLines.length * 11 : 138), false);
   page.drawRectangle({ x: MARGIN, y: y + 2, width: PAGE_W - MARGIN * 2, height: 0.7, color: INK });
   y -= 6;
   rightText(page, "Total", xSet - 6, y, 8.5, fonts.bold);
   page.drawText(`${data.totalSets} SETS`, { x: xSet, y, size: 8.5, font: fonts.bold, color: INK });
   if (isDO) {
     rightText(page, `${data.totalItems ?? 0} ITEMS`, xCol5Right, y, 8.5, fonts.bold);
-    if (data.grandBreakdown) {
-      y -= 12;
-      // Clip the aggregate breakdown so a many-component total stays on its row.
-      rightText(page, clip(fonts.helv, data.grandBreakdown, xCol5Right - MARGIN - 40, 8), xCol5Right, y, 8, fonts.helv, MUTED);
+    for (const ln of gbLines) {
+      y -= 11;
+      rightText(page, ln, xCol5Right, y, 8, fonts.helv, MUTED);
     }
   } else {
     rightText(page, "Subtotal", xCol4Right, y, 8.5, fonts.bold);

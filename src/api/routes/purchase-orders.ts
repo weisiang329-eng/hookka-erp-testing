@@ -146,7 +146,7 @@ async function loadSupplierSkuBindings(
   if (ids.length === 0) return m;
   const ph = ids.map(() => "?").join(", ");
   const res = await db
-    .prepare(`SELECT * FROM supplier_materials WHERE supplierId IN (${ph})`)
+    .prepare(`SELECT * FROM supplier_material_bindings WHERE supplierId IN (${ph})`)
     .bind(...ids)
     .all<Record<string, unknown>>();
   for (const r of res.results ?? []) {
@@ -292,14 +292,7 @@ app.get("/", async (c) => {
     poRows.map((p) => p.supplierId),
   );
   fillBlankSupplierSku(data, bindings);
-  // TEMP probe (BUG-2026-07-02-002): confirms this build is live on prod +
-  // whether the binding query returns rows. Remove once the deploy path is
-  // verified.
-  return c.json({
-    success: true,
-    data,
-    _skuProbe: { v: "3", bindingKeys: bindings.size },
-  });
+  return c.json({ success: true, data });
 });
 
 // POST /api/purchase-orders — create PO + items atomically

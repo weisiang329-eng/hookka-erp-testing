@@ -674,6 +674,66 @@ type ProductionOrderApiShape = {
 // PDF plus display fields derived from ONE fetched print-extras object — the
 // same object that feeds the attached PDF, so email and PDF cannot diverge.
 // ---------------------------------------------------------------------------
+// Render the DELIVERED invoice notice PDF (the SAME unified generator the
+// Invoice page downloads) for a delivered DO — find its live invoice, pull the
+// invoice + print-extras, render to base64. Returns {} on any failure so the
+// caller falls back to the backend's own server-rendered invoice. Shared by
+// the auto-notice (sendCustomerNotice) AND the manual Re-send so both attach
+// the exact same document.
+async function renderDeliveredInvoicePdf(
+  doId: string,
+  customerId: string,
+): Promise<{ pdfBase64?: string; pdfFilename?: string }> {
+  try {
+    const lr = await fetch(
+      `/api/invoices?customerId=${encodeURIComponent(customerId)}&_v=${Date.now()}`,
+      { cache: "no-store" },
+    );
+    const lj = (await lr.json()) as {
+      success?: boolean;
+      data?: Array<{
+        id: string;
+        invoiceNo: string;
+        deliveryOrderId?: string;
+        status?: string;
+        createdAt?: string;
+      }>;
+    };
+    const slim = (lj?.success ? (lj.data ?? []) : [])
+      .filter((inv) => inv.deliveryOrderId === doId && inv.status !== "CANCELLED")
+      .sort((a, b) =>
+        String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")),
+      )[0];
+    if (!slim) return {};
+    const [ir, er] = await Promise.all([
+      fetch(`/api/invoices/${encodeURIComponent(slim.id)}`),
+      fetch(`/api/invoices/${encodeURIComponent(slim.id)}/print-extras`),
+    ]);
+    const ij = (await ir.json()) as {
+      success?: boolean;
+      data?: import("@/types").Invoice;
+    };
+    const ej = (await er.json().catch(() => ({}))) as {
+      success?: boolean;
+      data?: import("@/lib/generate-invoice-pdf").InvoicePrintExtras;
+    };
+    const invoice = ij?.success ? ij.data : undefined;
+    if (!invoice) return {};
+    const { renderUnifiedInvoiceBase64 } = await import(
+      "@/lib/unified-doc-download"
+    );
+    return {
+      pdfBase64: await renderUnifiedInvoiceBase64(
+        invoice,
+        ej?.success ? ej.data : undefined,
+      ),
+      pdfFilename: `INV-${invoice.invoiceNo}.pdf`,
+    };
+  } catch {
+    return {};
+  }
+}
+
 async function sendCustomerNotice(
   row: DeliveryOrderRow,
   kind: "DISPATCHED" | "DELIVERED",
@@ -711,62 +771,13 @@ async function sendCustomerNotice(
         /* graceful — backend sends the notice without the attachment */
       }
     } else {
-      // DELIVERED — find the DO's live invoice (auto-created by the
-      // DELIVERED cascade, committed before this runs) and render the real
-      // branded invoice PDF. Any failure → POST without pdfBase64 and let
-      // the backend attach its server-rendered fallback.
-      try {
-        const lr = await fetch(
-          `/api/invoices?customerId=${encodeURIComponent(row.customerId)}&_v=${Date.now()}`,
-          { cache: "no-store" },
-        );
-        const lj = (await lr.json()) as {
-          success?: boolean;
-          data?: Array<{
-            id: string;
-            invoiceNo: string;
-            deliveryOrderId?: string;
-            status?: string;
-            createdAt?: string;
-          }>;
-        };
-        const candidates = (lj?.success ? (lj.data ?? []) : [])
-          .filter(
-            (inv) =>
-              inv.deliveryOrderId === row.id && inv.status !== "CANCELLED",
-          )
-          .sort((a, b) =>
-            String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")),
-          );
-        const slim = candidates[0];
-        if (slim) {
-          const [ir, er] = await Promise.all([
-            fetch(`/api/invoices/${encodeURIComponent(slim.id)}`),
-            fetch(`/api/invoices/${encodeURIComponent(slim.id)}/print-extras`),
-          ]);
-          const ij = (await ir.json()) as {
-            success?: boolean;
-            data?: import("@/types").Invoice;
-          };
-          const ej = (await er.json().catch(() => ({}))) as {
-            success?: boolean;
-            data?: import("@/lib/generate-invoice-pdf").InvoicePrintExtras;
-          };
-          const invoice = ij?.success ? ij.data : undefined;
-          if (invoice) {
-            const { renderUnifiedInvoiceBase64 } = await import(
-              "@/lib/unified-doc-download"
-            );
-            pdfBase64 = await renderUnifiedInvoiceBase64(
-              invoice,
-              ej?.success ? ej.data : undefined,
-            );
-            pdfFilename = `INV-${invoice.invoiceNo}.pdf`;
-          }
-        }
-      } catch {
-        /* graceful — backend attaches its own fallback invoice PDF */
-      }
+      // DELIVERED — find the DO's live invoice (auto-created by the DELIVERED
+      // cascade, committed before this runs) and render the real unified
+      // invoice PDF. Any failure → {} → POST without pdfBase64 and let the
+      // backend attach its server-rendered fallback.
+      const rendered = await renderDeliveredInvoicePdf(row.id, row.customerId);
+      pdfBase64 = rendered.pdfBase64;
+      pdfFilename = rendered.pdfFilename;
     }
 
     const r = await fetch(
@@ -2784,12 +2795,24 @@ export default function DeliveryPage() {
       return;
     setResendingId(row.id);
     try {
+      // Render the SAME unified invoice PDF the Invoice page downloads so an
+      // edited-then-resent invoice carries the exact document (not the backend
+      // fallback). Only for DELIVERED (invoice); DISPATCHED re-send leaves the
+      // backend to render the DO. {} on failure → backend fallback.
+      const rendered =
+        kind === "DELIVERED"
+          ? await renderDeliveredInvoicePdf(row.id, row.customerId)
+          : {};
       const r = await fetch(
         `/api/delivery-orders/${encodeURIComponent(row.id)}/resend-notice`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ kind }),
+          body: JSON.stringify({
+            kind,
+            pdfBase64: rendered.pdfBase64,
+            pdfFilename: rendered.pdfFilename,
+          }),
         },
       );
       const j = (await r.json().catch(() => ({}))) as {

@@ -14,6 +14,7 @@ import {
 } from "./build-unified-doc-data";
 import { buildUnifiedDocPdf } from "../api/lib/unified-do-invoice-pdf";
 import { HOOKKA_LOGO_PNG_BASE64 } from "../api/lib/hookka-logo-base64";
+import { PDFDocument } from "pdf-lib";
 
 function triggerDownload(bytes: Uint8Array, filename: string): void {
   const blob = new Blob([bytes.slice()], { type: "application/pdf" });
@@ -172,4 +173,37 @@ export async function renderUnifiedInvoiceBytes(inv: AnyInvoice, extras: AnyExtr
 
 export async function renderUnifiedInvoiceBase64(inv: AnyInvoice, extras: AnyExtras): Promise<string> {
   return bytesToBase64(await renderUnifiedInvoiceBytes(inv, extras));
+}
+
+// Batch download — render every selected invoice with the SAME unified
+// generator, then merge them into ONE multi-page PDF (pdf-lib copyPages) the
+// operator opens/prints in a single go. Replaces the jsPDF generateCombined*
+// path so a bulk download looks identical to a single download.
+export async function downloadCombinedUnifiedInvoicePdf(
+  items: Array<{ invoice: AnyInvoice; extras: AnyExtras }>,
+  filename: string,
+): Promise<void> {
+  const merged = await PDFDocument.create();
+  for (const { invoice, extras } of items) {
+    const bytes = await renderUnifiedInvoiceBytes(invoice, extras);
+    const src = await PDFDocument.load(bytes);
+    const pages = await merged.copyPages(src, src.getPageIndices());
+    for (const p of pages) merged.addPage(p);
+  }
+  triggerDownload(await merged.save(), filename);
+}
+
+// Batch download of DOs — same merge, unified DO generator.
+export async function downloadCombinedUnifiedDoPdf(
+  items: Array<{ order: AnyOrder; extras: AnyExtras }>,
+  filename: string,
+): Promise<void> {
+  const merged = await PDFDocument.create();
+  for (const { order, extras } of items) {
+    const bytes = await renderUnifiedDoBytes(order, extras);
+    const src = await PDFDocument.load(bytes);
+    const pages = await merged.copyPages(src, src.getPageIndices());
+    for (const p of pages) merged.addPage(p);
+  }
+  triggerDownload(await merged.save(), filename);
 }

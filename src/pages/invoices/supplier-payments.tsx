@@ -13,7 +13,7 @@ import { amountInWords } from "@/lib/amount-in-words";
 import { printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
 import { useRowSelection } from "@/lib/use-row-selection";
 import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
-import { CreditCard } from "lucide-react";
+import { CreditCard, Printer } from "lucide-react";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Supplier Payment — the AP twin of the customer Payment page
@@ -868,6 +868,13 @@ export default function SupplierPaymentsPage() {
                       <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{formatRM(p.totalBankSen)}</td>
                       <td className="px-3 py-2 text-right text-gray-600">{p.lines?.length ?? 0}</td>
                       <td className="px-3 py-2 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => printVouchers([buildSupplierPaymentVoucher(p)])}
+                          title="Print payment voucher"
+                          className="inline-flex items-center gap-1 text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3"
+                        >
+                          <Printer className="h-3 w-3" />print
+                        </button>
                         {(p.lifecycleState ?? "ACTIVE") === "ACTIVE" && (
                           <button onClick={() => editPayment(p)} className="text-xs text-[#3E6570] hover:underline mr-2">Edit</button>
                         )}

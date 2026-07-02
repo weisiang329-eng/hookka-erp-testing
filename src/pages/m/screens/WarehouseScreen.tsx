@@ -35,6 +35,7 @@ import {
   History,
   Eye,
   CheckCircle2,
+  Search,
 } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import {
@@ -350,6 +351,19 @@ function RackOverview({
   onView: (r: Rack) => void;
   onRackQr: (r: Rack) => void;
 }) {
+  // Rack search (spec §Search "Warehouse previously shipped with no search —
+  // add it"). Filters the loaded racks by rack no / product / customer / zone.
+  const [q, setQ] = useState("");
+  const ql = q.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!ql) return racks;
+    return racks.filter((r) =>
+      [rackLabel(r), rackProduct(r), str(r, "customerName"), str(r, "zone")]
+        .join(" ")
+        .toLowerCase()
+        .includes(ql),
+    );
+  }, [racks, ql]);
   return (
     <>
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -384,15 +398,45 @@ function RackOverview({
         <StatCard value={occupied} label="Occupied" valueColor={M.taupe} />
       </div>
 
-      {racks.length === 0 ? (
+      {/* Rack search — spec §Search (present on every list). */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 9,
+          padding: "11px 13px",
+          backgroundColor: M.card,
+          border: `1px solid ${M.hairline}`,
+          borderRadius: 12,
+          marginBottom: 14,
+        }}
+      >
+        <Search size={18} strokeWidth={1.75} color={M.faint} />
+        <input
+          value={q}
+          placeholder="Search rack / product / customer…"
+          onChange={(e) => setQ(e.target.value)}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            border: "none",
+            outline: "none",
+            background: "transparent",
+            fontSize: 14,
+            color: M.raisin,
+          }}
+        />
+      </div>
+
+      {filtered.length === 0 ? (
         <MobileCard radius={16} style={{ padding: 20 }}>
           <div style={{ color: M.muted, fontSize: 13, textAlign: "center" }}>
-            No racks configured.
+            {ql ? "No racks match your search." : "No racks configured."}
           </div>
         </MobileCard>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
-          {racks.map((r) => {
+          {filtered.map((r) => {
             const isOcc = str(r, "status") === "OCCUPIED";
             const itemCount = Array.isArray(r.items) ? r.items.length : isOcc ? 1 : 0;
             const fill = isOcc ? Math.min(100, (itemCount / 8) * 100) : 0;

@@ -49,6 +49,18 @@ Entries themselves stay newest-first.
 **Verified:** `tsc -p tsconfig.app.json --noEmit` clean (only the pre-existing, unrelated `scan-supplier-modal.tsx` errors from a concurrent session remain); `npm test` 1321/1322 (1 pre-existing skip), including 6 new regression tests in `tests/supplier-payment-alloc.test.mjs` that feed the camelCase-only row shape the live adapter actually produces (they fail under the old snake_case-read logic, pass now). Shipped to `main`; owner to confirm the payment now appears in the All Payments list on erp.hookka.com, and to use the Knock-off feature to re-attribute HPV-2607-002's advance to PI-2606-037 (the payment itself is GL-correct; only the subsidiary attribution needs fixing).
 ---
 
+## BUG-2026-07-02-002 — Every Purchase Order showed a blank "Supplier SKU" — value was saved but never read back (camelCase column fold) `purchasing` `data-migration`
+
+**Symptom (owner, live prod):** on PO-2607-008 the item's **Supplier SKU** column showed "—", even though the PO *create* form clearly displayed it ("MED- COMFY IVORY SAND"). Not a one-off: a prod sweep found **0 of 161** purchase-order items across the whole system returned a Supplier SKU. The supplier-material binding (887/887) and purchase-invoice items both showed their SKUs fine — only Purchase Orders were blank.
+
+**Root cause (camelCase-column-fold read miss, same class as BUG-2026-06-10-001 etc.):** `purchase_order_items.supplierSKU` was created as a camelCase identifier (migration 0001). Postgres folds unquoted identifiers to lowercase → the real column is **`suppliersku`** (no underscore). The `column-rename-map.json` lists `"supplierSKU": "supplier_sku"` (with an underscore — a column that never existed for this table), so `db-pg.ts`'s snake→camel inverse never restores the casing: the adapter emits the key `suppliersku`, but `rowToItem` read `r.supplierSKU` → always `undefined` → `""`. The WRITE side was fine (the INSERT's unquoted `supplierSKU` folds to the same `suppliersku`, so the value *was* stored) — purely a read miss. Other tables (`supplier_materials`, `purchase_invoice_items`) use a real snake_case `supplier_sku` column, so their reads work and the shared map is correct *for them* — which is why a map edit is the wrong fix (it would regress those). 
+
+**Fix:** dual-key the read in `purchase-orders.ts` `rowToItem` — `supplierSKU: r.supplierSKU ?? r.suppliersku ?? ""` — and add `suppliersku?` to `PurchaseOrderItemRow` (mirrors the existing `materialCode ?? material_code` dual-key two lines up). One change covers both the list (`GET /`) and detail (`GET /:id`) paths since both map through `rowToItem`. No data backfill needed — the values were already stored; they just start displaying. Verified other surfaces are unaffected: PI items (`r.supplier_sku ?? r.supplierSku`) and supplier-materials both already resolve correctly on prod.
+
+**Verified:** `tsc` clean. LIVE-VERIFY after deploy: PO-2607-008 shows "MED- COMFY IVORY SAND" in the Supplier SKU column.
+
+---
+
 ## BUG-2026-07-02-001 — "Copy from Sales/Consignment Order" lookup forced the full "SO-" prefix: bare "2605-001" resolved to nothing `sales-orders` `ui-frontend`
 
 **Symptom (owner, live prod):** on a Sales Order create, owner opened "Copy from

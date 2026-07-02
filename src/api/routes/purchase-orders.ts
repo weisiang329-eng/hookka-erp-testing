@@ -54,7 +54,14 @@ type PurchaseOrderItemRow = {
   material_code?: string | null;
   materialCode?: string | null;
   materialName: string | null;
-  supplierSKU: string | null;
+  // The DB column was created as camelCase `supplierSKU` (migration 0001),
+  // which Postgres folds to all-lowercase `suppliersku` (NO underscore). The
+  // rename-map lists `supplier_sku` (wrong — that column never existed), so the
+  // adapter can't restore the casing and `r.supplierSKU` was always undefined →
+  // every PO showed a blank Supplier SKU though the value was stored fine. Keep
+  // both keys so the dual-key read below works regardless of adapter casing.
+  supplierSKU?: string | null;
+  suppliersku?: string | null;
   quantity: number;
   unitPriceSen: number;
   totalSen: number;
@@ -87,7 +94,7 @@ function rowToItem(r: PurchaseOrderItemRow) {
     materialCategory: r.materialCategory ?? "",
     materialCode: r.materialCode ?? r.material_code ?? "",
     materialName: r.materialName ?? "",
-    supplierSKU: r.supplierSKU ?? "",
+    supplierSKU: r.supplierSKU ?? r.suppliersku ?? "",
     quantity: r.quantity,
     unitPriceSen: r.unitPriceSen,
     totalSen: r.totalSen,

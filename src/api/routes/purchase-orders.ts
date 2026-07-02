@@ -292,7 +292,14 @@ app.get("/", async (c) => {
     poRows.map((p) => p.supplierId),
   );
   fillBlankSupplierSku(data, bindings);
-  return c.json({ success: true, data });
+  // TEMP probe (BUG-2026-07-02-002): confirms this build is live on prod +
+  // whether the binding query returns rows. Remove once the deploy path is
+  // verified.
+  return c.json({
+    success: true,
+    data,
+    _skuProbe: { v: "3", bindingKeys: bindings.size },
+  });
 });
 
 // POST /api/purchase-orders — create PO + items atomically

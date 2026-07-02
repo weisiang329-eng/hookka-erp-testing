@@ -80,6 +80,7 @@ type GRNItem = {
   id?: number | string;
   poItemIndex: number;
   materialCode: string;
+  supplierSKU?: string;
   materialName: string;
   orderedQty: number;
   receivedQty: number;
@@ -548,6 +549,7 @@ export default function GRNDetailPage() {
         remarks: grn.notes ?? "",
         items: items.map((it) => ({
           itemCode: it.materialCode,
+          supplierSKU: it.supplierSKU,
           description: it.materialName,
           poQty: it.orderedQty,
           receivedQty: it.receivedQty,

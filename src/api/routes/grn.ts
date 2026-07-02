@@ -236,6 +236,10 @@ function rowToItem(r: GRNItemRow) {
     poItemIndex: r.poItemIndex ?? 0,
     materialCode: r.materialCode ?? "",
     materialName: r.materialName ?? "",
+    // Supplier SKU is filled by fillGrnSupplierSku after the GRN is built (it
+    // needs the parent GRN's supplierId). grn_items doesn't store it — recovered
+    // from supplier_material_bindings by supplier + code + price (BUG-2026-07-02-002).
+    supplierSKU: "",
     orderedQty: r.orderedQty,
     receivedQty: r.receivedQty,
     acceptedQty: r.acceptedQty,
@@ -245,6 +249,47 @@ function rowToItem(r: GRNItemRow) {
     invoicedQty,
     availableQty: computeAvailableQty(Number(r.acceptedQty) || 0, invoicedQty),
   };
+}
+
+type GrnLike = { supplierId: string; items: Array<{ supplierSKU: string; materialCode: string; unitPrice: number }> };
+
+// Recover blank Supplier SKUs on GRN lines from supplier_material_bindings —
+// same rule as purchase-orders.ts: unambiguous only (one binding for the code,
+// or one whose price matches the line). Mutates the built GRN objects.
+async function fillGrnSupplierSku(db: D1Database, grns: GrnLike[]): Promise<void> {
+  const ids = Array.from(new Set(grns.map((g) => g.supplierId).filter(Boolean)));
+  if (ids.length === 0) return;
+  const ph = ids.map(() => "?").join(", ");
+  const res = await db
+    .prepare(`SELECT * FROM supplier_material_bindings WHERE supplierId IN (${ph})`)
+    .bind(...ids)
+    .all<Record<string, unknown>>();
+  const map = new Map<string, Array<{ sku: string; priceSen: number }>>();
+  for (const r of res.results ?? []) {
+    const sid = String(r.supplierId ?? r.supplier_id ?? "");
+    const code = String(r.materialCode ?? r.material_code ?? "").trim().toUpperCase();
+    const sku = String(r.supplierSku ?? r.supplierSKU ?? r.supplier_sku ?? "").trim();
+    const priceSen = Number(r.unitPrice ?? r.unit_price ?? 0) || 0;
+    if (!sid || !code || !sku) continue;
+    const key = `${sid}::${code}`;
+    (map.get(key) ?? map.set(key, []).get(key)!).push({ sku, priceSen });
+  }
+  for (const g of grns) {
+    if (!g.supplierId) continue;
+    for (const it of g.items) {
+      if (it.supplierSKU) continue;
+      const code = String(it.materialCode ?? "").trim().toUpperCase();
+      const cands = map.get(`${g.supplierId}::${code}`);
+      if (!cands || cands.length === 0) continue;
+      let pick = "";
+      if (cands.length === 1) pick = cands[0].sku;
+      else {
+        const pm = cands.filter((c) => c.priceSen === it.unitPrice);
+        if (pm.length === 1) pick = pm[0].sku;
+      }
+      if (pick) it.supplierSKU = pick;
+    }
+  }
 }
 
 function rowToGRN(row: GRNRow, items: GRNItemRow[] = []) {
@@ -1006,6 +1051,7 @@ app.get("/", async (c) => {
         .all<GRNItemRow>()
     : { results: [] as GRNItemRow[] };
   const data = grnRows.map((g) => rowToGRN(g, itemsRes.results ?? []));
+  await fillGrnSupplierSku(c.var.DB, data);
   return c.json({ success: true, data });
 });
 
@@ -1396,6 +1442,7 @@ app.get("/:id", async (c) => {
   if (!grn) {
     return c.json({ success: false, error: "GRN not found" }, 404);
   }
+  await fillGrnSupplierSku(c.var.DB, [grn]);
   return c.json({ success: true, data: grn });
 });
 

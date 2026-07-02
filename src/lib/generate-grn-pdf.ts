@@ -98,6 +98,7 @@ export function generateGRNPdf(
   type GRNItem = {
     itemCode?: string;
     description?: string;
+    supplierSKU?: string;
     poQty?: number;
     receivedQty?: number;
     rejectedQty?: number;
@@ -113,6 +114,7 @@ export function generateGRNPdf(
     return [
       String(idx + 1),
       code,
+      item.supplierSKU || "-",
       description,
       String(item.poQty ?? 0),
       String(item.receivedQty ?? 0),
@@ -127,6 +129,7 @@ export function generateGRNPdf(
     head: [[
       { content: "No", styles: { halign: "center" } },
       { content: "Item Code" },
+      { content: "Supplier SKU" },
       { content: "Description" },
       { content: "PO Qty", styles: { halign: "right" } },
       { content: "Received Qty", styles: { halign: "right" } },
@@ -156,18 +159,19 @@ export function generateGRNPdf(
       valign: "middle",
     },
     columnStyles: {
-      0: { cellWidth: 10, halign: "center" },
-      1: { cellWidth: 25 },
-      2: { cellWidth: "auto" },
-      3: { cellWidth: 22, halign: "right" },
-      4: { cellWidth: 22, halign: "right" },
-      5: { cellWidth: 22, halign: "right" },
-      6: { cellWidth: 22, halign: "right", fontStyle: "bold" },
+      0: { cellWidth: 9, halign: "center" },
+      1: { cellWidth: 22 },
+      2: { cellWidth: 28 },
+      3: { cellWidth: "auto" },
+      4: { cellWidth: 19, halign: "right" },
+      5: { cellWidth: 19, halign: "right" },
+      6: { cellWidth: 19, halign: "right" },
+      7: { cellWidth: 19, halign: "right", fontStyle: "bold" },
     },
     didDrawCell(d) {
       // Thin dashed separator under every item row (drawn once on the last
       // column) — the DO/SI per-row separator.
-      if (d.section !== "body" || d.column.index !== 6) return;
+      if (d.section !== "body" || d.column.index !== 7) return;
       const yy = d.cell.y + d.cell.height;
       doc.setDrawColor(...PDF.rule);
       doc.setLineWidth(0.1);

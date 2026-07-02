@@ -492,6 +492,7 @@ export default function GRNPage() {
             remarks: grn.notes,
             items: grn.items.map((it) => ({
               itemCode: it.materialCode,
+              supplierSKU: it.supplierSKU,
               description: it.materialName,
               poQty: it.orderedQty,
               receivedQty: it.receivedQty,
@@ -716,6 +717,7 @@ export default function GRNPage() {
               remarks: row.notes,
               items: row.items.map((it) => ({
                 itemCode: it.materialCode,
+                supplierSKU: it.supplierSKU,
                 description: it.materialName,
                 poQty: it.orderedQty,
                 receivedQty: it.receivedQty,

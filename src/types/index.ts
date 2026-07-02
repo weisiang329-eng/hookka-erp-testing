@@ -1476,6 +1476,7 @@ export type BalanceSheetEntry = {
 export type GRNItem = {
   poItemIndex: number;
   materialCode: string;
+  supplierSKU?: string;
   materialName: string;
   orderedQty: number;
   receivedQty: number;

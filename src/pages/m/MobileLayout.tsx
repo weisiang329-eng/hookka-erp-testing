@@ -33,6 +33,7 @@ import { WarehouseScreen } from "./screens/WarehouseScreen";
 import { ProductionScreen } from "./screens/ProductionScreen";
 import { SalesScreen } from "./screens/SalesScreen";
 import { SalesDetailScreen } from "./screens/SalesDetailScreen";
+import { ProductionDetailScreen } from "./screens/ProductionDetailScreen";
 import { MODULE_CONFIGS } from "./config/modules";
 import { preloadMobileCritical } from "./lib/preload";
 import { bootstrapMobileTheme } from "./lib/theme-mode";
@@ -58,6 +59,7 @@ const CUSTOM_L1: Record<string, ComponentType> = {
 // Balance KPI strip + status action bar (v20 MobileSoDetail).
 const CUSTOM_L2: Record<string, ComponentType> = {
   sales: SalesDetailScreen,
+  production: ProductionDetailScreen,
 };
 
 export default function MobileLayout() {

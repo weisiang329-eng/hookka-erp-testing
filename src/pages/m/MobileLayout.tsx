@@ -36,6 +36,7 @@ import { SalesDetailScreen } from "./screens/SalesDetailScreen";
 import { ProductionDetailScreen } from "./screens/ProductionDetailScreen";
 import { ServiceCasesScreen } from "./screens/ServiceCasesScreen";
 import { AnnouncementsScreen } from "./screens/AnnouncementsScreen";
+import { MailCenterScreen, MailThreadScreen } from "./screens/MailCenterScreen";
 import { MODULE_CONFIGS } from "./config/modules";
 import { preloadMobileCritical } from "./lib/preload";
 import { bootstrapMobileTheme } from "./lib/theme-mode";
@@ -51,6 +52,7 @@ const CUSTOM_L1: Record<string, ComponentType> = {
   sales: SalesScreen,
   servicecases: ServiceCasesScreen,
   announcements: AnnouncementsScreen,
+  "mail-center": MailCenterScreen,
   warehouse: WarehouseScreen,
   // Production is a Kanban-style board grouped by current department (dc12
   // design v12) — the generic list flattens that signal. Detail route stays
@@ -64,6 +66,7 @@ const CUSTOM_L1: Record<string, ComponentType> = {
 const CUSTOM_L2: Record<string, ComponentType> = {
   sales: SalesDetailScreen,
   production: ProductionDetailScreen,
+  "mail-center": MailThreadScreen,
 };
 
 export default function MobileLayout() {

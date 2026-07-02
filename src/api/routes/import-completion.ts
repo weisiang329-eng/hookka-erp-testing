@@ -9200,6 +9200,164 @@ app.post("/backfill-so-item-product-name", async (c) => {
   return c.json({ success: true, candidates: all.length, updated });
 });
 
+// ---------------------------------------------------------------------------
+// POST /backfill-5543-co2606002 — ONE-SHOT (owner 2026-07-02). A phantom
+// product code "5543-1C(LHF)" (never in the catalog) got onto consignment
+// order CO-2606-002 and cascaded into its production order, finished units,
+// CN lines and stock movements. The owner corrected the 5543 BOM in the
+// catalog and wants the existing chain relabelled to the real "5543-1B(LHF)".
+//
+// Only the DENORMALISED product_code / product_name snapshots are touched, in
+// the 5 tables that carry them. job_cards / wip_items key off wip_code (NOT the
+// product code) so they are deliberately untouched, and the pieces breakdown is
+// derived LIVE from the (now-fixed) BOM at print time — so nothing is
+// re-exploded and no completed production is destroyed.
+//
+// AUDIT-FIRST: with no body it only REPORTS what it would change (read-only).
+// To apply, POST { "apply": true, "confirm": "5543-1B" }. Idempotent — a second
+// run finds zero phantom rows.
+app.post("/backfill-5543-co2606002", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+
+  const OLD = "5543-1C(LHF)";
+  const NEW = "5543-1B(LHF)";
+  const CO_NO = "CO-2606-002";
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    apply?: boolean;
+    confirm?: string;
+  };
+  const doApply = body.apply === true && body.confirm === "5543-1B";
+
+  // Resolve the consignment order by its Hookka number.
+  const co = await db
+    .prepare('SELECT id AS "id" FROM consignment_orders WHERE company_co_id = ?')
+    .bind(CO_NO)
+    .first<{ id: string }>();
+  if (!co?.id)
+    return c.json({ success: false, error: `Consignment order ${CO_NO} not found` }, 404);
+  const coId = co.id;
+
+  // Canonical new name + guard that the replacement code EXISTS in the catalog
+  // (else the live BOM/pieces lookup by code breaks after relabelling).
+  const prod = await db
+    .prepare('SELECT name AS "name" FROM products WHERE code = ?')
+    .bind(NEW)
+    .first<{ name: string }>();
+  const newName = prod?.name ?? null;
+  const newCodeInCatalog = !!prod;
+
+  // POs + CNs under this CO (ids only) to scope the downstream snapshot tables.
+  const posRes = await db
+    .prepare('SELECT id AS "id" FROM production_orders WHERE consignment_order_id = ?')
+    .bind(coId)
+    .all<{ id: string }>();
+  const poIds = (posRes.results ?? []).map((p) => p.id);
+  const cnsRes = await db
+    .prepare('SELECT id AS "id" FROM consignment_notes WHERE consignment_order_id = ?')
+    .bind(coId)
+    .all<{ id: string }>();
+  const cnIds = (cnsRes.results ?? []).map((r) => r.id);
+
+  const inList = (arr: string[]) => arr.map(() => "?").join(",");
+
+  // Each snapshot table + how to scope it to THIS CO's chain.
+  type Target = { table: string; scopeSql: string; scopeBind: string[] };
+  const targets: Target[] = [
+    { table: "consignment_order_items", scopeSql: "consignment_order_id = ?", scopeBind: [coId] },
+    { table: "production_orders", scopeSql: "consignment_order_id = ?", scopeBind: [coId] },
+  ];
+  if (poIds.length) {
+    targets.push({ table: "fg_units", scopeSql: `po_id IN (${inList(poIds)})`, scopeBind: poIds });
+    targets.push({ table: "stock_movements", scopeSql: `production_order_id IN (${inList(poIds)})`, scopeBind: poIds });
+  }
+  // CN lines link either by PO id or by CN id — cover both.
+  if (poIds.length || cnIds.length) {
+    const parts: string[] = [];
+    const binds: string[] = [];
+    if (poIds.length) { parts.push(`production_order_id IN (${inList(poIds)})`); binds.push(...poIds); }
+    if (cnIds.length) { parts.push(`consignment_note_id IN (${inList(cnIds)})`); binds.push(...cnIds); }
+    targets.push({ table: "consignment_items", scopeSql: `(${parts.join(" OR ")})`, scopeBind: binds });
+  }
+
+  // AUDIT every target (read-only): the exact rows carrying the phantom code,
+  // plus the DISTINCT codes present so OLD can be confirmed to match precisely.
+  type RowVM = { id: string; productCode: string | null; productName: string | null };
+  const report: Array<{
+    table: string;
+    distinctCodesInChain: string[];
+    phantomRows: RowVM[];
+    updated?: number;
+  }> = [];
+  let totalPhantom = 0;
+  for (const t of targets) {
+    const distinctRes = await db
+      .prepare(`SELECT DISTINCT product_code AS "productCode" FROM ${t.table} WHERE ${t.scopeSql}`)
+      .bind(...t.scopeBind)
+      .all<{ productCode: string | null }>();
+    const rowsRes = await db
+      .prepare(`SELECT id AS "id", product_code AS "productCode", product_name AS "productName" FROM ${t.table} WHERE ${t.scopeSql} AND product_code = ?`)
+      .bind(...t.scopeBind, OLD)
+      .all<RowVM>();
+    const phantomRows = rowsRes.results ?? [];
+    totalPhantom += phantomRows.length;
+    report.push({
+      table: t.table,
+      distinctCodesInChain: (distinctRes.results ?? [])
+        .map((r) => r.productCode ?? "")
+        .filter(Boolean),
+      phantomRows,
+    });
+  }
+
+  if (!doApply) {
+    return c.json({
+      success: true,
+      mode: "audit",
+      co: { number: CO_NO, id: coId },
+      old: OLD,
+      new: NEW,
+      newName,
+      newCodeInCatalog,
+      poCount: poIds.length,
+      cnCount: cnIds.length,
+      totalPhantomRows: totalPhantom,
+      report,
+      note: newCodeInCatalog
+        ? 'Review phantomRows. To apply, POST { "apply": true, "confirm": "5543-1B" }.'
+        : `REFUSING to apply: replacement code ${NEW} is NOT in the products catalog — fix the catalog/BOM first or the live pieces lookup will break.`,
+    });
+  }
+
+  // APPLY — refuse if the replacement code isn't a real catalog product.
+  if (!newCodeInCatalog || !newName) {
+    return c.json(
+      { success: false, error: `Replacement code ${NEW} not found in products catalog; aborting.` },
+      400,
+    );
+  }
+  for (const t of targets) {
+    await db
+      .prepare(`UPDATE ${t.table} SET product_code = ?, product_name = ? WHERE ${t.scopeSql} AND product_code = ?`)
+      .bind(NEW, newName, ...t.scopeBind, OLD)
+      .run();
+    const entry = report.find((r) => r.table === t.table);
+    if (entry) entry.updated = entry.phantomRows.length;
+  }
+  return c.json({
+    success: true,
+    mode: "apply",
+    co: { number: CO_NO, id: coId },
+    old: OLD,
+    new: NEW,
+    newName,
+    totalPhantomRows: totalPhantom,
+    report,
+  });
+});
+
 // Cascade-backfill productName/sizeLabel/sizeCode/fabricCode to downstream
 // snapshot tables (production_orders, delivery_order_items, invoice_items)
 // from the canonical sales_order_items values. Run AFTER

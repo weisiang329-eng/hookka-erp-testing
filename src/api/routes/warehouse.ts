@@ -368,6 +368,70 @@ app.post("/", async (c) => {
   }
 });
 
+// POST /api/warehouse/racks — create a NEW (empty) rack location.
+// The rack's id IS its QR token (see routes/public-rack-qr.ts), so a created
+// rack is immediately QR-printable ("Download all rack QRs" / per-rack QR) and
+// usable by EVERY warehouse API (GET /warehouse lists it, stock-in adds items,
+// movements + public scan resolve it by id) — no extra step, no separate token.
+app.post("/racks", async (c) => {
+  const denied = await requirePermission(c, "warehouse", "create");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as {
+      rack?: string;
+      position?: string;
+      reserved?: boolean;
+    };
+    const rack = (body.rack ?? "").trim();
+    if (!rack) {
+      return c.json(
+        { success: false, error: "Rack number / name is required" },
+        400,
+      );
+    }
+    const position = (body.position ?? "").trim() || null;
+    // Keep labels unique — the same rack (+ position) can't be created twice.
+    const dupe = await c.var.DB.prepare(
+      "SELECT id FROM rack_locations WHERE rack = ? AND IFNULL(position, '') = IFNULL(?, '')",
+    )
+      .bind(rack, position)
+      .first();
+    if (dupe) {
+      return c.json(
+        {
+          success: false,
+          error: `Rack "${rack}${position ? " · " + position : ""}" already exists`,
+        },
+        409,
+      );
+    }
+    const id = crypto.randomUUID();
+    const status = body.reserved ? "RESERVED" : "EMPTY";
+    await c.var.DB.prepare(
+      "INSERT INTO rack_locations (id, rack, position, status, reserved) VALUES (?, ?, ?, ?, ?)",
+    )
+      .bind(id, rack, position, status, body.reserved ? 1 : null)
+      .run();
+    const created = await c.var.DB.prepare(
+      "SELECT * FROM rack_locations WHERE id = ?",
+    )
+      .bind(id)
+      .first<RackLocationRow>();
+    return c.json(
+      {
+        success: true,
+        data: created
+          ? rowToRack(created, [])
+          : { id, rack, position, status },
+      },
+      201,
+    );
+  } catch (err) {
+    console.error("[POST /api/warehouse/racks] failed:", err);
+    return c.json({ success: false, error: "Failed to create rack" }, 500);
+  }
+});
+
 // GET /api/warehouse/movements — filter by type/from/to and return sorted DESC
 app.get("/movements", async (c) => {
   const type = c.req.query("type");

@@ -127,6 +127,68 @@ function rowToPO(row: PurchaseOrderRow, items: PurchaseOrderItemRow[] = []) {
   };
 }
 
+// Supplier SKU lives on the (supplier, material) binding in supplier_materials,
+// but a single internal code can have SEVERAL supplier SKUs under one supplier
+// (e.g. PC151-01 → "COMFY IVORY SAND" @ RM7.50, "VANILLA" @ RM12, "STONE" @
+// RM12). PO lines were meant to snapshot the chosen SKU but every line came
+// back blank on prod (BUG-2026-07-02-002). So on read we RECOVER the SKU from
+// the binding using supplier + code + PRICE — a match is used only when it is
+// UNAMBIGUOUS (exactly one binding for the code, OR exactly one at the line's
+// price). Same-price variants (VANILLA/STONE both RM12) stay blank rather than
+// risk showing the wrong colour. A non-blank stored value always wins.
+type SkuBinding = { sku: string; priceSen: number };
+async function loadSupplierSkuBindings(
+  db: D1Database,
+  supplierIds: string[],
+): Promise<Map<string, SkuBinding[]>> {
+  const m = new Map<string, SkuBinding[]>();
+  const ids = Array.from(new Set(supplierIds.filter(Boolean)));
+  if (ids.length === 0) return m;
+  const ph = ids.map(() => "?").join(", ");
+  const res = await db
+    .prepare(`SELECT * FROM supplier_materials WHERE supplierId IN (${ph})`)
+    .bind(...ids)
+    .all<Record<string, unknown>>();
+  for (const r of res.results ?? []) {
+    const sid = String(r.supplierId ?? r.supplier_id ?? "");
+    const code = String(r.materialCode ?? r.material_code ?? "").trim().toUpperCase();
+    const sku = String(r.supplierSku ?? r.supplierSKU ?? r.supplier_sku ?? "").trim();
+    const priceSen = Number(r.unitPrice ?? r.unit_price ?? 0) || 0;
+    if (!sid || !code || !sku) continue;
+    const key = `${sid}::${code}`;
+    const list = m.get(key);
+    if (list) list.push({ sku, priceSen });
+    else m.set(key, [{ sku, priceSen }]);
+  }
+  return m;
+}
+
+// Fill any BLANK line Supplier SKU from the bindings — only when the match is
+// unambiguous (see loadSupplierSkuBindings). Mutates the built PO objects.
+function fillBlankSupplierSku(
+  pos: Array<ReturnType<typeof rowToPO>>,
+  bindings: Map<string, SkuBinding[]>,
+): void {
+  for (const po of pos) {
+    if (!po.supplierId) continue;
+    for (const it of po.items) {
+      if (it.supplierSKU) continue;
+      const code = String(it.materialCode ?? "").trim().toUpperCase();
+      if (!code) continue;
+      const cands = bindings.get(`${po.supplierId}::${code}`);
+      if (!cands || cands.length === 0) continue;
+      let pick = "";
+      if (cands.length === 1) {
+        pick = cands[0].sku; // one binding for this code → unambiguous
+      } else {
+        const priceMatches = cands.filter((c) => c.priceSen === it.unitPriceSen);
+        if (priceMatches.length === 1) pick = priceMatches[0].sku; // price disambiguates
+      }
+      if (pick) it.supplierSKU = pick;
+    }
+  }
+}
+
 function genPoId(): string {
   return `po-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -190,7 +252,12 @@ async function fetchPOWithItems(db: D1Database, id: string) {
       .all<PurchaseOrderItemRow>(),
   ]);
   if (!po) return null;
-  return rowToPO(po, itemsRes.results ?? []);
+  const built = rowToPO(po, itemsRes.results ?? []);
+  // Recover blank line Supplier SKUs from the supplier binding (supplier + code
+  // + price, unambiguous only). See loadSupplierSkuBindings / BUG-2026-07-02-002.
+  const bindings = await loadSupplierSkuBindings(db, [built.supplierId]);
+  fillBlankSupplierSku([built], bindings);
+  return built;
 }
 
 // GET /api/purchase-orders — list all POs + items
@@ -218,6 +285,13 @@ app.get("/", async (c) => {
   const data = poRows.map((p) =>
     rowToPO(p, items.results ?? []),
   );
+  // Recover blank line Supplier SKUs from the supplier bindings (one query for
+  // every supplier in the page). See loadSupplierSkuBindings / BUG-2026-07-02-002.
+  const bindings = await loadSupplierSkuBindings(
+    c.var.DB,
+    poRows.map((p) => p.supplierId),
+  );
+  fillBlankSupplierSku(data, bindings);
   return c.json({ success: true, data });
 });
 

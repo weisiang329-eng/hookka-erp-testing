@@ -9,7 +9,7 @@ import { getQRCodeDataURL, rackScanUrl, itemQrValue } from "@/lib/qr-utils";
 import {
   Warehouse, Grid3X3, Package, MapPin, LayoutGrid,
   ArrowDownToLine, ArrowUpFromLine, History, X, ArrowRightLeft,
-  Loader2, RefreshCw, QrCode, Download, Search,
+  Loader2, RefreshCw, QrCode, Download, Search, Plus,
 } from "lucide-react";
 
 // ---------- Types ----------
@@ -143,6 +143,13 @@ export default function WarehousePage() {
   // "Create Item QR" — print a QR for a NON-system / loose item by name, with no
   // backend record (the name lives in the QR itself; see itemQrValue/parseItemQr).
   const [showItemQrForm, setShowItemQrForm] = useState(false);
+  // Create-rack modal (owner 2026-07-02): add a new rack. Its id IS its QR
+  // token, so a created rack is instantly QR-printable + used by every API.
+  const [showCreateRack, setShowCreateRack] = useState(false);
+  const [newRackName, setNewRackName] = useState("");
+  const [newRackPosition, setNewRackPosition] = useState("");
+  const [creatingRack, setCreatingRack] = useState(false);
+  const [createRackError, setCreateRackError] = useState<string | null>(null);
   const [itemQrName, setItemQrName] = useState("");
   const [itemQrCode, setItemQrCode] = useState("");
 
@@ -190,6 +197,42 @@ export default function WarehousePage() {
 
   const { data: rackResp, loading: rackLoading, refresh: fetchRackLocations } = useCachedJson<{ success?: boolean; data?: RackLocation[]; summary?: Summary }>("/api/warehouse");
   const { data: movementsResp, loading: movementsLoading, refresh: fetchMovements } = useCachedJson<{ success?: boolean; data?: StockMovement[] }>(movementsUrl);
+
+  // Create a new (empty) rack. The backend inserts a rack_locations row whose id
+  // IS the QR token — so no separate QR/step is needed and the rack immediately
+  // shows in the grid, prints via "Download all rack QRs", and accepts stock-in.
+  const handleCreateRack = async () => {
+    const rack = newRackName.trim();
+    if (!rack || creatingRack) return;
+    setCreatingRack(true);
+    setCreateRackError(null);
+    try {
+      const res = await fetch("/api/warehouse/racks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rack,
+          position: newRackPosition.trim() || undefined,
+        }),
+      });
+      const j = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+      };
+      if (!res.ok || j.success === false) {
+        setCreateRackError(j.error || "Failed to create rack");
+        return;
+      }
+      setShowCreateRack(false);
+      setNewRackName("");
+      setNewRackPosition("");
+      fetchRackLocations();
+    } catch {
+      setCreateRackError("Network error creating rack");
+    } finally {
+      setCreatingRack(false);
+    }
+  };
   // ?fields=minimal&include= → drop jobCards (this page only reads PO
   // basics — productionOrders.find / .filter — never .jobCards).
   // Trims a 12MB payload to ~100-300KB.
@@ -587,6 +630,9 @@ ${tilesHtml}
           <p className="text-xs text-[#6B7280]">Rack location management, stock-in/out tracking</p>
         </div>
         <div className="flex gap-2">
+          <Button size="sm" onClick={() => { setCreateRackError(null); setShowCreateRack(true); }}>
+            <Plus className="h-4 w-4" /> Create Rack
+          </Button>
           <Button variant="outline" size="sm" onClick={() => setShowItemQrForm(true)}>
             <QrCode className="h-4 w-4" /> Create Item QR
           </Button>
@@ -1062,6 +1108,60 @@ ${tilesHtml}
                 onClick={() => void handlePrintItemQr()}
               >
                 <QrCode className="h-4 w-4" /> Generate &amp; Print
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== Create Rack Modal ===== */}
+      {showCreateRack && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowCreateRack(false)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#1F1D1B]">Create Rack</h3>
+              <button onClick={() => setShowCreateRack(false)} className="text-[#6B7280] hover:text-[#1F1D1B] cursor-pointer">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="text-xs text-[#6B7280] mb-4">
+              Add a new (empty) rack. Its QR code is generated automatically — print
+              it from “Download all rack QRs” or the rack’s own QR button — and it’s
+              immediately usable for stock-in, movements and scanning.
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Rack number / name *</label>
+                <input
+                  type="text"
+                  autoFocus
+                  className="w-full border border-[#E2DDD8] rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  value={newRackName}
+                  onChange={(e) => setNewRackName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void handleCreateRack(); }}
+                  placeholder="e.g. Rack 21"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Position / zone (optional)</label>
+                <input
+                  type="text"
+                  className="w-full border border-[#E2DDD8] rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  value={newRackPosition}
+                  onChange={(e) => setNewRackPosition(e.target.value)}
+                  placeholder="e.g. A / Row 3"
+                />
+              </div>
+              {createRackError ? (
+                <p className="text-xs text-[#9A3A2D]">{createRackError}</p>
+              ) : null}
+            </div>
+            <div className="mt-6 flex gap-2 justify-end">
+              <Button variant="outline" size="sm" onClick={() => setShowCreateRack(false)}>
+                Cancel
+              </Button>
+              <Button size="sm" disabled={!newRackName.trim() || creatingRack} onClick={() => void handleCreateRack()}>
+                {creatingRack ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />} Create Rack
               </Button>
             </div>
           </div>

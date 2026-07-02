@@ -632,8 +632,10 @@ test("frontend: bulk + single transition paths fire the notify flow", () => {
   );
   assert.match(pageSrc, /\/notify-customer`,/);
   assert.match(pageSrc, /buildDoComponentBreakdown\(row\.items, extras\)/);
-  assert.match(pageSrc, /generateDoPdfBase64\(/);
-  assert.match(pageSrc, /generateInvoicePdfBase64\(/);
+  // Unified pdf-lib generator (2026-07-02): the customer email now carries the
+  // SAME document the operator downloads, not the old branded fallback.
+  assert.match(pageSrc, /renderUnifiedDoBase64\(/);
+  assert.match(pageSrc, /renderUnifiedInvoiceBase64\(/);
   // runBulkDoTransition (bulk buttons + PL-level bulk reuse) notifies every
   // DO that actually transitioned, mapping LOADED→DISPATCHED.
   assert.match(
@@ -944,9 +946,11 @@ test("resend-notice endpoint: clears the stamp THEN re-fires queueDoCustomerNoti
   );
   // The re-fire goes through the SAME helper (recipient chain + server PDF
   // fallback + no-recipient skip + the atomic re-claim) — no second send path.
+  // It forwards any client-rendered pdfBase64 so an edited invoice re-sends the
+  // exact document the operator sees.
   assert.match(
     doRouteSrc,
-    /const res = await queueDoCustomerNotice\(c, id, \{ kind \}\);/,
+    /const res = await queueDoCustomerNotice\(c, id, \{\s*\n\s*kind,\s*\n\s*pdfBase64: body\.pdfBase64,\s*\n\s*pdfFilename: body\.pdfFilename,\s*\n\s*\}\);/,
   );
   // The clear must come BEFORE the queueDoCustomerNotice call (order matters:
   // queue's claim only fires when the column it just cleared is NULL).
@@ -957,7 +961,7 @@ test("resend-notice endpoint: clears the stamp THEN re-fires queueDoCustomerNoti
     "UPDATE delivery_orders SET ${stampCol} = NULL WHERE id = ?",
   );
   const fireIdx = resendBody.indexOf(
-    "await queueDoCustomerNotice(c, id, { kind });",
+    "await queueDoCustomerNotice(c, id, {",
   );
   assert.ok(
     clearIdx > 0 && fireIdx > clearIdx,
@@ -967,7 +971,7 @@ test("resend-notice endpoint: clears the stamp THEN re-fires queueDoCustomerNoti
 
 test("resend-notice endpoint: reports sent / skipped-no-email / error", () => {
   const resendIdx = doRouteSrc.indexOf('app.post("/:id/resend-notice"');
-  const resendBody = doRouteSrc.slice(resendIdx, resendIdx + 3500);
+  const resendBody = doRouteSrc.slice(resendIdx, resendIdx + 4400);
   // Success → { success:true, sent:true, to }.
   assert.match(resendBody, /return c\.json\(\{ success: true, sent: true, to: j\?\.to \}\);/);
   // queueDoCustomerNotice's skip (no recipient / no invoice) → sent:false +

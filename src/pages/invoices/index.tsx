@@ -16,6 +16,7 @@ import {
   BarChart3,
   List,
   Download,
+  Send,
 } from "lucide-react";
 import type { Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
@@ -140,6 +141,7 @@ export default function InvoicesPage() {
   // Batch "Send to Customer" — confirm many DRAFT invoices in one go.
   const [selectedInvoices, setSelectedInvoices] = useState<Invoice[]>([]);
   const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
+  const [resendConfirmOpen, setResendConfirmOpen] = useState(false);
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchResult, setBatchResult] = useState<
     { ok: number; fail: number; errors: string[] } | null
@@ -244,6 +246,84 @@ export default function InvoicesPage() {
     setBatchResult({ ok, fail: errors.length, errors });
   };
 
+  // Re-send the customer invoice email for ANY selected invoice (including
+  // already-SENT — the owner edits an invoice, then re-sends it). Re-fires the
+  // linked DO's DELIVERED notice via /resend-notice, which now attaches the
+  // UNIFIED invoice PDF (same as the download).
+  const resendSelected = async () => {
+    if (selectedInvoices.length === 0) return;
+    setResendConfirmOpen(false);
+    setBatchRunning(true);
+    let ok = 0;
+    const errors: string[] = [];
+    const { renderUnifiedInvoiceBase64 } = await import("@/lib/unified-doc-download");
+    for (const inv of selectedInvoices) {
+      try {
+        // Pull the FULL invoice (the list row is slim — no items / DO id) so we
+        // can render the exact same PDF the detail page downloads.
+        const ir = await fetch(`/api/invoices/${encodeURIComponent(inv.id)}`, {
+          credentials: "include",
+        });
+        const ij = (await ir.json()) as {
+          data?: { deliveryOrderId?: string } & Record<string, unknown>;
+        };
+        const fullInv = ij?.data;
+        const doId = fullInv?.deliveryOrderId || "";
+        if (!fullInv || !doId) {
+          errors.push(`${inv.invoiceNo}: no linked delivery order`);
+          continue;
+        }
+        // Render the UNIFIED invoice PDF client-side (same generator as the
+        // download + the delivered-notice email) so the re-sent email carries
+        // the exact edited document. print-extras adds the per-line spec detail.
+        let pdfBase64: string | undefined;
+        try {
+          const er = await fetch(
+            `/api/invoices/${encodeURIComponent(inv.id)}/print-extras`,
+            { credentials: "include" }
+          );
+          const ej = (await er.json().catch(() => ({}))) as {
+            success?: boolean;
+            data?: unknown;
+          };
+          pdfBase64 = await renderUnifiedInvoiceBase64(
+            fullInv,
+            ej?.success ? (ej.data as Parameters<typeof renderUnifiedInvoiceBase64>[1]) : undefined
+          );
+        } catch {
+          // Render failed — send without the client PDF; the server renders its
+          // own fallback so the customer still gets the notice.
+          pdfBase64 = undefined;
+        }
+        const r = await fetch(
+          `/api/delivery-orders/${encodeURIComponent(doId)}/resend-notice`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              kind: "DELIVERED",
+              pdfBase64,
+              pdfFilename: `INV-${inv.invoiceNo}.pdf`,
+            }),
+          }
+        );
+        const j = (await r.json().catch(() => ({}))) as {
+          success?: boolean;
+          sent?: boolean;
+          reason?: string;
+          error?: string;
+        };
+        if (j?.success && j.sent) ok++;
+        else errors.push(`${inv.invoiceNo}: ${j?.reason || j?.error || "not sent"}`);
+      } catch (e) {
+        errors.push(`${inv.invoiceNo}: ${e instanceof Error ? e.message : "failed"}`);
+      }
+    }
+    setBatchRunning(false);
+    setSelectedInvoices([]);
+    setBatchResult({ ok, fail: errors.length, errors });
+  };
+
   // Bulk "Download PDF" — render EVERY selected invoice (any status, not just
   // drafts) into one merged PDF the owner opens/prints in a single go. The list
   // rows are the slim payload (no line items), so fetch each full invoice +
@@ -256,7 +336,10 @@ export default function InvoicesPage() {
       const ordered = [...selectedInvoices].sort((a, b) =>
         String(a.invoiceNo || "").localeCompare(String(b.invoiceNo || ""))
       );
-      const items: { invoice: unknown; extras?: unknown }[] = [];
+      type CombinedItem = Parameters<
+        typeof import("@/lib/unified-doc-download").downloadCombinedUnifiedInvoicePdf
+      >[0][number];
+      const items: CombinedItem[] = [];
       const CHUNK = 5;
       for (let i = 0; i < ordered.length; i += CHUNK) {
         const fetched = await Promise.all(
@@ -270,13 +353,15 @@ export default function InvoicesPage() {
                 { credentials: "include" }
               ),
             ]);
-            const invJson = (await invRes.json()) as { data?: unknown };
+            const invJson = (await invRes.json()) as {
+              data?: CombinedItem["invoice"];
+            };
             const invoice = invJson?.data ?? null;
-            let extras: unknown = {};
+            let extras: CombinedItem["extras"] = undefined;
             try {
               const ej = (await exRes.json()) as {
                 success?: boolean;
-                data?: unknown;
+                data?: CombinedItem["extras"];
               };
               if (ej?.success && ej.data) extras = ej.data;
             } catch {
@@ -288,12 +373,11 @@ export default function InvoicesPage() {
         for (const f of fetched) if (f) items.push(f);
       }
       if (items.length === 0) return;
-      const { generateCombinedInvoicePdf } = await import(
-        "@/lib/generate-invoice-pdf"
+      const { downloadCombinedUnifiedInvoicePdf } = await import(
+        "@/lib/unified-doc-download"
       );
-      await generateCombinedInvoicePdf(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        items as any,
+      await downloadCombinedUnifiedInvoicePdf(
+        items,
         `Invoices-${items.length}.pdf`
       );
     } catch {
@@ -686,6 +770,16 @@ export default function InvoicesPage() {
                     >
                       Send to Customer ({selectedDrafts.length})
                     </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={batchRunning}
+                      onClick={() => setResendConfirmOpen(true)}
+                      title="Re-send the invoice email to the customer — works on already-sent invoices (e.g. after an edit)"
+                    >
+                      <Send className="w-4 h-4 mr-1" />
+                      Re-send email ({selectedInvoices.length})
+                    </Button>
                   </div>
                 </div>
               )}
@@ -1043,6 +1137,44 @@ export default function InvoicesPage() {
                 {batchRunning
                   ? "Sending…"
                   : `Send ${selectedDrafts.length} invoice${selectedDrafts.length === 1 ? "" : "s"}`}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Re-send email confirm */}
+      {resendConfirmOpen && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+            <h2 className="text-lg font-bold text-[#1F1D1B] mb-2">
+              Re-send invoice email?
+            </h2>
+            <p className="text-sm text-[#4B5563] mb-4">
+              Re-send the invoice email (with the current PDF) to the customer for{" "}
+              <span className="font-semibold">{selectedInvoices.length}</span>{" "}
+              selected invoice{selectedInvoices.length === 1 ? "" : "s"}. Use this
+              after editing an invoice — it re-sends even already-sent ones.
+            </p>
+            {batchRunning && (
+              <p className="text-sm text-[#9C6F1E] mb-4">
+                Re-sending… please don't close this window.
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setResendConfirmOpen(false)}
+                disabled={batchRunning}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={resendSelected}
+                disabled={batchRunning || selectedInvoices.length === 0}
+              >
+                {batchRunning ? "Re-sending…" : "Re-send email"}
               </Button>
             </div>
           </div>

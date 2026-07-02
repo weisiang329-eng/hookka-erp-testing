@@ -34,6 +34,25 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-02-003 — Customer auto-emails attached a DIFFERENT-looking DO / Invoice than the one the owner downloads (two separate PDF generators) `delivery-orders` `invoices` `ui-frontend`
+
+🟢 **Fixed (staging/preview — pending owner verify before merge)** · owner-reported ("完全都不是我们的 Invoice 和 DO, 它是从哪里拿出来的?")
+
+**Symptom (owner, live prod):** a customer received the DELIVERED invoice email + the DISPATCHED DO email with attached PDFs that looked nothing like the real documents the owner prints/downloads from the ERP — no proper letterhead layout, wrong columns, missing spec detail.
+
+**Root cause:** there were **two** PDF generators. The on-screen Download used the real jsPDF templates (`generate-do-pdf.ts` / `generate-invoice-pdf.ts`), which only run in a browser (DOM-dependent). The customer emails fire from the backend (Cloudflare Workers), where jsPDF can't run — so the notice path fell back to a **simplified** server-side generator (`branded-fallback-pdf.ts`). The two never matched, and editing a template meant editing two places.
+
+**Fix (owner chose "unify into ONE"):** built a single Workers-*and*-browser generator (`src/api/lib/unified-do-invoice-pdf.ts` + `build-unified-doc-data.ts` + `doc-line-format.ts`, pdf-lib) as a 1:1 copy of the real DO/Invoice. Wired it into **every** path so download = email:
+- Detail-page Download (DO + Invoice) → unified.
+- Auto-notice on DISPATCH/DELIVER (delivery list) → renders the unified PDF client-side and passes it to the backend.
+- **Re-send** (invoice multiselect "Re-send email" — new, works on already-SENT invoices after an edit; and the delivery-page row/detail Re-send) → renders the unified PDF client-side, forwarded through `resend-notice` → `queueDoCustomerNotice`.
+- Invoices list "Download PDF" (batch) → merges unified PDFs into one file (pdf-lib copyPages) instead of the jsPDF combined generator.
+- Pure-backend fallback (a transition with no client render) → renders the SAME unified DO/Invoice server-side (Workers-pure) with `buildSimpleTablePdf` kept as the ultimate safety net.
+
+**Verified:** `tsc -p tsconfig.app.json --noEmit` clean; `npm test` 1347/1348 (1 pre-existing skip); minimal-data server render smoke-tested (valid PDF bytes for both DO + Invoice with no per-line extras). Branch `unify-do-invoice-pdf` deployed to preview `unify-do-invoice-pdf.hookka-erp-testing.pages.dev`. **Owner to verify the customer-facing PDFs on the preview (download + re-send) before merge to main** — customer-facing, can't self-verify every order variant. NOTE: the internal per-row "Print DO" (list) still uses the jsPDF generator because it carries a delivery-status QR with live scan consumers — left unchanged pending owner's call on dropping the QR.
+
+---
+
 ## BUG-2026-07-01-003 — Supplier Payment page showed "No supplier payments yet" / all-zero summary despite a real, GL-posted payment; PI-targeted allocations silently rejected/no-op'd `data-migration` `invoices` `accounting`
 
 🟢 **Fixed** · `data-migration` (camelCase/rename-map class — recurs, see BUG-2026-06-10-001 / -06-18-001/-002 / -06-30-001) · owner-reported

@@ -55,10 +55,17 @@ import {
   fmtEmailDate,
 } from "../lib/customer-notify";
 import { buildSimpleTablePdf } from "../lib/assistant-exports";
+// Server-side render of the SAME unified DO / Invoice the FE downloads and
+// e-mails. Workers-pure (pdf-lib), so the pure-backend notice path (a
+// transition with no client render) produces the identical document instead
+// of the simplified branded fallback. buildSimpleTablePdf stays the ULTIMATE
+// fallback if the unified render ever throws on Workers.
+import { buildUnifiedDocPdf } from "../lib/unified-do-invoice-pdf";
 import {
-  buildBrandedDeliveryOrderPdf,
-  buildBrandedInvoicePdf,
-} from "../lib/branded-fallback-pdf";
+  buildUnifiedDoData,
+  buildUnifiedInvoiceData,
+} from "../../lib/build-unified-doc-data";
+import { HOOKKA_LOGO_PNG_BASE64 } from "../lib/hookka-logo-base64";
 import { getOrCreateQrToken, qrScanUrl } from "../lib/do-qr-token";
 // Company office number — the driver-contact fallback on dispatch notices
 // (owner rule: no driver phone on file → give the company's number).
@@ -4817,7 +4824,15 @@ app.post("/:id/resend-notice", async (c) => {
   if (denied) return denied;
 
   const id = c.req.param("id");
-  const body = (await c.req.json().catch(() => ({}))) as { kind?: string };
+  const body = (await c.req.json().catch(() => ({}))) as {
+    kind?: string;
+    // Optional client-rendered PDF — when the operator re-sends after an edit,
+    // the page renders the SAME unified PDF it downloads and passes it here so
+    // the customer's re-sent email carries the exact document, not the
+    // server-side fallback. Omitted → queueDoCustomerNotice renders its own.
+    pdfBase64?: string;
+    pdfFilename?: string;
+  };
   const kind =
     body.kind === "DISPATCHED" || body.kind === "DELIVERED" ? body.kind : null;
   if (!kind) {
@@ -4858,7 +4873,13 @@ app.post("/:id/resend-notice", async (c) => {
     // Re-fire through the SAME helper the auto-notice + FE trigger use. It
     // owns the recipient chain, the server-rendered invoice-PDF fallback, the
     // no-recipient silent skip, and re-claims the stamp it just had cleared.
-    const res = await queueDoCustomerNotice(c, id, { kind });
+    // Forward any client-rendered PDF so an edited invoice re-sends the exact
+    // document the operator sees (else the helper renders its own fallback).
+    const res = await queueDoCustomerNotice(c, id, {
+      kind,
+      pdfBase64: body.pdfBase64,
+      pdfFilename: body.pdfFilename,
+    });
     const j = (await res.json().catch(() => ({}))) as {
       success?: boolean;
       queued?: boolean;
@@ -5243,13 +5264,12 @@ export async function queueDoCustomerNotice(
       } else {
         // Server-rendered fallback DO PDF. The dispatch notice usually fires
         // from the backend transition choke-point (queueDoCustomerNotice({kind}))
-        // which has NO client-rendered branded PDF — so without this the customer
-        // got the DO email with NOTHING attached (owner 2026-06-26). 2026-06-30
-        // upgrade: customer complained "this is not the proper DO" — the old
-        // buildSimpleTablePdf has no letterhead, no customer block, no doc info.
-        // We now render a BRANDED Workers-compatible PDF (pdf-lib, jsPDF can't
-        // run on Workers) via buildBrandedDeliveryOrderPdf, with the simple
-        // table as ULTIMATE fallback so a render bug never kills the notice.
+        // which has NO client-rendered PDF — so without this the customer got
+        // the DO email with NOTHING attached (owner 2026-06-26). 2026-07-02
+        // upgrade: render the SAME unified DO the FE downloads/e-mails
+        // (buildUnifiedDoData + buildUnifiedDocPdf; Workers-pure pdf-lib) so the
+        // pure-backend path matches "what the owner sees". buildSimpleTablePdf
+        // stays the ULTIMATE fallback so a render bug never kills the notice.
         try {
           const itRes = await c.var.DB.prepare(
             `SELECT productCode, productName, quantity, rackingNumber
@@ -5276,21 +5296,31 @@ export async function queueDoCustomerNotice(
             .first<{ companyAddress: string | null }>();
           let bytes: Uint8Array;
           try {
-            bytes = await buildBrandedDeliveryOrderPdf({
-              doNo: doRow.doNo,
-              customerName: doRow.customerName,
-              customerAddress: custRow?.companyAddress ?? null,
-              deliverTo: deliverTo || null,
-              dispatchDate: fmtEmailDate(doRow.dispatchedAt),
-              customerPO: customerPOIds.join(", ") || null,
-              customerSO: doRow.customerSO ?? null,
-              driver: doRow.driverName ?? null,
-              contactNo: (doRow.driverPhone ?? "").trim() || null,
-              items: lineRows,
-            });
+            bytes = await buildUnifiedDocPdf(
+              buildUnifiedDoData(
+                {
+                  doNo: doRow.doNo,
+                  docDate: doRow.dispatchedAt ?? "",
+                  customerName: doRow.customerName,
+                  deliverTo: deliverTo || "",
+                  deliveryAddress: custRow?.companyAddress ?? "",
+                  driverName: doRow.driverName ?? "",
+                  driverPhone: (doRow.driverPhone ?? "").trim(),
+                  lorryPlate: doRow.vehicleNo ?? "",
+                  fallbackCustomerSO: doRow.customerSO ?? "",
+                  items: lineRows.map((it, i) => ({
+                    id: String(i),
+                    productCode: it.productCode,
+                    productName: it.productName,
+                    quantity: it.quantity,
+                  })),
+                },
+                HOOKKA_LOGO_PNG_BASE64,
+              ),
+            );
           } catch (brandedErr) {
             console.warn(
-              `[delivery-orders] ${doRow.doNo}: branded DO fallback failed, using simple table`,
+              `[delivery-orders] ${doRow.doNo}: unified DO fallback failed, using simple table`,
               brandedErr instanceof Error ? brandedErr.message : brandedErr,
             );
             // ULTIMATE fallback — bare table, but the customer still gets
@@ -5393,13 +5423,12 @@ export async function queueDoCustomerNotice(
           },
         ];
       } else {
-        // Server-rendered fallback (frontend couldn't produce the branded
-        // PDF). 2026-06-30 upgrade: customer complained the simple-table
-        // fallback "is not a proper invoice" — no letterhead, no Bill To,
-        // no totals block. We now render a BRANDED Workers-compatible PDF
-        // (pdf-lib; jsPDF can't run on Workers) via buildBrandedInvoicePdf,
-        // with the simple table kept as ULTIMATE fallback so a render bug
-        // never kills the notice.
+        // Server-rendered fallback (frontend couldn't produce the PDF).
+        // 2026-07-02 upgrade: render the SAME unified invoice the FE
+        // downloads/e-mails (buildUnifiedInvoiceData + buildUnifiedDocPdf;
+        // Workers-pure pdf-lib) so the pure-backend path matches "what the
+        // owner sees". The simple table stays the ULTIMATE fallback so a
+        // render bug never kills the notice.
         try {
           const itRes = await c.var.DB.prepare(
             `SELECT productCode, productName, quantity, unitPriceSen, totalSen
@@ -5431,21 +5460,34 @@ export async function queueDoCustomerNotice(
             .first<{ companyAddress: string | null }>();
           let bytes: Uint8Array;
           try {
-            bytes = await buildBrandedInvoicePdf({
-              invoiceNo: inv.invoiceNo,
-              customerName: doRow.customerName,
-              customerAddress: custRow?.companyAddress ?? null,
-              invoiceDate: fmtEmailDate(inv.invoiceDate),
-              dueDate: null,
-              customerPO: customerPOIds.join(", ") || null,
-              items,
-              subtotalSen,
-              taxSen,
-              totalSen,
-            });
+            bytes = await buildUnifiedDocPdf(
+              buildUnifiedInvoiceData(
+                {
+                  invoiceNo: inv.invoiceNo,
+                  doNo: doRow.doNo,
+                  docDate: inv.invoiceDate ?? "",
+                  terms: "NET 30",
+                  customerName: doRow.customerName,
+                  billAddress: custRow?.companyAddress ?? "",
+                  fallbackCustomerSO: doRow.customerSO ?? "",
+                  items: items.map((it, i) => ({
+                    id: String(i),
+                    productCode: it.productCode,
+                    productName: it.productName,
+                    quantity: it.quantity,
+                    priceSen: it.unitPriceSen,
+                    lineTotalSen: it.lineTotalSen,
+                  })),
+                  subtotalSen,
+                  taxSen,
+                  totalSen,
+                },
+                HOOKKA_LOGO_PNG_BASE64,
+              ),
+            );
           } catch (brandedErr) {
             console.warn(
-              `[delivery-orders] ${doRow.doNo}: branded invoice fallback failed, using simple table`,
+              `[delivery-orders] ${doRow.doNo}: unified invoice fallback failed, using simple table`,
               brandedErr instanceof Error ? brandedErr.message : brandedErr,
             );
             const rm = (sen: number) =>

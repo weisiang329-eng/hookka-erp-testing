@@ -9265,6 +9265,10 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
     else toast.error(j?.error || "Delete failed");
   };
 
+  // Collapsed by default (owner 2026-07-02) — the totals in the header carry
+  // the signal; expand only to audit or exclude a row.
+  const [preApOpen, setPreApOpen] = useState(false);
+
   // Pre-opening PIs count as opening by default; toggling exclusion only
   // writes the exclude table — the PI row itself is never touched.
   const toggleApExclude = async (piId: string, excluded: boolean) => {
@@ -9440,11 +9444,16 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
       {(data?.preExistingAp?.length ?? 0) > 0 && (
         <Card>
           <CardContent className="p-4 space-y-3">
-            <div className="flex items-center justify-between gap-3 flex-wrap">
-              <h3 className="text-sm font-semibold text-[#1F1D1B]">
+            <button
+              type="button"
+              onClick={() => setPreApOpen((v) => !v)}
+              className="flex w-full items-center justify-between gap-3 flex-wrap text-left cursor-pointer"
+            >
+              <h3 className="text-sm font-semibold text-[#1F1D1B] flex items-center gap-1">
+                {preApOpen ? <ChevronDownIcon className="h-4 w-4 shrink-0 text-[#6B5C32]" /> : <ChevronRight className="h-4 w-4 shrink-0 text-[#6B5C32]" />}
                 Already-entered supplier invoices (before opening date){" "}
                 <span className="font-normal text-[#6B7280]">
-                  — counted as opening automatically; exclude wrong entries only
+                  — counted as opening automatically ({(data?.preExistingAp ?? []).length} PIs)
                 </span>
               </h3>
               <span className="text-sm text-[#6B7280]">
@@ -9457,7 +9466,8 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
                   {formatCurrency((data?.preExistingAp ?? []).filter((r) => r.excluded).reduce((s, r) => s + (Number(r.amountSen) || 0), 0))}
                 </span>
               </span>
-            </div>
+            </button>
+            {preApOpen && (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -9492,6 +9502,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
                 </tbody>
               </table>
             </div>
+            )}
           </CardContent>
         </Card>
       )}

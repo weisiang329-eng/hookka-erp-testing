@@ -70,15 +70,15 @@ export type BuildSpecExtra = {
   specialOrder?: string | null;
 };
 
-// Stacked Description cell — code / name / build-spec, joined by newlines.
-export function describe(
-  it: { productCode: string; productName: string; fabricCode: string; sizeLabel: string },
+// The build-spec segment only (no code / name) — e.g.
+//   "PC151-01 / DIVAN 8\" + 1\" LEG / GAP 12\" / T.Heights 21\""
+// The unified pdf-lib generator wants code / name / spec as SEPARATE cells, so
+// this is exposed on its own; describe() below joins all three for the jsPDF
+// renderers. One rule, no drift.
+export function buildSpec(
+  it: { fabricCode: string; sizeLabel: string },
   ex: BuildSpecExtra | undefined,
 ): string {
-  const lines: string[] = [];
-  if (it.productCode) lines.push(it.productCode);
-  if (it.productName) lines.push(it.productName);
-
   const cat = (ex?.itemCategory || "").toUpperCase();
   const dv = num(ex?.divanHeightInches);
   const lg = num(ex?.legHeightInches);
@@ -86,7 +86,6 @@ export function describe(
   const th = num(ex?.totalHeightInches);
   const spec: string[] = [];
   if (it.fabricCode) spec.push(it.fabricCode);
-
   const hasBfSpec = !!(dv || lg || gp || th);
   if (cat === "BEDFRAME" || (cat !== "SOFA" && cat !== "ACCESSORY" && hasBfSpec)) {
     if (dv) spec.push(`DIVAN ${dv}${lg ? ` + ${lg} LEG` : " + NO LEG"}`);
@@ -99,6 +98,18 @@ export function describe(
   }
   if (ex?.specialOrder && String(ex.specialOrder).trim())
     spec.push(String(ex.specialOrder).trim());
-  if (spec.length) lines.push(spec.join(" / "));
+  return spec.join(" / ");
+}
+
+// Stacked Description cell — code / name / build-spec, joined by newlines.
+export function describe(
+  it: { productCode: string; productName: string; fabricCode: string; sizeLabel: string },
+  ex: BuildSpecExtra | undefined,
+): string {
+  const lines: string[] = [];
+  if (it.productCode) lines.push(it.productCode);
+  if (it.productName) lines.push(it.productName);
+  const spec = buildSpec(it, ex);
+  if (spec) lines.push(spec);
   return lines.join("\n");
 }

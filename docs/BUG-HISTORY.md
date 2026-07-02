@@ -49,6 +49,37 @@ Entries themselves stay newest-first.
 **Verified:** `tsc -p tsconfig.app.json --noEmit` clean (only the pre-existing, unrelated `scan-supplier-modal.tsx` errors from a concurrent session remain); `npm test` 1321/1322 (1 pre-existing skip), including 6 new regression tests in `tests/supplier-payment-alloc.test.mjs` that feed the camelCase-only row shape the live adapter actually produces (they fail under the old snake_case-read logic, pass now). Shipped to `main`; owner to confirm the payment now appears in the All Payments list on erp.hookka.com, and to use the Knock-off feature to re-attribute HPV-2607-002's advance to PI-2606-037 (the payment itself is GL-correct; only the subsidiary attribution needs fixing).
 ---
 
+## BUG-2026-07-02-001 — "Copy from Sales/Consignment Order" lookup forced the full "SO-" prefix: bare "2605-001" resolved to nothing `sales-orders` `ui-frontend`
+
+**Symptom (owner, live prod):** on a Sales Order create, owner opened "Copy from
+Sales / Consignment Order", typed **`2605-001`**, and got *"No order found matching
+2605-001 — tried our SO, customer PO, customer SO, and reference."* — despite
+`SO-2605-001` existing. He had to type the full `SO-2605-001`. "为什么这样 search
+search 不到 一定要 full?"
+
+**Root cause:** the resolver (`sales/create.tsx` CopyFromSourceModal
+`handleResolveSource`) matched by **exact equality** — `norm(r.companySOId) ===
+target`. Our SO ids are stored WITH the doc-type prefix (`SO-2605-001`), so a bare
+`2605-001` never equalled the stored value. Nothing else was wrong; it was purely
+prefix-strictness.
+
+**Fix:** extracted `matchedOrderField` into `src/lib/order-lookup-match.ts`
+(mirrors the tested-helper pattern of `company-name-match.ts`) and made OUR-id
+matching **prefix-tolerant**: compare exact OR after stripping a leading
+`SO-/CO-/SV-` prefix from BOTH the stored id and the typed value. Our ids are
+unique on the number alone so this can't newly collide; if a bare number does hit
+two of our docs the existing multi-match chooser lets the operator pick. Customer
+PO / customer SO / reference stay EXACT (customer's own arbitrary strings — must
+not be prefix-mangled). Only desktop `create.tsx` has this lookup; the mobile
+form has no copy-from flow, so no parity change needed.
+
+**Verified:** `tsc` clean; 13 new tests in `order-lookup-match.test.mjs` (bare
+number resolves, full still resolves, no-dash prefix, CO variant, no false
+positive on "001"/"2605", customer fields stay exact, our-id precedence). LIVE-
+VERIFY after deploy: typing `2605-001` resolves `SO-2605-001`.
+
+---
+
 ## BUG-2026-07-01-005 — Whole-system sweep after the pillow fix: two more Consignment↔Delivery parity gaps from the same copy-drift `consignment` `production-orders`
 
 **Context:** after fixing BUG-2026-07-01-004 the owner asked "如果还有其他的种类呢?…

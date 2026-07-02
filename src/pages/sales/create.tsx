@@ -3,6 +3,7 @@ import { useToast } from "@/components/ui/toast";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSOMode, soBasePath, soSingularNoun } from "@/lib/so-mode";
 import { humanizeError } from "@/lib/humanize-error";
+import { matchedOrderField } from "@/lib/order-lookup-match";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -2408,19 +2409,12 @@ function CopyFromSourceModal({
       const candidates = listJson.data ?? [];
       const norm = (s?: string | null) => (s ?? "").trim().toUpperCase();
       const target = norm(sourceLookup);
-      const matchedField = (r: (typeof candidates)[number]): string | null => {
-        if (sourceType === "CO") {
-          if (norm(r.companyCOId) === target) return "our CO";
-          if (norm(r.reference) === target) return "reference";
-          return null;
-        }
-        if (norm(r.companySOId) === target) return "our SO";
-        if (norm(r.customerPOId) === target) return "customer PO";
-        if (norm(r.customerSO) === target || norm(r.customerSOId) === target)
-          return "customer SO";
-        if (norm(r.reference) === target) return "reference";
-        return null;
-      };
+      // Prefix-tolerant match: operators type "2605-001" for "SO-2605-001"
+      // (Wei Siang 2026-07-02 — "why must I type the full number?"). The
+      // resolver strips our SO-/CO-/SV- prefix on both sides for OUR ids;
+      // customer PO / SO / reference stay exact. See @/lib/order-lookup-match.
+      const matchedField = (r: (typeof candidates)[number]): string | null =>
+        matchedOrderField(r, sourceType, target);
       const matches = candidates
         .map((r) => ({ row: r, matched: matchedField(r) }))
         .filter((m): m is { row: (typeof candidates)[number]; matched: string } => m.matched !== null);

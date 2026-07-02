@@ -37,6 +37,7 @@ import {
   applySort,
   activeFilterCount,
 } from "../config/helpers";
+import { useDebounced } from "../lib/use-debounced";
 
 type Sort = { key: string; dir: "asc" | "desc" } | null;
 
@@ -57,6 +58,7 @@ export function SalesScreen() {
 
   const { data, loading, error } = useCachedJson<unknown>(source.url);
   const [q, setQ] = useState("");
+  const dq = useDebounced(q);
   const [chip, setChip] = useState("all");
   const [filterOpen, setFilterOpen] = useState(false);
   const [filters, setFilters] = useState<Record<string, ActiveFilter>>({});
@@ -73,20 +75,20 @@ export function SalesScreen() {
     const byChip = allRows.filter(
       (r) => chip === "all" || str(r, "status") === chip,
     );
-    const filtered = applyFilters(byChip, source.columns, filters, q);
+    const filtered = applyFilters(byChip, source.columns, filters, dq);
     return applySort(filtered, source.columns, sort);
-  }, [allRows, chip, source, filters, q, sort]);
+  }, [allRows, chip, source, filters, dq, sort]);
 
   // Per-chip counts + the summary strip (count · revenue over the searched set).
   const chipCounts = useMemo(() => {
-    const searched = applyFilters(allRows, source.columns, filters, q);
+    const searched = applyFilters(allRows, source.columns, filters, dq);
     const c: Record<string, number> = { all: searched.length };
     for (const r of searched) {
       const s = str(r, "status");
       c[s] = (c[s] ?? 0) + 1;
     }
     return c;
-  }, [allRows, source, filters, q]);
+  }, [allRows, source, filters, dq]);
 
   const summary = useMemo(() => {
     let rev = 0;

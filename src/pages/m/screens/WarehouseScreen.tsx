@@ -38,6 +38,7 @@ import {
   Search,
 } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
+import { useDebounced } from "../lib/use-debounced";
 import {
   getQRCodeDataURL,
   rackScanUrl,
@@ -356,7 +357,7 @@ function RackOverview({
   // the rack that holds it (owner 2026-07-02: "要跟著第三張照片那樣才 search 到東西"
   // — the rack's "In this rack now" items, not just its first/primary product).
   const [q, setQ] = useState("");
-  const ql = q.trim().toLowerCase();
+  const ql = useDebounced(q).trim().toLowerCase();
   const filtered = useMemo(() => {
     if (!ql) return racks;
     return racks.filter((r) => {

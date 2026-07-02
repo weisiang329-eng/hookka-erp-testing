@@ -23,6 +23,7 @@ import { announcementsConfig } from "../config/modules";
 import { newAnnouncementSpec } from "../config/forms";
 import { type FormSpec } from "../config/form-types";
 import { str, dateOnly, shortDate } from "../config/helpers";
+import { useDebounced } from "../lib/use-debounced";
 
 const CHIPS: { key: string; label: string }[] = [
   { key: "all", label: "All" },
@@ -39,8 +40,9 @@ export function AnnouncementsScreen() {
 
   const allRows = useMemo(() => (data ? source.select(data) : []), [data, source]);
 
+  const dq = useDebounced(q);
   const rows = useMemo(() => {
-    const n = q.trim().toLowerCase();
+    const n = dq.trim().toLowerCase();
     return allRows.filter((r) => {
       if (chip === "pinned" && r.isActive !== true) return false;
       if (
@@ -52,7 +54,7 @@ export function AnnouncementsScreen() {
         return false;
       return true;
     });
-  }, [allRows, chip, q]);
+  }, [allRows, chip, dq]);
 
   return (
     <>

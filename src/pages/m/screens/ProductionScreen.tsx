@@ -1,42 +1,29 @@
 // ===========================================================================
-// ProductionScreen — the custom L1 Production "Kanban" screen.
+// ProductionScreen — L1 Production list.
 //
-// Owner 2026-06-28 design v12: Production is no longer a generic list (which
-// reads as a wall of identical rows); it's a board grouped by the production
-// department the PO currently sits in. Per-dept row:
-//   header (colored dot + dept name + count badge)
-//   horizontal-scroll strip of 210-px job cards (SO code · status pill ·
-//   product · Qty + due · progress bar).
-// Tap a card → /m/production/:id (the existing DocumentDetailScreen — driven
-// by productionConfig.detail in src/pages/m/config/modules.ts; nothing about
-// the detail screen changes).
+// Owner 2026-07-02 (v20 React reference `MobileProduction.tsx`): Production is
+// a VERTICAL LIST with a department filter-chip row + a per-card stage-pipeline
+// bar, NOT the old horizontal Kanban board. This rebuild matches the v20 look
+// 1:1 while keeping Hookka's REAL data:
+//   • v20's mock has 5 stages; Hookka's real pipeline has 8 departments, so the
+//     chips + the pipeline bar use the real 8 depts (design "A": v20 look, real
+//     function — never fabricate the mock's simpler pipeline).
+//   • one GET /api/production-orders (minimal + jobCards), grouped/filtered
+//     client-side. Same endpoint productionConfig.detail uses → no new backend.
+//   • tap a card → /m/production/:id (unchanged DocumentDetailScreen).
 //
-// REAL DATA — single GET /api/production-orders, grouped client-side by
-// `currentDepartment`. Same endpoint productionConfig uses, so no new backend
-// and no second fetch.
-//
-// Progress per PO is derived from the embedded `jobCards`: completed cards ÷
-// total. A PO with no job cards shows a flat 0% bar (not fabricated).
-//
-// ADDITIVE: this screen replaces ONLY the /m/production L1 view (registered
-// in MobileLayout's CUSTOM_L1 map). All other production routes — the L2
-// detail at /m/production/:id, the More-menu "Production Orders" entry, and
-// the desktop / dashboard-b production data — are untouched.
+// ADDITIVE: replaces ONLY the /m/production L1 view (CUSTOM_L1 in MobileLayout).
+// The L2 detail, the More-menu entry, and desktop/dashboard data are untouched.
 // ===========================================================================
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Search } from "lucide-react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { MobileHeader, StatusPill } from "../components";
 import { M, M_ACCENT } from "../theme";
 import { resolveStatus, STATUS_MAPS, str, num, dateOnly } from "../config/helpers";
 
-// ---- API response shape (subset of /api/production-orders output) ----
-type JobCard = {
-  id?: string;
-  departmentCode?: string;
-  status?: string;
-  progress?: number;
-};
+type JobCard = { id?: string; departmentCode?: string; status?: string };
 type PO = {
   id: string;
   poNo?: string;
@@ -47,6 +34,7 @@ type PO = {
   companySO?: string;
   companySOId?: string;
   customerSO?: string;
+  picName?: string;
   quantity?: number;
   targetEndDate?: string;
   currentDepartment?: string;
@@ -54,9 +42,7 @@ type PO = {
 };
 type Resp = { success?: boolean; data?: PO[] };
 
-// Production depts in lifecycle order. The design source lists them in the
-// same order; mismatched/unknown department codes fall into an "Other" group
-// at the end (real fact-of-data — not fabricated).
+// Real 8-department pipeline in lifecycle order (v20's stage bar, real depts).
 const DEPTS: { code: string; label: string }[] = [
   { code: "FAB_CUT", label: "Fab Cut" },
   { code: "FAB_SEW", label: "Fab Sew" },
@@ -67,50 +53,30 @@ const DEPTS: { code: string; label: string }[] = [
   { code: "UPHOLSTERY", label: "Upholstery" },
   { code: "PACKING", label: "Packing" },
 ];
+const CHIPS = [{ code: "all", label: "All" }, ...DEPTS];
 
-// Accent cycle for the dept dot. The dc12 source uses a small palette and
-// cycles it across departments — reuse our existing M_ACCENT keys so colours
-// are consistent with the rest of /m.
-const DEPT_ACCENTS: (keyof typeof M_ACCENT)[] = [
-  "gold",
-  "info",
-  "moss",
-  "warning",
-  "plum",
-  "danger",
-  "gold",
-  "info",
-];
-
-function progressPctOf(po: PO): number {
-  const jcs = po.jobCards;
-  if (!Array.isArray(jcs) || jcs.length === 0) return 0;
-  const done = jcs.filter((jc) => str(jc, "status") === "COMPLETED").length;
-  return Math.round((done / jcs.length) * 100);
+/** Position of the PO's current department in the pipeline (-1 if unknown). */
+function stageIndexOf(po: PO): number {
+  const dept = str(po, "currentDepartment");
+  return DEPTS.findIndex((d) => d.code === dept);
 }
 
 export function ProductionScreen() {
   const navigate = useNavigate();
-  // Lightweight fetch — minimal fields + jobCards. Same query the Home
-  // Pending-Delivery card uses, so the cache may already be warm.
   const { data, loading, error } = useCachedJson<Resp>(
     "/api/production-orders?fields=minimal&include=jobCards",
   );
-
-  // Owner 2026-06-30: factory needs to find a job by Customer PO / Customer
-  // SO Reference / Company SO / Product / Customer Name from the phone. Match
-  // is case-insensitive substring against the same fields the desktop list
-  // already searches.
   const [query, setQuery] = useState("");
+  const [chip, setChip] = useState("all");
 
-  const groups = useMemo(() => {
+  const rows = useMemo(() => {
     const all = data?.success ? data.data ?? [] : [];
-    // Exclude terminal POs (completed/cancelled) — a board view shows
-    // in-flight work. The desktop dashboard's plant-load uses the same cut.
     const q = query.trim().toLowerCase();
-    const live = all.filter((po) => {
+    return all.filter((po) => {
       const s = str(po, "status");
+      // Live board — exclude terminal work (matches the desktop plant view).
       if (s === "COMPLETED" || s === "CANCELLED") return false;
+      if (chip !== "all" && str(po, "currentDepartment") !== chip) return false;
       if (!q) return true;
       const hay = [
         str(po, "poNo"),
@@ -125,155 +91,154 @@ export function ProductionScreen() {
         .toLowerCase();
       return hay.includes(q);
     });
-    const byDept = new Map<string, PO[]>();
-    for (const po of live) {
-      const dept = str(po, "currentDepartment") || "OTHER";
-      const arr = byDept.get(dept) ?? [];
-      arr.push(po);
-      byDept.set(dept, arr);
-    }
-    // Ordered render: known depts in lifecycle order, then any unknown depts
-    // (rare — old POs missing a current dept) under "Other".
-    const ordered: { code: string; label: string; jobs: PO[]; accent: keyof typeof M_ACCENT }[] = [];
-    DEPTS.forEach((d, i) => {
-      const jobs = byDept.get(d.code) ?? [];
-      ordered.push({ ...d, jobs, accent: DEPT_ACCENTS[i % DEPT_ACCENTS.length] });
-      byDept.delete(d.code);
+  }, [data, query, chip]);
+
+  // Per-chip counts (over the live, searched set — ignoring the dept filter).
+  const counts = useMemo(() => {
+    const all = data?.success ? data.data ?? [] : [];
+    const q = query.trim().toLowerCase();
+    const live = all.filter((po) => {
+      const s = str(po, "status");
+      if (s === "COMPLETED" || s === "CANCELLED") return false;
+      if (!q) return true;
+      const hay = [
+        str(po, "poNo"), str(po, "companySO"), str(po, "customerSO"),
+        str(po, "productCode"), str(po, "productName"), str(po, "customerName"),
+      ].filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(q);
     });
-    for (const [code, jobs] of byDept) {
-      ordered.push({ code, label: code, jobs, accent: "plum" });
+    const c: Record<string, number> = { all: live.length };
+    for (const po of live) {
+      const d = str(po, "currentDepartment") || "";
+      c[d] = (c[d] ?? 0) + 1;
     }
-    return ordered;
+    return c;
   }, [data, query]);
 
   return (
     <>
-      <MobileHeader title="Production" />
-      <div style={{ padding: "10px 16px 4px" }}>
-        <input
-          type="search"
-          inputMode="search"
-          placeholder="Search PO# / Company SO / Customer SO / product"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
+      <MobileHeader title="Production Orders" />
+
+      {/* Search */}
+      <div style={{ padding: "12px 18px 4px" }}>
+        <div
           style={{
-            width: "100%",
-            height: 38,
-            padding: "0 12px",
-            fontSize: 14,
-            color: M.raisin,
-            background: M.card,
-            border: `1px solid ${M.border}`,
-            borderRadius: 10,
-            outline: "none",
+            display: "flex",
+            alignItems: "center",
+            gap: 9,
+            padding: "11px 13px",
+            backgroundColor: M.card,
+            border: `1px solid ${M.hairline}`,
+            borderRadius: 12,
           }}
-        />
+        >
+          <Search size={18} strokeWidth={1.75} color={M.faint} />
+          <input
+            value={query}
+            placeholder="Search PRD · product · SO · customer"
+            onChange={(e) => setQuery(e.target.value)}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              border: "none",
+              outline: "none",
+              background: "transparent",
+              fontSize: 14,
+              color: M.raisin,
+            }}
+          />
+        </div>
       </div>
+
+      {/* Department chips (All + 8 real depts) */}
+      <div
+        style={{
+          display: "flex",
+          gap: 7,
+          overflowX: "auto",
+          padding: "10px 18px 4px",
+          WebkitOverflowScrolling: "touch",
+        }}
+      >
+        {CHIPS.map((c) => {
+          const on = chip === c.code;
+          const n = counts[c.code] ?? 0;
+          return (
+            <button
+              key={c.code}
+              onClick={() => setChip(c.code)}
+              style={{
+                height: 30,
+                padding: "0 13px",
+                borderRadius: 999,
+                fontSize: 12,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                flex: "none",
+                cursor: "pointer",
+                border: `1px solid ${on ? M.taupe : M.hairline}`,
+                background: on ? M_ACCENT.gold.bg : M.card,
+                color: on ? M.taupe : M.muted,
+                WebkitTapHighlightColor: "transparent",
+              }}
+            >
+              {c.label}
+              {n > 0 ? (
+                <span style={{ marginLeft: 6, fontSize: 10.5, opacity: 0.7 }}>
+                  {n}
+                </span>
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+
       {loading && !data ? (
         <Msg text="Loading…" />
       ) : error && !data ? (
         <Msg text="Couldn’t load production orders." />
+      ) : rows.length === 0 ? (
+        <Msg
+          text={
+            query || chip !== "all"
+              ? "No matching production orders."
+              : "No live production orders."
+          }
+        />
       ) : (
-        <div style={{ padding: "2px 0 120px" }}>
-          {groups.every((g) => g.jobs.length === 0) ? (
-            <Msg text={query ? `No matches for "${query}".` : "No live production orders."} />
-          ) : (
-            groups.map((g) => {
-              if (g.jobs.length === 0) return null;
-              const accent = M_ACCENT[g.accent];
-              return (
-                <div key={g.code} style={{ marginBottom: 6 }}>
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 9,
-                      padding: "10px 20px 8px",
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 9,
-                        height: 9,
-                        borderRadius: 3,
-                        background: accent.fg,
-                        flex: "none",
-                      }}
-                    />
-                    <span
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 700,
-                        color: M.raisin,
-                      }}
-                    >
-                      {g.label}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: M.muted,
-                        background: M.card,
-                        border: `1px solid ${M.border}`,
-                        padding: "1px 8px",
-                        borderRadius: 20,
-                      }}
-                    >
-                      {g.jobs.length}
-                    </span>
-                  </div>
-                  <div
-                    className="scrollarea"
-                    style={{
-                      display: "flex",
-                      gap: 11,
-                      overflowX: "auto",
-                      overflowY: "hidden",
-                      padding: "4px 18px 8px",
-                      WebkitOverflowScrolling: "touch",
-                    }}
-                  >
-                    {g.jobs.map((po) => (
-                      <JobCardTile
-                        key={po.id}
-                        po={po}
-                        accent={accent.fg}
-                        onClick={() =>
-                          navigate(`/m/production/${encodeURIComponent(po.id)}`)
-                        }
-                      />
-                    ))}
-                  </div>
-                </div>
-              );
-            })
-          )}
+        <div style={{ padding: "8px 18px 120px" }}>
+          {rows.map((po) => (
+            <JobRow
+              key={po.id}
+              po={po}
+              onClick={() =>
+                navigate(`/m/production/${encodeURIComponent(po.id)}`)
+              }
+            />
+          ))}
         </div>
       )}
     </>
   );
 }
 
-// ---- Single job-card tile (210px wide, design source spec). ------------------
-
-function JobCardTile({
-  po,
-  accent,
-  onClick,
-}: {
-  po: PO;
-  accent: string;
-  onClick: () => void;
-}) {
-  const so =
-    str(po, "companySO", "companySOId", "customerSO") || str(po, "poNo") || "—";
-  const product =
-    str(po, "productName", "productCode") || str(po, "customerName") || "—";
+// ---- One production-order card (v20 layout: code+badge, product, sub, stage
+// pipeline bar, current-stage label + PIC/due). ------------------------------
+function JobRow({ po, onClick }: { po: PO; onClick: () => void }) {
+  const code = str(po, "poNo", "companySO", "companySOId") || "—";
+  const product = str(po, "productName", "productCode") || "—";
+  const soRef = str(po, "companySO", "companySOId", "customerSO");
+  const customer = str(po, "customerName");
   const qty = num(po, "quantity");
+  const pic = str(po, "picName");
   const due = dateOnly(po, "targetEndDate");
-  const pct = progressPctOf(po);
+  const si = stageIndexOf(po);
+  const stageLabel = si >= 0 ? DEPTS[si].label : "—";
   const status = resolveStatus(str(po, "status"), STATUS_MAPS.production);
+
+  const sub = [soRef, customer, qty ? `×${qty}` : ""]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div
@@ -287,80 +252,92 @@ function JobCardTile({
         }
       }}
       style={{
-        width: 210,
-        flex: "none",
         background: M.card,
         border: `1px solid ${M.border}`,
-        borderRadius: 15,
-        padding: "13px 14px",
+        borderRadius: 16,
+        padding: "13px 15px",
+        marginBottom: 11,
         cursor: "pointer",
+        boxShadow: "0 1px 0 rgba(31,29,27,.03),0 6px 20px -12px rgba(31,29,27,.14)",
         WebkitTapHighlightColor: "transparent",
       }}
     >
       <div
         style={{
           display: "flex",
-          alignItems: "center",
           justifyContent: "space-between",
+          gap: 8,
+          alignItems: "center",
         }}
       >
         <span
           style={{
-            fontSize: 11,
+            fontSize: 11.5,
             fontWeight: 700,
             color: M.taupe,
             fontVariantNumeric: "tabular-nums",
           }}
         >
-          {so}
+          {code}
         </span>
         <StatusPill style={status.style} label={status.label} size="sm" />
       </div>
       <div
         style={{
-          fontSize: 13.5,
-          fontWeight: 600,
+          fontSize: 15,
+          fontWeight: 700,
           color: M.raisin,
           marginTop: 8,
-          lineHeight: 1.3,
+          letterSpacing: "-0.2px",
           overflow: "hidden",
-          display: "-webkit-box",
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: "vertical",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
         }}
       >
         {product}
       </div>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginTop: 10,
-        }}
-      >
-        <span style={{ fontSize: 11.5, color: M.muted }}>
-          Qty <b style={{ color: M.ink }}>{qty}</b>
-        </span>
-        <span style={{ fontSize: 11, color: M.muted }}>{due || "—"}</span>
+      {sub ? (
+        <div
+          style={{
+            fontSize: 12.5,
+            color: M.muted,
+            marginTop: 3,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {sub}
+        </div>
+      ) : null}
+
+      {/* Stage pipeline bar — 8 segments, filled up to the current dept. */}
+      <div style={{ display: "flex", gap: 3, marginTop: 12 }}>
+        {DEPTS.map((d, i) => (
+          <div
+            key={d.code}
+            style={{
+              flex: 1,
+              height: 4,
+              borderRadius: 2,
+              background: si >= 0 && i <= si ? M.taupe : "#EAE3D6",
+            }}
+          />
+        ))}
       </div>
       <div
         style={{
-          marginTop: 9,
-          height: 5,
-          background: "#F0EBE0",
-          borderRadius: 4,
-          overflow: "hidden",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginTop: 6,
+          fontSize: 11,
         }}
       >
-        <div
-          style={{
-            width: `${pct}%`,
-            height: "100%",
-            background: accent,
-            borderRadius: 4,
-          }}
-        />
+        <span style={{ color: M.taupe, fontWeight: 700 }}>{stageLabel}</span>
+        <span style={{ color: M.muted }}>
+          {pic ? `PIC ${pic}` : due ? `Due ${due}` : ""}
+        </span>
       </div>
     </div>
   );

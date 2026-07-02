@@ -32,6 +32,7 @@ import { LineItemDetailScreen } from "./screens/LineItemDetailScreen";
 import { WarehouseScreen } from "./screens/WarehouseScreen";
 import { ProductionScreen } from "./screens/ProductionScreen";
 import { SalesScreen } from "./screens/SalesScreen";
+import { SalesDetailScreen } from "./screens/SalesDetailScreen";
 import { MODULE_CONFIGS } from "./config/modules";
 import { preloadMobileCritical } from "./lib/preload";
 import { bootstrapMobileTheme } from "./lib/theme-mode";
@@ -50,6 +51,13 @@ const CUSTOM_L1: Record<string, ComponentType> = {
   // design v12) — the generic list flattens that signal. Detail route stays
   // generic via productionConfig.detail.
   production: ProductionScreen,
+};
+
+// Modules whose L2 detail is a bespoke screen (v20 alignment) instead of the
+// generic DocumentDetailScreen. Sales = the locked create-form + Total/Paid/
+// Balance KPI strip + status action bar (v20 MobileSoDetail).
+const CUSTOM_L2: Record<string, ComponentType> = {
+  sales: SalesDetailScreen,
 };
 
 export default function MobileLayout() {
@@ -115,17 +123,25 @@ export default function MobileLayout() {
           {MODULE_CONFIGS.map((cfg) => {
             const CustomL1 = CUSTOM_L1[cfg.slug];
             const L1 = CustomL1 ? <CustomL1 /> : <ModuleListScreen config={cfg} />;
+            const CustomL2 = CUSTOM_L2[cfg.slug];
+            // The L2 detail: a bespoke screen (CUSTOM_L2) wins; else the generic
+            // config-driven detail; else a ComingSoon placeholder.
+            const L2 = CustomL2 ? (
+              <CustomL2 />
+            ) : cfg.detail ? (
+              <DocumentDetailScreen config={cfg} />
+            ) : null;
             return (
             <Route key={cfg.slug}>
               <Route path={cfg.slug} element={L1} />
               <Route
                 path={`${cfg.slug}/:id`}
                 element={
-                  cfg.detail ? (
+                  L2 ? (
                     fold ? (
-                      <TwoPane left={L1} right={<DocumentDetailScreen config={cfg} />} />
+                      <TwoPane left={L1} right={L2} />
                     ) : (
-                      <DocumentDetailScreen config={cfg} />
+                      L2
                     )
                   ) : (
                     <ComingSoon title={`${cfg.title} detail`} />

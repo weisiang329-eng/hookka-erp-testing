@@ -94,6 +94,23 @@ function money(sen: number): string {
   });
 }
 
+// Truncate to fit maxW with a trailing ellipsis — the guard that keeps any
+// single-line cell (order refs, code, qty breakdown, grand total) from bleeding
+// into the next column when real data runs long. Binary-search the cut point.
+function clip(font: PDFFont, text: string, maxW: number, size: number): string {
+  if (!text) return "";
+  if (font.widthOfTextAtSize(text, size) <= maxW) return text;
+  const ell = "…";
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (font.widthOfTextAtSize(text.slice(0, mid) + ell, size) <= maxW) lo = mid;
+    else hi = mid - 1;
+  }
+  return (text.slice(0, lo).trimEnd() || text.slice(0, 1)) + ell;
+}
+
 function wrap(font: PDFFont, text: string, maxW: number, size: number, maxLines = 4): string[] {
   if (!text) return [];
   const words = text.split(/\s+/).filter(Boolean);
@@ -194,12 +211,12 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
     return ry2 - 12;
   };
 
-  const ensureSpace = (need: number) => {
+  const ensureSpace = (need: number, withHeader = true) => {
     if (y - need < 60) {
       drawFooterLine();
       page = pdf.addPage([PAGE_W, PAGE_H]);
       y = drawLetterhead();
-      y = drawTableHeader(y);
+      if (withHeader) y = drawTableHeader(y);
     }
   };
 
@@ -228,17 +245,22 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
       ensureSpace(rowH);
 
       refLines.forEach((r, i) => {
-        page.drawText(r, { x: xOrder, y: y - i * 9.3, size: 7.5, font: fonts.helv, color: INK });
+        // Clip each ref to the Order column so a long PO/SO/REF can't run under
+        // the Description text.
+        page.drawText(clip(fonts.helv, r, wOrder - 2, 7.5), { x: xOrder, y: y - i * 9.3, size: 7.5, font: fonts.helv, color: INK });
       });
-      // Description: code (bold) then name then spec
-      page.drawText(it.code, { x: xDesc, y, size: 8, font: fonts.bold, color: INK });
+      // Description: code (bold, clipped to the column) then name then spec
+      page.drawText(clip(fonts.bold, it.code, wDesc, 8), { x: xDesc, y, size: 8, font: fonts.bold, color: INK });
       let dl = 1;
       for (const ln of nameWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 7.5, font: fonts.helv, color: INK }); dl++; }
       for (const ln of specWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 7.5, font: fonts.helv, color: MUTED }); dl++; }
 
       page.drawText(String(it.set), { x: xSet, y, size: 8, font: fonts.helv, color: INK });
       if (isDO) {
-        rightText(page, it.qtyBreakdown || "-", xCol4Right, y, 7.5, fonts.helv, INK);
+        // Clip the pieces breakdown to its column (xSet..xCol4Right) so a
+        // multi-component repair line ("3 HB + 6 Divan + 3 R Arm + …") can't
+        // spill left across the row.
+        rightText(page, clip(fonts.helv, it.qtyBreakdown || "-", xCol4Right - xSet - 16, 7.5), xCol4Right, y, 7.5, fonts.helv, INK);
         rightText(page, String(it.totalQty ?? ""), xCol5Right, y, 8, fonts.helv, INK);
       } else {
         rightText(page, money(it.priceSen ?? 0), xCol4Right, y, 8, fonts.helv, INK);
@@ -253,7 +275,10 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
   }
 
   // ── Totals row ──────────────────────────────────────────────────────────
-  ensureSpace(20);
+  // Reserve the WHOLE tail (totals + DO breakdown / invoice summary + the
+  // signature block) so it never crosses the footer — if it won't fit, push
+  // the entire block to a fresh page (no table header on that page).
+  ensureSpace(isDO ? 88 : 138, false);
   page.drawRectangle({ x: MARGIN, y: y + 2, width: PAGE_W - MARGIN * 2, height: 0.7, color: INK });
   y -= 6;
   rightText(page, "Total", xSet - 6, y, 8.5, fonts.bold);
@@ -262,7 +287,8 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
     rightText(page, `${data.totalItems ?? 0} ITEMS`, xCol5Right, y, 8.5, fonts.bold);
     if (data.grandBreakdown) {
       y -= 12;
-      rightText(page, data.grandBreakdown, xCol5Right, y, 8, fonts.helv, MUTED);
+      // Clip the aggregate breakdown so a many-component total stays on its row.
+      rightText(page, clip(fonts.helv, data.grandBreakdown, xCol5Right - MARGIN - 40, 8), xCol5Right, y, 8, fonts.helv, MUTED);
     }
   } else {
     rightText(page, "Subtotal", xCol4Right, y, 8.5, fonts.bold);

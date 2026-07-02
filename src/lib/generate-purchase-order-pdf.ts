@@ -178,7 +178,6 @@ export function generatePurchaseOrderPdf(
   const leftMaxW = cw * 0.55 - labelW;
   let ly = 40;
   ly = lblVal(leftX, ly, "Supplier", po.supplierName, leftMaxW);
-  ly = lblVal(leftX, ly, "Supplier ID", String(po.supplierId ?? "-"), leftMaxW);
 
   const rightX = pageW / 2 + 12;
   const rightMaxW = pageW - margin - rightX - labelW;
@@ -206,6 +205,7 @@ export function generatePurchaseOrderPdf(
     return [
       String(idx + 1),
       code,
+      item.supplierSKU || "-",
       description,
       item.unit,
       String(item.quantity),
@@ -220,6 +220,7 @@ export function generatePurchaseOrderPdf(
     head: [[
       { content: "#", styles: { halign: "center" } },
       { content: "Item Code" },
+      { content: "Supplier SKU" },
       { content: "Description" },
       { content: "Unit", styles: { halign: "center" } },
       { content: "Qty", styles: { halign: "right" } },
@@ -249,18 +250,19 @@ export function generatePurchaseOrderPdf(
       valign: "middle",
     },
     columnStyles: {
-      0: { cellWidth: 10, halign: "center" },
-      1: { cellWidth: 28, fontStyle: "bold" },
-      2: { cellWidth: "auto" },
-      3: { cellWidth: 18, halign: "center" },
-      4: { cellWidth: 18, halign: "right" },
-      5: { cellWidth: 28, halign: "right" },
-      6: { cellWidth: 28, halign: "right", fontStyle: "bold" },
+      0: { cellWidth: 9, halign: "center" },
+      1: { cellWidth: 24, fontStyle: "bold" },
+      2: { cellWidth: 32 },
+      3: { cellWidth: "auto" },
+      4: { cellWidth: 15, halign: "center" },
+      5: { cellWidth: 14, halign: "right" },
+      6: { cellWidth: 26, halign: "right" },
+      7: { cellWidth: 26, halign: "right", fontStyle: "bold" },
     },
     didDrawCell(data) {
       // Thin dashed separator under every item row (drawn once on the last
       // column) — the DO/SI per-row separator.
-      if (data.section !== "body" || data.column.index !== 6) return;
+      if (data.section !== "body" || data.column.index !== 7) return;
       const yy = data.cell.y + data.cell.height;
       doc.setDrawColor(...PDF.rule);
       doc.setLineWidth(0.1);

@@ -1,71 +1,112 @@
 // ============================================================================
-// GlobalSearchSheet — CHANGELOG O.1: "全局搜索:客户/PO/SO/Reference/单号,
-// 任何模块列表都能搜". Fans out across the preloaded localStorage cache
-// (every endpoint in src/pages/m/lib/preload.ts) and shows top matches
-// grouped by module. Open it from the Home header's search icon.
+// GlobalSearchSheet — "Search All" (CHANGELOG O.1 + spec §Search): one search
+// box on the Home header that searches EVERY module at once — customer / PO /
+// SO / reference / doc number / product / supplier / rack / employee / case…
 //
-// Strategy: read each cached list from localStorage (cached-fetch keys), do a
-// substring match on the most identifying fields per type, render up to 5
-// hits per module with a tappable row that navigates to the L2 detail.
-//
-// No new backend — pure client-side overlay over the cache we already prime.
+// Config-driven: instead of hand-listing fields per module (which silently
+// drifted — only 7 of 20 modules were covered, the rest returned nothing), it
+// reuses the SAME MODULE_CONFIGS the lists are built from. For each module it
+//   • warms that module's list endpoint on open (best-effort, cache-backed),
+//   • matches the query against that source's declared text columns (the
+//     module's real "search matches" from the spec's Filter·Sort·Search table),
+//   • renders the match via the source's own toVM (correct code / title / items)
+//     and navigates via the module's own detailPath.
+// So every module is searchable, with the right fields, and it stays in sync as
+// configs change. No new backend — pure client-side over the cache we prime.
 // ============================================================================
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, X } from "lucide-react";
 import { Sheet } from "./Sheet";
+import { StatusPill } from "./StatusPill";
 import { M } from "../theme";
-import { peekCache } from "@/lib/cached-fetch";
+import { cachedFetchJson, peekCache } from "@/lib/cached-fetch";
+import { MODULE_CONFIGS } from "../config/modules";
+import type { DataSource, ModuleConfig, RawRow, RowVM } from "../config/types";
 
 type Hit = {
-  module: string; // human label (Sales / Delivery / etc)
-  modulePath: string; // /m/<slug>/:id
-  code: string;
-  title: string;
-  subLine?: string;
+  key: string;
+  moduleTitle: string;
+  path: string | null;
+  vm: RowVM;
 };
 
-type Props = {
-  open: boolean;
-  onClose: () => void;
-};
+type Group = { moduleTitle: string; results: Hit[] };
 
-// Read a cached endpoint payload (set up by preload) + return its data[].
-function readCachedList(url: string): Record<string, unknown>[] {
-  const cached = peekCache<{ data?: unknown[] | { data?: unknown[] } } | unknown[]>(url);
-  if (!cached) return [];
-  if (Array.isArray(cached)) return cached as Record<string, unknown>[];
-  const obj = cached as { data?: unknown[] | { data?: unknown[] } };
-  const d = obj.data;
-  if (Array.isArray(d)) return d as Record<string, unknown>[];
-  if (d && typeof d === "object" && Array.isArray((d as { data?: unknown[] }).data)) {
-    return (d as { data: Record<string, unknown>[] }).data;
+type Props = { open: boolean; onClose: () => void };
+
+// Max hits shown per module source (keeps the sheet scannable).
+const PER_SOURCE = 6;
+
+// Every distinct list endpoint across all module sources — warmed on open so
+// even modules the operator hasn't visited yet are searchable.
+const ALL_SOURCE_URLS: string[] = Array.from(
+  new Set(MODULE_CONFIGS.flatMap((c) => c.sources.map((s) => s.url))),
+);
+
+/** Read a warmed endpoint payload out of the cache and pull its rows via the
+ * source's own `select` (the exact unwrap the list uses). Never throws. */
+function rowsOf(src: DataSource): RawRow[] {
+  const cached = peekCache<unknown>(src.url);
+  if (cached == null) return [];
+  try {
+    const rows = src.select(cached);
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
   }
-  return [];
 }
 
-function lc(v: unknown): string {
-  return typeof v === "string" ? v.toLowerCase() : "";
-}
-
-// Substring match across a set of identifying fields per row.
-function matchHits(
-  q: string,
-  list: Record<string, unknown>[],
-  fields: string[],
-  toHit: (r: Record<string, unknown>) => Hit,
-): Hit[] {
-  const ql = q.toLowerCase().trim();
-  if (!ql) return [];
-  const out: Hit[] = [];
-  for (const r of list) {
-    for (const f of fields) {
-      if (lc(r[f]).includes(ql)) {
-        out.push(toHit(r));
-        break;
-      }
+/** The searchable haystack for one row = its declared text columns (the
+ * module's real "search matches"). Cheap: just the column getters. */
+function matchesQuery(src: DataSource, row: RawRow, ql: string): boolean {
+  for (const col of src.columns) {
+    if (col.type !== "text") continue;
+    try {
+      const v = col.value(row);
+      if (typeof v === "string" && v.toLowerCase().includes(ql)) return true;
+    } catch {
+      /* skip a bad column getter */
     }
-    if (out.length >= 5) break;
+  }
+  return false;
+}
+
+/** Fallback haystack when a source declares no text columns — match the VM's
+ * own code/title/items so the module is never silently un-searchable. */
+function vmMatches(vm: RowVM, ql: string): boolean {
+  return (
+    vm.code.toLowerCase().includes(ql) ||
+    vm.title.toLowerCase().includes(ql) ||
+    (vm.items ?? vm.subLine ?? "").toLowerCase().includes(ql)
+  );
+}
+
+function searchModule(cfg: ModuleConfig, ql: string): Hit[] {
+  const out: Hit[] = [];
+  const seen = new Set<string>();
+  for (const src of cfg.sources) {
+    const hasTextCol = src.columns.some((c) => c.type === "text");
+    let count = 0;
+    for (const row of rowsOf(src)) {
+      if (count >= PER_SOURCE) break;
+      let vm: RowVM;
+      try {
+        vm = src.toVM(row);
+      } catch {
+        continue;
+      }
+      const hit = hasTextCol
+        ? matchesQuery(src, row, ql)
+        : vmMatches(vm, ql);
+      if (!hit) continue;
+      const path = cfg.detailPath?.(vm, row) ?? `/m/${cfg.slug}`;
+      const dedupe = `${cfg.slug}:${vm.id}`;
+      if (seen.has(dedupe)) continue;
+      seen.add(dedupe);
+      out.push({ key: dedupe, moduleTitle: cfg.title, path, vm });
+      count++;
+    }
   }
   return out;
 }
@@ -73,124 +114,50 @@ function matchHits(
 export function GlobalSearchSheet({ open, onClose }: Props) {
   const navigate = useNavigate();
   const [q, setQ] = useState("");
+  // Bumped as each cold endpoint warms so freshly-fetched modules appear in the
+  // results without the operator re-typing.
+  const [warmTick, setWarmTick] = useState(0);
 
-  // Read caches lazily — only when sheet is open AND query has content.
-  const hits: { module: string; results: Hit[] }[] = useMemo(() => {
-    if (!open || !q.trim()) return [];
-    const groups: { module: string; results: Hit[] }[] = [];
+  // Warm every module's list endpoint when the sheet opens. Cache-backed +
+  // deduped by cached-fetch, so already-visited modules are instant and cold
+  // ones fetch once. Best-effort — a failed warm just leaves that module out.
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    for (const url of ALL_SOURCE_URLS) {
+      void cachedFetchJson(url)
+        .then(() => {
+          if (alive) setWarmTick((t) => t + 1);
+        })
+        .catch(() => {
+          /* silent — module just won't have results until next visit */
+        });
+    }
+    return () => {
+      alive = false;
+    };
+  }, [open]);
 
-    // SALES
-    const sales = readCachedList("/api/sales-orders");
-    const salesHits = matchHits(
-      q,
-      sales,
-      ["companySO", "companySOId", "customerSO", "customerSOId", "customerPO", "customerPOId", "customerName", "reference"],
-      (r) => ({
-        module: "Sales",
-        modulePath: `/m/sales/${encodeURIComponent(String(r.id ?? r.companySO ?? ""))}`,
-        code: String(r.companySO ?? r.companySOId ?? ""),
-        title: String(r.customerName ?? ""),
-        subLine: String(r.customerPO ?? r.customerPOId ?? "") || undefined,
-      }),
-    );
-    if (salesHits.length > 0) groups.push({ module: "Sales", results: salesHits });
+  const groups: Group[] = useMemo(() => {
+    const ql = q.trim().toLowerCase();
+    if (!open || !ql) return [];
+    const out: Group[] = [];
+    for (const cfg of MODULE_CONFIGS) {
+      const results = searchModule(cfg, ql);
+      if (results.length > 0) out.push({ moduleTitle: cfg.title, results });
+    }
+    return out;
+    // warmTick is an intentional dep: re-run as cold endpoints finish warming.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, q, warmTick]);
 
-    // DELIVERY
-    const dos = readCachedList("/api/delivery-orders");
-    const doHits = matchHits(
-      q,
-      dos,
-      ["doNo", "companySO", "companySOId", "customerName", "customerPO"],
-      (r) => ({
-        module: "Delivery",
-        modulePath: `/m/delivery/${encodeURIComponent(String(r.id ?? r.doNo ?? ""))}`,
-        code: String(r.doNo ?? ""),
-        title: String(r.customerName ?? ""),
-        subLine: String(r.companySO ?? r.companySOId ?? "") || undefined,
-      }),
-    );
-    if (doHits.length > 0) groups.push({ module: "Delivery", results: doHits });
+  const totalHits = useMemo(
+    () => groups.reduce((n, g) => n + g.results.length, 0),
+    [groups],
+  );
 
-    // PROCUREMENT
-    const pos = readCachedList("/api/purchase-orders");
-    const poHits = matchHits(
-      q,
-      pos,
-      ["poNo", "supplierName"],
-      (r) => ({
-        module: "Procurement",
-        modulePath: `/m/procurement/${encodeURIComponent(String(r.id ?? r.poNo ?? ""))}`,
-        code: String(r.poNo ?? ""),
-        title: String(r.supplierName ?? ""),
-      }),
-    );
-    if (poHits.length > 0) groups.push({ module: "Procurement", results: poHits });
-
-    // INVOICES
-    const invs = readCachedList("/api/invoices");
-    const invHits = matchHits(
-      q,
-      invs,
-      ["invoiceNo", "customerName"],
-      (r) => ({
-        module: "Invoices",
-        modulePath: `/m/invoices/${encodeURIComponent(String(r.id ?? r.invoiceNo ?? ""))}`,
-        code: String(r.invoiceNo ?? ""),
-        title: String(r.customerName ?? ""),
-      }),
-    );
-    if (invHits.length > 0) groups.push({ module: "Invoices", results: invHits });
-
-    // CUSTOMERS
-    const custs = readCachedList("/api/customers");
-    const custHits = matchHits(
-      q,
-      custs,
-      ["code", "name", "phone"],
-      (r) => ({
-        module: "Customers",
-        modulePath: `/m/customers/${encodeURIComponent(String(r.id ?? r.code ?? ""))}`,
-        code: String(r.code ?? ""),
-        title: String(r.name ?? ""),
-      }),
-    );
-    if (custHits.length > 0) groups.push({ module: "Customers", results: custHits });
-
-    // SUPPLIERS
-    const sups = readCachedList("/api/suppliers");
-    const supHits = matchHits(
-      q,
-      sups,
-      ["code", "name", "phone", "contactPerson"],
-      (r) => ({
-        module: "Suppliers",
-        modulePath: `/m/suppliers/${encodeURIComponent(String(r.id ?? r.code ?? ""))}`,
-        code: String(r.code ?? ""),
-        title: String(r.name ?? ""),
-      }),
-    );
-    if (supHits.length > 0) groups.push({ module: "Suppliers", results: supHits });
-
-    // PRODUCTS
-    const prods = readCachedList("/api/products");
-    const prodHits = matchHits(
-      q,
-      prods,
-      ["code", "name"],
-      (r) => ({
-        module: "Products",
-        modulePath: `/m/products/${encodeURIComponent(String(r.id ?? r.code ?? ""))}`,
-        code: String(r.code ?? ""),
-        title: String(r.name ?? ""),
-      }),
-    );
-    if (prodHits.length > 0) groups.push({ module: "Products", results: prodHits });
-
-    return groups;
-  }, [open, q]);
-
-  // Reset query when sheet re-opens (render-time check, NOT in an effect —
-  // matches the codebase's no-setState-in-effect rule).
+  // Reset query when the sheet re-opens (render-time, not in an effect — the
+  // codebase's no-setState-in-effect rule).
   const [lastOpen, setLastOpen] = useState(open);
   if (open !== lastOpen) {
     setLastOpen(open);
@@ -199,7 +166,14 @@ export function GlobalSearchSheet({ open, onClose }: Props) {
 
   return (
     <Sheet open={open} onClose={onClose}>
-      <div style={{ padding: "16px 16px 8px", display: "flex", alignItems: "center", gap: 10 }}>
+      <div
+        style={{
+          padding: "16px 16px 8px",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+        }}
+      >
         <div
           style={{
             flex: 1,
@@ -216,7 +190,7 @@ export function GlobalSearchSheet({ open, onClose }: Props) {
           <input
             autoFocus
             value={q}
-            placeholder="Search customer / PO / SO / Reference…"
+            placeholder="Search all — customer, SO, PO, product, supplier…"
             onChange={(e) => setQ(e.target.value)}
             style={{
               flex: 1,
@@ -229,6 +203,26 @@ export function GlobalSearchSheet({ open, onClose }: Props) {
               fontFamily: "inherit",
             }}
           />
+          {q ? (
+            <button
+              onClick={() => setQ("")}
+              aria-label="Clear"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 22,
+                height: 22,
+                borderRadius: "50%",
+                background: M.hairline,
+                border: "none",
+                cursor: "pointer",
+                flex: "none",
+              }}
+            >
+              <X size={13} color={M.body} />
+            </button>
+          ) : null}
         </div>
         <button
           onClick={onClose}
@@ -242,23 +236,66 @@ export function GlobalSearchSheet({ open, onClose }: Props) {
             background: "transparent",
             border: "none",
             cursor: "pointer",
+            fontSize: 14,
+            fontWeight: 600,
+            color: M.taupe,
           }}
         >
-          <X size={20} color={M.body} />
+          Cancel
         </button>
       </div>
-      <div style={{ padding: "4px 16px 80px", overflowY: "auto", maxHeight: "calc(85dvh - 60px)" }}>
+
+      {/* Result-count line — the "Search All" affordance: how many across how
+          many modules, so the operator knows the search spans everything. */}
+      {q.trim() ? (
+        <div
+          style={{
+            padding: "2px 20px 6px",
+            fontSize: 11.5,
+            color: M.muted,
+            fontWeight: 600,
+          }}
+        >
+          {totalHits === 0
+            ? "No matches across all modules"
+            : `${totalHits} result${totalHits === 1 ? "" : "s"} in ${groups.length} module${groups.length === 1 ? "" : "s"}`}
+        </div>
+      ) : null}
+
+      <div
+        style={{
+          padding: "4px 16px 90px",
+          overflowY: "auto",
+          maxHeight: "calc(85dvh - 96px)",
+        }}
+      >
         {q.trim().length === 0 ? (
-          <div style={{ color: M.muted, fontSize: 13, padding: "20px 4px", textAlign: "center" }}>
-            Type a customer name, PO, SO, or reference to search every module.
+          <div
+            style={{
+              color: M.muted,
+              fontSize: 13,
+              padding: "24px 8px",
+              textAlign: "center",
+              lineHeight: 1.6,
+            }}
+          >
+            Search every module at once — customer name, SO / PO / DO / invoice
+            number, product, supplier, rack, service case, or any reference.
           </div>
-        ) : hits.length === 0 ? (
-          <div style={{ color: M.muted, fontSize: 13, padding: "20px 4px", textAlign: "center" }}>
-            No matches.
+        ) : groups.length === 0 ? (
+          <div
+            style={{
+              color: M.muted,
+              fontSize: 13,
+              padding: "24px 8px",
+              textAlign: "center",
+            }}
+          >
+            No matches. Try a document number, customer, or reference.
           </div>
         ) : (
-          hits.map((g) => (
-            <div key={g.module} style={{ marginBottom: 14 }}>
+          groups.map((g) => (
+            <div key={g.moduleTitle} style={{ marginBottom: 14 }}>
               <div
                 style={{
                   fontSize: 10,
@@ -266,17 +303,17 @@ export function GlobalSearchSheet({ open, onClose }: Props) {
                   letterSpacing: 0.5,
                   textTransform: "uppercase",
                   color: M.muted,
-                  padding: "6px 4px 6px",
+                  padding: "6px 4px",
                 }}
               >
-                {g.module} · {g.results.length}
+                {g.moduleTitle} · {g.results.length}
               </div>
-              {g.results.map((h, i) => (
+              {g.results.map((h) => (
                 <button
-                  key={`${g.module}-${i}`}
+                  key={h.key}
                   onClick={() => {
                     onClose();
-                    navigate(h.modulePath);
+                    if (h.path) navigate(h.path);
                   }}
                   style={{
                     width: "100%",
@@ -295,8 +332,15 @@ export function GlobalSearchSheet({ open, onClose }: Props) {
                   }}
                 >
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: M.taupe, fontVariantNumeric: "tabular-nums" }}>
-                      {h.code || "—"}
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        color: M.taupe,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {h.vm.code || "—"}
                     </div>
                     <div
                       style={{
@@ -309,9 +353,9 @@ export function GlobalSearchSheet({ open, onClose }: Props) {
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {h.title}
+                      {h.vm.title}
                     </div>
-                    {h.subLine ? (
+                    {h.vm.items || h.vm.subLine ? (
                       <div
                         style={{
                           fontSize: 12,
@@ -322,10 +366,16 @@ export function GlobalSearchSheet({ open, onClose }: Props) {
                           whiteSpace: "nowrap",
                         }}
                       >
-                        {h.subLine}
+                        {h.vm.items || h.vm.subLine}
                       </div>
                     ) : null}
                   </div>
+                  {h.vm.status ? (
+                    <StatusPill
+                      style={h.vm.status.style}
+                      label={h.vm.status.label}
+                    />
+                  ) : null}
                 </button>
               ))}
             </div>

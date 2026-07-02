@@ -351,18 +351,34 @@ function RackOverview({
   onView: (r: Rack) => void;
   onRackQr: (r: Rack) => void;
 }) {
-  // Rack search (spec §Search "Warehouse previously shipped with no search —
-  // add it"). Filters the loaded racks by rack no / product / customer / zone.
+  // Rack search — scans the rack no / zone AND EVERY item inside the rack
+  // (product · customer · PO · SO · SKU), so searching any stocked item finds
+  // the rack that holds it (owner 2026-07-02: "要跟著第三張照片那樣才 search 到東西"
+  // — the rack's "In this rack now" items, not just its first/primary product).
   const [q, setQ] = useState("");
   const ql = q.trim().toLowerCase();
   const filtered = useMemo(() => {
     if (!ql) return racks;
-    return racks.filter((r) =>
-      [rackLabel(r), rackProduct(r), str(r, "customerName"), str(r, "zone")]
+    return racks.filter((r) => {
+      const items = Array.isArray(r.items)
+        ? (r.items as Record<string, unknown>[])
+        : [];
+      const itemHay = items
+        .map((it) =>
+          [
+            str(it, "productName", "productCode"),
+            str(it, "customerName"),
+            str(it, "poNo", "poNumber"),
+            str(it, "companySO", "companySOId", "customerSO", "soNo"),
+            str(it, "code", "sku"),
+          ].join(" "),
+        )
+        .join(" ");
+      return [rackLabel(r), rackProduct(r), str(r, "customerName"), str(r, "zone"), itemHay]
         .join(" ")
         .toLowerCase()
-        .includes(ql),
-    );
+        .includes(ql);
+    });
   }, [racks, ql]);
   return (
     <>

@@ -127,6 +127,55 @@ function rowToPO(row: PurchaseOrderRow, items: PurchaseOrderItemRow[] = []) {
   };
 }
 
+// Supplier SKU is a property of the (supplier, material) binding — it lives in
+// supplier_materials (887/887 populated on prod). Purchase-order lines were
+// meant to snapshot it on create, but every PO on prod came back blank (the
+// snapshot never surfaced — see BUG-2026-07-02-002). Rather than depend on the
+// stored snapshot, we fill any BLANK line SKU from the live binding on read, so
+// the Supplier SKU column always shows the correct code. A non-blank stored
+// value always wins (never overwritten). Keyed by supplierId + upper-cased
+// materialCode (the PO line's materialCode === the binding's RM code).
+async function loadSupplierSkuMap(
+  db: D1Database,
+  supplierIds: string[],
+): Promise<Map<string, string>> {
+  const m = new Map<string, string>();
+  const ids = Array.from(new Set(supplierIds.filter(Boolean)));
+  if (ids.length === 0) return m;
+  const ph = ids.map(() => "?").join(", ");
+  const res = await db
+    .prepare(
+      `SELECT * FROM supplier_materials WHERE supplierId IN (${ph})`,
+    )
+    .bind(...ids)
+    .all<Record<string, unknown>>();
+  for (const r of res.results ?? []) {
+    const sid = String(r.supplierId ?? r.supplier_id ?? "");
+    const code = String(r.materialCode ?? r.material_code ?? "").trim().toUpperCase();
+    const sku = String(r.supplierSku ?? r.supplierSKU ?? r.supplier_sku ?? "").trim();
+    if (sid && code && sku) m.set(`${sid}::${code}`, sku);
+  }
+  return m;
+}
+
+// Mutates the built PO objects in place: any item whose supplierSKU is blank
+// gets the binding's SKU. Safe no-op when the map has no matching entry.
+function fillBlankSupplierSku(
+  pos: Array<ReturnType<typeof rowToPO>>,
+  skuMap: Map<string, string>,
+): void {
+  for (const po of pos) {
+    if (!po.supplierId) continue;
+    for (const it of po.items) {
+      if (it.supplierSKU) continue;
+      const code = String(it.materialCode ?? "").trim().toUpperCase();
+      if (!code) continue;
+      const hit = skuMap.get(`${po.supplierId}::${code}`);
+      if (hit) it.supplierSKU = hit;
+    }
+  }
+}
+
 function genPoId(): string {
   return `po-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -190,7 +239,12 @@ async function fetchPOWithItems(db: D1Database, id: string) {
       .all<PurchaseOrderItemRow>(),
   ]);
   if (!po) return null;
-  return rowToPO(po, itemsRes.results ?? []);
+  const built = rowToPO(po, itemsRes.results ?? []);
+  // Backfill blank line Supplier SKUs from the supplier binding (see
+  // loadSupplierSkuMap). One PO → one supplier lookup.
+  const skuMap = await loadSupplierSkuMap(db, [built.supplierId]);
+  fillBlankSupplierSku([built], skuMap);
+  return built;
 }
 
 // GET /api/purchase-orders — list all POs + items
@@ -218,6 +272,13 @@ app.get("/", async (c) => {
   const data = poRows.map((p) =>
     rowToPO(p, items.results ?? []),
   );
+  // Backfill blank line Supplier SKUs from the supplier bindings (one query for
+  // every supplier in the page). See loadSupplierSkuMap / BUG-2026-07-02-002.
+  const skuMap = await loadSupplierSkuMap(
+    c.var.DB,
+    poRows.map((p) => p.supplierId),
+  );
+  fillBlankSupplierSku(data, skuMap);
   return c.json({ success: true, data });
 });
 

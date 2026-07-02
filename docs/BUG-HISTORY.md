@@ -36,7 +36,7 @@ Entries themselves stay newest-first.
 
 ## BUG-2026-07-02-003 — Customer auto-emails attached a DIFFERENT-looking DO / Invoice than the one the owner downloads (two separate PDF generators) `delivery-orders` `invoices` `ui-frontend`
 
-🟢 **Fixed (staging/preview — pending owner verify before merge)** · owner-reported ("完全都不是我们的 Invoice 和 DO, 它是从哪里拿出来的?")
+🟢 **Fixed — shipped to `main`/prod 2026-07-02 (owner approved the rendered DO + Invoice samples)** · owner-reported ("完全都不是我们的 Invoice 和 DO, 它是从哪里拿出来的?")
 
 **Symptom (owner, live prod):** a customer received the DELIVERED invoice email + the DISPATCHED DO email with attached PDFs that looked nothing like the real documents the owner prints/downloads from the ERP — no proper letterhead layout, wrong columns, missing spec detail.
 
@@ -49,7 +49,9 @@ Entries themselves stay newest-first.
 - Invoices list "Download PDF" (batch) → merges unified PDFs into one file (pdf-lib copyPages) instead of the jsPDF combined generator.
 - Pure-backend fallback (a transition with no client render) → renders the SAME unified DO/Invoice server-side (Workers-pure) with `buildSimpleTablePdf` kept as the ultimate safety net.
 
-**Verified:** `tsc -p tsconfig.app.json --noEmit` clean; `npm test` 1347/1348 (1 pre-existing skip); minimal-data server render smoke-tested (valid PDF bytes for both DO + Invoice with no per-line extras). Branch `unify-do-invoice-pdf` deployed to preview `unify-do-invoice-pdf.hookka-erp-testing.pages.dev`. **Owner to verify the customer-facing PDFs on the preview (download + re-send) before merge to main** — customer-facing, can't self-verify every order variant. NOTE: the internal per-row "Print DO" (list) still uses the jsPDF generator because it carries a delivery-status QR with live scan consumers — left unchanged pending owner's call on dropping the QR.
+**Overflow hardening (owner: "確保 UI 不會爆"):** stress-tested worst-case data (super-long customer/address, long PO/SO/REF, a repair line breaking into 6 component types, 22 rows across pages) and it broke three ways — order refs bled into Description, the qty breakdown spilled across the row, and the totals+signature block collided with the footer. Fixed with a `clip()` ellipsis helper on every single-line cell (refs, code, qty breakdown, grand total) and a full-tail page-break reservation (`ensureSpace(isDO?88:138, false)`) so the totals + summary + signature block relocate together to a fresh page rather than crossing the footer. Normal single-page docs are byte-unchanged (clip is a no-op when text fits).
+
+**Verified:** `tsc -p tsconfig.app.json --noEmit` clean; `npm test` green (1 pre-existing skip); minimal-data server render smoke-tested; worst-case stress render inspected page-by-page (columns clean, tail on its own page). Owner approved the rendered DO-2607-007 + INV-2607-002 samples (+ hardened v2). Merged to `main` and the "Deploy to Cloudflare Pages" run went green on prod. NOTE: the internal per-row "Print DO" (list) still uses the jsPDF generator because it carries a delivery-status QR with live scan consumers — left unchanged pending owner's call on dropping the QR.
 
 ---
 

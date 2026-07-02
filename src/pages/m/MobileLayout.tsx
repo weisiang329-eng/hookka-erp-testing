@@ -35,6 +35,7 @@ import { SalesScreen } from "./screens/SalesScreen";
 import { SalesDetailScreen } from "./screens/SalesDetailScreen";
 import { ProductionDetailScreen } from "./screens/ProductionDetailScreen";
 import { ServiceCasesScreen } from "./screens/ServiceCasesScreen";
+import { AnnouncementsScreen } from "./screens/AnnouncementsScreen";
 import { MODULE_CONFIGS } from "./config/modules";
 import { preloadMobileCritical } from "./lib/preload";
 import { bootstrapMobileTheme } from "./lib/theme-mode";
@@ -49,6 +50,7 @@ bootstrapMobileTheme();
 const CUSTOM_L1: Record<string, ComponentType> = {
   sales: SalesScreen,
   servicecases: ServiceCasesScreen,
+  announcements: AnnouncementsScreen,
   warehouse: WarehouseScreen,
   // Production is a Kanban-style board grouped by current department (dc12
   // design v12) — the generic list flattens that signal. Detail route stays

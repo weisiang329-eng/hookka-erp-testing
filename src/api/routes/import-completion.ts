@@ -9368,6 +9368,79 @@ app.post("/backfill-5543-co2606002", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /create-updated-at-indexes — ONE-SHOT (owner 2026-07-04, IT-hygiene
+// audit follow-up). The dashboard snapshot freshness probe runs
+// MAX(updated_at) across its source tables on every read; ~15 tables carry an
+// updated_at column with NO index on it, so each probe is a sequential scan
+// that gets linearly slower as data grows. SELF-DISCOVERING: asks Postgres
+// which public tables have an updated_at column but no index covering it —
+// no hardcoded list to go stale. Plain CREATE INDEX briefly locks writes; the
+// tables are small (ms-scale builds), and IF NOT EXISTS keeps it idempotent.
+// AUDIT-FIRST — apply with { "apply": true, "confirm": "indexes" }.
+app.post("/create-updated-at-indexes", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const body = (await c.req.json().catch(() => ({}))) as {
+    apply?: boolean;
+    confirm?: string;
+  };
+  const apply = body.apply === true && body.confirm === "indexes";
+
+  const res = await db
+    .prepare(
+      `SELECT c.table_name AS "tableName",
+              EXISTS (
+                SELECT 1 FROM pg_indexes i
+                 WHERE i.schemaname = 'public'
+                   AND i.tablename = c.table_name
+                   AND i.indexdef ILIKE '%(updated_at%'
+              ) AS "hasIndex"
+         FROM information_schema.columns c
+         JOIN information_schema.tables t
+           ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+        WHERE c.table_schema = 'public'
+          AND c.column_name = 'updated_at'
+          AND t.table_type = 'BASE TABLE'
+        ORDER BY c.table_name`,
+    )
+    .all<{ tableName: string; hasIndex: boolean }>();
+  const all = res.results ?? [];
+  const missing = all.filter(
+    (r) => !r.hasIndex && /^[a-z0-9_]+$/.test(r.tableName),
+  );
+
+  if (!apply) {
+    return c.json({
+      success: true,
+      apply: false,
+      tablesWithUpdatedAt: all.length,
+      alreadyIndexed: all.length - missing.length,
+      missing: missing.map((m) => m.tableName),
+      note: 'Audit only. Apply with { "apply": true, "confirm": "indexes" }.',
+    });
+  }
+
+  const created: string[] = [];
+  const failed: Array<{ table: string; error: string }> = [];
+  for (const m of missing) {
+    try {
+      await db
+        .prepare(
+          `CREATE INDEX IF NOT EXISTS idx_${m.tableName}_updated_at ON ${m.tableName} (updated_at)`,
+        )
+        .run();
+      created.push(m.tableName);
+    } catch (err) {
+      failed.push({
+        table: m.tableName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return c.json({ success: true, apply: true, created, failed });
+});
+
 // POST /backfill-punch-autofill-blocked — ONE-SHOT (owner 2026-07-04).
 // Repairs the days already bitten by the punch-autofill safety-gate bug: an
 // APPROVED non-production request row that landed BEFORE the worker's

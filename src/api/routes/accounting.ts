@@ -4927,6 +4927,10 @@ interface DocDateCtx {
     postedAt: string | null | undefined,
   ) => string;
   openingDate: string | null;
+  // Per-request memo for glWindowSigned (key `${startYm}|${endYm}`). The
+  // periodic-inventory stock chain re-reads overlapping windows; cached
+  // results are shared and must be treated as READ-ONLY by callers.
+  glMemo?: Map<string, { net: GlWindow; coa: Map<string, { name: string; type: CoaRow["type"] }> }>;
 }
 
 // Prior-cumulative P&L balances (the old accountant's TB as at the month-end
@@ -4966,6 +4970,9 @@ async function glWindowSigned(
   endYm: string | null,
   dc: DocDateCtx,
 ): Promise<{ net: GlWindow; coa: Map<string, { name: string; type: CoaRow["type"] }> }> {
+  const memoKey = `${startYm ?? ""}|${endYm ?? ""}`;
+  const cached = dc.glMemo?.get(memoKey);
+  if (cached) return cached;
   const [legRes, coaRes] = await Promise.all([
     db.prepare("SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0")
       .all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
@@ -5006,7 +5013,9 @@ async function glWindowSigned(
       return t !== undefined && PNL_TYPES.has(t);
     });
   }
-  return { net, coa };
+  const out = { net, coa };
+  dc.glMemo?.set(memoKey, out);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -5958,7 +5967,40 @@ async function computePnlWindow(
     }
     return x;
   };
-  // 1) Engine stock per group → its purchase account (scaled per group).
+  // Periodic-inventory display chain (owner rule 2026-07-03 v2: 「不要我还没
+  // import 就用 BOM 的方式」— months without an imported count must show NO
+  // system-computed consumption at all). Under kv rm_valuation_mode =
+  // stock_take_only the P&L stock rows follow the LEDGER exactly: value at any
+  // month-end = latest imported count (an import is a complete statement —
+  // groups absent from it are zero) + GL purchases since it (opening seed
+  // before any import). Opening + window purchases − closing is then 0 BY
+  // CONSTRUCTION for un-imported months; the import month absorbs the true
+  // consumption. The group-level PI chain (materialWindow) still serves the
+  // Stock Summary page and closing-stock GL posting.
+  const noAutoPnl = matData.rmValuationMode === "stock_take_only";
+  const stEndKey = endYm ?? matData.lastYm;
+  const stPrevKey = startYm ? prevMonthYm(startYm) : null;
+  const rmCountMonths = noAutoPnl
+    ? [...new Set(
+        [...matData.stockTakeByGroupYm.entries()]
+          .filter(([g]) => g !== "WIP" && g !== "FG")
+          .flatMap(([, m]) => [...m.keys()]),
+      )].sort()
+    : [];
+  const lastCountAtOrBefore = (ym: string | null): string | null => {
+    if (!ym) return null;
+    let hit: string | null = null;
+    for (const m of rmCountMonths) {
+      if (m <= ym) hit = m;
+      else break;
+    }
+    return hit;
+  };
+  const cOpenYm = lastCountAtOrBefore(stPrevKey);
+  const cCloseYm = lastCountAtOrBefore(stEndKey);
+  // 1) Stock base per group → its purchase account (scaled per group).
+  //    auto mode: the engine (FIFO/BOM or PI chain) window values.
+  //    stock_take_only: the count at the relevant base month (or opening seed).
   for (const r of mat.rmGroups) {
     const sc = rmScale(r.itemGroup, line, R);
     const mapped = purchaseAcctOf(r.itemGroup);
@@ -5968,8 +6010,17 @@ async function computePnlWindow(
     // the default purchase account instead of double-showing the account.
     const acct = mappedMeta && isPurchaseAcct(mapped, mappedMeta.type) ? mapped : pnlPDefault;
     const x = ensureAcctRow(acct);
-    x.openingSen += Math.round(r.openingSen * sc);
-    x.closingSen += Math.round(r.closingSen * sc);
+    if (noAutoPnl) {
+      const gst = matData.stockTakeByGroupYm.get(r.itemGroup);
+      const seed = matData.seedByGroup.get(r.itemGroup) ?? 0;
+      const openBase = stPrevKey === null ? 0 : cOpenYm ? (gst?.get(cOpenYm) ?? 0) : seed;
+      const closeBase = cCloseYm ? (gst?.get(cCloseYm) ?? 0) : seed;
+      x.openingSen += Math.round(openBase * sc);
+      x.closingSen += Math.round(closeBase * sc);
+    } else {
+      x.openingSen += Math.round(r.openingSen * sc);
+      x.closingSen += Math.round(r.closingSen * sc);
+    }
     x.grpLines.add(rmLineOf(r.itemGroup));
   }
   // 2) Ledger purchases per account (scaled by the account's group lines:
@@ -5981,6 +6032,35 @@ async function computePnlWindow(
     const only = x.grpLines.size === 1 ? [...x.grpLines][0] : "shared";
     const sc = line === "all" ? 1 : only === "shared" ? R : only === line ? 1 : 0;
     x.purchasesSen += Math.round(v * sc);
+  }
+  // 3) stock_take_only: GL purchases since the base month roll INTO the chain
+  //    values, so closing − opening always equals the window's purchases when
+  //    no import falls inside it (→ consumed 0 exactly; ±1 sen on pro-rated
+  //    product-line views from rounding).
+  if (noAutoPnl) {
+    const nextYmOf = (ym: string): string => {
+      const [y, m] = ym.split("-").map((n) => parseInt(n, 10));
+      return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
+    };
+    const addChainPurchases = async (
+      fromCount: string | null,
+      toYm: string | null,
+      field: "openingSen" | "closingSen",
+    ) => {
+      if (!toYm) return; // whole-history window → opening stays 0
+      if (fromCount && nextYmOf(fromCount) > toYm) return; // base month IS the boundary
+      const sub = await glWindowSigned(db, fromCount ? nextYmOf(fromCount) : null, toYm, dc);
+      for (const [code, v] of sub.net) {
+        const meta = sub.coa.get(code);
+        if (!meta || !isPurchaseAcct(code, meta.type)) continue;
+        const x = ensureAcctRow(code);
+        const only = x.grpLines.size === 1 ? [...x.grpLines][0] : "shared";
+        const sc = line === "all" ? 1 : only === "shared" ? R : only === line ? 1 : 0;
+        x[field] += Math.round(v * sc);
+      }
+    };
+    await addChainPurchases(cOpenYm, stPrevKey, "openingSen");
+    await addChainPurchases(cCloseYm, stEndKey, "closingSen");
   }
   const rmGroups = [...acctRows.entries()]
     .map(([code, x]) => ({
@@ -9406,14 +9486,7 @@ async function ensureFundTransfersTable(
 // posters set sourceId inconsistently (some the UUID, some the doc number).
 async function loadDocDateResolver(
   db: Env["Variables"]["DB"],
-): Promise<{
-  docDate: (
-    sourceType: string,
-    sourceId: string,
-    postedAt: string | null | undefined,
-  ) => string;
-  openingDate: string | null;
-}> {
+): Promise<DocDateCtx> {
   const openingDate = await getOpeningDate(db);
   const maps = new Map<string, Map<string, string>>(); // family → (id|no → 'YYYY-MM-DD')
   for (const [fam, cfg] of Object.entries(DOC_DATE_FAMILIES)) {
@@ -9450,7 +9523,7 @@ async function loadDocDateResolver(
     const sp = parseSourceIdDate(sourceType, sourceId);
     return sp ?? String(postedAt ?? "").slice(0, 10);
   };
-  return { docDate, openingDate };
+  return { docDate, openingDate, glMemo: new Map() };
 }
 
 // Per-control-account sums of the opening invoices: AR per parseDebtorCode

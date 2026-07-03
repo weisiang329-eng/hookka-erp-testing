@@ -265,3 +265,45 @@ test("selectHistoricalWindow — computePnlWindow used for opening-or-later ym",
   assert.deepEqual(computeCalled, ["2026-05", "2026-06"],
     "Only opening-or-later months should call computePnlWindow");
 });
+
+// ---------------------------------------------------------------------------
+// Regression (owner report 2026-07-02): historical windows carry code:"" on
+// EVERY line (old-books names, never mapped to COA codes). Merging strictly
+// by code collapsed all expense lines into one row (labelled by the first
+// line seen — "Bank Charges", RM 407,750.36 lump on prod). Lines must merge
+// by code-falling-back-to-name.
+// ---------------------------------------------------------------------------
+test("sumPnlWindows — empty-coded historical lines merge by NAME, not into one lump", () => {
+  const apr = W({
+    expenseLines: [
+      { code: "", name: "Bank Charges", amountSen: 50, salary: false },
+      { code: "", name: "Factory - Rental", amountSen: 1250000, salary: false },
+      { code: "", name: "Staff Salaries & Overtime", amountSen: 2398586, salary: true },
+    ],
+    expenseSen: 50 + 1250000 + 2398586,
+  });
+  const mar = W({
+    expenseLines: [
+      { code: "", name: "Bank Charges", amountSen: 5100, salary: false },
+      { code: "", name: "Factory - Rental", amountSen: 1250000, salary: false },
+    ],
+    expenseSen: 5100 + 1250000,
+  });
+  const out = m.sumPnlWindows([apr, mar]);
+  assert.equal(out.expenseLines.length, 3, "three distinct names → three lines");
+  const bank = out.expenseLines.find((l) => l.name === "Bank Charges");
+  const rent = out.expenseLines.find((l) => l.name === "Factory - Rental");
+  const sal = out.expenseLines.find((l) => l.name === "Staff Salaries & Overtime");
+  assert.equal(bank.amountSen, 5150);
+  assert.equal(rent.amountSen, 2500000);
+  assert.equal(sal.amountSen, 2398586);
+  assert.equal(sal.salary, true);
+  assert.equal(out.expenseSen, apr.expenseSen + mar.expenseSen);
+});
+
+test("sumPnlWindows — mixed coded + uncoded lines never collide", () => {
+  const a = W({ expenseLines: [{ code: "900-T003", name: "TRANSPORT EXPENSE", amountSen: 60000, salary: false }], expenseSen: 60000 });
+  const b = W({ expenseLines: [{ code: "", name: "Transport Expense", amountSen: 270000, salary: false }], expenseSen: 270000 });
+  const out = m.sumPnlWindows([a, b]);
+  assert.equal(out.expenseLines.length, 2, "coded and name-keyed lines stay separate");
+});

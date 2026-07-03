@@ -101,13 +101,21 @@ export function sumPnlWindows(windows: HistoricalPnlWindow[]): HistoricalPnlWind
     };
   }
 
-  function mergeByCode<T extends { code: string; amountSen: number }>(arrays: T[][]): T[] {
+  // Historical windows keyed from the old books carry code:"" on every line
+  // (names only — the old accounts were never mapped to system COA codes).
+  // Merging strictly by `code` collapsed ALL of them into ONE row (labelled by
+  // whichever line came first — "Bank Charges" on prod, RM 407,750.36 lump,
+  // owner report 2026-07-02). Key by code, falling back to name.
+  const lineKey = (item: { code: string; name?: string }): string =>
+    item.code || item.name || "";
+
+  function mergeByCode<T extends { code: string; name?: string; amountSen: number }>(arrays: T[][]): T[] {
     const map = new Map<string, T>();
     for (const arr of arrays) {
       for (const item of arr) {
-        const existing = map.get(item.code);
+        const existing = map.get(lineKey(item));
         if (!existing) {
-          map.set(item.code, { ...item });
+          map.set(lineKey(item), { ...item });
         } else {
           existing.amountSen += item.amountSen;
         }
@@ -137,9 +145,9 @@ export function sumPnlWindows(windows: HistoricalPnlWindow[]): HistoricalPnlWind
     const map = new Map<string, PnlExpenseLine>();
     for (const arr of arrays) {
       for (const item of arr) {
-        const existing = map.get(item.code);
+        const existing = map.get(lineKey(item));
         if (!existing) {
-          map.set(item.code, { ...item });
+          map.set(lineKey(item), { ...item });
         } else {
           existing.amountSen += item.amountSen;
         }

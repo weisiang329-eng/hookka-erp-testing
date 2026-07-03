@@ -54,7 +54,12 @@ export function buildPnlMatrix(cols: PnlMatrixCol[]): PnlMatrix {
 
   const netSales = windows.map((w) => w.netSalesSen);
   const pctOf = (vals: number[]) => vals.map((v, i) => (netSales[i] ? Math.round((v / netSales[i]) * 1000) / 10 : 0));
-  const byCode = (list: { code: string; amountSen: number }[], code: string) => list.find((l) => l.code === code)?.amountSen ?? 0;
+  // Line identity = code, falling back to name — historical windows carry
+  // code:"" on every line (old-books names never mapped to COA codes), so a
+  // pure-code match would return the FIRST empty-coded line for every row.
+  const keyOf = (l: { code: string; name?: string }) => l.code || l.name || "";
+  const byCode = (list: { code: string; name?: string; amountSen: number }[], key: string) =>
+    list.find((l) => keyOf(l) === key)?.amountSen ?? 0;
 
   let gid = 0;
   const push = (kind: PnlMatrixRow["kind"], depth: number, label: string, ex: (w: PnlWindowLike) => number, opts: { groupId?: string; accountCode?: string } = {}) => {
@@ -69,7 +74,7 @@ export function buildPnlMatrix(cols: PnlMatrixCol[]): PnlMatrix {
 
   // SALES
   group("SALES", 0, (w) => w.netSalesSen);
-  for (const rl of spine.revLines) line(rl.name, 1, (w) => byCode(w.revLines, rl.code), rl.code);
+  for (const rl of spine.revLines) line(rl.name, 1, (w) => byCode(w.revLines, keyOf(rl)), rl.code);
   gap();
 
   // COST OF GOODS SOLD
@@ -86,9 +91,9 @@ export function buildPnlMatrix(cols: PnlMatrixCol[]): PnlMatrix {
   line("CARRIAGE INWARDS", 1, (w) => w.carriageSen);
   line("SST CHARGES", 1, (w) => w.sstSen);
   group("DIRECT LABOUR", 1, (w) => w.labourSen);
-  for (const ll of spine.labourLines) line(ll.name, 2, (w) => byCode(w.labourLines, ll.code), ll.code);
+  for (const ll of spine.labourLines) line(ll.name, 2, (w) => byCode(w.labourLines, keyOf(ll)), ll.code);
   group("FACTORY OVERHEAD", 1, (w) => w.overheadSen);
-  for (const ol of spine.overheadLines) line(ol.name, 2, (w) => byCode(w.overheadLines, ol.code), ol.code);
+  for (const ol of spine.overheadLines) line(ol.name, 2, (w) => byCode(w.overheadLines, keyOf(ol)), ol.code);
   group("WORK IN PROGRESS", 1, (w) => w.wipOpen - w.wipClose);
   line("WIP - OPENING", 2, (w) => w.wipOpen);
   line("WIP - CLOSING", 2, (w) => -w.wipClose);
@@ -100,7 +105,7 @@ export function buildPnlMatrix(cols: PnlMatrixCol[]): PnlMatrix {
   // OTHER INCOME
   if (spine.otherIncomeLines.length > 0 || windows.some((w) => w.otherIncomeSen !== 0)) {
     group("OTHER INCOME", 0, (w) => w.otherIncomeSen);
-    for (const ol of spine.otherIncomeLines) line(ol.name, 1, (w) => byCode(w.otherIncomeLines, ol.code), ol.code);
+    for (const ol of spine.otherIncomeLines) line(ol.name, 1, (w) => byCode(w.otherIncomeLines, keyOf(ol)), ol.code);
   }
 
   // OPERATING EXPENSES
@@ -108,9 +113,9 @@ export function buildPnlMatrix(cols: PnlMatrixCol[]): PnlMatrix {
   const salLines = spine.expenseLines.filter((l) => l.salary);
   if (salLines.length > 0) {
     group("SALARIES & CONTRIBUTION", 1, (w) => w.expenseLines.filter((l) => l.salary).reduce((s, l) => s + l.amountSen, 0));
-    for (const sl of salLines) line(sl.name, 2, (w) => byCode(w.expenseLines, sl.code), sl.code);
+    for (const sl of salLines) line(sl.name, 2, (w) => byCode(w.expenseLines, keyOf(sl)), sl.code);
   }
-  for (const el of spine.expenseLines.filter((l) => !l.salary)) line(el.name, 1, (w) => byCode(w.expenseLines, el.code), el.code);
+  for (const el of spine.expenseLines.filter((l) => !l.salary)) line(el.name, 1, (w) => byCode(w.expenseLines, keyOf(el)), el.code);
   grand("NET PROFIT / (LOSS)", (w) => w.netProfitSen);
 
   return { columns, rows };

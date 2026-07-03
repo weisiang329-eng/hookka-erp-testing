@@ -64,3 +64,32 @@ test("salary expense lines grouped under SALARIES & CONTRIBUTION", () => {
   const rent = m.rows.find((r) => r.accountCode === "910-0000");
   assert.equal(rent.depth, 1);
 });
+
+// Regression (2026-07-02): month columns must look up empty-coded historical
+// lines by NAME — a pure-code lookup returned the FIRST ""-coded line of each
+// month for every row (Monthly P&L showed wrong per-month expense splits).
+test("buildPnlMatrix — empty-coded lines resolve month values by name", async () => {
+  const mkW = (expenseLines) => ({
+    netSalesSen: 0, revLines: [], rmGroups: [], rmConsumedSen: 0, carriageSen: 0, sstSen: 0,
+    labourLines: [], labourSen: 0, overheadLines: [], overheadSen: 0,
+    wipOpen: 0, wipClose: 0, fgOpen: 0, fgClose: 0, manufacturingSen: 0,
+    cogsSen: 0, grossProfitSen: 0, otherIncomeSen: 0, otherIncomeLines: [],
+    expenseLines, expenseSen: expenseLines.reduce((s, l) => s + l.amountSen, 0), netProfitSen: 0,
+  });
+  const acc = mkW([
+    { code: "", name: "Bank Charges", amountSen: 5150, salary: false },
+    { code: "", name: "Factory - Rental", amountSen: 2500000, salary: false },
+  ]);
+  const apr = mkW([
+    { code: "", name: "Bank Charges", amountSen: 50, salary: false },
+    { code: "", name: "Factory - Rental", amountSen: 1250000, salary: false },
+  ]);
+  const { rows } = buildPnlMatrix([
+    { key: "acc", label: "Accumulated", accum: true, window: acc },
+    { key: "2026-04", label: "Apr 2026", accum: false, window: apr },
+  ]);
+  const bank = rows.find((r) => r.label === "Bank Charges");
+  const rent = rows.find((r) => r.label === "Factory - Rental");
+  assert.deepEqual(bank.values, [5150, 50], "bank row picks the BANK line per month, not the first empty-coded line");
+  assert.deepEqual(rent.values, [2500000, 1250000]);
+});

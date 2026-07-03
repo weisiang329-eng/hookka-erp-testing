@@ -478,13 +478,45 @@ const deliveryOrdersSource: DataSource = {
     enumCol("status", "Status", (r) => str(r, "status"), DO_STATUSES),
   ],
   defaultSort: { key: "deliveryDate", dir: "desc" },
-  // v17 (line ~1742): 6 status-based sub-tabs + providers (separate source)
+  // Design 2026-07: a DO only exists from Pending Dispatch onward, so the DO
+  // source only feeds Dispatch / Dispatched / Delivered. Planning + Pending
+  // Delivery are SALES ORDERS (no DO yet) — see pendingSosSource below.
   subTabs: [
-    { key: "planning", label: "Planning", match: (r) => str(r, "status") === "DRAFT" || !dateOnly(r, "dispatchDate", "deliveryDate") },
-    { key: "pending", label: "Pending Delivery", match: (r) => str(r, "status") === "LOADED" && !str(r, "vehicleNo", "providerName") },
-    { key: "dispatch", label: "Pending Dispatch", match: (r) => str(r, "status") === "LOADED" && !!str(r, "vehicleNo", "providerName") },
+    { key: "dispatch", label: "Pending Dispatch", match: (r) => ["DRAFT", "LOADED"].includes(str(r, "status")) },
     { key: "dispatched", label: "Dispatched", match: (r) => ["DISPATCHED", "IN_TRANSIT"].includes(str(r, "status")) },
     { key: "delivered", label: "Delivered", match: (r) => ["DELIVERED", "SIGNED", "INVOICED"].includes(str(r, "status")) },
+  ],
+};
+
+// Planning + Pending Delivery = confirmed/ready Sales Orders that have NO DO
+// yet (design 2026-07 / INDEX rule 7: "never show a DO in Planning / Pending").
+// Backed by GET /api/delivery-orders/pending-sos. Rows are SALES ORDERS, so a
+// tap opens the SO detail (see deliveryConfig.detailPath).
+const pendingSosSource: DataSource = {
+  url: "/api/delivery-orders/pending-sos",
+  select: selectData,
+  toVM: (r): RowVM => ({
+    id: str(r, "id", "companySO", "companySOId"),
+    code: str(r, "companySO", "companySOId") || "—",
+    title: str(r, "customerName") || "—",
+    items: str(r, "hubName") ? `Ship to · ${str(r, "hubName")}` : undefined,
+    metas: [
+      { label: "Cust PO", value: str(r, "customerPO", "customerPOId") || "—" },
+      { label: "Exp DD", value: shortDate(dateOnly(r, "hookkaExpectedDD")) || "—" },
+    ],
+    status: resolveStatus(str(r, "status"), STATUS_MAPS.so),
+  }),
+  columns: [
+    textCol("companySO", "Company SO", (r) => str(r, "companySO", "companySOId")),
+    textCol("customer", "Customer", (r) => str(r, "customerName")),
+    textCol("customerPO", "Customer PO", (r) => str(r, "customerPO", "customerPOId")),
+    dateCol("expectedDD", "Expected DD", (r) => dateOnly(r, "hookkaExpectedDD")),
+    enumCol("status", "Status", (r) => str(r, "status"), SO_STATUSES),
+  ],
+  defaultSort: { key: "expectedDD", dir: "asc" },
+  subTabs: [
+    { key: "planning", label: "Planning", match: (r) => str(r, "planTab") === "planning" },
+    { key: "pending", label: "Pending Delivery", match: (r) => str(r, "planTab") === "pending" },
   ],
 };
 
@@ -601,11 +633,16 @@ const deliveryDetail: DetailConfig = {
 export const deliveryConfig: ModuleConfig = {
   slug: "delivery",
   title: "Delivery",
-  // 3PL provider rows (no doNo) have no document detail.
+  // DO rows → DO detail; Planning/Pending rows are Sales Orders → SO detail;
+  // packing-list + 3PL rows (no doNo, no companySO) have no document detail.
   detailPath: (vm, row) =>
-    str(row, "doNo") ? `/m/delivery/${encodeURIComponent(vm.id)}` : null,
+    str(row, "doNo")
+      ? `/m/delivery/${encodeURIComponent(vm.id)}`
+      : str(row, "companySO", "companySOId")
+        ? `/m/sales/${encodeURIComponent(str(row, "id", "companySO", "companySOId"))}`
+        : null,
   detail: deliveryDetail,
-  sources: [deliveryOrdersSource, packingListsSource, threePlSource],
+  sources: [pendingSosSource, deliveryOrdersSource, packingListsSource, threePlSource],
 };
 
 // ---------------------------------------------------------------------------

@@ -9,14 +9,33 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-04 — 🔵 Owner: mobile parity sweep + FULL brutal technical audit
+
+A. **Mobile parity**: every problem class already solved on desktop must be
+   re-checked and solved on mobile (/m + worker portal) too — explicitly:
+   mobile loading performance (measured /m home = 4.3MB/20 calls) and scan/OCR
+   issues. Method: BUG-HISTORY + this week's fixes → per-fix mobile
+   counterpart check → fix list → implement (staging for /m).
+B. **Full technical audit** per owner's pasted 15-area prompt (architecture,
+   DB, API, perf BE/FE, UX, business logic, AI, security, monitoring, testing,
+   devops, scalability, code quality, consistency) with Critical/High/Med/Low
+   issues, prioritised lists (top-10 critical, top-20 ROI, quick wins), and
+   scores out of 100. Output = written report doc for the owner.
+
+---
+
 ## 2026-07-04 — 🔵 Owner multi-ask batch (labor hours + OCR ordering + sweeps)
 
 Logged verbatim so nothing is skipped:
-1. **SO + GRN should parse/keep the uploaded documentation's line ORDER like
-   the PO OCR does** (owner reconciles against the paper order). Investigate
-   why PO preserves order but SO/GRN don't; fix to match. (NOTE: another
-   session shipped "GRN receive — sort PO items by id" to main 2026-07-03
-   15:57 — check whether that already covers the GRN half.)
+1. **SO + GRN should follow the uploaded documentation's ORDER** — owner
+   CLARIFIED 2026-07-04: he means the order of RECORDS from a combined
+   multi-PO upload (10 customer POs in one file → the 10 created SOs must be
+   numbered/listed 1st→10th like the paper stack), NOT line order within one
+   SO (the within-SO category sort is fine / not his complaint — do NOT
+   remove it). Batch-pipeline investigation running. SEPARATE keeper from
+   the first investigation: desktop GRN create sends poItemIndex from an
+   un-sorted array while the backend matches ORDER BY id — same class the
+   mobile fix (2cfa3ba7) closed; fix desktop too (correctness, not display).
 2. **Invoice-page bug classes → whole-system sweep** ("查看全系統還有哪個這樣"):
    (a) filter dropdowns sending NAME where the API expects an ID
    (b) stale grid selections surviving filter changes (DataGrid fix 99c20d3c
@@ -34,7 +53,17 @@ Logged verbatim so nothing is skipped:
    (5.3h short — half-day, maybe correct). Also: punch-out 6:28 vs expected
    6:30 — rounding/grace? does OT count from it?
 5. **Explain the pay rules in plain language**: when is a day late/short,
-   when does OT start, what adds/deducts money — full list for owner.
+   when does OT start, what adds/deducts money — full list for owner. DONE
+   2026-07-04 — and owner CORRECTED one rule: **OT only counts from 30
+   minutes past 18:00** (code currently pays from >15 min; 18:28 must be 0
+   OT, not 15 min). Fix with the ① batch on staging; affects punch autofill,
+   labor engine, payslips — verify numbers on staging before prod.
+6. Owner "ok" 2026-07-04 → plan approved: ① autofill safety-gate bug (an
+   approved non-prod row blocks punch-row generation → AUNG KYAW SOE 1.33h
+   day) + fragment rule (fold <0.1h scan-boundary rows into largest bucket)
+   + OT-30min correction, all on staging → ② SO/GRN document-order fixes
+   (batch investigation pending) → ③ full-auto Keep-pay/Deduct settlement
+   (staging month-recalc shown to owner before prod).
 
 Invoice-page 4-fix (BUG-2026-07-03-003) pushed to main 99c20d3c, deploy
 in progress; verify live then report.

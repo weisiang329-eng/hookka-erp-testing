@@ -2914,6 +2914,14 @@ export default function DeliveryPage() {
       toast.success(`${doIds.length} delivery orders ${successVerb}`);
       setSelectedIds(new Set());
     }
+    // A bulk transition to DELIVERED auto-creates invoices + CLOSEs SOs on the
+    // backend; without these broadcasts the Invoices/Sales lists stay stale
+    // until a manual refresh (2026-07-04 cache sweep — matched the single
+    // invoice-gen path fixed earlier).
+    if (nextStatus === "DELIVERED") {
+      invalidateCachePrefix("/api/invoices");
+      invalidateCachePrefix("/api/sales-orders");
+    }
     fetchData();
     // Customer notices for every DO that actually transitioned — covers the
     // bulk buttons AND the PL-level bulk actions (runPlBulkTransition reuses

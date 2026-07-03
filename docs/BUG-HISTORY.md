@@ -34,6 +34,62 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-03-008 — Mobile Warehouse search couldn't find a rack by its customer PO `ui-frontend` `mobile` `warehouse`
+
+**Status:** 🟢 Fixed
+
+**Symptom:** On `/m/warehouse`, typing a customer PO number into the rack search never matched the rack holding that PO's goods.
+
+**Root cause:** Rack items expose the customer PO as `customerPOId` (routes/warehouse.ts `RackItemApi`), but the search haystack looked for `poNo`/`poNumber` (and `code`/`sku` for the product code) — none of which exist on a rack item — so the PO (and product-code) terms always missed.
+
+**Fix:** `src/pages/m/screens/WarehouseScreen.tsx` — search now reads `customerPOId` (+ `productCode`), dual-keyed for back-compat.
+
+**Verified:** prod `/m/warehouse` — 20 racks; search "PO-009090" → exactly the 1 rack holding it; bogus PO → "No racks match". 39 rack items carry a real `customerPOId`.
+
+---
+
+## BUG-2026-07-03-007 — Mobile Supplier detail "Price · SKU table" rendered every row blank `ui-frontend` `mobile`
+
+**Status:** 🟢 Fixed
+
+**Symptom:** A supplier's materials sub-list on `/m` showed rows with no name, SKU, price, or MOQ.
+
+**Root cause:** The sub-list read `materialName`/`itemCode`/`supplierSku`/`moq`/`lastPriceSen`; the `/api/suppliers/:id` `materials[]` shape (suppliers.ts `materialRowToApi`) is `materialCategory`/`supplierSKU`/`unitPriceSen`/`minOrderQty`/`leadTimeDays` — a case + name mismatch, so only lead time ever populated.
+
+**Fix:** `src/pages/m/config/modules.ts` — read the real keys (dual-keyed): title `materialCategory`, `supplierSKU`, `unitPriceSen`, `minOrderQty`.
+
+**Verified:** field names confirmed against suppliers.ts; renders when a supplier has materials (prod suppliers currently have none populated).
+
+---
+
+## BUG-2026-07-03-006 — Mobile Customers list showed a blank "—" status pill for every customer `ui-frontend` `mobile`
+
+**Status:** 🟢 Fixed
+
+**Symptom:** On `/m/customers`, every row's status pill rendered as "—" instead of Active/Inactive.
+
+**Root cause:** The mobile Customers `toVM` resolved the pill from `str(r, "status")`, but the `/api/customers` row has no `status` string — it carries an `isActive` boolean. The lookup always missed → blank pill.
+
+**Fix:** `src/pages/m/config/modules.ts` — derive the pill from `r.isActive === true ? "ACTIVE" : "INACTIVE"` and add All/Active/Inactive filter tabs.
+
+**Verified:** prod `/m/customers` — pills render Active/Inactive; tabs read All 5 / Active 5 / Inactive.
+
+---
+
+## BUG-2026-07-03-005 — Mobile Procurement PO/GRN/PI detail line items showed "—" instead of the material name `ui-frontend` `mobile`
+
+**Status:** 🟢 Fixed
+
+**Symptom:** Opening a PO / GRN / Purchase Invoice on `/m` showed each line item's name as "—".
+
+**Root cause:** The shared `itemVM` title/subLine fallbacks didn't include the fields these rows actually carry (`materialName` / `material_code` / `materialCode`).
+
+**Fix:** `src/pages/m/config/modules.ts` — `itemVM` title fallback now includes `materialName` / `material_code`; subLine includes `materialCode` / `material_code`.
+
+**Verified:** prod `/m` procurement detail — line item names render. (Renumbered from an earlier 07-03-001/002/003/004 that collided with the phantom-code entry below.)
+
+---
+
 ## BUG-2026-07-03-001 — Phantom product code `5543-1C(LHF)` on CO-2606-002 cascaded through production + inventory; owner fixed the BOM, chain needed relabelling `data-migration` `consignment-orders` `production-orders`
 
 🟢 **Fixed — one-shot backfill applied + verified live on prod 2026-07-03** · owner-requested

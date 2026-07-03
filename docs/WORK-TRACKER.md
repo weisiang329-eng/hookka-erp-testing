@@ -438,3 +438,24 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 - 🟡 Supplier inline **Batch Edit** in grid (scope ambiguous).
 - 🟡 Supplier **quotation export / print** (scope ambiguous).
 - 🟡 Purchasing **Phase D** — document-flow lineage / SmartButtons (deferred).
+
+## 2026-07-03 — Opening-month P&L slice (report-layer) + purchases read ledger
+
+- ✅ **Purchases read the LEDGER** (owner: 「照 C 做,采购改读 ledger」) — P&L raw-material
+  PURCHASE lines now come from GL per purchase account; stock stays engine-valued, mapped
+  onto the same account rows. Shipped `b092a405`.
+- ✅ **Route C ABANDONED before execution** (owner: 「我不想要 ledger 留痕迹」) — no re-post
+  with April values, no 22/05 slice JV, no 190 bridge account. Replaced by a REPORT-LAYER
+  slice: kv `pnl_opening_prior_cum` (30/04 TB P&L balances, {code: signedSen}) +
+  `applyOpeningSlice` in `glWindowSigned` and `/cost-expense-classes`. The opening month
+  shows `opening − prior-cum`; earlier months read pnl_historical; ledger keeps exactly ONE
+  clean opening entry. `src/lib/opening-slice.ts` (+7 tests, suite 1364 green). Shipped
+  `b798847c`, deployed, April TB PUT to prod (20 accounts, RM 125,310.83).
+- ✅ **Verified live (sen-exact)**: May purchases 115,981.54 = slice 95,297.58 + real
+  post-22/05 GL 20,683.96; May FACTORY OVERHEAD +1,560 (780-0030) + OPEX +1,768
+  (900-R002/900-T003) = expense slice 3,328; matrix vs /cost-expense-classes agree
+  (119,309.54 both paths); TB untouched (701-0010 cumulative 46,481.42 = opening
+  23,038.56 + May real 5,223.60 + Jun 18,219.26).
+- Owner-visible effect: Monthly P&L May column now shows the 1–21 May slice on top of real
+  post-opening trading; sales opening (debtor v5, still awaiting owner confirm) will land
+  in May automatically (April sales = 0, not in the kv).

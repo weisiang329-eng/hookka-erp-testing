@@ -5040,13 +5040,20 @@ function MonthlyPlTab() {
                 const isGroup = r.kind === "group";
                 const isTot = r.kind === "total" || r.kind === "grandtotal";
                 const open = isGroup && r.groupId ? !collapsed.has(r.groupId) : false;
-                const rowCls = r.kind === "grandtotal" ? "font-semibold border-t border-[#C9C2BA] bg-[#F7F5F2]" : isTot ? "font-medium border-t border-[#E2DDD8]" : isGroup ? "font-medium" : "";
+                // Visual hierarchy: section heads (depth-0 groups) tinted +
+                // semibold; totals bordered; deep detail lines recede. The
+                // sticky Item cell carries the SAME background as its row so
+                // horizontal scrolling never shows a white notch.
+                const rowBg = r.kind === "grandtotal" ? "bg-[#F7F5F2]" : r.kind === "total" ? "bg-[#FBFAF8]" : isGroup && r.depth === 0 ? "bg-[#F3F0EC]" : "bg-white";
+                const rowCls = r.kind === "grandtotal" ? "font-semibold border-t-2 border-[#C9C2BA]" : r.kind === "total" ? "font-medium border-t border-[#E2DDD8]" : isGroup && r.depth === 0 ? "font-semibold border-t border-[#E2DDD8]" : isGroup ? "font-medium" : "";
+                const deepLine = !isGroup && !isTot && r.depth >= 3;
                 return (
-                  <tr key={i} className={`${rowCls} ${isGroup ? "cursor-pointer" : ""}`} onClick={isGroup && r.groupId ? () => toggle(r.groupId!) : undefined}>
-                    <td className="px-3 py-1.5 sticky left-0 bg-white" style={{ paddingLeft: `${12 + r.depth * 16}px` }}>{isGroup ? (open ? "▾ " : "▸ ") : ""}{r.label}</td>
+                  <tr key={i} className={`${rowBg} ${rowCls} ${isGroup ? "cursor-pointer" : ""}`} onClick={isGroup && r.groupId ? () => toggle(r.groupId!) : undefined}>
+                    {/* uppercase = display-only: unifies the COA's ALL-CAPS names with the owner-keyed Title Case historical labels */}
+                    <td className={`px-3 py-1.5 sticky left-0 ${rowBg} uppercase whitespace-nowrap ${deepLine ? "text-[12px] text-[#6B7280]" : ""} ${isGroup && r.depth === 0 ? "tracking-wide" : ""}`} style={{ paddingLeft: `${12 + r.depth * 16}px` }}>{isGroup ? (open ? "▾ " : "▸ ") : ""}{r.label}</td>
                     {r.values.map((v, j) => (
                       <React.Fragment key={j}>
-                        <td className={`px-3 py-1.5 text-right tabular-nums border-l border-[#F0ECE9] ${v < 0 ? "text-[#9A3A2D]" : ""}`}>{fmt(v)}</td>
+                        <td className={`px-3 py-1.5 text-right tabular-nums border-l border-[#F0ECE9] ${deepLine ? "text-[12px]" : ""} ${v < 0 ? "text-[#9A3A2D]" : ""}`}>{fmt(v)}</td>
                         <td className="px-2 py-1.5 text-right tabular-nums text-[11px] text-[#9CA3AF]">{(r.pctValues[j] ?? 0).toFixed(1)}%</td>
                       </React.Fragment>
                     ))}

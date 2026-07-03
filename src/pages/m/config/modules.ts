@@ -2244,6 +2244,50 @@ const laborRevenueSource: DataSource = {
   ],
 };
 
+// Efficiency — the design's `eff` tab (Worker Efficiency = production mins ÷
+// clocked hours). Real data via GET /api/reports/efficiency.json → EfficiencyData
+// (efficiency-report.ts): data.workers[] each { name, departmentName,
+// efficiencyPct, jobsCompleted, productionMinutes }. Sorted by efficiency desc.
+const efficiencySource: DataSource = {
+  url: "/api/reports/efficiency.json",
+  select: (resp) => {
+    const w = (resp as { data?: { workers?: unknown[] } } | null)?.data?.workers;
+    return Array.isArray(w) ? (w as RawRow[]) : [];
+  },
+  toVM: (r): RowVM => {
+    const eff = num(r, "efficiencyPct");
+    const prod = num(r, "productionMinutes");
+    return {
+      id: str(r, "workerId", "empNo") || str(r, "name"),
+      code: str(r, "empNo") || str(r, "departmentName") || "—",
+      title: str(r, "name") || "—",
+      items: str(r, "departmentName") || undefined,
+      metas: [
+        { label: "Efficiency", value: eff > 0 ? `${eff}%` : "—" },
+        { label: "Jobs", value: String(num(r, "jobsCompleted")) },
+        { label: "Prod", value: prod > 0 ? `${(prod / 60).toFixed(1)}h` : "—" },
+      ],
+      // Colour by efficiency band (green ≥100 · amber ≥60 · red <60), matching the
+      // report's own thresholds; no real "status" string on the row.
+      status: resolveStatus(
+        eff >= 100 ? "GREEN" : eff >= 60 ? "AMBER" : "RED",
+        {
+          GREEN: PAYMENT_STATUS_MAP.ACTIVE,
+          AMBER: PAYMENT_STATUS_MAP.PARTIAL,
+          RED: PAYMENT_STATUS_MAP.CANCELLED,
+        },
+      ),
+    };
+  },
+  columns: [
+    textCol("name", "Customer", (r) => str(r, "name")),
+    textCol("dept", "State", (r) => str(r, "departmentName")),
+    numCol("efficiency", "Amount", (r) => num(r, "efficiencyPct")),
+  ],
+  defaultSort: { key: "efficiency", dir: "desc" },
+  subTabs: [{ key: "efficiency", label: "Efficiency", match: () => true }],
+};
+
 // Department Performance sub-tab — /api/department-performance returns
 // per-department utilization + output aggregates for the date range.
 // dc13 v13 sync.
@@ -2482,17 +2526,21 @@ export const employeesConfig: ModuleConfig = {
   },
   detail: employeeDetail,
   // Design tab-bar (owner 2026-07-03 "完全照 design"): no Leave tab; Directory =
-  // "Employee Master", Labor vs Revenue = "Labor Cost". Efficiency (design's 4th
-  // tab) needs a dedicated aggregation backend — deferred.
+  // "Employee Master", Labor vs Revenue = "Labor Cost". Efficiency (design's `eff`
+  // tab) now backed by GET /api/reports/efficiency.json (efficiencySource).
+  // Tab order matches the .dc.html employees tab-bar exactly (owner: .dc.html为准):
+  // Working Hours · Attendance · Labor Cost · Efficiency · Dept Labor ·
+  // Employee Perf · Dept Perf · Payroll · Employee Master.
   sources: [
-    directorySource,
-    attendanceSource,
     workingHoursSource,
+    attendanceSource,
+    laborRevenueSource,
+    efficiencySource,
     deptLaborSource,
-    payrollSource,
     empPerfSource,
     deptPerfSource,
-    laborRevenueSource,
+    payrollSource,
+    directorySource,
   ],
 };
 

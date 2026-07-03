@@ -9358,6 +9358,101 @@ app.post("/backfill-5543-co2606002", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /backfill-complete-stray-jc-co2606002 — ONE-SHOT (owner 2026-07-03).
+// The 5543 production order pord-co-72dcea0a-01 is stuck PENDING because ONE
+// junk job card is WAITING: a leftover from the OLD broken 5543 BOM whose
+// wip_key still reads "5543-1C(LHF)::…::Base {MODULE}" with the unexpanded
+// {MODULE} template placeholder. The physical sofa is done (the other 12 cards
+// are COMPLETED). This marks that ONE stray card COMPLETED and recomputes so
+// the PO flips to COMPLETED. It touches ONLY that card, creates no inventory
+// (the finished unit already exists), and refuses to run unless the target is
+// genuinely the WAITING {MODULE} junk card. AUDIT-FIRST — apply with
+// { "apply": true, "confirm": "complete-jc" }.
+app.post("/backfill-complete-stray-jc-co2606002", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+
+  const PO_ID = "pord-co-72dcea0a-01";
+  const JC_ID = "jc-1vxvn3i011nbi7-05";
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    apply?: boolean;
+    confirm?: string;
+  };
+  const doApply = body.apply === true && body.confirm === "complete-jc";
+
+  const jc = await db
+    .prepare(
+      'SELECT id AS "id", status AS "status", wip_key AS "wipKey", wip_label AS "wipLabel", completed_date AS "completedDate" FROM job_cards WHERE id = ? AND production_order_id = ?',
+    )
+    .bind(JC_ID, PO_ID)
+    .first<{
+      id: string;
+      status: string;
+      wipKey: string | null;
+      wipLabel: string | null;
+      completedDate: string | null;
+    }>();
+  const poBefore = await db
+    .prepare('SELECT status AS "status", completed_date AS "completedDate" FROM production_orders WHERE id = ?')
+    .bind(PO_ID)
+    .first<{ status: string; completedDate: string | null }>();
+  if (!jc || !poBefore)
+    return c.json({ success: false, error: "job card or PO not found" }, 404);
+
+  // Only ever touch the genuine junk card: WAITING + the {MODULE} placeholder.
+  const isJunk =
+    jc.status === "WAITING" && String(jc.wipKey ?? "").includes("{MODULE}");
+
+  if (!doApply) {
+    return c.json({
+      success: true,
+      mode: "audit",
+      po: { id: PO_ID, status: poBefore.status },
+      strayCard: jc,
+      isJunkWaitingCard: isJunk,
+      note: isJunk
+        ? 'Target is the junk WAITING {MODULE} card. To apply, POST { "apply": true, "confirm": "complete-jc" }.'
+        : "Target is NOT a junk WAITING {MODULE} card — refusing to change it.",
+    });
+  }
+
+  if (!isJunk)
+    return c.json(
+      { success: false, error: "Target is not the expected junk WAITING {MODULE} card; aborting." },
+      400,
+    );
+
+  // Stamp with the latest real sibling completion date so it reads sensibly.
+  const maxRow = await db
+    .prepare('SELECT MAX(completed_date) AS "maxDate" FROM job_cards WHERE production_order_id = ? AND completed_date IS NOT NULL')
+    .bind(PO_ID)
+    .first<{ maxDate: string | null }>();
+  const doneDate = maxRow?.maxDate || new Date().toISOString().slice(0, 10);
+
+  await db
+    .prepare("UPDATE job_cards SET status = 'COMPLETED', completed_date = ? WHERE id = ? AND status = 'WAITING'")
+    .bind(doneDate, JC_ID)
+    .run();
+  const recompute = await recomputePoStatusAndProgress(db, PO_ID);
+
+  const poAfter = await db
+    .prepare('SELECT status AS "status", completed_date AS "completedDate", progress AS "progress" FROM production_orders WHERE id = ?')
+    .bind(PO_ID)
+    .first<{ status: string; completedDate: string | null; progress: number }>();
+  return c.json({
+    success: true,
+    mode: "apply",
+    jcId: JC_ID,
+    completedDate: doneDate,
+    poBefore: poBefore.status,
+    poAfter,
+    recompute,
+  });
+});
+
 // Cascade-backfill productName/sizeLabel/sizeCode/fabricCode to downstream
 // snapshot tables (production_orders, delivery_order_items, invoice_items)
 // from the canonical sales_order_items values. Run AFTER

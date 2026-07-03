@@ -19,6 +19,7 @@ import { Trash2, ArrowLeft, Printer } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column } from "@/components/ui/data-grid";
 import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
+import { invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   BatchActionToolbar,
   ApplyBatchDateDialog,
@@ -597,6 +598,10 @@ export default function ProductionFolderDetailPage() {
             const failed = (j.results || []).filter((x) => !x.success);
             if (failed.length > 0) toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
             else toast.success(`${date ? "Stamped" : "Cleared"} completion date on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+            // Cross-page freshness (2026-07-04 cache sweep): other consumers
+            // of the production list (delivery pipeline, dashboards, /m)
+            // read it through the localStorage cache — broadcast the change.
+            invalidateCachePrefix("/api/production-orders");
             // Wei Siang 2026-05-13: keep selection + optimistic local
             // update so the operator can chain Apply Date → Apply PIC
             // without re-selecting every time. See same change on the
@@ -646,6 +651,7 @@ export default function ProductionFolderDetailPage() {
             const failed = (j.results || []).filter((x) => !x.success);
             if (failed.length > 0) toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
             else toast.success(`${date ? "Set" : "Cleared"} due date on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+            invalidateCachePrefix("/api/production-orders");
             const patchedJcIds = new Set(patches.map((p) => p.jobCardId));
             setRows((prev) =>
               prev.map((r) =>
@@ -721,6 +727,7 @@ export default function ProductionFolderDetailPage() {
             const slots = [pic1 !== undefined ? "PIC 1" : null, pic2 !== undefined ? "PIC 2" : null].filter(Boolean).join(" + ");
             if (failed.length > 0) toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
             else toast.success(`Set ${slots} on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+            invalidateCachePrefix("/api/production-orders");
             // Keep selection + optimistic local PIC 1 update so operator
             // can chain into another batch action without re-selecting.
             // Only PIC 1 is rendered in the folder grid (single PIC column);

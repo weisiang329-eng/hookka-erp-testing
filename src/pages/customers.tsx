@@ -2274,6 +2274,9 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
         return;
       }
       reload();
+      // Cross-page freshness (2026-07-04 cache sweep): the maintenance Sofa
+      // Combos page reads the same prefix through the localStorage cache.
+      invalidateCachePrefix("/api/sofa-combos");
     } finally {
       setCopying(false);
     }
@@ -2292,6 +2295,7 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
       return;
     }
     reload();
+    invalidateCachePrefix("/api/sofa-combos");
   };
 
   return (

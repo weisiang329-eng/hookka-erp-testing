@@ -367,11 +367,14 @@ function RackOverview({
       const itemHay = items
         .map((it) =>
           [
-            str(it, "productName", "productCode"),
+            str(it, "productName"),
+            str(it, "productCode", "code", "sku"),
             str(it, "customerName"),
-            str(it, "poNo", "poNumber"),
-            str(it, "companySO", "companySOId", "customerSO", "soNo"),
-            str(it, "code", "sku"),
+            // The customer PO on a rack item is `customerPOId` (routes/warehouse.ts
+            // RackItemApi) — the old search looked for poNo/poNumber, which the
+            // item never carries, so "search by PO" always missed.
+            str(it, "customerPOId", "poNo", "poNumber"),
+            str(it, "sizeLabel"),
           ].join(" "),
         )
         .join(" ");

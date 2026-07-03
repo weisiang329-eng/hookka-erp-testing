@@ -1252,8 +1252,12 @@ export default function WorkerScanPage() {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: "environment" },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
+          // 1440p soft "ideal" — the browser gives the closest the lens supports
+          // (falls back to 1080p on older phones, never fails). More pixels let
+          // both decode paths resolve a small / far / angled sticker QR (owner
+          // 2026-07-03, mirrors the rack-scan sensitivity fix).
+          width: { ideal: 2560 },
+          height: { ideal: 1440 },
         },
         audio: false,
       });
@@ -1564,9 +1568,9 @@ export default function WorkerScanPage() {
               }
             } else {
               // QR mode: full frame, jsQR first then ZXing (reads QR + Code 128).
-              // Keep more detail (960px) so small stickers at arm's length still
-              // resolve their finder patterns.
-              const scale = Math.min(1, 960 / Math.max(vw, vh));
+              // Decode at 1440px (was 960) so a small / far / angled sticker QR
+              // keeps enough module detail for the finder patterns to resolve.
+              const scale = Math.min(1, 1440 / Math.max(vw, vh));
               const cw = Math.max(1, Math.round(vw * scale));
               const ch = Math.max(1, Math.round(vh * scale));
               canvas.width = cw;

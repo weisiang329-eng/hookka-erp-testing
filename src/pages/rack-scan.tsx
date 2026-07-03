@@ -510,6 +510,36 @@ export default function RackScanPage() {
     }
   }, [torchOn]);
 
+  // Tap-to-focus — a close packing sticker often sits inside the lens's
+  // continuous-AF hunt range and reads blurry. Tapping the camera view fires a
+  // single-shot refocus that snaps THIS sticker sharp at the current distance
+  // (all rack stickers are scanned at roughly one arm's length, so the lock
+  // stays useful for the next few too). Best-effort: Android Chrome exposes it,
+  // iOS Safari ignores focusMode and continuous AF carries on — never blocks.
+  const refocus = useCallback(async () => {
+    const track = streamRef.current?.getVideoTracks?.()[0];
+    if (!track) return;
+    const caps = track.getCapabilities?.() as
+      | (MediaTrackCapabilities & { focusMode?: string[] })
+      | undefined;
+    const modes = caps?.focusMode ?? [];
+    try {
+      if (modes.includes("single-shot")) {
+        await track.applyConstraints({
+          advanced: [{ focusMode: "single-shot" } as unknown as MediaTrackConstraintSet],
+        });
+      } else if (modes.includes("continuous")) {
+        // Re-assert continuous to kick a fresh AF sweep on lenses without
+        // single-shot.
+        await track.applyConstraints({
+          advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
+        });
+      }
+    } catch {
+      /* focus is best-effort — never break the scan over it */
+    }
+  }, []);
+
   const startScan = useCallback(async () => {
     if (scanning) return;
     setCameraError(null);
@@ -520,11 +550,16 @@ export default function RackScanPage() {
     if (ac && ac.state === "suspended") void ac.resume();
     try {
       // Rear camera, sharp feed — small / arm's-length stickers need the detail.
+      // Ask for 1440p (soft "ideal" → the browser gives the closest the lens
+      // supports, falling back to 1080p on older phones, never failing). The
+      // extra pixels let BOTH decode paths (Android's native detector on the
+      // full frame AND the iOS canvas path) resolve a QR that's small, far, or
+      // at an angle instead of missing it (owner 2026-07-03: "上下左右斜角不敏感").
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: "environment" },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
+          width: { ideal: 2560 },
+          height: { ideal: 1440 },
         },
         audio: false,
       });
@@ -680,7 +715,7 @@ export default function RackScanPage() {
             // keeps a wider working width (~1280px) so Code 128 bars stay sharp;
             // QR is fine smaller. jsQR (QR only) runs first in QR mode, then
             // ZXing (QR + Code 128) for both.
-            const targetW = mode === "barcode" ? 1280 : 960;
+            const targetW = mode === "barcode" ? 1280 : 1440;
             const scale = Math.min(1, targetW / Math.max(vw, vh));
             const cw = Math.max(1, Math.round(vw * scale));
             const ch = Math.max(1, Math.round(vh * scale));
@@ -950,6 +985,7 @@ export default function RackScanPage() {
                     onClick={() => {
                       const ac = ensureAudio();
                       if (ac && ac.state === "suspended") void ac.resume();
+                      void refocus();
                     }}
                     className="absolute inset-0 flex items-center justify-center"
                   >

@@ -34,6 +34,18 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-03-001 — Phantom product code `5543-1C(LHF)` on CO-2606-002 cascaded through production + inventory; owner fixed the BOM, chain needed relabelling `data-migration` `consignment-orders` `production-orders`
+
+🟢 **Fixed — one-shot backfill applied + verified live on prod 2026-07-03** · owner-requested
+
+**Symptom:** consignment order CO-2606-002 (Houzs Century) carried a product code `5543-1C(LHF)` that was never a real catalog product. It cascaded into the denormalised `product_code`/`product_name` snapshots down the chain: the CO line, its production order, the finished unit, and the CN line. Because the pieces breakdown is derived LIVE from the BOM keyed by product code, a phantom code means the BOM lookup finds nothing → blank/wrong pieces on the printed DO/CN. Owner corrected the 5543 BOM in the catalog (added the real `5543-1B(LHF)`) and asked to relabel the existing chain — **without touching completed production** (dates/status/job cards).
+
+**Fix:** one-shot, audit-first endpoint `POST /api/import/backfill-5543-co2606002` (`src/api/routes/import-completion.ts`). Read-only by default (reports the exact phantom rows + the distinct codes in the chain so the old string is confirmed before any write); applies only on `{apply:true,confirm:"5543-1B"}`. It updates ONLY `product_code`/`product_name` in the 5 snapshot tables that carry them — `consignment_order_items`, `production_orders`, `fg_units`, `consignment_items`, `stock_movements` — scoped to CO-2606-002's chain (CO id → its PO ids / CN ids). Deliberately leaves `job_cards`/`wip_items` alone (they key off `wip_code`, not the product code) so completion dates, statuses and WIP ledger are untouched; nothing is re-exploded. Refuses to apply if the replacement code isn't in the products catalog (else the live pieces lookup would break). Idempotent.
+
+**Verified live (prod, via the owner's authenticated session):** audit found exactly 4 phantom rows (consignment_order_items ×1, production_orders ×1, fg_units ×1, consignment_items ×1; stock_movements 0); safety valve confirmed `5543-1B(LHF)` is in the catalog as "SOFA 5543 1B(LHF)". Applied → 4 rows updated. Re-scan → **0 phantom rows**; the chain now shows `5543-1B(LHF)` + the untouched `5543-2A(RHF)` / `5543-CNR`. Completion dates / production progress provably untouched (the UPDATE names only the two code/name columns). Tool relabels code only, "backfill" per owner's definition. NOTE: the one-shot endpoint remains on main (idempotent no-op now) — safe to prune later.
+
+---
+
 ## BUG-2026-07-02-003 — Customer auto-emails attached a DIFFERENT-looking DO / Invoice than the one the owner downloads (two separate PDF generators) `delivery-orders` `invoices` `ui-frontend`
 
 🟢 **Fixed — shipped to `main`/prod 2026-07-02 (owner approved the rendered DO + Invoice samples)** · owner-reported ("完全都不是我们的 Invoice 和 DO, 它是从哪里拿出来的?")

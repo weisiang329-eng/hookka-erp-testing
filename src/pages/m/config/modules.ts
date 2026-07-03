@@ -2937,7 +2937,12 @@ export const customersConfig: ModuleConfig = {
             { label: "Credit", value: money(num(r, "creditLimitSen")) },
             { label: "AR", value: money(num(r, "outstandingSen")) },
           ],
-          status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
+          // Customers carry `isActive` (boolean), NOT a `status` string — deriving
+          // it (the old `str(r,"status")` always resolved to "—").
+          status: resolveStatus(
+            r.isActive === true ? "ACTIVE" : "INACTIVE",
+            PAYMENT_STATUS_MAP,
+          ),
         };
       },
       columns: [
@@ -2948,7 +2953,11 @@ export const customersConfig: ModuleConfig = {
         enumCol("status", "Status", (r) => str(r, "status"), ["ACTIVE", "INACTIVE"]),
       ],
       defaultSort: { key: "name", dir: "asc" },
-      subTabs: [{ key: "all", label: "Customers", match: () => true }],
+      subTabs: [
+        { key: "all", label: "All", match: () => true },
+        { key: "active", label: "Active", match: (r) => r.isActive === true },
+        { key: "inactive", label: "Inactive", match: (r) => r.isActive !== true },
+      ],
     },
   ],
 };
@@ -3086,7 +3095,11 @@ export const suppliersConfig: ModuleConfig = {
         enumCol("status", "Status", (r) => str(r, "status"), ["ACTIVE", "INACTIVE"]),
       ],
       defaultSort: { key: "name", dir: "asc" },
-      subTabs: [{ key: "all", label: "Suppliers", match: () => true }],
+      subTabs: [
+        { key: "all", label: "All", match: () => true },
+        { key: "active", label: "Active", match: (r) => str(r, "status").toUpperCase() !== "INACTIVE" },
+        { key: "inactive", label: "Inactive", match: (r) => str(r, "status").toUpperCase() === "INACTIVE" },
+      ],
     },
   ],
 };
@@ -3192,7 +3205,12 @@ export const productsConfig: ModuleConfig = {
         numCol("amount", "Amount", (r) => num(r, "basePriceSen", "price1Sen")),
       ],
       defaultSort: { key: "name", dir: "asc" },
-      subTabs: [{ key: "all", label: "Products", match: () => true }],
+      subTabs: [
+        { key: "all", label: "All", match: () => true },
+        { key: "sofa", label: "Sofa", match: (r) => str(r, "category") === "SOFA" },
+        { key: "bedframe", label: "Bedframe", match: (r) => str(r, "category") === "BEDFRAME" },
+        { key: "accessory", label: "Accessory", match: (r) => str(r, "category") === "ACCESSORY" },
+      ],
     },
   ],
 };
@@ -3536,7 +3554,10 @@ const userDetail: DetailConfig = {
 export const usermgmtConfig: ModuleConfig = {
   slug: "usermgmt",
   title: "User Management",
-  detailPath: (vm) => `/m/usermgmt/${encodeURIComponent(vm.id)}`,
+  // Members open the user detail; pending-invite rows carry a `token` (no user
+  // record yet) → non-navigable (dest null).
+  detailPath: (vm, row) =>
+    read(row, "token") ? null : `/m/usermgmt/${encodeURIComponent(vm.id)}`,
   detail: userDetail,
   sources: [
     {
@@ -3573,7 +3594,31 @@ export const usermgmtConfig: ModuleConfig = {
         ),
       ],
       defaultSort: { key: "displayName", dir: "asc" },
-      subTabs: [{ key: "all", label: "Users", match: () => true }],
+      subTabs: [{ key: "members", label: "Members", match: () => true }],
+    },
+    // Pending Invites — un-accepted, un-expired invitations (separate table via
+    // GET /api/users/invites). Rows are non-navigable (no user record yet).
+    {
+      url: "/api/users/invites",
+      select: selectData,
+      toVM: (r): RowVM => ({
+        id: str(r, "token"),
+        code: str(r, "role") || "USER",
+        title: str(r, "displayName") || str(r, "email") || "—",
+        items: str(r, "email") || undefined,
+        metas: [
+          { label: "Invited by", value: str(r, "inviterName") || "—" },
+          { label: "Expires", value: shortDate(dateOnly(r, "expiresAt")) || "—" },
+        ],
+        status: resolveStatus("PENDING", PAYMENT_STATUS_MAP),
+      }),
+      columns: [
+        textCol("email", "Reference", (r) => str(r, "email")),
+        textCol("displayName", "Customer", (r) => str(r, "displayName")),
+        textCol("role", "State", (r) => str(r, "role")),
+      ],
+      defaultSort: { key: "email", dir: "asc" },
+      subTabs: [{ key: "pending", label: "Pending Invites", match: () => true }],
     },
   ],
 };
@@ -3652,12 +3697,24 @@ const threePlDetail: DetailConfig = {
   attachmentsResource: (id) => ({ type: "THREE_PL_PROVIDER", id }),
 };
 
+// Standalone Logistics module shows All / Active / Inactive filter tabs (design
+// `logistics` tab-bar). Delivery's own "3PL Providers" tab keeps threePlSource's
+// single-tab shape — so we clone the source here rather than mutate the shared one.
+const threePlListSource: DataSource = {
+  ...threePlSource,
+  subTabs: [
+    { key: "all", label: "All", match: () => true },
+    { key: "active", label: "Active", match: (r) => str(r, "status").toUpperCase() !== "INACTIVE" },
+    { key: "inactive", label: "Inactive", match: (r) => str(r, "status").toUpperCase() === "INACTIVE" },
+  ],
+};
+
 export const logisticsConfig: ModuleConfig = {
   slug: "logistics",
   title: "3PL Providers",
   detailPath: (vm) => `/m/logistics/${encodeURIComponent(vm.id)}`,
   detail: threePlDetail,
-  sources: [threePlSource],
+  sources: [threePlListSource],
 };
 
 // ---------------------------------------------------------------------------

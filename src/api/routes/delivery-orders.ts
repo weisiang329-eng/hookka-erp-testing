@@ -1359,6 +1359,53 @@ app.get("/linked-po-ids", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/delivery-orders/pending-sos
+//
+// Confirmed / in-production / ready-to-ship Sales Orders that have NO delivery
+// order yet. These are exactly what the mobile Delivery "Planning" (not yet
+// ready) and "Pending Delivery" (ready-to-ship) tabs show — a DO only exists
+// from *Pending Dispatch* onward (design 2026-07 / INDEX rule 7: "Planning and
+// Pending Delivery show confirmed SOs that are ready but have no DO yet — never
+// show a DO in Planning / Pending Delivery"). "Has a DO" = the SO is the DO's
+// primary salesOrderId OR one of the SOs its production orders belong to (multi-
+// SO DOs), across non-cancelled DOs. Registered BEFORE /:id.
+// ---------------------------------------------------------------------------
+app.get("/pending-sos", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const res = await c.var.DB.prepare(
+    `SELECT id, companySO, companySOId, customerName, customerState,
+            customerPO, customerPOId, customerSO, customerSOId,
+            hubName, hookkaExpectedDD, totalSen, status
+       FROM sales_orders
+      WHERE orgId = ?
+        AND status IN ('CONFIRMED','IN_PRODUCTION','READY_TO_SHIP')
+        AND id NOT IN (
+          SELECT salesOrderId FROM delivery_orders
+            WHERE orgId = ? AND salesOrderId IS NOT NULL AND salesOrderId <> ''
+              AND status <> 'CANCELLED'
+          UNION
+          SELECT DISTINCT po.salesOrderId
+            FROM delivery_order_items doi
+            JOIN delivery_orders d ON d.id = doi.deliveryOrderId
+            JOIN production_orders po ON po.id = doi.productionOrderId
+           WHERE d.status <> 'CANCELLED'
+             AND po.salesOrderId IS NOT NULL AND po.salesOrderId <> ''
+        )
+      ORDER BY hookkaExpectedDD ASC`,
+  )
+    .bind(orgId, orgId)
+    .all<Record<string, unknown>>();
+  const data = (res.results ?? []).map((r) => ({
+    ...r,
+    // planTab drives the mobile sub-tab: ready-to-ship → "pending", else "planning".
+    planTab: r.status === "READY_TO_SHIP" ? "pending" : "planning",
+  }));
+  return c.json({ success: true, data });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/delivery-orders/backfill-customer-po
 //
 // One-shot historical repair (Wei Siang 2026-06-03). Old DOs never snapshotted

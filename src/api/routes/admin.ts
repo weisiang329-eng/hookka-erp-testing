@@ -150,6 +150,24 @@ app.post("/archive/run", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const confirm = body && typeof body === "object" && (body as { confirm?: unknown }).confirm === true;
 
+  // HARD-DISABLED per owner decision 2026-07-03: most read paths (search, detail,
+  // dashboards, accounting) and several write paths (invoice line lookup, cost
+  // cascade, status recompute) only see the hot tables, so a real archive run
+  // makes rows invisible and lets writes silently no-op — and there is no
+  // unarchive endpoint. Dry-run stays available for counting. Re-enabling
+  // requires removing this guard AND making every consumer archive-aware first.
+  if (!dryRun) {
+    console.error("[archive] real run blocked — hard-disabled per owner decision 2026-07-03");
+    return c.json(
+      {
+        success: false,
+        error:
+          "Archive execution is disabled. Search/detail/reporting and several write paths do not read the archive tables yet, so archived rows would disappear from the app. Dry-run (?dryRun=true) is still available.",
+      },
+      410,
+    );
+  }
+
   // Guardrail: only bypass the confirm flag when ENVIRONMENT === "production".
   // Literal reading of the phase-5 spec:
   //   "Require ENVIRONMENT === 'production' || body.confirm === true"

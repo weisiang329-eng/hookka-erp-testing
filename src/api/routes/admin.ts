@@ -37,8 +37,11 @@ import {
 
 const app = new Hono<Env>();
 
-// Age threshold for cold data — 90 days, per spec.
-const COLD_DAYS = 90;
+// Age threshold for cold data — 45 days (owner 2026-07-03, lowered from 90 to
+// demote completed/closed records to the archive tables sooner and keep the
+// hot working set smaller as data grows). Only COMPLETED POs / CLOSED-CANCELLED
+// SOs that haven't been touched in this many days become archivable.
+const COLD_DAYS = 45;
 
 type Counts = {
   production_orders: number;

@@ -5872,8 +5872,16 @@ async function loadHistoricalPnl(
   // only — stored rows untouched) so historical months and engine months share
   // one row per item in the Monthly P&L instead of duplicating (owner
   // complaint 2026-07-03). Exact normalized-name matches + explicit spelling
-  // aliases only; see src/lib/pnl-hist-remap.ts.
-  const remap = buildHistIdentityRemap(coaRes.results ?? []);
+  // aliases only; see src/lib/pnl-hist-remap.ts. The historical rmGroups carry
+  // AutoCount stock-group CODES ("B.M-FABR", "MAINTENA"…) — resolve those with
+  // the same group→purchase-account map the engine posts with.
+  const { DEFAULT_PURCHASE_MAP: histPMap } = await import("./purchase-invoices");
+  const histStockMap = await getStockMap(db);
+  const histGroupAcct: Record<string, string> = { ...histPMap };
+  for (const [g, v] of Object.entries(histStockMap.rm as Record<string, { purchase?: string }>)) {
+    if (v?.purchase) histGroupAcct[g] = v.purchase;
+  }
+  const remap = buildHistIdentityRemap(coaRes.results ?? [], histGroupAcct);
   for (const perLine of map.values()) {
     for (const w of Object.values(perLine)) {
       if (w) remap.remapWindow(w as unknown as Parameters<typeof remap.remapWindow>[0]);

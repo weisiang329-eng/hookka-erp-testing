@@ -51,7 +51,14 @@ export interface HistIdentityRemap {
   remapWindow(w: WindowLike): number;
 }
 
-export function buildHistIdentityRemap(coa: CoaLite[]): HistIdentityRemap {
+export function buildHistIdentityRemap(
+  coa: CoaLite[],
+  // Item-group → purchase-account map (DEFAULT_PURCHASE_MAP + kv overrides).
+  // The owner-keyed historical rmGroups carry the AutoCount stock-group CODES
+  // ("B.M-FABR", "MAINTENA", "B.WEBB"…) as their group keys — only the same
+  // map the engine posts with can resolve those.
+  groupAcct: Record<string, string> = {},
+): HistIdentityRemap {
   // Unique normalized-name → account (per allowed-type set). Names that
   // normalize identically for two accounts are dropped (ambiguous → no remap).
   const byName = new Map<string, CoaLite | null>();
@@ -71,6 +78,17 @@ export function buildHistIdentityRemap(coa: CoaLite[]): HistIdentityRemap {
     purchaseBySuffix.set(k, purchaseBySuffix.has(k) ? null : a);
   }
   const codeSet = new Set(coa.map((a) => a.code));
+  const byCode = new Map(coa.map((a) => [a.code, a] as const));
+  // norm(item-group code) → COST account, via the posting map.
+  const groupCodeIdx = new Map<string, CoaLite | null>();
+  for (const [g, code] of Object.entries(groupAcct)) {
+    const a = byCode.get(code);
+    if (!a || a.type !== "COST") continue; // e.g. R&D → EXPENSE: not an rm row target
+    const k = norm(g);
+    if (!k) continue;
+    const prev = groupCodeIdx.get(k);
+    groupCodeIdx.set(k, prev === undefined || prev?.code === a.code ? a : null);
+  }
 
   const remapLines = (lines: LineLike[] | undefined, allowedTypes: ReadonlySet<string>): number => {
     if (!lines) return 0;
@@ -94,7 +112,8 @@ export function buildHistIdentityRemap(coa: CoaLite[]): HistIdentityRemap {
       let n = 0;
       for (const g of w.rmGroups ?? []) {
         if (codeSet.has(g.group)) continue; // already account-keyed (engine era)
-        const hit = purchaseBySuffix.get(aliased(norm(g.group), RM_ALIASES));
+        const k = aliased(norm(g.group), RM_ALIASES);
+        const hit = purchaseBySuffix.get(k) ?? groupCodeIdx.get(k);
         if (!hit) continue;
         g.group = hit.code;
         g.description = hit.name;

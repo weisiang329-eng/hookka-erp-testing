@@ -83,3 +83,40 @@ test("already-canonical line is a no-op (count stays 0)", () => {
   const w = { expenseLines: [{ code: "900-B001", name: "BANK CHARGES" }] };
   assert.equal(buildHistIdentityRemap(COA).remapWindow(w), 0);
 });
+
+test("rm groups: AutoCount stock-group CODES resolve via the posting map", () => {
+  const coa = [
+    { code: "701-0010", name: "PURCHASE - B.M FABRIC", type: "COST" },
+    { code: "704-0030", name: "PURCHASE - MAINTENANCE", type: "COST" },
+    { code: "704-0050", name: "PURCHASE - B.WEBBING", type: "COST" },
+    { code: "900-R002", name: "RESEARCH & DEVELOPMENT", type: "EXPENSE" },
+  ];
+  const groupAcct = {
+    "B.M-FABR": "701-0010",
+    MAINTENA: "704-0030",
+    "B.WEBB": "704-0050",
+    "R&D": "900-R002", // EXPENSE target → must NOT remap an rm row
+  };
+  const w = {
+    rmGroups: [
+      { group: "B.M-FABR", description: "B.M Fabric" },
+      { group: "MAINTENA", description: "Maintenance" },
+      { group: "B.WEBB", description: "B.Webbing" },
+      { group: "R&D", description: "R&D" },
+    ],
+  };
+  const n = buildHistIdentityRemap(coa, groupAcct).remapWindow(w);
+  assert.equal(n, 3);
+  assert.deepEqual(w.rmGroups[0], { group: "701-0010", description: "PURCHASE - B.M FABRIC" });
+  assert.deepEqual(w.rmGroups[1], { group: "704-0030", description: "PURCHASE - MAINTENANCE" });
+  assert.deepEqual(w.rmGroups[2], { group: "704-0050", description: "PURCHASE - B.WEBBING" });
+  assert.equal(w.rmGroups[3].group, "R&D");
+});
+
+test("rm groups: name-suffix match still wins when both indexes could apply", () => {
+  const coa = [{ code: "702-0010", name: "PURCHASE - PLYWOOD", type: "COST" }];
+  const w = { rmGroups: [{ group: "PLYWOOD", description: "Plywood" }] };
+  const n = buildHistIdentityRemap(coa, { PLYWOOD: "702-0010" }).remapWindow(w);
+  assert.equal(n, 1);
+  assert.equal(w.rmGroups[0].group, "702-0010");
+});

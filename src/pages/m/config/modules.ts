@@ -86,11 +86,22 @@ function itemVM(it: RawRow, i: number): LineItemVM {
   const line = num(it, "lineTotalSen", "amountSen", "totalSen") || unit * qty;
   return {
     id: str(it, "id", "lineNo") || String(i),
+    // Procurement (PO / GRN / Purchase Invoice) items store the name in
+    // `materialName` + `material_code`, not productName — include them or the
+    // line shows "—".
     title:
-      str(it, "productName", "description", "itemDescription", "productCode") ||
-      "—",
+      str(
+        it,
+        "productName",
+        "materialName",
+        "description",
+        "itemDescription",
+        "productCode",
+        "material_code",
+      ) || "—",
     subLine:
-      str(it, "productCode", "itemCode", "sku") || undefined,
+      str(it, "productCode", "materialCode", "material_code", "itemCode", "sku") ||
+      undefined,
     meta1: { label: "Qty", value: qty },
     meta2: { label: "Amount", value: money(line) },
   };

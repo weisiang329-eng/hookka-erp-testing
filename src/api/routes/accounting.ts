@@ -25,7 +25,7 @@ import {
 import { getFyeMonth, fyWindowFor } from "../lib/fiscal";
 import { emitAudit } from "../lib/audit";
 import { parseDebtorCode } from "../../lib/debtor";
-import { pnlBucketFor } from "../../lib/pnl-bucket";
+import { defaultPnlBucket, pnlBucketFor } from "../../lib/pnl-bucket";
 import { bsSectionFor, bsSectionClass } from "../../lib/bs-section";
 import type { BsSection } from "../../lib/bs-section";
 import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
@@ -55,7 +55,7 @@ import {
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
 import { selectHistoricalWindow, sumPnlWindows, buildHistoricalMap } from "../../lib/pnl-historical";
-import { rmScale } from "../../lib/product-line-rm";
+import { rmLineOf, rmScale } from "../../lib/product-line-rm";
 import { buildInventoryOpeningSeed, applyOpeningSeed, type InventoryOpeningRow } from "../../lib/inventory-opening";
 import { bucketAging } from "../../lib/other-party-aging";
 import { applyLifecycle } from "../lib/document-lifecycle";
@@ -5816,23 +5816,81 @@ async function computePnlWindow(
   // revLines is already filtered to the selected line, so net sales is exact.
   const netSalesSen = revLines.reduce((s, r) => s + r.amountSen, 0);
 
-  // --- Raw materials (per group, opening+purchase−closing = consumed) ---
-  // From the FIFO engine (loadMaterialCost). The engine guarantees
-  // opening + purchase − closing === consumed per group, so rmConsumedSen
-  // (still derived as opening+purchases−closing for the downstream row tree)
-  // ties out to the engine's consumed exactly. Line-share scaling uses
-  // rmScale: B.* groups go 100% to bedframe view (0 in sofa), S.* / S- groups
-  // go 100% to sofa view (0 in bedframe), shared groups are pro-rated by R.
-  const rmGroups = mat.rmGroups.map((r) => {
+  // --- Raw materials (rows keyed by PURCHASE ACCOUNT; owner rule 2026-07-03:
+  // "采购改读 ledger") ---
+  // PURCHASES read the LEDGER — the GL purchase accounts that the PI postings
+  // and the opening-slice JV debit — so the P&L purchase figures tie to the
+  // TB. OPENING/CLOSING stock stays engine-valued (item-level FIFO; the
+  // ledger has no items). Each engine group's stock lands on its mapped
+  // purchase account (kv coa_stock_map rm[g].purchase → DEFAULT_PURCHASE_MAP
+  // → default), mirroring how the PI posting picked the DR account, so
+  // opening + purchase − closing stays a same-account identity.
+  const { DEFAULT_PURCHASE_MAP: pnlPMap, DEFAULT_PURCHASE_ACCT: pnlPDefault } =
+    await import("./purchase-invoices");
+  const pnlStockMap = await getStockMap(db);
+  const purchaseAcctOf = (g: string): string => {
+    const o = (pnlStockMap.rm as Record<string, { purchase?: string }>)[g];
+    return (
+      o?.purchase ??
+      pnlPMap[g] ??
+      (pnlStockMap.rmDefault as { purchase?: string })?.purchase ??
+      pnlPDefault
+    );
+  };
+  // A "purchase account" = COST-type account that is not one of the dedicated
+  // account-driven lines (carriage 700-1015 / SST 706-0000 / labour 750 /
+  // overhead 780) — i.e. the 701~705 purchase band.
+  const isPurchaseAcct = (code: string, type: CoaRow["type"]): boolean =>
+    type === "COST" &&
+    defaultPnlBucket(code, type) === null &&
+    code !== "700-1015" &&
+    code !== "706-0000";
+  const acctRows = new Map<
+    string,
+    { openingSen: number; purchasesSen: number; closingSen: number; grpLines: Set<string> }
+  >();
+  const ensureAcctRow = (code: string) => {
+    let x = acctRows.get(code);
+    if (!x) {
+      x = { openingSen: 0, purchasesSen: 0, closingSen: 0, grpLines: new Set() };
+      acctRows.set(code, x);
+    }
+    return x;
+  };
+  // 1) Engine stock per group → its purchase account (scaled per group).
+  for (const r of mat.rmGroups) {
     const sc = rmScale(r.itemGroup, line, R);
-    return {
-      group: r.itemGroup,
-      description: GROUP_DESCRIPTIONS[r.itemGroup] ?? r.itemGroup,
-      openingSen: Math.round(r.openingSen * sc),
-      purchasesSen: Math.round(r.purchaseSen * sc),
-      closingSen: Math.round(r.closingSen * sc),
-    };
-  });
+    const mapped = purchaseAcctOf(r.itemGroup);
+    const mappedMeta = gl.coa.get(mapped);
+    // Groups mapped to a NON-purchase account (e.g. R&D → 900-R002, an
+    // EXPENSE — already counted in the expense section) park their stock on
+    // the default purchase account instead of double-showing the account.
+    const acct = mappedMeta && isPurchaseAcct(mapped, mappedMeta.type) ? mapped : pnlPDefault;
+    const x = ensureAcctRow(acct);
+    x.openingSen += Math.round(r.openingSen * sc);
+    x.closingSen += Math.round(r.closingSen * sc);
+    x.grpLines.add(rmLineOf(r.itemGroup));
+  }
+  // 2) Ledger purchases per account (scaled by the account's group lines:
+  //    single-line accounts stay on their line, mixed/unknown pro-rate by R).
+  for (const [code, v] of gl.net) {
+    const meta = gl.coa.get(code);
+    if (!meta || !isPurchaseAcct(code, meta.type)) continue;
+    const x = ensureAcctRow(code);
+    const only = x.grpLines.size === 1 ? [...x.grpLines][0] : "shared";
+    const sc = line === "all" ? 1 : only === "shared" ? R : only === line ? 1 : 0;
+    x.purchasesSen += Math.round(v * sc);
+  }
+  const rmGroups = [...acctRows.entries()]
+    .map(([code, x]) => ({
+      group: code,
+      description: gl.coa.get(code)?.name ?? GROUP_DESCRIPTIONS[code] ?? code,
+      openingSen: x.openingSen,
+      purchasesSen: x.purchasesSen,
+      closingSen: x.closingSen,
+    }))
+    .filter((g) => g.openingSen !== 0 || g.purchasesSen !== 0 || g.closingSen !== 0)
+    .sort((a, b) => a.group.localeCompare(b.group));
   const rmConsumedSen = rmGroups.reduce((s, g) => s + g.openingSen + g.purchasesSen - g.closingSen, 0);
 
   // --- Carriage (700-1015), SST (706-0000) ---

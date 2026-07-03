@@ -26,7 +26,18 @@ type Props = {
 export function GrnReceiveSheet({ open, poId, onClose, onSubmit }: Props) {
   const { data } = useCachedJson<POResp>(open && poId ? `/api/purchase-orders/${encodeURIComponent(poId)}` : null);
   const po = data?.data;
-  const items = Array.isArray(po?.items) ? (po!.items as POItem[]) : [];
+  // CRITICAL: the backend keys GRN lines to PO lines by poItemIndex = the line's
+  // position in `SELECT … FROM purchase_order_items ORDER BY id` (grn.ts:703).
+  // The PO GET does NOT return items in that order, so we MUST re-sort by id
+  // (byte/BINARY, matching SQLite) — then the row index the operator sees IS the
+  // poItemIndex the backend expects. Without this, qty lands on the wrong line.
+  const items = (Array.isArray(po?.items) ? (po!.items as POItem[]) : [])
+    .slice()
+    .sort((a, b) => {
+      const ai = str(a, "id");
+      const bi = str(b, "id");
+      return ai < bi ? -1 : ai > bi ? 1 : 0;
+    });
 
   const [recv, setRecv] = useState<Record<number, number>>({});
   const [receivedBy, setReceivedBy] = useState("");

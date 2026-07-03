@@ -50,6 +50,8 @@ import {
 } from "../config/types";
 import { type FormSpec } from "../config/form-types";
 import { editSpecFor, newMailSpec, recordPaymentSpec } from "../config/forms";
+import { PodSheet } from "../components/PodSheet";
+import type { ProofOfDelivery } from "@/types";
 import { mutateJson, refreshOne, refreshList } from "../config/mutate";
 import { str } from "../config/helpers";
 
@@ -124,6 +126,8 @@ function Inner({
   const [sheet, setSheet] = useState<null | "print">(null);
   // Edit / reply forms (FormSheet). When set, the prefilled form is open.
   const [formSpec, setFormSpec] = useState<FormSpec | null>(null);
+  // Proof-of-delivery capture sheet (delivery "Mark Delivered").
+  const [podOpen, setPodOpen] = useState(false);
   // CTA action state (acknowledge / sign / mark-read) — inline busy + toast.
   const [ctaBusy, setCtaBusy] = useState(false);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; text: string } | null>(
@@ -369,6 +373,12 @@ function Inner({
         return { ok: true };
       };
       setFormSpec(spec);
+      return;
+    }
+
+    if (config.slug === "delivery" && primaryCta === "Mark Delivered") {
+      // Open POD capture (signature + photos) — submit handled by onSubmit below.
+      setPodOpen(true);
       return;
     }
 
@@ -1118,6 +1128,24 @@ function Inner({
           setFormSpec(null);
           setToast({ kind: "ok", text: "Saved." });
           if (to) navigate(to);
+        }}
+      />
+
+      {/* Proof of Delivery — same PUT the desktop DO detail uses. */}
+      <PodSheet
+        open={podOpen}
+        onClose={() => setPodOpen(false)}
+        onSubmit={async (pod: ProofOfDelivery) => {
+          const res = await mutateJson(
+            `/api/delivery-orders/${encodeURIComponent(id)}`,
+            "PUT",
+            { proofOfDelivery: pod, status: "DELIVERED" },
+          );
+          if (!res.ok) return { ok: false, error: res.error };
+          refreshOne(`/api/delivery-orders/${encodeURIComponent(id)}`);
+          refreshList("/api/delivery-orders");
+          setToast({ kind: "ok", text: "Delivered — proof captured." });
+          return { ok: true };
         }}
       />
 

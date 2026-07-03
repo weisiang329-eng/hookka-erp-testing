@@ -9,7 +9,7 @@ import { getQRCodeDataURL, rackScanUrl, itemQrValue } from "@/lib/qr-utils";
 import {
   Warehouse, Grid3X3, Package, MapPin, LayoutGrid,
   ArrowDownToLine, ArrowUpFromLine, History, X, ArrowRightLeft,
-  Loader2, RefreshCw, QrCode, Download, Search, Plus,
+  Loader2, RefreshCw, QrCode, Download, Search, Plus, ChevronDown,
 } from "lucide-react";
 
 // ---------- Types ----------
@@ -110,8 +110,6 @@ type RackDetails = {
 
 // ---------- Constants ----------
 // Flat rack layout — "Rack 1" … "Rack 20", no A/B/C sub-columns.
-const RACKS = Array.from({ length: 20 }, (_, i) => `Rack ${i + 1}`);
-
 const TABS = [
   { key: "grid", label: "Rack Overview", icon: Grid3X3 },
   { key: "stockio", label: "Stock In/Out", icon: ArrowRightLeft },
@@ -125,6 +123,10 @@ export default function WarehousePage() {
 
   // Popup / modals
   const [selectedSlot, setSelectedSlot] = useState<RackLocation | null>(null);
+  // Rack-detail accordions — collapsed by default (owner 2026-07-03: Contents +
+  // Move history open only on click). Reset each time a rack is opened.
+  const [contentsOpen, setContentsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   // Rack Overview search (owner 2026-06-25): substring match — type "9090" to
   // find PO-009090, "062" to find SO-2606-062 — across each rack item's SO /
   // customer PO / customer name / product, to see WHICH rack a piece is in.
@@ -294,10 +296,10 @@ export default function WarehousePage() {
         .includes(rackQuery),
     );
   };
-  const shownRackCount = RACKS.reduce((n, rn) => {
-    const s = rackLocations.find((x) => x.rack === rn);
-    return n + (s && rackHasMatch(s) ? 1 : 0);
-  }, 0);
+  const shownRackCount = rackLocations.reduce(
+    (n, s) => n + (rackHasMatch(s) ? 1 : 0),
+    0,
+  );
 
   // ---------- Actions ----------
   const handleStockIn = async () => {
@@ -770,7 +772,7 @@ ${tilesHtml}
               </div>
               {rackQuery && (
                 <p className="text-xs text-[#6B5C32]">
-                  Showing <span className="font-semibold">{shownRackCount}</span> of {RACKS.length} racks
+                  Showing <span className="font-semibold">{shownRackCount}</span> of {rackLocations.length} racks
                   {shownRackCount === 0 ? " — no item matches" : ""}
                 </p>
               )}
@@ -779,9 +781,9 @@ ${tilesHtml}
                   multiple items; if more than 3 items we show the first 3 and
                   a "+N more" indicator. Card height auto-grows. */}
               <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3 items-start">
-                {RACKS.map((rackName) => {
-                  const slot = rackLocations.find((s) => s.rack === rackName);
-                  if (!slot) return null;
+                {rackLocations.map((slot) => {
+                  // Render every real rack from the DB (incl. Floor + any created
+                  // rack), not a hard-coded 1..20 list — a new rack was invisible.
                   // Hide racks with no item matching the search (empty query = all).
                   if (rackQuery && !rackHasMatch(slot)) return null;
 
@@ -803,6 +805,8 @@ ${tilesHtml}
                       className={`rounded-md p-3 cursor-pointer hover:opacity-80 transition-opacity min-h-[72px] ${bgColor}`}
                       onClick={() => {
                         if (slot.status === "OCCUPIED") {
+                          setContentsOpen(false);
+                          setHistoryOpen(false);
                           setSelectedSlot(slot);
                         } else if (slot.status === "EMPTY") {
                           // Empty rack: offer Print Rack QR + Stock in here rather
@@ -886,11 +890,19 @@ ${tilesHtml}
                 <Badge>{selectedSlot.status}</Badge>
               </div>
 
-              {/* ----- Contents: what's currently IN this rack ----- */}
-              <div className="flex items-center justify-between pt-1">
-                <span className="font-semibold text-[#1F1D1B]">Contents</span>
+              {/* ----- Contents: what's currently IN this rack (collapsed by default) ----- */}
+              <button
+                type="button"
+                onClick={() => setContentsOpen((o) => !o)}
+                className="flex w-full items-center justify-between pt-1 cursor-pointer text-left"
+              >
+                <span className="flex items-center gap-1.5 font-semibold text-[#1F1D1B]">
+                  <ChevronDown className={`h-4 w-4 text-[#6B7280] transition-transform ${contentsOpen ? "" : "-rotate-90"}`} />
+                  Contents
+                </span>
                 <span className="text-xs text-[#6B7280]">{popupContents.length} item{popupContents.length === 1 ? "" : "s"}</span>
-              </div>
+              </button>
+              {contentsOpen && (
               <div className="space-y-2">
                 {popupContents.length === 0 ? (
                   <p className="text-xs text-[#6B7280] text-center py-3">No items in this rack.</p>
@@ -923,12 +935,21 @@ ${tilesHtml}
                   })
                 )}
               </div>
+              )}
 
-              {/* ----- Move history: in/out for THIS rack, newest first ----- */}
-              <div className="flex items-center justify-between pt-3 border-t border-[#E2DDD8]">
-                <span className="font-semibold text-[#1F1D1B]">Move history</span>
+              {/* ----- Move history: in/out for THIS rack (collapsed by default) ----- */}
+              <button
+                type="button"
+                onClick={() => setHistoryOpen((o) => !o)}
+                className="flex w-full items-center justify-between pt-3 mt-3 border-t border-[#E2DDD8] cursor-pointer text-left"
+              >
+                <span className="flex items-center gap-1.5 font-semibold text-[#1F1D1B]">
+                  <ChevronDown className={`h-4 w-4 text-[#6B7280] transition-transform ${historyOpen ? "" : "-rotate-90"}`} />
+                  Move history
+                </span>
                 {rackDetailLoading && <Loader2 className="h-4 w-4 animate-spin text-[#6B5C32]" />}
-              </div>
+              </button>
+              {historyOpen && (
               <div className="space-y-2">
                 {popupMovements.length === 0 ? (
                   <p className="text-xs text-[#6B7280] text-center py-3">
@@ -982,6 +1003,7 @@ ${tilesHtml}
                   ))
                 )}
               </div>
+              )}
             </div>
             <div className="mt-6 flex gap-2 justify-between">
               <Button

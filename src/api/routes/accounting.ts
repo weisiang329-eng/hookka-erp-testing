@@ -56,6 +56,7 @@ import {
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { buildPnlMatrix, type PnlMatrixCol } from "../../lib/pnl-matrix";
 import { selectHistoricalWindow, sumPnlWindows, buildHistoricalMap } from "../../lib/pnl-historical";
+import { buildHistIdentityRemap } from "../../lib/pnl-hist-remap";
 import { rmLineOf, rmScale } from "../../lib/product-line-rm";
 import { buildInventoryOpeningSeed, applyOpeningSeed, type InventoryOpeningRow } from "../../lib/inventory-opening";
 import { bucketAging } from "../../lib/other-party-aging";
@@ -5850,18 +5851,35 @@ async function loadHistoricalPnl(
   db: D1Database,
   orgId: string,
 ): Promise<Map<string, Partial<Record<"all" | "sofa" | "bedframe", PnlWindow>>>> {
-  const res = await db
-    .prepare("SELECT ym, line, window_json FROM pnl_historical WHERE org_id = ?")
-    .bind(orgId)
-    .all<{ ym: string; line: string; windowJson?: string; window_json?: string }>();
+  const [res, coaRes] = await Promise.all([
+    db
+      .prepare("SELECT ym, line, window_json FROM pnl_historical WHERE org_id = ?")
+      .bind(orgId)
+      .all<{ ym: string; line: string; windowJson?: string; window_json?: string }>(),
+    db
+      .prepare("SELECT code, name, type FROM chart_of_accounts")
+      .all<{ code: string; name: string; type: string }>(),
+  ]);
   // window_json arrives camelCased as `windowJson` via the db-pg adapter's
   // transform.column.from; buildHistoricalMap reads it dual-keyed. Reading
   // row.window_json directly gave undefined → JSON.parse threw → every row
   // skipped → empty map → no injection (prod bug 2026-06-30).
-  return buildHistoricalMap(res.results ?? []) as Map<
+  const map = buildHistoricalMap(res.results ?? []) as Map<
     string,
     Partial<Record<"all" | "sofa" | "bedframe", PnlWindow>>
   >;
+  // Canonicalize the owner-keyed identities to the COA at LOAD time (display
+  // only — stored rows untouched) so historical months and engine months share
+  // one row per item in the Monthly P&L instead of duplicating (owner
+  // complaint 2026-07-03). Exact normalized-name matches + explicit spelling
+  // aliases only; see src/lib/pnl-hist-remap.ts.
+  const remap = buildHistIdentityRemap(coaRes.results ?? []);
+  for (const perLine of map.values()) {
+    for (const w of Object.values(perLine)) {
+      if (w) remap.remapWindow(w as unknown as Parameters<typeof remap.remapWindow>[0]);
+    }
+  }
+  return map;
 }
 
 async function computePnlWindow(

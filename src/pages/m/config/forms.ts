@@ -1128,6 +1128,67 @@ export function editSupplierSpec(doc: Record<string, unknown>, id: string): Form
 }
 
 // ===========================================================================
+// 3PL PROVIDER — edit. Wires to PUT /api/drivers/:id (drivers.ts). Design's
+// "Edit provider" pencil. No cascade — a driver/provider is standalone master
+// data. Rates are integer sen (money kind); status ∈ ACTIVE/INACTIVE/ON_LEAVE.
+// ===========================================================================
+const THREE_PL_STATUS_OPTS: SelectOption[] = [
+  { value: "ACTIVE", label: "Active" },
+  { value: "INACTIVE", label: "Inactive" },
+  { value: "ON_LEAVE", label: "On Leave" },
+];
+
+export function editThreePlSpec(doc: Record<string, unknown>, id: string): FormSpec {
+  return {
+    title: "Edit 3PL Provider",
+    submitLabel: "Save",
+    fields: [
+      { name: "name", label: "Provider Name", kind: "text" as const, required: true, full: true },
+      { name: "contactPerson", label: "Account Contact", kind: "text" as const, full: true },
+      { name: "phone", label: "Phone", kind: "text" as const, full: true },
+      { name: "vehicleNo", label: "Vehicle No", kind: "text" as const, full: true },
+      { name: "vehicleType", label: "Vehicle Type", kind: "text" as const, full: true },
+      { name: "capacityM3", label: "Capacity (m³)", kind: "number" as const, full: true },
+      { name: "ratePerTripSen", label: "Rate / Trip (RM)", kind: "money" as const, full: true },
+      { name: "ratePerExtraDropSen", label: "Extra Drop (RM)", kind: "money" as const, full: true },
+      { name: "status", label: "Status", kind: "select" as const, options: THREE_PL_STATUS_OPTS, full: true },
+      { name: "remarks", label: "Remarks", kind: "textarea" as const, full: true },
+    ],
+    initial: {
+      name: s(doc.name),
+      contactPerson: s(doc.contactPerson),
+      phone: s(doc.phone),
+      vehicleNo: s(doc.vehicleNo),
+      vehicleType: s(doc.vehicleType),
+      capacityM3: n(doc.capacityM3),
+      ratePerTripSen: n(doc.ratePerTripSen),
+      ratePerExtraDropSen: n(doc.ratePerExtraDropSen),
+      status: s(doc.status) || "ACTIVE",
+      remarks: s(doc.remarks),
+    },
+    submit: async (v) => {
+      const body = {
+        name: s(v.name).trim(),
+        contactPerson: s(v.contactPerson),
+        phone: s(v.phone),
+        vehicleNo: s(v.vehicleNo),
+        vehicleType: s(v.vehicleType),
+        capacityM3: n(v.capacityM3),
+        ratePerTripSen: n(v.ratePerTripSen),
+        ratePerExtraDropSen: n(v.ratePerExtraDropSen),
+        status: s(v.status) || "ACTIVE",
+        remarks: s(v.remarks),
+      };
+      const res = await mutateJson(`/api/drivers/${encodeURIComponent(id)}`, "PUT", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshOne(`/api/drivers/${encodeURIComponent(id)}`);
+      refreshList("/api/drivers");
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
 // R&D PROJECT — create. Wires to /api/rd-projects POST (rd-projects.ts:383).
 // Required: name + productCategory. Optional: projectType, currentStage,
 // targetLaunchDate, totalBudget.
@@ -1555,6 +1616,9 @@ export function editSpecFor(
       return editSupplierSpec(doc, id);
     case "employees":
       return editEmployeeSpec(doc, id);
+    case "logistics":
+      // Design "Edit provider" — 3PL master data, PUT /api/drivers/:id (no cascade).
+      return editThreePlSpec(doc, id);
     default:
       // DO edit (status transitions / dispatch overlay), production, etc. are
       // not free-form edits — left to desktop / the CTA action. // TODO: add a

@@ -238,11 +238,44 @@ export function SalesDetailScreen() {
                     <div style={{ fontSize: 13, fontWeight: 700, color: M.ink }}>
                       {str(it, "productName", "description", "productCode") || "—"}
                     </div>
-                    <div style={{ fontSize: 10.5, color: M.faint, marginTop: 3 }}>
-                      {str(it, "productCode", "itemCode", "sku")
-                        ? `SKU ${str(it, "productCode", "itemCode", "sku")}`
-                        : ""}
-                    </div>
+                    {/* Spec line + variant chips — real SO item fields
+                        (itemCategory/sizeLabel/fabricCode + leg/divan/gap/special),
+                        matching the design's "Size 24 · BO315-24" + chips. */}
+                    {(() => {
+                      const sku = str(it, "productCode", "itemCode", "sku");
+                      const spec = [
+                        str(it, "itemCategory"),
+                        str(it, "sizeLabel") ? `Size ${str(it, "sizeLabel")}` : "",
+                        str(it, "fabricCode"),
+                      ].filter(Boolean).join(" · ");
+                      const chips = [
+                        num(it, "legPriceSen") > 0 ? "Leg" : "",
+                        num(it, "divanPriceSen") > 0 ? "Divan" : "",
+                        num(it, "gapInches") > 0 ? `Gap ${num(it, "gapInches")}"` : "",
+                        str(it, "specialOrder") ? "Special" : "",
+                      ].filter(Boolean);
+                      return (
+                        <>
+                          {sku || spec ? (
+                            <div style={{ fontSize: 10.5, color: M.faint, marginTop: 3 }}>
+                              {[sku ? `SKU ${sku}` : "", spec].filter(Boolean).join(" · ")}
+                            </div>
+                          ) : null}
+                          {chips.length > 0 ? (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 5 }}>
+                              {chips.map((c) => (
+                                <span
+                                  key={c}
+                                  style={{ fontSize: 9.5, fontWeight: 700, color: M.taupe, background: M.paper, border: `1px solid ${M.border}`, borderRadius: 6, padding: "2px 6px" }}
+                                >
+                                  {c}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </>
+                      );
+                    })()}
                   </div>
                   <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                     <div style={{ fontSize: 13, fontWeight: 700, color: M.taupe }}>{money(line)}</div>

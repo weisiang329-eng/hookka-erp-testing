@@ -34,6 +34,7 @@ import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { apRowBeforeOpening, legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
+import { applyOpeningSlice, windowCoversMonth } from "../../lib/opening-slice";
 import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
 import { costAsOfByPo } from "../../lib/cost-attribution";
 import { STOCK_TAKE_ITEM_ALIAS_SEED_2026_05 } from "../lib/stock-take-item-alias-seed-2026-05";
@@ -4927,6 +4928,37 @@ interface DocDateCtx {
   openingDate: string | null;
 }
 
+// Prior-cumulative P&L balances (the old accountant's TB as at the month-end
+// BEFORE the opening month) — kv-config JSON {accountCode: signedSen}. Used to
+// carve the opening-balance P&L lump into "≤ prior month" (shown via the
+// historical P&L) and "opening-month 1st → opening date" (shown in the opening
+// month by applyOpeningSlice). Report-layer only; the ledger keeps one clean
+// opening entry (owner rule 2026-07-03: no bridge JVs, no trace).
+async function getPnlOpeningPriorCum(
+  db: Env["Variables"]["DB"],
+): Promise<Record<string, number>> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'pnl_opening_prior_cum'")
+      .first<{ value: string | null }>();
+    const parsed = JSON.parse(row?.value ?? "null");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        const n = Math.round(Number(v));
+        if (Number.isFinite(n) && n !== 0) out[k] = n;
+      }
+      return out;
+    }
+  } catch {
+    // absent key / bad JSON → no prior-cum: the whole opening lump stays in
+    // the opening month (still correct when the books simply began then)
+  }
+  return {};
+}
+
+const PNL_TYPES: ReadonlySet<CoaRow["type"]> = new Set(["REVENUE", "COST", "EXPENSE"]);
+
 async function glWindowSigned(
   db: Env["Variables"]["DB"],
   startYm: string | null,
@@ -4941,12 +4973,21 @@ async function glWindowSigned(
   const resolve = await loadAccountResolver(db);
   const { docDate, openingDate: obDate } = dc;
   const net: GlWindow = new Map();
+  const openingNet: GlWindow = new Map(); // opening_balance(+reversal) legs, netted
   for (const l of legRes.results ?? []) {
     const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
     if (legBeforeOpening(l.sourceType, dd, obDate)) continue; // pre-opening: not extracted
-    // Opening-balance and closing-stock legs are bookkeeping, not trading —
-    // exclude from the P&L window (the stock summary already supplies stock).
-    if (isOpeningSource(l.sourceType) || l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal") continue;
+    // Opening-balance legs carry the CUMULATIVE-to-opening P&L balances — they
+    // don't belong to any single month directly. Collect them (reversals net
+    // out) and inject only the opening-month slice below.
+    if (isOpeningSource(l.sourceType)) {
+      const code = resolve(l.accountCode);
+      openingNet.set(code, (openingNet.get(code) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
+      continue;
+    }
+    // Closing-stock legs are bookkeeping, not trading — the stock summary
+    // already supplies stock.
+    if (l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal") continue;
     const ym = dd.slice(0, 7);
     if (startYm && ym < startYm) continue;
     if (endYm && ym > endYm) continue;
@@ -4954,6 +4995,16 @@ async function glWindowSigned(
     net.set(code, (net.get(code) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
   }
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, { name: a.name, type: a.type }] as const));
+  // Mid-year opening: the opening month's P&L = opening cumulative − prior
+  // month-end TB (kv `pnl_opening_prior_cum`). Months before the opening month
+  // come from the owner-keyed historical P&L, so nothing double-counts.
+  if (openingNet.size && windowCoversMonth(startYm, endYm, obDate ? obDate.slice(0, 7) : null)) {
+    const priorCum = await getPnlOpeningPriorCum(db);
+    applyOpeningSlice(net, openingNet, priorCum, (code) => {
+      const t = coa.get(code)?.type;
+      return t !== undefined && PNL_TYPES.has(t);
+    });
+  }
   return { net, coa };
 }
 
@@ -6192,10 +6243,16 @@ app.get("/cost-expense-classes", async (c) => {
   const { docDate, openingDate: obDateCec } = await loadDocDateResolver(db);
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
   const byAcct = new Map<string, number[]>();
+  const openingNetCec = new Map<string, number>(); // opening legs on COST/EXPENSE accounts
   for (const l of legRes.results ?? []) {
     const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
     if (legBeforeOpening(l.sourceType, dd, obDateCec)) continue; // pre-opening: not extracted
-    if (isOpeningSource(l.sourceType) || l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal" || l.sourceType === "year_close") continue;
+    if (isOpeningSource(l.sourceType)) {
+      const code = resolve(l.accountCode);
+      openingNetCec.set(code, (openingNetCec.get(code) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
+      continue;
+    }
+    if (l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal" || l.sourceType === "year_close") continue;
     const ym = dd.slice(0, 7);
     if (ym < startYm || ym > endYm) continue;
     const code = resolve(l.accountCode);
@@ -6206,6 +6263,23 @@ app.get("/cost-expense-classes", async (c) => {
     let arr = byAcct.get(code);
     if (!arr) { arr = new Array(12).fill(0); byAcct.set(code, arr); }
     arr[idx] += (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+  }
+  // Mid-year opening: show the opening-month slice (opening cumulative − prior
+  // month-end TB) in the opening month's column — same rule as glWindowSigned.
+  const obYmCec = obDateCec ? obDateCec.slice(0, 7) : null;
+  const obIdxCec = obYmCec ? cols.indexOf(obYmCec) : -1;
+  if (openingNetCec.size && obIdxCec >= 0) {
+    const priorCum = await getPnlOpeningPriorCum(db);
+    const sliceNet = new Map<string, number>();
+    applyOpeningSlice(sliceNet, openingNetCec, priorCum, (code) => {
+      const t = coa.get(code)?.type;
+      return t === "COST" || t === "EXPENSE";
+    });
+    for (const [code, v] of sliceNet) {
+      let arr = byAcct.get(code);
+      if (!arr) { arr = new Array(12).fill(0); byAcct.set(code, arr); }
+      arr[obIdxCec] += v;
+    }
   }
   const classOf = (cat: string | null) => {
     const v = String(cat ?? "").toUpperCase();
@@ -9510,6 +9584,7 @@ app.get("/opening-balance", async (c) => {
     /* excludes table unavailable — list stays empty */
   }
   const sums = await openingControlSums(db);
+  const pnlPriorCum = await getPnlOpeningPriorCum(db);
   return c.json({
     success: true,
     data: {
@@ -9520,6 +9595,7 @@ app.get("/opening-balance", async (c) => {
       arInvoices,
       apInvoices,
       preExistingAp,
+      pnlPriorCum,
       arByControl: Object.fromEntries(sums.arByControl),
       arTotalSen: sums.arTotalSen,
       apTotalSen: sums.apTotalSen,
@@ -9579,6 +9655,53 @@ app.post("/opening-balance/ap-exclude", async (c) => {
     after: { openingExcluded: excluded, piNo: pi.piNo },
   });
   return c.json({ success: true, data: { piId, excluded } });
+});
+
+// PUT /opening-balance/pnl-prior-cum — store the prior-month-end TB P&L
+// balances (kv 'pnl_opening_prior_cum', {accountCode: signedSen}, DR+/CR−).
+// The P&L then shows, in the OPENING month, opening-cumulative − these values
+// (the slice belonging to that month); earlier months read the historical P&L.
+// Report-layer config only — writes NO ledger rows (owner rule 2026-07-03).
+app.put("/opening-balance/pnl-prior-cum", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as {
+    rows?: Record<string, number>;
+  };
+  const rows = body.rows;
+  if (!rows || typeof rows !== "object" || Array.isArray(rows)) {
+    return c.json(
+      { success: false, error: "rows must be an object of {accountCode: signedSen}" },
+      400,
+    );
+  }
+  const clean: Record<string, number> = {};
+  for (const [code, v] of Object.entries(rows)) {
+    const n = Math.round(Number(v));
+    if (!code.trim() || !Number.isFinite(n)) {
+      return c.json(
+        { success: false, error: `invalid row: ${code} = ${String(v)}` },
+        400,
+      );
+    }
+    if (n !== 0) clean[code.trim()] = n;
+  }
+  await c.var.DB.prepare(
+    `INSERT INTO kv_config (key, value, updated_at)
+       VALUES ('pnl_opening_prior_cum', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+  )
+    .bind(JSON.stringify(clean), new Date().toISOString())
+    .run();
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: "pnl_opening_prior_cum",
+    action: "update",
+    after: { accounts: Object.keys(clean).length, totalSen: Object.values(clean).reduce((s, n) => s + n, 0) },
+  });
+  return c.json({ success: true, data: { accounts: Object.keys(clean).length } });
 });
 
 // Add ONE opening invoice (AR). Subledger only — no GL legs, no SST.

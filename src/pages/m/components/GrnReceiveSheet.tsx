@@ -44,16 +44,20 @@ export function GrnReceiveSheet({ open, poId, onClose, onSubmit }: Props) {
 
   const confirm = async () => {
     if (busy) return;
+    // PO-linked GRN lines key to PO lines by INDEX (backend grn.ts: grn_items
+    // .poItemIndex → purchase_order_items ORDER BY id). Send poItemIndex + qtys;
+    // the backend looks up material/price from the PO line — matches the desktop
+    // receive form (procurement/grn/create.tsx). poItemIndex is the ORIGINAL
+    // index (kept before filtering out the zero lines).
     const lines = items
-      .map((it, i) => ({ it, q: qtyFor(i, it) }))
+      .map((_it, i) => ({ poItemIndex: i, q: qtyFor(i, items[i]) }))
       .filter((x) => x.q > 0)
-      .map(({ it, q }) => ({
-        materialName: str(it, "materialName"),
-        materialCode: str(it, "materialCode", "material_code"),
+      .map(({ poItemIndex, q }) => ({
+        poItemIndex,
         receivedQty: q,
         acceptedQty: q,
         rejectedQty: 0,
-        unitPriceSen: num(it, "unitPriceSen"),
+        rejectionReason: "",
       }));
     if (lines.length === 0) {
       setErr("Enter a received quantity for at least one line.");
@@ -67,6 +71,10 @@ export function GrnReceiveSheet({ open, poId, onClose, onSubmit }: Props) {
       receivedBy: receivedBy.trim(),
       notes: notes.trim(),
       ocrUsed: false,
+      // Mobile "receive now" = goods in hand → post immediately (GRN → POSTED, PO
+      // line receivedQty bumped, stock in). Without this a PO-linked GRN defaults
+      // to NOT_ARRIVED/DRAFT and never posts.
+      arrival_state: "ARRIVED",
       items: lines,
     });
     setBusy(false);

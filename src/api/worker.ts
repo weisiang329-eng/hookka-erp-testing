@@ -649,6 +649,32 @@ app.post("/api/internal/scan-queue-sweep", async (c) => {
   }
 });
 
+// Backup retention prune — deletes Storage objects under backups/supabase/
+// older than 90 days. The prune logic lived in cron/daily-backup.ts waiting
+// on a Workers Cron Trigger that was never provisioned, so it never ran and
+// dumps accumulated unbounded (2026-07-03 IT-hygiene audit). backup.yml now
+// POSTs this right after each daily upload. Same CRON_SECRET pattern as the
+// sweep above; registered BEFORE authMiddleware.
+app.post("/api/internal/backup-prune", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[backup-prune] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  try {
+    const { pruneOldBackups } = await import("./cron/daily-backup");
+    await pruneOldBackups(c.env);
+    return c.json({ ok: true });
+  } catch (err) {
+    console.error("[backup-prune] error:", err);
+    return c.json({ ok: false, error: "prune failed" }, 500);
+  }
+});
+
 // Midnight auto-clockout cron entry. CRON_SECRET-gated, registered BEFORE
 // authMiddleware so the GitHub Actions runner can hit it without a worker
 // session — the same pattern as /api/qc-pending/trigger above. Closes every

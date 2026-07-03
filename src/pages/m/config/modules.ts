@@ -612,6 +612,8 @@ const deliveryDetail: DetailConfig = {
     fld("Expected DD", (d) => dateOnly(d, "deliveryDate", "hookkaExpectedDD")),
     fld("Driver", (d) => str(d, "driverName")),
     fld("Vehicle", (d) => str(d, "vehicleNo", "vehicleType")),
+    fld("Contact", (d) => str(d, "contactPerson")),
+    fld("Phone", (d) => str(d, "contactPhone")),
     fld("Items", (d) => String(num(d, "totalItems"))),
     fld("Reference", (d) => str(d, "reference")),
     fld("Delivery Address", (d) => str(d, "deliveryAddress"), true),
@@ -629,6 +631,16 @@ const deliveryDetail: DetailConfig = {
         code: soNo || "—",
         // SO GET resolves a companySOId too, so the No is a safe route param.
         href: `/m/sales/${encodeURIComponent(soId || soNo)}`,
+      });
+    }
+    // Customer cross-link (design DO detail links the Customer). DO GET returns customerId.
+    const custId = str(d, "customerId");
+    if (custId) {
+      out.push({
+        id: custId,
+        group: "Customer",
+        code: str(d, "customerName") || "Customer",
+        href: `/m/customers/${encodeURIComponent(custId)}`,
       });
     }
     return out;
@@ -816,12 +828,33 @@ const invoiceDetail: DetailConfig = {
     fld("Order Date", (d) => dateOnly(d, "invoiceDate")),
     fld("Expected DD", (d) => dateOnly(d, "dueDate")),
     fld("Amount", (d) => money(num(d, "totalSen"))),
+    fld("Paid", (d) => money(num(d, "paidAmount"))),
     fld("Outstanding", (d) => money(num(d, "totalSen") - num(d, "paidAmount"))),
     fld("Customer PO", (d) => str(d, "customerPOId")),
   ],
   // Invoice items carry the full variant set (Category/Size/Fabric + leg/divan/
   // gap/special) — show them like the desktop invoice line table.
   lineItems: (d) => richItemsOf(d, "items"),
+  // Payments — real invoice_payments[] from GET /api/invoices/:id (rowToPayment:
+  // date · amountSen · method · reference). Design invoice detail = a transactional
+  // Total/Paid/Balance doc; the Paid field above + this list give the payment record.
+  subDocLists: (d) => {
+    const pays = asArr(d.payments);
+    if (pays.length === 0) return [];
+    return [
+      {
+        title: `Payments · ${pays.length}`,
+        rows: pays.map((p, i) => ({
+          id: str(p, "id") || `pay-${i}`,
+          title: money(num(p, "amountSen")),
+          subLine: [dateOnly(p, "date"), str(p, "method"), str(p, "reference")]
+            .filter(Boolean)
+            .join(" · ") || undefined,
+          icon: "file-text" as const,
+        })),
+      },
+    ];
+  },
   relatedDocs: (d) => {
     const out: RelatedDocVM[] = [];
     const soId = str(d, "salesOrderId");
@@ -841,6 +874,15 @@ const invoiceDetail: DetailConfig = {
         group: "Delivery Order",
         code: str(d, "doNo") || "—",
         href: doId ? `/m/delivery/${encodeURIComponent(doId)}` : undefined,
+      });
+    }
+    const custId = str(d, "customerId");
+    if (custId) {
+      out.push({
+        id: custId,
+        group: "Customer",
+        code: str(d, "customerName") || "Customer",
+        href: `/m/customers/${encodeURIComponent(custId)}`,
       });
     }
     return out;
@@ -1015,6 +1057,21 @@ const poDetail: DetailConfig = {
     fld("Notes", (d) => str(d, "notes"), true),
   ],
   lineItems: (d) => itemsOf(d, "items"),
+  // Supplier cross-link (design procurement detail links the Supplier). PO GET
+  // returns supplierId. (The design's Goods-Receipt link is NOT backable — the
+  // PO GET attaches no receipts array — so it is intentionally omitted.)
+  relatedDocs: (d) => {
+    const supId = str(d, "supplierId");
+    if (!supId) return [];
+    return [
+      {
+        id: supId,
+        group: "Supplier",
+        code: str(d, "supplierName") || "Supplier",
+        href: `/m/suppliers/${encodeURIComponent(supId)}`,
+      },
+    ];
+  },
   // Convert document (owner 2026-06-28 design v10): PO → Goods Receipt / PO →
   // Purchase Invoice. Both deep-link to the existing desktop convert pages
   // (?poId=<id>), which prefill from the PO — the real, working conversion
@@ -2278,6 +2335,7 @@ const employeeDetail: DetailConfig = {
     fld("Passport No", (d) => str(d, "passportNumber")),
     fld("Join Date", (d) => dateOnly(d, "joinDate")),
     fld("Basic Salary", (d) => money(num(d, "basicSalarySen"))),
+    fld("Efficiency Allowance", (d) => money(num(d, "efficiencyAllowanceSen"))),
     fld("OT Multiplier", (d) => {
       const ot = num(d, "otMultiplier");
       return ot > 0 ? `${ot}×` : "—";
@@ -2987,22 +3045,26 @@ const supplierDetail: DetailConfig = {
       lists.push({
         title: `Price · SKU table · ${mats.length}`,
         rows: mats.slice(0, 80).map((m) => {
-          const sku = str(m, "supplierSku");
-          const code = str(m, "itemCode", "materialCode");
+          // /api/suppliers/:id materials[] shape (suppliers.ts materialRowToApi):
+          // materialCategory · supplierSKU · unitPriceSen · leadTimeDays · minOrderQty.
+          // Old readers (materialName/itemCode/supplierSku/moq/lastPriceSen) matched
+          // none of these → every row rendered blank. Dual-keyed for back-compat.
+          const sku = str(m, "supplierSKU", "supplierSku");
+          const cat = str(m, "materialCategory") || str(m, "materialName", "itemCode", "materialCode");
           const lead = num(m, "leadTimeDays");
-          const moq = num(m, "moq");
+          const moq = num(m, "minOrderQty", "moq");
+          const price = num(m, "unitPriceSen", "lastPriceSen", "unitPrice");
+          const prio = str(m, "priority");
           return {
-            id: str(m, "id"),
-            title: str(m, "materialName") || code || "Material",
+            id: str(m, "id") || sku || cat,
+            title: cat || "Material",
             subLine: [
-              code,
               sku ? `SKU ${sku}` : "",
               lead > 0 ? `LT ${lead}d` : "",
               moq > 0 ? `MOQ ${moq}` : "",
+              prio ? `Priority ${prio}` : "",
             ].filter(Boolean).join(" · ") || undefined,
-            trailing: num(m, "lastPriceSen", "unitPrice") > 0
-              ? money(num(m, "lastPriceSen", "unitPrice"))
-              : undefined,
+            trailing: price > 0 ? money(price) : undefined,
             icon: "package" as const,
           };
         }),
@@ -3118,10 +3180,32 @@ const productDetail: DetailConfig = {
     fld("Description", (d) => str(d, "description"), true),
   ],
   subDocLists: (d) => {
+    const lists: SubDocList[] = [];
+    // BOM — real bom_components[] from GET /api/products/:id (products.ts:145):
+    // materialCategory · materialName · qtyPerUnit · unit · wastePct.
+    const bom = asArr(d.bomComponents);
+    if (bom.length > 0) {
+      lists.push({
+        title: `BOM · ${bom.length}`,
+        rows: bom.map((b, i) => {
+          const qty = num(b, "qtyPerUnit");
+          const unit = str(b, "unit");
+          const waste = num(b, "wastePct");
+          return {
+            id: str(b, "id") || `bom-${i}`,
+            title: str(b, "materialName") || str(b, "materialCategory") || "Component",
+            subLine: [str(b, "materialCategory"), waste > 0 ? `+${waste}% waste` : ""]
+              .filter(Boolean)
+              .join(" · ") || undefined,
+            trailing: qty > 0 ? `${qty}${unit ? ` ${unit}` : ""}` : undefined,
+            icon: "package" as const,
+          };
+        }),
+      });
+    }
     const dwts = asArr(d.deptWorkingTimes);
-    if (dwts.length === 0) return [];
-    return [
-      {
+    if (dwts.length > 0) {
+      lists.push({
         title: `Dept Working Times · ${dwts.length}`,
         rows: dwts.map((w) => ({
           id: str(w, "id") || str(w, "departmentCode"),
@@ -3130,8 +3214,9 @@ const productDetail: DetailConfig = {
           trailing: `${num(w, "minutes")} min`,
           icon: "file-text" as const,
         })),
-      },
-    ];
+      });
+    }
+    return lists;
   },
   // CHANGELOG F.1: product detail with photo upload. The existing /api/files
   // mechanism (resourceType="PRODUCT") handles cover photos + supporting
@@ -3604,14 +3689,22 @@ const threePlDetail: DetailConfig = {
   code: (d) => str(d, "vehicleNo") || str(d, "code") || str(d, "id") || "—",
   title: (d) => str(d, "name") || "—",
   status: (d) => resolveStatus(str(d, "status"), PAYMENT_STATUS_MAP),
+  // /api/drivers/:id (rowToDriver) returns name/contactPerson/phone/vehicleNo/
+  // vehicleType/capacityM3/ratePerTripSen/ratePerExtraDropSen/status/remarks —
+  // NO email, coverage, serviceType or notes. Old grid showed those → all "—".
   fields: [
     fld("Provider", (d) => str(d, "name")),
     fld("Contact", (d) => str(d, "contactPerson")),
     fld("Phone", (d) => str(d, "phone")),
-    fld("Email", (d) => str(d, "email")),
-    fld("Service Type", (d) => str(d, "serviceType", "vehicleType")),
-    fld("Coverage", (d) => str(d, "coverage", "region", "state")),
-    fld("Notes", (d) => str(d, "notes"), true),
+    fld("Vehicle No", (d) => str(d, "vehicleNo")),
+    fld("Vehicle Type", (d) => str(d, "vehicleType")),
+    fld("Capacity (m³)", (d) => {
+      const c = num(d, "capacityM3");
+      return c > 0 ? String(c) : "—";
+    }),
+    fld("Rate / Trip", (d) => money(num(d, "ratePerTripSen"))),
+    fld("Extra Drop", (d) => money(num(d, "ratePerExtraDropSen"))),
+    fld("Remarks", (d) => str(d, "remarks", "notes"), true),
   ],
   extraFetches: {
     a: {

@@ -109,11 +109,16 @@ export function SalesDetailScreen() {
   const info: [string, string][] = [
     ["Company SO", str(doc, "companySO", "companySOId") || "—"],
     ["Customer PO", str(doc, "customerPO", "customerPOId") || "—"],
+    ["Customer PO Date", dateOnly(doc, "customerPODate") || "—"],
     ["Customer SO", str(doc, "customerSO", "customerSOId") || "—"],
+    // Reference + Customer Delivery Date are real SO fields (sales-orders.ts
+    // rowToSO) the design's SO grid shows. Payment Terms was dropped — the SO
+    // GET never returns it, so that row always rendered "—".
+    ["Reference", str(doc, "reference") || "—"],
     ["Customer", str(doc, "customerName") || "—"],
     ["Delivery Hub", str(doc, "hubName") || "—"],
-    ["Payment Terms", str(doc, "paymentTerms") || "—"],
     ["Order Date", dateOnly(doc, "companySODate") || "—"],
+    ["Customer DD", dateOnly(doc, "customerDeliveryDate") || "—"],
     ["Expected DD", dateOnly(doc, "hookkaExpectedDD") || "—"],
   ];
 

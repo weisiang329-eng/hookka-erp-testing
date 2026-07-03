@@ -14,14 +14,12 @@
 // L2 detail routes resolve to /m/<slug>/:id — Phase 3 supplies the detail
 // screen; today they land on a ComingSoon detail (see MobileLayout).
 // ===========================================================================
-import { createElement } from "react";
 import {
   type ModuleConfig,
   type DataSource,
   type RawRow,
   type RowVM,
 } from "./types";
-import { PendingLeaveRequests } from "../components/PendingLeaveRequests";
 import { logHoursSpec, hubFormSpec, addAffectedProductSpec } from "./forms";
 import {
   type DetailConfig,
@@ -2001,7 +1999,7 @@ const directorySource: DataSource = {
     enumCol("status", "Status", (r) => str(r, "status"), ["ACTIVE", "INACTIVE"]),
   ],
   defaultSort: { key: "name", dir: "asc" },
-  subTabs: [{ key: "directory", label: "Directory", match: () => true }],
+  subTabs: [{ key: "directory", label: "Employee Master", match: () => true }],
 };
 
 const attendanceSource: DataSource = {
@@ -2111,30 +2109,6 @@ const deptLaborSource: DataSource = {
   subTabs: [{ key: "deptlabor", label: "Dept Labor", match: () => true }],
 };
 
-const leaveSource: DataSource = {
-  url: "/api/leaves",
-  select: selectData,
-  toVM: (r): RowVM => ({
-    id: str(r, "id"),
-    code: str(r, "leaveType", "type") || "Leave",
-    title: str(r, "employeeName", "workerName", "name") || "—",
-    subLine:
-      [dateOnly(r, "startDate", "fromDate"), dateOnly(r, "endDate", "toDate")]
-        .filter(Boolean)
-        .join(" → ") || undefined,
-    meta1: { label: "Days", value: num(r, "days", "totalDays") },
-    status: resolveStatus(str(r, "status"), PAYMENT_STATUS_MAP),
-  }),
-  columns: [
-    textCol("name", "Customer", (r) => str(r, "employeeName", "workerName", "name")),
-    textCol("type", "State", (r) => str(r, "leaveType", "type")),
-    dateCol("startDate", "Order Date", (r) => dateOnly(r, "startDate", "fromDate")),
-    enumCol("status", "Status", (r) => str(r, "status"), ["PENDING", "APPROVED", "CANCELLED"]),
-  ],
-  defaultSort: { key: "startDate", dir: "desc" },
-  subTabs: [{ key: "leave", label: "Leave", match: () => true }],
-};
-
 // Employee Performance sub-tab (dc13 v13 sync, owner 2026-06-29 — backed
 // by existing /api/working-hour-entries/summary, same endpoint the
 // "Working Hours" tab uses but presented as a per-worker performance
@@ -2206,7 +2180,7 @@ const laborRevenueSource: DataSource = {
   ],
   defaultSort: { key: "date", dir: "desc" },
   subTabs: [
-    { key: "labrev", label: "Labor vs Revenue", match: () => true },
+    { key: "labrev", label: "Labor Cost", match: () => true },
     { key: "labrev-sofa", label: "Sofa", match: (r) => str(r, "category") === "SOFA" },
     { key: "labrev-bed", label: "Bedframe", match: (r) => str(r, "category") === "BEDFRAME" },
     { key: "labrev-acc", label: "Accessory", match: (r) => str(r, "category") === "ACCESSORY" },
@@ -2449,25 +2423,19 @@ export const employeesConfig: ModuleConfig = {
     return null;
   },
   detail: employeeDetail,
-  // dc12 design v12 lists 9 sub-tabs for Employees. We ship the 6 with real
-  // existing endpoints (Directory / Attendance / Leave / Working Hours /
-  // Dept Labor / Payroll). The other 3 (Labor Cost · Employee Perf · Dept
-  // Perf) need new aggregation backends — deferred.
+  // Design tab-bar (owner 2026-07-03 "完全照 design"): no Leave tab; Directory =
+  // "Employee Master", Labor vs Revenue = "Labor Cost". Efficiency (design's 4th
+  // tab) needs a dedicated aggregation backend — deferred.
   sources: [
     directorySource,
     attendanceSource,
     workingHoursSource,
     deptLaborSource,
-    leaveSource,
     payrollSource,
     empPerfSource,
     deptPerfSource,
     laborRevenueSource,
   ],
-  // Design source: a "Pending requests" approve/reject card above the list on
-  // the Leave tab. Real leave-approval flow (GET/PUT /api/leaves).
-  topPanel: (activeTab) =>
-    activeTab === "leave" ? createElement(PendingLeaveRequests) : null,
 };
 
 // ---------------------------------------------------------------------------

@@ -3604,14 +3604,84 @@ const userDetail: DetailConfig = {
   hideActionBar: true,
 };
 
+// Pending-invite detail — invites have no single-GET, so (like announcementsDetail)
+// we fetch the invites LIST and find the row by token. Route id is "invite-<token>".
+// Actions map to real endpoints: POST /invites/:token/resend, DELETE /invites/:token.
+const inviteTokenOf = (id: string) => (id ?? "").replace(/^invite-/, "");
+const inviteDetail: DetailConfig = {
+  url: () => "/api/users/invites",
+  selectDoc: (resp, id) => {
+    const token = inviteTokenOf(id);
+    const rows = (resp as { data?: RawRow[] } | null | undefined)?.data;
+    return (Array.isArray(rows) ? rows : []).find((r) => str(r, "token") === token) ?? {};
+  },
+  code: (d) => str(d, "role") || "USER",
+  title: (d) => str(d, "displayName") || str(d, "email") || "—",
+  status: () => resolveStatus("PENDING", PAYMENT_STATUS_MAP),
+  fields: [
+    fld("Email", (d) => str(d, "email")),
+    fld("Role", (d) => str(d, "role")),
+    fld("Invited By", (d) => str(d, "inviterName")),
+    fld("Expires", (d) => dateOnly(d, "expiresAt")),
+  ],
+  extraActions: (_d, id) => {
+    const token = inviteTokenOf(id);
+    return [
+      {
+        label: "Resend Invite",
+        icon: "package-check",
+        onClick: async () => {
+          if (!window.confirm("Resend this invitation email?")) return;
+          try {
+            const r = await fetch(`/api/users/invites/${encodeURIComponent(token)}/resend`, { method: "POST" });
+            window.alert(r.ok ? "Invitation resent." : "Failed to resend invitation.");
+          } catch {
+            window.alert("Network error.");
+          }
+        },
+      },
+      {
+        label: "Revoke Invite",
+        icon: "copy",
+        onClick: async () => {
+          if (!window.confirm("Revoke this invitation? The invite link will stop working.")) return;
+          try {
+            const r = await fetch(`/api/users/invites/${encodeURIComponent(token)}`, { method: "DELETE" });
+            window.alert(r.ok ? "Invitation revoked." : "Failed to revoke invitation.");
+          } catch {
+            window.alert("Network error.");
+          }
+        },
+      },
+    ];
+  },
+  hideActionBar: true,
+};
+
+/** Dispatch the usermgmt detail by route id — "invite-…" → pending invite. */
+function pickUserDetail(id: string): DetailConfig {
+  return id.startsWith("invite-") ? inviteDetail : userDetail;
+}
+const userDetailDispatcher: DetailConfig = {
+  url: (id) => pickUserDetail(id).url(id),
+  selectDoc: (resp, id) => pickUserDetail(id).selectDoc(resp, id),
+  resolve: (_doc, id) => pickUserDetail(id),
+  code: (d) => str(d, "role") || "USER",
+  title: (d) => str(d, "displayName") || str(d, "email") || "—",
+  fields: [],
+};
+
 export const usermgmtConfig: ModuleConfig = {
   slug: "usermgmt",
   title: "User Management",
-  // Members open the user detail; pending-invite rows carry a `token` (no user
-  // record yet) → non-navigable (dest null).
+  // Members → /m/usermgmt/<userId> (user detail). Pending-invite rows carry a
+  // `token` (no user record) → /m/usermgmt/invite-<token> (invite detail with
+  // Resend / Revoke). The dispatcher picks the right sub-config by id prefix.
   detailPath: (vm, row) =>
-    read(row, "token") ? null : `/m/usermgmt/${encodeURIComponent(vm.id)}`,
-  detail: userDetail,
+    read(row, "token")
+      ? `/m/usermgmt/invite-${encodeURIComponent(str(row, "token"))}`
+      : `/m/usermgmt/${encodeURIComponent(vm.id)}`,
+  detail: userDetailDispatcher,
   sources: [
     {
       url: "/api/users",

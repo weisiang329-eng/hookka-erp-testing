@@ -9075,6 +9075,9 @@ type ObState = {
   glRows: { accountCode: string; debitSen: number; creditSen: number }[];
   arInvoices: { id: string; invoiceNo: string; customerId: string; customerName: string; invoiceDate: string | null; dueDate: string | null; totalSen: number; paidAmount: number; status: string }[];
   apInvoices: { id: string; piNo: string; supplierId: string; supplierName: string; invoiceDate: string | null; dueDate: string | null; amountSen: number; status: string }[];
+  // PIs entered before the opening date — counted as opening by default
+  // (rows untouched); `excluded` marks the wrong/phantom exceptions.
+  preExistingAp?: { id: string; piNo: string; supplierName: string; invoiceDate: string | null; amountSen: number; status: string; excluded: number }[];
   arByControl: Record<string, number>;
   arTotalSen: number;
   apTotalSen: number;
@@ -9140,11 +9143,12 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
     return Number.isFinite(v) ? Math.round(v * 100) : 0;
   };
 
-  // BALANCE SHEET accounts only; controls are derived rows.
+  // Mid-year opening: ALL postable accounts (balance sheet AND P&L) — the
+  // opening date sits inside the financial year, so the old books' YTD
+  // sales/purchases/expenses must ride along. Controls stay derived rows.
   const glAccounts = accounts
     .filter(
       (a) =>
-        ["ASSET", "LIABILITY", "EQUITY"].includes(a.type) &&
         a.isPostable !== false &&
         a.specialAccountType !== "SDC" &&
         a.specialAccountType !== "SCC",
@@ -9259,6 +9263,25 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
     const j = asMutationResponse(await res.json());
     if (j?.success) load(false);
     else toast.error(j?.error || "Delete failed");
+  };
+
+  // Collapsed by default (owner 2026-07-02) — the totals in the header carry
+  // the signal; expand only to audit or exclude a row.
+  const [preApOpen, setPreApOpen] = useState(false);
+
+  // Pre-opening PIs count as opening by default; toggling exclusion only
+  // writes the exclude table — the PI row itself is never touched.
+  const toggleApExclude = async (piId: string, excluded: boolean) => {
+    const res = await fetch("/api/accounting/opening-balance/ap-exclude", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ piId, excluded }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (res.ok && j?.success) {
+      toast.success(excluded ? "Excluded from opening" : "Included in opening again");
+      load(false);
+    } else toast.error(j?.error || "Failed to update opening inclusion");
   };
 
   const inputCls =
@@ -9417,13 +9440,80 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
         </CardContent>
       </Card>
 
-      {/* GL grid — balance-sheet accounts; controls are derived read-only rows */}
+      {/* Pre-opening PIs — counted as opening by default; rows never touched */}
+      {(data?.preExistingAp?.length ?? 0) > 0 && (
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <button
+              type="button"
+              onClick={() => setPreApOpen((v) => !v)}
+              className="flex w-full items-center justify-between gap-3 flex-wrap text-left cursor-pointer"
+            >
+              <h3 className="text-sm font-semibold text-[#1F1D1B] flex items-center gap-1">
+                {preApOpen ? <ChevronDownIcon className="h-4 w-4 shrink-0 text-[#6B5C32]" /> : <ChevronRight className="h-4 w-4 shrink-0 text-[#6B5C32]" />}
+                Already-entered supplier invoices (before opening date){" "}
+                <span className="font-normal text-[#6B7280]">
+                  — counted as opening automatically ({(data?.preExistingAp ?? []).length} PIs)
+                </span>
+              </h3>
+              <span className="text-sm text-[#6B7280]">
+                Included{" "}
+                <span className="font-medium text-[#1F1D1B] tabular-nums">
+                  {formatCurrency((data?.preExistingAp ?? []).filter((r) => !r.excluded).reduce((s, r) => s + (Number(r.amountSen) || 0), 0))}
+                </span>
+                {" "}· Excluded{" "}
+                <span className="font-medium text-[#9A3A2D] tabular-nums">
+                  {formatCurrency((data?.preExistingAp ?? []).filter((r) => r.excluded).reduce((s, r) => s + (Number(r.amountSen) || 0), 0))}
+                </span>
+              </span>
+            </button>
+            {preApOpen && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-2 py-1.5 text-left">Supplier</th>
+                    <th className="px-2 py-1.5 text-left">PI No</th>
+                    <th className="px-2 py-1.5 text-left">Date</th>
+                    <th className="px-2 py-1.5 text-right">Amount</th>
+                    <th className="px-2 py-1.5 text-left">Status</th>
+                    <th className="px-2 py-1.5" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data?.preExistingAp ?? []).map((r) => (
+                    <tr key={r.id} className={`border-b border-[#F0ECE9] ${r.excluded ? "opacity-50" : ""}`}>
+                      <td className="px-2 py-1.5">{r.supplierName}</td>
+                      <td className="px-2 py-1.5 tabular-nums text-xs">{r.piNo}</td>
+                      <td className="px-2 py-1.5 text-xs text-[#6B7280]">{r.invoiceDate ?? ""}</td>
+                      <td className="px-2 py-1.5 text-right tabular-nums">{formatCurrency(r.amountSen)}</td>
+                      <td className="px-2 py-1.5 text-xs text-[#6B7280]">
+                        {r.excluded ? <span className="text-[#9A3A2D] font-medium">EXCLUDED</span> : "counted as opening"}
+                      </td>
+                      <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                        {r.excluded ? (
+                          <button onClick={() => toggleApExclude(r.id, false)} className="text-xs text-[#3E6570] hover:underline cursor-pointer">include again</button>
+                        ) : (
+                          <button onClick={() => toggleApExclude(r.id, true)} className="text-xs text-[#9A3A2D] hover:underline decoration-dotted cursor-pointer">exclude</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* GL grid — all postable accounts (BS + P&L, mid-year opening); controls are derived read-only rows */}
       <Card>
         <CardContent className="p-0 overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                <th className="px-3 py-2 text-left">Balance-sheet account</th>
+                <th className="px-3 py-2 text-left">Account (balance sheet &amp; P&amp;L)</th>
                 <th className="px-3 py-2 text-right w-40">Debit (RM)</th>
                 <th className="px-3 py-2 text-right w-40">Credit (RM)</th>
               </tr>
@@ -9445,7 +9535,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
                   <td className="px-3 py-1.5">
                     <span className="tabular-nums text-xs text-[#6B7280] mr-1">400-0000</span>
                     {accounts.find((a) => a.code === "400-0000")?.name ?? "TRADE CREDITORS"}
-                    <span className="ml-2 text-[11px] text-[#9CA3AF]">auto — Σ creditor opening invoices</span>
+                    <span className="ml-2 text-[11px] text-[#9CA3AF]">auto — Σ creditor opening + included pre-opening invoices</span>
                   </td>
                   <td className="px-3 py-1.5 text-right text-[#9CA3AF]">—</td>
                   <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data!.apTotalSen)}</td>

@@ -9,6 +9,17 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-02 — 🔵 Debtor/Creditor OPENING 工程(年中开账,owner 全程拍板)
+
+- ✅ Supplier Payment 每行加 print(已上线 prod)
+- ✅ Debtor 对账定案 v5(货品级三层验证 PO→SO→description):opening 52 张 RM 148,803 + knock 系统发票 RM 7,588 = 旧TB 156,391 分毫不差。工作簿 Downloads/debtor-opening-最终清单-v5.xlsx。**Debtor+sales 等业主最终确认才录(铁律)**
+- 🔵 年中开账功能(分支 `claude/midyear-opening`,canary 就绪待业主验):opening 表格收 P&L + 22/05 前 PI 默认当 opening(`opening_ap_excludes` 排除表,原单零改动)
+- ✅ Creditor 开工包已交付:Downloads/creditor-opening-开工包.xlsx + creditor-opening-粘贴版.sql(76 张期初 PI RM 118,138.41;排除 8 定案 + GVP×2/CLM×1 待业主决定;Advance GVP 950/CHL 640;开账表格数值页)
+- ⏳ 待业主:① canary 验收→合 main ② 建 DELIMIX 供应商 ③ 决定 GVP×2/CLM 排除与否 ④ 按开工包顺序执行
+- 铁律:之前录入的不删不改;录入动作全部等业主下令
+
+---
+
 ## 2026-07-01 — ✅ Supplier Payment list showed empty despite a real, GL-posted payment (BUG-2026-07-01-003)
 
 Owner recorded HPV-2607-002 (ADD WOORD TRADING, RM 11,476.00) via the normal Record

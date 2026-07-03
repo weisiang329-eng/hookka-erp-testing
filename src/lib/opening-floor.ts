@@ -57,3 +57,27 @@ export function rowBeforeOpening(
   if (isOpening) return false;
   return dayBefore(date, openingDate);
 }
+
+// Mid-year opening include rule (owner rule 2026-07-02): pre-opening PIs that
+// were ALREADY entered count as opening seeds BY DEFAULT — the owner's iron
+// rule is "never edit existing rows", so instead of flagging them is_opening=1
+// the exceptions (wrong/phantom entries) are listed in `opening_ap_excludes`
+// and everything else passes the floor untouched.
+//
+// A PI row is floored (hidden) only when: an opening date is set, the row is
+// dated before it, it is not an explicit opening seed (is_opening), AND it is
+// in the exclude list. Pure so the semantics are unit-testable.
+export function apRowBeforeOpening(
+  row: {
+    id: string | null | undefined;
+    date: string | null | undefined;
+    isOpening?: boolean | number | null;
+  },
+  openingDate: string | null | undefined,
+  excludedIds: ReadonlySet<string>,
+): boolean {
+  if (!openingDate) return false;
+  if (row.isOpening) return false;
+  if (!dayBefore(row.date, openingDate)) return false;
+  return excludedIds.has(String(row.id ?? ""));
+}

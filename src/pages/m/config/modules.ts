@@ -645,7 +645,13 @@ const deliveryDetail: DetailConfig = {
     }
     return out;
   },
-  primaryCta: (d) => (str(d, "status") === "DELIVERED" ? "Sign" : "Dispatch"),
+  // "Mark Delivered" opens the POD capture sheet (signature + photos) and, on
+  // confirm, PUTs proofOfDelivery + status DELIVERED — the desktop flow. Hidden
+  // once the DO is delivered/invoiced.
+  primaryCta: (d) => {
+    const s = str(d, "status");
+    return s === "DELIVERED" || s === "INVOICED" ? undefined : "Mark Delivered";
+  },
   attachmentsResource: (id) => ({ type: "DO", id }),
   auditResource: () => "delivery-orders",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "DO_LINE", id: lineId }),

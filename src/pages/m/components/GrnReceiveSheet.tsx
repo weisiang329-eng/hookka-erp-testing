@@ -26,18 +26,15 @@ type Props = {
 export function GrnReceiveSheet({ open, poId, onClose, onSubmit }: Props) {
   const { data } = useCachedJson<POResp>(open && poId ? `/api/purchase-orders/${encodeURIComponent(poId)}` : null);
   const po = data?.data;
-  // CRITICAL: the backend keys GRN lines to PO lines by poItemIndex = the line's
-  // position in `SELECT … FROM purchase_order_items ORDER BY id` (grn.ts:703).
-  // The PO GET does NOT return items in that order, so we MUST re-sort by id
-  // (byte/BINARY, matching SQLite) — then the row index the operator sees IS the
-  // poItemIndex the backend expects. Without this, qty lands on the wrong line.
-  const items = (Array.isArray(po?.items) ? (po!.items as POItem[]) : [])
-    .slice()
-    .sort((a, b) => {
-      const ai = str(a, "id");
-      const bi = str(b, "id");
-      return ai < bi ? -1 : ai > bi ? 1 : 0;
-    });
+  // The backend keys GRN lines to PO lines by poItemIndex = the line's
+  // position in the PO endpoints' canonical order. Since 2026-07-04 the
+  // SERVER guarantees that order (`ORDER BY line_no NULLS LAST, id` — paper
+  // order for new POs, legacy id-order for backfilled rows) on BOTH the PO
+  // GET and every grn.ts matcher, so the row index the operator sees IS the
+  // poItemIndex the backend expects. Do NOT re-add the old client-side sort
+  // by raw id (the 2cfa3ba7 stopgap) — ids are random, so it would scramble
+  // new POs' paper order while the backend serves line_no order.
+  const items = Array.isArray(po?.items) ? (po!.items as POItem[]) : [];
 
   const [recv, setRecv] = useState<Record<number, number>>({});
   const [receivedBy, setReceivedBy] = useState("");

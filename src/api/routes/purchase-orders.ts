@@ -240,14 +240,55 @@ function isPoNoUniqueViolation(err: unknown): boolean {
   );
 }
 
+// ── line_no: document/paper order for PO items (owner 2026-07-04) ──────────
+// Item ids are RANDOM (`poi-<uuid8>`), so no existing column encodes the
+// paper order, yet GRN receive matches lines positionally (poItemIndex).
+// line_no is set from the request's array index on POST/PUT; pre-existing
+// rows are backfilled in legacy id-order so saved GRN poItemIndex values keep
+// pointing at the same lines. Runtime self-apply (migration files are inert
+// on deploy). One DDL round-trip per isolate.
+export const PO_ITEMS_ORDER = "ORDER BY line_no NULLS LAST, id";
+let poItemLineNoEnsured = false;
+export async function ensurePoItemLineNo(db: D1Database): Promise<void> {
+  if (poItemLineNoEnsured) return;
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE purchase_order_items ADD COLUMN IF NOT EXISTS line_no INTEGER",
+      )
+      .run();
+    await db
+      .prepare(
+        `UPDATE purchase_order_items p
+            SET line_no = r.rn
+           FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY purchaseOrderId ORDER BY id) AS rn
+                   FROM purchase_order_items
+                  WHERE line_no IS NULL) r
+          WHERE p.id = r.id AND p.line_no IS NULL`,
+      )
+      .run();
+    poItemLineNoEnsured = true;
+  } catch (err) {
+    // Never block the request path — reads fall back to NULLS LAST, id.
+    console.error("[purchase-orders] ensurePoItemLineNo failed:", err);
+  }
+}
+
 async function fetchPOWithItems(db: D1Database, id: string) {
+  await ensurePoItemLineNo(db);
   const [po, itemsRes] = await Promise.all([
     db
       .prepare("SELECT * FROM purchase_orders WHERE id = ?")
       .bind(id)
       .first<PurchaseOrderRow>(),
     db
-      .prepare("SELECT * FROM purchase_order_items WHERE purchaseOrderId = ?")
+      // Canonical item order (2026-07-04): line_no = document/paper order for
+      // new POs; backfilled as the legacy id-order for pre-existing rows so
+      // saved GRN poItemIndex values keep meaning the same lines. GRN receive
+      // matches lines by poItemIndex against grn.ts reads using the SAME
+      // ORDER BY — every consumer must agree or quantities land on the wrong
+      // line. Postgres heap order is otherwise unguaranteed.
+      .prepare(`SELECT * FROM purchase_order_items WHERE purchaseOrderId = ? ${PO_ITEMS_ORDER}`)
       .bind(id)
       .all<PurchaseOrderItemRow>(),
   ]);
@@ -266,6 +307,7 @@ app.get("/", async (c) => {
   const denied = await requirePermission(c, "purchase-orders", "read");
   if (denied) return denied;
   const orgId = getOrgId(c);
+  await ensurePoItemLineNo(c.var.DB);
   const pos = await c.var.DB
     .prepare("SELECT * FROM purchase_orders WHERE orgId = ? ORDER BY created_at DESC, id DESC")
     .bind(orgId)
@@ -277,7 +319,7 @@ app.get("/", async (c) => {
   const items = poIds.length
     ? await c.var.DB
         .prepare(
-          `SELECT * FROM purchase_order_items WHERE purchaseOrderId IN (${poIds.map(() => "?").join(", ")})`,
+          `SELECT * FROM purchase_order_items WHERE purchaseOrderId IN (${poIds.map(() => "?").join(", ")}) ${PO_ITEMS_ORDER}`,
         )
         .bind(...poIds)
         .all<PurchaseOrderItemRow>()
@@ -300,6 +342,8 @@ app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — purchase-orders:create.
   const denied = await requirePermission(c, "purchase-orders", "create");
   if (denied) return denied;
+  // line_no column must exist before the item INSERTs below (self-apply).
+  await ensurePoItemLineNo(c.var.DB);
   // 5.3 — make sure the unique-poNo index exists before we rely on it for
   // concurrency safety. Idempotent + cheap; same one-shot promise pattern
   // as sales-orders.ts.
@@ -403,12 +447,12 @@ app.post("/", async (c) => {
           now,
           now,
         ),
-        ...items.map((item) =>
+        ...items.map((item, itemIdx) =>
           c.var.DB.prepare(
             `INSERT INTO purchase_order_items (id, purchaseOrderId,
                materialCategory, material_code, materialName, supplierSKU, quantity,
-               unitPriceSen, totalSen, receivedQty, unit)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               unitPriceSen, totalSen, receivedQty, unit, line_no)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             item.id,
             poId,
@@ -421,6 +465,7 @@ app.post("/", async (c) => {
             item.totalSen,
             item.receivedQty,
             item.unit,
+            itemIdx + 1,
           ),
         ),
       ];
@@ -490,6 +535,8 @@ app.put("/:id", async (c) => {
   const baseDenied = await requirePermission(c, "purchase-orders", "update");
   if (baseDenied) return baseDenied;
   const id = c.req.param("id");
+  // line_no column must exist before the item re-INSERTs below (self-apply).
+  await ensurePoItemLineNo(c.var.DB);
   try {
     const existing = await c.var.DB.prepare(
       "SELECT * FROM purchase_orders WHERE id = ?",
@@ -623,13 +670,15 @@ app.put("/:id", async (c) => {
           "DELETE FROM purchase_order_items WHERE purchaseOrderId = ?",
         ).bind(id),
       );
+      let putLineNo = 0;
       for (const item of newItems) {
+        putLineNo += 1;
         statements.push(
           c.var.DB.prepare(
             `INSERT INTO purchase_order_items (id, purchaseOrderId,
                materialCategory, material_code, materialName, supplierSKU, quantity,
-               unitPriceSen, totalSen, receivedQty, unit)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               unitPriceSen, totalSen, receivedQty, unit, line_no)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             item.id,
             id,
@@ -642,6 +691,7 @@ app.put("/:id", async (c) => {
             item.totalSen,
             item.receivedQty,
             item.unit,
+            putLineNo,
           ),
         );
       }

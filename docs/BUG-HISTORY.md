@@ -34,6 +34,32 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-04-001 — Approved non-production request blocked the punch autofill: whole days of punched hours never logged; OT rule corrected to 30-min minimum; 0.01h scan fragments `payroll` `attendance` `data-integrity`
+
+🟢 **Fixed on main (ff591ab3) + 7 bitten days repaired live on prod (one-shot 848f259b), verified**
+
+**Symptom (owner screenshots):** AUNG KYAW SOE punched 07:32→18:02 (a full
+9-hour day) but his day showed only "R&D 1.33h — Non-production (approved)";
+several workers had confusing 0.01h/0.09h fragment rows; owner also corrected
+the OT rule — OT counts only from 30 minutes past 18:00 (code paid from >15).
+
+**Root causes + fixes:** ① punch-autofill's blanket `COUNT(*)` safety gate
+treated the approval-created row as "day already logged" and skipped the whole
+day — gate now ignores `Non-production (approved)%` rows and autofills minus
+the approved hours (`src/api/lib/punch-autofill.ts`). ② OT threshold raised to
+30 min in `computeAttendanceDay` (18:28 → 0 OT; quarters from 18:30), tests
+updated incl. the owner's exact 18:28 example. ③ `prorateHours` folds sub-0.1h
+scan-boundary fragments into the largest bucket (totals still exact).
+
+**Repair:** audit-first one-shot `POST /api/import/backfill-punch-autofill-blocked`
+found exactly 7 bitten days (2026-06-30 → 07-03, 6 workers) → applied → 13
+rows created → re-audit 0 remaining. Spot-check: AUNG KYAW SOE 2026-07-01 now
+totals exactly 9.00h (R&D 1.33 kept + UPH 7.13 + WHS 0.54). NOTE: July's
+pre-fix OT tails (15-29 min) get renormalised in the upcoming full-auto
+payroll staging recalc (owner-approved).
+
+---
+
 ## BUG-2026-07-03-008 — Mobile Warehouse search couldn't find a rack by its customer PO `ui-frontend` `mobile` `warehouse`
 
 **Status:** 🟢 Fixed

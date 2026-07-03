@@ -58,6 +58,15 @@ export function ProductionDetailScreen() {
   const pill = resolveStatus(status, STATUS_MAPS.production);
   const si = DEPTS.findIndex((d) => d.code === str(doc, "currentDepartment"));
   const audit = arr(auditRaw?.data);
+  // Real per-department job cards (GET /api/production-orders/:id → jobCards[]):
+  // departmentCode · status · completedDate · dueDate · pic1Name/pic2Name. The
+  // stepper only lights from the currentDepartment scalar; this surfaces the
+  // real "who + when" per stage the design shows (no fabricated timeline).
+  const jobCards = arr(doc.jobCards).slice().sort((a, b) => {
+    const ai = DEPTS.findIndex((d) => d.code === str(a, "departmentCode"));
+    const bi = DEPTS.findIndex((d) => d.code === str(b, "departmentCode"));
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+  });
   const soId = str(doc, "salesOrderId");
   const soNo = str(doc, "companySO", "companySOId", "customerSO");
 
@@ -159,6 +168,39 @@ export function ProductionDetailScreen() {
             })}
           </div>
         </div>
+
+        {/* Stage Progress — real job-card completion per department */}
+        {jobCards.length > 0 ? (
+          <Card title="Stage Progress">
+            <div style={{ padding: "4px 15px 8px" }}>
+              {jobCards.map((jc, i) => {
+                const deptCode = str(jc, "departmentCode");
+                const label = DEPTS.find((d) => d.code === deptCode)?.label || deptCode || "Stage";
+                const st = str(jc, "status") || "—";
+                const done = /COMPLET|DONE/i.test(st);
+                const completed = dateOnly(jc, "completedDate");
+                const due = dateOnly(jc, "dueDate");
+                const when = completed ? completed : due ? `due ${due}` : "";
+                const pic = [str(jc, "pic1Name"), str(jc, "pic2Name")].filter(Boolean).join(", ");
+                return (
+                  <div
+                    key={str(jc, "id") || i}
+                    style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "10px 0", borderBottom: `1px solid ${M.divider}`, alignItems: "baseline" }}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: M.ink }}>{label}</div>
+                      {pic ? <div style={{ fontSize: 11, color: M.faint, marginTop: 2 }}>{pic}</div> : null}
+                    </div>
+                    <div style={{ textAlign: "right", flex: "none" }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: done ? "#4F7C3A" : M.muted }}>{st}</div>
+                      {when ? <div style={{ fontSize: 11, color: M.faint, marginTop: 2 }}>{when}</div> : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        ) : null}
 
         {/* Linked SO */}
         {soId || soNo ? (

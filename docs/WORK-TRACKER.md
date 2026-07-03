@@ -9,6 +9,91 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-03 — 🔵 Visibility plan EXECUTING on staging (owner: "上staging就行")
+
+**Phase 1a SHIPPED to staging (commit 64d62058) + verified live on staging:**
+KV serve-stale for the non-paginated production list — body stored under stable
+key `pos:body:{org}:{qs}` with org version in KV METADATA; version mismatch →
+serve previous body instantly (X-Cache: STALE) + single-flighted background
+rebuild (buildListPayload(swr:false)) stores fresh body stamped with
+post-compute version. Paginated path unchanged (versioned key). Freshness
+semantics identical to the 2026-06-06 mark-stale SWR design — only the COST of
+the stale serve drops (1.3-5.4s → ~0.1s KV read). Verified on staging (9.8MB
+data, same volume as prod): MISS 5.1s cold → HIT ~0.9s → benign write (JC
+dueDate set to same value) → next poll STALE 0.87s (was 1.3-5.4s MISS) →
++16s HIT fresh. Convergence ≤2 poll cycles, all reads sub-2s.
+**Phase 2 SHIPPED to staging (4392e710):** new src/lib/upload-file.ts (50MB
+pre-check, 180s timeout, verify-bytes-servable via Range probe before success
+toast) wired into products/documents.tsx + catalog.tsx; files.ts 413 message
+humanised; worker punch POST got catch + status check + 60s timeout + new
+home.punchFailed i18n (was: failed punch showed NOTHING).
+**Phases 3+4 SHIPPED to staging (20ceeb7a):** verify-before-fix killed most
+audit claims (invoices-page create, PO/GRN/PI, inventory all already
+invalidate fine). Real fixes: ① delivery-page invoice-generate now broadcasts
+invoices/SO/DO cache invalidation (was: nothing) ② NEW scan-queue-sweep.yml
+cron every 15min (endpoint existed, NOTHING scheduled it) ③ backup retention
+prune wired: pruneOldBackups exported + CRON_SECRET-gated
+/api/internal/backup-prune + backup.yml step after upload (was: prune code
+orphaned behind a never-provisioned Workers Cron Trigger, dumps unbounded).
+Pre-auth route allowlist test updated (security-public-endpoints.test.mjs).
+NOTE: schedule: workflows only fire from main — sweep/prune go live at merge.
+**Remaining:** restore drill (needs owner's Supabase dashboard, PITR confirm);
+deeper perf levers (BOM parse cache, fabric precompute, per-dept versions) =
+diminishing returns, only if lag persists after Phase 1a.
+
+**2026-07-03 late: all-tab perf sweep on staging (17 pages, live measured).**
+Owner upgraded Supabase (plan/compute — helps DB speed + PITR; app-side fixes
+still needed). HEAVY tabs (payload/slowest): ① /m mobile home 4.3MB/20 calls
+(652KB delivery-orders + eager prefetch of everything — phones on weak wifi!)
+② /inventory 4.0MB (inventory/wip 2.9MB + delivery-orders 652KB + products)
+③ /delivery 2.4MB (pulls FULL unpaginated sales-orders 1.4MB @ 6.1s + products
+277KB) ④ /warehouse 1.7MB (one 1.45MB call @3.8s) ⑤ /procurement 1.3MB
+(inventory 895KB on the PO page). HEALTHY: invoices 156KB, customers 14KB,
+GRN/PI ~200KB, planning 37KB, reports lazy, consignment 320KB, employees
+274KB, sales ~1MB acceptable. Disease = same as production had: pages eagerly
+pull FULL sibling-module lists. Cure queue (owner to green-light): slim/paged
+variants for delivery→sales-orders, inventory/wip, warehouse list; /m home
+lazy per-tile loading. Reuse Phase-1a KV serve-stale pattern where applicable.
+
+**Phase 0 SHIPPED to staging (commit bb104e1f) + verified live on staging URL:**
+① archive real-run hard-disabled (POST ?dryRun=false → 410 confirmed; dry-run still
+returns counts) ② global search shows "Search failed — connection problem" on network
+failure instead of "No results" (verified by fetch-fail simulation; normal search
+regression-checked OK). NOTE: lock protects PROD only after staging→main merge (owner
+must order the merge explicitly).
+**Phase 1 measurement (live prod, read-only):** wire transfer is only 0.5MB (CF
+compression) — download is NOT the bottleneck; TTFB = 5.4s on cold snapshot rebuild,
+1.3-1.8s snapshot-warm/KV-miss, 0.77s KV HIT. 92% of decompressed 10MB = jobCards
+(14,702 JCs / 1,007 POs). fields=minimal already slims non-active-dept JCs in DEPT
+mode but OVERVIEW mode (activeDeptCode=null) sends full shape for all 8 depts.
+piecePics NOT emitted in minimal (agent claim corrected). → Phase 1 = attack server
+compute (5.4s rebuild + per-write version-bump churn) + overview-shape trim as
+secondary; NOT pagination (breaks 10 features), NOT transfer size (already 0.5MB).
+
+---
+
+## 2026-07-03 — 🟡 Full-system "visibility" audit DONE → plan proposed, awaiting owner pick
+
+4-agent audit completed (archive reads / uploads / caches / archived-row writes).
+**Verdict: NEVER run the archive as-is** — hot-only reads mean archived orders vanish
+from search + detail 404 + dashboards/reports/accounting undercount (dashboard-overview,
+department-performance, leadtimes, compliance-report, accounting.ts all hot-only;
+INNER JOINs in invoices.ts:1306 / planning-schedule.ts:131 DROP rows); writes silently
+no-op on archived rows (invoice-from-old-DO can bill RM 0 via computeDoInvoiceLines
+fallback, po-cost-cascade.ts:529 skips cost posting, consignment hold 0-row UPDATE,
+recomputePoStatusAndProgress no-ops); NO unarchive endpoint. Archive stays dormant/never
+run; 45d COLD_DAYS harmless. Speed to be solved by pagination instead (Fix #1).
+Other real gaps found (all need verify-before-fix at file:line before touching):
+① invoices POST doesn't invalidateCachePrefix("/api/invoices") → cross-tab stale list
+② PO/GRN/PI caches not cross-linked ③ inventory list manual-refresh only ④ uploads:
+file listed in DB but bytes possibly not yet openable (storage lag) → "uploaded but
+can't open"; presigned URL 300s expiry mid-Export-Pack; 413 error prints raw bytes.
+Proposed 3-step plan to owner (1 = paginate+server-search Production, 2 = upload
+verify-then-confirm + retries + human errors, 3 = cache invalidation patch set).
+Stale-chunk white-screen: already well-mitigated (main.tsx preloadError + SW purge).
+
+---
+
 ## 2026-07-02 — 🔵 Debtor/Creditor OPENING 工程(年中开账,owner 全程拍板)
 
 - ✅ Supplier Payment 每行加 print(已上线 prod)

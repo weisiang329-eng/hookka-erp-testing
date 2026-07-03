@@ -394,6 +394,10 @@ async function processRow(
   input: InputRow,
   workerCache: WorkerCache,
   dryRun: boolean,
+  // Threaded from the handler so the WIP cascade's wip_cascade_log
+  // idempotency guard engages (2026-07-03 audit: backfill re-runs /
+  // cursor-resumes could double-apply inventory changes without it).
+  orgId: string,
 ): Promise<RowResult> {
   const result: RowResult = {
     matched: false,
@@ -596,6 +600,7 @@ async function processRow(
               "COMPLETED",
               refreshed,
               jc.status,
+              { orgId, source: "BACKFILL" },
             );
           } catch (err) {
             console.error("[import-completion] WIP cascade failed", {
@@ -733,7 +738,7 @@ app.post("/job-card-completion", async (c) => {
     const absoluteIdx = startIdx + i;
     const r = slice[i];
     try {
-      const res = await processRow(db, absoluteIdx, r, workerCache, dryRun);
+      const res = await processRow(db, absoluteIdx, r, workerCache, dryRun, getOrgId(c));
       if (res.matched) matched++;
       if (res.noSoMatch) noSoMatch++;
       if (res.noJcMatch) noJcMatch++;
@@ -1444,6 +1449,7 @@ app.post("/cascade-upstream-completion", async (c) => {
         "COMPLETED",
         cached.allJcs,
         prevStatus,
+        { orgId: getOrgId(c), source: "BACKFILL" },
       );
     } catch (err) {
       console.error("[cascade-upstream-completion] WIP cascade failed", {
@@ -1811,6 +1817,7 @@ app.post("/uph-pofold-backfill", async (c) => {
         "COMPLETED",
         cached.allJcs,
         prevStatus,
+        { orgId: getOrgId(c), source: "BACKFILL" },
       );
     } catch (err) {
       console.error("[uph-pofold-backfill] WIP cascade failed", {
@@ -2685,6 +2692,7 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
         "COMPLETED",
         cached.allJcs,
         prevStatus,
+        { orgId: getOrgId(c), source: "BACKFILL" },
       );
     } catch (err) {
       console.error("[fab-cut-pofold-backfill] WIP cascade failed", {

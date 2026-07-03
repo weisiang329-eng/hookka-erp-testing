@@ -90,6 +90,77 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-03-003 — Invoices customer filter blanked the list (name sent as ?customerId=); stale "N selected" toolbar over filtered-out rows; Send-to-Customer + Re-send-email merged into one button `ui-frontend` `invoices`
+
+🟢 **Fixed — shipped to main 2026-07-04, verified live on prod**
+
+**Symptoms (owner report, prod):** picking a customer in the Invoices filter
+instantly emptied the list ("0 of 0") even though that customer has invoices;
+the toolbar still said "1 selected · Re-send email (1)" over the empty grid;
+clicking Re-send then surfaced "no email" for a customer with no email on file.
+Owner also asked for ONE email button instead of the confusing
+Send-to-Customer / Re-send-email pair.
+
+**Root causes + fixes:** ① The customer dropdown used the customer NAME as its
+option value while the fetch sent it as `?customerId=` — SQL matched nothing
+(`src/pages/invoices/index.tsx`). Dropdown now sources the full /api/customers
+list (id + name; previously it also only listed names from the loaded page)
+and filters by real id on both server and client. ② DataGrid only re-emitted
+the selection on checkbox clicks, so filtered-out rows stayed in the parent's
+selection (`src/components/ui/data-grid.tsx` — selection effect now also
+depends on sortedData, pruning the emitted selection to visible rows for every
+grid in the app); the invoices page additionally clears selection on filter
+change. ③ One primary "Email to Customer (n)" button replaces the pair:
+drafts are finalised then emailed, already-sent invoices re-emailed with the
+current PDF, and customers with no email on file are pre-flagged in the
+confirm dialog (via the customers list) and skipped with a "add it on the
+Customer page" message. Same commit: the four import-completion backfill
+callers of applyWipInventoryChange now pass `{ orgId, source: "BACKFILL" }`
+so the wip_cascade_log idempotency guard engages on re-runs (2026-07-03 audit;
+the live PATCH/scan paths were already guarded). OCR catalog-snap audit
+confirmed all four SO/CO POST+PUT paths already guarded — memory updated.
+
+---
+
+## BUG-2026-07-03-002 — Silent-failure batch from the visibility audit: punch failures showed nothing, timed-out search said "No results", invoice-from-DO never refreshed the invoice list, two janitors never ran `ui-frontend` `infrastructure` `data-integrity`
+
+🟢 **Fixed — on `staging` (commits bb104e1f / 64d62058 / 4392e710 / 20ceeb7a), verified live on staging; reaches prod at the next staging→main merge (owner to order)**
+
+**Symptoms (all instances of one class — failures that pretend to be fine):**
+① Worker punch POST (`src/pages/worker/index.tsx` handleClock) had NO catch, NO
+status check, NO timeout — on weak factory wifi a failed punch showed NOTHING
+and the worker walked away believing they'd clocked in. ② Global search
+(`src/components/layout/global-search.tsx`) swallowed every fetch error
+(`.catch(() => {})` ×6) — a weak-wifi timeout rendered "No results", making an
+existing order look deleted (the owner's "东西不见了" trauma). ③ File uploads
+(products/documents.tsx, catalog.tsx) had no timeout (dead connection = spinner
+forever), no size pre-check (60MB crawled up the wifi only to get a raw-bytes
+413), and toasted success before anyone confirmed the bytes were servable —
+the "uploaded but it won't open" trap. ④ Invoice generated from the Delivery
+page (delivery/index.tsx confirmGenerateInvoice) invalidated no caches — the
+new invoice didn't appear in the Invoices list until TTL. ⑤ Two janitors were
+written but never scheduled: /api/internal/scan-queue-sweep (stuck scans hung
+forever) and the backup 90-day retention prune (orphaned behind a
+never-provisioned Workers Cron Trigger; dumps accumulate unbounded).
+
+**Fixes:** honest error states everywhere (new `home.punchFailed` i18n ×4
+languages; "Search failed — connection problem" state distinct from "No
+results"); new shared `src/lib/upload-file.ts` (50MB pre-check, 180s abort,
+verify-servable Range probe before the success toast, humanised 413);
+cache broadcast on invoice-from-DO; `.github/workflows/scan-queue-sweep.yml`
+(*/15min) + `POST /api/internal/backup-prune` (CRON_SECRET-gated, called from
+backup.yml after each upload; allowlisted in security-public-endpoints test).
+Also in the same batch: archive real-run hard-disabled (410) after the audit
+showed hot-only reads/writes would make archived rows vanish and no-op.
+
+**Verified:** search-failure state via fetch-fail simulation on staging (shows
+"Search failed", normal results unaffected); archive 410 + dry-run live on
+staging; full test suite (1347) green; typecheck strict green. NOTE:
+`schedule:` workflows only fire from the DEFAULT branch — sweep + prune crons
+go live at the staging→main merge.
+
+---
+
 ## BUG-2026-07-03-001 — Phantom product code `5543-1C(LHF)` on CO-2606-002 cascaded through production + inventory; owner fixed the BOM, chain needed relabelling `data-migration` `consignment-orders` `production-orders`
 
 🟢 **Fixed — one-shot backfill applied + verified live on prod 2026-07-03** · owner-requested

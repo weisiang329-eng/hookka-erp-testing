@@ -2549,10 +2549,17 @@ export function DataGrid<T extends Record<string, any>>({
 
   useEffect(() => {
     if (!onSelectionChange) return;
+    // Depend on sortedData too (2026-07-03, invoices stale-selection bug):
+    // the emitted selection must always be a subset of the rows currently
+    // shown. Previously this only re-ran on checkbox clicks, so applying a
+    // filter left the parent holding rows that were no longer visible —
+    // "1 selected" toolbars over an empty grid, batch actions counting
+    // invisible rows. Internal selectedKeys are kept, so clearing the filter
+    // restores the same ticks.
     const selected = sortedData.filter(row => selectedKeys.has(String(getNestedValue(row, keyField))));
     onSelectionChange(selected);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedKeys]);
+  }, [selectedKeys, sortedData]);
 
   // Mirror the grid's internal filter + sort result back to the parent.
   // Scoped to the stable identity of `onFilteredDataChange` so a caller

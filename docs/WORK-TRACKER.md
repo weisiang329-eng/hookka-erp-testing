@@ -485,3 +485,12 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
   BOM). May shows 73,692.84 (opening-slice boundary + hand-keyed pre-opening PI
   attribution) — absorbed once the owner enters the 31/05 count. Until counts exist,
   June COGS is ~0/negative and GP ≈ sales — expected shape, meaningful after counts.
+- ✅ **v2 (owner: 「不要我还没 import 就用 BOM 的方式」, `590fbaad`)**: stock_take_only P&L
+  chain moved to ACCOUNT level off the GL — month-end value = latest import (complete
+  statement; absent groups = 0) + GL purchases since (opening seed before any import).
+  Un-imported months show consumed = 0 BY CONSTRUCTION (May 73,692.84 / June 5,310.56
+  residuals → 0.00, verified live; chain continuity 107,268.13 → 223,249.67 → 408,203.87).
+  Import month absorbs true consumption. glWindowSigned gained a per-request memo
+  (DocDateCtx.glMemo). Group-level PI chain still serves Stock Summary + closing-stock GL
+  posting. Until imports exist COGS is FG/WIP/labour only (GP > sales) — owner-accepted
+  interim shape.

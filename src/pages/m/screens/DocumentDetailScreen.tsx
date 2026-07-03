@@ -51,6 +51,7 @@ import {
 import { type FormSpec } from "../config/form-types";
 import { editSpecFor, newMailSpec, recordPaymentSpec } from "../config/forms";
 import { PodSheet } from "../components/PodSheet";
+import { GrnReceiveSheet } from "../components/GrnReceiveSheet";
 import type { ProofOfDelivery } from "@/types";
 import { mutateJson, refreshOne, refreshList } from "../config/mutate";
 import { str } from "../config/helpers";
@@ -128,6 +129,8 @@ function Inner({
   const [formSpec, setFormSpec] = useState<FormSpec | null>(null);
   // Proof-of-delivery capture sheet (delivery "Mark Delivered").
   const [podOpen, setPodOpen] = useState(false);
+  // Goods-receipt sheet (procurement PO "Receive (GRN)").
+  const [grnOpen, setGrnOpen] = useState(false);
   // CTA action state (acknowledge / sign / mark-read) — inline busy + toast.
   const [ctaBusy, setCtaBusy] = useState(false);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; text: string } | null>(
@@ -373,6 +376,12 @@ function Inner({
         return { ok: true };
       };
       setFormSpec(spec);
+      return;
+    }
+
+    if (config.slug === "procurement" && primaryCta === "Receive (GRN)") {
+      // Receive goods against this PO — opens the per-line receive sheet.
+      setGrnOpen(true);
       return;
     }
 
@@ -1145,6 +1154,22 @@ function Inner({
           refreshOne(`/api/delivery-orders/${encodeURIComponent(id)}`);
           refreshList("/api/delivery-orders");
           setToast({ kind: "ok", text: "Delivered — proof captured." });
+          return { ok: true };
+        }}
+      />
+
+      {/* Goods Receipt — same POST /api/grn the desktop receive form uses. */}
+      <GrnReceiveSheet
+        open={grnOpen}
+        poId={id}
+        onClose={() => setGrnOpen(false)}
+        onSubmit={async (body) => {
+          const res = await mutateJson("/api/grn", "POST", body);
+          if (!res.ok) return { ok: false, error: res.error };
+          refreshOne(`/api/purchase-orders/${encodeURIComponent(id)}`);
+          refreshList("/api/grn");
+          refreshList("/api/purchase-orders");
+          setToast({ kind: "ok", text: "Goods received." });
           return { ok: true };
         }}
       />

@@ -1098,7 +1098,14 @@ const poDetail: DetailConfig = {
       primary: true,
     },
   ],
-  primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Submit" : "Status"),
+  // Receivable POs (Confirmed / Submitted / Partial) → "Receive (GRN)" opens the
+  // mobile goods-receipt sheet; else Submit (Draft) / Status. Matches the desktop
+  // GRN-eligible statuses (procurement/grn.tsx).
+  primaryCta: (d) => {
+    const s = str(d, "status");
+    if (["CONFIRMED", "SUBMITTED", "PARTIAL_RECEIVED"].includes(s)) return "Receive (GRN)";
+    return s === "DRAFT" ? "Submit" : "Status";
+  },
   attachmentsResource: (id) => ({ type: "PO", id }),
   auditResource: () => "purchase-orders",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "PO_LINE", id: lineId }),

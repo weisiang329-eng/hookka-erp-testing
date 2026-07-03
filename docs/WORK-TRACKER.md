@@ -9,6 +9,38 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-04 — 🔵 Owner multi-ask batch (labor hours + OCR ordering + sweeps)
+
+Logged verbatim so nothing is skipped:
+1. **SO + GRN should parse/keep the uploaded documentation's line ORDER like
+   the PO OCR does** (owner reconciles against the paper order). Investigate
+   why PO preserves order but SO/GRN don't; fix to match. (NOTE: another
+   session shipped "GRN receive — sort PO items by id" to main 2026-07-03
+   15:57 — check whether that already covers the GRN half.)
+2. **Invoice-page bug classes → whole-system sweep** ("查看全系統還有哪個這樣"):
+   (a) filter dropdowns sending NAME where the API expects an ID
+   (b) stale grid selections surviving filter changes (DataGrid fix 99c20d3c
+   already app-wide; verify no page keeps its own parallel selection state).
+3. **Labor/Payroll go-live decision (owner)**: the manual Keep-pay/Deduct
+   backlog panel on Labor Cost vs Revenue is NO LONGER wanted — punch clock is
+   live, so the system must auto-settle from real punches per the Payroll
+   algorithm (≥9h check, late deduction, OT). No manual choice. NOTE memory:
+   auto-deduct was gated on staging verification (can't test pay on prod).
+   Investigate current flow → propose exact auto rules → owner confirms → build.
+4. **Bug: auto-from-punch hour attribution looks wrong** (owner screenshots,
+   entries dated 2026-07-01): AUNG KYAW SOE punch 07:32→18:02 but only 1.33h
+   logged (an approved R&D non-production row seems to displace the auto
+   rows?); PHYU SIN MOE 0.01h fragment row; ZAW LIN 12:59→18:28 = 0.94+4.31
+   (5.3h short — half-day, maybe correct). Also: punch-out 6:28 vs expected
+   6:30 — rounding/grace? does OT count from it?
+5. **Explain the pay rules in plain language**: when is a day late/short,
+   when does OT start, what adds/deducts money — full list for owner.
+
+Invoice-page 4-fix (BUG-2026-07-03-003) pushed to main 99c20d3c, deploy
+in progress; verify live then report.
+
+---
+
 ## 2026-07-03 — 🔵 Visibility plan EXECUTING on staging (owner: "上staging就行")
 
 **Phase 1a SHIPPED to staging (commit 64d62058) + verified live on staging:**

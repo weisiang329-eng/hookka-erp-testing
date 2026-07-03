@@ -1914,7 +1914,9 @@ const rawMaterialDetail: DetailConfig = {
 
     return lists;
   },
-  hideActionBar: true,
+  // Remove-only stock adjustment (damage / write-off / count-down). Opens the
+  // adjustment form via runCta (inventory slug). Positive "found" stays desktop.
+  primaryCta: () => "Reduce Stock",
 };
 
 const rawMaterialsSource: DataSource = {

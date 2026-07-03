@@ -1180,6 +1180,62 @@ export function recordPaymentSpec(doc: Record<string, unknown>, id: string): For
 }
 
 // ===========================================================================
+// STOCK ADJUSTMENT (Raw Material, REMOVE-ONLY) — POST /api/stock-adjustments
+// { type:"RM", itemId, qtyDelta (negative), unitCostSen:0, reason, notes }.
+// Only negative deltas are exposed on mobile: the backend values a stock-OUT by
+// FIFO on the existing cost layers, so no unit cost is needed (the mobile RM API
+// doesn't return one). Positive "found" adjustments — which WOULD need a cost to
+// value the new stock — stay on desktop. Matches inventory/adjustments.tsx.
+// ===========================================================================
+const ADJUST_REASON_OPTS: SelectOption[] = [
+  { value: "COUNT_CORRECTION", label: "Count correction (reduce)" },
+  { value: "DAMAGED", label: "Damaged" },
+  { value: "WRITE_OFF", label: "Write-off" },
+];
+
+export function stockAdjustmentSpec(doc: Record<string, unknown>, id: string): FormSpec {
+  const balance = n(doc.balanceQty);
+  const uom = s(doc.baseUOM);
+  return {
+    title: "Reduce Stock",
+    submitLabel: "Confirm Adjustment",
+    fields: [
+      { name: "reason", label: "Reason", kind: "select" as const, options: ADJUST_REASON_OPTS, required: true, full: true },
+      {
+        name: "qty",
+        label: `Quantity to remove${uom ? ` (${uom})` : ""}${balance > 0 ? ` — in stock: ${balance}` : ""}`,
+        kind: "number" as const,
+        required: true,
+        full: true,
+      },
+      { name: "notes", label: "Notes", kind: "textarea" as const, full: true },
+    ],
+    initial: { reason: "COUNT_CORRECTION", qty: 0, notes: "" },
+    submit: async (v) => {
+      const qty = n(v.qty);
+      if (qty <= 0) return { ok: false, error: "Enter a quantity to remove." };
+      if (balance > 0 && qty > balance) {
+        return { ok: false, error: `Only ${balance} in stock — can't remove ${qty}.` };
+      }
+      const body = {
+        type: "RM",
+        itemId: id,
+        qtyDelta: -qty, // remove-only
+        unitCostSen: 0, // stock-OUT is FIFO-valued; cost not needed
+        reason: s(v.reason) || "COUNT_CORRECTION",
+        notes: s(v.notes) || null,
+      };
+      const res = await mutateJson("/api/stock-adjustments", "POST", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshOne(`/api/raw-materials/${encodeURIComponent(id)}`);
+      refreshList("/api/raw-materials");
+      refreshList("/api/stock-adjustments");
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
 // 3PL PROVIDER — edit. Wires to PUT /api/drivers/:id (drivers.ts). Design's
 // "Edit provider" pencil. No cascade — a driver/provider is standalone master
 // data. Rates are integer sen (money kind); status ∈ ACTIVE/INACTIVE/ON_LEAVE.

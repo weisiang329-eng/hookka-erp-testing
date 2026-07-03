@@ -49,7 +49,7 @@ import {
   type SubDocRow,
 } from "../config/types";
 import { type FormSpec } from "../config/form-types";
-import { editSpecFor, newMailSpec, recordPaymentSpec } from "../config/forms";
+import { editSpecFor, newMailSpec, recordPaymentSpec, stockAdjustmentSpec } from "../config/forms";
 import { PodSheet } from "../components/PodSheet";
 import { GrnReceiveSheet } from "../components/GrnReceiveSheet";
 import type { ProofOfDelivery } from "@/types";
@@ -376,6 +376,12 @@ function Inner({
         return { ok: true };
       };
       setFormSpec(spec);
+      return;
+    }
+
+    if (config.slug === "inventory" && primaryCta === "Reduce Stock") {
+      // Remove-only raw-material stock adjustment (FIFO-valued).
+      setFormSpec(stockAdjustmentSpec(doc, id));
       return;
     }
 

@@ -120,3 +120,24 @@ test("rm groups: name-suffix match still wins when both indexes could apply", ()
   assert.equal(n, 1);
   assert.equal(w.rmGroups[0].group, "702-0010");
 });
+
+test("owner-approved E'yer → STAFFS' merges (2026-07-03)", () => {
+  const coa = [
+    { code: "900-S002", name: "STAFFS' SALARIES", type: "EXPENSE" },
+    { code: "900-S004", name: "STAFFS' SOCSO", type: "EXPENSE" },
+    { code: "900-S005", name: "STAFFS' EPF", type: "EXPENSE" },
+    { code: "900-S009", name: "STAFFS' EIS", type: "EXPENSE" },
+  ];
+  const w = {
+    expenseLines: [
+      { code: "900", name: "E'yer SOCSO" },
+      { code: "900", name: "E'yerEPF" },
+      { code: "900", name: "E'yer EIS" },
+      { code: "900", name: "Staff Salaries & Overtime" },
+    ],
+  };
+  const n = buildHistIdentityRemap(coa).remapWindow(w);
+  assert.equal(n, 4);
+  assert.deepEqual(w.expenseLines.map((l) => l.code), ["900-S004", "900-S005", "900-S009", "900-S002"]);
+  assert.deepEqual(w.expenseLines.map((l) => l.name), ["STAFFS' SOCSO", "STAFFS' EPF", "STAFFS' EIS", "STAFFS' SALARIES"]);
+});

@@ -38,6 +38,13 @@ const NAME_ALIASES: Record<string, string> = {
   UPKEEPOFOFFICEEQUIPMENT: "UPKEEPOFOFFICEEQUIPMENTS",
   SECRETARIALFEES: "SECRETARIALFEE",
   TRAVELLINGEXPENSE: "TRAVELLINGEXPENSES",
+  // Owner-approved merges 2026-07-03 (「E'yer 那幾行也對到 STAFFS' 系列」):
+  // the old-company employer-contribution labels are the same thing as the
+  // system's STAFFS' accounts.
+  EYERSOCSO: "STAFFSSOCSO",
+  EYEREPF: "STAFFSEPF",
+  EYEREIS: "STAFFSEIS",
+  STAFFSALARIESOVERTIME: "STAFFSSALARIES",
 };
 // Historical material-group names → the COA purchase-account suffix.
 const RM_ALIASES: Record<string, string> = {

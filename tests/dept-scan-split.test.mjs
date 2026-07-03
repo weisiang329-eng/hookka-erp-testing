@@ -157,3 +157,22 @@ test("prorateHours: tiny totals never create phantom hours", () => {
   const sum = r.reduce((s, x) => s + Math.round(x.hours * 100), 0);
   assert.equal(sum, 2);
 });
+
+test("prorateHours folds sub-0.1h fragments into the largest bucket (owner 2026-07-04)", () => {
+  // 9h split where one scan boundary leaves a 1-minute sliver: the sliver's
+  // cents move into the biggest row instead of surfacing as a 0.01h entry.
+  const rows = lib.prorateHours(9, [
+    { departmentCode: "FAB_SEW", weight: 539 },
+    { departmentCode: "R_AND_D", weight: 1 },
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].departmentCode, "FAB_SEW");
+  assert.equal(rows[0].hours, 9);
+  // Fragments >= 0.1h survive untouched, and totals still sum back exactly.
+  const ok = lib.prorateHours(9, [
+    { departmentCode: "A", weight: 480 },
+    { departmentCode: "B", weight: 60 },
+  ]);
+  assert.equal(ok.length, 2);
+  assert.equal(ok.reduce((s, r) => s + r.hours, 0), 9);
+});

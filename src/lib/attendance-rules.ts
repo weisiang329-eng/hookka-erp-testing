@@ -128,6 +128,12 @@ export function computeAttendanceDay(
     const roundedOut =
       Math.floor(clockOutMin / 60) * 60 + roundOutMinute(clockOutMin % 60);
     otMin = Math.max(0, roundedOut - rules.endMin);
+    // OT only counts from 30 minutes past shift end (owner correction
+    // 2026-07-04: "OT 要30分鐘才算" — an 18:28 punch-out is 0 OT, not 15).
+    // Below the threshold the tail also stops offsetting the shortfall,
+    // consistent with it not being counted as work. From 30 minutes on,
+    // quarters apply as before (18:30→30, 18:45→45).
+    if (otMin < 30) otMin = 0;
   }
 
   // Shortfall — same-day OT OFFSETS it first (owner 2026-06-11): a worker who

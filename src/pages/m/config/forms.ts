@@ -1128,6 +1128,58 @@ export function editSupplierSpec(doc: Record<string, unknown>, id: string): Form
 }
 
 // ===========================================================================
+// RECORD PAYMENT — Invoice. Reuses the EXACT desktop flow (invoices/detail.tsx):
+// PUT /api/invoices/:id { paidAmount: existing + amount, paymentMethod,
+// paymentDate, paymentReference }. The backend derives the delta, writes one
+// invoice_payments row and flips status → PARTIAL_PAID / PAID (invoices.ts:1707).
+// ===========================================================================
+const PAYMENT_METHOD_OPTS: SelectOption[] = [
+  { value: "BANK_TRANSFER", label: "Bank Transfer" },
+  { value: "CHEQUE", label: "Cheque" },
+  { value: "CASH", label: "Cash" },
+  { value: "CREDIT_CARD", label: "Credit Card" },
+  { value: "OTHER", label: "Other" },
+];
+
+export function recordPaymentSpec(doc: Record<string, unknown>, id: string): FormSpec {
+  const totalSen = n(doc.totalSen);
+  const paidSen = n(doc.paidAmount);
+  const balanceSen = Math.max(0, totalSen - paidSen);
+  return {
+    title: "Record Payment",
+    submitLabel: "Save Payment",
+    fields: [
+      { name: "amount", label: "Amount (RM)", kind: "money" as const, required: true, full: true },
+      { name: "paymentMethod", label: "Method", kind: "select" as const, options: PAYMENT_METHOD_OPTS, full: true },
+      { name: "paymentDate", label: "Payment Date", kind: "date" as const, full: true },
+      { name: "paymentReference", label: "Reference", kind: "text" as const, full: true },
+    ],
+    // Default to the full outstanding balance — the common case is "paid in full".
+    initial: {
+      amount: balanceSen,
+      paymentMethod: "BANK_TRANSFER",
+      paymentDate: "",
+      paymentReference: "",
+    },
+    submit: async (v) => {
+      const amountSen = n(v.amount);
+      if (amountSen <= 0) return { ok: false, error: "Enter a payment amount." };
+      const body = {
+        paidAmount: paidSen + amountSen,
+        paymentMethod: s(v.paymentMethod) || "BANK_TRANSFER",
+        paymentDate: s(v.paymentDate) || undefined,
+        paymentReference: s(v.paymentReference),
+      };
+      const res = await mutateJson(`/api/invoices/${encodeURIComponent(id)}`, "PUT", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshOne(`/api/invoices/${encodeURIComponent(id)}`);
+      refreshList("/api/invoices");
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
 // 3PL PROVIDER — edit. Wires to PUT /api/drivers/:id (drivers.ts). Design's
 // "Edit provider" pencil. No cascade — a driver/provider is standalone master
 // data. Rates are integer sen (money kind); status ∈ ACTIVE/INACTIVE/ON_LEAVE.

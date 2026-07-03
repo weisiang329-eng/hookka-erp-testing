@@ -49,7 +49,7 @@ import {
   type SubDocRow,
 } from "../config/types";
 import { type FormSpec } from "../config/form-types";
-import { editSpecFor, newMailSpec } from "../config/forms";
+import { editSpecFor, newMailSpec, recordPaymentSpec } from "../config/forms";
 import { mutateJson, refreshOne, refreshList } from "../config/mutate";
 import { str } from "../config/helpers";
 
@@ -369,6 +369,12 @@ function Inner({
         return { ok: true };
       };
       setFormSpec(spec);
+      return;
+    }
+
+    if (config.slug === "invoices" && primaryCta === "Record Payment") {
+      // Record a customer payment — same PUT the desktop invoice detail uses.
+      setFormSpec(recordPaymentSpec(doc, id));
       return;
     }
 
@@ -1499,99 +1505,6 @@ function LineItemRow({
         color="#C4BDB2"
         style={{ flexShrink: 0, marginTop: hasDetail ? 2 : 0 }}
       />
-    </div>
-  );
-}
-
-function RelatedRow({
-  rel,
-  first,
-  onClick,
-}: {
-  rel: RelatedDocVM;
-  /** First row in the card — no top hairline. */
-  first?: boolean;
-  onClick?: () => void;
-}) {
-  const interactive = typeof onClick === "function";
-  return (
-    <div
-      onClick={onClick}
-      role={interactive ? "button" : undefined}
-      tabIndex={interactive ? 0 : undefined}
-      onKeyDown={
-        interactive
-          ? (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onClick?.();
-              }
-            }
-          : undefined
-      }
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "14px 16px",
-        borderTop: first ? "none" : `1px solid ${M.divider}`,
-        cursor: interactive ? "pointer" : "default",
-        WebkitTapHighlightColor: "transparent",
-      }}
-    >
-      {/* Parchment icon tile (design source). */}
-      <span
-        style={{
-          width: 38,
-          height: 38,
-          borderRadius: 10,
-          background: "#F4EFE6",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flex: "none",
-        }}
-      >
-        <FileText size={18} strokeWidth={1.75} color={M.taupe} />
-      </span>
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div
-          style={{
-            color: M.raisin,
-            fontSize: 13.5,
-            fontWeight: 600,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {rel.subLine || rel.group}
-        </div>
-        <div
-          style={{
-            color: M.muted,
-            fontSize: 11.5,
-            marginTop: 2,
-            fontVariantNumeric: "tabular-nums",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {rel.code}
-        </div>
-      </div>
-      {rel.status ? (
-        <StatusPill style={rel.status.style} label={rel.status.label} size="sm" />
-      ) : null}
-      {interactive ? (
-        <ChevronRight
-          size={18}
-          strokeWidth={1.75}
-          color="#C4BDB2"
-          style={{ flexShrink: 0 }}
-        />
-      ) : null}
     </div>
   );
 }

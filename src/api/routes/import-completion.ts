@@ -43,6 +43,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { autofillWorkingHoursFromPunch } from "../lib/punch-autofill";
 import {
   applyWipInventoryChange,
   recomputePoStatusAndProgress,
@@ -9367,6 +9368,95 @@ app.post("/backfill-5543-co2606002", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /backfill-punch-autofill-blocked — ONE-SHOT (owner 2026-07-04).
+// Repairs the days already bitten by the punch-autofill safety-gate bug: an
+// APPROVED non-production request row that landed BEFORE the worker's
+// punch-out made the blanket COUNT(*) gate skip the whole day, so the punched
+// hours were never logged (the "AUNG KYAW SOE 1.33h day"). Candidates =
+// punched days whose working_hour_entries are ALL "Non-production (approved)"
+// rows. Apply re-runs the (now fixed) autofill for exactly those days — it
+// generates the punch rows minus the hours the approval already claimed, and
+// still never touches any day that has office-keyed or auto rows.
+// AUDIT-FIRST — apply with { "apply": true, "confirm": "autofill" }.
+app.post("/backfill-punch-autofill-blocked", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
+  const db = c.var.DB;
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    apply?: boolean;
+    confirm?: string;
+  };
+  const apply = body.apply === true && body.confirm === "autofill";
+
+  const cands = await db
+    .prepare(
+      `SELECT a.id AS "attendanceId", a.employeeId AS "workerId", a.date,
+              a.clockIn AS "clockIn", a.clockOut AS "clockOut",
+              w.name AS "workerName", w.departmentCode AS "homeDeptCode",
+              (SELECT COALESCE(SUM(e.hours), 0) FROM working_hour_entries e
+                WHERE e.attendanceId = a.id) AS "nonProdHours"
+         FROM attendance_records a
+         JOIN workers w ON w.id = a.employeeId
+        WHERE a.clockIn IS NOT NULL AND a.clockOut IS NOT NULL
+          AND EXISTS (SELECT 1 FROM working_hour_entries e WHERE e.attendanceId = a.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM working_hour_entries e
+             WHERE e.attendanceId = a.id
+               AND e.notes NOT LIKE 'Non-production (approved)%'
+          )
+        ORDER BY a.date, w.name`,
+    )
+    .all<{
+      attendanceId: string;
+      workerId: string;
+      date: string;
+      clockIn: string;
+      clockOut: string;
+      workerName: string;
+      homeDeptCode: string | null;
+      nonProdHours: number;
+    }>();
+  const days = cands.results ?? [];
+
+  if (!apply) {
+    return c.json({
+      success: true,
+      apply: false,
+      count: days.length,
+      days: days.map((d) => ({
+        worker: d.workerName,
+        date: d.date,
+        punch: `${d.clockIn}→${d.clockOut}`,
+        nonProdApprovedHours: Number(d.nonProdHours) || 0,
+      })),
+      note: 'Audit only. Apply with { "apply": true, "confirm": "autofill" }.',
+    });
+  }
+
+  const results: Array<{ worker: string; date: string; created: number }> = [];
+  for (const d of days) {
+    try {
+      const r = await autofillWorkingHoursFromPunch(db, {
+        attendanceId: d.attendanceId,
+        workerId: d.workerId,
+        date: d.date,
+        clockIn: d.clockIn,
+        clockOut: d.clockOut,
+        homeDeptCode: d.homeDeptCode,
+      });
+      results.push({ worker: d.workerName, date: d.date, created: r.created });
+    } catch (err) {
+      console.error("[backfill-punch-autofill-blocked] failed", {
+        attendanceId: d.attendanceId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      results.push({ worker: d.workerName, date: d.date, created: -1 });
+    }
+  }
+  return c.json({ success: true, apply: true, count: days.length, results });
+});
+
 // POST /backfill-complete-stray-jc-co2606002 — ONE-SHOT (owner 2026-07-03).
 // The 5543 production order pord-co-72dcea0a-01 is stuck PENDING because ONE
 // junk job card is WAITING: a leftover from the OLD broken 5543 BOM whose

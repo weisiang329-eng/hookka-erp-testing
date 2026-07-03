@@ -1457,21 +1457,51 @@ function StockTakeTab() {
   // displayed value is derived straight from state + `entries` on every render.
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  // Periodic-inventory switch (owner rule 2026-07-03): 'stock_take_only' turns
+  // OFF the BOM/FIFO auto-consumption — closing = latest count + purchases since.
+  const [rmMode, setRmMode] = useState<"auto" | "stock_take_only" | null>(null);
+  const [modeSaving, setModeSaving] = useState(false);
 
   useEffect(() => {
     let stale = false;
     Promise.all([
       fetch("/api/accounting/material-opening-stock").then((r) => r.json() as Promise<{ data?: { itemGroup: string }[] }>),
-      fetch("/api/accounting/stock-take").then((r) => r.json() as Promise<{ data?: { itemGroup: string; ym: string; valueSen: number }[] }>),
+      fetch("/api/accounting/stock-take").then((r) => r.json() as Promise<{ data?: { itemGroup: string; ym: string; valueSen: number }[]; rmValuationMode?: "auto" | "stock_take_only" }>),
     ])
       .then(([mos, st]) => {
         if (stale) return;
         setGroups([...new Set((mos.data ?? []).map((r) => r.itemGroup).filter(Boolean))].sort());
         setEntries(st.data ?? []);
+        setRmMode(st.rmValuationMode ?? "auto");
       })
       .catch(() => {});
     return () => { stale = true; };
   }, []);
+
+  const saveMode = async (mode: "auto" | "stock_take_only") => {
+    if (mode === rmMode) return;
+    setModeSaving(true);
+    try {
+      const res = await fetch("/api/accounting/rm-valuation-mode", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) {
+        setRmMode(mode);
+        toast.success(
+          mode === "stock_take_only"
+            ? "Raw-material valuation switched to stock-take only — no automatic BOM/FIFO consumption."
+            : "Raw-material valuation switched back to automatic (BOM/FIFO).",
+        );
+      } else toast.error(j?.error || "Failed to switch valuation mode");
+    } catch {
+      toast.error("Failed to switch valuation mode");
+    } finally {
+      setModeSaving(false);
+    }
+  };
 
   const key = (g: string) => `${ym}::${g}`;
   const savedFor = (g: string) => entries.find((e) => e.ym === ym && e.itemGroup === g);
@@ -1780,6 +1810,36 @@ function StockTakeTab() {
           </Button>
         </div>
       </div>
+      <Card>
+        <CardContent className="p-4 flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-[16rem] flex-1">
+            <div className="text-sm font-medium text-[#1F1D1B]">Closing-stock source</div>
+            <p className="text-xs text-[#6B7280] mt-0.5 max-w-3xl">
+              {rmMode === "stock_take_only"
+                ? "Stock take only: each month-end's raw-material value = your latest count + purchases since it (the opening seed before any count). No automatic BOM/FIFO consumption — consumption shows only in months you enter a count."
+                : "Automatic: the system computes consumption from BOM/FIFO; a stock-take entry overrides that month's closing where present."}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              size="sm"
+              variant={rmMode === "stock_take_only" ? "default" : "outline"}
+              disabled={modeSaving || rmMode === null}
+              onClick={() => void saveMode("stock_take_only")}
+            >
+              Stock take only
+            </Button>
+            <Button
+              size="sm"
+              variant={rmMode === "auto" ? "default" : "outline"}
+              disabled={modeSaving || rmMode === null}
+              onClick={() => void saveMode("auto")}
+            >
+              Automatic (BOM/FIFO)
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
       <Card>
         <CardContent className="p-4 space-y-3">
           <div className="flex flex-wrap items-end gap-4">

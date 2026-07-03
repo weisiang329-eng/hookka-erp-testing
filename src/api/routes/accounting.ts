@@ -64,6 +64,7 @@ import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import {
   computeMaterialCheckpoints,
   windowFromCheckpoints,
+  stockTakeChainValue,
   type MaterialInput,
   type FifoEvent,
   type CheckpointCum,
@@ -5102,6 +5103,13 @@ type MaterialCostData = {
   // Month-end stock-take (owner periodic option): group → ym → closing value sen.
   // materialWindow uses it as the period closing (override FIFO) where present.
   stockTakeByGroupYm: Map<string, Map<string, number>>;
+  // Periodic-inventory mode (owner rule 2026-07-03, kv `rm_valuation_mode`):
+  // 'stock_take_only' → RM closing = last stock-take + purchases since (no
+  // BOM/FIFO auto-consumption); 'auto' → FIFO/BOM behaviour unchanged.
+  rmValuationMode: "auto" | "stock_take_only";
+  // Opening seed value per group (material_opening_stock, qty × unitCost) —
+  // the chain base for stock_take_only months before any count exists.
+  seedByGroup: Map<string, number>;
   wipByYm: Map<string, number>;
   fgByYm: Map<string, number>;
   warnings: {
@@ -5528,6 +5536,21 @@ async function loadMaterialCostData(
     piPurchaseCum.set(g, cum);
   }
 
+  // Periodic-inventory mode + per-group opening seed (owner rule 2026-07-03).
+  const modeRow = await db
+    .prepare("SELECT value FROM kv_config WHERE key = 'rm_valuation_mode'")
+    .first<{ value: string | null }>()
+    .catch(() => null);
+  const rmValuationMode: "auto" | "stock_take_only" =
+    (modeRow?.value ?? "").trim() === "stock_take_only" ? "stock_take_only" : "auto";
+  const seedByGroup = new Map<string, number>();
+  for (const r of openingRows) {
+    const g = groupOf.get(r.rmId) ?? "OTHER";
+    const v = Math.round((Number(r.qty) || 0) * (Number(r.unitCostSen) || 0));
+    if (v) seedByGroup.set(g, (seedByGroup.get(g) ?? 0) + v);
+  }
+  for (const g of seedByGroup.keys()) allGroups.add(g);
+
   // Month-end stock-take (owner periodic-inventory option): group → ym → closing
   // value sen. materialWindow uses it as the period closing (and the prior month
   // as opening) INSTEAD of the FIFO value, where present. Read-only override.
@@ -5558,6 +5581,8 @@ async function loadMaterialCostData(
     groupCum,
     piPurchaseCum,
     stockTakeByGroupYm,
+    rmValuationMode,
+    seedByGroup,
     wipByYm,
     fgByYm,
     warnings: { negatives, unresolved },
@@ -5573,6 +5598,25 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
   const ZERO: CheckpointCum = { closingSen: 0, cumPurchaseSen: 0, cumConsumedSen: 0, cumNegativeUnits: 0 };
   const endKey = endYm ?? data.lastYm;
   const prevKey = startYm ? prevMonthYm(startYm) : null;
+  // Periodic-inventory mode (owner rule 2026-07-03, kv `rm_valuation_mode`):
+  // RM stock value at any month-end = latest stock-take count ≤ that month +
+  // PI purchases since (opening seed + all purchases before any count) — the
+  // BOM/FIFO consumption guess is not used at all. Consumption between counts
+  // is zero; the month a count is entered absorbs the true consumed amount.
+  const noAuto = data.rmValuationMode === "stock_take_only";
+  const chainVal = (g: string, ym: string | null): number => {
+    if (!ym) return 0;
+    const piCum = data.piPurchaseCum.get(g);
+    const piOf = (m: string) => (m < data.globalFirstYm ? 0 : (piCum?.get(m) ?? 0));
+    const st = data.stockTakeByGroupYm.get(g);
+    return stockTakeChainValue(
+      data.seedByGroup.get(g) ?? 0,
+      piOf,
+      (m) => (st?.has(m) ? (st.get(m) as number) : null),
+      ym,
+      data.globalFirstYm,
+    );
+  };
   const rmGroups = data.groups.map((g) => {
     const gm = data.groupCum.get(g);
     const end = gm?.get(endKey) ?? ZERO;
@@ -5592,9 +5636,15 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
     // entered count at a month-end becomes the period CLOSING (and the prior month's
     // the OPENING) instead of the FIFO value, for groups that have one. Groups with
     // no stock-take keep the FIFO/BOM closing exactly as before. CONSUMED rebalances.
+    // (chainVal starts its walk AT the month itself, so a count entered for the
+    // month still wins under stock_take_only.)
     const st = data.stockTakeByGroupYm.get(g);
-    const openingSen = (prevKey && st?.has(prevKey)) ? (st.get(prevKey) as number) : w.openingSen;
-    const closingSen = st?.has(endKey) ? (st.get(endKey) as number) : w.closingSen;
+    const openingSen = noAuto
+      ? chainVal(g, prevKey)
+      : (prevKey && st?.has(prevKey)) ? (st.get(prevKey) as number) : w.openingSen;
+    const closingSen = noAuto
+      ? chainVal(g, endKey)
+      : st?.has(endKey) ? (st.get(endKey) as number) : w.closingSen;
     const consumedSen = openingSen + purchaseSen - closingSen;
     return { itemGroup: g, openingSen, purchaseSen, closingSen, consumedSen };
   });
@@ -10073,7 +10123,49 @@ app.get("/stock-take", async (c) => {
     ym: String(r.ym ?? ""),
     valueSen: Math.round(Number(r.valueSen ?? r.value_sen) || 0),
   }));
-  return c.json({ success: true, data, total: data.length });
+  const modeRow = await c.var.DB
+    .prepare("SELECT value FROM kv_config WHERE key = 'rm_valuation_mode'")
+    .first<{ value: string | null }>()
+    .catch(() => null);
+  const rmValuationMode = (modeRow?.value ?? "").trim() === "stock_take_only" ? "stock_take_only" : "auto";
+  return c.json({ success: true, data, total: data.length, rmValuationMode });
+});
+
+// PUT /api/accounting/rm-valuation-mode — periodic-inventory switch (owner rule
+// 2026-07-03: "不要用 BOM 算先"). 'stock_take_only' → RM closing at every
+// month-end = latest stock-take count + PI purchases since (no BOM/FIFO
+// auto-consumption; consumption shows only in counted months). 'auto' →
+// FIFO/BOM behaviour (with stock-take override) exactly as before. Report-layer
+// valuation only — writes NO ledger rows. Also steers the closing-stock GL
+// posting numbers (same engine), so re-Post any already-posted month after
+// flipping this.
+app.put("/rm-valuation-mode", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { mode?: string };
+  const mode = String(body.mode ?? "").trim();
+  if (mode !== "auto" && mode !== "stock_take_only") {
+    return c.json(
+      { success: false, error: "mode must be 'auto' or 'stock_take_only'" },
+      400,
+    );
+  }
+  await c.var.DB.prepare(
+    `INSERT INTO kv_config (key, value, updated_at)
+       VALUES ('rm_valuation_mode', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+  )
+    .bind(mode, new Date().toISOString())
+    .run();
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: "rm_valuation_mode",
+    action: "update",
+    after: { mode },
+  });
+  return c.json({ success: true, data: { mode } });
 });
 
 // GET /api/accounting/stock-take-item-aliases

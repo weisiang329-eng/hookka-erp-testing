@@ -101,6 +101,8 @@ function rowToItem(r: PurchaseOrderItemRow) {
     receivedQty,
     availableQty: computeAvailableQty(Number(r.quantity) || 0, receivedQty),
     unit: r.unit ?? "pcs",
+    // Document/paper order (2026-07-04) — the adapter camelCases line_no.
+    lineNo: (r as { lineNo?: number | null }).lineNo ?? null,
   };
 }
 

@@ -459,3 +459,29 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 - Owner-visible effect: Monthly P&L May column now shows the 1–21 May slice on top of real
   post-opening trading; sales opening (debtor v5, still awaiting owner confirm) will land
   in May automatically (April sales = 0, not in the kv).
+
+## 2026-07-03 (later) — Periodic-inventory mode + June-purchase reconciliation + incident
+
+- ⚠️ **INCIDENT (disclosed to owner, zero visible impact)**: intended a dry-run of
+  POST /purchase-invoices/backfill-gl-postings but the dry switch is `?dry=1` (query),
+  not `{dry:true}` (body) → 46 unposted PIs (RM 58,736.70) actually posted. All 46 are
+  dated BEFORE the 22/05 opening → floored out of every report (TB/P&L/aging/GL inquiry
+  unchanged, verified to the sen). The nightly cron runs the same call nightly — same
+  end state. Found the cron itself has FAILED both nights since shipping (suspect 60s
+  curl timeout against the 46-PI backlog); backlog now zero so it should self-heal —
+  watch one night.
+- ✅ **June purchases reconciled** (owner asked "那么少?"): 103 CONFIRMED + 1 PAID June
+  PIs = 187,141.01 = P&L purchase lines 184,954.20 + SST 1,616.81 + R&D 570.00
+  (PI-2606-010 maps to 900-R002). 2 DRAFTs (2,427.60) unposted by design. The "small"
+  number the owner saw was CONSUMED (BOM under-consumption, no May/June stock takes).
+- ✅ **Periodic-inventory mode shipped** (`3a4b92b7`, owner: 「不要用 BOM 算先」): kv
+  `rm_valuation_mode = stock_take_only` → RM month-end value = latest stock-take +
+  PI purchases since (opening seed before any count); consumption only in counted
+  months. Toggle card on Stock Take tab; PUT /rm-valuation-mode (audited); GET
+  /stock-take returns mode. Pure stockTakeChainValue in material-cost-fifo.ts (+5
+  tests; suite 1369 green). **Prod switched to stock_take_only + verified**: June RM
+  consumed 8,353.67 → 5,310.56 (= FEE/SERVICE/unmapped lines GL posts to purchase
+  accounts but that never become stock — correct immediate-consumption semantics, not
+  BOM). May shows 73,692.84 (opening-slice boundary + hand-keyed pre-opening PI
+  attribution) — absorbed once the owner enters the 31/05 count. Until counts exist,
+  June COGS is ~0/negative and GP ≈ sales — expected shape, meaningful after counts.

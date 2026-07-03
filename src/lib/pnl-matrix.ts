@@ -54,10 +54,11 @@ export function buildPnlMatrix(cols: PnlMatrixCol[]): PnlMatrix {
 
   const netSales = windows.map((w) => w.netSalesSen);
   const pctOf = (vals: number[]) => vals.map((v, i) => (netSales[i] ? Math.round((v / netSales[i]) * 1000) / 10 : 0));
-  // Line identity = code, falling back to name — historical windows carry
-  // code:"" on every line (old-books names never mapped to COA codes), so a
-  // pure-code match would return the FIRST empty-coded line for every row.
-  const keyOf = (l: { code: string; name?: string }) => l.code || l.name || "";
+  // Line identity = code AND name — historical windows share ONE placeholder
+  // code ("900") on every line, so a pure-code match would return the FIRST
+  // such line of each month for every row. Must mirror pnl-historical's
+  // lineKey exactly.
+  const keyOf = (l: { code: string; name?: string }) => `${l.code ?? ""} ${l.name ?? ""}`;
   const byCode = (list: { code: string; name?: string; amountSen: number }[], key: string) =>
     list.find((l) => keyOf(l) === key)?.amountSen ?? 0;
 

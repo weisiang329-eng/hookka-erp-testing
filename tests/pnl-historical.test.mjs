@@ -307,3 +307,25 @@ test("sumPnlWindows — mixed coded + uncoded lines never collide", () => {
   const out = m.sumPnlWindows([a, b]);
   assert.equal(out.expenseLines.length, 2, "coded and name-keyed lines stay separate");
 });
+
+test("sumPnlWindows — SHARED placeholder code ('900') with different names stays separate (prod shape)", () => {
+  const apr = W({
+    expenseLines: [
+      { code: "900", name: "Bank Charges", amountSen: 50, salary: false },
+      { code: "900", name: "Factory - Rental", amountSen: 1250000, salary: false },
+      { code: "900", name: "Staff Salaries & Overtime", amountSen: 2398586, salary: true },
+    ],
+    expenseSen: 50 + 1250000 + 2398586,
+  });
+  const mar = W({
+    expenseLines: [
+      { code: "900", name: "Bank Charges", amountSen: 5100, salary: false },
+      { code: "900", name: "Factory - Rental", amountSen: 1250000, salary: false },
+    ],
+    expenseSen: 5100 + 1250000,
+  });
+  const out = m.sumPnlWindows([apr, mar]);
+  assert.equal(out.expenseLines.length, 3);
+  assert.equal(out.expenseLines.find((l) => l.name === "Bank Charges").amountSen, 5150);
+  assert.equal(out.expenseLines.find((l) => l.name === "Factory - Rental").amountSen, 2500000);
+});

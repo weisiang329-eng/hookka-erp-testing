@@ -64,7 +64,6 @@ import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import {
   computeMaterialCheckpoints,
   windowFromCheckpoints,
-  stockTakeChainValue,
   type MaterialInput,
   type FifoEvent,
   type CheckpointCum,
@@ -5112,13 +5111,18 @@ type MaterialCostData = {
   // Month-end stock-take (owner periodic option): group → ym → closing value sen.
   // materialWindow uses it as the period closing (override FIFO) where present.
   stockTakeByGroupYm: Map<string, Map<string, number>>;
-  // Periodic-inventory mode (owner rule 2026-07-03, kv `rm_valuation_mode`):
-  // 'stock_take_only' → RM closing = last stock-take + purchases since (no
-  // BOM/FIFO auto-consumption); 'auto' → FIFO/BOM behaviour unchanged.
+  // Periodic-inventory mode (owner rule 2026-07-03 v3, kv `rm_valuation_mode`):
+  // 'stock_take_only' → a month-end RM value is EXACTLY what the owner imported
+  // for that month, 0 when nothing imported (the opening seed counts as the
+  // cutover month's import). No system-computed carry or consumption — every
+  // nonzero stock figure is verifiably the owner's own number. 'auto' →
+  // FIFO/BOM behaviour unchanged.
   rmValuationMode: "auto" | "stock_take_only";
-  // Opening seed value per group (material_opening_stock, qty × unitCost) —
-  // the chain base for stock_take_only months before any count exists.
+  // Opening seed value per group (material_opening_stock, qty × unitCost) and
+  // the month it belongs to (the cutover month) — the one "import" that exists
+  // before any stock_take rows.
   seedByGroup: Map<string, number>;
+  seedYm: string | null;
   wipByYm: Map<string, number>;
   fgByYm: Map<string, number>;
   warnings: {
@@ -5559,6 +5563,7 @@ async function loadMaterialCostData(
     if (v) seedByGroup.set(g, (seedByGroup.get(g) ?? 0) + v);
   }
   for (const g of seedByGroup.keys()) allGroups.add(g);
+  const seedYm = cutoverIso >= "2000-01-01" ? cutoverIso.slice(0, 7) : null;
 
   // Month-end stock-take (owner periodic-inventory option): group → ym → closing
   // value sen. materialWindow uses it as the period closing (and the prior month
@@ -5592,6 +5597,7 @@ async function loadMaterialCostData(
     stockTakeByGroupYm,
     rmValuationMode,
     seedByGroup,
+    seedYm,
     wipByYm,
     fgByYm,
     warnings: { negatives, unresolved },
@@ -5607,24 +5613,18 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
   const ZERO: CheckpointCum = { closingSen: 0, cumPurchaseSen: 0, cumConsumedSen: 0, cumNegativeUnits: 0 };
   const endKey = endYm ?? data.lastYm;
   const prevKey = startYm ? prevMonthYm(startYm) : null;
-  // Periodic-inventory mode (owner rule 2026-07-03, kv `rm_valuation_mode`):
-  // RM stock value at any month-end = latest stock-take count ≤ that month +
-  // PI purchases since (opening seed + all purchases before any count) — the
-  // BOM/FIFO consumption guess is not used at all. Consumption between counts
-  // is zero; the month a count is entered absorbs the true consumed amount.
+  // Periodic-inventory mode (owner rule 2026-07-03 v3: 「我没上传就 0 就好」):
+  // a month-end RM value is EXACTLY the owner's import for that month — 0 when
+  // nothing was imported (the opening seed counts as the cutover month's
+  // import). No carry, no computed consumption: every nonzero stock figure on
+  // the statement is verifiably the owner's own number.
   const noAuto = data.rmValuationMode === "stock_take_only";
-  const chainVal = (g: string, ym: string | null): number => {
+  const importedVal = (g: string, ym: string | null): number => {
     if (!ym) return 0;
-    const piCum = data.piPurchaseCum.get(g);
-    const piOf = (m: string) => (m < data.globalFirstYm ? 0 : (piCum?.get(m) ?? 0));
     const st = data.stockTakeByGroupYm.get(g);
-    return stockTakeChainValue(
-      data.seedByGroup.get(g) ?? 0,
-      piOf,
-      (m) => (st?.has(m) ? (st.get(m) as number) : null),
-      ym,
-      data.globalFirstYm,
-    );
+    if (st?.has(ym)) return st.get(ym) as number;
+    if (data.seedYm && ym === data.seedYm) return data.seedByGroup.get(g) ?? 0;
+    return 0;
   };
   const rmGroups = data.groups.map((g) => {
     const gm = data.groupCum.get(g);
@@ -5645,14 +5645,12 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
     // entered count at a month-end becomes the period CLOSING (and the prior month's
     // the OPENING) instead of the FIFO value, for groups that have one. Groups with
     // no stock-take keep the FIFO/BOM closing exactly as before. CONSUMED rebalances.
-    // (chainVal starts its walk AT the month itself, so a count entered for the
-    // month still wins under stock_take_only.)
     const st = data.stockTakeByGroupYm.get(g);
     const openingSen = noAuto
-      ? chainVal(g, prevKey)
+      ? importedVal(g, prevKey)
       : (prevKey && st?.has(prevKey)) ? (st.get(prevKey) as number) : w.openingSen;
     const closingSen = noAuto
-      ? chainVal(g, endKey)
+      ? importedVal(g, endKey)
       : st?.has(endKey) ? (st.get(endKey) as number) : w.closingSen;
     const consumedSen = openingSen + purchaseSen - closingSen;
     return { itemGroup: g, openingSen, purchaseSen, closingSen, consumedSen };
@@ -5967,40 +5965,13 @@ async function computePnlWindow(
     }
     return x;
   };
-  // Periodic-inventory display chain (owner rule 2026-07-03 v2: 「不要我还没
-  // import 就用 BOM 的方式」— months without an imported count must show NO
-  // system-computed consumption at all). Under kv rm_valuation_mode =
-  // stock_take_only the P&L stock rows follow the LEDGER exactly: value at any
-  // month-end = latest imported count (an import is a complete statement —
-  // groups absent from it are zero) + GL purchases since it (opening seed
-  // before any import). Opening + window purchases − closing is then 0 BY
-  // CONSTRUCTION for un-imported months; the import month absorbs the true
-  // consumption. The group-level PI chain (materialWindow) still serves the
-  // Stock Summary page and closing-stock GL posting.
-  const noAutoPnl = matData.rmValuationMode === "stock_take_only";
-  const stEndKey = endYm ?? matData.lastYm;
-  const stPrevKey = startYm ? prevMonthYm(startYm) : null;
-  const rmCountMonths = noAutoPnl
-    ? [...new Set(
-        [...matData.stockTakeByGroupYm.entries()]
-          .filter(([g]) => g !== "WIP" && g !== "FG")
-          .flatMap(([, m]) => [...m.keys()]),
-      )].sort()
-    : [];
-  const lastCountAtOrBefore = (ym: string | null): string | null => {
-    if (!ym) return null;
-    let hit: string | null = null;
-    for (const m of rmCountMonths) {
-      if (m <= ym) hit = m;
-      else break;
-    }
-    return hit;
-  };
-  const cOpenYm = lastCountAtOrBefore(stPrevKey);
-  const cCloseYm = lastCountAtOrBefore(stEndKey);
-  // 1) Stock base per group → its purchase account (scaled per group).
-  //    auto mode: the engine (FIFO/BOM or PI chain) window values.
-  //    stock_take_only: the count at the relevant base month (or opening seed).
+  // 1) Stock per group → its purchase account (scaled per group). materialWindow
+  //    already applies the valuation mode: under stock_take_only (owner rule
+  //    2026-07-03 v3 「我没上传就 0 就好」) a month-end value is exactly the
+  //    owner's import for that month — 0 when nothing imported (opening seed =
+  //    the cutover month's import) — so every nonzero stock figure on the
+  //    statement is verifiably the owner's own number and consumption exists
+  //    only where he supplied the counts. auto mode: FIFO/BOM window values.
   for (const r of mat.rmGroups) {
     const sc = rmScale(r.itemGroup, line, R);
     const mapped = purchaseAcctOf(r.itemGroup);
@@ -6010,17 +5981,8 @@ async function computePnlWindow(
     // the default purchase account instead of double-showing the account.
     const acct = mappedMeta && isPurchaseAcct(mapped, mappedMeta.type) ? mapped : pnlPDefault;
     const x = ensureAcctRow(acct);
-    if (noAutoPnl) {
-      const gst = matData.stockTakeByGroupYm.get(r.itemGroup);
-      const seed = matData.seedByGroup.get(r.itemGroup) ?? 0;
-      const openBase = stPrevKey === null ? 0 : cOpenYm ? (gst?.get(cOpenYm) ?? 0) : seed;
-      const closeBase = cCloseYm ? (gst?.get(cCloseYm) ?? 0) : seed;
-      x.openingSen += Math.round(openBase * sc);
-      x.closingSen += Math.round(closeBase * sc);
-    } else {
-      x.openingSen += Math.round(r.openingSen * sc);
-      x.closingSen += Math.round(r.closingSen * sc);
-    }
+    x.openingSen += Math.round(r.openingSen * sc);
+    x.closingSen += Math.round(r.closingSen * sc);
     x.grpLines.add(rmLineOf(r.itemGroup));
   }
   // 2) Ledger purchases per account (scaled by the account's group lines:
@@ -6032,35 +5994,6 @@ async function computePnlWindow(
     const only = x.grpLines.size === 1 ? [...x.grpLines][0] : "shared";
     const sc = line === "all" ? 1 : only === "shared" ? R : only === line ? 1 : 0;
     x.purchasesSen += Math.round(v * sc);
-  }
-  // 3) stock_take_only: GL purchases since the base month roll INTO the chain
-  //    values, so closing − opening always equals the window's purchases when
-  //    no import falls inside it (→ consumed 0 exactly; ±1 sen on pro-rated
-  //    product-line views from rounding).
-  if (noAutoPnl) {
-    const nextYmOf = (ym: string): string => {
-      const [y, m] = ym.split("-").map((n) => parseInt(n, 10));
-      return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
-    };
-    const addChainPurchases = async (
-      fromCount: string | null,
-      toYm: string | null,
-      field: "openingSen" | "closingSen",
-    ) => {
-      if (!toYm) return; // whole-history window → opening stays 0
-      if (fromCount && nextYmOf(fromCount) > toYm) return; // base month IS the boundary
-      const sub = await glWindowSigned(db, fromCount ? nextYmOf(fromCount) : null, toYm, dc);
-      for (const [code, v] of sub.net) {
-        const meta = sub.coa.get(code);
-        if (!meta || !isPurchaseAcct(code, meta.type)) continue;
-        const x = ensureAcctRow(code);
-        const only = x.grpLines.size === 1 ? [...x.grpLines][0] : "shared";
-        const sc = line === "all" ? 1 : only === "shared" ? R : only === line ? 1 : 0;
-        x[field] += Math.round(v * sc);
-      }
-    };
-    await addChainPurchases(cOpenYm, stPrevKey, "openingSen");
-    await addChainPurchases(cCloseYm, stEndKey, "closingSen");
   }
   const rmGroups = [...acctRows.entries()]
     .map(([code, x]) => ({

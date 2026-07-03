@@ -1816,7 +1816,7 @@ function StockTakeTab() {
             <div className="text-sm font-medium text-[#1F1D1B]">Closing-stock source</div>
             <p className="text-xs text-[#6B7280] mt-0.5 max-w-3xl">
               {rmMode === "stock_take_only"
-                ? "Stock take only: each month-end's raw-material value = your latest count + purchases since it (the opening seed before any count). No automatic BOM/FIFO consumption — consumption shows only in months you enter a count."
+                ? "Stock take only: each month-end shows exactly what you imported for that month — 0 when nothing is imported yet (the 30/04 opening seed counts as April). The system never computes stock or consumption on its own, so every nonzero figure is your own number."
                 : "Automatic: the system computes consumption from BOM/FIFO; a stock-take entry overrides that month's closing where present."}
             </p>
           </div>

@@ -836,18 +836,19 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     for (const row of selectedClaude) {
       const po = row.extracted;
       try {
-        // Few-shot integrity: confirm a sample either when the operator
-        // edited it, or when they explicitly marked it as a gold
-        // reference. Plain unedited Claude output is not stored back.
-        const wasEdited =
-          JSON.stringify(po) !== JSON.stringify(row.original);
-        if (wasEdited || row.markedGold) {
-          fetch(`/api/scan-po/samples/${row.sampleId}/confirm`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ correctedJson: po, gold: row.markedGold }),
-          }).catch(() => {});
-        }
+        // Record the OUTCOME of every import (2026-07-04, OCR accuracy
+        // dashboard): store the final imported JSON as correctedJson on ALL
+        // imports — edited or not — so a clean pass (correctedJson deep-equals
+        // rawExtracted) is countable, not just the edits. Previously only
+        // edited/gold rows were written, so successes were invisible and the
+        // accuracy rate couldn't be computed. `gold` still only flags the
+        // operator's explicit gold marks, so the few-shot/distill set (which
+        // reads WHERE isGold = 1) is unchanged.
+        fetch(`/api/scan-po/samples/${row.sampleId}/confirm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ correctedJson: po, gold: row.markedGold }),
+        }).catch(() => {});
 
         // Render the source PDF page(s) for this PO into a PNG attachment.
         // Done lazily here (rather than at parse time) so the UI doesn't

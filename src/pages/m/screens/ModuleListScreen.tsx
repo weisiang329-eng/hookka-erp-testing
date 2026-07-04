@@ -239,8 +239,13 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   );
 
   const rows = useMemo(() => {
-    const byTab = sourceRows.filter((r) => tab.match(r));
-    const filtered = applyFilters(byTab, source.columns, filters, debouncedSearch);
+    // When there's a search query, look across EVERY sub-tab of this source so
+    // a record is findable no matter which status tab it currently sits in
+    // (owner 2026-07-04: a Loaded DO couldn't be found from the Delivered tab).
+    // An empty search respects the active tab as before.
+    const searching = debouncedSearch.trim().length > 0;
+    const base = searching ? sourceRows : sourceRows.filter((r) => tab.match(r));
+    const filtered = applyFilters(base, source.columns, filters, debouncedSearch);
     return applySort(filtered, source.columns, sort);
   }, [sourceRows, source, tab, filters, debouncedSearch, sort]);
 

@@ -1376,7 +1376,7 @@ app.get("/pending-sos", async (c) => {
   const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
     `SELECT id, companySO, companySOId, customerName, customerState,
-            customerPO, customerPOId, customerSO, customerSOId,
+            customerPO, customerPOId, customerSO, customerSOId, reference,
             hubName, hookkaExpectedDD, totalSen, status
        FROM sales_orders
       WHERE orgId = ?

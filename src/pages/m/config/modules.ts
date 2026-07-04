@@ -479,6 +479,10 @@ const deliveryOrdersSource: DataSource = {
   columns: [
     textCol("doNo", "Customer Delivery", (r) => str(r, "doNo")),
     textCol("companySO", "Company SO", (r) => str(r, "companySO", "companySOId")),
+    // customerPO + reference kept searchable (owner 2026-07-04: "PO 也 search
+    // 不到" — the DO tabs lacked these columns, so a PO/reference query missed).
+    textCol("customerPO", "Customer PO", (r) => str(r, "customerPO", "customerPOId")),
+    textCol("reference", "Reference", (r) => str(r, "reference")),
     textCol("customer", "Customer", (r) => str(r, "customerName")),
     textCol("state", "State", (r) => str(r, "customerState")),
     dateCol("deliveryDate", "Expected DD", (r) => dateOnly(r, "deliveryDate", "hookkaExpectedDD")),
@@ -504,6 +508,10 @@ const deliveryOrdersSource: DataSource = {
 const pendingSosSource: DataSource = {
   url: "/api/delivery-orders/pending-sos",
   select: selectData,
+  // Owner 2026-07-04: a Planning/Pending card must show all five identifiers
+  // he reconciles against — our SO number (the big code), customer name, and
+  // Customer PO / Reference / Customer SO as metas (DocCard flows 4 metas
+  // 3-across + 1). Exp DD rides along as the 4th meta.
   toVM: (r): RowVM => ({
     id: str(r, "id", "companySO", "companySOId"),
     code: str(r, "companySO", "companySOId") || "—",
@@ -511,6 +519,8 @@ const pendingSosSource: DataSource = {
     items: str(r, "hubName") ? `Ship to · ${str(r, "hubName")}` : undefined,
     metas: [
       { label: "Cust PO", value: str(r, "customerPO", "customerPOId") || "—" },
+      { label: "Reference", value: str(r, "reference") || "—" },
+      { label: "Cust SO", value: str(r, "customerSO", "customerSOId") || "—" },
       { label: "Exp DD", value: shortDate(dateOnly(r, "hookkaExpectedDD")) || "—" },
     ],
     status: resolveStatus(str(r, "status"), STATUS_MAPS.so),
@@ -519,6 +529,8 @@ const pendingSosSource: DataSource = {
     textCol("companySO", "Company SO", (r) => str(r, "companySO", "companySOId")),
     textCol("customer", "Customer", (r) => str(r, "customerName")),
     textCol("customerPO", "Customer PO", (r) => str(r, "customerPO", "customerPOId")),
+    textCol("customerSO", "Customer SO", (r) => str(r, "customerSO", "customerSOId")),
+    textCol("reference", "Reference", (r) => str(r, "reference")),
     dateCol("expectedDD", "Expected DD", (r) => dateOnly(r, "hookkaExpectedDD")),
     enumCol("status", "Status", (r) => str(r, "status"), SO_STATUSES),
   ],

@@ -1611,12 +1611,16 @@ function ActionBar({
         }}
       >
         <SecondaryBtn label="Print" icon={<Printer size={16} strokeWidth={1.75} />} onClick={onPrint} />
-        <SecondaryBtn
-          label="Edit"
-          icon={<Pencil size={16} strokeWidth={1.75} />}
-          onClick={onEdit}
-          dim={!editable}
-        />
+        {/* Edit only when this doc type is actually editable on mobile. A
+            greyed, no-op Edit button (editing lives on desktop) read as broken
+            and left two oversized half-width buttons — owner 2026-07-04. */}
+        {editable ? (
+          <SecondaryBtn
+            label="Edit"
+            icon={<Pencil size={16} strokeWidth={1.75} />}
+            onClick={onEdit}
+          />
+        ) : null}
         {extraAction ? (
           <SecondaryBtn
             label={extraAction.label}

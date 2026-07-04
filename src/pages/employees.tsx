@@ -9442,19 +9442,8 @@ function LaborCostTab({
     return { nonProductionStaff, underLoggedFactory, nonProdSubtotalSen, underLoggedSubtotalSen };
   }, [showReconciliation, reconPayslips, allDepts, workersById, factoryDeptCodes, loggedValueByWorker, absenceLeniencyByPayslip, otAdjustmentByPayslip, lateDockAdjByPayslip]);
 
-  // Clean per-department under-logged total — aggregated from the PER-WORKER
-  // gaps (each worker's gross − their OWN logged value), so it is NOT polluted
-  // by cross-department borrowing the way the old gross-minus-bucketed
-  // breakdown was. Sums to the unlogged-factory subtotal below.
-  const underLoggedByDept = useMemo(() => {
-    const m = new Map<string, { code: string; name: string; gapSen: number }>();
-    for (const e of employeeResidual.underLoggedFactory) {
-      const cur = m.get(e.deptCode) ?? { code: e.deptCode, name: e.deptName, gapSen: 0 };
-      cur.gapSen += e.gapSen;
-      m.set(e.deptCode, cur);
-    }
-    return [...m.values()].sort((a, b) => b.gapSen - a.gapSen);
-  }, [employeeResidual.underLoggedFactory]);
+  // (The per-department under-logged roll-up that used to live here was removed
+  // with the under-logged worker panel — owner 2026-07-04, now fully auto-docked.)
 
   // ---- Fully-burdened department buckets --------------------------------
   // The owner wants each department's labor line to carry the FULL cost of its
@@ -10002,139 +9991,12 @@ function LaborCostTab({
               </div>
             )}
 
-            {/* 2. Factory workers with unlogged hours — the DATA GAP. */}
-            <div className="mb-3">
-              <button
-                type="button"
-                onClick={() => setShowRangeGapTbl((v) => !v)}
-                className="text-xs font-semibold text-[#9A3A2D] mb-1 flex items-center gap-1.5 hover:opacity-80"
-                title={showRangeGapTbl ? "Hide this section" : "Show this section"}
-              >
-                {showRangeGapTbl ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                <AlertTriangle className="h-3.5 w-3.5" />
-                Factory workers with under-logged hours (auto-docked — key the real hours to restore pay)
-              </button>
-              {showRangeGapTbl && (
-              <>
-              {/* Clean per-department roll-up of the under-logged gaps (sums to
-                  the Subtotal below). This is the real "by department" figure —
-                  the misleading one on the reconciliation line above was removed. */}
-              {underLoggedByDept.length > 0 && (
-                <div className="mb-2 rounded-md border border-[#E7C9C1] bg-white px-3 py-2">
-                  <p className="mb-1 text-[11px] font-medium text-[#6B7280]">By department</p>
-                  <div className="space-y-0.5">
-                    {underLoggedByDept.map((d) => (
-                      <div
-                        key={`ul-dept-${d.code}`}
-                        className="flex items-center justify-between text-xs"
-                      >
-                        <span className="text-[#6B7280]">↳ {d.name}</span>
-                        <span className="tabular-nums font-medium text-[#9A3A2D]">
-                          {formatCurrency(d.gapSen)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div className="overflow-x-auto rounded-md border border-[#E7C9C1] bg-[#FCF4F2]">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-[#E7C9C1] text-xs text-[#9A3A2D]">
-                      <th className="py-1.5 px-3 text-left font-medium">Employee</th>
-                      <th className="py-1.5 px-3 text-left font-medium">Department</th>
-                      <th className="py-1.5 px-3 text-right font-medium">Paid</th>
-                      <th className="py-1.5 px-3 text-right font-medium">Logged</th>
-                      <th className="py-1.5 px-3 text-right font-medium">Gap</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {employeeResidual.underLoggedFactory.map((e) => {
-                      // Drill-in keys on the worker record id (employeeId), not
-                      // the payslip id, since the per-day hours map is keyed by
-                      // workerId. Rows whose payslip has no linked employeeId
-                      // can't be drilled — render them non-interactive.
-                      const drillWorkerId = e.workerId;
-                      const canDrill = !!drillWorkerId && workersById.has(drillWorkerId);
-                      const isOpen = canDrill && expandedGapWorkerId === drillWorkerId;
-                      const breakdown = isOpen ? buildWorkerDayBreakdown(drillWorkerId!) : null;
-                      return (
-                        <Fragment key={`ul-fac-${e.id}`}>
-                          <tr
-                            className={`border-b border-[#F1DDD7] ${canDrill ? "cursor-pointer hover:bg-[#FBEAE5]" : ""}`}
-                            onClick={canDrill ? () => setExpandedGapWorkerId(isOpen ? null : drillWorkerId!) : undefined}
-                          >
-                            <td className="py-1.5 px-3 text-[#1F1D1B]">
-                              <span className="inline-flex items-center gap-1.5">
-                                {canDrill && (
-                                  isOpen
-                                    ? <ChevronDown className="h-3.5 w-3.5 text-[#9A3A2D]" />
-                                    : <ChevronRight className="h-3.5 w-3.5 text-[#9A3A2D]" />
-                                )}
-                                {e.name}
-                              </span>
-                            </td>
-                            <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums text-[#1F1D1B]">{formatCurrency(e.grossSen)}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{formatCurrency(e.loggedValueSen)}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums font-semibold text-[#9A3A2D]">{formatCurrency(e.gapSen)}</td>
-                          </tr>
-                          {isOpen && breakdown && (
-                            <tr className="border-b border-[#F1DDD7] bg-white">
-                              <td colSpan={5} className="px-3 py-2">
-                                <WorkerDayDrillIn
-                                  name={e.name}
-                                  idPrefix={`gap-day-${e.id}`}
-                                  breakdown={breakdown}
-                                  emptyLabel="No absent or under-recorded days in this period"
-                                />
-                              </td>
-                            </tr>
-                          )}
-                        </Fragment>
-                      );
-                    })}
-                    {employeeResidual.underLoggedFactory.length === 0 && (
-                      <tr>
-                        <td colSpan={5} className="py-2 px-3 text-center text-xs text-[#4F7C3A]">
-                          All factory workers fully reconciled — no unlogged hours
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                  <tfoot>
-                    <tr className="border-t border-[#E7C9C1]">
-                      <td className="py-1.5 px-3 font-semibold text-[#1F1D1B]" colSpan={4}>Subtotal (unrecorded)</td>
-                      <td className="py-1.5 px-3 text-right tabular-nums font-bold text-[#9A3A2D]">
-                        {formatCurrency(employeeResidual.underLoggedSubtotalSen)}
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-              </>
-              )}
-            </div>
-
-            {/* Prove the itemised gap equals the Under-recorded reconciliation
-                line above (identical figure by construction). Any genuine
-                non-production staff salary sits in Overhead, noted here. */}
-            <div className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-xs">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[#6B7280]">
-                  Unlogged factory hours {formatCurrency(employeeResidual.underLoggedSubtotalSen)}
-                  {employeeResidual.nonProdSubtotalSen > 0 && (
-                    <> {" "}(non-production staff {formatCurrency(employeeResidual.nonProdSubtotalSen)} sits in Overhead)</>
-                  )}
-                </span>
-                <span className="inline-flex items-center gap-1.5 font-semibold text-[#1F1D1B]">
-                  = Under-recorded hours {formatCurrency(underRecordedReconSen)}
-                  <span className="inline-flex items-center gap-1 rounded-full bg-[#EEF3E4] px-2 py-0.5 text-[#4F7C3A]">
-                    <Check className="h-3 w-3" /> matches
-                  </span>
-                </span>
-              </div>
-            </div>
+            {/* Under-logged worker panel REMOVED (owner 2026-07-04): every
+                under-logged/To-fill day now auto-docks at the ÷26 rate — there
+                is no manual action to take, so the review table is gone. The
+                dock still shows per-worker on payslips; the labor-cost total
+                still includes it (employeeResidual.underLoggedSubtotalSen feeds
+                the reconciliation + the Settle-from-punches button). */}
           </div>
         )}
 

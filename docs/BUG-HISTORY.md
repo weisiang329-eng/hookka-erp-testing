@@ -34,6 +34,46 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-04-008 — DO create path could silently persist a 0/0 (RM 0) 3PL rate: a rate-less vehicle masked its provider's real rate `delivery-orders` `3pl`
+
+🟡 **Fixed on worktree branch (not yet merged)**
+
+**Symptom (latent, deprioritized):** creating a delivery order with a 3PL vehicle
+whose per-trip / per-extra-drop rates were never keyed in 3PL Maintenance (0/0)
+persisted `deliveryCostSen = 0` even when the vehicle's PROVIDER (company) had a
+real rate. The DO looked like a free trip. Same class as BUG-2026-06-25 (the
+packing-list money path), which was fixed there but the note explicitly flagged
+"the DO write path has the same latent behavior for `deliveryCostSen` — untouched".
+
+**Root cause:** in `createDeliveryOrderForPOs` (src/api/routes/delivery-orders.ts,
+POST create), the vehicle cost branch (~3448) overrode `resolvedDeliveryCostSen`
+unconditionally whenever a `vehicleId` was picked — including a 0/0 vehicle — so a
+rate-less vehicle "won" over the provider's real rate and wrote 0. The provider
+fallback (~3424) was gated on `!resolvedVehicleId`, so it never got a chance.
+
+**Fix (additive):** added a `hasRatePair(trip, drop)` guard (0/0 = UNSET, not free)
+mirroring packing-lists.ts `rateForDo`/`hasRate`. Provider rate is now staged into
+`providerRateCostSen` whenever the provider has a keyed rate; the vehicle branch
+only overrides when the VEHICLE has a keyed rate, else falls through to the staged
+provider rate. When neither side has a rate, the operator's explicit
+`deliveryCostSen` (or 0) stands untouched — existing legitimately-0 DOs unaffected.
+The PUT path was audited and left alone: it only persists an explicit
+`body.deliveryCostSen`, never derives a rate, so it can't silently write 0.
+
+**Verified:** `tests/do-rate-hasrate-guard.test.mjs` (5 source-assertion tests,
+house style) all green; `npx tsc -p tsconfig.app.json --noEmit` clean; existing
+3PL / delivery / overdue tests (98) still pass. Live-prod verification pending merge.
+
+**Note on the paired FE audit (production "overdue PO" count, #17a):** verified
+NOT a bug. FE `isOverduePO` / `earliestOverdueDateOnPO` in
+`src/pages/production/utils.ts` are dead code (no call sites — only referenced in
+comments). Both the chip counts (`bedframeOverdueCount` / `sofaOverdueCount`) and
+the grid filter (`overduePoIdSet`) are sourced entirely from the backend
+`/api/production-orders/overdue-counts` endpoint, which already applies the
+per-piece ship-exclusion. Nothing changed there.
+
+---
+
 ## BUG-2026-07-04-007 — Supplier scan batch import only recorded a sample when the operator EDITED or gold-marked it → clean supplier scans never captured `ocr` `scan` `suppliers`
 
 🟢 **Fixed on main**

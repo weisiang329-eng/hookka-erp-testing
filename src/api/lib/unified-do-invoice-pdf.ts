@@ -274,8 +274,15 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
       for (const ln of nameWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 7.5, font: fonts.helv, color: INK }); dl++; }
       for (const ln of specWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 7.5, font: fonts.helv, color: MUTED }); dl++; }
 
-      page.drawText(String(it.set), { x: xSet, y, size: 8, font: fonts.helv, color: INK });
+      // Set / Price / Total are single-line values. The Order cell alone is up
+      // to 4 reference lines, so pinning these to the top line makes the whole
+      // number column float high and read as misaligned against each item's
+      // body (owner 2026-07-04: invoice "歪到完了"). Vertically centre them
+      // against the row's text height so every number sits beside its line item.
+      // DO is left byte-identical (owner: DO is fine) — only the invoice centres.
+      const midY = y - ((rowLines - 1) * 9.3) / 2;
       if (isDO) {
+        page.drawText(String(it.set), { x: xSet, y, size: 8, font: fonts.helv, color: INK });
         // Pieces breakdown wraps within the Quantity column (a multi-component
         // repair line stacks over several lines instead of spilling across).
         (qtyWrapped.length ? qtyWrapped : ["-"]).forEach((ln, i) => {
@@ -283,8 +290,9 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
         });
         rightText(page, String(it.totalQty ?? ""), xCol5Right, y, 8, fonts.helv, INK);
       } else {
-        rightText(page, money(it.priceSen ?? 0), xCol4Right, y, 8, fonts.helv, INK);
-        rightText(page, money(it.lineTotalSen ?? 0), xCol5Right, y, 8, fonts.bold, INK);
+        page.drawText(String(it.set), { x: xSet, y: midY, size: 8, font: fonts.helv, color: INK });
+        rightText(page, money(it.priceSen ?? 0), xCol4Right, midY, 8, fonts.helv, INK);
+        rightText(page, money(it.lineTotalSen ?? 0), xCol5Right, midY, 8, fonts.bold, INK);
       }
       y -= rowH;
       // dashed row separator

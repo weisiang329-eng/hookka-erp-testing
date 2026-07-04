@@ -34,6 +34,28 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-04-002 — Invoice PDF: Set/Price/Total pinned to the top line of tall 4-ref rows read as "歪" (misaligned number column) `ui-frontend` `pdf` `invoices`
+
+🟢 **Fixed on main, verified via render (before/after)**
+
+**Symptom (owner):** the auto-sent / downloaded Invoice PDF looked "歪到完了" —
+the right-hand Set / Price / Total numbers sat at the very top of each line
+item while the left "Order" cell ran 4 lines (PO / SO / REF / CO SO), so the
+number column floated high and read as detached / ragged down the page. The DO
+looked fine because its Quantity column is multi-line, so both sides balanced.
+
+**Root cause:** `src/api/lib/unified-do-invoice-pdf.ts` drew the single-line
+Set / Price / Total at the row's TOP baseline `y`; in a 4-line row they aligned
+only with line 1 (the product code), not the row's body.
+
+**Fix:** vertically centre them against the row height —
+`midY = y - ((rowLines - 1) * 9.3) / 2` — for the INVOICE branch only. The DO
+branch is left byte-identical (owner: DO is fine). Verified by rendering a
+faithful sample invoice through the real `buildUnifiedDocPdf` generator and
+comparing before (numbers at top) vs after (numbers centred beside each item).
+
+---
+
 ## BUG-2026-07-04-001 — Approved non-production request blocked the punch autofill: whole days of punched hours never logged; OT rule corrected to 30-min minimum; 0.01h scan fragments `payroll` `attendance` `data-integrity`
 
 🟢 **Fixed on main (ff591ab3) + 7 bitten days repaired live on prod (one-shot 848f259b), verified**

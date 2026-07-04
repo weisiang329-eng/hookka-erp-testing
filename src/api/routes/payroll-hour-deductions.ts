@@ -174,6 +174,79 @@ app.post("/auto-from-punch", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /settle-period  — AUTO-settle a whole month from real punches.
+// Body: { period: "YYYY-MM" }
+//
+// Owner 2026-07-04: the manual Keep-pay/Deduct backlog is retired — every day
+// with a real punch settles from the shift algorithm, no human pick. Live
+// punch-out already settles each day (worker.ts → maybeApplyAutoPunchDock); this
+// endpoint replays that over EVERY punch in a period so a month of existing
+// punches (or punches keyed before this feature) all settle at once. It is a
+// thin batch loop over the SAME per-day helper — identical guards apply per day
+// (no clock-out → skip; finalised month → skip; a MANUAL dock is never
+// overridden; full day → clears any stale AUTO row). Idempotent: re-running
+// recomputes the same AUTO docks. Returns per-reason counts so the caller (and
+// the month-recompute script) can eyeball what changed. Does NOT regenerate
+// payslips — the caller regenerates once after, exactly like a single Deduct.
+// ---------------------------------------------------------------------------
+app.post("/settle-period", async (c) => {
+  const denied = await requirePermission(c, "payslips", "update");
+  if (denied) return denied;
+  let body: { period?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+  const period = typeof body.period === "string" ? body.period.trim() : "";
+  if (!/^\d{4}-\d{2}$/.test(period)) {
+    return c.json(
+      { success: false, error: "period (YYYY-MM) is required" },
+      400,
+    );
+  }
+  await ensureDeductionSourceColumn(c.var.DB);
+  // Pull the month's punches (both times present is enforced per-day inside the
+  // helper; we still fetch clock-in-only rows so the tally reflects them).
+  const res = await c.var.DB.prepare(
+    "SELECT employeeId, date, clockIn, clockOut FROM attendance_records WHERE date LIKE ? ORDER BY date, employeeId",
+  )
+    .bind(`${period}-%`)
+    .all<{ employeeId: string; date: string; clockIn: string | null; clockOut: string | null }>();
+  const punches = res.results ?? [];
+
+  const tally: Record<string, number> = {
+    applied: 0,
+    "no-clockout": 0,
+    "invalid-times": 0,
+    "no-shortfall": 0,
+    "period-locked": 0,
+    "manual-exists": 0,
+  };
+  let dockedHours = 0;
+  for (const p of punches) {
+    if (!p.employeeId || !/^\d{4}-\d{2}-\d{2}$/.test(String(p.date ?? ""))) continue;
+    const r = await maybeApplyAutoPunchDock(c.var.DB, {
+      workerId: p.employeeId,
+      date: p.date,
+      clockIn: p.clockIn,
+      clockOut: p.clockOut,
+    });
+    tally[r.reason] = (tally[r.reason] ?? 0) + 1;
+    if (r.applied) dockedHours += r.hours ?? 0;
+  }
+  return c.json({
+    success: true,
+    data: {
+      period,
+      punches: punches.length,
+      ...tally,
+      dockedHours: Math.round(dockedHours * 100) / 100,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // DELETE /:id  — remove one dock (undo)
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {

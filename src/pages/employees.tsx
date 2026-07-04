@@ -342,6 +342,13 @@ type WorkerDayRow = {
    *  (what a Deduct would dock). Meaningful for "under" rows. */
   shortValueSen: number;
   type: "absent" | "under" | "pending" | "ok";
+  /** AUTO-SETTLED (owner 2026-07-04): the day has a complete real punch
+   *  (clock-in + clock-out), so the shift algorithm already settled it — the
+   *  office gets NO manual Keep-pay/Deduct choice, only a read-only outcome. */
+  autoSettled?: boolean;
+  /** Hours the system already auto-docked for this day (source=AUTO), shown
+   *  read-only when autoSettled. 0 = punch was a full day (nothing docked). */
+  autoDockHours?: number;
 };
 type WorkerDayBreakdown = {
   rows: WorkerDayRow[];
@@ -384,7 +391,7 @@ function WorkerDayDrillIn({
   return (
     <>
       <p className="text-xs font-semibold text-[#4B5563] mb-1">
-        Per-day Working Hours for {name} — absent days are already settled in Payroll; only under-recorded days need action here
+        Per-day Working Hours for {name} — absent days are already settled in Payroll; days with a real punch auto-settle from the shift rules; only under-recorded days with NO punch need a manual choice here
       </p>
       <p className="text-[11px] text-[#4B5563] mb-1.5">
         Absent: {breakdown.absentDays} day(s) · −{formatRM(breakdown.absenceDeductionSen)}{" "}
@@ -448,26 +455,44 @@ function WorkerDayDrillIn({
                     {onAction && (
                       <td className="py-1 px-2 text-right whitespace-nowrap">
                         {d.type === "under" && workerId ? (
-                          <span className="inline-flex gap-1 justify-end">
-                            <button
-                              type="button"
-                              onClick={() => onAction("idle", workerId, d.date, d.short)}
-                              disabled={!!busyKey}
-                              title="Came but had no work to do — keep paying for these hours (standby / waiting, not the worker's fault). Logged as idle; pay unchanged."
-                              className="rounded border border-[#D8D2CC] px-1.5 py-0.5 text-[10px] text-[#4B5563] hover:bg-[#F0EDE9] disabled:opacity-40"
+                          d.autoSettled ? (
+                            // AUTO-SETTLED (owner 2026-07-04): a real punch
+                            // already decided this day — no manual choice. Show
+                            // the system's outcome read-only.
+                            <span
+                              className="inline-block rounded bg-[#E7F0E9] px-1.5 py-0.5 text-[10px] font-medium text-[#3F6B4A]"
+                              title={
+                                (d.autoDockHours ?? 0) > 0
+                                  ? `Settled from the worker's punch — the system already docked ${(d.autoDockHours ?? 0).toFixed(2)}h for this short day (≥9h / late / OT rules). No manual choice.`
+                                  : "Settled from the worker's punch — the shift rules applied automatically. No manual choice."
+                              }
                             >
-                              {busyKey === `${workerId}|${d.date}|idle` ? "…" : "Keep pay"}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onAction("deduct", workerId, d.date, d.short)}
-                              disabled={!!busyKey}
-                              title="Did not work these hours and won't be paid for them — docks them from this month's pay."
-                              className="rounded border border-[#E2B8AE] px-1.5 py-0.5 text-[10px] text-[#9A3A2D] hover:bg-[#FBEAE6] disabled:opacity-40"
-                            >
-                              {busyKey === `${workerId}|${d.date}|deduct` ? "…" : "Deduct"}
-                            </button>
-                          </span>
+                              {(d.autoDockHours ?? 0) > 0
+                                ? `Auto-docked ${(d.autoDockHours ?? 0).toFixed(2)}h`
+                                : "Auto-settled"}
+                            </span>
+                          ) : (
+                            <span className="inline-flex gap-1 justify-end">
+                              <button
+                                type="button"
+                                onClick={() => onAction("idle", workerId, d.date, d.short)}
+                                disabled={!!busyKey}
+                                title="No punch for this day — decide manually. Came but had no work to do → keep paying for these hours (standby / waiting, not the worker's fault). Logged as idle; pay unchanged."
+                                className="rounded border border-[#D8D2CC] px-1.5 py-0.5 text-[10px] text-[#4B5563] hover:bg-[#F0EDE9] disabled:opacity-40"
+                              >
+                                {busyKey === `${workerId}|${d.date}|idle` ? "…" : "Keep pay"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onAction("deduct", workerId, d.date, d.short)}
+                                disabled={!!busyKey}
+                                title="No punch for this day — decide manually. Did not work these hours and won't be paid for them → docks them from this month's pay."
+                                className="rounded border border-[#E2B8AE] px-1.5 py-0.5 text-[10px] text-[#9A3A2D] hover:bg-[#FBEAE6] disabled:opacity-40"
+                              >
+                                {busyKey === `${workerId}|${d.date}|deduct` ? "…" : "Deduct"}
+                              </button>
+                            </span>
+                          )
                         ) : null}
                       </td>
                     )}
@@ -499,6 +524,7 @@ function WorkerDayDrillIn({
         Working days are Mon–Sat, excluding Sundays and declared public holidays.
         Absent days are a salary deduction; under-recorded days just need the missing hours keyed in.
         Pending days are too recent to confirm (within 2 working days) and are not yet deducted.
+        Days with a real punch are <span className="text-[#3F6B4A]">auto-settled</span> — the shift rules (≥9h, late past grace, OT from 30 min past 18:00) already ran on punch-out, so there is no manual Keep-pay / Deduct choice for them.
       </p>
     </>
   );
@@ -8574,6 +8600,50 @@ function LaborCostTab({
   // Which "workerId|date|action" write is mid-flight, so its button disables.
   const [underActionBusy, setUnderActionBusy] = useState<string | null>(null);
 
+  // AUTO-SETTLEMENT (owner 2026-07-04): a day with a REAL punch (clock-in AND
+  // clock-out) is settled by the system, not by a manual Keep-pay/Deduct pick.
+  // The worker punch-out already ran the shift algorithm (≥9h, late past grace,
+  // OT from 30min past 18:00, day-typed multipliers) and wrote an AUTO
+  // short-hour dock via maybeApplyAutoPunchDock, so the day is DONE. We pull the
+  // period's punches so the drill-in can label those days "auto-settled" and
+  // HIDE the manual buttons — the office can no longer override the punch truth.
+  // Days with NO punch (pure office-keyed, no attendance record) keep the manual
+  // choice: there is no punch evidence to auto-derive from, so silently docking
+  // would be a guess (the conservative direction — never auto-dock a no-evidence
+  // day). Best-effort: if this fetch fails, every day just falls back to the old
+  // manual behaviour rather than blocking the screen.
+  const { data: periodAttendanceResp } = useCachedJson<{
+    data?: Array<{
+      employeeId?: string;
+      date?: string;
+      clockIn?: string | null;
+      clockOut?: string | null;
+    }>;
+  }>(from && to ? `/api/attendance?from=${from}&to=${to}` : null);
+  // "workerId|YYYY-MM-DD" → true when that day has a complete punch (in + out),
+  // i.e. the shift algorithm could settle it. A punch with only a clock-in is
+  // NOT settled (forgot to punch out) — it stays manual, mirroring the
+  // maybeApplyAutoPunchDock "no clock-out → never dock" guard.
+  const punchSettledByWorkerDate = useMemo(() => {
+    const s = new Set<string>();
+    for (const a of periodAttendanceResp?.data ?? []) {
+      if (!a.employeeId || !a.date) continue;
+      if (a.clockIn && a.clockOut) s.add(`${a.employeeId}|${a.date}`);
+    }
+    return s;
+  }, [periodAttendanceResp]);
+  // "workerId|YYYY-MM-DD" → the hours the system already auto-docked for that
+  // day (source=AUTO). Lets the drill-in show the settled dock inline instead of
+  // an actionable "short" figure.
+  const autoDockByWorkerDate = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of deductionsResp?.data ?? []) {
+      if ((r.source ?? "MANUAL") !== "AUTO") continue;
+      m.set(`${r.workerId}|${r.date}`, (m.get(`${r.workerId}|${r.date}`) ?? 0) + (Number(r.hours) || 0));
+    }
+    return m;
+  }, [deductionsResp]);
+
   // Resolve an under-recorded short day. "idle" = came but no work, still paid →
   // log the short hours to PRODUCTION_SHORTFALL so they land in the Idle bucket
   // and the worker's gap closes (no pay change). "deduct" = came but didn't work
@@ -8688,6 +8758,63 @@ function LaborCostTab({
     },
     [payrollPeriod, refreshRecon, refreshDeductions, confirm],
   );
+
+  // AUTO-settle the whole month from real punches (owner 2026-07-04). Replays the
+  // shift algorithm over every punch in the period so days settle without a
+  // manual pick — then regenerates once so pay reflects the docks. Idempotent
+  // and heavily guarded server-side (no clock-out → skip, finalised month →
+  // skip, a MANUAL dock is never overridden). Live punch-out already settles day
+  // by day; this is for catching up a month of existing punches at once.
+  const [settleBusy, setSettleBusy] = useState(false);
+  const [settleResult, setSettleResult] = useState<string | null>(null);
+  const handleSettleFromPunches = useCallback(async () => {
+    if (!payrollPeriod) return;
+    if (
+      !(await confirm({
+        title: "Auto-settle this month from punches?",
+        message: `Apply the shift rules (≥9h, late past grace, OT from 30 min past 18:00) to every real punch in ${payrollMonthLabel} and regenerate payslips? Days with a real punch are settled automatically — a full day docks nothing, a short/late day docks the shortfall. Your own MANUAL Keep-pay / Deduct decisions are never overridden, and an already-approved month is not touched.`,
+        confirmLabel: "Settle from punches",
+      }))
+    ) {
+      return;
+    }
+    setSettleBusy(true);
+    setSettleResult(null);
+    try {
+      const r = await fetch("/api/payroll-hour-deductions/settle-period", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ period: payrollPeriod }),
+      });
+      const j = (await r.json()) as {
+        success?: boolean;
+        data?: { punches: number; applied: number; "no-shortfall": number; "period-locked": number; "manual-exists": number; dockedHours: number };
+        error?: string;
+      };
+      if (!r.ok || !j.success) throw new Error(j.error || `settle ${r.status}`);
+      const d = j.data;
+      if (d) {
+        setSettleResult(
+          `${d.punches} punch day(s) settled — ${d.applied} docked (${d.dockedHours}h), ${d["no-shortfall"]} full day(s), ${d["manual-exists"]} left on your manual pick${d["period-locked"] > 0 ? `, ${d["period-locked"]} skipped (month locked)` : ""}.`,
+        );
+      }
+      // Regenerate once so the docks land in pay (same as a single Deduct).
+      await fetch("/api/payslips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ period: payrollPeriod, regenerate: true }),
+      });
+      invalidateCachePrefix("/api/payslips");
+      invalidateCachePrefix("/api/payroll-hour-deductions");
+      refreshDeductions?.();
+      refreshRecon?.();
+    } catch (e) {
+      console.error("[settle-from-punches]", e);
+      setSettleResult("Could not settle — please try again.");
+    } finally {
+      setSettleBusy(false);
+    }
+  }, [payrollPeriod, payrollMonthLabel, confirm, refreshDeductions, refreshRecon]);
 
   // Index departments by code once so the per-row / per-worker reconciliation
   // loops below do O(1) lookups instead of allDepts.find() on every iteration.
@@ -9254,6 +9381,14 @@ function LaborCostTab({
         } else {
           type = "ok";
         }
+        // AUTO-SETTLED: this day has a COMPLETE real punch, so the shift
+        // algorithm already decided it (an AUTO short-hour dock, or a full day).
+        // The manual Keep-pay/Deduct choice is removed for these — the panel
+        // shows the settled outcome read-only. A day with only a clock-in (no
+        // clock-out) is NOT settled (forgot to punch out) and stays manual.
+        const wdKey = `${workerId}|${date}`;
+        const autoSettled = punchSettledByWorkerDate.has(wdKey);
+        const autoDockHours = autoDockByWorkerDate.get(wdKey) ?? 0;
         return {
           date,
           logged,
@@ -9261,6 +9396,8 @@ function LaborCostTab({
           short,
           shortValueSen: Math.round(short * costingHourlyRateSen),
           type,
+          autoSettled,
+          autoDockHours,
         };
       });
       const absenceDeductionSen = absentDays * perDayDeductionSen;
@@ -9275,7 +9412,7 @@ function LaborCostTab({
         perDayDeductionSen,
       };
     },
-    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList, period, from, effSalaryOf, payRuleVersions],
+    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList, period, from, effSalaryOf, payRuleVersions, punchSettledByWorkerDate, autoDockByWorkerDate],
   );
 
   // Set of department codes the labor buckets cover (the 8 production depts +
@@ -9763,11 +9900,25 @@ function LaborCostTab({
               <option value="BEDFRAME">Bedframe</option>
               <option value="ACCESSORY">Accessory</option>
             </select>
+            {showReconciliation && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleSettleFromPunches}
+                disabled={settleBusy || !payrollPeriod}
+                title="Apply the shift rules to every real punch this month and regenerate payslips. Days with a punch settle automatically (a short/late day docks its shortfall; a full day docks nothing). Your manual Keep-pay / Deduct picks are never overridden."
+              >
+                <Clock className="h-4 w-4 mr-1" /> {settleBusy ? "Settling…" : "Settle from punches"}
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={handlePrint} title="Print the production labor breakdown for the selected period">
               <Printer className="h-4 w-4 mr-1" /> Print Report
             </Button>
           </div>
         </div>
+        {settleResult && (
+          <p className="mt-2 text-xs text-[#3F6B4A]">{settleResult}</p>
+        )}
       </CardHeader>
       <CardContent>
         {/* KPI strip */}

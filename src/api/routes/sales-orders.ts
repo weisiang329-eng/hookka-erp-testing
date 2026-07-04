@@ -342,6 +342,60 @@ function rowToSOList(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// soListToDeliveryRefs — GET /api/sales-orders?fields=delivery-refs projection.
+//
+// The Delivery page (src/pages/delivery/index.tsx) fetches the whole SO list
+// for two joins onto DO / PO rows:
+//   1. Customer PO/SO numbers + reference + hookkaExpectedDD (the DO payload
+//      doesn't carry these) — the ref scalars below.
+//   2. A per-SO {productCode → unitPriceSen} price map, so the PO-based
+//      Planning / Pending Delivery tabs can compute a Sales Figure when the
+//      exact server value (/api/delivery-orders/po-values) hasn't been resolved
+//      for a PO yet (soPriceByProduct fallback in delivery/index.tsx).
+//
+// So this projects the SAME cached snapshot list down to those ref scalars PLUS
+// a SLIM items array carrying ONLY {productCode, unitPriceSen} (same shape as
+// ?fields=price-index). That drops the per-SO base64 scan image AND the ~22
+// other fields on every line item — a >90% payload cut vs the full list — while
+// keeping BOTH joins byte-identical. Kept pure + exported so it's unit-testable.
+//
+// The four ref columns are dual-keyed (*Id + plain) because the DO grid prefers
+// the far-better-populated *Id columns and falls back to the plain ones — see
+// the soRefMap builder in delivery/index.tsx. Both keys are carried through.
+// ---------------------------------------------------------------------------
+type SOListRefLike = {
+  id: string;
+  companySOId?: string;
+  customerId?: string;
+  customerSO?: string;
+  customerSOId?: string;
+  customerPO?: string;
+  customerPOId?: string;
+  reference?: string;
+  hookkaExpectedDD?: string;
+  items?: Array<{ productCode?: string; unitPriceSen?: number }>;
+};
+export function soListToDeliveryRefs(list: SOListRefLike[]) {
+  return list.map((s) => ({
+    id: s.id,
+    companySOId: s.companySOId ?? "",
+    customerId: s.customerId,
+    customerSO: s.customerSO ?? "",
+    customerSOId: s.customerSOId ?? "",
+    customerPO: s.customerPO ?? "",
+    customerPOId: s.customerPOId ?? "",
+    reference: s.reference ?? "",
+    hookkaExpectedDD: s.hookkaExpectedDD ?? "",
+    // Slim items — product code + unit price ONLY (the price-fallback join),
+    // never the full ~24-field line the grid doesn't read here.
+    items: (s.items ?? []).map((it) => ({
+      productCode: it.productCode,
+      unitPriceSen: it.unitPriceSen,
+    })),
+  }));
+}
+
 function parseAutoActions(raw: string | null): string[] {
   if (!raw) return [];
   try {
@@ -1029,6 +1083,20 @@ app.get("/", async (c) => {
           unitPriceSen: it.unitPriceSen,
         })),
       }));
+      return c.json({ success: true, data: slim, total: slim.length });
+    }
+    // The Delivery page fetches this whole list ONLY to join Customer PO/SO
+    // numbers + reference + hookkaExpectedDD onto DO rows (the DO payload
+    // doesn't carry these). It never needs line items — dropping them (each
+    // SO has ~24-field items) shrinks the payload by well over 90%.
+    // ?fields=delivery-refs projects the SAME cached snapshot down to the ref
+    // scalars the DO grids read (id/companySOId/customerId + the four ref
+    // columns dual-keyed *Id/plain + hookkaExpectedDD). Byte-identical values,
+    // no items, no image. The full-list path (no param) is untouched.
+    if (c.req.query("fields") === "delivery-refs") {
+      const slim = soListToDeliveryRefs(
+        (data?.data ?? []) as SOListRefLike[],
+      );
       return c.json({ success: true, data: slim, total: slim.length });
     }
     return c.json(data);

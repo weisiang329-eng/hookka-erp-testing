@@ -1136,7 +1136,14 @@ export default function DeliveryPage() {
   // needs uph JC statuses to compute Planning vs Pending Delivery). Cuts
   // the response from 2-6 MB to 200-600 KB.
   const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders?fields=minimal&include=jobCards");
-  const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string; customerSO?: string; customerPO?: string; reference?: string }[] }>("/api/sales-orders");
+  // Slim projection: this page joins Customer PO/SO + reference + expected-DD
+  // onto DO rows, plus a per-SO {productCode → unitPriceSen} price map for the
+  // PO-based Planning / Pending Delivery Sales-Figure fallback. ?fields=
+  // delivery-refs serves the SAME cached snapshot down to just those ref
+  // scalars + SLIM items (product code + unit price only — no scan image, no
+  // other line fields) — the full list was ~1.4MB; the slim variant is a
+  // fraction of that.
+  const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string; customerSO?: string; customerSOId?: string; customerPO?: string; customerPOId?: string; reference?: string; items?: { productCode?: string; unitPriceSen?: number }[] }[] }>("/api/sales-orders?fields=delivery-refs");
   // Exact per-PO Sales Figure from the server (same resolver the DO /
   // invoice path uses) so Planning / Pending Delivery reconcile to the
   // cent instead of the page guessing price by product code.

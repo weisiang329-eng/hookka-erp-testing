@@ -34,6 +34,35 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-04-005 — Auto-sent DO/Invoice emails used a SECOND pdf engine (pdf-lib) that looked different from the jsPDF the operator prints `ui-frontend` `pdf` `delivery` `invoices` `customer-notify`
+
+🟢 **Fixed on main — email now renders the exact print PDF (verify with one real send)**
+
+**Symptom (owner 2026-07-04):** the auto-sent DO and Invoice PDFs looked "歪"
+and "差得很远" from what the operator prints/downloads, and DO vs Invoice were
+inconsistent.
+
+**Root cause:** two separate PDF engines. Print/Download uses **jsPDF**
+(`src/lib/generate-do-pdf.ts` / `generate-invoice-pdf.ts`). The customer-notify
+email rendered a SECOND **pdf-lib** generator (`unified-do-invoice-pdf.ts` via
+`renderUnifiedDoBase64` / `renderUnifiedInvoiceBase64`) — a different-looking
+document. The stated goal ("customer receives exactly what the operator sees")
+was inverted.
+
+**Fix:** the operator-triggered notify path (browser present, the normal case)
+now renders the SAME jsPDF the Print button produces — `generateDoPdfBase64` /
+`generateInvoicePdfBase64`, with the same row/invoice + print-extras.
+Changed `src/pages/delivery/index.tsx` (dispatch DO + delivered Invoice) and
+`src/pages/invoices/index.tsx` (bulk resend). The pdf-lib generator stays ONLY
+as the pure-backend fallback (no-browser sends — jsPDF can't run on Workers).
+Note: BUG-2026-07-04-002 (pdf-lib invoice centring) still applies to that
+fallback path.
+
+**Verify:** owner does one real dispatch + one real delivered → the emailed
+DO/Invoice is byte-for-byte the printed one.
+
+---
+
 ## BUG-2026-07-04-004 — Creating any new sister organisation 500'd on prod: migration 0142 never auto-applied and had no runtime self-apply `organisations` `multi-tenant` `schema`
 
 🟢 **Fixed on main (ensureOrganisationRegistry) — verified by creating HKMFG on prod**

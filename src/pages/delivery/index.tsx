@@ -719,11 +719,15 @@ async function renderDeliveredInvoicePdf(
     };
     const invoice = ij?.success ? ij.data : undefined;
     if (!invoice) return {};
-    const { renderUnifiedInvoiceBase64 } = await import(
-      "@/lib/unified-doc-download"
+    // Email the SAME jsPDF the operator prints. The pdf-lib "unified" render
+    // was a second engine that looked different from Print ("歪", owner
+    // 2026-07-04); generateInvoicePdfBase64 IS exactly what the Print button
+    // produces, so the customer now receives what the operator sees.
+    const { generateInvoicePdfBase64 } = await import(
+      "@/lib/generate-invoice-pdf"
     );
     return {
-      pdfBase64: await renderUnifiedInvoiceBase64(
+      pdfBase64: generateInvoicePdfBase64(
         invoice,
         ej?.success ? ej.data : undefined,
       ),
@@ -764,8 +768,14 @@ async function sendCustomerNotice(
       itemsBreakdown = buildDoComponentBreakdown(row.items, extras);
       customerPOIds = collectCustomerPOIds(row.items, extras, row.customerPOId);
       try {
-        const { renderUnifiedDoBase64 } = await import("@/lib/unified-doc-download");
-        pdfBase64 = await renderUnifiedDoBase64(row, extras);
+        // Email the SAME jsPDF the operator prints (owner 2026-07-04: the
+        // pdf-lib email version looked different/"歪"). Same row + extras the
+        // Print-DO handler passes — no delivery QR on the customer email.
+        const { generateDoPdfBase64 } = await import("@/lib/generate-do-pdf");
+        pdfBase64 = generateDoPdfBase64(
+          row as unknown as import("@/types").DeliveryOrder,
+          extras,
+        );
         pdfFilename = `${row.doNo.startsWith("DO-") ? row.doNo : `DO-${row.doNo}`}.pdf`;
       } catch {
         /* graceful — backend sends the notice without the attachment */

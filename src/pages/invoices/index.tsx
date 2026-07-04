@@ -267,7 +267,7 @@ export default function InvoicesPage() {
     setBatchRunning(true);
     let ok = 0;
     const errors: string[] = [];
-    const { renderUnifiedInvoiceBase64 } = await import("@/lib/unified-doc-download");
+    const { generateInvoicePdfBase64 } = await import("@/lib/generate-invoice-pdf");
     for (const inv of selectedInvoices) {
       if (
         customerEmailById.size > 0 &&
@@ -305,9 +305,10 @@ export default function InvoicesPage() {
           errors.push(`${inv.invoiceNo}: no linked delivery order`);
           continue;
         }
-        // Render the UNIFIED invoice PDF client-side (same generator as the
-        // download + the delivered-notice email) so the re-sent email carries
-        // the exact edited document. print-extras adds the per-line spec detail.
+        // Render the invoice PDF client-side with the SAME jsPDF generator the
+        // detail-page download + the delivered-notice email now use, so the
+        // re-sent email carries the exact document the operator prints.
+        // print-extras adds the per-line spec detail.
         let pdfBase64: string | undefined;
         try {
           const er = await fetch(
@@ -318,9 +319,9 @@ export default function InvoicesPage() {
             success?: boolean;
             data?: unknown;
           };
-          pdfBase64 = await renderUnifiedInvoiceBase64(
+          pdfBase64 = generateInvoicePdfBase64(
             fullInv,
-            ej?.success ? (ej.data as Parameters<typeof renderUnifiedInvoiceBase64>[1]) : undefined
+            ej?.success ? (ej.data as Parameters<typeof generateInvoicePdfBase64>[1]) : undefined
           );
         } catch {
           // Render failed — send without the client PDF; the server renders its

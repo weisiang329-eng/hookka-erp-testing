@@ -632,10 +632,12 @@ test("frontend: bulk + single transition paths fire the notify flow", () => {
   );
   assert.match(pageSrc, /\/notify-customer`,/);
   assert.match(pageSrc, /buildDoComponentBreakdown\(row\.items, extras\)/);
-  // Unified pdf-lib generator (2026-07-02): the customer email now carries the
-  // SAME document the operator downloads, not the old branded fallback.
-  assert.match(pageSrc, /renderUnifiedDoBase64\(/);
-  assert.match(pageSrc, /renderUnifiedInvoiceBase64\(/);
+  // The customer email carries the SAME jsPDF the operator prints/downloads
+  // (fix 2026-07-04 BUG-...-005: the earlier pdf-lib "unified" render was a
+  // second engine that looked different/"歪" → now renders via the print
+  // generators generateDoPdfBase64 / generateInvoicePdfBase64).
+  assert.match(pageSrc, /generateDoPdfBase64\(/);
+  assert.match(pageSrc, /generateInvoicePdfBase64\(/);
   // runBulkDoTransition (bulk buttons + PL-level bulk reuse) notifies every
   // DO that actually transitioned, mapping LOADED→DISPATCHED.
   assert.match(

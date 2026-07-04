@@ -9,6 +9,36 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-04 — 🟡 Multi-company Phase 2: consolidated group P&L / Balance Sheet + company drill (worktree branch, NOT pushed)
+
+Owner #1 ask: "see the group P&L all together, also drill to one company."
+ADDITIVE, front-end only — reuses the Phase-1 `?orgId=` backend (companyFilter),
+NO backend logic change. Worktree branch `worktree-agent-a398b72b2050a314b`,
+committed there, NOT pushed.
+
+**Built:**
+- `useCompanyOptions()` + `orgIdParam()` in `accounting/shared.ts`; a shared
+  `<CompanySelect>` in `index.tsx` matching the existing period-select styling.
+  DEFAULT = "All companies (group)" (value "") → report URL UNCHANGED =
+  today's consolidated numbers. A company appends `&orgId=<code>` (org CODE
+  lower-cased — `hookka`/`ohana` — NOT the org row id).
+- Wired into: Balance Sheet tab (`/pl`), Trial Balance tab (`/trial-balance`),
+  Debtor Aging + Creditor Aging (`/aging` + `/ar-control`/`/ap-control`). AR/AP
+  aging re-fetch a company-scoped copy locally; the consolidated prop path is
+  untouched.
+- `GroupByCompanyCard` on the Balance Sheet group view: parallel per-company
+  `/pl?orgId=` fetches → Net Profit + Total Equity per company + group total
+  (hidden once a single company is picked).
+- Test `tests/company-filter-param.test.mjs` locks "group default → no param"
+  (byte-identical URL). tsc clean; pnl-*/bs-section/other-party-aging green.
+
+**Out of scope (deliberate):** the rich hierarchical P&L tab (`/pl-statement`)
+does NOT accept `?orgId=` — scoping it needs a backend change threading
+companyFilter through computePnlWindow + FIFO material costing, which the
+"don't touch backend logic" constraint rules out. Left unchanged.
+
+---
+
 ## 2026-07-04 — 🟡 FULL-auto payroll settlement, manual panel REMOVED (staging branch, NOT pushed)
 
 Owner picked (A): FULL auto — auto-dock the shortfall on partial/under-logged

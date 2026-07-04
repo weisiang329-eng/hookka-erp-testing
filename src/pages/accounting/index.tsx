@@ -59,8 +59,40 @@ import type {
 // Shared helpers + per-tab components extracted from this file (2026-07-04
 // split of the ~9.6k-line Accounting page; behaviour-identical, more tabs
 // to follow).
-import { asMutationResponse } from "./shared";
+import { asMutationResponse, useCompanyOptions, orgIdParam, type CompanyOption } from "./shared";
 import { AuditLogTab } from "./tabs/AuditLogTab";
+
+// =============== MULTI-COMPANY (Phase 2) — company selector ===============
+//
+// A compact company dropdown that matches the existing period selector's
+// styling (rounded-md border, bg-white, px-3 py-1.5, text-sm). DEFAULT is
+// "All companies (group)" (value "") — the report then fetches with NO orgId
+// param, i.e. today's consolidated numbers, byte-identical to before. Picking
+// a company appends `&orgId=<code>` and scopes the report to that one entity.
+function CompanySelect({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: CompanyOption[];
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="text-xs font-semibold text-[#1F1D1B]">Company</label>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+      >
+        {options.map((o) => (
+          <option key={o.value || "__all__"} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
 
 // =============== TYPES ===============
 
@@ -3324,7 +3356,7 @@ function JournalEntryForm({
 // Three numbers that must agree: the SDC control accounts in the ledger,
 // the invoice-derived outstanding (gross of SST), and the running
 // customers.outstandingSen counter. Drift badges make divergence loud.
-function ARControlPanel() {
+function ARControlPanel({ company = "" }: { company?: string }) {
   const [data, setData] = useState<{
     asOf: string;
     controls: { code: string; name: string; balanceSen: number }[];
@@ -3345,11 +3377,18 @@ function ARControlPanel() {
     rows: { date: string; ref: string; type: string; debitSen: number; creditSen: number; runningSen: number }[];
   } | null>(null);
 
+  // Multi-company (Phase 2): scope the control reconciliation to the selected
+  // company. Absent (group) → URL unchanged = today's consolidated numbers.
   useEffect(() => {
-    fetch("/api/accounting/ar-control")
+    let stale = false;
+    fetch(`/api/accounting/ar-control${company ? `?orgId=${encodeURIComponent(company)}` : ""}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: typeof data }>)
-      .then((j) => { if (j?.success && j.data) setData(j.data); })
+      .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
       .catch(() => {});
+    return () => { stale = true; };
+  }, [company]);
+
+  useEffect(() => {
     fetch("/api/customers")
       .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; name: string }[] }>)
       .then((j) => { if (j?.success) setCustomers((j.data ?? []).map((c2) => ({ id: c2.id, name: c2.name }))); })
@@ -3503,6 +3542,27 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
   const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split("T")[0]);
   const [paymentRef, setPaymentRef] = useState("");
 
+  // Multi-company (Phase 2): "" = All companies (group). The consolidated
+  // aging arrives via the arData prop (unchanged). Picking a company fetches
+  // a company-scoped /aging locally and shows that instead — additive, the
+  // group path is untouched.
+  const [company, setCompany] = useState("");
+  const companyOptions = useCompanyOptions();
+  const [scopedAr, setScopedAr] = useState<ARAgingEntry[] | null>(null);
+  // Clearing scoped state on de-select happens in the selector's onChange (not
+  // in the effect) to keep the effect side-effect-free per lint.
+  const pickCompany = (v: string) => { setCompany(v); if (!v) setScopedAr(null); };
+  useEffect(() => {
+    if (!company) return;
+    let stale = false;
+    fetch(`/api/accounting/aging?orgId=${encodeURIComponent(company)}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { ar: ARAgingEntry[] } }>)
+      .then((j) => { if (!stale && j?.success && j.data) setScopedAr(j.data.ar ?? []); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [company]);
+  const rows = company ? (scopedAr ?? []) : arData;
+
   const handlePayment = async (customerId: string) => {
     const amountSen = Math.round(Number(paymentAmount) * 100);
     if (amountSen <= 0) return;
@@ -3519,14 +3579,17 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
     onRefresh();
   };
 
-  const totalOutstanding = arData.reduce(
+  const totalOutstanding = rows.reduce(
     (s, a) => s + a.currentSen + a.days30Sen + a.days60Sen + a.days90Sen + a.over90Sen,
     0
   );
 
   return (
     <div className="space-y-4">
-      <ARControlPanel />
+      <div className="flex justify-end">
+        <CompanySelect value={company} onChange={pickCompany} options={companyOptions} />
+      </div>
+      <ARControlPanel company={company} />
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Receivable</h2>
@@ -3551,7 +3614,7 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                 </tr>
               </thead>
               <tbody>
-                {arData.map((ar) => {
+                {rows.map((ar) => {
                   const total = ar.currentSen + ar.days30Sen + ar.days60Sen + ar.days90Sen + ar.over90Sen;
                   return (
                     <tr key={ar.customerId} className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30">
@@ -3580,11 +3643,11 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
               <tfoot>
                 <tr className="bg-[#F0ECE9]/50 font-semibold">
                   <td className="py-3 px-4 text-[#1F1D1B]">Total</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(arData.reduce((s, a) => s + a.currentSen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(arData.reduce((s, a) => s + a.days30Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(arData.reduce((s, a) => s + a.days60Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(arData.reduce((s, a) => s + a.days90Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(arData.reduce((s, a) => s + a.over90Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.currentSen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days30Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days60Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days90Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.over90Sen, 0))}</td>
                   <td className="py-3 px-4 text-right">{formatCurrency(totalOutstanding)}</td>
                   <td></td>
                 </tr>
@@ -3596,7 +3659,7 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
           {paymentForm && (
             <div className="border-t border-[#E2DDD8] p-4 bg-[#F0ECE9]/30">
               <h4 className="text-sm font-medium text-[#1F1D1B] mb-3">
-                Record Payment - {arData.find((a) => a.customerId === paymentForm)?.customerName}
+                Record Payment - {rows.find((a) => a.customerId === paymentForm)?.customerName}
               </h4>
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
                 <div>
@@ -3654,7 +3717,7 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
 // running counter (outstandingSen)" card was removed (2026-06-25) — suppliers
 // .outstandingSen is never maintained on PI approve/pay, so it only ever showed
 // a false drift. The real reconciliation is Creditor-control-ledger vs PI.
-function APControlPanel() {
+function APControlPanel({ company = "" }: { company?: string }) {
   const [data, setData] = useState<{
     controls: { code: string; name: string; balanceSen: number }[];
     tradeControlSen: number;
@@ -3671,11 +3734,17 @@ function APControlPanel() {
     closingSen: number;
     rows: { date: string; ref: string; type: string; debitSen: number; creditSen: number; runningSen: number }[];
   } | null>(null);
+  // Multi-company (Phase 2): scope the creditor-control reconciliation to the
+  // selected company. Absent (group) → URL unchanged = consolidated numbers.
   useEffect(() => {
-    fetch("/api/accounting/ap-control")
+    let stale = false;
+    fetch(`/api/accounting/ap-control${company ? `?orgId=${encodeURIComponent(company)}` : ""}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: typeof data }>)
-      .then((j) => { if (j?.success && j.data) setData(j.data); })
+      .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
       .catch(() => {});
+    return () => { stale = true; };
+  }, [company]);
+  useEffect(() => {
     fetch("/api/suppliers")
       .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; name: string }[] }>)
       .then((j) => { if (j?.success) setSuppliers((j.data ?? []).map((s) => ({ id: s.id, name: s.name }))); })
@@ -4253,6 +4322,23 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
   const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split("T")[0]);
   const [paymentRef, setPaymentRef] = useState("");
 
+  // Multi-company (Phase 2): "" = All companies (group). Consolidated aging
+  // arrives via apData prop (unchanged); a company scopes /aging locally.
+  const [company, setCompany] = useState("");
+  const companyOptions = useCompanyOptions();
+  const [scopedAp, setScopedAp] = useState<APAgingEntry[] | null>(null);
+  const pickCompany = (v: string) => { setCompany(v); if (!v) setScopedAp(null); };
+  useEffect(() => {
+    if (!company) return;
+    let stale = false;
+    fetch(`/api/accounting/aging?orgId=${encodeURIComponent(company)}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { ap: APAgingEntry[] } }>)
+      .then((j) => { if (!stale && j?.success && j.data) setScopedAp(j.data.ap ?? []); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [company]);
+  const rows = company ? (scopedAp ?? []) : apData;
+
   const handlePayment = async (supplierId: string) => {
     const amountSen = Math.round(Number(paymentAmount) * 100);
     if (amountSen <= 0) return;
@@ -4269,14 +4355,17 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
     onRefresh();
   };
 
-  const totalOutstanding = apData.reduce(
+  const totalOutstanding = rows.reduce(
     (s, a) => s + a.currentSen + a.days30Sen + a.days60Sen + a.days90Sen + a.over90Sen,
     0
   );
 
   return (
     <div className="space-y-4">
-      <APControlPanel />
+      <div className="flex justify-end">
+        <CompanySelect value={company} onChange={pickCompany} options={companyOptions} />
+      </div>
+      <APControlPanel company={company} />
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Payable</h2>
@@ -4301,7 +4390,7 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                 </tr>
               </thead>
               <tbody>
-                {apData.map((ap) => {
+                {rows.map((ap) => {
                   const total = ap.currentSen + ap.days30Sen + ap.days60Sen + ap.days90Sen + ap.over90Sen;
                   return (
                     <tr key={ap.supplierId} className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30">
@@ -4330,11 +4419,11 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
               <tfoot>
                 <tr className="bg-[#F0ECE9]/50 font-semibold">
                   <td className="py-3 px-4 text-[#1F1D1B]">Total</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(apData.reduce((s, a) => s + a.currentSen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(apData.reduce((s, a) => s + a.days30Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(apData.reduce((s, a) => s + a.days60Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(apData.reduce((s, a) => s + a.days90Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(apData.reduce((s, a) => s + a.over90Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.currentSen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days30Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days60Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days90Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.over90Sen, 0))}</td>
                   <td className="py-3 px-4 text-right">{formatCurrency(totalOutstanding)}</td>
                   <td></td>
                 </tr>
@@ -4346,7 +4435,7 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
           {paymentForm && (
             <div className="border-t border-[#E2DDD8] p-4 bg-[#F0ECE9]/30">
               <h4 className="text-sm font-medium text-[#1F1D1B] mb-3">
-                Record Payment - {apData.find((a) => a.supplierId === paymentForm)?.supplierName}
+                Record Payment - {rows.find((a) => a.supplierId === paymentForm)?.supplierName}
               </h4>
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
                 <div>
@@ -6213,6 +6302,10 @@ function sourceHref(sourceType: string, sourceId: string): string | null {
 // statement, no inquiry attached.
 function TrialBalanceTab() {
   const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  // Multi-company (Phase 2): "" = All companies (group). trial-balance accepts
+  // ?orgId= — absent = today's consolidated TB, unchanged.
+  const [company, setCompany] = useState("");
+  const companyOptions = useCompanyOptions();
   const [tb, setTb] = useState<{
     rows: TbRow[];
     totalDr: number;
@@ -6223,18 +6316,21 @@ function TrialBalanceTab() {
 
   useEffect(() => {
     let stale = false;
-    fetch(`/api/accounting/trial-balance?asOf=${asOf}`)
+    fetch(`/api/accounting/trial-balance?asOf=${asOf}${orgIdParam(company)}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: { rows: TbRow[]; totalDr: number; totalCr: number; balanced: boolean } }>)
       .then((j) => { if (!stale && j?.success && j.data) setTb(j.data); })
       .catch(() => {});
     return () => { stale = true; };
-  }, [asOf]);
+  }, [asOf, company]);
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Trial Balance</h2>
         <div className="flex items-end gap-3">
+          <div className="pb-0.5">
+            <CompanySelect value={company} onChange={setCompany} options={companyOptions} />
+          </div>
           <div>
             <label className="text-xs font-medium text-[#6B7280] mb-1 block">As of</label>
             <input
@@ -9577,8 +9673,112 @@ function YearCloseCard() {
 
 type CashFlowResp = { operating: number; investing: number; financing: number; netChange: number; note: string };
 
+// Multi-company (Phase 2) — compact "by company" breakdown for the group view.
+// Fetches /pl per active company IN PARALLEL and shows each one's Net Profit
+// (P&L for the period) and Total Equity (net worth as at period end), so the
+// owner sees the consolidated group split into its sister companies at a
+// glance. Purely additive: it reuses the SAME /pl?orgId= endpoint the drill
+// already uses and never touches the consolidated statement above it. All
+// money is integer sen (formatCurrency divides by 100).
+function GroupByCompanyCard({ period, options }: { period: string; options: CompanyOption[] }) {
+  // Only real companies (drop the "" group option). useCompanyOptions returns
+  // a fresh array each render, so key the memo/effect off a STABLE string of
+  // the company codes (not the array identity) to avoid a re-fetch loop.
+  const companyKey = options.filter((o) => o.value !== "").map((o) => o.value).join(",");
+  const companies = useMemo(
+    () => options.filter((o) => o.value !== ""),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- companyKey is the stable identity of `options`
+    [companyKey],
+  );
+  const [rows, setRows] = useState<{ value: string; label: string; netProfitSen: number; equitySen: number }[] | null>(null);
+
+  useEffect(() => {
+    if (companies.length === 0) return;
+    let stale = false;
+    Promise.all(
+      companies.map(async (co) => {
+        try {
+          const r = await fetch(`/api/accounting/pl?period=${period}${orgIdParam(co.value)}`);
+          const j = (await r.json()) as {
+            success?: boolean;
+            data?: { totals?: { netProfit?: number }; balanceSheet?: { category: string; balance: number }[] };
+          };
+          const netProfitSen = j?.data?.totals?.netProfit ?? 0;
+          const equitySen = (j?.data?.balanceSheet ?? [])
+            .filter((e) => e.category === "EQUITY")
+            .reduce((s, e) => s + (e.balance || 0), 0);
+          return { value: co.value, label: co.label, netProfitSen, equitySen };
+        } catch {
+          return { value: co.value, label: co.label, netProfitSen: 0, equitySen: 0 };
+        }
+      }),
+    ).then((res) => { if (!stale) setRows(res); });
+    return () => { stale = true; };
+  }, [period, companies]);
+
+  if (companies.length === 0) return null;
+
+  const totalNet = (rows ?? []).reduce((s, r) => s + r.netProfitSen, 0);
+  const totalEquity = (rows ?? []).reduce((s, r) => s + r.equitySen, 0);
+
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <h3 className="text-sm font-semibold text-[#1F1D1B] mb-1">
+          Group P&amp;L by company
+          <span className="font-normal text-[#6B7280]"> — net profit for {period} &amp; net worth at period-end, per sister company</span>
+        </h3>
+        {rows === null ? (
+          <p className="text-sm text-[#6B7280] py-2">Loading company breakdown…</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">Company</th>
+                  <th className="px-3 py-2 text-right">Net Profit ({period})</th>
+                  <th className="px-3 py-2 text-right">Total Equity (net worth)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.value} className="border-b border-[#F0ECE9]">
+                    <td className="px-3 py-1.5 text-[#1F1D1B]">{r.label}</td>
+                    <td className={`px-3 py-1.5 text-right font-medium ${r.netProfitSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                      {r.netProfitSen < 0 ? `(${formatCurrency(Math.abs(r.netProfitSen))})` : formatCurrency(r.netProfitSen)}
+                    </td>
+                    <td className={`px-3 py-1.5 text-right font-medium ${r.equitySen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                      {r.equitySen < 0 ? `(${formatCurrency(Math.abs(r.equitySen))})` : formatCurrency(r.equitySen)}
+                    </td>
+                  </tr>
+                ))}
+                <tr className="border-t-2 border-[#1F1D1B] font-semibold">
+                  <td className="px-3 py-2 text-[#1F1D1B]">Group total</td>
+                  <td className={`px-3 py-2 text-right ${totalNet < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                    {totalNet < 0 ? `(${formatCurrency(Math.abs(totalNet))})` : formatCurrency(totalNet)}
+                  </td>
+                  <td className={`px-3 py-2 text-right ${totalEquity < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                    {totalEquity < 0 ? `(${formatCurrency(Math.abs(totalEquity))})` : formatCurrency(totalEquity)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p className="mt-2 text-[11px] text-[#B4B2A9]">
+              Each row = that company scoped via ?orgId=. Today all data sits under HOOKKA, so sister companies read near-zero until their books are posted. The consolidated statement below is unchanged.
+            </p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function BalanceSheetTab() {
   const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
+  // Multi-company (Phase 2): "" = All companies (group) → URL unchanged =
+  // today's consolidated sheet. A company code scopes /pl via &orgId=.
+  const [company, setCompany] = useState("");
+  const companyOptions = useCompanyOptions();
   const months: string[] = [];
   {
     const now = new Date();
@@ -9587,7 +9787,7 @@ function BalanceSheetTab() {
       months.push(d.toISOString().slice(0, 7));
     }
   }
-  const { data: bsResp, loading: bsLoading, refresh: bsRefresh } = useCachedJson<{ success?: boolean; data?: { balanceSheet?: BalanceSheetEntry[]; cashFlow?: CashFlowResp } }>(`/api/accounting/pl?period=${period}`);
+  const { data: bsResp, loading: bsLoading, refresh: bsRefresh } = useCachedJson<{ success?: boolean; data?: { balanceSheet?: BalanceSheetEntry[]; cashFlow?: CashFlowResp } }>(`/api/accounting/pl?period=${period}${orgIdParam(company)}`);
   const bsData: BalanceSheetEntry[] = useMemo(
     () => (bsResp?.success && bsResp.data?.balanceSheet ? bsResp.data.balanceSheet : []),
     [bsResp]
@@ -9684,12 +9884,16 @@ function BalanceSheetTab() {
         <select value={period} onChange={(e) => setPeriod(e.target.value)} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
           {months.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>
+        <CompanySelect value={company} onChange={setCompany} options={companyOptions} />
         <button onClick={() => setEdit((v) => !v)}
           className={`ml-2 rounded-md border px-3 py-1.5 text-sm cursor-pointer ${edit ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>
           {edit ? "Done" : "Edit"}
         </button>
         {edit && <span className="text-[11px] text-[#6B5C32]">Drag an account row onto a target section to reclassify it · Assets ↔ Liabilities is allowed too (the sign flips on the move, the statement still balances) · all months recompute under the new rule · drag back to undo</span>}
       </div>
+      {/* Group P&L / net-worth by company — only on the consolidated (group)
+          view; picking a single company hides it (you're already scoped). */}
+      {company === "" && <GroupByCompanyCard period={period} options={companyOptions} />}
       {/* Balance equation */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
         <Card>

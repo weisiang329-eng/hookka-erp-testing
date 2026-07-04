@@ -161,3 +161,42 @@ export function withOrgScope<E extends Env>(
     params: [orgId],
   };
 }
+
+// ---------------------------------------------------------------------------
+// Multi-company finance foundation (Phase 1) — OPTIONAL report scoping.
+//
+// The finance reports (/pl, /aging, /ar-control, /ap-control, /trial-balance)
+// aggregate the WHOLE ledger with NO org filter today. That is the reconciliation
+// contract: the default view must stay byte-identical. This helper reads an
+// OPTIONAL `?orgId=` (or `?company=`) query param and returns a filter fragment
+// that the report SQL appends ONLY when a company is explicitly requested:
+//
+//   · param absent → { active:false, sql:"", param:null } → no WHERE change →
+//     the query is exactly today's all-org aggregate.
+//   · param present → { active:true, sql:"<col> = ?", param:<orgId> } → the
+//     report scopes to that one company.
+//
+// Deliberately does NOT call getOrgId(): the filter is a caller-supplied report
+// dimension, not the tenant-isolation boundary. Every finance row is already
+// under the caller's own org (single-tenant install today); this param lets an
+// operator break the P&L / aging down PER sister company, defaulting to the
+// consolidated (all-org) figure. `col` lets the caller name the column with its
+// table alias when the query joins (e.g. "pi.org_id"); defaults to "org_id".
+// The value flows through the standard `?` bind — never string-interpolated.
+// ---------------------------------------------------------------------------
+export type CompanyFilter =
+  | { active: false; sql: ""; param: null; orgId: null }
+  | { active: true; sql: string; param: string; orgId: string };
+
+export function companyFilter<E extends Env>(
+  c: Context<E>,
+  col: string = "org_id",
+): CompanyFilter {
+  const raw = c.req.query("orgId") ?? c.req.query("company");
+  const orgId = typeof raw === "string" ? raw.trim() : "";
+  if (orgId.length === 0) {
+    return { active: false, sql: "", param: null, orgId: null };
+  }
+  return { active: true, sql: `${col} = ?`, param: orgId, orgId };
+}
+

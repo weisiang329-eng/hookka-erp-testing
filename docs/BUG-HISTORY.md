@@ -34,6 +34,30 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-04-004 — Creating any new sister organisation 500'd on prod: migration 0142 never auto-applied and had no runtime self-apply `organisations` `multi-tenant` `schema`
+
+🟢 **Fixed on main (ensureOrganisationRegistry) — verified by creating HKMFG on prod**
+
+**Symptom:** `POST /api/organisations` inserts into the migration-0142 columns
+(msic_code / business_type / is_default / display_order / …) and requires the
+legacy `CHECK (code IN ('HOOKKA','OHANA'))` to be gone. Migrations do NOT
+auto-apply on deploy (project rule) and 0142 had **no runtime ensure**, so on a
+prod where nobody pasted 0142 the create would 500 (missing column / CHECK
+violation on the new code).
+
+**Fix:** `src/api/routes/organisations.ts` — added `ensureOrganisationRegistry(db)`
+(idempotent, best-effort, module-promise-cached like `ensureDistillColumns`):
+`DROP CONSTRAINT IF EXISTS organisations_code_check` + `ADD COLUMN IF NOT EXISTS`
+for the 7 registry columns + the unique `(org_id, code)` index +
+`suppliers.purchase_org_code`. Called at the top of the POST handler before the
+first write.
+
+**Verified:** created **HOOKKA MANUFACTURING SDN. BHD.** (code HKMFG) live on
+prod → 201; GET now lists 4 orgs (HOOKKA, OHANA, HOUZS, HKMFG) with every
+e-invoice field (reg no / TIN / MSIC / address / email) stored correctly.
+
+---
+
 ## BUG-2026-07-04-003 — OCR Accuracy dashboard card shipped with Chinese UI strings (violates 100%-English rule) `ui-frontend` `i18n` `dashboard`
 
 🟢 **Fixed on main**

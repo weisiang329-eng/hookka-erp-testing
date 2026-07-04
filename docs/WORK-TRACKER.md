@@ -9,6 +9,50 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-04 — 🟡 Full-auto Keep-pay / Deduct settlement (staging branch, NOT pushed)
+
+Item #3 of the labor batch. Built on a worktree branch, staging-oriented, NOT
+merged to main / never touched prod (PAY = can't verify on prod).
+
+**What already existed (verified):** the shift algorithm + auto short-hour dock
+(`maybeApplyAutoPunchDock`, `attendance-deduct.ts`) already runs on EVERY worker
+punch-out (`worker.ts:1182`) and office grid save (`employees.tsx`) — ≥9h check,
+late-past-grace, OT-from-30-min (owner 2026-07-04 correction confirmed live in
+`attendance-rules.ts:130-136`), day-typed 2×/3× multipliers, unified ÷26. So the
+per-day auto engine was DONE; the remaining "manual choice" was the Labor Cost
+Under-recorded review's Keep-pay / Deduct buttons.
+
+**What I built (auto-settlement, no manual pick for punched days):**
+1. `employees.tsx` — the Under-recorded drill-in now loads the period's punches
+   (`/api/attendance`) + the AUTO docks; a day with a COMPLETE real punch
+   (in + out) is **auto-settled** → the Keep-pay / Deduct buttons are REPLACED by
+   a read-only "Auto-docked Xh" / "Auto-settled" chip. Days with NO punch keep
+   the manual choice (conservative — never auto-dock a no-evidence day). A
+   clock-in-only day (forgot punch-out) stays manual, mirroring the engine guard.
+2. New `POST /api/payroll-hour-deductions/settle-period` — batch-replays the
+   per-day helper over EVERY punch in a month (idempotent, same guards: no
+   clock-out → skip, finalised month → skip, MANUAL never overridden, full day
+   clears stale AUTO). Wired a "Settle from punches" button (single-month view)
+   that runs it then regenerates payslips once.
+3. Tests: `tests/settle-period-punch.test.mjs` (5 cases: mixed month, idempotent,
+   MANUAL-preserved, approved-month-skip, corrected-punch-clears). Added to the
+   `npm test` list. Full suite 1374 pass / 0 fail; strict typecheck clean.
+
+**Month recompute (June 2026, representative crew, before→after gross):**
+- AH SENG perfect full days → **RM0.00 Δ** (byte-identical, no-change worker).
+- SITI 18:25-out → **RM0.00 Δ** (OT-30 rule: 0 OT, full day — not a spurious 15m).
+- MEI 15m-late daily → −RM51.25 (6.5h × ~RM7.88/h).
+- RAJ leaves-30m-early daily → −RM102.50 (13h).
+- KUMAR mixed → −RM21.68 (forgot-punch-out day kept full; OT day paid; short docked).
+- Crew total RM10,200.72 → RM10,025.29 (Δ −RM175.43).
+
+**Flag for owner:** the no-punch under-recorded day still shows a manual
+Keep-pay / Deduct choice (conservative). If owner wants those auto-DEDUCTED too
+(treat missing punch as short → dock), that's a one-line policy flip — but it
+docks pay on absent-punch evidence, so left as manual pending his call.
+
+---
+
 ## 2026-07-04 — 🔵 Owner: mobile parity sweep + FULL brutal technical audit
 
 A. **Mobile parity**: every problem class already solved on desktop must be

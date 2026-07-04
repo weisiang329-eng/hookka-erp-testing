@@ -1023,7 +1023,12 @@ async function buildDoDeliveredSoAndInvoice(
       statements.push(
         db
           .prepare(
-            "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ?",
+            // AND status = 'DELIVERED' (2026-07-04 audit): every legitimate
+            // path has the SO at DELIVERED by this point (advanced earlier in
+            // THIS batch, or already-DELIVERED on the resolve path). The guard
+            // makes a stale/concurrent re-fire a no-op instead of downgrading
+            // an already-INVOICED/CLOSED SO back to INVOICED.
+            "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ? AND status = 'DELIVERED'",
           )
           .bind(now, sid),
       );

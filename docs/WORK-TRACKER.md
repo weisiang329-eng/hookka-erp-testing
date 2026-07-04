@@ -18,9 +18,19 @@ A. **Mobile parity**: every problem class already solved on desktop must be
    counterpart check → fix list → implement (staging for /m).
 B. **Full technical audit** per owner's pasted 15-area prompt (architecture,
    DB, API, perf BE/FE, UX, business logic, AI, security, monitoring, testing,
-   devops, scalability, code quality, consistency) with Critical/High/Med/Low
-   issues, prioritised lists (top-10 critical, top-20 ROI, quick wins), and
-   scores out of 100. Output = written report doc for the owner.
+   devops, scalability, code quality, consistency) — DONE. 12 reviewers (6
+   by-domain + 6 by-module/tab), every claim file:line-verified. Report artifact
+   published (erp-audit-v1). Overall 66/100 = "solid single-tenant, harden
+   before 100 users". FALSE POSITIVES caught: assistant.ts "no auth" (has
+   SUPER_ADMIN gate at :532); cost_ledger "out of control" (narrow COUNT-race,
+   real but bounded). 5 real bugs found+fixed live this session (delivery
+   bulk/POD invoice cache, folder-detail bulk cache, customer sofa-combo cache,
+   /m bulk+mail cache, 52 updated_at indexes). Fix queue by tier in the artifact:
+   scale-blockers (cascade transactions, N+1 bulk cascade, cost_ledger UNIQUE,
+   composite indexes, money idempotency), correctness (SO→INVOICED WHERE guard,
+   CN-reversal-ledger VERIFY, AR-aging page-1, warehouse stock-in rollback),
+   quality (monolith files, camelCase map, API envelope, error tracking), quick
+   wins. Owner picks what to build. VERIFY-BEFORE-FIX applies to every flagged item.
 
 ---
 

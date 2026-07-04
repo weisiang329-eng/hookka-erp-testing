@@ -4600,6 +4600,20 @@ async function stockSummaryRange(
 // opening/closing LIVE and overrides these SOS/SCS legs, so there is no
 // double count — the legs exist to put inventory on the Balance Sheet
 // and keep the trial balance whole.
+// Hex SHA-256 of a string — used to derive a content-deterministic ledger
+// source_id for the closing-stock post so a retried/double-fired re-post
+// collides on the immutable unique index (exactly-once) while a genuine
+// restate (changed stock snapshot → different hash) still posts.
+async function sha256Hex(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(input),
+  );
+  return [...new Uint8Array(buf)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 async function buildClosingStockLegs(
   db: Env["Variables"]["DB"],
   month: string,
@@ -4649,14 +4663,42 @@ app.post("/stock/close-post", async (c) => {
     const orgId = getOrgId(c);
     const actorUserId =
       (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
-    const stamp = Date.now();
+
+    // --- Idempotency (2026-07-04) -----------------------------------------
+    // Re-posting closing stock is an INTENTIONAL feature (re-base after a
+    // stock-take / RM-valuation-mode flip / next-month roll). But the old
+    // code keyed the ledger source_id on `Date.now()`, so the immutable
+    // UNIQUE(org,source_type,source_id,leg_no) index NEVER fired on a
+    // re-post — an accidental double-fire (network retry, double-click past
+    // the FE `posting` guard) appended a SECOND reversal+repost pair. The
+    // trial balance self-heals (each post first reverses ALL prior net), but
+    // the append-only ledger accumulated unbounded duplicate legs.
+    //
+    // Fix: derive the source_id from the CONTENT of the fresh legs (a hash
+    // of month + every (account,debit,credit) tuple) instead of the clock.
+    //   * An IDENTICAL re-post (same month, same computed closing snapshot)
+    //     → same source_id → collides on the unique index → we detect it via
+    //     ledgerHasSource and cleanly NO-OP. A double-fire posts exactly once.
+    //   * A GENUINE restate (stock/valuation actually changed → a different
+    //     closing snapshot) → different content hash → different source_id →
+    //     posts as a fresh reversal+repost, exactly as before.
+    // This preserves the re-post feature while making a retried double-fire
+    // exactly-once at the ledger level.
+    const { legs: freshLegs, closingTotalSen } = await buildClosingStockLegs(
+      db,
+      month,
+      orgId,
+      actorUserId,
+      "PENDING", // placeholder sourceId — rewritten below once we know the hash
+    );
+
     // Reverse the prior closing-stock net (any month) so a re-post or the
     // next month always lands the 330 stock accounts at THIS month's
     // closing — history-independent, like the opening-balance re-post.
     const prior = await db
       .prepare(
         `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
-          WHERE sourceType IN ('closing_stock','closing_stock_reversal') AND orgId = ?`,
+          WHERE sourceType IN ('closing_stock','closing_stock_reversal') AND orgId = ? AND hidden = 0`,
       )
       .bind(orgId)
       .all<{ accountCode: string; debitSen: number; creditSen: number }>();
@@ -4664,6 +4706,29 @@ app.post("/stock/close-post", async (c) => {
     for (const l of prior.results ?? []) {
       priorNet.set(l.accountCode, (priorNet.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
     }
+
+    // Content hash over the fresh closing snapshot + the prior net being
+    // reversed. Two identical re-posts against the same ledger state hash the
+    // same; anything that moved the stock value changes the hash.
+    const hashInput = [
+      month,
+      ...freshLegs.map((l) => `${l.accountCode}:${l.debitSen}:${l.creditSen}`),
+      "REV",
+      ...[...priorNet.entries()].map(([code, net]) => `${code}:${net}`),
+    ].join("|");
+    const contentHash = await sha256Hex(hashInput);
+    const postSourceId = `cs-${month}-${contentHash.slice(0, 16)}`;
+    const revSourceId = `cs-rev-${contentHash.slice(0, 16)}`;
+
+    // Already posted this exact snapshot? Clean no-op — a retry / double-fire
+    // returns success without appending a second identical pair.
+    if (await ledgerHasSource(db, orgId, "closing_stock", postSourceId)) {
+      return c.json({
+        success: true,
+        data: { month, closingTotalSen, alreadyPosted: true },
+      });
+    }
+
     const legs: LedgerEntryInput[] = [];
     let legNo = 1;
     for (const [code, net] of priorNet) {
@@ -4671,7 +4736,7 @@ app.post("/stock/close-post", async (c) => {
       legs.push({
         id: `lje-${crypto.randomUUID().slice(0, 12)}`,
         sourceType: "closing_stock_reversal",
-        sourceId: `cs-rev-${stamp}`,
+        sourceId: revSourceId,
         legNo: legNo++,
         accountCode: code,
         debitSen: net < 0 ? -net : 0,
@@ -4681,13 +4746,8 @@ app.post("/stock/close-post", async (c) => {
         orgId,
       });
     }
-    const { legs: freshLegs, closingTotalSen } = await buildClosingStockLegs(
-      db,
-      month,
-      orgId,
-      actorUserId,
-      `cs-${month}-${stamp}`,
-    );
+    // Re-stamp the fresh legs with the content-derived source_id.
+    for (const l of freshLegs) l.sourceId = postSourceId;
     if (freshLegs.length === 0 && legs.length === 0) {
       return c.json({ success: false, error: `No stock movements for ${month} — nothing to post.` }, 400);
     }

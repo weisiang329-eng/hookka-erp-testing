@@ -484,24 +484,26 @@ async function rebuildSingleSO(
     };
   }
 
-  // Real run: wipe fg_units + production_orders for this SO (job_cards
-  // cascades via FK), then run createProductionOrdersForSO against the
-  // current items + BOM and batch all statements together.
-  const wipeStmts: D1PreparedStatement[] = [
-    db
-      .prepare(
-        `DELETE FROM fg_units WHERE poId IN (SELECT id FROM production_orders WHERE salesOrderId = ?)`,
-      )
-      .bind(so.id),
-    db
-      .prepare("DELETE FROM production_orders WHERE salesOrderId = ?")
-      .bind(so.id),
-  ];
-  await db.batch(wipeStmts);
-
+  // Real run: build the regeneration statements FIRST (read-only — a broken
+  // BOM throws here before we touch anything), THEN commit the wipe + the
+  // re-INSERTs in ONE atomic db.batch. db.batch wraps every statement in a
+  // single Postgres transaction (supabase-compat.ts `sql.begin`), so a mid-
+  // rebuild failure rolls the whole thing back — the SO never ends up wiped
+  // of production with no replacement (the all-or-nothing money/cascade
+  // rule). This mirrors the correct teardown+rebuild pattern in
+  // sales-orders.ts (Option D re-explosion) and import-completion.ts, and
+  // fixes the earlier two-transaction gap where the wipe committed before the
+  // rebuild statements were even built (a throw left the SO stripped).
+  //
+  // forceRebuild:true so the builder's PO-level "preExisting" idempotency
+  // guard does NOT bail on the about-to-be-deleted production_orders — the
+  // DELETE runs FIRST inside the same batch, freeing the deterministic poIds
+  // before the INSERTs land.
   let genResult: Awaited<ReturnType<typeof createProductionOrdersForSO>>;
   try {
-    genResult = await createProductionOrdersForSO(db, so, items);
+    genResult = await createProductionOrdersForSO(db, so, items, {
+      forceRebuild: true,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -514,9 +516,22 @@ async function rebuildSingleSO(
     };
   }
 
-  if (genResult.statements.length > 0) {
-    await db.batch(genResult.statements);
-  }
+  // job_cards cascade via FK on the production_orders DELETE.
+  const wipeStmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `DELETE FROM fg_units WHERE poId IN (SELECT id FROM production_orders WHERE salesOrderId = ?)`,
+      )
+      .bind(so.id),
+    db
+      .prepare("DELETE FROM production_orders WHERE salesOrderId = ?")
+      .bind(so.id),
+  ];
+
+  // Wipe + re-INSERT in ONE transaction. Even when genResult produced no
+  // statements (SO legitimately has nothing to build), still run the wipe so
+  // the maintenance intent (clear stale POs) is honoured.
+  await db.batch([...wipeStmts, ...genResult.statements]);
 
   return {
     ok: true,

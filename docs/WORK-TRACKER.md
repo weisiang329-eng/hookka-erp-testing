@@ -9,10 +9,58 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-04 — 🟡 Full-auto Keep-pay / Deduct settlement (staging branch, NOT pushed)
+## 2026-07-04 — 🟡 FULL-auto payroll settlement, manual panel REMOVED (staging branch, NOT pushed)
 
-Item #3 of the labor batch. Built on a worktree branch, staging-oriented, NOT
-merged to main / never touched prod (PAY = can't verify on prod).
+Owner picked (A): FULL auto — auto-dock the shortfall on partial/under-logged
+days too, and REMOVE the manual Keep-pay/Deduct review panel entirely. Delta
+built on top of the prior-round auto-settle, on the worktree branch (NOT pushed).
+
+**Delta this round:**
+1. **Under-logged (To-fill) days now auto-dock.** New pure helper
+   `computeUnderLoggedShortfallHours(logged, expected)` (= expected − logged on a
+   partial day; 0 logged = absence, left to the salary deduction). Extracted the
+   shared guard/apply core `maybeApplyAutoDayDock` (MANUAL never overridden,
+   finalised month skipped, full day clears stale AUTO); `maybeApplyAutoPunchDock`
+   now delegates to it (byte-identical — all prior tests green).
+2. **`POST /settle-period` rewritten** to a unified per-day settle over ALL factory
+   workers × working days: dock = max(punch shortfall, under-logged shortfall).
+   Returns punch-source vs logged-source counts. `Settle month` button + confirm
+   text updated; live punch-out path unchanged.
+3. **Manual panel removed.** `WorkerDayDrillIn` is now READ-ONLY (dropped
+   onAction/busyKey/workerId, the Action column, Keep-pay/Deduct buttons). Removed
+   `handleUnderAction` + `underActionBusy` + the auto-settle-chip code + the
+   period-attendance fetch. Panels re-labelled "under-logged (auto-docked)". Undo
+   on a stored dock kept (restores pay for a wrong auto-dock).
+3b. Historical MANUAL overrides respected (guard) + finalised months never
+   re-settled.
+
+**FULL-auto month recompute (June 2026, before=nothing docked → after=full auto):**
+- AH SENG perfect → RM0.00 (byte-identical).
+- MEI 15m-late (punch) → −RM51.25 (6.5h, already auto last round).
+- **ZAW LIN under-logged, NO punch → −RM33.12 (4.2h To-fill) — NEW this round**
+  (previously waited for a manual Deduct click).
+- KUMAR mixed → −RM29.57 (0.75h punch + 3h To-fill; forgot-punch-out day logged
+  full so NOT docked; OT paid).
+- Crew Δ −RM113.94; of which **7.2h is NEW To-fill/under-logged auto-dock** (the
+  hours the manual panel used to hold — ~RM57 on this crew, in the ballpark of the
+  ~RM52.73 To-fill the owner cited).
+
+**Tests:** `tests/settle-period-punch.test.mjs` rewritten (13 cases: To-fill maths,
+day-dock core guards, unified mixed month, ZAW-LIN under-log, idempotent,
+MANUAL-survives, approved-skip, corrected-clears). Full suite 1387 pass / 0 fail;
+strict typecheck clean; eslint 0 errors.
+
+**RISK owner explicitly ACCEPTED (do not re-litigate):** weak wifi → a worker who
+worked full but whose punch-out failed AND whose office grid logs fewer hours
+will now be auto-docked. His call; the office fixes it by keying the real hours
+(clears the dock on next settle) or a MANUAL Keep-pay row.
+
+---
+
+## 2026-07-04 — (superseded) Auto-settle with manual panel kept for no-punch days
+
+Prior round (before owner picked A): punched days auto-settled, no-punch days kept
+a manual choice. Superseded by the FULL-auto entry above.
 
 **What already existed (verified):** the shift algorithm + auto short-hour dock
 (`maybeApplyAutoPunchDock`, `attendance-deduct.ts`) already runs on EVERY worker

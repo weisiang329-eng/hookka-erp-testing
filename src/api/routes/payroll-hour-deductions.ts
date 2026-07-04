@@ -21,8 +21,13 @@ import { requirePermission } from "../lib/rbac";
 import {
   ensureDeductionSourceColumn,
   maybeApplyAutoPunchDock,
+  maybeApplyAutoDayDock,
+  computePunchShortfallHours,
+  computeUnderLoggedShortfallHours,
   MANUAL_DOCK_SOURCE,
 } from "../lib/attendance-deduct";
+import { resolvePayRulesAsOf, toAttendanceRules } from "../../lib/pay-rules";
+import { loadPayRuleVersions } from "../lib/pay-rules-store";
 
 const app = new Hono<Env>();
 
@@ -174,20 +179,33 @@ app.post("/auto-from-punch", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /settle-period  — AUTO-settle a whole month from real punches.
+// POST /settle-period  — FULL AUTO settle a whole month (owner 2026-07-04, A).
 // Body: { period: "YYYY-MM" }
 //
-// Owner 2026-07-04: the manual Keep-pay/Deduct backlog is retired — every day
-// with a real punch settles from the shift algorithm, no human pick. Live
-// punch-out already settles each day (worker.ts → maybeApplyAutoPunchDock); this
-// endpoint replays that over EVERY punch in a period so a month of existing
-// punches (or punches keyed before this feature) all settle at once. It is a
-// thin batch loop over the SAME per-day helper — identical guards apply per day
-// (no clock-out → skip; finalised month → skip; a MANUAL dock is never
-// overridden; full day → clears any stale AUTO row). Idempotent: re-running
-// recomputes the same AUTO docks. Returns per-reason counts so the caller (and
-// the month-recompute script) can eyeball what changed. Does NOT regenerate
-// payslips — the caller regenerates once after, exactly like a single Deduct.
+// The manual Keep-pay/Deduct backlog is RETIRED — every under-settled day now
+// auto-docks its shortfall; nothing waits for a human. For each factory worker,
+// each working day (Mon–Sat minus public holidays) in the month, the shortfall
+// is the LARGER of:
+//   • the PUNCH shortfall (from clock in/out via the shift algorithm — late past
+//     grace, short of a full day; a day with only a clock-in / no clock-out
+//     yields no punch shortfall), and
+//   • the UNDER-LOGGED ("To-fill") shortfall = expected − logged working hours,
+//     when the worker logged SOME hours but fewer than a full day.
+// A day with ZERO logged AND no complete punch is an ABSENCE — left to the
+// monthly salary deduction, never docked here. The larger of the two evidences
+// wins so neither a short punch nor an under-logged grid entry is missed, and
+// they never double-dock (one AUTO row per worker-day).
+//
+// Guards (per day, inside maybeApplyAutoDayDock): a MANUAL dock is never
+// overridden (historical Keep-pay/Deduct picks survive); a finalised month is
+// never touched; a full/over day clears any stale AUTO row. Idempotent — a
+// re-run recomputes the same AUTO docks. Does NOT regenerate payslips; the
+// caller regenerates once after, exactly like a single dock.
+//
+// Owner ACCEPTED the weak-wifi risk: a worker who worked a full day but whose
+// punch-out failed AND whose office grid logs fewer hours will be auto-docked.
+// His explicit call — the office fixes it by keying the real hours (which
+// clears the AUTO dock on the next settle) or entering a MANUAL Keep-pay row.
 // ---------------------------------------------------------------------------
 app.post("/settle-period", async (c) => {
   const denied = await requirePermission(c, "payslips", "update");
@@ -206,42 +224,151 @@ app.post("/settle-period", async (c) => {
     );
   }
   await ensureDeductionSourceColumn(c.var.DB);
-  // Pull the month's punches (both times present is enforced per-day inside the
-  // helper; we still fetch clock-in-only rows so the tally reflects them).
-  const res = await c.var.DB.prepare(
-    "SELECT employeeId, date, clockIn, clockOut FROM attendance_records WHERE date LIKE ? ORDER BY date, employeeId",
+
+  const [yearS, monthS] = period.split("-");
+  const year = Number(yearS);
+  const month = Number(monthS); // 1-indexed
+
+  // Public holidays — same kv_config source the engine reads. A holiday is never
+  // a working day, so it never docks.
+  const phRow = await c.var.DB.prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("public_holidays")
+    .first<{ value: string | null }>();
+  const holidays = new Set<string>();
+  if (phRow?.value) {
+    try {
+      const parsed = JSON.parse(phRow.value);
+      if (Array.isArray(parsed))
+        for (const d of parsed)
+          if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) holidays.add(d);
+    } catch { /* malformed — no holidays */ }
+  }
+
+  // The month's working days (Mon–Sat, excluding Sundays and public holidays).
+  const lastDay = new Date(year, month, 0).getDate();
+  const mm = String(month).padStart(2, "0");
+  const workingDays: string[] = [];
+  for (let d = 1; d <= lastDay; d++) {
+    const dow = new Date(year, month - 1, d).getDay();
+    if (dow === 0) continue; // Sunday — non-working
+    const iso = `${year}-${mm}-${String(d).padStart(2, "0")}`;
+    if (holidays.has(iso)) continue; // public holiday
+    workingDays.push(iso);
+  }
+
+  // Factory workers + their standard daily hours (the To-fill expectation). Only
+  // ACTIVE / RESIGNED-in-month people; office / sales / admin never log factory
+  // hours so they never appear in the To-fill gap.
+  const workersRes = await c.var.DB.prepare(
+    "SELECT id, workingHoursPerDay FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
+  )
+    .bind(`${period}-%`)
+    .all<{ id: string; workingHoursPerDay: number | null }>();
+  const expectedByWorker = new Map<string, number>();
+  for (const w of workersRes.results ?? []) {
+    const h = Number(w.workingHoursPerDay) || 0;
+    expectedByWorker.set(w.id, h > 0 ? h : 9); // default 9h/day (matches the UI)
+  }
+
+  // The month's punches, keyed per (worker|date). A row with both times present
+  // feeds the shift algorithm; clock-in-only rows are ignored (no clock-out →
+  // no punch shortfall), mirroring the live-punch guard.
+  const punchRes = await c.var.DB.prepare(
+    "SELECT employeeId, date, clockIn, clockOut FROM attendance_records WHERE date LIKE ?",
   )
     .bind(`${period}-%`)
     .all<{ employeeId: string; date: string; clockIn: string | null; clockOut: string | null }>();
-  const punches = res.results ?? [];
+  const punchByKey = new Map<string, { clockIn: string | null; clockOut: string | null }>();
+  for (const p of punchRes.results ?? []) {
+    if (!p.employeeId || !p.date) continue;
+    punchByKey.set(`${p.employeeId}|${p.date}`, { clockIn: p.clockIn, clockOut: p.clockOut });
+  }
+
+  // The month's LOGGED working hours, summed per (worker|date). This is the
+  // To-fill evidence: expected − logged on a partial day.
+  const heRes = await c.var.DB.prepare(
+    "SELECT workerId, date, hours FROM working_hour_entries WHERE date LIKE ?",
+  )
+    .bind(`${period}-%`)
+    .all<{ workerId: string; date: string; hours: number | string }>();
+  const loggedByKey = new Map<string, number>();
+  for (const e of heRes.results ?? []) {
+    if (!e.workerId || !e.date) continue;
+    const k = `${e.workerId}|${e.date}`;
+    loggedByKey.set(k, (loggedByKey.get(k) ?? 0) + (Number(e.hours) || 0));
+  }
+
+  // Effective-dated rules for the punch shortfall (resolved per date).
+  let versions: Awaited<ReturnType<typeof loadPayRuleVersions>> = [];
+  try {
+    versions = await loadPayRuleVersions(c.var.DB);
+  } catch {
+    versions = [];
+  }
 
   const tally: Record<string, number> = {
     applied: 0,
-    "no-clockout": 0,
-    "invalid-times": 0,
     "no-shortfall": 0,
     "period-locked": 0,
     "manual-exists": 0,
+    "punch-source": 0,
+    "logged-source": 0,
   };
   let dockedHours = 0;
-  for (const p of punches) {
-    if (!p.employeeId || !/^\d{4}-\d{2}-\d{2}$/.test(String(p.date ?? ""))) continue;
-    const r = await maybeApplyAutoPunchDock(c.var.DB, {
-      workerId: p.employeeId,
-      date: p.date,
-      clockIn: p.clockIn,
-      clockOut: p.clockOut,
-    });
-    tally[r.reason] = (tally[r.reason] ?? 0) + 1;
-    if (r.applied) dockedHours += r.hours ?? 0;
+  let periodLockedHit = false;
+
+  for (const [workerId, expected] of expectedByWorker) {
+    for (const date of workingDays) {
+      const key = `${workerId}|${date}`;
+      const punch = punchByKey.get(key);
+      const logged = loggedByKey.get(key);
+      // Nothing recorded at all → absence (salary-deduction territory). Skip.
+      const hasPunch = !!(punch && punch.clockIn && punch.clockOut);
+      const hasLogged = (logged ?? 0) > 0;
+      if (!hasPunch && !hasLogged) continue;
+
+      // Punch shortfall (shift algorithm) — 0 unless a complete punch is short.
+      let punchShort = 0;
+      if (hasPunch) {
+        const rules = toAttendanceRules(resolvePayRulesAsOf(versions, date));
+        punchShort = computePunchShortfallHours(punch!.clockIn, punch!.clockOut, rules).shortfallHours;
+      }
+      // Under-logged shortfall — expected − logged on a partial day.
+      const loggedShort = hasLogged
+        ? computeUnderLoggedShortfallHours(logged ?? 0, expected)
+        : 0;
+
+      const shortfall = Math.max(punchShort, loggedShort);
+      const source = punchShort >= loggedShort ? "from punch" : "from unlogged hours";
+      const r = await maybeApplyAutoDayDock(c.var.DB, {
+        workerId,
+        date,
+        shortfallHours: shortfall,
+        note:
+          shortfall > 0
+            ? `Auto: short ${Math.round(shortfall * 100) / 100}h (${source})`
+            : "Auto: full day",
+      });
+      tally[r.reason] = (tally[r.reason] ?? 0) + 1;
+      if (r.applied) {
+        dockedHours += r.hours ?? 0;
+        tally[source === "from punch" ? "punch-source" : "logged-source"] += 1;
+      }
+      if (r.reason === "period-locked") periodLockedHit = true;
+    }
+    // A finalised month short-circuits everything — stop scanning once we know.
+    if (periodLockedHit) break;
   }
+
   return c.json({
     success: true,
     data: {
       period,
-      punches: punches.length,
+      workers: expectedByWorker.size,
+      workingDays: workingDays.length,
       ...tally,
       dockedHours: Math.round(dockedHours * 100) / 100,
+      periodLocked: periodLockedHit,
     },
   });
 });

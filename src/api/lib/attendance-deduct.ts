@@ -114,6 +114,28 @@ export function computePunchShortfallHours(
   return { valid: true, hasClockOut: true, shortfallHours, lateMin: day.lateMin, otMin: day.otMin };
 }
 
+/**
+ * The under-logged ("To-fill") shortfall for ONE working day, in hours:
+ * expected − logged, when the worker logged SOME hours but fewer than a full
+ * day. Owner 2026-07-04 (FULL auto): these days now auto-dock the shortfall
+ * instead of waiting for a manual Keep-pay/Deduct pick.
+ *
+ * A day with ZERO logged hours is NOT under-logged — it is an ABSENCE, already
+ * settled by the monthly salary deduction (÷working-days). Returning 0 here
+ * leaves those alone. Rounded to 2 dp; never negative. Pure.
+ */
+export function computeUnderLoggedShortfallHours(
+  loggedHours: number,
+  expectedHours: number,
+): number {
+  const logged = Number(loggedHours) || 0;
+  const expected = Number(expectedHours) || 0;
+  if (logged <= 0 || expected <= 0) return 0; // absent / no expectation → not under-logged
+  const short = expected - logged;
+  if (short <= 0) return 0; // full day (or over) → nothing to dock
+  return Math.round(short * 100) / 100;
+}
+
 export type AutoDockReason =
   | "applied"
   | "no-clockout"
@@ -162,6 +184,37 @@ export async function maybeApplyAutoPunchDock(
   if (!sf.hasClockOut) return { applied: false, reason: "no-clockout" };
   if (!sf.valid) return { applied: false, reason: "invalid-times" };
 
+  const noteParts = [`Auto: short ${sf.shortfallHours}h`];
+  if (sf.lateMin > 0) noteParts.push(`late ${sf.lateMin}m`);
+  return maybeApplyAutoDayDock(db, {
+    workerId,
+    date,
+    shortfallHours: sf.shortfallHours,
+    note: `${noteParts.join(", ")} (from punch)`,
+  });
+}
+
+/**
+ * The shared guard-and-apply core: given a PRE-COMPUTED shortfall for one
+ * worker-day, upsert (or clear) its AUTO dock. Used by BOTH the punch path
+ * (maybeApplyAutoPunchDock, shortfall from clock in/out) and the under-logged
+ * path (owner 2026-07-04 FULL auto: shortfall = expected − logged working
+ * hours). The guards are identical either way — a MANUAL dock is never
+ * overridden, a finalised month is never touched, a below-noise shortfall
+ * writes nothing (and clears any stale AUTO row). Idempotent per (worker, date).
+ */
+export async function maybeApplyAutoDayDock(
+  db: DeductDbLike,
+  input: {
+    workerId: string;
+    date: string; // YYYY-MM-DD
+    shortfallHours: number;
+    note: string;
+  },
+): Promise<AutoDockResult> {
+  const { workerId, date, note } = input;
+  const shortfallHours = Math.round((Number(input.shortfallHours) || 0) * 100) / 100;
+
   await ensureDeductionSourceColumn(db);
 
   // Any existing dock for this (worker, date)?
@@ -172,12 +225,13 @@ export async function maybeApplyAutoPunchDock(
     .bind(workerId, date)
     .first<{ id: string; source: string | null }>();
 
-  // Guard 2: NEVER override an owner's manual decision (Deduct or any non-AUTO).
+  // Guard: NEVER override an owner's manual decision (Deduct or any non-AUTO).
+  // This is how historical MANUAL Keep-pay / Deduct picks survive a re-settle.
   if (existing && (existing.source ?? MANUAL_DOCK_SOURCE) === MANUAL_DOCK_SOURCE) {
     return { applied: false, reason: "manual-exists" };
   }
 
-  // Guard 3: never touch a finalised month (any payslip APPROVED / PAID).
+  // Guard: never touch a finalised month (any payslip APPROVED / PAID).
   const period = date.slice(0, 7);
   const locked = await db
     .prepare(
@@ -187,9 +241,9 @@ export async function maybeApplyAutoPunchDock(
     .first<{ c: number | string }>();
   if (Number(locked?.c ?? 0) > 0) return { applied: false, reason: "period-locked" };
 
-  // Guard 4: no real shortfall → no dock. If a stale AUTO dock exists (e.g. the
-  // punch was corrected to a full day), clear it so it stops reducing pay.
-  if (sf.shortfallHours < MIN_DOCK_HOURS) {
+  // Guard: no real shortfall → no dock. If a stale AUTO dock exists (e.g. the
+  // punch/hours were corrected to a full day), clear it so it stops reducing pay.
+  if (shortfallHours < MIN_DOCK_HOURS) {
     if (existing) {
       await db
         .prepare("DELETE FROM payroll_hour_deductions WHERE id = ?")
@@ -202,9 +256,6 @@ export async function maybeApplyAutoPunchDock(
   // Apply. DELETE+INSERT in one batch (overwrite). We only reach here when the
   // existing row is AUTO or absent — a manual dock was already returned above —
   // so this never clobbers an owner decision.
-  const noteParts = [`Auto: short ${sf.shortfallHours}h`];
-  if (sf.lateMin > 0) noteParts.push(`late ${sf.lateMin}m`);
-  const note = `${noteParts.join(", ")} (from punch)`;
   const id = `phd-${crypto.randomUUID().slice(0, 8)}`;
   await db.batch([
     db
@@ -214,7 +265,7 @@ export async function maybeApplyAutoPunchDock(
       .prepare(
         "INSERT INTO payroll_hour_deductions (id, workerId, date, hours, note, source) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .bind(id, workerId, date, sf.shortfallHours, note, AUTO_DOCK_SOURCE),
+      .bind(id, workerId, date, shortfallHours, note, AUTO_DOCK_SOURCE),
   ]);
-  return { applied: true, reason: "applied", hours: sf.shortfallHours };
+  return { applied: true, reason: "applied", hours: shortfallHours };
 }

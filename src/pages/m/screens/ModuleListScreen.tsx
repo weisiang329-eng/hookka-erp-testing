@@ -249,6 +249,24 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
     return applySort(filtered, source.columns, sort);
   }, [sourceRows, source, tab, filters, debouncedSearch, sort]);
 
+  // Auto-jump to the sub-tab a search lands in (desktop parity, owner
+  // 2026-07-04: "bold the term + jump to that page"). If every matching row of
+  // this source lives under exactly ONE sub-tab, switch to it so the tab bar
+  // shows where the result is; clearing the search then leaves the operator on
+  // that tab. Uses the render-time setState pattern (like the visibleCount
+  // reset below) — NOT setState-in-effect — and tracks the last applied target
+  // so it jumps only when the target changes, never fighting a manual tap.
+  const searchJumpKey = useMemo(() => {
+    if (debouncedSearch.trim().length === 0) return null;
+    const hit = source.subTabs.filter((t) => rows.some((r) => t.match(r)));
+    return hit.length === 1 ? hit[0].key : null;
+  }, [debouncedSearch, source, rows]);
+  const [lastJumpKey, setLastJumpKey] = useState<string | null>(null);
+  if (searchJumpKey !== lastJumpKey) {
+    setLastJumpKey(searchJumpKey);
+    if (searchJumpKey && searchJumpKey !== activeTab) setActiveTab(searchJumpKey);
+  }
+
   // How many rows are painted. Reset to the first page whenever the visible set
   // changes (tab / source / filters / search / sort) so "Show more" never
   // strands the list mid-scroll on a different dataset. Render-time state reset
@@ -492,6 +510,7 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
                   title={vm.title}
                   items={vm.items}
                   subLine={vm.subLine}
+                  highlight={debouncedSearch}
                   meta={vm.metas ?? [vm.meta1, vm.meta2]}
                   pill={
                     vm.status ? (

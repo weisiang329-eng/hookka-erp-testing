@@ -24,6 +24,37 @@ import { M } from "../theme";
 
 type Meta = { label: string; value: ReactNode };
 
+// Bold the matched search terms, mirroring the desktop global search
+// (global-search.tsx highlightMatch). Multi-term (space-separated), case-
+// insensitive. Non-string values (meta nodes) pass through untouched.
+function highlightTerms(value: ReactNode, query?: string): ReactNode {
+  if (!query || typeof value !== "string" || !value) return value;
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return value;
+  const esc = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const parts = value.split(new RegExp(`(${esc.join("|")})`, "ig"));
+  if (parts.length === 1) return value;
+  const set = new Set(terms);
+  return parts.map((p, i) =>
+    set.has(p.toLowerCase()) ? (
+      <mark
+        key={i}
+        style={{
+          background: "#FBEFB8",
+          borderRadius: 2,
+          padding: "0 1px",
+          fontWeight: 700,
+          color: "inherit",
+        }}
+      >
+        {p}
+      </mark>
+    ) : (
+      <span key={i}>{p}</span>
+    ),
+  );
+}
+
 type Props = {
   code: string;
   title: string;
@@ -36,12 +67,16 @@ type Props = {
   meta?: (Meta | undefined)[] | [Meta?, Meta?];
   /** Status pill node (use <StatusPill/>). */
   pill?: ReactNode;
+  /** Active search query — bolds matched terms in code/title/items/subLine
+   * and string meta values (mirrors the desktop search). */
+  highlight?: string;
   onClick?: () => void;
 };
 
-export function DocCard({ code, title, items, subLine, meta, pill, onClick }: Props) {
+export function DocCard({ code, title, items, subLine, meta, pill, highlight, onClick }: Props) {
   const interactive = typeof onClick === "function";
   const metas = (meta ?? []).filter(Boolean) as Meta[];
+  const hl = (v: ReactNode) => highlightTerms(v, highlight);
   return (
     <div
       onClick={onClick}
@@ -90,7 +125,7 @@ export function DocCard({ code, title, items, subLine, meta, pill, onClick }: Pr
             textOverflow: "ellipsis",
           }}
         >
-          {code}
+          {hl(code)}
         </span>
         {pill ? <span style={{ flexShrink: 0 }}>{pill}</span> : null}
       </div>
@@ -108,7 +143,7 @@ export function DocCard({ code, title, items, subLine, meta, pill, onClick }: Pr
           whiteSpace: "nowrap",
         }}
       >
-        {title}
+        {hl(title)}
       </div>
 
       {/* Items line (dc13 — preferred). Falls back to subLine when not set. */}
@@ -124,7 +159,7 @@ export function DocCard({ code, title, items, subLine, meta, pill, onClick }: Pr
             whiteSpace: "nowrap",
           }}
         >
-          {items}
+          {hl(items)}
         </div>
       ) : subLine ? (
         <div
@@ -137,7 +172,7 @@ export function DocCard({ code, title, items, subLine, meta, pill, onClick }: Pr
             whiteSpace: "nowrap",
           }}
         >
-          {subLine}
+          {hl(subLine)}
         </div>
       ) : null}
 
@@ -194,7 +229,7 @@ export function DocCard({ code, title, items, subLine, meta, pill, onClick }: Pr
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
-                {m.value}
+                {hl(m.value)}
               </div>
             </div>
           ))}

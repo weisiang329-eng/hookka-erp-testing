@@ -288,12 +288,17 @@ function pickRecords(v: unknown, ...keys: string[]): ApiRecord[] {
 function useApiSearch(query: string) {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
+  // True when every category fetch failed (timeout / offline / 5xx) and nothing
+  // was collected — the UI must say "search failed", NOT "no results", or a
+  // weak-wifi timeout looks like the record doesn't exist (owner-reported trap).
+  const [failed, setFailed] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect -- debounced query effect resets results when query is cleared */
   useEffect(() => {
     if (query.length < 2) {
       setResults([]);
+      setFailed(false);
       return;
     }
 
@@ -311,11 +316,12 @@ function useApiSearch(query: string) {
     const timer = setTimeout(async () => {
       setLoading(true);
       const collected: SearchResult[] = [];
+      let fetchFailures = 0;
 
       const fetchers = [
         // Sales Orders
         fetch(`/api/sales-orders?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
-          .then((r) => r.ok ? r.json() : null)
+          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
           .then((data) => {
             // Every list endpoint wraps records as {success, data:[...]} —
             // the legacy keys never matched, so this category silently
@@ -346,11 +352,11 @@ function useApiSearch(query: string) {
               });
             });
           })
-          .catch(() => {}),
+          .catch(() => { fetchFailures++; }),
 
         // Customers
         fetch(`/api/customers?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
-          .then((r) => r.ok ? r.json() : null)
+          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
           .then((data) => {
             const items = pickRecords(data, "data", "customers");
             items.forEach((item) => {
@@ -364,11 +370,11 @@ function useApiSearch(query: string) {
               });
             });
           })
-          .catch(() => {}),
+          .catch(() => { fetchFailures++; }),
 
         // Products
         fetch(`/api/products?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
-          .then((r) => r.ok ? r.json() : null)
+          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
           .then((data) => {
             const items = pickRecords(data, "data", "products");
             items.forEach((item) => {
@@ -382,11 +388,11 @@ function useApiSearch(query: string) {
               });
             });
           })
-          .catch(() => {}),
+          .catch(() => { fetchFailures++; }),
 
         // Delivery Orders
         fetch(`/api/delivery-orders?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
-          .then((r) => r.ok ? r.json() : null)
+          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
           .then((data) => {
             const items = pickRecords(data, "data", "deliveryOrders", "orders");
             items.forEach((item) => {
@@ -419,11 +425,11 @@ function useApiSearch(query: string) {
               });
             });
           })
-          .catch(() => {}),
+          .catch(() => { fetchFailures++; }),
 
         // Invoices
         fetch(`/api/invoices?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
-          .then((r) => r.ok ? r.json() : null)
+          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
           .then((data) => {
             const items = pickRecords(data, "data", "invoices");
             items.forEach((item) => {
@@ -441,13 +447,13 @@ function useApiSearch(query: string) {
               });
             });
           })
-          .catch(() => {}),
+          .catch(() => { fetchFailures++; }),
 
         // Consignment Notes — payload is { success, data: [...] }, hence the
         // explicit "data" key. The ?focus= deep link makes the CN page hop
         // to the record's status tab and open its Detail dialog.
         fetch(`/api/consignment-notes?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
-          .then((r) => r.ok ? r.json() : null)
+          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
           .then((data) => {
             const items = pickRecords(data, "consignmentNotes", "data");
             items.forEach((item) => {
@@ -462,7 +468,7 @@ function useApiSearch(query: string) {
               });
             });
           })
-          .catch(() => {}),
+          .catch(() => { fetchFailures++; }),
       ];
 
       await Promise.allSettled(fetchers);
@@ -484,6 +490,10 @@ function useApiSearch(query: string) {
 
       if (!controller.signal.aborted) {
         setResults(collected);
+        // Only flag failure when NOTHING came back AND at least one fetch
+        // errored — partial results still render normally. (Aborted requests
+        // can bump fetchFailures, but this whole branch is gated on !aborted.)
+        setFailed(collected.length === 0 && fetchFailures > 0);
         setLoading(false);
       }
     }, 250); // debounce
@@ -495,7 +505,7 @@ function useApiSearch(query: string) {
   }, [query]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  return { results, loading };
+  return { results, loading, failed };
 }
 
 // ---------------------------------------------------------------------------
@@ -512,7 +522,7 @@ export function GlobalSearch() {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const { results: apiResults, loading } = useApiSearch(open ? query : "");
+  const { results: apiResults, loading, failed: searchFailed } = useApiSearch(open ? query : "");
 
   // Filter static results
   const filteredPages = useMemo(() => {
@@ -788,8 +798,20 @@ export function GlobalSearch() {
                 </div>
               )}
 
+              {/* Search failed (network/timeout) — must NOT masquerade as
+                  "No results": on weak factory wifi a timed-out search looked
+                  like the record didn't exist. */}
+              {query && !loading && searchFailed && allResults.length === 0 && (
+                <div className="px-4 py-8 text-center text-sm">
+                  <div className="font-medium text-[#B45309]">Search failed — connection problem</div>
+                  <div className="mt-1 text-[#9CA3AF]">
+                    The record may still exist. Check your network and type again to retry.
+                  </div>
+                </div>
+              )}
+
               {/* No results */}
-              {query && !loading && allResults.length === 0 && (
+              {query && !loading && !searchFailed && allResults.length === 0 && (
                 <div className="px-4 py-8 text-center text-sm text-[#9CA3AF]">
                   No results for &ldquo;{query}&rdquo;
                 </div>

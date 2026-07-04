@@ -138,6 +138,35 @@ jobs:
             exit 1
           fi
 
+      - name: Prune backups older than 90 days
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          # Retention was designed to run inside a Workers Cron Trigger that
+          # was never provisioned, so it never ran and dumps accumulated
+          # unbounded (2026-07-03 IT-hygiene audit). Run it here instead,
+          # right after each successful upload, via the CRON_SECRET-gated
+          # /api/internal/backup-prune endpoint.
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty — prune skipped"
+            exit 1
+          fi
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 60 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-cron-secret: $CRON_SECRET" \
+            --data '{}' \
+            'https://hookka-erp-testing.pages.dev/api/internal/backup-prune')
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+          echo "Status: $status"
+          echo "Body: $body"
+          if [ "$status" -ne 200 ]; then
+            echo "::error::backup-prune failed with HTTP $status"
+            exit 1
+          fi
+
       - name: Print recovery hint
         run: |
           echo "Daily backup uploaded: hookka-files/backups/supabase/${BACKUP_FILE}"

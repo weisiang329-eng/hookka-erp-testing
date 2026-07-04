@@ -3119,6 +3119,13 @@ export default function DeliveryPage() {
       return; // keep the dialog open so the operator can retry
     }
     // Confirmed persisted → apply the optimistic INVOICED flip + close.
+    // Cross-tab freshness (2026-07-03 audit): invoice creation also CLOSEs the
+    // SO on the backend, and this handler previously invalidated NOTHING — an
+    // invoice generated here didn't show in the Invoices list (own tab or
+    // another) until the cache TTL. Broadcast all three affected prefixes.
+    invalidateCachePrefix("/api/invoices");
+    invalidateCachePrefix("/api/sales-orders");
+    invalidateCachePrefix("/api/delivery-orders");
     setDeliveryOrders((prev) =>
       prev.map((d) =>
         d.id === invoiceDialog.id && d.status === "DELIVERED"

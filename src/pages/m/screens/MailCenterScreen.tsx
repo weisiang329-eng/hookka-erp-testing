@@ -13,7 +13,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Search, Plus, Paperclip } from "lucide-react";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { MobileHeader, FormSheet } from "../components";
 import { M, M_ACCENT } from "../theme";
 import { mailConfig } from "../config/modules";
@@ -179,8 +179,12 @@ export function MailThreadScreen() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "closed", unread: false }),
       });
-      if (r.ok) setSigned(true);
-      else window.alert("Couldn’t sign receipt.");
+      if (r.ok) {
+        setSigned(true);
+        // Broadcast so the mail lists (mobile + desktop Mail Center) drop the
+        // unread badge / show closed without a reload (2026-07-04 cache sweep).
+        invalidateCachePrefix("/api/mail-center");
+      } else window.alert("Couldn’t sign receipt.");
     } catch {
       window.alert("Network error.");
     } finally {

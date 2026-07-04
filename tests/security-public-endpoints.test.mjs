@@ -175,6 +175,10 @@ const EXPECTED_PRE_AUTH_ROUTES = [
   // Background scan-queue sweep (added 2026-06-29). CRON_SECRET-gated like the
   // rest of /api/internal/*; re-queues 'processing' rows older than 5min.
   "POST /api/internal/scan-queue-sweep",
+  // Backup retention prune (added 2026-07-03). CRON_SECRET-gated; deletes
+  // Storage objects under backups/supabase/ older than 90 days. Called by
+  // backup.yml right after each daily upload.
+  "POST /api/internal/backup-prune",
   // Nightly PI->GL backfill safety net (added 2026-07-01). CRON_SECRET-gated
   // like the rest of /api/internal/*; idempotent re-run of the owner's
   // "Post to GL" button so 400-0000 can't silently drift again.

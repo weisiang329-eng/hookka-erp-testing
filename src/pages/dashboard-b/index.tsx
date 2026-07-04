@@ -14,6 +14,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/utils";
 import { Skeleton, SkeletonDashboard } from "@/components/ui/skeleton";
 import { useCachedJson } from "@/lib/cached-fetch";
+import { OcrAccuracyCard } from "./OcrAccuracyCard";
 import {
   poReadyForDelivery,
   type PipelinePO,
@@ -1212,6 +1213,9 @@ export default function DashboardBPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* OCR accuracy — automation-readiness gauge (owner 2026-07-04) */}
+      <OcrAccuracyCard />
 
       {/* Revenue + Plant load */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

@@ -244,10 +244,11 @@ app.post("/", async (c) => {
     );
   }
   if (file.size > MAX_UPLOAD_BYTES) {
+    // Human-readable — this string surfaces directly in an operator toast.
     return c.json(
       {
         success: false,
-        error: `file exceeds max ${MAX_UPLOAD_BYTES} bytes`,
+        error: `File is too large (${Math.round(file.size / 1048576)} MB) — maximum is ${Math.round(MAX_UPLOAD_BYTES / 1048576)} MB`,
       },
       413,
     );

@@ -14,7 +14,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, SlidersHorizontal, Plus, ScanLine, FileSearch, ListChecks, X, Download, Check, PackageCheck } from "lucide-react";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { MobileHeader, DocCard, StatusPill, FormSheet, ScanSheet, ScanPOSheet } from "../components";
 import { newSalesOrderSpec, type SOCreatePrefill } from "../config/forms";
 import { SubTabs } from "../components/SubTabs";
@@ -160,6 +160,11 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
       } catch { failed++; }
     }
     setBulkBusy(false);
+    // Broadcast so THIS list, the desktop GRN/PO pages and any other open tab
+    // refetch — without this the new GRNs were invisible until cache TTL
+    // (2026-07-04 cache sweep).
+    invalidateCachePrefix("/api/grn");
+    invalidateCachePrefix("/api/purchase-orders");
     setScanToast(`Converted ${ok} PO${ok === 1 ? "" : "s"} to GRN${failed > 0 ? ` · ${failed} failed` : ""}`);
     window.setTimeout(() => setScanToast(null), 3000);
     exitSelectMode();
@@ -173,9 +178,12 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
     const ids = Array.from(selectedIds);
     let ok = 0;
     let failed = 0;
+    const touchedPrefixes = new Set<string>();
     for (const id of ids) {
       try {
         const url = bulkCfg.endpoint(id);
+        // e.g. "/api/grn/<id>" → "/api/grn" — whatever module this list is.
+        touchedPrefixes.add(url.replace(/\/[^/]*$/, ""));
         const res = await fetch(url, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -188,6 +196,8 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
       }
     }
     setBulkBusy(false);
+    // Broadcast so this list + desktop pages refetch (2026-07-04 cache sweep).
+    for (const p of touchedPrefixes) invalidateCachePrefix(p);
     setScanToast(
       `${bulkCfg.label}: ${ok} done${failed > 0 ? ` · ${failed} failed` : ""}`,
     );
@@ -229,8 +239,13 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   );
 
   const rows = useMemo(() => {
-    const byTab = sourceRows.filter((r) => tab.match(r));
-    const filtered = applyFilters(byTab, source.columns, filters, debouncedSearch);
+    // When there's a search query, look across EVERY sub-tab of this source so
+    // a record is findable no matter which status tab it currently sits in
+    // (owner 2026-07-04: a Loaded DO couldn't be found from the Delivered tab).
+    // An empty search respects the active tab as before.
+    const searching = debouncedSearch.trim().length > 0;
+    const base = searching ? sourceRows : sourceRows.filter((r) => tab.match(r));
+    const filtered = applyFilters(base, source.columns, filters, debouncedSearch);
     return applySort(filtered, source.columns, sort);
   }, [sourceRows, source, tab, filters, debouncedSearch, sort]);
 

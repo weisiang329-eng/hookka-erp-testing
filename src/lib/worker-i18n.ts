@@ -174,6 +174,12 @@ const dict: Dict = {
     zh: '请拍照后才能打卡',
     my: 'ဓာတ်ပုံ ဦးစွာရိုက်ပါ',
   },
+  'home.punchFailed': {
+    en: 'Punch NOT recorded — network problem. Please tap again.',
+    ms: 'Daftar TIDAK direkodkan — masalah rangkaian. Sila tekan sekali lagi.',
+    zh: '打卡没有成功——网络问题，请再打一次。',
+    my: 'ပန်ချ် မမှတ်တမ်းတင်ရပါ — ကွန်ရက်ပြဿနာ။ ထပ်နှိပ်ပါ။',
+  },
   'home.lateBy': {
     en: 'Late',
     ms: 'Lewat',

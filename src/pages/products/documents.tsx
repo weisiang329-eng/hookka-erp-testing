@@ -33,6 +33,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cachedFetchJson } from "@/lib/cached-fetch";
+import { uploadFileAsset } from "@/lib/upload-file";
 import type { Product } from "@/types";
 
 const RT_PREFIX = "product:";
@@ -263,20 +264,22 @@ function DocSlot({
   async function upload(file: File) {
     setBusy(true);
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("resourceType", `${RT_PREFIX}${slot.key}`);
-      fd.append("resourceId", productId);
-      const res = await fetch("/api/files", { method: "POST", body: fd });
-      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
-      if (!res.ok || !j?.success) {
-        toast.error(j?.error || `Upload failed (${res.status})`);
+      const r = await uploadFileAsset({
+        file,
+        resourceType: `${RT_PREFIX}${slot.key}`,
+        resourceId: productId,
+      });
+      if (!r.ok) {
+        toast.error(r.error);
         return;
       }
-      toast.success(`${slot.label}: uploaded`);
+      if (r.verified) {
+        toast.success(`${slot.label}: uploaded`);
+      } else {
+        // Row saved but bytes not yet servable — never claim clean success.
+        toast.error(`${slot.label}: uploaded, but it can't be opened yet — wait a few seconds and check it opens before using it`);
+      }
       onChanged();
-    } catch {
-      toast.error("Upload failed — network error");
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";

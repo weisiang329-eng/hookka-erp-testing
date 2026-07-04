@@ -5123,6 +5123,76 @@ function buildPoListCacheKey(orgId: string, version: string, url: URL): string {
   return `pos:${orgId}:v${version}:${qs}`;
 }
 
+// ---------------------------------------------------------------------------
+// KV-layer serve-stale for the non-paginated list (2026-07-03, Phase 1 of the
+// visibility/perf plan). Measured on prod: a KV HIT serves in ~0.77s but any
+// write bumps the org version, and the next poll then pays the snapshot path —
+// a ~10MB snapshot row read from Postgres + JSON.parse + JSON.stringify,
+// 1.3-1.8s warm and up to ~5.4s on a full recompute. During an active shift
+// scans bump the version every 10-20s while the page polls every 8s, so
+// operators sat on the slow path ~half the time.
+//
+// Fix: store the response body under a STABLE key (no version in the key) and
+// stamp the org version into KV *metadata*. On version mismatch, serve the
+// previous body immediately (X-Cache: STALE) and refresh in the background.
+// Freshness semantics are unchanged — the snapshot layer's own
+// serve-stale-while-revalidate already hands back the pre-write copy once
+// after every write (see the 2026-06-06 mark-stale note above); this just cuts
+// what that stale serve costs from 1.3-5.4s to a ~0.1s KV read. The page's 8s
+// poll picks up the refreshed body one cycle later exactly as before, and
+// in-page cell edits stay protected by the drafts/pending-patch overlay.
+// ---------------------------------------------------------------------------
+const PO_LIST_BODY_TTL_S = 300;
+
+function buildPoListBodyKey(orgId: string, url: URL): string {
+  const pairs = Array.from(url.searchParams.entries())
+    .filter(([, v]) => v !== "")
+    .sort(([a], [b]) => a.localeCompare(b));
+  const qs = pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+  return `pos:body:${orgId}:${qs}`;
+}
+
+// Single-flight guard so a burst of stale serves (several operators polling
+// the same sheet) triggers ONE background rebuild, not one per request.
+const inFlightPoListBodyRefreshes = new Set<string>();
+
+function schedulePoListBodyRefresh(
+  c: Context<Env>,
+  orgId: string,
+  bodyKey: string,
+  build: () => Promise<unknown>,
+): void {
+  const kv = c.env.SESSION_CACHE;
+  if (!kv) return;
+  let waitUntil: ((p: Promise<unknown>) => void) | undefined;
+  try {
+    const ctx = c.executionCtx;
+    if (ctx?.waitUntil) waitUntil = ctx.waitUntil.bind(ctx);
+  } catch {
+    waitUntil = undefined;
+  }
+  if (!waitUntil || inFlightPoListBodyRefreshes.has(bodyKey)) return;
+  inFlightPoListBodyRefreshes.add(bodyKey);
+  const task = (async () => {
+    try {
+      const fresh = await build();
+      // Re-read the version AFTER the compute: if another write landed while
+      // we were rebuilding, the stamp won't match it and the next poll simply
+      // refreshes again — self-healing, never serves a wrong "fresh" flag.
+      const v = await poListCacheVersion(c, orgId);
+      await kv.put(bodyKey, JSON.stringify(fresh), {
+        expirationTtl: PO_LIST_BODY_TTL_S,
+        metadata: { v },
+      });
+    } catch (err) {
+      console.error("[poList cache] stale refresh failed", err);
+    } finally {
+      inFlightPoListBodyRefreshes.delete(bodyKey);
+    }
+  })();
+  waitUntil(task);
+}
+
 // After a worker QR scan completes job cards, the operator-facing production
 // dept sheets read from a cache-aside snapshot (production_orders_list_snapshot)
 // plus the KV list cache. The snapshot freshness probe compares MAX(updated_at)
@@ -5300,60 +5370,16 @@ app.get("/", async (c) => {
     return c.json({ success: true, data, total: data.length });
   }
 
-  // Cache check — return early if a fresh response for this (orgId, query)
-  // is sitting in KV. Cache key includes the per-org version counter so any
-  // mutation auto-invalidates the entire org's matrix cache.
-  const kvCache = c.env.SESSION_CACHE;
-  let cacheKeyForWrite: string | null = null;
-  if (kvCache) {
-    const version = await poListCacheVersion(c, orgId);
-    const cacheKey = buildPoListCacheKey(orgId, version, new URL(c.req.url));
-    try {
-      const cached = await kvCache.get(cacheKey);
-      if (cached !== null) {
-        return new Response(cached, {
-          status: 200,
-          headers: {
-            "Content-Type": "application/json",
-            "X-Cache": "HIT",
-          },
-        });
-      }
-    } catch (err) {
-      console.error("[poList cache] kv get failed", err);
-    }
-    cacheKeyForWrite = cacheKey;
-  }
-
-  if (!paginate) {
-    // Phase 6 (2026-05-24): wrap the heavy fetch in the cache-aside
-    // snapshot pattern. Cache key encodes every query param so dept tabs
-    // / category filters / completed-toggle each get their own entry.
-    // Source tables = production_orders + job_cards so the next read
-    // after any PO/JC write auto-recomputes (the existing snapshot-
-    // freshness probe handles the MAX(updated_at) comparison).
-    //
-    // Effect on the hot path:
-    //   - Cold (first request): same SQL cost as before (~2-3s), payload
-    //     gets written into production_orders_list_snapshot.
-    //   - Warm (every subsequent request until next PO/JC write): single
-    //     SELECT data FROM production_orders_list_snapshot + freshness
-    //     probe — ~50-100ms total. No SQL on the 1086-row PO scan, no
-    //     8-dept JC join, no lead-time / BOM preload.
-    //
-    // The old KV layer above remains in place as a Cloudflare-edge cache
-    // (60s TTL, scope = Worker isolate). The two are complementary: KV
-    // catches the same request twice within a minute at the edge before
-    // ever hitting the origin; the snapshot catches it at the origin
-    // across minutes / instances. Hit-rate stack-up means most requests
-    // never run a single full SQL pass.
+  // Builds the full non-paginated list payload through the snapshot layer.
+  // `swr` selects serve-stale-while-revalidate: true on the user-facing path
+  // (a stale snapshot returns instantly, refresh runs in background); false
+  // on the KV background refresh (already off the request path — wait for
+  // fresh data so the stored body is current, and skip the version bump).
+  const buildListPayload = async (swr: boolean) => {
     const { withSnapshot } = await import("../lib/snapshot");
-    // cacheKeyForWrite already encodes the canonicalised query string for
-    // the KV cache. Reuse it for the snapshot so the two caches share a
-    // namespace — easier to reason about.
     const snapshotCacheKey =
       new URL(c.req.url).searchParams.toString().split("&").sort().join("&");
-    const cached = await withSnapshot<{
+    return withSnapshot<{
       success: true;
       data: unknown[];
       total: number;
@@ -5390,20 +5416,94 @@ app.get("/", async (c) => {
       },
       snapshotCacheKey,
       c,
-      {
-        // Serve-stale-while-revalidate: a stale dept sheet is returned
-        // instantly (no ~2-3s recompute wait) and refreshed in the background.
-        // onRevalidated bumps this endpoint's KV version when the refresh lands
-        // so the 60s edge cache stops serving the stale body it cached during
-        // the SWR window — next read picks up the fresh snapshot.
-        staleWhileRevalidate: true,
-        onRevalidated: () => bumpPoListCacheVersion(c, orgId),
-      },
+      swr
+        ? {
+            // Serve-stale-while-revalidate: a stale dept sheet is returned
+            // instantly (no ~2-3s recompute wait) and refreshed in the
+            // background. onRevalidated bumps this endpoint's KV version when
+            // the refresh lands so the edge cache stops serving the stale body
+            // it cached during the SWR window.
+            staleWhileRevalidate: true,
+            onRevalidated: () => bumpPoListCacheVersion(c, orgId),
+          }
+        : undefined,
     );
+  };
+
+  // Cache check. Non-paginated list: stable body key + version-in-metadata so
+  // a version mismatch serves the previous body instantly (X-Cache: STALE)
+  // and refreshes in the background — see the buildPoListBodyKey comment.
+  // Paginated path keeps the original versioned-key behaviour.
+  const kvCache = c.env.SESSION_CACHE;
+  let cacheKeyForWrite: string | null = null;
+  let bodyKeyForWrite: string | null = null;
+  let versionAtRead: string | null = null;
+  if (kvCache) {
+    const version = await poListCacheVersion(c, orgId);
+    versionAtRead = version;
+    if (!paginate) {
+      const bodyKey = buildPoListBodyKey(orgId, new URL(c.req.url));
+      bodyKeyForWrite = bodyKey;
+      try {
+        const got = (await kvCache.getWithMetadata(bodyKey)) as {
+          value: string | null;
+          metadata: { v?: string } | null;
+        } | null;
+        if (got && got.value !== null) {
+          const isFresh = got.metadata?.v === version;
+          if (!isFresh) {
+            schedulePoListBodyRefresh(c, orgId, bodyKey, () =>
+              buildListPayload(false),
+            );
+          }
+          return new Response(got.value, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "X-Cache": isFresh ? "HIT" : "STALE",
+            },
+          });
+        }
+      } catch (err) {
+        console.error("[poList cache] kv get failed", err);
+      }
+    } else {
+      const cacheKey = buildPoListCacheKey(orgId, version, new URL(c.req.url));
+      try {
+        const cached = await kvCache.get(cacheKey);
+        if (cached !== null) {
+          return new Response(cached, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "X-Cache": "HIT",
+            },
+          });
+        }
+      } catch (err) {
+        console.error("[poList cache] kv get failed", err);
+      }
+      cacheKeyForWrite = cacheKey;
+    }
+  }
+
+  if (!paginate) {
+    // Phase 6 (2026-05-24): the heavy fetch runs through the cache-aside
+    // snapshot pattern — see buildListPayload above. The snapshot cache key
+    // encodes every query param so dept tabs / category filters /
+    // completed-toggle each get their own entry; source tables =
+    // production_orders + job_cards so the next read after any PO/JC write
+    // auto-recomputes. The KV layer above sits in front as the edge cache;
+    // since 2026-07-03 it stores the body under a stable key with the org
+    // version in metadata so version mismatches serve stale instantly.
+    const cached = await buildListPayload(true);
     const body = JSON.stringify(cached);
-    if (cacheKeyForWrite && kvCache) {
+    if (bodyKeyForWrite && kvCache) {
       const writePromise = kvCache
-        .put(cacheKeyForWrite, body, { expirationTtl: 60 })
+        .put(bodyKeyForWrite, body, {
+          expirationTtl: PO_LIST_BODY_TTL_S,
+          metadata: { v: versionAtRead ?? "0" },
+        })
         .catch((err) => console.error("[poList cache] kv put failed", err));
       if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(writePromise);
       else void writePromise;

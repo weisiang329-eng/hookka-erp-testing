@@ -278,6 +278,10 @@ export type SalesOrder = {
    *  Sales Orders list). The whole production cascade (PO / DO / Invoice)
    *  reuses unchanged. */
   isServiceOrder?: boolean;
+  /** Multi-Company Phase 2 — the company this SO is booked under (org code:
+   *  HOOKKA / OHANA / HOUZS / HKMFG …). Defaults to HOOKKA server-side, so
+   *  existing orders and the default list view are unchanged. */
+  salesOrgCode?: string;
   createdAt: string;
   updatedAt: string;
 };

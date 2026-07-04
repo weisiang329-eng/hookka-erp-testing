@@ -37,6 +37,7 @@ import {
   loadProductCatalog,
 } from "./_shared/item-catalog-snap";
 import { withOrgScope, getOrgId } from "../lib/tenant";
+import { resolveCompanyCode, readCompanyCode } from "../../lib/company-dimension";
 import { invalidateHubChangeSnapshots } from "../lib/snapshot";
 import { loadDeliveredItemsValueSen } from "../lib/do-value";
 import {
@@ -114,6 +115,11 @@ export type SalesOrderRow = {
   held_by?: string | null;
   heldAt?: string | null;
   held_at?: string | null;
+  // Multi-Company Phase 2 — the company this SO is booked under
+  // (HOOKKA / OHANA / …). snake_case DB column; db-pg toCamel folds it to
+  // salesOrgCode on SELECT *, so both keys are typed for dual-key reads.
+  salesOrgCode?: string | null;
+  sales_org_code?: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -321,6 +327,9 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
     holdReason: row.holdReason ?? row.hold_reason ?? "",
     heldBy: row.heldBy ?? row.held_by ?? "",
     heldAt: row.heldAt ?? row.held_at ?? "",
+    // Multi-Company Phase 2 — company code (dual-keyed). Defaults to HOOKKA so
+    // rows from before the column existed (or partial selects) render as Hookka.
+    salesOrgCode: readCompanyCode(row.salesOrgCode, row.sales_org_code),
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
   };
@@ -1948,6 +1957,19 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS hold_reason TEXT",
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS held_by TEXT",
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS held_at TEXT",
+      // Multi-Company Phase 2 — the "company" a Sales Order is booked under
+      // (HOOKKA / OHANA / HOUZS / HKMFG …). DELIBERATELY a NEW snake_case
+      // column, NOT the existing `orgId`: orgId is the tenant-isolation
+      // boundary (the SO list is scoped `WHERE orgId = <users.orgId>` via
+      // withOrgScope, always 'hookka' today) — writing a sister-company value
+      // into orgId would HIDE the SO from the default all-companies list. This
+      // mirrors purchase_orders.purchase_org_code exactly: a display/filter
+      // dimension that is independent of the tenant scope. DEFAULT 'HOOKKA'
+      // backfills every existing row so the default list view is byte-identical
+      // (every SO reads as Hookka until an operator picks otherwise). Runtime
+      // self-apply because deploy.yml does NOT replay migration files.
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS sales_org_code TEXT NOT NULL DEFAULT 'HOOKKA'",
+      "UPDATE sales_orders SET sales_org_code = 'HOOKKA' WHERE sales_org_code IS NULL OR sales_org_code = ''",
     ];
     for (const sql of stmts) {
       try {
@@ -2460,6 +2482,12 @@ app.post("/", async (c) => {
         ? body.customerPOImageB64
         : null;
 
+    // Multi-Company Phase 2 — the company this SO is booked under. Operator
+    // picks it on the create form; an omitted / blank value defaults to HOOKKA
+    // so nothing changes for callers that don't send it (OCR / scan-PO, older
+    // clients). Stored uppercased to match the organisations.code convention.
+    const salesOrgCode = resolveCompanyCode(body.salesOrgCode);
+
     const statements = [
       c.var.DB.prepare(
         `INSERT INTO sales_orders (id, customerPO, customerPOId, customerPODate,
@@ -2467,8 +2495,8 @@ app.post("/", async (c) => {
            customerState, hubId, hubName, companySO, companySOId, companySODate,
            customerDeliveryDate, hookkaExpectedDD, hookkaDeliveryOrder,
            subtotalSen, totalSen, status, overdue, notes,
-           customerPOImageB64, is_service_order, caseid, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           customerPOImageB64, is_service_order, caseid, sales_org_code, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         soId,
         body.customerPO ?? "",
@@ -2497,6 +2525,7 @@ app.post("/", async (c) => {
         customerPOImageB64,
         isServiceOrder,
         linkedCaseId,
+        salesOrgCode,
         now,
         now,
       ),
@@ -3973,6 +4002,7 @@ app.put("/:id", async (c) => {
            subtotalSen = ?, totalSen = ?, status = ?, overdue = ?,
            notes = ?, is_service_order = ?,
            hold_reason = ?, held_by = ?, held_at = ?,
+           sales_org_code = ?,
            updated_at = ?
          WHERE id = ?`,
       ).bind(
@@ -4016,6 +4046,13 @@ app.put("/:id", async (c) => {
           : clearHoldFields
             ? null
             : existing.heldAt ?? existing.held_at ?? null,
+        // Multi-Company Phase 2 — company code. Only changes when the operator
+        // explicitly supplies body.salesOrgCode; otherwise the existing value
+        // is preserved (a header-only edit never resets the company), and a
+        // pre-column row falls back to HOOKKA.
+        typeof body.salesOrgCode === "string" && body.salesOrgCode.trim()
+          ? resolveCompanyCode(body.salesOrgCode)
+          : readCompanyCode(existing.salesOrgCode, existing.sales_org_code),
         now,
         id,
       ),

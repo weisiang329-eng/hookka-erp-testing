@@ -239,6 +239,10 @@ function CreateSalesOrderPage() {
   const CAT_OPTS = { revalidateOnFocus: true };
   const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers", 300, CAT_OPTS);
   const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products", 300, CAT_OPTS);
+  // Multi-Company Phase 2 — the registry that feeds the "Company" dropdown on
+  // create. Same endpoint the procurement create page + PO/PI lists use, so the
+  // cache is typically warm. Mirrors procurement/create.tsx's pattern exactly.
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code: string; name: string; isActive?: boolean }> }>("/api/organisations", 300, CAT_OPTS);
   // Fabric picker now reads from /api/fabric-tracking (sourced from
   // raw_materials, the inventory source of truth) — the legacy /api/fabrics
   // table has stale leading-zero duplicates (M2402-04 vs M2402-4) which let
@@ -402,11 +406,20 @@ function CreateSalesOrderPage() {
   const [customerPOId, setCustomerPOId] = useState("");
   const [customerSOId, setCustomerSOId] = useState("");
   const [reference, setReference] = useState("");
+  // Multi-Company Phase 2 — company this SO is booked under. Defaults to
+  // HOOKKA so the default create behaviour is byte-identical to today.
+  const [salesOrgCode, setSalesOrgCode] = useState<string>("HOOKKA");
   const [companySODate, setCompanySODate] = useState(new Date().toISOString().split("T")[0]);
   const [customerDeliveryDate, setCustomerDeliveryDate] = useState("");
   const [hookkaExpectedDD, setHookkaExpectedDD] = useState("");
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<LineItem[]>([makeEmptyLine()]);
+
+  // Multi-Company Phase 2 — active companies for the Company dropdown.
+  const activeOrgs = useMemo(
+    () => (orgsResp?.organisations ?? []).filter((o) => o.isActive !== false),
+    [orgsResp],
+  );
 
   // 0134 — Copy-from modal state (Service Order mode only). Two-step:
   // (1) pick source SO/CO by id, (2) tick which lines to copy and dial
@@ -647,6 +660,7 @@ function CreateSalesOrderPage() {
     customerPOId: string;
     customerSOId: string;
     reference: string;
+    salesOrgCode: string;
     companySODate: string;
     customerDeliveryDate: string;
     hookkaExpectedDD: string;
@@ -659,6 +673,7 @@ function CreateSalesOrderPage() {
     customerPOId,
     customerSOId,
     reference,
+    salesOrgCode,
     companySODate,
     customerDeliveryDate,
     hookkaExpectedDD,
@@ -666,7 +681,7 @@ function CreateSalesOrderPage() {
     items,
   }), [
     customerId, deliveryHubId, customerPOId, customerSOId, reference,
-    companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+    salesOrgCode, companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
   ]);
   const restoredDraft = useFormDraft<DraftShape>(draftKey, draftCurrent);
   const [draftBannerDismissed, setDraftBannerDismissed] = useState(false);
@@ -685,6 +700,7 @@ function CreateSalesOrderPage() {
     setCustomerPOId(restoredDraft.customerPOId);
     setCustomerSOId(restoredDraft.customerSOId);
     setReference(restoredDraft.reference);
+    if (restoredDraft.salesOrgCode) setSalesOrgCode(restoredDraft.salesOrgCode);
     setCompanySODate(restoredDraft.companySODate);
     setCustomerDeliveryDate(restoredDraft.customerDeliveryDate);
     setHookkaExpectedDD(restoredDraft.hookkaExpectedDD);
@@ -1843,6 +1859,8 @@ function CreateSalesOrderPage() {
         body: JSON.stringify({
           customerId, customerPOId, customerSOId, reference,
           companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
+          // Multi-Company Phase 2 — company this SO is booked under.
+          salesOrgCode,
           items: itemsForServer,
           status,
           // 0134 — flips the new SO into a Service Order (SV-YYMM-NNN
@@ -2120,6 +2138,26 @@ function CreateSalesOrderPage() {
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Reference</label>
                 <Input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Optional reference" />
+              </div>
+              <div>
+                {/* Multi-Company Phase 2 — company this Sales Order is booked
+                    under. Defaults to HOOKKA; other sister companies come from
+                    the /api/organisations registry. */}
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">Company</label>
+                <select
+                  className="w-full h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  value={salesOrgCode}
+                  onChange={(e) => setSalesOrgCode(e.target.value)}
+                  aria-label="Company this sales order is booked under"
+                >
+                  {activeOrgs.length === 0 ? (
+                    <option value="HOOKKA">HOOKKA</option>
+                  ) : (
+                    activeOrgs.map((o) => (
+                      <option key={o.code} value={o.code}>{o.name}</option>
+                    ))
+                  )}
+                </select>
               </div>
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Company SO Date</label>

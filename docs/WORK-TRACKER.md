@@ -9,33 +9,39 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-04 — 🟡 Multi-company Phase 2: consolidated group P&L / Balance Sheet + company drill (worktree branch, NOT pushed)
+## 2026-07-04 — 🔵 Multi-Company Phase 2: company dimension on SO + PO (worktree branch, NOT pushed)
 
-Owner #1 ask: "see the group P&L all together, also drill to one company."
-ADDITIVE, front-end only — reuses the Phase-1 `?orgId=` backend (companyFilter),
-NO backend logic change. Worktree branch `worktree-agent-a398b72b2050a314b`,
-committed there, NOT pushed.
+ADDITIVE-only. Company selector on create + Company column + Company filter on
+the Sales Orders and Purchase Orders lists. Existing docs → Hookka; default list
+view shows EVERYTHING; filter defaults to ALL companies.
 
-**Built:**
-- `useCompanyOptions()` + `orgIdParam()` in `accounting/shared.ts`; a shared
-  `<CompanySelect>` in `index.tsx` matching the existing period-select styling.
-  DEFAULT = "All companies (group)" (value "") → report URL UNCHANGED =
-  today's consolidated numbers. A company appends `&orgId=<code>` (org CODE
-  lower-cased — `hookka`/`ohana` — NOT the org row id).
-- Wired into: Balance Sheet tab (`/pl`), Trial Balance tab (`/trial-balance`),
-  Debtor Aging + Creditor Aging (`/aging` + `/ar-control`/`/ap-control`). AR/AP
-  aging re-fetch a company-scoped copy locally; the consolidated prop path is
-  untouched.
-- `GroupByCompanyCard` on the Balance Sheet group view: parallel per-company
-  `/pl?orgId=` fetches → Net Profit + Total Equity per company + group total
-  (hidden once a single company is picked).
-- Test `tests/company-filter-param.test.mjs` locks "group default → no param"
-  (byte-identical URL). tsc clean; pnl-*/bs-section/other-party-aging green.
+**Findings (verified before coding):**
+- PO side largely DONE already: `/procurement/create` full-page form has the
+  "Purchase company" dropdown (persists `purchaseOrgCode` via POST); PO list has a
+  "Purchase co" column. Only the PO list **company filter** is missing.
+- SO side: `sales_orders.orgId` is the TENANT-isolation column and the SO list is
+  tenant-scoped (`withOrgScope` → `WHERE orgId=?` bound to users.orgId='hookka').
+  Writing a non-hookka `orgId` would HIDE the SO → violates "show everything".
+  → Company dimension for SO is a NEW snake_case `sales_org_code` column (mirrors
+  PO's `purchase_org_code`), leaving `orgId` untouched.
 
-**Out of scope (deliberate):** the rich hierarchical P&L tab (`/pl-statement`)
-does NOT accept `?orgId=` — scoping it needs a backend change threading
-companyFilter through computePnlWindow + FIFO material costing, which the
-"don't touch backend logic" constraint rules out. Left unchanged.
+**Plan:** (1) SO create dropdown → sales_org_code; (2) SO list column + filter;
+(3) PO list filter. Runtime ensure + DEFAULT 'HOOKKA' backfill for sales_org_code.
+
+**DONE (worktree, NOT pushed):**
+- New pure helper `src/lib/company-dimension.ts` (resolveCompanyCode /
+  readCompanyCode / matchesCompanyFilter) + `tests/company-dimension.test.mjs`.
+- Backend `sales-orders.ts`: `sales_org_code` runtime ensure + DEFAULT 'HOOKKA'
+  backfill; POST INSERT + PUT UPDATE persist it; SalesOrderRow type + rowToSO
+  read (dual-keyed). PO backend already accepted purchaseOrgCode — untouched.
+- SO create `sales/create.tsx`: "Company" dropdown (defaults HOOKKA), payload +
+  localStorage draft. PO create `/procurement/create` already had it.
+- SO list `sales/index.tsx`: "Company" column (code→name) + "Company" filter
+  (default All Companies). PO list `procurement/index.tsx`: "Company" filter
+  added (column already existed).
+- `SalesOrder` type in `src/types/index.ts` gained `salesOrgCode?`.
+- build:strict clean; company-dimension + so-category + sql-write-column-coverage
+  + delivery-refs + sofa-combo tests green.
 
 ---
 

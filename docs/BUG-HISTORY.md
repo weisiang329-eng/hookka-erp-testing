@@ -34,6 +34,34 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-04-006 — OCR weekly self-learning silently stopped for ~2 weeks (cron timed out at 60s) + only ever learned from GOLD samples so most customers/suppliers learned nothing `ocr` `scan` `ci`
+
+🟢 **Fixed on main — restored + verified (manual run 200 OK)**
+
+**Symptom (owner asked "有没有在重新学习/为什么准确率那么低"):** the per-entity
+OCR rule distiller (`ocr-distill.ts`, weekly `distill-ocr-rules.yml` cron) had
+been **failing since 2026-06-21** — every Sunday run errored. And even when it
+ran, most entities got no rules.
+
+**Root causes + fixes:**
+① The cron `curl --max-time 60` was too short — the endpoint loops each eligible
+entity making one Anthropic call, and as gold pools grew a full run now takes
+~77s (verified). Every run past 06-14 timed out at 60s → learning silently
+stopped. Raised the curl timeout to **280s** (still under the 5-min job timeout;
+the endpoint is I/O-bound so Workers allow it). Manual re-run: **200 OK, 77s**.
+② The distiller learned ONLY from `isGold = 1` samples (owner rarely marks gold)
+→ the manual run showed customers 2/5 distilled, **suppliers 0/34** (all skipped
+for want of gold). Changed both the customer and supplier queries to learn from
+**every confirmed sample** (`WHERE correctedJson IS NOT NULL`), gold-preferred
+(`ORDER BY isGold DESC, createdAt DESC`, 50 cap, ≥2 floor unchanged). Now every
+entity with ≥2 accepted imports teaches the OCR its document format.
+
+**Note:** more eligible entities = more Anthropic calls per run; the 280s
+headroom covers current volume. If it grows, add incremental "only regen when
+the sample pool changed" so unchanged entities skip the API call.
+
+---
+
 ## BUG-2026-07-04-005 — Auto-sent DO/Invoice emails used a SECOND pdf engine (pdf-lib) that looked different from the jsPDF the operator prints `ui-frontend` `pdf` `delivery` `invoices` `customer-notify`
 
 🟢 **Fixed on main — email now renders the exact print PDF (verify with one real send)**

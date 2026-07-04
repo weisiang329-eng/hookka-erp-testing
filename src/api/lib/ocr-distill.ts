@@ -160,14 +160,13 @@ export async function distillCustomerRules(
     .prepare(
       `SELECT id, correctedJson, customerHint, poIdentifier, createdAt
          FROM po_scan_samples
-         WHERE isGold = 1
-           AND correctedJson IS NOT NULL
+         WHERE correctedJson IS NOT NULL
            AND (
                  UPPER(customerHint) = UPPER(?)
               OR regexp_replace(UPPER(COALESCE(customerHint, '')), '[^A-Z0-9]', '', 'g')
                    LIKE regexp_replace(UPPER(?), '[^A-Z0-9]', '', 'g') || '%'
            )
-         ORDER BY createdAt DESC
+         ORDER BY isGold DESC, createdAt DESC
          LIMIT 50`,
     )
     .bind(customer.name, customer.name)
@@ -186,7 +185,7 @@ export async function distillCustomerRules(
   if (rows.length < 2) {
     return {
       status: "skipped",
-      reason: `Need at least 2 gold samples to distill rules; this customer has ${rows.length}.`,
+      reason: `Need at least 2 confirmed samples to distill rules; this customer has ${rows.length}.`,
       sampleCount: rows.length,
     };
   }
@@ -461,15 +460,14 @@ export async function distillSupplierRules(
     .prepare(
       `SELECT id, correctedJson, supplierHint, docIdentifier, createdAt
          FROM supplier_scan_samples
-         WHERE isGold = 1
-           AND correctedJson IS NOT NULL
+         WHERE correctedJson IS NOT NULL
            AND (orgId = ? OR orgId IS NULL)
            AND (
                  UPPER(supplierHint) = UPPER(?)
               OR regexp_replace(UPPER(COALESCE(supplierHint, '')), '[^A-Z0-9]', '', 'g')
                    LIKE regexp_replace(UPPER(?), '[^A-Z0-9]', '', 'g') || '%'
            )
-         ORDER BY createdAt DESC
+         ORDER BY isGold DESC, createdAt DESC
          LIMIT 50`,
     )
     .bind(orgId, supplier.name, supplier.name)
@@ -485,7 +483,7 @@ export async function distillSupplierRules(
   if (rows.length < 2) {
     return {
       status: "skipped",
-      reason: `Need at least 2 gold samples to distill rules; this supplier has ${rows.length}.`,
+      reason: `Need at least 2 confirmed samples to distill rules; this supplier has ${rows.length}.`,
       sampleCount: rows.length,
     };
   }

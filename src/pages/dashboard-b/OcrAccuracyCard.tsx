@@ -92,14 +92,14 @@ export function OcrAccuracyCard() {
             <ScanLine className="h-4.5 w-4.5 text-[#6B5C32]" />
             <span className="text-base font-semibold text-[#1F1D1B]">OCR Accuracy</span>
           </div>
-          <span className="text-xs text-[#8A8577]">上传后你改过 = Fail · 达 ~100% 才敢自动化</span>
+          <span className="text-xs text-[#8A8577]">Changed after upload = Fail · automate only near ~100%</span>
         </div>
 
         {loading && !d ? (
           <div className="py-10 text-center text-sm text-[#9CA3AF]">Loading…</div>
         ) : !d || d.overall.total === 0 ? (
           <div className="py-10 text-center text-sm text-[#9CA3AF]">
-            还没有扫描数据。扫描并导入订单 / 供应商单后,这里会自动统计准确率。
+            No scans yet. Once you scan and import orders / supplier docs, the accuracy shows here automatically.
           </div>
         ) : (
           <>
@@ -111,7 +111,7 @@ export function OcrAccuracyCard() {
 
             {d.salesOrders.customers.length > 0 ? (
               <div className="mb-5">
-                <div className="text-sm font-semibold text-[#6B5C32] mb-2">Sales Orders · 顾客 × 类别 <span className="font-normal text-[11px] text-[#9A9384]">(点顾客展开类别)</span></div>
+                <div className="text-sm font-semibold text-[#6B5C32] mb-2">Sales Orders · Customer × Category <span className="font-normal text-[11px] text-[#9A9384]">(click a customer to expand categories)</span></div>
                 <div className="overflow-x-auto rounded-lg border border-[#E7E0D4]">
                   <table className="w-full text-[13px]">
                     <thead>
@@ -119,7 +119,7 @@ export function OcrAccuracyCard() {
                         <th className="px-3 py-2 text-left">Customer / Category</th>
                         <th className="px-2 py-2 text-right">Scans</th>
                         <th className="px-2 py-2 text-right">Success</th>
-                        <th className="px-3 py-2 text-left">最常改的字段</th>
+                        <th className="px-3 py-2 text-left">Most-changed fields</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -134,7 +134,7 @@ export function OcrAccuracyCard() {
 
             {d.supplier.suppliers.length > 0 ? (
               <div>
-                <div className="text-sm font-semibold text-[#6B5C32] mb-2">Supplier · 按 Supplier (PO / PI / GRN)</div>
+                <div className="text-sm font-semibold text-[#6B5C32] mb-2">Supplier · by Supplier (PO / PI / GRN)</div>
                 <div className="overflow-x-auto rounded-lg border border-[#E7E0D4]">
                   <table className="w-full text-[13px]">
                     <thead>
@@ -142,7 +142,7 @@ export function OcrAccuracyCard() {
                         <th className="px-3 py-2 text-left">Supplier</th>
                         <th className="px-2 py-2 text-right">Scans</th>
                         <th className="px-2 py-2 text-right">Success</th>
-                        <th className="px-3 py-2 text-left">最常改的字段</th>
+                        <th className="px-3 py-2 text-left">Most-changed fields</th>
                       </tr>
                     </thead>
                     <tbody>

@@ -34,6 +34,24 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-04-003 — OCR Accuracy dashboard card shipped with Chinese UI strings (violates 100%-English rule) `ui-frontend` `i18n` `dashboard`
+
+🟢 **Fixed on main**
+
+**Symptom (owner):** the OCR Accuracy block on the main Dashboard (live on prod
+via the staging merge) showed Chinese labels — "上传后你改过 = Fail…",
+"顾客 × 类别 (点顾客展开类别)", "最常改的字段", "按 Supplier", and the empty state.
+The ERP UI is 100% English (worker portal is the only intentional multilingual
+surface); this card slipped through.
+
+**Fix:** `src/pages/dashboard-b/OcrAccuracyCard.tsx` — all 6 Chinese strings
+translated to English (header hint, empty state, SO section title + hint, the
+two "Most-changed fields" headers, supplier section title). No logic change.
+Backend fail-reason labels (Product code / Special order / Fabric code / Qty /
+Doc No) were already English.
+
+---
+
 ## BUG-2026-07-04-002 — Invoice PDF: Set/Price/Total pinned to the top line of tall 4-ref rows read as "歪" (misaligned number column) `ui-frontend` `pdf` `invoices`
 
 🟢 **Fixed on main, verified via render (before/after)**

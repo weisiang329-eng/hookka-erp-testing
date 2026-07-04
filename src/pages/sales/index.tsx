@@ -13,7 +13,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
 import { matchesCompanyFilter } from "@/lib/company-dimension";
-import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine, DollarSign } from "lucide-react";
+import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine, DollarSign, Building2 } from "lucide-react";
 // Note: generateSOPdf is dynamic-imported at the click handler so the
 // 1MB jspdf vendor chunk only ships when the user actually prints a SO.
 import { ScanPOModal } from "@/components/scan-po-modal";
@@ -288,6 +288,11 @@ export default function SalesPage() {
   const [selectedRows, setSelectedRows] = useState<SalesOrder[]>([]);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [bulkConverting, setBulkConverting] = useState(false);
+  // Multi-Company Phase 4 — bulk re-assign company. Target company picked in
+  // the selection banner; button POSTs /batch-company. Server enforces the
+  // early-status lock guard and reports moved/skipped.
+  const [bulkCompany, setBulkCompany] = useState<string>("");
+  const [bulkReassigning, setBulkReassigning] = useState(false);
   // Bulk-review modal — flat table of every line item across all DRAFT
   // SOs in the current view. Lets the operator scan productCode / size /
   // fabric / divan / leg / gap / special / qty for 50+ items in one
@@ -1303,6 +1308,79 @@ export default function SalesPage() {
               >
                 <CheckCircle className="h-4 w-4" /> {bulkConverting ? "Converting..." : "Convert to Confirmed"}
               </Button>
+            </div>
+          )}
+          {/* Multi-Company Phase 4 — bulk re-assign company. Shown whenever
+              rows are selected (both Draft + Confirmed tabs) in real-SO mode.
+              Only early-status SOs are actually moved server-side; locked ones
+              (in production / shipped / invoiced …) are reported as skipped. */}
+          {!isServiceOrderMode && selectedRows.length > 0 && activeOrgs.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#DED8CF] bg-[#F5F1EA] px-3 py-2 text-sm">
+              <span className="flex items-center gap-1.5 text-[#6B5C32]">
+                <Building2 className="h-4 w-4" />
+                Re-assign company for {selectedRows.length} order(s)
+              </span>
+              <div className="flex items-center gap-2">
+                <select
+                  className="h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  value={bulkCompany}
+                  onChange={(e) => setBulkCompany(e.target.value)}
+                  aria-label="Target company for bulk re-assign"
+                  disabled={bulkReassigning}
+                >
+                  <option value="">Select company…</option>
+                  {activeOrgs.map((o) => (
+                    <option key={o.code} value={o.code}>{o.name || o.code}</option>
+                  ))}
+                </select>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={bulkReassigning || !bulkCompany}
+                  onClick={async () => {
+                    if (!bulkCompany) return;
+                    const targetName = orgNameByCode[bulkCompany] || bulkCompany;
+                    const ids = selectedRows.map((s) => s.id);
+                    if (!(await confirm({
+                      title: "Re-assign company",
+                      message: `Move ${ids.length} selected order(s) to ${targetName}? Orders already in production, shipped, or invoiced can't be re-assigned and will be skipped.`,
+                      danger: false,
+                    }))) return;
+                    setBulkReassigning(true);
+                    try {
+                      const res = await fetch(`/api/sales-orders/batch-company`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ ids, salesOrgCode: bulkCompany, changedBy: "Admin" }),
+                      });
+                      const text = await res.text();
+                      let d: { success?: boolean; error?: string; moved?: number; skipped?: number } = {};
+                      try { d = JSON.parse(text); } catch { d = { error: text.slice(0, 200) }; }
+                      if (!res.ok || !d.success) {
+                        toast.error(d.error || `HTTP ${res.status}`);
+                      } else {
+                        const moved = d.moved ?? 0;
+                        const skipped = d.skipped ?? 0;
+                        if (skipped > 0) {
+                          toast.error(`Moved ${moved} to ${targetName} · ${skipped} skipped (locked or already there).`);
+                        } else {
+                          toast.success(`Moved ${moved} order${moved !== 1 ? "s" : ""} to ${targetName}.`);
+                        }
+                        setSelectedRows([]);
+                        setBulkCompany("");
+                        invalidateCachePrefix("/api/sales-orders");
+                        fetchAll();
+                      }
+                    } catch (e) {
+                      toast.error((e as Error).message);
+                    } finally {
+                      setBulkReassigning(false);
+                    }
+                  }}
+                >
+                  <Building2 className="h-4 w-4" /> {bulkReassigning ? "Moving..." : "Re-assign"}
+                </Button>
+              </div>
             </div>
           )}
           <DataGrid<SalesOrder>

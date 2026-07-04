@@ -37,7 +37,11 @@ import {
   loadProductCatalog,
 } from "./_shared/item-catalog-snap";
 import { withOrgScope, getOrgId } from "../lib/tenant";
-import { resolveCompanyCode, readCompanyCode } from "../../lib/company-dimension";
+import {
+  resolveCompanyCode,
+  readCompanyCode,
+  classifyBatchReassign,
+} from "../../lib/company-dimension";
 import { invalidateHubChangeSnapshots } from "../lib/snapshot";
 import { loadDeliveredItemsValueSen } from "../lib/do-value";
 import {
@@ -5639,6 +5643,181 @@ app.post("/copy-for-service-order", async (c) => {
     }
     return c.json(
       { success: false, error: msg || "Internal error building service-order draft" },
+      500,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sales-orders/batch-company — Multi-Company Phase 4.
+//
+// Bulk re-assign the booked company (`sales_org_code`) for a set of Sales
+// Orders in one confirmed action from the SO list. ADDITIVE + safe:
+//
+//   • Default behaviour is unchanged — this endpoint only runs when the
+//     operator explicitly selects rows and picks a target company.
+//   • LOCK GUARD: only EARLY-status SOs (DRAFT / CONFIRMED / ON_HOLD — see
+//     `isCompanyReassignable`) are moved. Any SO already in production /
+//     shipped / delivered / invoiced / closed / cancelled is SKIPPED with a
+//     reason and never silently reassigned (its POs/DOs/invoices were booked
+//     under the original company). Locked rows are reported, not failed —
+//     the operator sees exactly which ones were held back and why.
+//   • Company code is normalised through the same `resolveCompanyCode` used by
+//     create/edit, so it is always a canonical UPPERCASE org code.
+//
+// The AUTO-allocation rule (how incoming orders get split among companies)
+// is deliberately NOT implemented here — that's the owner's spec to define.
+// This is the manual mechanism only.
+//
+// Body: { ids: string[]; salesOrgCode: string; changedBy?: string }
+// Resp: { success, moved, skipped, total, targetCompany,
+//         results: [{ id, companySOId, status, moved, reason? }] }
+// ---------------------------------------------------------------------------
+app.post("/batch-company", async (c) => {
+  // Reuse the SO "update" permission — reassigning the company is a header
+  // edit, same authority level as editing the SO.
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
+
+  try {
+    const body = await c.req.json();
+    const rawIds = Array.isArray(body.ids) ? body.ids : [];
+    const ids = Array.from(
+      new Set(
+        rawIds
+          .filter((v: unknown): v is string => typeof v === "string")
+          .map((v: string) => v.trim())
+          .filter((v: string) => v.length > 0),
+      ),
+    ) as string[];
+    if (ids.length === 0) {
+      return c.json(
+        { success: false, error: "No sales orders selected." },
+        400,
+      );
+    }
+    // Guard against an accidental unbounded batch.
+    if (ids.length > 500) {
+      return c.json(
+        { success: false, error: "Too many orders in one batch (max 500)." },
+        400,
+      );
+    }
+
+    // Require an explicit target company from the operator — never default
+    // silently to HOOKKA on a bulk MOVE (that would be a data-losing surprise).
+    if (typeof body.salesOrgCode !== "string" || body.salesOrgCode.trim() === "") {
+      return c.json(
+        { success: false, error: "A target company is required." },
+        400,
+      );
+    }
+    const targetCompany = resolveCompanyCode(body.salesOrgCode);
+    const now = new Date().toISOString();
+
+    // Load only the rows we need (id, status, current company, display code).
+    // Tenant scope is enforced by withOrgScope so a caller can only touch SOs
+    // inside their own org.
+    const placeholders = ids.map(() => "?").join(", ");
+    const { whereSql: orgWhere, params: orgParams } = withOrgScope(
+      c,
+      "sales_orders",
+      `id IN (${placeholders})`,
+    );
+    const rowsRes = await c.var.DB.prepare(
+      `SELECT id, companySOId, status, sales_org_code
+         FROM sales_orders ${orgWhere}`,
+    )
+      .bind(...orgParams, ...ids)
+      .all<{
+        id: string;
+        companySOId: string | null;
+        status: string;
+        sales_org_code: string | null;
+      }>();
+    const rows = rowsRes.results ?? [];
+    const byId = new Map(rows.map((r) => [r.id, r]));
+
+    // Any selected id we didn't find (deleted / cross-org) is reported as
+    // "Not found" so the operator sees the full accounting; the classifier
+    // only decides moved/skipped for rows that exist.
+    const foundRows = ids
+      .map((id) => byId.get(id))
+      .filter((r): r is NonNullable<typeof r> => Boolean(r))
+      .map((r) => ({
+        id: r.id,
+        companySOId: r.companySOId,
+        status: r.status,
+        currentCompany: r.sales_org_code,
+      }));
+    const decided = classifyBatchReassign(foundRows, targetCompany);
+    const notFound = ids
+      .filter((id) => !byId.has(id))
+      .map((id) => ({
+        id,
+        companySOId: id,
+        status: "—",
+        moved: false,
+        reason: "Not found",
+      }));
+    const results = [...decided, ...notFound];
+
+    const updates: import("@cloudflare/workers-types").D1PreparedStatement[] = [];
+    for (const r of decided) {
+      if (!r.moved) continue;
+      updates.push(
+        c.var.DB.prepare(
+          `UPDATE sales_orders
+              SET sales_org_code = ?, updated_at = ?
+            WHERE id = ?`,
+        ).bind(targetCompany, now, r.id),
+      );
+      // Best-effort audit trail (one row per moved SO). Swallowed if the
+      // audit helper is unavailable — the reassignment itself must not fail.
+      const before = readCompanyCode(
+        null,
+        byId.get(r.id)?.sales_org_code ?? null,
+      );
+      const audit = await buildAuditStatement(c, {
+        resource: "sales-orders",
+        resourceId: r.id,
+        action: "company-reassign",
+        before: { salesOrgCode: before },
+        after: {
+          salesOrgCode: targetCompany,
+          changedBy: (body.changedBy as string) || "Admin",
+        },
+      });
+      if (audit) updates.push(audit);
+    }
+
+    if (updates.length > 0) {
+      await c.var.DB.batch(updates);
+    }
+
+    // The list snapshot (`sales_orders_list_snapshot`) is cache-aside keyed on
+    // MAX(sales_orders.updated_at); bumping updated_at above auto-invalidates
+    // it on the next read — no explicit wipe needed. (Company is a display /
+    // filter dimension only; no production / DO / invoice cascade to run.)
+    const moved = results.filter((r) => r.moved).length;
+    const skipped = results.length - moved;
+    return c.json({
+      success: true,
+      moved,
+      skipped,
+      total: results.length,
+      targetCompany,
+      results,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/sales-orders/batch-company] failed:", msg, err);
+    if (err instanceof SyntaxError) {
+      return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
+    }
+    return c.json(
+      { success: false, error: msg || "Internal error reassigning company" },
       500,
     );
   }

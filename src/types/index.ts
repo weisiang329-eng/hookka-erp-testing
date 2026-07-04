@@ -59,6 +59,12 @@ export type Customer = {
   phone: string;
   email: string;
   deliveryHubs: DeliveryHub[];
+  /**
+   * Multi-Company Phase 4 — optional default company (org code, e.g. "OHANA")
+   * for NEW sales orders from this customer. Empty string = no mapping → the
+   * SO create form falls back to HOOKKA. Never moves existing orders.
+   */
+  defaultCompanyCode?: string;
 };
 
 // --- BOM Types ---

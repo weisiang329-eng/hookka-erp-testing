@@ -9,6 +9,30 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-04 — 🔵 Multi-Company Phase 4: order allocation (worktree branch, NOT pushed)
+
+ADDITIVE-only layer on top of Phase 2's per-SO company selector. Two mechanisms:
+1. **Bulk re-assign company** on the SO list — select N orders → set their
+   `sales_org_code` in one confirmed action. New batch endpoint
+   `POST /api/sales-orders/batch-company`. **Lock guard:** only EARLY-status SOs
+   (DRAFT / CONFIRMED / ON_HOLD) are reassignable — once an SO is IN_PRODUCTION /
+   READY_TO_SHIP / SHIPPED / DELIVERED / INVOICED / CLOSED / CANCELLED it is
+   REFUSED (production/DO/invoice already booked under the company; company is the
+   accounting attribution dimension → must not silently move). Per-row skip with a
+   reason; endpoint reports moved / skipped counts.
+2. **Per-customer default company** — new snake_case `customers.default_company_code`
+   (runtime ensure, default '' = fall back to HOOKKA). NEW orders default the company
+   selector to the mapped company. Does NOT auto-move existing orders.
+
+**Deferred to owner:** the AUTO-allocation RULE (how incoming/bulk orders get split
+among the 4 companies) is NOT specified — built the manual + default mechanism only;
+owner must define the auto rule before any auto-split is built.
+
+Shared helper: `resolveCompanyCode` / `readCompanyCode` / `isCompanyReassignable`
+in `src/lib/company-dimension.ts`. Test: `tests/company-batch-reassign.test.mjs`.
+
+---
+
 ## 2026-07-04 — 🔵 Multi-Company Phase 2: company dimension on SO + PO (worktree branch, NOT pushed)
 
 ADDITIVE-only. Company selector on create + Company column + Company filter on

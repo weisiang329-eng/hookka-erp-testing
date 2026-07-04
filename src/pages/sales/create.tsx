@@ -2103,6 +2103,15 @@ function CreateSalesOrderPage() {
                     } else {
                       setDeliveryHubId("");
                     }
+                    // Multi-Company Phase 4 — pre-fill the company selector from
+                    // this customer's default company mapping, if any and if the
+                    // mapped company is an active org. Unmapped customers leave
+                    // the selector on its current value (HOOKKA by default) — the
+                    // operator can still override the pick by hand afterwards.
+                    const mapped = (cust?.defaultCompanyCode || "").trim().toUpperCase();
+                    if (mapped && activeOrgs.some((o) => o.code === mapped)) {
+                      setSalesOrgCode(mapped);
+                    }
                   }}
                   options={customers.map(c => ({ value: c.id, label: `${c.code} - ${c.name}` }))}
                   placeholder="Select customer..."

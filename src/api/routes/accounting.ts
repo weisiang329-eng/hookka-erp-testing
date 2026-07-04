@@ -16,7 +16,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { monthsOverdue, nextMonthDueDate } from "../../lib/terms";
-import { getOrgId } from "../lib/tenant";
+import { getOrgId, companyFilter } from "../lib/tenant";
 import {
   buildJournalEntryStatements,
   ledgerHasSource,
@@ -33,6 +33,7 @@ import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/
 import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "../lib/doc-number-service";
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
+import { ensureFinanceOrgColumns } from "../lib/ensure-finance-org";
 import { apRowBeforeOpening, legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
 import { applyOpeningSlice, windowCoversMonth } from "../../lib/opening-slice";
 import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
@@ -346,12 +347,24 @@ app.get("/aging", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   const orgId = getOrgId(c);
+  // Multi-company (Phase 1): OPTIONAL ?orgId= / ?company= scopes the aging to
+  // one sister company. Absent → no WHERE change → today's consolidated view.
+  // The column it filters on is runtime-ensured so this can never 500 on prod.
+  await ensureFinanceOrgColumns(c.var.DB);
+  const coFilter = companyFilter(c);
+  const arWhere = coFilter.active ? ` WHERE ${coFilter.sql}` : "";
+  const apWhere = coFilter.active ? ` WHERE ${coFilter.sql}` : "";
   const { withSnapshot } = await import("../lib/snapshot");
   // PR 7 — cache-aside snapshot. AR/AP aging is computed live from
   // unpaid invoices + purchase invoices, bucketed by months overdue
   // (the prod-correct source — the old ar_aging / ap_aging snapshot
   // tables are dead). The snapshot caches that computed result and
   // rebuilds whenever either source table changes.
+  //
+  // cacheKey partitions the consolidated ("") result from each per-company
+  // ("company:<orgId>") result so a filtered request never poisons the
+  // default cache — the default read stays byte-identical to today.
+  const cacheKey = coFilter.active ? `company:${coFilter.orgId}` : "";
   const data = await withSnapshot(
     c.var.DB,
     {
@@ -364,8 +377,10 @@ app.get("/aging", async (c) => {
     async () => {
       const [invRes, piRes] = await Promise.all([
         c.var.DB.prepare(
-          "SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening FROM invoices",
-        ).all<{
+          `SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening FROM invoices${arWhere}`,
+        )
+          .bind(...(coFilter.active ? [coFilter.param] : []))
+          .all<{
           customerId: string;
           customerName: string;
           totalSen: number;
@@ -376,8 +391,10 @@ app.get("/aging", async (c) => {
           isOpening: number | null;
         }>(),
         c.var.DB.prepare(
-          "SELECT id, supplierId, supplierName, amountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices",
-        ).all<{
+          `SELECT id, supplierId, supplierName, amountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices${apWhere}`,
+        )
+          .bind(...(coFilter.active ? [coFilter.param] : []))
+          .all<{
           id: string;
           supplierId: string;
           supplierName: string;
@@ -448,6 +465,7 @@ app.get("/aging", async (c) => {
         },
       };
     },
+    cacheKey,
   );
   return c.json({ success: true, ...data });
 });
@@ -1396,18 +1414,28 @@ app.delete("/journals/:id", async (c) => {
 app.get("/ar-control", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
+  // Multi-company (Phase 1): OPTIONAL ?orgId= / ?company= scopes the control
+  // account to one company. Absent → today's consolidated numbers, unchanged.
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const invWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const custWhere = coFilter.active ? ` WHERE ${coFilter.sql}` : "";
   const [coaRes, legRes, invRes, custRes] = await Promise.all([
     c.var.DB.prepare(
       "SELECT code, name, type, specialAccountType FROM chart_of_accounts WHERE specialAccountType = 'SDC'",
     ).all<{ code: string; name: string; type: string; specialAccountType: string }>(),
     c.var.DB.prepare(
-      "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
-    ).all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+      `SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     c.var.DB.prepare(
       `SELECT customerId, customerName, invoiceNo, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening
          FROM invoices
-        WHERE status NOT IN ('DRAFT','CANCELLED')`,
-    ).all<{
+        WHERE status NOT IN ('DRAFT','CANCELLED')${invWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{
       customerId: string;
       customerName: string;
       invoiceNo: string;
@@ -1419,8 +1447,10 @@ app.get("/ar-control", async (c) => {
       isOpening: number | null;
     }>(),
     c.var.DB.prepare(
-      "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM customers",
-    ).first<{ s: number }>(),
+      `SELECT COALESCE(SUM(outstandingSen),0) AS s FROM customers${custWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .first<{ s: number }>(),
   ]);
   const { docDate, openingDate: obDateAr } = await loadDocDateResolver(c.var.DB);
   const dr = new Map<string, number>();
@@ -2173,16 +2203,29 @@ app.get("/ap-control", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   await ensurePartialPaymentColumns(c.var.DB);
+  // Multi-company (Phase 1): OPTIONAL ?orgId= / ?company= scopes the payable
+  // control to one company. Absent → today's consolidated numbers, unchanged.
+  // Runtime-ensure org_id on suppliers / purchase_invoices so the filter cannot
+  // 500 on a prod where the migration file hasn't been applied.
+  await ensureFinanceOrgColumns(c.var.DB);
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const supWhere = coFilter.active ? ` WHERE ${coFilter.sql}` : "";
+  const piWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
   const [coaRes, legRes, supRes] = await Promise.all([
     c.var.DB.prepare(
       "SELECT code, name FROM chart_of_accounts WHERE specialAccountType = 'SCC'",
     ).all<{ code: string; name: string }>(),
     c.var.DB.prepare(
-      "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
-    ).all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+      `SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     c.var.DB.prepare(
-      "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers",
-    ).first<{ s: number }>(),
+      `SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers${supWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .first<{ s: number }>(),
   ]);
   const { docDate, openingDate: obDateAp } = await loadDocDateResolver(c.var.DB);
   // PI subledger — defensive: prefer net outstanding (amount − paid, incl
@@ -2205,14 +2248,18 @@ app.get("/ap-control", async (c) => {
     piRes = await c.var.DB.prepare(
       `SELECT id, supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
-        WHERE status IN ('CONFIRMED', 'APPROVED', 'PARTIAL_PAID')`,
-    ).all<PiAgingRow>();
+        WHERE status IN ('CONFIRMED', 'APPROVED', 'PARTIAL_PAID')${piWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<PiAgingRow>();
   } catch {
     piRes = await c.var.DB.prepare(
       `SELECT id, supplierId, supplierName, piNo, amountSen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
-        WHERE status IN ('CONFIRMED', 'APPROVED')`,
-    ).all<PiAgingRow>();
+        WHERE status IN ('CONFIRMED', 'APPROVED')${piWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<PiAgingRow>();
   }
   // Posted purchase CNs reduce what we owe (the control account already absorbed
   // their DR 400-0000 legs). The ALLOCATED portion of each CN is already netted
@@ -3696,10 +3743,16 @@ app.get("/trial-balance", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   const asOf = c.req.query("asOf") || new Date().toISOString().slice(0, 10);
+  // Multi-company (Phase 1): OPTIONAL ?orgId= / ?company= scopes the TB to one
+  // company. Absent → today's consolidated trial balance, byte-identical.
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
   const [legRes, coaRes] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
-    ).all<{
+      `SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{
       accountCode: string;
       sourceId: string;
       debitSen: number;
@@ -6678,6 +6731,12 @@ app.get("/pl", async (c) => {
   const productCategory = c.req.query("productCategory");
   const customerId = c.req.query("customerId");
   const state = c.req.query("state");
+  // Multi-company (Phase 1): OPTIONAL ?orgId= / ?company= scopes the P&L and
+  // Balance Sheet to one company. Absent → today's consolidated statements,
+  // byte-identical (the GL legs + operational-revenue cut both stay unfiltered).
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const invWhere = coFilter.active ? ` WHERE ${coFilter.sql}` : "";
 
   // --- chart of accounts lookup ---
   const coaRes = await c.var.DB.prepare(
@@ -6708,8 +6767,10 @@ app.get("/pl", async (c) => {
 
   // --- ledger legs ---
   const legRes = await c.var.DB.prepare(
-    "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
-  ).all<{
+    `SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+  )
+    .bind(...(coFilter.active ? [coFilter.param] : []))
+    .all<{
     accountCode: string;
     sourceId: string;
     debitSen: number;
@@ -6892,8 +6953,10 @@ app.get("/pl", async (c) => {
   // --- operational revenue cuts from invoices (NOT the GL) ---
   const [invRes, itemRes, prodRes] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT id, customerName, totalSen, invoiceDate, customerId, customerState, status FROM invoices",
-    ).all<{
+      `SELECT id, customerName, totalSen, invoiceDate, customerId, customerState, status FROM invoices${invWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{
       id: string;
       customerName: string;
       totalSen: number;

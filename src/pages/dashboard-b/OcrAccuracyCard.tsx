@@ -80,9 +80,21 @@ function CustomerRow({ b }: { b: Bucket }) {
   );
 }
 
-export function OcrAccuracyCard() {
-  const { data, loading } = useCachedJson<Resp>("/api/ocr-accuracy");
+// Follows the Command Center's existing `period` dropdown (owner 2026-07-04):
+// pick a month there → OCR recomputes for that month; "All-time" = no filter.
+// The backend already accepts ?from=&to= (routes/ocr-accuracy.ts) so this is
+// pure wiring — no new control on the card.
+export function OcrAccuracyCard({
+  period = "all",
+  range = null,
+}: {
+  period?: string;
+  range?: { from: string; to: string } | null;
+}) {
+  const qs = range ? `?from=${range.from}&to=${range.to}` : "";
+  const { data, loading } = useCachedJson<Resp>(`/api/ocr-accuracy${qs}`);
   const d = data?.data;
+  const periodLabel = period === "all" ? "All-time" : period;
 
   return (
     <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
@@ -91,6 +103,7 @@ export function OcrAccuracyCard() {
           <div className="flex items-center gap-2">
             <ScanLine className="h-4.5 w-4.5 text-[#6B5C32]" />
             <span className="text-base font-semibold text-[#1F1D1B]">OCR Accuracy</span>
+            <span className="text-xs font-normal text-[#9A9384]">· {periodLabel}</span>
           </div>
           <span className="text-xs text-[#8A8577]">Changed after upload = Fail · automate only near ~100%</span>
         </div>

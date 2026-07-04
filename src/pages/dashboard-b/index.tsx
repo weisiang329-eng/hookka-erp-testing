@@ -2486,8 +2486,9 @@ export default function DashboardBPage() {
       </div>
 
       {/* OCR accuracy — automation-readiness gauge (owner 2026-07-04, placed
-          at the bottom of the dashboard). */}
-      <OcrAccuracyCard />
+          at the bottom of the dashboard). Follows the same `period` dropdown as
+          the rest of the Command Center (owner: pick a month → OCR for that month). */}
+      <OcrAccuracyCard period={period} range={period === "all" ? null : monthWindow(period)} />
 
       <p className="text-center text-[11px] text-[#9CA3AF] pt-2">
         Dashboard B · experimental view · full data parity with Dashboard

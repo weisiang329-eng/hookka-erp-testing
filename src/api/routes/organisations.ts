@@ -175,6 +175,42 @@ async function loadOrganisations(
   }
 }
 
+// Runtime self-apply of migration 0142 (organisations registry). Migrations do
+// NOT auto-apply on deploy, so on a prod where 0142 was never pasted the table
+// still carries the legacy CHECK (code IN ('HOOKKA','OHANA')) and lacks the new
+// columns — any attempt to create a sister company would 500. This mirrors the
+// ensureScanPoColumns / ensureDistillColumns pattern: idempotent, best-effort,
+// runs once per isolate before the first write. Only adds columns + drops the
+// over-restrictive CHECK — never removes data.
+let orgRegistryPromise: Promise<void> | null = null;
+function ensureOrganisationRegistry(db: D1Database): Promise<void> {
+  if (orgRegistryPromise) return orgRegistryPromise;
+  orgRegistryPromise = (async () => {
+    const stmts = [
+      // Postgres names an inline column CHECK `<table>_<column>_check`.
+      "ALTER TABLE organisations DROP CONSTRAINT IF EXISTS organisations_code_check",
+      "ALTER TABLE organisations ADD COLUMN IF NOT EXISTS org_id text NOT NULL DEFAULT 'hookka'",
+      "ALTER TABLE organisations ADD COLUMN IF NOT EXISTS msic_code text NOT NULL DEFAULT ''",
+      "ALTER TABLE organisations ADD COLUMN IF NOT EXISTS business_type text NOT NULL DEFAULT ''",
+      "ALTER TABLE organisations ADD COLUMN IF NOT EXISTS letterhead_url text NOT NULL DEFAULT ''",
+      "ALTER TABLE organisations ADD COLUMN IF NOT EXISTS is_default boolean NOT NULL DEFAULT false",
+      "ALTER TABLE organisations ADD COLUMN IF NOT EXISTS display_order integer NOT NULL DEFAULT 0",
+      "ALTER TABLE organisations ADD COLUMN IF NOT EXISTS created_at text",
+      "ALTER TABLE organisations ADD COLUMN IF NOT EXISTS updated_at text",
+      "CREATE UNIQUE INDEX IF NOT EXISTS organisations_code_per_org_uniq ON organisations (org_id, code)",
+      "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS purchase_org_code text NOT NULL DEFAULT 'HOOKKA'",
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).bind().run();
+      } catch {
+        // best-effort; column/constraint may already be in the target state
+      }
+    }
+  })();
+  return orgRegistryPromise;
+}
+
 // GET /api/organisations — list + active org + inter-company config.
 app.get("/", async (c) => {
   let organisations: ReturnType<typeof rowToOrg>[];
@@ -205,6 +241,7 @@ app.get("/", async (c) => {
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "organisations", "update");
   if (denied) return denied;
+  await ensureOrganisationRegistry(c.var.DB);
   let body: Record<string, unknown>;
   try {
     body = await c.req.json();

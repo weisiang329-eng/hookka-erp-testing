@@ -17,6 +17,7 @@ import { supplierPoEmailTemplate } from "../lib/email";
 import { enqueueEmail } from "../lib/email-outbox";
 import { emitAudit } from "../lib/audit";
 import { availableQty as computeAvailableQty } from "../../lib/convert-chain";
+import { createPurchaseOrderMirror } from "../lib/intercompany-mirror-create";
 
 const app = new Hono<Env>();
 
@@ -366,11 +367,24 @@ app.post("/", async (c) => {
 
     // Validate supplier exists + grab its default purchase company code so
     // an omitted body field inherits from the supplier rather than nulling.
+    // Also read the Phase 3 dual-identity flags (isGroupCompany / group_org_code)
+    // so we can decide whether this PO's seller is a sister group company and a
+    // mirror SO should be raised. SELECT * so both dual-keyed camel/snake
+    // projections are available and a missing column can't break the SELECT.
     const supplier = await c.var.DB.prepare(
-      "SELECT id, purchaseOrgCode FROM suppliers WHERE id = ?",
+      "SELECT * FROM suppliers WHERE id = ?",
     )
       .bind(supplierId)
-      .first<{ id: string; purchaseOrgCode?: string | null; purchase_org_code?: string | null }>();
+      .first<{
+        id: string;
+        name?: string | null;
+        purchaseOrgCode?: string | null;
+        purchase_org_code?: string | null;
+        isGroupCompany?: number | boolean | null;
+        is_group_company?: number | boolean | null;
+        groupOrgCode?: string | null;
+        group_org_code?: string | null;
+      }>();
     if (!supplier) {
       return c.json({ success: false, error: "Supplier not found" }, 400);
     }
@@ -505,6 +519,65 @@ app.post("/", async (c) => {
       action: "create",
       after: created,
     });
+
+    // Multi-Company Phase 3 — inter-company mirror. If this PO's seller is a
+    // SISTER group company (supplier flagged group + its org code != the buyer)
+    // and the global auto-mirror config is ON, raise a mirror SALES ORDER under
+    // that sister with HOOKKA as the customer. ADDITIVE + non-blocking: any
+    // failure here is logged and swallowed so a normal PO create is never
+    // affected, and external POs never reach the DB work (the pure decision in
+    // intercompany-mirror.ts short-circuits). Idempotent via
+    // intercompany_mirror_log — a re-save/retry never double-creates.
+    try {
+      const cfgRow = await c.var.DB
+        .prepare("SELECT auto_create_mirror_docs FROM inter_company_config WHERE id = 1")
+        .first<{ auto_create_mirror_docs?: number | boolean | null }>()
+        .catch(() => null);
+      const autoCreateMirrorDocs =
+        cfgRow?.auto_create_mirror_docs === 1 ||
+        cfgRow?.auto_create_mirror_docs === true;
+      if (autoCreateMirrorDocs) {
+        const mirrorResult = await createPurchaseOrderMirror(
+          c.var.DB,
+          {
+            id: poId,
+            poNo,
+            orderDate: body.orderDate ?? today,
+            purchaseOrgCode,
+            supplier: {
+              isGroupCompany:
+                supplier.isGroupCompany === 1 ||
+                supplier.isGroupCompany === true ||
+                supplier.is_group_company === 1 ||
+                supplier.is_group_company === true,
+              groupOrgCode:
+                supplier.groupOrgCode ?? supplier.group_org_code ?? null,
+              name: supplier.name ?? supplierName ?? null,
+            },
+            items: items.map((it) => ({
+              materialCode: it.materialCode,
+              materialName: it.materialName,
+              quantity: it.quantity,
+              unitPriceSen: it.unitPriceSen,
+            })),
+          },
+          { autoCreateMirrorDocs },
+        );
+        if (mirrorResult.created) {
+          console.log(
+            `[intercompany-mirror] PO ${poNo} (${poId}) → mirror SO ${mirrorResult.companySOId} (${mirrorResult.mirrorSoId})`,
+          );
+        }
+      }
+    } catch (mirrorErr) {
+      // Never let a mirror failure break the PO create — log only.
+      console.error(
+        "[intercompany-mirror] mirror creation failed for PO",
+        poId,
+        mirrorErr instanceof Error ? mirrorErr.message : String(mirrorErr),
+      );
+    }
+
     return c.json({ success: true, data: created }, 201);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -833,6 +906,12 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       // supplier on create; never null in writes (HOOKKA fallback).
       "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS purchase_org_code TEXT",
       "UPDATE purchase_orders SET purchase_org_code = 'HOOKKA' WHERE purchase_org_code IS NULL",
+      // Multi-Company Phase 3 — dual-identity link on the supplier side. A
+      // supplier that IS one of our group companies carries its org code here
+      // (snake_case, default '' = a normal external supplier → nothing changes).
+      // Paired with customers.group_org_code (ensured in customers.ts). This is
+      // what lets the PO→SO mirror know the seller is a sister group company.
+      "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS group_org_code TEXT NOT NULL DEFAULT ''",
     ];
     for (const sql of stmts) {
       try {

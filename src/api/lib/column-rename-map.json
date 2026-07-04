@@ -431,6 +431,7 @@
   "invoiceNumber": "invoice_number",
   "invoiceTotal": "invoice_total",
   "ipAddress": "ip_address",
+  "groupOrgCode": "group_org_code",
   "isActive": "is_active",
   "isDefault": "is_default",
   "isGold": "is_gold",

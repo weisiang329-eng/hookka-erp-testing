@@ -9,27 +9,37 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-04 — 🔵 Multi-Company Phase 4: order allocation (worktree branch, NOT pushed)
+## 2026-07-04 — 🔵 Multi-Company Phase 3: dual-identity + inter-company mirror (worktree branch, NOT pushed)
 
-ADDITIVE-only layer on top of Phase 2's per-SO company selector. Two mechanisms:
-1. **Bulk re-assign company** on the SO list — select N orders → set their
-   `sales_org_code` in one confirmed action. New batch endpoint
-   `POST /api/sales-orders/batch-company`. **Lock guard:** only EARLY-status SOs
-   (DRAFT / CONFIRMED / ON_HOLD) are reassignable — once an SO is IN_PRODUCTION /
-   READY_TO_SHIP / SHIPPED / DELIVERED / INVOICED / CLOSED / CANCELLED it is
-   REFUSED (production/DO/invoice already booked under the company; company is the
-   accounting attribution dimension → must not silently move). Per-row skip with a
-   reason; endpoint reports moved / skipped counts.
-2. **Per-customer default company** — new snake_case `customers.default_company_code`
-   (runtime ensure, default '' = fall back to HOOKKA). NEW orders default the company
-   selector to the mapped company. Does NOT auto-move existing orders.
+ADDITIVE-only, opt-in, default OFF. Finance-adjacent — built conservatively;
+external customers/suppliers/POs/SOs behave byte-identical.
 
-**Deferred to owner:** the AUTO-allocation RULE (how incoming/bulk orders get split
-among the 4 companies) is NOT specified — built the manual + default mechanism only;
-owner must define the auto rule before any auto-split is built.
+**Delivered (foundation of inter-company flow):**
+- **Dual-identity link** — new snake_case `group_org_code` on BOTH `customers`
+  and `suppliers` (default ''). A customer and a supplier that share the same
+  code (e.g. 'HOUZS') are the one real group company wearing its two hats
+  (AR/customer + AP/supplier stay separate streams). Reuses the existing
+  `suppliers.is_group_company`; the mirror decision also name-matches legacy
+  rows flagged only via is_group_company. Runtime-ensured, backfilled off.
+- **PO→SO mirror** — when a PO's seller is a flagged SISTER group company (not
+  HOOKKA) and the global `auto_create_mirror_docs` config is ON, PO create
+  auto-raises a mirror SALES ORDER under that sister (`sales_org_code` = sister,
+  buyer HOOKKA as customer, PO lines copied 1:1 in sen, status DRAFT — a doc
+  record, NO production cascade). Idempotent via `intercompany_mirror_log`
+  (UNIQUE source_type+source_id → retry never double-creates). Non-blocking:
+  any mirror failure is logged + swallowed so PO create never breaks. External
+  POs never reach the DB work (pure decision short-circuits).
+- Pure decision logic in `src/lib/intercompany-mirror.ts` (12 unit tests,
+  `tests/intercompany-mirror.test.mjs`, wired into `npm test`).
+- DO/Invoice customer auto-send: UNTOUCHED (no code near it changed).
 
-Shared helper: `resolveCompanyCode` / `readCompanyCode` / `isCompanyReassignable`
-in `src/lib/company-dimension.ts`. Test: `tests/company-batch-reassign.test.mjs`.
+**TODO'd (deliberately deferred):** consolidated-P&L intra-group profit
+elimination (`TODO(intercompany-pnl-elimination)`); GRN mirror
+(`TODO(grn-mirror)` — needs inventory-safe design since GRN posts stock+cost).
+
+**Risk note:** mirror SO customer resolution requires HOOKKA to exist as a
+CUSTOMER of the sister in the catalog — if absent the mirror SKIPS (no back-door
+customer creation) and releases its log claim so a later retry succeeds.
 
 ---
 

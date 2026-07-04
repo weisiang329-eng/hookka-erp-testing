@@ -1538,21 +1538,19 @@ function CreatePIWizard({
     for (const card of includedCards) {
       await (async () => {
         try {
-          // Fire-and-forget gold/correction sample save (best-effort).
+          // Record EVERY accepted import (best-effort), not just edited/gold —
+          // a clean pass (OCR got it right) must count as a SUCCESS on the
+          // accuracy dashboard and feed the per-supplier learning pool. Same
+          // fix as the SO scan side (scan-po-modal). BUG-2026-07-04-007.
           if (card.sampleId) {
-            const edited =
-              JSON.stringify(card.originalExtraction) !==
-              JSON.stringify(serialiseCardAsExtraction(card));
-            if (edited || card.markedGold) {
-              fetch(`/api/scan-supplier/samples/${card.sampleId}/confirm`, {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({
-                  correctedJson: serialiseCardAsExtraction(card),
-                  gold: card.markedGold,
-                }),
-              }).catch(() => {});
-            }
+            fetch(`/api/scan-supplier/samples/${card.sampleId}/confirm`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                correctedJson: serialiseCardAsExtraction(card),
+                gold: card.markedGold,
+              }),
+            }).catch(() => {});
           }
 
           const sup = supplierById(card.supplierId);
@@ -3699,20 +3697,17 @@ function CreateGRNWizard({
     for (const card of includedCards) {
       await (async () => {
         try {
+          // Record EVERY accepted import (not just edited/gold) so clean passes
+          // count as successes + feed learning — same fix as the PI mode above.
           if (card.sampleId) {
-            const edited =
-              JSON.stringify(card.originalExtraction) !==
-              JSON.stringify(serialiseGRNCardAsExtraction(card));
-            if (edited || card.markedGold) {
-              fetch(`/api/scan-supplier/samples/${card.sampleId}/confirm`, {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({
-                  correctedJson: serialiseGRNCardAsExtraction(card),
-                  gold: card.markedGold,
-                }),
-              }).catch(() => {});
-            }
+            fetch(`/api/scan-supplier/samples/${card.sampleId}/confirm`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                correctedJson: serialiseGRNCardAsExtraction(card),
+                gold: card.markedGold,
+              }),
+            }).catch(() => {});
           }
 
           const sup = supplierById(card.supplierId);

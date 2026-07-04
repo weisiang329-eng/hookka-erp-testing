@@ -34,6 +34,30 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-04-007 — Supplier scan batch import only recorded a sample when the operator EDITED or gold-marked it → clean supplier scans never captured `ocr` `scan` `suppliers`
+
+🟢 **Fixed on main**
+
+**Symptom:** the OCR accuracy dashboard showed Supplier = 1 scan total, and the
+weekly distill skipped all 34 suppliers (none had ≥2 confirmed samples) — so the
+supplier side never learned. Yet the owner had scanned real PI/GRN bundles.
+
+**Root cause:** both batch `handleCreateAll` paths in
+`src/components/scan-supplier-modal.tsx` (PI create ~1542, GRN create ~3702)
+guarded the sample confirm with `if (edited || card.markedGold)`. A clean scan
+(OCR right, operator changes nothing, doesn't mark gold) created the PI/GRN but
+never wrote `correctedJson` → the sample stayed uncaptured, invisible to both
+the accuracy metric (a clean pass IS a success) and the learning pool. Exact
+same class as the SO scan-po-modal guard fixed earlier this session.
+
+**Fix:** drop the guard — fire the `/samples/:id/confirm` on EVERY accepted
+import (still best-effort `.catch(()=>{})`), for both PI and GRN batch modes.
+The single-doc modal `apply()` already confirmed unconditionally. Now every
+accepted supplier document is captured (clean = success, edited = fail-reason),
+and suppliers accrue the ≥2 samples the distiller needs.
+
+---
+
 ## BUG-2026-07-04-006 — OCR weekly self-learning silently stopped for ~2 weeks (cron timed out at 60s) + only ever learned from GOLD samples so most customers/suppliers learned nothing `ocr` `scan` `ci`
 
 🟢 **Fixed on main — restored + verified (manual run 200 OK)**

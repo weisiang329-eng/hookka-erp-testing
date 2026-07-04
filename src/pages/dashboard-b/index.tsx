@@ -1214,9 +1214,6 @@ export default function DashboardBPage() {
         </CardContent>
       </Card>
 
-      {/* OCR accuracy — automation-readiness gauge (owner 2026-07-04) */}
-      <OcrAccuracyCard />
-
       {/* Revenue + Plant load */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2 bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
@@ -2487,6 +2484,10 @@ export default function DashboardBPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* OCR accuracy — automation-readiness gauge (owner 2026-07-04, placed
+          at the bottom of the dashboard). */}
+      <OcrAccuracyCard />
 
       <p className="text-center text-[11px] text-[#9CA3AF] pt-2">
         Dashboard B · experimental view · full data parity with Dashboard

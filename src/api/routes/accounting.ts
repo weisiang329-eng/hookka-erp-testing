@@ -341,6 +341,39 @@ function addToBucket(
 // invoices / purchase invoices bucketed by days past due. Replaces the
 // dead manual ar_aging/ap_aging snapshot tables (response shape kept so
 // the AR/AP/Overview tabs are unchanged).
+// Un-knocked supplier advances (owner rule 2026-07-05: the creditor aging must
+// INCLUDE unapplied advances as NEGATIVE rows, so the aging total ties the
+// 400-0000 control exactly instead of drifting by the advance sum). An advance
+// is a supplier_payments row with NO purchaseInvoiceId; knock-off decrements
+// its amountSen, so amountSen > 0 = still unapplied.
+async function loadUnappliedSupplierAdvances(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+): Promise<Map<string, { supplierName: string; sen: number }>> {
+  const out = new Map<string, { supplierName: string; sen: number }>();
+  try {
+    const res = await db
+      .prepare(
+        `SELECT supplierId, supplierName, amountSen FROM supplier_payments
+          WHERE orgId = ? AND purchaseInvoiceId IS NULL AND amountSen > 0`,
+      )
+      .bind(orgId)
+      .all<{ supplierId?: string; supplier_id?: string; supplierName?: string; supplier_name?: string; amountSen?: number; amount_sen?: number }>();
+    for (const r of res.results ?? []) {
+      const id = String(r.supplierId ?? r.supplier_id ?? "");
+      if (!id) continue;
+      const sen = Math.round(Number(r.amountSen ?? r.amount_sen) || 0);
+      if (sen <= 0) continue;
+      const cur = out.get(id);
+      if (cur) cur.sen += sen;
+      else out.set(id, { supplierName: String(r.supplierName ?? r.supplier_name ?? ""), sen });
+    }
+  } catch {
+    /* supplier_payments unavailable → no advance rows */
+  }
+  return out;
+}
+
 app.get("/aging", async (c) => {
   // RBAC gate (P3.3-followup) — accounting:read.
   const denied = await requirePermission(c, "accounting", "read");
@@ -358,7 +391,9 @@ app.get("/aging", async (c) => {
       tableName: "accounting_aging_snapshot",
       // kv_config so the snapshot rebuilds when opening_date (the pre-opening
       // floor) is saved — not just when invoices/PIs change.
-      sourceTables: ["invoices", "purchase_invoices", "kv_config"],
+      // supplier_payments included so knocking off an advance rebuilds the
+      // snapshot (advances appear as negative rows below).
+      sourceTables: ["invoices", "purchase_invoices", "supplier_payments", "kv_config"],
     },
     orgId,
     async () => {
@@ -376,12 +411,14 @@ app.get("/aging", async (c) => {
           isOpening: number | null;
         }>(),
         c.var.DB.prepare(
-          "SELECT id, supplierId, supplierName, amountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices",
+          "SELECT id, supplierId, supplierName, amountSen, paidAmountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices",
         ).all<{
           id: string;
           supplierId: string;
           supplierName: string;
           amountSen: number;
+          paidAmountSen?: number | null;
+          paid_amount_sen?: number | null;
           status: string;
           dueDate: string | null;
           invoiceDate: string | null;
@@ -419,7 +456,11 @@ app.get("/aging", async (c) => {
         // Pre-opening PIs count as opening by default; only excluded ones drop.
         if (apRowBeforeOpening({ id: p.id, date: p.invoiceDate, isOpening: p.isOpening }, obDateAg, apExclAg)) continue;
         if (["DRAFT", "CANCELLED", "PAID"].includes(p.status)) continue;
-        const outstanding = Number(p.amountSen) || 0;
+        // Net outstanding = face − paid (BUG-2026-07-05-001: this tab showed the
+        // FULL face amount for partially-paid PIs — the AR loop above always
+        // netted, the AP loop didn't).
+        const outstanding =
+          (Number(p.amountSen) || 0) - (Number(p.paidAmountSen ?? p.paid_amount_sen) || 0);
         if (outstanding <= 0) continue;
         let row = apMap.get(p.supplierId);
         if (!row) {
@@ -435,6 +476,24 @@ app.get("/aging", async (c) => {
           apMap.set(p.supplierId, row);
         }
         addToBucket(row, monthsOverdue(p.invoiceDate ?? p.dueDate), outstanding);
+      }
+      // Unapplied supplier advances → NEGATIVE current-bucket rows (owner rule
+      // 2026-07-05), so the AP aging total ties the 400-0000 control exactly.
+      for (const [supplierId, adv] of await loadUnappliedSupplierAdvances(c.var.DB, orgId)) {
+        let row = apMap.get(supplierId);
+        if (!row) {
+          row = {
+            supplierId,
+            supplierName: adv.supplierName || "Unknown",
+            currentSen: 0,
+            days30Sen: 0,
+            days60Sen: 0,
+            days90Sen: 0,
+            over90Sen: 0,
+          };
+          apMap.set(supplierId, row);
+        }
+        row.currentSen -= adv.sen;
       }
 
       return {
@@ -2307,6 +2366,29 @@ app.get("/ap-control", async (c) => {
     else if (overdueDays <= 120) row.d120Sen += amt;
     else row.over120Sen += amt;
     row.totalSen += amt;
+  }
+  // Unapplied supplier advances → NEGATIVE not-due rows (owner rule 2026-07-05),
+  // so the aging table's total ties the 400-0000 control exactly; knock-off
+  // clears both sides at once. (piOutstandingSen stays bills-only — the drift
+  // card = un-knocked advances, by design.)
+  for (const [supplierId, adv] of await loadUnappliedSupplierAdvances(c.var.DB, getOrgId(c))) {
+    let row = bySupplier.get(supplierId);
+    if (!row) {
+      row = {
+        supplierId,
+        supplierName: adv.supplierName || "Unknown",
+        notDueSen: 0,
+        d30Sen: 0,
+        d60Sen: 0,
+        d90Sen: 0,
+        d120Sen: 0,
+        over120Sen: 0,
+        totalSen: 0,
+      };
+      bySupplier.set(supplierId, row);
+    }
+    row.notDueSen -= adv.sen;
+    row.totalSen -= adv.sen;
   }
   const aging = [...bySupplier.values()].sort((a, b) => b.totalSen - a.totalSen);
   const supplierCounterSen = Number(supRes?.s) || 0;

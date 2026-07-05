@@ -34,6 +34,25 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-05-001 — AR/AP Aging tab showed the FULL face amount for partially-paid purchase invoices (AP loop never subtracted paid) `accounting`
+
+🟢 **Fixed — shipped with the advance-rows-in-aging change, verified live on prod 2026-07-05**
+
+- **Symptom**: the Aging tab (`GET /api/accounting/aging`, snapshot-cached) overstated
+  supplier balances — a PARTIAL_PAID PI (or one reduced by a knocked-off supplier CN)
+  appeared at its full `amountSen`.
+- **Root cause**: the AP loop used `outstanding = amountSen` and didn't even SELECT
+  `paid_amount_sen`; the AR loop right above always netted `totalSen − paidAmount`.
+  Found during the owner-requested full-module audit (2026-07-05) by diffing the two
+  loops — /ap-control's aging was already netting, so only this tab was wrong.
+- **Fix** (`src/api/routes/accounting.ts` /aging builder): SELECT `paidAmountSen`
+  (dual-key read) and net it; while there, unapplied supplier advances now join BOTH
+  agings as negative current/not-due rows (owner rule 2026-07-05: aging total must tie
+  the 400-0000 control exactly), and `supplier_payments` joined the snapshot's
+  sourceTables so knock-offs rebuild it.
+- **Verify**: live — /ap-control aging total == GL 400-0000 to the sen; GVP/CHL/INFAB
+  show −950/−640/−10 not-due rows; partially-paid PIs show net outstanding.
+
 ## BUG-2026-07-03-001 — Phantom product code `5543-1C(LHF)` on CO-2606-002 cascaded through production + inventory; owner fixed the BOM, chain needed relabelling `data-migration` `consignment-orders` `production-orders`
 
 🟢 **Fixed — one-shot backfill applied + verified live on prod 2026-07-03** · owner-requested

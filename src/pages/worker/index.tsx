@@ -659,12 +659,36 @@ export default function WorkerHomePage() {
         payload.lat = loc.lat;
         payload.lng = loc.lng;
       }
-      await workerFetch("/api/worker/clock", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
+      // Weak-wifi hardening (2026-07-03): the POST previously had no timeout
+      // (a dead connection spun forever) and no catch/status check (a failed
+      // punch showed NOTHING — the worker walked away believing they'd
+      // clocked in). Bound the wait, surface every failure, and only refresh
+      // on a confirmed success.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 60_000);
+      let res: Response;
+      try {
+        res = await workerFetch("/api/worker/clock", {
+          method: "POST",
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      const j = (await res.json().catch(() => null)) as {
+        success?: boolean;
+        error?: string;
+      } | null;
+      if (!res.ok || (j && j.success === false)) {
+        setClockErr(j?.error || t("home.punchFailed"));
+        return;
+      }
       // Re-fetch both — a fresh clock event shifts daily/attendance too
       await Promise.all([refreshToday(), refreshHistory(from, to)]);
+    } catch {
+      // Network drop / timeout — the punch did NOT record; say so plainly.
+      setClockErr(t("home.punchFailed"));
     } finally {
       setClocking(false);
     }

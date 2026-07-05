@@ -2549,10 +2549,17 @@ export function DataGrid<T extends Record<string, any>>({
 
   useEffect(() => {
     if (!onSelectionChange) return;
+    // Depend on sortedData too (2026-07-03, invoices stale-selection bug):
+    // the emitted selection must always be a subset of the rows currently
+    // shown. Previously this only re-ran on checkbox clicks, so applying a
+    // filter left the parent holding rows that were no longer visible —
+    // "1 selected" toolbars over an empty grid, batch actions counting
+    // invisible rows. Internal selectedKeys are kept, so clearing the filter
+    // restores the same ticks.
     const selected = sortedData.filter(row => selectedKeys.has(String(getNestedValue(row, keyField))));
     onSelectionChange(selected);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedKeys]);
+  }, [selectedKeys, sortedData]);
 
   // Mirror the grid's internal filter + sort result back to the parent.
   // Scoped to the stable identity of `onFilteredDataChange` so a caller
@@ -3362,9 +3369,19 @@ export function DataGrid<T extends Record<string, any>>({
       <div className="flex items-center justify-between border border-t-0 border-[#E2DDD8] bg-[#F0ECE9] px-3 py-1 rounded-b text-[10px] text-[#777]">
         <span className="flex items-center gap-2">
           <span>
-            {selectedKeys.size > 0
-              ? `${selectedKeys.size} selected`
-              : `Record 1 of ${sortedData.length.toLocaleString()}`}
+            {/* Count only selections VISIBLE under the current filter — the
+                raw selectedKeys.size kept saying "1 selected" over a filtered
+                list with zero ticked rows (BUG-2026-07-03-003 follow-up). */}
+            {(() => {
+              const visibleSelected = sortedData.reduce(
+                (n, row) =>
+                  n + (selectedKeys.has(String(getNestedValue(row, keyField))) ? 1 : 0),
+                0,
+              );
+              return visibleSelected > 0
+                ? `${visibleSelected} selected`
+                : `Record 1 of ${sortedData.length.toLocaleString()}`;
+            })()}
           </span>
           {/* Row cap pill — filter / sort / search still act on the full
               sortedData; this only toggles how many rows are painted. */}

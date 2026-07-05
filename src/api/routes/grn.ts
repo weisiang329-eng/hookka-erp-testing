@@ -27,6 +27,7 @@ import { makeLedgerEntry } from "../../lib/costing";
 import { emitAudit } from "../lib/audit";
 import { availableQty as computeAvailableQty, clampDecrement } from "../../lib/convert-chain";
 import { checkGrnLineQtyEdit, isGrnLockedByDownstreamPi, grnLockedByDownstreamPiError } from "../../lib/purchase-edit-rules";
+import { PO_ITEMS_ORDER, ensurePoItemLineNo } from "./purchase-orders";
 
 const app = new Hono<Env>();
 
@@ -737,15 +738,17 @@ async function cascadePOStatusAfterGRNPost(
     .all<{ poItemIndex: number | null; acceptedQty: number }>();
   const grnItems = grnItemsRes.results ?? [];
 
+  await ensurePoItemLineNo(db);
   const poItemsRes = await db
     .prepare(
-      // ORDER BY id — SQLite happened to return rows in insertion order, but
-      // Postgres heap-scan order is undefined and can shift after any UPDATE.
-      // GRN lines key to PO lines by index, so a scan-order flip silently
-      // routes acceptedQty to the WRONG PO line (wrong stock, wrong status).
-      // IDs are time-ordered (chronological suffix) so ORDER BY id matches
-      // insertion order deterministically.
-      "SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ORDER BY id",
+      // Canonical order (2026-07-04): line_no = paper order for new POs,
+      // legacy id-order for backfilled rows. GRN lines key to PO lines by
+      // index, so this MUST match the order the PO endpoints serve
+      // (PO_ITEMS_ORDER) or acceptedQty routes to the WRONG PO line.
+      // NOTE the old comment claimed ids are time-ordered — they are NOT
+      // (poi-<uuid8> is random); line_no exists precisely because no column
+      // encoded the document order.
+      `SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ${PO_ITEMS_ORDER}`,
     )
     .bind(poId)
     .all<{ id: string; quantity: number; receivedQty: number }>();
@@ -847,11 +850,12 @@ async function restorePOReceivedQtyForGRN(
     .all<{ poItemIndex: number | null; acceptedQty: number }>();
   const grnItems = grnItemsRes.results ?? [];
 
+  await ensurePoItemLineNo(db);
   const poItemsRes = await db
     .prepare(
-      // Same deterministic ORDER BY id as the post cascade — GRN lines key to
-      // PO lines by index, so scan order must match the original mapping.
-      "SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ORDER BY id",
+      // Same deterministic PO_ITEMS_ORDER as the post cascade — GRN lines key
+      // to PO lines by index, so scan order must match the original mapping.
+      `SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ${PO_ITEMS_ORDER}`,
     )
     .bind(poId)
     .all<{ id: string; quantity: number; receivedQty: number }>();
@@ -943,9 +947,10 @@ async function cascadePOReceivedQtyDelta(
   if (!grn?.poId) return;
   const poId = grn.poId;
 
+  await ensurePoItemLineNo(db);
   const poItemsRes = await db
     .prepare(
-      "SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ORDER BY id",
+      `SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ${PO_ITEMS_ORDER}`,
     )
     .bind(poId)
     .all<{ id: string; quantity: number; receivedQty: number }>();

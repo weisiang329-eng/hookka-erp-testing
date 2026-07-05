@@ -52,6 +52,343 @@ Entries themselves stay newest-first.
   sourceTables so knock-offs rebuild it.
 - **Verify**: live — /ap-control aging total == GL 400-0000 to the sen; GVP/CHL/INFAB
   show −950/−640/−10 not-due rows; partially-paid PIs show net outstanding.
+## BUG-2026-07-04-008 — DO create path could silently persist a 0/0 (RM 0) 3PL rate: a rate-less vehicle masked its provider's real rate `delivery-orders` `3pl`
+
+🟡 **Fixed on worktree branch (not yet merged)**
+
+**Symptom (latent, deprioritized):** creating a delivery order with a 3PL vehicle
+whose per-trip / per-extra-drop rates were never keyed in 3PL Maintenance (0/0)
+persisted `deliveryCostSen = 0` even when the vehicle's PROVIDER (company) had a
+real rate. The DO looked like a free trip. Same class as BUG-2026-06-25 (the
+packing-list money path), which was fixed there but the note explicitly flagged
+"the DO write path has the same latent behavior for `deliveryCostSen` — untouched".
+
+**Root cause:** in `createDeliveryOrderForPOs` (src/api/routes/delivery-orders.ts,
+POST create), the vehicle cost branch (~3448) overrode `resolvedDeliveryCostSen`
+unconditionally whenever a `vehicleId` was picked — including a 0/0 vehicle — so a
+rate-less vehicle "won" over the provider's real rate and wrote 0. The provider
+fallback (~3424) was gated on `!resolvedVehicleId`, so it never got a chance.
+
+**Fix (additive):** added a `hasRatePair(trip, drop)` guard (0/0 = UNSET, not free)
+mirroring packing-lists.ts `rateForDo`/`hasRate`. Provider rate is now staged into
+`providerRateCostSen` whenever the provider has a keyed rate; the vehicle branch
+only overrides when the VEHICLE has a keyed rate, else falls through to the staged
+provider rate. When neither side has a rate, the operator's explicit
+`deliveryCostSen` (or 0) stands untouched — existing legitimately-0 DOs unaffected.
+The PUT path was audited and left alone: it only persists an explicit
+`body.deliveryCostSen`, never derives a rate, so it can't silently write 0.
+
+**Verified:** `tests/do-rate-hasrate-guard.test.mjs` (5 source-assertion tests,
+house style) all green; `npx tsc -p tsconfig.app.json --noEmit` clean; existing
+3PL / delivery / overdue tests (98) still pass. Live-prod verification pending merge.
+
+**Note on the paired FE audit (production "overdue PO" count, #17a):** verified
+NOT a bug. FE `isOverduePO` / `earliestOverdueDateOnPO` in
+`src/pages/production/utils.ts` are dead code (no call sites — only referenced in
+comments). Both the chip counts (`bedframeOverdueCount` / `sofaOverdueCount`) and
+the grid filter (`overduePoIdSet`) are sourced entirely from the backend
+`/api/production-orders/overdue-counts` endpoint, which already applies the
+per-piece ship-exclusion. Nothing changed there.
+
+---
+
+## BUG-2026-07-04-007 — Supplier scan batch import only recorded a sample when the operator EDITED or gold-marked it → clean supplier scans never captured `ocr` `scan` `suppliers`
+
+🟢 **Fixed on main**
+
+**Symptom:** the OCR accuracy dashboard showed Supplier = 1 scan total, and the
+weekly distill skipped all 34 suppliers (none had ≥2 confirmed samples) — so the
+supplier side never learned. Yet the owner had scanned real PI/GRN bundles.
+
+**Root cause:** both batch `handleCreateAll` paths in
+`src/components/scan-supplier-modal.tsx` (PI create ~1542, GRN create ~3702)
+guarded the sample confirm with `if (edited || card.markedGold)`. A clean scan
+(OCR right, operator changes nothing, doesn't mark gold) created the PI/GRN but
+never wrote `correctedJson` → the sample stayed uncaptured, invisible to both
+the accuracy metric (a clean pass IS a success) and the learning pool. Exact
+same class as the SO scan-po-modal guard fixed earlier this session.
+
+**Fix:** drop the guard — fire the `/samples/:id/confirm` on EVERY accepted
+import (still best-effort `.catch(()=>{})`), for both PI and GRN batch modes.
+The single-doc modal `apply()` already confirmed unconditionally. Now every
+accepted supplier document is captured (clean = success, edited = fail-reason),
+and suppliers accrue the ≥2 samples the distiller needs.
+
+---
+
+## BUG-2026-07-04-006 — OCR weekly self-learning silently stopped for ~2 weeks (cron timed out at 60s) + only ever learned from GOLD samples so most customers/suppliers learned nothing `ocr` `scan` `ci`
+
+🟢 **Fixed on main — restored + verified (manual run 200 OK)**
+
+**Symptom (owner asked "有没有在重新学习/为什么准确率那么低"):** the per-entity
+OCR rule distiller (`ocr-distill.ts`, weekly `distill-ocr-rules.yml` cron) had
+been **failing since 2026-06-21** — every Sunday run errored. And even when it
+ran, most entities got no rules.
+
+**Root causes + fixes:**
+① The cron `curl --max-time 60` was too short — the endpoint loops each eligible
+entity making one Anthropic call, and as gold pools grew a full run now takes
+~77s (verified). Every run past 06-14 timed out at 60s → learning silently
+stopped. Raised the curl timeout to **280s** (still under the 5-min job timeout;
+the endpoint is I/O-bound so Workers allow it). Manual re-run: **200 OK, 77s**.
+② The distiller learned ONLY from `isGold = 1` samples (owner rarely marks gold)
+→ the manual run showed customers 2/5 distilled, **suppliers 0/34** (all skipped
+for want of gold). Changed both the customer and supplier queries to learn from
+**every confirmed sample** (`WHERE correctedJson IS NOT NULL`), gold-preferred
+(`ORDER BY isGold DESC, createdAt DESC`, 50 cap, ≥2 floor unchanged). Now every
+entity with ≥2 accepted imports teaches the OCR its document format.
+
+**Note:** more eligible entities = more Anthropic calls per run; the 280s
+headroom covers current volume. If it grows, add incremental "only regen when
+the sample pool changed" so unchanged entities skip the API call.
+
+---
+
+## BUG-2026-07-04-005 — Auto-sent DO/Invoice emails used a SECOND pdf engine (pdf-lib) that looked different from the jsPDF the operator prints `ui-frontend` `pdf` `delivery` `invoices` `customer-notify`
+
+🟢 **Fixed on main — email now renders the exact print PDF (verify with one real send)**
+
+**Symptom (owner 2026-07-04):** the auto-sent DO and Invoice PDFs looked "歪"
+and "差得很远" from what the operator prints/downloads, and DO vs Invoice were
+inconsistent.
+
+**Root cause:** two separate PDF engines. Print/Download uses **jsPDF**
+(`src/lib/generate-do-pdf.ts` / `generate-invoice-pdf.ts`). The customer-notify
+email rendered a SECOND **pdf-lib** generator (`unified-do-invoice-pdf.ts` via
+`renderUnifiedDoBase64` / `renderUnifiedInvoiceBase64`) — a different-looking
+document. The stated goal ("customer receives exactly what the operator sees")
+was inverted.
+
+**Fix:** the operator-triggered notify path (browser present, the normal case)
+now renders the SAME jsPDF the Print button produces — `generateDoPdfBase64` /
+`generateInvoicePdfBase64`, with the same row/invoice + print-extras.
+Changed `src/pages/delivery/index.tsx` (dispatch DO + delivered Invoice) and
+`src/pages/invoices/index.tsx` (bulk resend). The pdf-lib generator stays ONLY
+as the pure-backend fallback (no-browser sends — jsPDF can't run on Workers).
+Note: BUG-2026-07-04-002 (pdf-lib invoice centring) still applies to that
+fallback path.
+
+**Verify:** owner does one real dispatch + one real delivered → the emailed
+DO/Invoice is byte-for-byte the printed one.
+
+---
+
+## BUG-2026-07-04-004 — Creating any new sister organisation 500'd on prod: migration 0142 never auto-applied and had no runtime self-apply `organisations` `multi-tenant` `schema`
+
+🟢 **Fixed on main (ensureOrganisationRegistry) — verified by creating HKMFG on prod**
+
+**Symptom:** `POST /api/organisations` inserts into the migration-0142 columns
+(msic_code / business_type / is_default / display_order / …) and requires the
+legacy `CHECK (code IN ('HOOKKA','OHANA'))` to be gone. Migrations do NOT
+auto-apply on deploy (project rule) and 0142 had **no runtime ensure**, so on a
+prod where nobody pasted 0142 the create would 500 (missing column / CHECK
+violation on the new code).
+
+**Fix:** `src/api/routes/organisations.ts` — added `ensureOrganisationRegistry(db)`
+(idempotent, best-effort, module-promise-cached like `ensureDistillColumns`):
+`DROP CONSTRAINT IF EXISTS organisations_code_check` + `ADD COLUMN IF NOT EXISTS`
+for the 7 registry columns + the unique `(org_id, code)` index +
+`suppliers.purchase_org_code`. Called at the top of the POST handler before the
+first write.
+
+**Verified:** created **HOOKKA MANUFACTURING SDN. BHD.** (code HKMFG) live on
+prod → 201; GET now lists 4 orgs (HOOKKA, OHANA, HOUZS, HKMFG) with every
+e-invoice field (reg no / TIN / MSIC / address / email) stored correctly.
+
+---
+
+## BUG-2026-07-04-003 — OCR Accuracy dashboard card shipped with Chinese UI strings (violates 100%-English rule) `ui-frontend` `i18n` `dashboard`
+
+🟢 **Fixed on main**
+
+**Symptom (owner):** the OCR Accuracy block on the main Dashboard (live on prod
+via the staging merge) showed Chinese labels — "上传后你改过 = Fail…",
+"顾客 × 类别 (点顾客展开类别)", "最常改的字段", "按 Supplier", and the empty state.
+The ERP UI is 100% English (worker portal is the only intentional multilingual
+surface); this card slipped through.
+
+**Fix:** `src/pages/dashboard-b/OcrAccuracyCard.tsx` — all 6 Chinese strings
+translated to English (header hint, empty state, SO section title + hint, the
+two "Most-changed fields" headers, supplier section title). No logic change.
+Backend fail-reason labels (Product code / Special order / Fabric code / Qty /
+Doc No) were already English.
+
+---
+
+## BUG-2026-07-04-002 — Invoice PDF: Set/Price/Total pinned to the top line of tall 4-ref rows read as "歪" (misaligned number column) `ui-frontend` `pdf` `invoices`
+
+🟢 **Fixed on main, verified via render (before/after)**
+
+**Symptom (owner):** the auto-sent / downloaded Invoice PDF looked "歪到完了" —
+the right-hand Set / Price / Total numbers sat at the very top of each line
+item while the left "Order" cell ran 4 lines (PO / SO / REF / CO SO), so the
+number column floated high and read as detached / ragged down the page. The DO
+looked fine because its Quantity column is multi-line, so both sides balanced.
+
+**Root cause:** `src/api/lib/unified-do-invoice-pdf.ts` drew the single-line
+Set / Price / Total at the row's TOP baseline `y`; in a 4-line row they aligned
+only with line 1 (the product code), not the row's body.
+
+**Fix:** vertically centre them against the row height —
+`midY = y - ((rowLines - 1) * 9.3) / 2` — for the INVOICE branch only. The DO
+branch is left byte-identical (owner: DO is fine). Verified by rendering a
+faithful sample invoice through the real `buildUnifiedDocPdf` generator and
+comparing before (numbers at top) vs after (numbers centred beside each item).
+
+---
+
+## BUG-2026-07-04-001 — Approved non-production request blocked the punch autofill: whole days of punched hours never logged; OT rule corrected to 30-min minimum; 0.01h scan fragments `payroll` `attendance` `data-integrity`
+
+🟢 **Fixed on main (ff591ab3) + 7 bitten days repaired live on prod (one-shot 848f259b), verified**
+
+**Symptom (owner screenshots):** AUNG KYAW SOE punched 07:32→18:02 (a full
+9-hour day) but his day showed only "R&D 1.33h — Non-production (approved)";
+several workers had confusing 0.01h/0.09h fragment rows; owner also corrected
+the OT rule — OT counts only from 30 minutes past 18:00 (code paid from >15).
+
+**Root causes + fixes:** ① punch-autofill's blanket `COUNT(*)` safety gate
+treated the approval-created row as "day already logged" and skipped the whole
+day — gate now ignores `Non-production (approved)%` rows and autofills minus
+the approved hours (`src/api/lib/punch-autofill.ts`). ② OT threshold raised to
+30 min in `computeAttendanceDay` (18:28 → 0 OT; quarters from 18:30), tests
+updated incl. the owner's exact 18:28 example. ③ `prorateHours` folds sub-0.1h
+scan-boundary fragments into the largest bucket (totals still exact).
+
+**Repair:** audit-first one-shot `POST /api/import/backfill-punch-autofill-blocked`
+found exactly 7 bitten days (2026-06-30 → 07-03, 6 workers) → applied → 13
+rows created → re-audit 0 remaining. Spot-check: AUNG KYAW SOE 2026-07-01 now
+totals exactly 9.00h (R&D 1.33 kept + UPH 7.13 + WHS 0.54). NOTE: July's
+pre-fix OT tails (15-29 min) get renormalised in the upcoming full-auto
+payroll staging recalc (owner-approved).
+
+---
+
+## BUG-2026-07-03-008 — Mobile Warehouse search couldn't find a rack by its customer PO `ui-frontend` `mobile` `warehouse`
+
+**Status:** 🟢 Fixed
+
+**Symptom:** On `/m/warehouse`, typing a customer PO number into the rack search never matched the rack holding that PO's goods.
+
+**Root cause:** Rack items expose the customer PO as `customerPOId` (routes/warehouse.ts `RackItemApi`), but the search haystack looked for `poNo`/`poNumber` (and `code`/`sku` for the product code) — none of which exist on a rack item — so the PO (and product-code) terms always missed.
+
+**Fix:** `src/pages/m/screens/WarehouseScreen.tsx` — search now reads `customerPOId` (+ `productCode`), dual-keyed for back-compat.
+
+**Verified:** prod `/m/warehouse` — 20 racks; search "PO-009090" → exactly the 1 rack holding it; bogus PO → "No racks match". 39 rack items carry a real `customerPOId`.
+
+---
+
+## BUG-2026-07-03-007 — Mobile Supplier detail "Price · SKU table" rendered every row blank `ui-frontend` `mobile`
+
+**Status:** 🟢 Fixed
+
+**Symptom:** A supplier's materials sub-list on `/m` showed rows with no name, SKU, price, or MOQ.
+
+**Root cause:** The sub-list read `materialName`/`itemCode`/`supplierSku`/`moq`/`lastPriceSen`; the `/api/suppliers/:id` `materials[]` shape (suppliers.ts `materialRowToApi`) is `materialCategory`/`supplierSKU`/`unitPriceSen`/`minOrderQty`/`leadTimeDays` — a case + name mismatch, so only lead time ever populated.
+
+**Fix:** `src/pages/m/config/modules.ts` — read the real keys (dual-keyed): title `materialCategory`, `supplierSKU`, `unitPriceSen`, `minOrderQty`.
+
+**Verified:** field names confirmed against suppliers.ts; renders when a supplier has materials (prod suppliers currently have none populated).
+
+---
+
+## BUG-2026-07-03-006 — Mobile Customers list showed a blank "—" status pill for every customer `ui-frontend` `mobile`
+
+**Status:** 🟢 Fixed
+
+**Symptom:** On `/m/customers`, every row's status pill rendered as "—" instead of Active/Inactive.
+
+**Root cause:** The mobile Customers `toVM` resolved the pill from `str(r, "status")`, but the `/api/customers` row has no `status` string — it carries an `isActive` boolean. The lookup always missed → blank pill.
+
+**Fix:** `src/pages/m/config/modules.ts` — derive the pill from `r.isActive === true ? "ACTIVE" : "INACTIVE"` and add All/Active/Inactive filter tabs.
+
+**Verified:** prod `/m/customers` — pills render Active/Inactive; tabs read All 5 / Active 5 / Inactive.
+
+---
+
+## BUG-2026-07-03-005 — Mobile Procurement PO/GRN/PI detail line items showed "—" instead of the material name `ui-frontend` `mobile`
+
+**Status:** 🟢 Fixed
+
+**Symptom:** Opening a PO / GRN / Purchase Invoice on `/m` showed each line item's name as "—".
+
+**Root cause:** The shared `itemVM` title/subLine fallbacks didn't include the fields these rows actually carry (`materialName` / `material_code` / `materialCode`).
+
+**Fix:** `src/pages/m/config/modules.ts` — `itemVM` title fallback now includes `materialName` / `material_code`; subLine includes `materialCode` / `material_code`.
+
+**Verified:** prod `/m` procurement detail — line item names render. (Renumbered from an earlier 07-03-001/002/003/004 that collided with the phantom-code entry below.)
+
+---
+
+## BUG-2026-07-03-003 — Invoices customer filter blanked the list (name sent as ?customerId=); stale "N selected" toolbar over filtered-out rows; Send-to-Customer + Re-send-email merged into one button `ui-frontend` `invoices`
+
+🟢 **Fixed — shipped to main 2026-07-04, verified live on prod**
+
+**Symptoms (owner report, prod):** picking a customer in the Invoices filter
+instantly emptied the list ("0 of 0") even though that customer has invoices;
+the toolbar still said "1 selected · Re-send email (1)" over the empty grid;
+clicking Re-send then surfaced "no email" for a customer with no email on file.
+Owner also asked for ONE email button instead of the confusing
+Send-to-Customer / Re-send-email pair.
+
+**Root causes + fixes:** ① The customer dropdown used the customer NAME as its
+option value while the fetch sent it as `?customerId=` — SQL matched nothing
+(`src/pages/invoices/index.tsx`). Dropdown now sources the full /api/customers
+list (id + name; previously it also only listed names from the loaded page)
+and filters by real id on both server and client. ② DataGrid only re-emitted
+the selection on checkbox clicks, so filtered-out rows stayed in the parent's
+selection (`src/components/ui/data-grid.tsx` — selection effect now also
+depends on sortedData, pruning the emitted selection to visible rows for every
+grid in the app); the invoices page additionally clears selection on filter
+change. ③ One primary "Email to Customer (n)" button replaces the pair:
+drafts are finalised then emailed, already-sent invoices re-emailed with the
+current PDF, and customers with no email on file are pre-flagged in the
+confirm dialog (via the customers list) and skipped with a "add it on the
+Customer page" message. Same commit: the four import-completion backfill
+callers of applyWipInventoryChange now pass `{ orgId, source: "BACKFILL" }`
+so the wip_cascade_log idempotency guard engages on re-runs (2026-07-03 audit;
+the live PATCH/scan paths were already guarded). OCR catalog-snap audit
+confirmed all four SO/CO POST+PUT paths already guarded — memory updated.
+
+---
+
+## BUG-2026-07-03-002 — Silent-failure batch from the visibility audit: punch failures showed nothing, timed-out search said "No results", invoice-from-DO never refreshed the invoice list, two janitors never ran `ui-frontend` `infrastructure` `data-integrity`
+
+🟢 **Fixed — on `staging` (commits bb104e1f / 64d62058 / 4392e710 / 20ceeb7a), verified live on staging; reaches prod at the next staging→main merge (owner to order)**
+
+**Symptoms (all instances of one class — failures that pretend to be fine):**
+① Worker punch POST (`src/pages/worker/index.tsx` handleClock) had NO catch, NO
+status check, NO timeout — on weak factory wifi a failed punch showed NOTHING
+and the worker walked away believing they'd clocked in. ② Global search
+(`src/components/layout/global-search.tsx`) swallowed every fetch error
+(`.catch(() => {})` ×6) — a weak-wifi timeout rendered "No results", making an
+existing order look deleted (the owner's "东西不见了" trauma). ③ File uploads
+(products/documents.tsx, catalog.tsx) had no timeout (dead connection = spinner
+forever), no size pre-check (60MB crawled up the wifi only to get a raw-bytes
+413), and toasted success before anyone confirmed the bytes were servable —
+the "uploaded but it won't open" trap. ④ Invoice generated from the Delivery
+page (delivery/index.tsx confirmGenerateInvoice) invalidated no caches — the
+new invoice didn't appear in the Invoices list until TTL. ⑤ Two janitors were
+written but never scheduled: /api/internal/scan-queue-sweep (stuck scans hung
+forever) and the backup 90-day retention prune (orphaned behind a
+never-provisioned Workers Cron Trigger; dumps accumulate unbounded).
+
+**Fixes:** honest error states everywhere (new `home.punchFailed` i18n ×4
+languages; "Search failed — connection problem" state distinct from "No
+results"); new shared `src/lib/upload-file.ts` (50MB pre-check, 180s abort,
+verify-servable Range probe before the success toast, humanised 413);
+cache broadcast on invoice-from-DO; `.github/workflows/scan-queue-sweep.yml`
+(*/15min) + `POST /api/internal/backup-prune` (CRON_SECRET-gated, called from
+backup.yml after each upload; allowlisted in security-public-endpoints test).
+Also in the same batch: archive real-run hard-disabled (410) after the audit
+showed hot-only reads/writes would make archived rows vanish and no-op.
+
+**Verified:** search-failure state via fetch-fail simulation on staging (shows
+"Search failed", normal results unaffected); archive 410 + dry-run live on
+staging; full test suite (1347) green; typecheck strict green. NOTE:
+`schedule:` workflows only fire from the DEFAULT branch — sweep + prune crons
+go live at the staging→main merge.
+
+---
 
 ## BUG-2026-07-03-001 — Phantom product code `5543-1C(LHF)` on CO-2606-002 cascaded through production + inventory; owner fixed the BOM, chain needed relabelling `data-migration` `consignment-orders` `production-orders`
 

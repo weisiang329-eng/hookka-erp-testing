@@ -9,6 +9,324 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-04 — 🔵 Multi-Company Phase 3: dual-identity + inter-company mirror (worktree branch, NOT pushed)
+
+ADDITIVE-only, opt-in, default OFF. Finance-adjacent — built conservatively;
+external customers/suppliers/POs/SOs behave byte-identical.
+
+**Delivered (foundation of inter-company flow):**
+- **Dual-identity link** — new snake_case `group_org_code` on BOTH `customers`
+  and `suppliers` (default ''). A customer and a supplier that share the same
+  code (e.g. 'HOUZS') are the one real group company wearing its two hats
+  (AR/customer + AP/supplier stay separate streams). Reuses the existing
+  `suppliers.is_group_company`; the mirror decision also name-matches legacy
+  rows flagged only via is_group_company. Runtime-ensured, backfilled off.
+- **PO→SO mirror** — when a PO's seller is a flagged SISTER group company (not
+  HOOKKA) and the global `auto_create_mirror_docs` config is ON, PO create
+  auto-raises a mirror SALES ORDER under that sister (`sales_org_code` = sister,
+  buyer HOOKKA as customer, PO lines copied 1:1 in sen, status DRAFT — a doc
+  record, NO production cascade). Idempotent via `intercompany_mirror_log`
+  (UNIQUE source_type+source_id → retry never double-creates). Non-blocking:
+  any mirror failure is logged + swallowed so PO create never breaks. External
+  POs never reach the DB work (pure decision short-circuits).
+- Pure decision logic in `src/lib/intercompany-mirror.ts` (12 unit tests,
+  `tests/intercompany-mirror.test.mjs`, wired into `npm test`).
+- DO/Invoice customer auto-send: UNTOUCHED (no code near it changed).
+
+**TODO'd (deliberately deferred):** consolidated-P&L intra-group profit
+elimination (`TODO(intercompany-pnl-elimination)`); GRN mirror
+(`TODO(grn-mirror)` — needs inventory-safe design since GRN posts stock+cost).
+
+**Risk note:** mirror SO customer resolution requires HOOKKA to exist as a
+CUSTOMER of the sister in the catalog — if absent the mirror SKIPS (no back-door
+customer creation) and releases its log claim so a later retry succeeds.
+
+---
+
+## 2026-07-04 — 🔵 Multi-Company Phase 2: company dimension on SO + PO (worktree branch, NOT pushed)
+
+ADDITIVE-only. Company selector on create + Company column + Company filter on
+the Sales Orders and Purchase Orders lists. Existing docs → Hookka; default list
+view shows EVERYTHING; filter defaults to ALL companies.
+
+**Findings (verified before coding):**
+- PO side largely DONE already: `/procurement/create` full-page form has the
+  "Purchase company" dropdown (persists `purchaseOrgCode` via POST); PO list has a
+  "Purchase co" column. Only the PO list **company filter** is missing.
+- SO side: `sales_orders.orgId` is the TENANT-isolation column and the SO list is
+  tenant-scoped (`withOrgScope` → `WHERE orgId=?` bound to users.orgId='hookka').
+  Writing a non-hookka `orgId` would HIDE the SO → violates "show everything".
+  → Company dimension for SO is a NEW snake_case `sales_org_code` column (mirrors
+  PO's `purchase_org_code`), leaving `orgId` untouched.
+
+**Plan:** (1) SO create dropdown → sales_org_code; (2) SO list column + filter;
+(3) PO list filter. Runtime ensure + DEFAULT 'HOOKKA' backfill for sales_org_code.
+
+**DONE (worktree, NOT pushed):**
+- New pure helper `src/lib/company-dimension.ts` (resolveCompanyCode /
+  readCompanyCode / matchesCompanyFilter) + `tests/company-dimension.test.mjs`.
+- Backend `sales-orders.ts`: `sales_org_code` runtime ensure + DEFAULT 'HOOKKA'
+  backfill; POST INSERT + PUT UPDATE persist it; SalesOrderRow type + rowToSO
+  read (dual-keyed). PO backend already accepted purchaseOrgCode — untouched.
+- SO create `sales/create.tsx`: "Company" dropdown (defaults HOOKKA), payload +
+  localStorage draft. PO create `/procurement/create` already had it.
+- SO list `sales/index.tsx`: "Company" column (code→name) + "Company" filter
+  (default All Companies). PO list `procurement/index.tsx`: "Company" filter
+  added (column already existed).
+- `SalesOrder` type in `src/types/index.ts` gained `salesOrgCode?`.
+- build:strict clean; company-dimension + so-category + sql-write-column-coverage
+  + delivery-refs + sofa-combo tests green.
+
+---
+
+## 2026-07-04 — 🟡 FULL-auto payroll settlement, manual panel REMOVED (staging branch, NOT pushed)
+
+Owner picked (A): FULL auto — auto-dock the shortfall on partial/under-logged
+days too, and REMOVE the manual Keep-pay/Deduct review panel entirely. Delta
+built on top of the prior-round auto-settle, on the worktree branch (NOT pushed).
+
+**Delta this round:**
+1. **Under-logged (To-fill) days now auto-dock.** New pure helper
+   `computeUnderLoggedShortfallHours(logged, expected)` (= expected − logged on a
+   partial day; 0 logged = absence, left to the salary deduction). Extracted the
+   shared guard/apply core `maybeApplyAutoDayDock` (MANUAL never overridden,
+   finalised month skipped, full day clears stale AUTO); `maybeApplyAutoPunchDock`
+   now delegates to it (byte-identical — all prior tests green).
+2. **`POST /settle-period` rewritten** to a unified per-day settle over ALL factory
+   workers × working days: dock = max(punch shortfall, under-logged shortfall).
+   Returns punch-source vs logged-source counts. `Settle month` button + confirm
+   text updated; live punch-out path unchanged.
+3. **Manual panel removed.** `WorkerDayDrillIn` is now READ-ONLY (dropped
+   onAction/busyKey/workerId, the Action column, Keep-pay/Deduct buttons). Removed
+   `handleUnderAction` + `underActionBusy` + the auto-settle-chip code + the
+   period-attendance fetch. Panels re-labelled "under-logged (auto-docked)". Undo
+   on a stored dock kept (restores pay for a wrong auto-dock).
+3b. Historical MANUAL overrides respected (guard) + finalised months never
+   re-settled.
+
+**FULL-auto month recompute (June 2026, before=nothing docked → after=full auto):**
+- AH SENG perfect → RM0.00 (byte-identical).
+- MEI 15m-late (punch) → −RM51.25 (6.5h, already auto last round).
+- **ZAW LIN under-logged, NO punch → −RM33.12 (4.2h To-fill) — NEW this round**
+  (previously waited for a manual Deduct click).
+- KUMAR mixed → −RM29.57 (0.75h punch + 3h To-fill; forgot-punch-out day logged
+  full so NOT docked; OT paid).
+- Crew Δ −RM113.94; of which **7.2h is NEW To-fill/under-logged auto-dock** (the
+  hours the manual panel used to hold — ~RM57 on this crew, in the ballpark of the
+  ~RM52.73 To-fill the owner cited).
+
+**Tests:** `tests/settle-period-punch.test.mjs` rewritten (13 cases: To-fill maths,
+day-dock core guards, unified mixed month, ZAW-LIN under-log, idempotent,
+MANUAL-survives, approved-skip, corrected-clears). Full suite 1387 pass / 0 fail;
+strict typecheck clean; eslint 0 errors.
+
+**RISK owner explicitly ACCEPTED (do not re-litigate):** weak wifi → a worker who
+worked full but whose punch-out failed AND whose office grid logs fewer hours
+will now be auto-docked. His call; the office fixes it by keying the real hours
+(clears the dock on next settle) or a MANUAL Keep-pay row.
+
+---
+
+## 2026-07-04 — (superseded) Auto-settle with manual panel kept for no-punch days
+
+Prior round (before owner picked A): punched days auto-settled, no-punch days kept
+a manual choice. Superseded by the FULL-auto entry above.
+
+**What already existed (verified):** the shift algorithm + auto short-hour dock
+(`maybeApplyAutoPunchDock`, `attendance-deduct.ts`) already runs on EVERY worker
+punch-out (`worker.ts:1182`) and office grid save (`employees.tsx`) — ≥9h check,
+late-past-grace, OT-from-30-min (owner 2026-07-04 correction confirmed live in
+`attendance-rules.ts:130-136`), day-typed 2×/3× multipliers, unified ÷26. So the
+per-day auto engine was DONE; the remaining "manual choice" was the Labor Cost
+Under-recorded review's Keep-pay / Deduct buttons.
+
+**What I built (auto-settlement, no manual pick for punched days):**
+1. `employees.tsx` — the Under-recorded drill-in now loads the period's punches
+   (`/api/attendance`) + the AUTO docks; a day with a COMPLETE real punch
+   (in + out) is **auto-settled** → the Keep-pay / Deduct buttons are REPLACED by
+   a read-only "Auto-docked Xh" / "Auto-settled" chip. Days with NO punch keep
+   the manual choice (conservative — never auto-dock a no-evidence day). A
+   clock-in-only day (forgot punch-out) stays manual, mirroring the engine guard.
+2. New `POST /api/payroll-hour-deductions/settle-period` — batch-replays the
+   per-day helper over EVERY punch in a month (idempotent, same guards: no
+   clock-out → skip, finalised month → skip, MANUAL never overridden, full day
+   clears stale AUTO). Wired a "Settle from punches" button (single-month view)
+   that runs it then regenerates payslips once.
+3. Tests: `tests/settle-period-punch.test.mjs` (5 cases: mixed month, idempotent,
+   MANUAL-preserved, approved-month-skip, corrected-punch-clears). Added to the
+   `npm test` list. Full suite 1374 pass / 0 fail; strict typecheck clean.
+
+**Month recompute (June 2026, representative crew, before→after gross):**
+- AH SENG perfect full days → **RM0.00 Δ** (byte-identical, no-change worker).
+- SITI 18:25-out → **RM0.00 Δ** (OT-30 rule: 0 OT, full day — not a spurious 15m).
+- MEI 15m-late daily → −RM51.25 (6.5h × ~RM7.88/h).
+- RAJ leaves-30m-early daily → −RM102.50 (13h).
+- KUMAR mixed → −RM21.68 (forgot-punch-out day kept full; OT day paid; short docked).
+- Crew total RM10,200.72 → RM10,025.29 (Δ −RM175.43).
+
+**Flag for owner:** the no-punch under-recorded day still shows a manual
+Keep-pay / Deduct choice (conservative). If owner wants those auto-DEDUCTED too
+(treat missing punch as short → dock), that's a one-line policy flip — but it
+docks pay on absent-punch evidence, so left as manual pending his call.
+
+---
+
+## 2026-07-04 — 🔵 Owner: mobile parity sweep + FULL brutal technical audit
+
+A. **Mobile parity**: every problem class already solved on desktop must be
+   re-checked and solved on mobile (/m + worker portal) too — explicitly:
+   mobile loading performance (measured /m home = 4.3MB/20 calls) and scan/OCR
+   issues. Method: BUG-HISTORY + this week's fixes → per-fix mobile
+   counterpart check → fix list → implement (staging for /m).
+B. **Full technical audit** per owner's pasted 15-area prompt (architecture,
+   DB, API, perf BE/FE, UX, business logic, AI, security, monitoring, testing,
+   devops, scalability, code quality, consistency) — DONE. 12 reviewers (6
+   by-domain + 6 by-module/tab), every claim file:line-verified. Report artifact
+   published (erp-audit-v1). Overall 66/100 = "solid single-tenant, harden
+   before 100 users". FALSE POSITIVES caught: assistant.ts "no auth" (has
+   SUPER_ADMIN gate at :532); cost_ledger "out of control" (narrow COUNT-race,
+   real but bounded). 5 real bugs found+fixed live this session (delivery
+   bulk/POD invoice cache, folder-detail bulk cache, customer sofa-combo cache,
+   /m bulk+mail cache, 52 updated_at indexes). Fix queue by tier in the artifact:
+   scale-blockers (cascade transactions, N+1 bulk cascade, cost_ledger UNIQUE,
+   composite indexes, money idempotency), correctness (SO→INVOICED WHERE guard,
+   CN-reversal-ledger VERIFY, AR-aging page-1, warehouse stock-in rollback),
+   quality (monolith files, camelCase map, API envelope, error tracking), quick
+   wins. Owner picks what to build. VERIFY-BEFORE-FIX applies to every flagged item.
+
+---
+
+## 2026-07-04 — 🔵 Owner multi-ask batch (labor hours + OCR ordering + sweeps)
+
+Logged verbatim so nothing is skipped:
+1. **SO + GRN should follow the uploaded documentation's ORDER** — owner
+   CLARIFIED 2026-07-04: he means the order of RECORDS from a combined
+   multi-PO upload (10 customer POs in one file → the 10 created SOs must be
+   numbered/listed 1st→10th like the paper stack), NOT line order within one
+   SO (the within-SO category sort is fine / not his complaint — do NOT
+   remove it). Batch-pipeline investigation running. SEPARATE keeper from
+   the first investigation: desktop GRN create sends poItemIndex from an
+   un-sorted array while the backend matches ORDER BY id — same class the
+   mobile fix (2cfa3ba7) closed; fix desktop too (correctness, not display).
+2. **Invoice-page bug classes → whole-system sweep** ("查看全系統還有哪個這樣"):
+   (a) filter dropdowns sending NAME where the API expects an ID
+   (b) stale grid selections surviving filter changes (DataGrid fix 99c20d3c
+   already app-wide; verify no page keeps its own parallel selection state).
+3. **Labor/Payroll go-live decision (owner)**: the manual Keep-pay/Deduct
+   backlog panel on Labor Cost vs Revenue is NO LONGER wanted — punch clock is
+   live, so the system must auto-settle from real punches per the Payroll
+   algorithm (≥9h check, late deduction, OT). No manual choice. NOTE memory:
+   auto-deduct was gated on staging verification (can't test pay on prod).
+   Investigate current flow → propose exact auto rules → owner confirms → build.
+4. **Bug: auto-from-punch hour attribution looks wrong** (owner screenshots,
+   entries dated 2026-07-01): AUNG KYAW SOE punch 07:32→18:02 but only 1.33h
+   logged (an approved R&D non-production row seems to displace the auto
+   rows?); PHYU SIN MOE 0.01h fragment row; ZAW LIN 12:59→18:28 = 0.94+4.31
+   (5.3h short — half-day, maybe correct). Also: punch-out 6:28 vs expected
+   6:30 — rounding/grace? does OT count from it?
+5. **Explain the pay rules in plain language**: when is a day late/short,
+   when does OT start, what adds/deducts money — full list for owner. DONE
+   2026-07-04 — and owner CORRECTED one rule: **OT only counts from 30
+   minutes past 18:00** (code currently pays from >15 min; 18:28 must be 0
+   OT, not 15 min). Fix with the ① batch on staging; affects punch autofill,
+   labor engine, payslips — verify numbers on staging before prod.
+6. Owner "ok" 2026-07-04 → plan approved: ① autofill safety-gate bug (an
+   approved non-prod row blocks punch-row generation → AUNG KYAW SOE 1.33h
+   day) + fragment rule (fold <0.1h scan-boundary rows into largest bucket)
+   + OT-30min correction, all on staging → ② SO/GRN document-order fixes
+   (batch investigation pending) → ③ full-auto Keep-pay/Deduct settlement
+   (staging month-recalc shown to owner before prod).
+
+Invoice-page 4-fix (BUG-2026-07-03-003) pushed to main 99c20d3c, deploy
+in progress; verify live then report.
+
+---
+
+## 2026-07-03 — 🔵 Visibility plan EXECUTING on staging (owner: "上staging就行")
+
+**Phase 1a SHIPPED to staging (commit 64d62058) + verified live on staging:**
+KV serve-stale for the non-paginated production list — body stored under stable
+key `pos:body:{org}:{qs}` with org version in KV METADATA; version mismatch →
+serve previous body instantly (X-Cache: STALE) + single-flighted background
+rebuild (buildListPayload(swr:false)) stores fresh body stamped with
+post-compute version. Paginated path unchanged (versioned key). Freshness
+semantics identical to the 2026-06-06 mark-stale SWR design — only the COST of
+the stale serve drops (1.3-5.4s → ~0.1s KV read). Verified on staging (9.8MB
+data, same volume as prod): MISS 5.1s cold → HIT ~0.9s → benign write (JC
+dueDate set to same value) → next poll STALE 0.87s (was 1.3-5.4s MISS) →
++16s HIT fresh. Convergence ≤2 poll cycles, all reads sub-2s.
+**Phase 2 SHIPPED to staging (4392e710):** new src/lib/upload-file.ts (50MB
+pre-check, 180s timeout, verify-bytes-servable via Range probe before success
+toast) wired into products/documents.tsx + catalog.tsx; files.ts 413 message
+humanised; worker punch POST got catch + status check + 60s timeout + new
+home.punchFailed i18n (was: failed punch showed NOTHING).
+**Phases 3+4 SHIPPED to staging (20ceeb7a):** verify-before-fix killed most
+audit claims (invoices-page create, PO/GRN/PI, inventory all already
+invalidate fine). Real fixes: ① delivery-page invoice-generate now broadcasts
+invoices/SO/DO cache invalidation (was: nothing) ② NEW scan-queue-sweep.yml
+cron every 15min (endpoint existed, NOTHING scheduled it) ③ backup retention
+prune wired: pruneOldBackups exported + CRON_SECRET-gated
+/api/internal/backup-prune + backup.yml step after upload (was: prune code
+orphaned behind a never-provisioned Workers Cron Trigger, dumps unbounded).
+Pre-auth route allowlist test updated (security-public-endpoints.test.mjs).
+NOTE: schedule: workflows only fire from main — sweep/prune go live at merge.
+**Remaining:** restore drill (needs owner's Supabase dashboard, PITR confirm);
+deeper perf levers (BOM parse cache, fabric precompute, per-dept versions) =
+diminishing returns, only if lag persists after Phase 1a.
+
+**2026-07-03 late: all-tab perf sweep on staging (17 pages, live measured).**
+Owner upgraded Supabase (plan/compute — helps DB speed + PITR; app-side fixes
+still needed). HEAVY tabs (payload/slowest): ① /m mobile home 4.3MB/20 calls
+(652KB delivery-orders + eager prefetch of everything — phones on weak wifi!)
+② /inventory 4.0MB (inventory/wip 2.9MB + delivery-orders 652KB + products)
+③ /delivery 2.4MB (pulls FULL unpaginated sales-orders 1.4MB @ 6.1s + products
+277KB) ④ /warehouse 1.7MB (one 1.45MB call @3.8s) ⑤ /procurement 1.3MB
+(inventory 895KB on the PO page). HEALTHY: invoices 156KB, customers 14KB,
+GRN/PI ~200KB, planning 37KB, reports lazy, consignment 320KB, employees
+274KB, sales ~1MB acceptable. Disease = same as production had: pages eagerly
+pull FULL sibling-module lists. Cure queue (owner to green-light): slim/paged
+variants for delivery→sales-orders, inventory/wip, warehouse list; /m home
+lazy per-tile loading. Reuse Phase-1a KV serve-stale pattern where applicable.
+
+**Phase 0 SHIPPED to staging (commit bb104e1f) + verified live on staging URL:**
+① archive real-run hard-disabled (POST ?dryRun=false → 410 confirmed; dry-run still
+returns counts) ② global search shows "Search failed — connection problem" on network
+failure instead of "No results" (verified by fetch-fail simulation; normal search
+regression-checked OK). NOTE: lock protects PROD only after staging→main merge (owner
+must order the merge explicitly).
+**Phase 1 measurement (live prod, read-only):** wire transfer is only 0.5MB (CF
+compression) — download is NOT the bottleneck; TTFB = 5.4s on cold snapshot rebuild,
+1.3-1.8s snapshot-warm/KV-miss, 0.77s KV HIT. 92% of decompressed 10MB = jobCards
+(14,702 JCs / 1,007 POs). fields=minimal already slims non-active-dept JCs in DEPT
+mode but OVERVIEW mode (activeDeptCode=null) sends full shape for all 8 depts.
+piecePics NOT emitted in minimal (agent claim corrected). → Phase 1 = attack server
+compute (5.4s rebuild + per-write version-bump churn) + overview-shape trim as
+secondary; NOT pagination (breaks 10 features), NOT transfer size (already 0.5MB).
+
+---
+
+## 2026-07-03 — 🟡 Full-system "visibility" audit DONE → plan proposed, awaiting owner pick
+
+4-agent audit completed (archive reads / uploads / caches / archived-row writes).
+**Verdict: NEVER run the archive as-is** — hot-only reads mean archived orders vanish
+from search + detail 404 + dashboards/reports/accounting undercount (dashboard-overview,
+department-performance, leadtimes, compliance-report, accounting.ts all hot-only;
+INNER JOINs in invoices.ts:1306 / planning-schedule.ts:131 DROP rows); writes silently
+no-op on archived rows (invoice-from-old-DO can bill RM 0 via computeDoInvoiceLines
+fallback, po-cost-cascade.ts:529 skips cost posting, consignment hold 0-row UPDATE,
+recomputePoStatusAndProgress no-ops); NO unarchive endpoint. Archive stays dormant/never
+run; 45d COLD_DAYS harmless. Speed to be solved by pagination instead (Fix #1).
+Other real gaps found (all need verify-before-fix at file:line before touching):
+① invoices POST doesn't invalidateCachePrefix("/api/invoices") → cross-tab stale list
+② PO/GRN/PI caches not cross-linked ③ inventory list manual-refresh only ④ uploads:
+file listed in DB but bytes possibly not yet openable (storage lag) → "uploaded but
+can't open"; presigned URL 300s expiry mid-Export-Pack; 413 error prints raw bytes.
+Proposed 3-step plan to owner (1 = paginate+server-search Production, 2 = upload
+verify-then-confirm + retries + human errors, 3 = cache invalidation patch set).
+Stale-chunk white-screen: already well-mitigated (main.tsx preloadError + SW purge).
+
+---
+
 ## 2026-07-02 — 🔵 Debtor/Creditor OPENING 工程(年中开账,owner 全程拍板)
 
 - ✅ Supplier Payment 每行加 print(已上线 prod)

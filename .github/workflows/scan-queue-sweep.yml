@@ -1,0 +1,56 @@
+name: Scan Queue Sweep — Re-queue Stuck Scans (15 min)
+
+# Hits POST /api/internal/scan-queue-sweep so any scan_queue row stuck in
+# 'processing' for over 5 minutes (worker died mid-batch, or Workers killed
+# the isolate before the batch drained) gets re-queued instead of hanging
+# forever — the "my scan never came out" symptom (see BUG-2026-06-30-003).
+# The endpoint existed since the scan-engine landed but NOTHING scheduled it
+# (found in the 2026-07-03 IT-hygiene audit); stuck rows sat until someone
+# happened to curl it manually. The sweep is idempotent and cheap (one
+# UPDATE over a small table), so a 15-minute cadence is plenty.
+#
+# NOTE: GitHub only runs `schedule:` on the DEFAULT branch (main → production).
+# On the staging branch this file rides along but won't auto-fire; use the
+# workflow_dispatch button (or curl the staging endpoint) to test there.
+#
+# Auth: the endpoint expects an x-cron-secret header matching the CRON_SECRET
+# repo secret AND the CRON_SECRET env var on Cloudflare Pages (same value on
+# both). Server returns 503 if its env var is missing, 403 if the header differs.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/internal/scan-queue-sweep
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty. See workflow header for setup."
+            exit 1
+          fi
+
+          # 60s timeout: a warm Pages worker responds in ~2-3s, but a cold start
+          # during Hyperdrive's first SQL round-trip can stretch to 30s+.
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 60 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-cron-secret: $CRON_SECRET" \
+            --data '{}' \
+            'https://hookka-erp-testing.pages.dev/api/internal/scan-queue-sweep')
+
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+
+          echo "Status: $status"
+          echo "Body: $body"
+
+          if [ "$status" -ne 200 ]; then
+            echo "::error::scan-queue-sweep failed with HTTP $status"
+            exit 1
+          fi

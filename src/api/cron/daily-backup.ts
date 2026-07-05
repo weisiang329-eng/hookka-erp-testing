@@ -144,9 +144,13 @@ export async function runDailyBackup(env: DailyBackupEnv): Promise<{
   }
 }
 
-async function pruneOldBackups(
+// Exported (2026-07-03) so /api/internal/backup-prune can run retention on
+// its own: the Workers Cron Trigger this file was written for was never
+// provisioned, so the prune never ran and dumps accumulated unbounded. The
+// backup.yml GitHub Action now POSTs that endpoint right after each upload.
+export async function pruneOldBackups(
   env: DailyBackupEnv,
-  retentionDays: number,
+  retentionDays: number = RETENTION_DAYS,
 ): Promise<void> {
   if (!env.SUPABASE_PROJECT_REF || !env.SUPABASE_SERVICE_KEY) return;
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;

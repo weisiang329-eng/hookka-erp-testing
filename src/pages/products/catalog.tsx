@@ -24,6 +24,7 @@ import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { PhotoCropDialog } from "@/components/ui/PhotoCropDialog";
 import { familyOf } from "@/lib/product-family";
+import { uploadFileAsset } from "@/lib/upload-file";
 
 const RT_MODULAR = "modular";
 
@@ -354,24 +355,30 @@ function ModelDetailDialog({
     setBusy(true);
     let ok = 0;
     let fail = 0;
+    let unverified = 0;
     try {
       for (const file of files) {
-        const fd = new FormData();
-        fd.append("file", file);
-        fd.append("resourceType", RT_MODULAR);
         // Key the photo by the FAMILY base (e.g. "1003"), not the per-variant
         // baseModel — so ONE photo covers the whole family + all its variants.
-        fd.append("resourceId", group.familyKey);
-        const res = await fetch("/api/files", { method: "POST", body: fd });
-        const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
-        if (res.ok && j?.success) ok++;
-        else { fail++; if (j?.error) toast.error(j.error); }
+        const r = await uploadFileAsset({
+          file,
+          resourceType: RT_MODULAR,
+          resourceId: group.familyKey,
+        });
+        if (r.ok) {
+          ok++;
+          if (!r.verified) unverified++;
+        } else {
+          fail++;
+          toast.error(r.error);
+        }
       }
       if (ok > 0) toast.success(`${ok} photo${ok === 1 ? "" : "s"} uploaded`);
+      if (unverified > 0) {
+        toast.error(`${unverified} photo${unverified === 1 ? "" : "s"} can't be opened yet — refresh in a moment and check before using`);
+      }
       if (fail > 0 && ok === 0) toast.error("Upload failed");
       onChanged();
-    } catch {
-      toast.error("Upload failed — network error");
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";

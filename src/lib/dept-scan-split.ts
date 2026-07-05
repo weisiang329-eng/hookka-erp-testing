@@ -117,6 +117,22 @@ export function prorateHours<T extends { weight: number }>(
     cents[i] += 1;
     left -= 1;
   }
+  // Fold sub-0.1h fragments into the largest bucket (owner 2026-07-04:
+  // scan-boundary minutes were surfacing as confusing 0.01h/0.09h rows on
+  // Working Hours). The fragment's cents MOVE — the rows still sum back to
+  // the total exactly. If every bucket is tiny, they all collapse into the
+  // single largest one rather than vanishing.
+  const MIN_FRAGMENT_CENTS = 10;
+  if (cents.length > 1) {
+    let maxI = 0;
+    for (let i = 1; i < cents.length; i++) if (cents[i] > cents[maxI]) maxI = i;
+    for (let i = 0; i < cents.length; i++) {
+      if (i !== maxI && cents[i] > 0 && cents[i] < MIN_FRAGMENT_CENTS) {
+        cents[maxI] += cents[i];
+        cents[i] = 0;
+      }
+    }
+  }
   return safe
     .map((b, i) => ({ ...b, hours: cents[i] / 100 }))
     .filter((b) => b.hours > 0);

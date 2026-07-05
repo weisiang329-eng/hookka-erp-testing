@@ -479,6 +479,10 @@ const deliveryOrdersSource: DataSource = {
   columns: [
     textCol("doNo", "Customer Delivery", (r) => str(r, "doNo")),
     textCol("companySO", "Company SO", (r) => str(r, "companySO", "companySOId")),
+    // customerPO + reference kept searchable (owner 2026-07-04: "PO 也 search
+    // 不到" — the DO tabs lacked these columns, so a PO/reference query missed).
+    textCol("customerPO", "Customer PO", (r) => str(r, "customerPO", "customerPOId")),
+    textCol("reference", "Reference", (r) => str(r, "reference")),
     textCol("customer", "Customer", (r) => str(r, "customerName")),
     textCol("state", "State", (r) => str(r, "customerState")),
     dateCol("deliveryDate", "Expected DD", (r) => dateOnly(r, "deliveryDate", "hookkaExpectedDD")),
@@ -504,6 +508,10 @@ const deliveryOrdersSource: DataSource = {
 const pendingSosSource: DataSource = {
   url: "/api/delivery-orders/pending-sos",
   select: selectData,
+  // Owner 2026-07-04: a Planning/Pending card must show all five identifiers
+  // he reconciles against — our SO number (the big code), customer name, and
+  // Customer PO / Reference / Customer SO as metas (DocCard flows 4 metas
+  // 3-across + 1). Exp DD rides along as the 4th meta.
   toVM: (r): RowVM => ({
     id: str(r, "id", "companySO", "companySOId"),
     code: str(r, "companySO", "companySOId") || "—",
@@ -511,6 +519,8 @@ const pendingSosSource: DataSource = {
     items: str(r, "hubName") ? `Ship to · ${str(r, "hubName")}` : undefined,
     metas: [
       { label: "Cust PO", value: str(r, "customerPO", "customerPOId") || "—" },
+      { label: "Reference", value: str(r, "reference") || "—" },
+      { label: "Cust SO", value: str(r, "customerSO", "customerSOId") || "—" },
       { label: "Exp DD", value: shortDate(dateOnly(r, "hookkaExpectedDD")) || "—" },
     ],
     status: resolveStatus(str(r, "status"), STATUS_MAPS.so),
@@ -519,6 +529,8 @@ const pendingSosSource: DataSource = {
     textCol("companySO", "Company SO", (r) => str(r, "companySO", "companySOId")),
     textCol("customer", "Customer", (r) => str(r, "customerName")),
     textCol("customerPO", "Customer PO", (r) => str(r, "customerPO", "customerPOId")),
+    textCol("customerSO", "Customer SO", (r) => str(r, "customerSO", "customerSOId")),
+    textCol("reference", "Reference", (r) => str(r, "reference")),
     dateCol("expectedDD", "Expected DD", (r) => dateOnly(r, "hookkaExpectedDD")),
     enumCol("status", "Status", (r) => str(r, "status"), SO_STATUSES),
   ],
@@ -645,7 +657,13 @@ const deliveryDetail: DetailConfig = {
     }
     return out;
   },
-  primaryCta: (d) => (str(d, "status") === "DELIVERED" ? "Sign" : "Dispatch"),
+  // "Mark Delivered" opens the POD capture sheet (signature + photos) and, on
+  // confirm, PUTs proofOfDelivery + status DELIVERED — the desktop flow. Hidden
+  // once the DO is delivered/invoiced.
+  primaryCta: (d) => {
+    const s = str(d, "status");
+    return s === "DELIVERED" || s === "INVOICED" ? undefined : "Mark Delivered";
+  },
   attachmentsResource: (id) => ({ type: "DO", id }),
   auditResource: () => "delivery-orders",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "DO_LINE", id: lineId }),
@@ -1092,7 +1110,14 @@ const poDetail: DetailConfig = {
       primary: true,
     },
   ],
-  primaryCta: (d) => (str(d, "status") === "DRAFT" ? "Submit" : "Status"),
+  // Receivable POs (Confirmed / Submitted / Partial) → "Receive (GRN)" opens the
+  // mobile goods-receipt sheet; else Submit (Draft) / Status. Matches the desktop
+  // GRN-eligible statuses (procurement/grn.tsx).
+  primaryCta: (d) => {
+    const s = str(d, "status");
+    if (["CONFIRMED", "SUBMITTED", "PARTIAL_RECEIVED"].includes(s)) return "Receive (GRN)";
+    return s === "DRAFT" ? "Submit" : "Status";
+  },
   attachmentsResource: (id) => ({ type: "PO", id }),
   auditResource: () => "purchase-orders",
   lineAttachmentsResource: (_parent, lineId) => ({ type: "PO_LINE", id: lineId }),
@@ -1901,7 +1926,9 @@ const rawMaterialDetail: DetailConfig = {
 
     return lists;
   },
-  hideActionBar: true,
+  // Remove-only stock adjustment (damage / write-off / count-down). Opens the
+  // adjustment form via runCta (inventory slug). Positive "found" stays desktop.
+  primaryCta: () => "Reduce Stock",
 };
 
 const rawMaterialsSource: DataSource = {
@@ -2244,6 +2271,50 @@ const laborRevenueSource: DataSource = {
   ],
 };
 
+// Efficiency — the design's `eff` tab (Worker Efficiency = production mins ÷
+// clocked hours). Real data via GET /api/reports/efficiency.json → EfficiencyData
+// (efficiency-report.ts): data.workers[] each { name, departmentName,
+// efficiencyPct, jobsCompleted, productionMinutes }. Sorted by efficiency desc.
+const efficiencySource: DataSource = {
+  url: "/api/reports/efficiency.json",
+  select: (resp) => {
+    const w = (resp as { data?: { workers?: unknown[] } } | null)?.data?.workers;
+    return Array.isArray(w) ? (w as RawRow[]) : [];
+  },
+  toVM: (r): RowVM => {
+    const eff = num(r, "efficiencyPct");
+    const prod = num(r, "productionMinutes");
+    return {
+      id: str(r, "workerId", "empNo") || str(r, "name"),
+      code: str(r, "empNo") || str(r, "departmentName") || "—",
+      title: str(r, "name") || "—",
+      items: str(r, "departmentName") || undefined,
+      metas: [
+        { label: "Efficiency", value: eff > 0 ? `${eff}%` : "—" },
+        { label: "Jobs", value: String(num(r, "jobsCompleted")) },
+        { label: "Prod", value: prod > 0 ? `${(prod / 60).toFixed(1)}h` : "—" },
+      ],
+      // Colour by efficiency band (green ≥100 · amber ≥60 · red <60), matching the
+      // report's own thresholds; no real "status" string on the row.
+      status: resolveStatus(
+        eff >= 100 ? "GREEN" : eff >= 60 ? "AMBER" : "RED",
+        {
+          GREEN: PAYMENT_STATUS_MAP.ACTIVE,
+          AMBER: PAYMENT_STATUS_MAP.PARTIAL,
+          RED: PAYMENT_STATUS_MAP.CANCELLED,
+        },
+      ),
+    };
+  },
+  columns: [
+    textCol("name", "Customer", (r) => str(r, "name")),
+    textCol("dept", "State", (r) => str(r, "departmentName")),
+    numCol("efficiency", "Amount", (r) => num(r, "efficiencyPct")),
+  ],
+  defaultSort: { key: "efficiency", dir: "desc" },
+  subTabs: [{ key: "efficiency", label: "Efficiency", match: () => true }],
+};
+
 // Department Performance sub-tab — /api/department-performance returns
 // per-department utilization + output aggregates for the date range.
 // dc13 v13 sync.
@@ -2482,17 +2553,21 @@ export const employeesConfig: ModuleConfig = {
   },
   detail: employeeDetail,
   // Design tab-bar (owner 2026-07-03 "完全照 design"): no Leave tab; Directory =
-  // "Employee Master", Labor vs Revenue = "Labor Cost". Efficiency (design's 4th
-  // tab) needs a dedicated aggregation backend — deferred.
+  // "Employee Master", Labor vs Revenue = "Labor Cost". Efficiency (design's `eff`
+  // tab) now backed by GET /api/reports/efficiency.json (efficiencySource).
+  // Tab order matches the .dc.html employees tab-bar exactly (owner: .dc.html为准):
+  // Working Hours · Attendance · Labor Cost · Efficiency · Dept Labor ·
+  // Employee Perf · Dept Perf · Payroll · Employee Master.
   sources: [
-    directorySource,
-    attendanceSource,
     workingHoursSource,
+    attendanceSource,
+    laborRevenueSource,
+    efficiencySource,
     deptLaborSource,
-    payrollSource,
     empPerfSource,
     deptPerfSource,
-    laborRevenueSource,
+    payrollSource,
+    directorySource,
   ],
 };
 
@@ -3604,14 +3679,84 @@ const userDetail: DetailConfig = {
   hideActionBar: true,
 };
 
+// Pending-invite detail — invites have no single-GET, so (like announcementsDetail)
+// we fetch the invites LIST and find the row by token. Route id is "invite-<token>".
+// Actions map to real endpoints: POST /invites/:token/resend, DELETE /invites/:token.
+const inviteTokenOf = (id: string) => (id ?? "").replace(/^invite-/, "");
+const inviteDetail: DetailConfig = {
+  url: () => "/api/users/invites",
+  selectDoc: (resp, id) => {
+    const token = inviteTokenOf(id);
+    const rows = (resp as { data?: RawRow[] } | null | undefined)?.data;
+    return (Array.isArray(rows) ? rows : []).find((r) => str(r, "token") === token) ?? {};
+  },
+  code: (d) => str(d, "role") || "USER",
+  title: (d) => str(d, "displayName") || str(d, "email") || "—",
+  status: () => resolveStatus("PENDING", PAYMENT_STATUS_MAP),
+  fields: [
+    fld("Email", (d) => str(d, "email")),
+    fld("Role", (d) => str(d, "role")),
+    fld("Invited By", (d) => str(d, "inviterName")),
+    fld("Expires", (d) => dateOnly(d, "expiresAt")),
+  ],
+  extraActions: (_d, id) => {
+    const token = inviteTokenOf(id);
+    return [
+      {
+        label: "Resend Invite",
+        icon: "package-check",
+        onClick: async () => {
+          if (!window.confirm("Resend this invitation email?")) return;
+          try {
+            const r = await fetch(`/api/users/invites/${encodeURIComponent(token)}/resend`, { method: "POST" });
+            window.alert(r.ok ? "Invitation resent." : "Failed to resend invitation.");
+          } catch {
+            window.alert("Network error.");
+          }
+        },
+      },
+      {
+        label: "Revoke Invite",
+        icon: "copy",
+        onClick: async () => {
+          if (!window.confirm("Revoke this invitation? The invite link will stop working.")) return;
+          try {
+            const r = await fetch(`/api/users/invites/${encodeURIComponent(token)}`, { method: "DELETE" });
+            window.alert(r.ok ? "Invitation revoked." : "Failed to revoke invitation.");
+          } catch {
+            window.alert("Network error.");
+          }
+        },
+      },
+    ];
+  },
+  hideActionBar: true,
+};
+
+/** Dispatch the usermgmt detail by route id — "invite-…" → pending invite. */
+function pickUserDetail(id: string): DetailConfig {
+  return id.startsWith("invite-") ? inviteDetail : userDetail;
+}
+const userDetailDispatcher: DetailConfig = {
+  url: (id) => pickUserDetail(id).url(id),
+  selectDoc: (resp, id) => pickUserDetail(id).selectDoc(resp, id),
+  resolve: (_doc, id) => pickUserDetail(id),
+  code: (d) => str(d, "role") || "USER",
+  title: (d) => str(d, "displayName") || str(d, "email") || "—",
+  fields: [],
+};
+
 export const usermgmtConfig: ModuleConfig = {
   slug: "usermgmt",
   title: "User Management",
-  // Members open the user detail; pending-invite rows carry a `token` (no user
-  // record yet) → non-navigable (dest null).
+  // Members → /m/usermgmt/<userId> (user detail). Pending-invite rows carry a
+  // `token` (no user record) → /m/usermgmt/invite-<token> (invite detail with
+  // Resend / Revoke). The dispatcher picks the right sub-config by id prefix.
   detailPath: (vm, row) =>
-    read(row, "token") ? null : `/m/usermgmt/${encodeURIComponent(vm.id)}`,
-  detail: userDetail,
+    read(row, "token")
+      ? `/m/usermgmt/invite-${encodeURIComponent(str(row, "token"))}`
+      : `/m/usermgmt/${encodeURIComponent(vm.id)}`,
+  detail: userDetailDispatcher,
   sources: [
     {
       url: "/api/users",

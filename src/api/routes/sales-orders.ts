@@ -37,6 +37,11 @@ import {
   loadProductCatalog,
 } from "./_shared/item-catalog-snap";
 import { withOrgScope, getOrgId } from "../lib/tenant";
+import {
+  resolveCompanyCode,
+  readCompanyCode,
+  classifyBatchReassign,
+} from "../../lib/company-dimension";
 import { invalidateHubChangeSnapshots } from "../lib/snapshot";
 import { loadDeliveredItemsValueSen } from "../lib/do-value";
 import {
@@ -114,6 +119,11 @@ export type SalesOrderRow = {
   held_by?: string | null;
   heldAt?: string | null;
   held_at?: string | null;
+  // Multi-Company Phase 2 — the company this SO is booked under
+  // (HOOKKA / OHANA / …). snake_case DB column; db-pg toCamel folds it to
+  // salesOrgCode on SELECT *, so both keys are typed for dual-key reads.
+  salesOrgCode?: string | null;
+  sales_org_code?: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -321,6 +331,9 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
     holdReason: row.holdReason ?? row.hold_reason ?? "",
     heldBy: row.heldBy ?? row.held_by ?? "",
     heldAt: row.heldAt ?? row.held_at ?? "",
+    // Multi-Company Phase 2 — company code (dual-keyed). Defaults to HOOKKA so
+    // rows from before the column existed (or partial selects) render as Hookka.
+    salesOrgCode: readCompanyCode(row.salesOrgCode, row.sales_org_code),
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
   };
@@ -340,6 +353,60 @@ function rowToSOList(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
     ...rowToSO(row, items),
     customerPOImageB64: null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// soListToDeliveryRefs — GET /api/sales-orders?fields=delivery-refs projection.
+//
+// The Delivery page (src/pages/delivery/index.tsx) fetches the whole SO list
+// for two joins onto DO / PO rows:
+//   1. Customer PO/SO numbers + reference + hookkaExpectedDD (the DO payload
+//      doesn't carry these) — the ref scalars below.
+//   2. A per-SO {productCode → unitPriceSen} price map, so the PO-based
+//      Planning / Pending Delivery tabs can compute a Sales Figure when the
+//      exact server value (/api/delivery-orders/po-values) hasn't been resolved
+//      for a PO yet (soPriceByProduct fallback in delivery/index.tsx).
+//
+// So this projects the SAME cached snapshot list down to those ref scalars PLUS
+// a SLIM items array carrying ONLY {productCode, unitPriceSen} (same shape as
+// ?fields=price-index). That drops the per-SO base64 scan image AND the ~22
+// other fields on every line item — a >90% payload cut vs the full list — while
+// keeping BOTH joins byte-identical. Kept pure + exported so it's unit-testable.
+//
+// The four ref columns are dual-keyed (*Id + plain) because the DO grid prefers
+// the far-better-populated *Id columns and falls back to the plain ones — see
+// the soRefMap builder in delivery/index.tsx. Both keys are carried through.
+// ---------------------------------------------------------------------------
+type SOListRefLike = {
+  id: string;
+  companySOId?: string;
+  customerId?: string;
+  customerSO?: string;
+  customerSOId?: string;
+  customerPO?: string;
+  customerPOId?: string;
+  reference?: string;
+  hookkaExpectedDD?: string;
+  items?: Array<{ productCode?: string; unitPriceSen?: number }>;
+};
+export function soListToDeliveryRefs(list: SOListRefLike[]) {
+  return list.map((s) => ({
+    id: s.id,
+    companySOId: s.companySOId ?? "",
+    customerId: s.customerId,
+    customerSO: s.customerSO ?? "",
+    customerSOId: s.customerSOId ?? "",
+    customerPO: s.customerPO ?? "",
+    customerPOId: s.customerPOId ?? "",
+    reference: s.reference ?? "",
+    hookkaExpectedDD: s.hookkaExpectedDD ?? "",
+    // Slim items — product code + unit price ONLY (the price-fallback join),
+    // never the full ~24-field line the grid doesn't read here.
+    items: (s.items ?? []).map((it) => ({
+      productCode: it.productCode,
+      unitPriceSen: it.unitPriceSen,
+    })),
+  }));
 }
 
 function parseAutoActions(raw: string | null): string[] {
@@ -1029,6 +1096,20 @@ app.get("/", async (c) => {
           unitPriceSen: it.unitPriceSen,
         })),
       }));
+      return c.json({ success: true, data: slim, total: slim.length });
+    }
+    // The Delivery page fetches this whole list ONLY to join Customer PO/SO
+    // numbers + reference + hookkaExpectedDD onto DO rows (the DO payload
+    // doesn't carry these). It never needs line items — dropping them (each
+    // SO has ~24-field items) shrinks the payload by well over 90%.
+    // ?fields=delivery-refs projects the SAME cached snapshot down to the ref
+    // scalars the DO grids read (id/companySOId/customerId + the four ref
+    // columns dual-keyed *Id/plain + hookkaExpectedDD). Byte-identical values,
+    // no items, no image. The full-list path (no param) is untouched.
+    if (c.req.query("fields") === "delivery-refs") {
+      const slim = soListToDeliveryRefs(
+        (data?.data ?? []) as SOListRefLike[],
+      );
       return c.json({ success: true, data: slim, total: slim.length });
     }
     return c.json(data);
@@ -1880,6 +1961,19 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS hold_reason TEXT",
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS held_by TEXT",
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS held_at TEXT",
+      // Multi-Company Phase 2 — the "company" a Sales Order is booked under
+      // (HOOKKA / OHANA / HOUZS / HKMFG …). DELIBERATELY a NEW snake_case
+      // column, NOT the existing `orgId`: orgId is the tenant-isolation
+      // boundary (the SO list is scoped `WHERE orgId = <users.orgId>` via
+      // withOrgScope, always 'hookka' today) — writing a sister-company value
+      // into orgId would HIDE the SO from the default all-companies list. This
+      // mirrors purchase_orders.purchase_org_code exactly: a display/filter
+      // dimension that is independent of the tenant scope. DEFAULT 'HOOKKA'
+      // backfills every existing row so the default list view is byte-identical
+      // (every SO reads as Hookka until an operator picks otherwise). Runtime
+      // self-apply because deploy.yml does NOT replay migration files.
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS sales_org_code TEXT NOT NULL DEFAULT 'HOOKKA'",
+      "UPDATE sales_orders SET sales_org_code = 'HOOKKA' WHERE sales_org_code IS NULL OR sales_org_code = ''",
     ];
     for (const sql of stmts) {
       try {
@@ -2392,6 +2486,12 @@ app.post("/", async (c) => {
         ? body.customerPOImageB64
         : null;
 
+    // Multi-Company Phase 2 — the company this SO is booked under. Operator
+    // picks it on the create form; an omitted / blank value defaults to HOOKKA
+    // so nothing changes for callers that don't send it (OCR / scan-PO, older
+    // clients). Stored uppercased to match the organisations.code convention.
+    const salesOrgCode = resolveCompanyCode(body.salesOrgCode);
+
     const statements = [
       c.var.DB.prepare(
         `INSERT INTO sales_orders (id, customerPO, customerPOId, customerPODate,
@@ -2399,8 +2499,8 @@ app.post("/", async (c) => {
            customerState, hubId, hubName, companySO, companySOId, companySODate,
            customerDeliveryDate, hookkaExpectedDD, hookkaDeliveryOrder,
            subtotalSen, totalSen, status, overdue, notes,
-           customerPOImageB64, is_service_order, caseid, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           customerPOImageB64, is_service_order, caseid, sales_org_code, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         soId,
         body.customerPO ?? "",
@@ -2429,6 +2529,7 @@ app.post("/", async (c) => {
         customerPOImageB64,
         isServiceOrder,
         linkedCaseId,
+        salesOrgCode,
         now,
         now,
       ),
@@ -3905,6 +4006,7 @@ app.put("/:id", async (c) => {
            subtotalSen = ?, totalSen = ?, status = ?, overdue = ?,
            notes = ?, is_service_order = ?,
            hold_reason = ?, held_by = ?, held_at = ?,
+           sales_org_code = ?,
            updated_at = ?
          WHERE id = ?`,
       ).bind(
@@ -3948,6 +4050,13 @@ app.put("/:id", async (c) => {
           : clearHoldFields
             ? null
             : existing.heldAt ?? existing.held_at ?? null,
+        // Multi-Company Phase 2 — company code. Only changes when the operator
+        // explicitly supplies body.salesOrgCode; otherwise the existing value
+        // is preserved (a header-only edit never resets the company), and a
+        // pre-column row falls back to HOOKKA.
+        typeof body.salesOrgCode === "string" && body.salesOrgCode.trim()
+          ? resolveCompanyCode(body.salesOrgCode)
+          : readCompanyCode(existing.salesOrgCode, existing.sales_org_code),
         now,
         id,
       ),
@@ -5534,6 +5643,181 @@ app.post("/copy-for-service-order", async (c) => {
     }
     return c.json(
       { success: false, error: msg || "Internal error building service-order draft" },
+      500,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sales-orders/batch-company — Multi-Company Phase 4.
+//
+// Bulk re-assign the booked company (`sales_org_code`) for a set of Sales
+// Orders in one confirmed action from the SO list. ADDITIVE + safe:
+//
+//   • Default behaviour is unchanged — this endpoint only runs when the
+//     operator explicitly selects rows and picks a target company.
+//   • LOCK GUARD: only EARLY-status SOs (DRAFT / CONFIRMED / ON_HOLD — see
+//     `isCompanyReassignable`) are moved. Any SO already in production /
+//     shipped / delivered / invoiced / closed / cancelled is SKIPPED with a
+//     reason and never silently reassigned (its POs/DOs/invoices were booked
+//     under the original company). Locked rows are reported, not failed —
+//     the operator sees exactly which ones were held back and why.
+//   • Company code is normalised through the same `resolveCompanyCode` used by
+//     create/edit, so it is always a canonical UPPERCASE org code.
+//
+// The AUTO-allocation rule (how incoming orders get split among companies)
+// is deliberately NOT implemented here — that's the owner's spec to define.
+// This is the manual mechanism only.
+//
+// Body: { ids: string[]; salesOrgCode: string; changedBy?: string }
+// Resp: { success, moved, skipped, total, targetCompany,
+//         results: [{ id, companySOId, status, moved, reason? }] }
+// ---------------------------------------------------------------------------
+app.post("/batch-company", async (c) => {
+  // Reuse the SO "update" permission — reassigning the company is a header
+  // edit, same authority level as editing the SO.
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
+
+  try {
+    const body = await c.req.json();
+    const rawIds = Array.isArray(body.ids) ? body.ids : [];
+    const ids = Array.from(
+      new Set(
+        rawIds
+          .filter((v: unknown): v is string => typeof v === "string")
+          .map((v: string) => v.trim())
+          .filter((v: string) => v.length > 0),
+      ),
+    ) as string[];
+    if (ids.length === 0) {
+      return c.json(
+        { success: false, error: "No sales orders selected." },
+        400,
+      );
+    }
+    // Guard against an accidental unbounded batch.
+    if (ids.length > 500) {
+      return c.json(
+        { success: false, error: "Too many orders in one batch (max 500)." },
+        400,
+      );
+    }
+
+    // Require an explicit target company from the operator — never default
+    // silently to HOOKKA on a bulk MOVE (that would be a data-losing surprise).
+    if (typeof body.salesOrgCode !== "string" || body.salesOrgCode.trim() === "") {
+      return c.json(
+        { success: false, error: "A target company is required." },
+        400,
+      );
+    }
+    const targetCompany = resolveCompanyCode(body.salesOrgCode);
+    const now = new Date().toISOString();
+
+    // Load only the rows we need (id, status, current company, display code).
+    // Tenant scope is enforced by withOrgScope so a caller can only touch SOs
+    // inside their own org.
+    const placeholders = ids.map(() => "?").join(", ");
+    const { whereSql: orgWhere, params: orgParams } = withOrgScope(
+      c,
+      "sales_orders",
+      `id IN (${placeholders})`,
+    );
+    const rowsRes = await c.var.DB.prepare(
+      `SELECT id, companySOId, status, sales_org_code
+         FROM sales_orders ${orgWhere}`,
+    )
+      .bind(...orgParams, ...ids)
+      .all<{
+        id: string;
+        companySOId: string | null;
+        status: string;
+        sales_org_code: string | null;
+      }>();
+    const rows = rowsRes.results ?? [];
+    const byId = new Map(rows.map((r) => [r.id, r]));
+
+    // Any selected id we didn't find (deleted / cross-org) is reported as
+    // "Not found" so the operator sees the full accounting; the classifier
+    // only decides moved/skipped for rows that exist.
+    const foundRows = ids
+      .map((id) => byId.get(id))
+      .filter((r): r is NonNullable<typeof r> => Boolean(r))
+      .map((r) => ({
+        id: r.id,
+        companySOId: r.companySOId,
+        status: r.status,
+        currentCompany: r.sales_org_code,
+      }));
+    const decided = classifyBatchReassign(foundRows, targetCompany);
+    const notFound = ids
+      .filter((id) => !byId.has(id))
+      .map((id) => ({
+        id,
+        companySOId: id,
+        status: "—",
+        moved: false,
+        reason: "Not found",
+      }));
+    const results = [...decided, ...notFound];
+
+    const updates: import("@cloudflare/workers-types").D1PreparedStatement[] = [];
+    for (const r of decided) {
+      if (!r.moved) continue;
+      updates.push(
+        c.var.DB.prepare(
+          `UPDATE sales_orders
+              SET sales_org_code = ?, updated_at = ?
+            WHERE id = ?`,
+        ).bind(targetCompany, now, r.id),
+      );
+      // Best-effort audit trail (one row per moved SO). Swallowed if the
+      // audit helper is unavailable — the reassignment itself must not fail.
+      const before = readCompanyCode(
+        null,
+        byId.get(r.id)?.sales_org_code ?? null,
+      );
+      const audit = await buildAuditStatement(c, {
+        resource: "sales-orders",
+        resourceId: r.id,
+        action: "company-reassign",
+        before: { salesOrgCode: before },
+        after: {
+          salesOrgCode: targetCompany,
+          changedBy: (body.changedBy as string) || "Admin",
+        },
+      });
+      if (audit) updates.push(audit);
+    }
+
+    if (updates.length > 0) {
+      await c.var.DB.batch(updates);
+    }
+
+    // The list snapshot (`sales_orders_list_snapshot`) is cache-aside keyed on
+    // MAX(sales_orders.updated_at); bumping updated_at above auto-invalidates
+    // it on the next read — no explicit wipe needed. (Company is a display /
+    // filter dimension only; no production / DO / invoice cascade to run.)
+    const moved = results.filter((r) => r.moved).length;
+    const skipped = results.length - moved;
+    return c.json({
+      success: true,
+      moved,
+      skipped,
+      total: results.length,
+      targetCompany,
+      results,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/sales-orders/batch-company] failed:", msg, err);
+    if (err instanceof SyntaxError) {
+      return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
+    }
+    return c.json(
+      { success: false, error: msg || "Internal error reassigning company" },
       500,
     );
   }

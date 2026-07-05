@@ -43,6 +43,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { autofillWorkingHoursFromPunch } from "../lib/punch-autofill";
 import {
   applyWipInventoryChange,
   recomputePoStatusAndProgress,
@@ -394,6 +395,10 @@ async function processRow(
   input: InputRow,
   workerCache: WorkerCache,
   dryRun: boolean,
+  // Threaded from the handler so the WIP cascade's wip_cascade_log
+  // idempotency guard engages (2026-07-03 audit: backfill re-runs /
+  // cursor-resumes could double-apply inventory changes without it).
+  orgId: string,
 ): Promise<RowResult> {
   const result: RowResult = {
     matched: false,
@@ -596,6 +601,7 @@ async function processRow(
               "COMPLETED",
               refreshed,
               jc.status,
+              { orgId, source: "BACKFILL" },
             );
           } catch (err) {
             console.error("[import-completion] WIP cascade failed", {
@@ -733,7 +739,7 @@ app.post("/job-card-completion", async (c) => {
     const absoluteIdx = startIdx + i;
     const r = slice[i];
     try {
-      const res = await processRow(db, absoluteIdx, r, workerCache, dryRun);
+      const res = await processRow(db, absoluteIdx, r, workerCache, dryRun, getOrgId(c));
       if (res.matched) matched++;
       if (res.noSoMatch) noSoMatch++;
       if (res.noJcMatch) noJcMatch++;
@@ -1444,6 +1450,7 @@ app.post("/cascade-upstream-completion", async (c) => {
         "COMPLETED",
         cached.allJcs,
         prevStatus,
+        { orgId: getOrgId(c), source: "BACKFILL" },
       );
     } catch (err) {
       console.error("[cascade-upstream-completion] WIP cascade failed", {
@@ -1811,6 +1818,7 @@ app.post("/uph-pofold-backfill", async (c) => {
         "COMPLETED",
         cached.allJcs,
         prevStatus,
+        { orgId: getOrgId(c), source: "BACKFILL" },
       );
     } catch (err) {
       console.error("[uph-pofold-backfill] WIP cascade failed", {
@@ -2685,6 +2693,7 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
         "COMPLETED",
         cached.allJcs,
         prevStatus,
+        { orgId: getOrgId(c), source: "BACKFILL" },
       );
     } catch (err) {
       console.error("[fab-cut-pofold-backfill] WIP cascade failed", {
@@ -9359,6 +9368,168 @@ app.post("/backfill-5543-co2606002", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /create-updated-at-indexes — ONE-SHOT (owner 2026-07-04, IT-hygiene
+// audit follow-up). The dashboard snapshot freshness probe runs
+// MAX(updated_at) across its source tables on every read; ~15 tables carry an
+// updated_at column with NO index on it, so each probe is a sequential scan
+// that gets linearly slower as data grows. SELF-DISCOVERING: asks Postgres
+// which public tables have an updated_at column but no index covering it —
+// no hardcoded list to go stale. Plain CREATE INDEX briefly locks writes; the
+// tables are small (ms-scale builds), and IF NOT EXISTS keeps it idempotent.
+// AUDIT-FIRST — apply with { "apply": true, "confirm": "indexes" }.
+app.post("/create-updated-at-indexes", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const body = (await c.req.json().catch(() => ({}))) as {
+    apply?: boolean;
+    confirm?: string;
+  };
+  const apply = body.apply === true && body.confirm === "indexes";
+
+  const res = await db
+    .prepare(
+      `SELECT c.table_name AS "tableName",
+              EXISTS (
+                SELECT 1 FROM pg_indexes i
+                 WHERE i.schemaname = 'public'
+                   AND i.tablename = c.table_name
+                   AND i.indexdef ILIKE '%(updated_at%'
+              ) AS "hasIndex"
+         FROM information_schema.columns c
+         JOIN information_schema.tables t
+           ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+        WHERE c.table_schema = 'public'
+          AND c.column_name = 'updated_at'
+          AND t.table_type = 'BASE TABLE'
+        ORDER BY c.table_name`,
+    )
+    .all<{ tableName: string; hasIndex: boolean }>();
+  const all = res.results ?? [];
+  const missing = all.filter(
+    (r) => !r.hasIndex && /^[a-z0-9_]+$/.test(r.tableName),
+  );
+
+  if (!apply) {
+    return c.json({
+      success: true,
+      apply: false,
+      tablesWithUpdatedAt: all.length,
+      alreadyIndexed: all.length - missing.length,
+      missing: missing.map((m) => m.tableName),
+      note: 'Audit only. Apply with { "apply": true, "confirm": "indexes" }.',
+    });
+  }
+
+  const created: string[] = [];
+  const failed: Array<{ table: string; error: string }> = [];
+  for (const m of missing) {
+    try {
+      await db
+        .prepare(
+          `CREATE INDEX IF NOT EXISTS idx_${m.tableName}_updated_at ON ${m.tableName} (updated_at)`,
+        )
+        .run();
+      created.push(m.tableName);
+    } catch (err) {
+      failed.push({
+        table: m.tableName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return c.json({ success: true, apply: true, created, failed });
+});
+
+// POST /backfill-punch-autofill-blocked — ONE-SHOT (owner 2026-07-04).
+// Repairs the days already bitten by the punch-autofill safety-gate bug: an
+// APPROVED non-production request row that landed BEFORE the worker's
+// punch-out made the blanket COUNT(*) gate skip the whole day, so the punched
+// hours were never logged (the "AUNG KYAW SOE 1.33h day"). Candidates =
+// punched days whose working_hour_entries are ALL "Non-production (approved)"
+// rows. Apply re-runs the (now fixed) autofill for exactly those days — it
+// generates the punch rows minus the hours the approval already claimed, and
+// still never touches any day that has office-keyed or auto rows.
+// AUDIT-FIRST — apply with { "apply": true, "confirm": "autofill" }.
+app.post("/backfill-punch-autofill-blocked", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
+  const db = c.var.DB;
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    apply?: boolean;
+    confirm?: string;
+  };
+  const apply = body.apply === true && body.confirm === "autofill";
+
+  const cands = await db
+    .prepare(
+      `SELECT a.id AS "attendanceId", a.employeeId AS "workerId", a.date,
+              a.clockIn AS "clockIn", a.clockOut AS "clockOut",
+              w.name AS "workerName", w.departmentCode AS "homeDeptCode",
+              (SELECT COALESCE(SUM(e.hours), 0) FROM working_hour_entries e
+                WHERE e.attendanceId = a.id) AS "nonProdHours"
+         FROM attendance_records a
+         JOIN workers w ON w.id = a.employeeId
+        WHERE a.clockIn IS NOT NULL AND a.clockOut IS NOT NULL
+          AND EXISTS (SELECT 1 FROM working_hour_entries e WHERE e.attendanceId = a.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM working_hour_entries e
+             WHERE e.attendanceId = a.id
+               AND e.notes NOT LIKE 'Non-production (approved)%'
+          )
+        ORDER BY a.date, w.name`,
+    )
+    .all<{
+      attendanceId: string;
+      workerId: string;
+      date: string;
+      clockIn: string;
+      clockOut: string;
+      workerName: string;
+      homeDeptCode: string | null;
+      nonProdHours: number;
+    }>();
+  const days = cands.results ?? [];
+
+  if (!apply) {
+    return c.json({
+      success: true,
+      apply: false,
+      count: days.length,
+      days: days.map((d) => ({
+        worker: d.workerName,
+        date: d.date,
+        punch: `${d.clockIn}→${d.clockOut}`,
+        nonProdApprovedHours: Number(d.nonProdHours) || 0,
+      })),
+      note: 'Audit only. Apply with { "apply": true, "confirm": "autofill" }.',
+    });
+  }
+
+  const results: Array<{ worker: string; date: string; created: number }> = [];
+  for (const d of days) {
+    try {
+      const r = await autofillWorkingHoursFromPunch(db, {
+        attendanceId: d.attendanceId,
+        workerId: d.workerId,
+        date: d.date,
+        clockIn: d.clockIn,
+        clockOut: d.clockOut,
+        homeDeptCode: d.homeDeptCode,
+      });
+      results.push({ worker: d.workerName, date: d.date, created: r.created });
+    } catch (err) {
+      console.error("[backfill-punch-autofill-blocked] failed", {
+        attendanceId: d.attendanceId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      results.push({ worker: d.workerName, date: d.date, created: -1 });
+    }
+  }
+  return c.json({ success: true, apply: true, count: days.length, results });
+});
+
 // POST /backfill-complete-stray-jc-co2606002 — ONE-SHOT (owner 2026-07-03).
 // The 5543 production order pord-co-72dcea0a-01 is stuck PENDING because ONE
 // junk job card is WAITING: a leftover from the OLD broken 5543 BOM whose

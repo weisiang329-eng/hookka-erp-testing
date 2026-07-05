@@ -12,7 +12,8 @@ import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
-import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine, DollarSign } from "lucide-react";
+import { matchesCompanyFilter } from "@/lib/company-dimension";
+import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine, DollarSign, Building2 } from "lucide-react";
 // Note: generateSOPdf is dynamic-imported at the click handler so the
 // 1MB jspdf vendor chunk only ships when the user actually prints a SO.
 import { ScanPOModal } from "@/components/scan-po-modal";
@@ -201,9 +202,12 @@ export default function SalesPage() {
   const _flCat = useUrlState<"" | "BEDFRAME" | "SOFA" | "ACCESSORY">("cat", "");
   const _flDDFrom = useUrlState<string>("ddFrom", "");
   const _flDDTo = useUrlState<string>("ddTo", "");
+  // Multi-Company Phase 2 — company filter. Default "" = ALL companies (today's
+  // view, nothing hidden). Operator narrows to one org code (HOOKKA / OHANA …).
+  const _flCompany = useUrlState<string>("company", "");
   const _filtersActive = !!(
     _flStatus[0] || _flCustomer[0] || _flFrom[0] || _flTo[0] ||
-    _flCat[0] || _flDDFrom[0] || _flDDTo[0] || gridSearch.trim()
+    _flCat[0] || _flDDFrom[0] || _flDDTo[0] || _flCompany[0] || gridSearch.trim()
   );
 
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{
@@ -233,6 +237,9 @@ export default function SalesPage() {
     outstandingItemsSen?: number;
   }>(`/api/sales-orders/stats?${soFilterQs}`);
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
+  // Multi-Company Phase 2 — company registry for the "Company" column (code →
+  // name) and the company filter dropdown. Mirrors procurement/index.tsx.
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; isActive?: boolean }> }>("/api/organisations");
   const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string; currentDepartment?: string; progress?: number; quantity?: number }[] }>("/api/production-orders");
   const { data: statusChangesResp, refresh: refreshStatusChanges } = useCachedJson<{ success?: boolean; data?: SOStatusChangeEntry[] }>("/api/sales-orders/status-changes");
   // Per-SO delivered quantity (items on a DELIVERED/INVOICED DO), keyed by
@@ -281,6 +288,11 @@ export default function SalesPage() {
   const [selectedRows, setSelectedRows] = useState<SalesOrder[]>([]);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [bulkConverting, setBulkConverting] = useState(false);
+  // Multi-Company Phase 4 — bulk re-assign company. Target company picked in
+  // the selection banner; button POSTs /batch-company. Server enforces the
+  // early-status lock guard and reports moved/skipped.
+  const [bulkCompany, setBulkCompany] = useState<string>("");
+  const [bulkReassigning, setBulkReassigning] = useState(false);
   // Bulk-review modal — flat table of every line item across all DRAFT
   // SOs in the current view. Lets the operator scan productCode / size /
   // fabric / divan / leg / gap / special / qty for 50+ items in one
@@ -323,6 +335,7 @@ export default function SalesPage() {
   const [filterCategory, setFilterCategory] = _flCat;
   const [filterDDFrom, setFilterDDFrom] = _flDDFrom;
   const [filterDDTo, setFilterDDTo] = _flDDTo;
+  const [filterCompany, setFilterCompany] = _flCompany;
   // Show/hide filter panel — sessionStorage so closing the tab forgets,
   // but a refresh keeps the panel open if user had it open.
   const [showFilters, setShowFilters] = useSessionState<boolean>("sales:showFilters", false);
@@ -349,7 +362,7 @@ export default function SalesPage() {
   useEffect(() => {
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo, tab]);
+  }, [filterStatus, filterCustomer, filterCompany, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo, tab]);
 
   const fetchAll = () => {
     invalidateCachePrefix("/api/sales-orders");
@@ -362,7 +375,7 @@ export default function SalesPage() {
     refreshStatusChanges();
   };
 
-  const hasActiveFilters = filterStatus || filterCustomer || filterDateFrom || filterDateTo || filterCategory || filterDDFrom || filterDDTo;
+  const hasActiveFilters = filterStatus || filterCustomer || filterDateFrom || filterDateTo || filterCategory || filterDDFrom || filterDDTo || filterCompany;
 
   // Atomic clear — one setSearchParams call, not seven. Each useUrlState
   // setter calls navigate() under the hood; firing seven in a row races on
@@ -380,6 +393,7 @@ export default function SalesPage() {
         out.delete("cat");
         out.delete("ddFrom");
         out.delete("ddTo");
+        out.delete("company");
         return out;
       },
       { replace: true },
@@ -416,6 +430,9 @@ export default function SalesPage() {
   const filteredOrdersForKpi = useMemo(() => {
     return orders.filter(o => {
       if (filterCustomer && o.customerId !== filterCustomer) return false;
+      // Multi-Company Phase 2 — company filter. "" = ALL companies (default,
+      // nothing hidden). Pre-column rows read as HOOKKA (server default).
+      if (!matchesCompanyFilter(o.salesOrgCode, filterCompany)) return false;
       if (filterDateFrom) {
         const orderDate = o.companySODate.split("T")[0];
         if (orderDate < filterDateFrom) return false;
@@ -438,7 +455,7 @@ export default function SalesPage() {
       }
       return true;
     });
-  }, [orders, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
+  }, [orders, filterCustomer, filterCompany, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
 
   const filteredOrdersByUserFilters = useMemo(() => {
     return filteredOrdersForKpi.filter(o => {
@@ -568,8 +585,41 @@ export default function SalesPage() {
   // filteredData/sortedData memos (which depend on columns) recompute over the
   // full ~690-row dataset on EVERY unrelated re-render (poll, selection,
   // search-mirror). Its only external dep is linkedPOMap. (2026-06-04 jank fix.)
+  // Multi-Company Phase 2 — company display map (org code → legal name) for the
+  // Company column, and the active-org list for the filter dropdown.
+  const activeOrgs = useMemo(
+    () => (orgsResp?.organisations ?? []).filter((o) => o.isActive !== false && o.code),
+    [orgsResp],
+  );
+  const orgNameByCode = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const o of orgsResp?.organisations ?? []) {
+      if (o.code) out[o.code] = o.name || o.code;
+    }
+    return out;
+  }, [orgsResp]);
+
   const columns: Column<SalesOrder>[] = useMemo<Column<SalesOrder>[]>(() => [
     { key: "companySOId", label: "Company SO", type: "docno", width: "130px", sortable: true },
+    {
+      key: "salesOrgCode",
+      label: "Company",
+      type: "text",
+      width: "120px",
+      sortable: true,
+      render: (_v: unknown, row: SalesOrder) => {
+        const code = row.salesOrgCode || "HOOKKA";
+        const label = orgNameByCode[code] || code;
+        return (
+          <span
+            className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-[#F0ECE9] text-[#6B5C32]"
+            title={code}
+          >
+            {label}
+          </span>
+        );
+      },
+    },
     { key: "customerSOId", label: "Customer SO", type: "docno", width: "120px", sortable: true },
     { key: "customerPOId", label: "Customer PO", type: "docno", width: "120px", sortable: true },
     { key: "customerName", label: "Customer", type: "text", width: "100px", sortable: true },
@@ -733,7 +783,7 @@ export default function SalesPage() {
         ]
       : []),
     { key: "status", label: "Status", type: "status", width: "100px", sortable: true },
-  ], [linkedPOMap, deliveredQtyMap, isServiceOrderMode]);
+  ], [linkedPOMap, deliveredQtyMap, isServiceOrderMode, orgNameByCode]);
 
   const getContextMenuItems = (row: SalesOrder): ContextMenuItem[] => [
     {
@@ -1094,6 +1144,21 @@ export default function SalesPage() {
                 </select>
               </div>
               <div>
+                {/* Multi-Company Phase 2 — company filter. Default "All
+                    Companies" shows every SO (nothing hidden). */}
+                <label className="block text-xs text-[#9CA3AF] mb-1">Company</label>
+                <select
+                  value={filterCompany}
+                  onChange={(e) => setFilterCompany(e.target.value)}
+                  className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                >
+                  <option value="">All Companies</option>
+                  {activeOrgs.map((o) => (
+                    <option key={o.code} value={o.code}>{o.name || o.code}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
                 <label className="block text-xs text-[#9CA3AF] mb-1">Date From</label>
                 <Input
                   type="date"
@@ -1243,6 +1308,79 @@ export default function SalesPage() {
               >
                 <CheckCircle className="h-4 w-4" /> {bulkConverting ? "Converting..." : "Convert to Confirmed"}
               </Button>
+            </div>
+          )}
+          {/* Multi-Company Phase 4 — bulk re-assign company. Shown whenever
+              rows are selected (both Draft + Confirmed tabs) in real-SO mode.
+              Only early-status SOs are actually moved server-side; locked ones
+              (in production / shipped / invoiced …) are reported as skipped. */}
+          {!isServiceOrderMode && selectedRows.length > 0 && activeOrgs.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#DED8CF] bg-[#F5F1EA] px-3 py-2 text-sm">
+              <span className="flex items-center gap-1.5 text-[#6B5C32]">
+                <Building2 className="h-4 w-4" />
+                Re-assign company for {selectedRows.length} order(s)
+              </span>
+              <div className="flex items-center gap-2">
+                <select
+                  className="h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  value={bulkCompany}
+                  onChange={(e) => setBulkCompany(e.target.value)}
+                  aria-label="Target company for bulk re-assign"
+                  disabled={bulkReassigning}
+                >
+                  <option value="">Select company…</option>
+                  {activeOrgs.map((o) => (
+                    <option key={o.code} value={o.code}>{o.name || o.code}</option>
+                  ))}
+                </select>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={bulkReassigning || !bulkCompany}
+                  onClick={async () => {
+                    if (!bulkCompany) return;
+                    const targetName = orgNameByCode[bulkCompany] || bulkCompany;
+                    const ids = selectedRows.map((s) => s.id);
+                    if (!(await confirm({
+                      title: "Re-assign company",
+                      message: `Move ${ids.length} selected order(s) to ${targetName}? Orders already in production, shipped, or invoiced can't be re-assigned and will be skipped.`,
+                      danger: false,
+                    }))) return;
+                    setBulkReassigning(true);
+                    try {
+                      const res = await fetch(`/api/sales-orders/batch-company`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ ids, salesOrgCode: bulkCompany, changedBy: "Admin" }),
+                      });
+                      const text = await res.text();
+                      let d: { success?: boolean; error?: string; moved?: number; skipped?: number } = {};
+                      try { d = JSON.parse(text); } catch { d = { error: text.slice(0, 200) }; }
+                      if (!res.ok || !d.success) {
+                        toast.error(d.error || `HTTP ${res.status}`);
+                      } else {
+                        const moved = d.moved ?? 0;
+                        const skipped = d.skipped ?? 0;
+                        if (skipped > 0) {
+                          toast.error(`Moved ${moved} to ${targetName} · ${skipped} skipped (locked or already there).`);
+                        } else {
+                          toast.success(`Moved ${moved} order${moved !== 1 ? "s" : ""} to ${targetName}.`);
+                        }
+                        setSelectedRows([]);
+                        setBulkCompany("");
+                        invalidateCachePrefix("/api/sales-orders");
+                        fetchAll();
+                      }
+                    } catch (e) {
+                      toast.error((e as Error).message);
+                    } finally {
+                      setBulkReassigning(false);
+                    }
+                  }}
+                >
+                  <Building2 className="h-4 w-4" /> {bulkReassigning ? "Moving..." : "Re-assign"}
+                </Button>
+              </div>
             </div>
           )}
           <DataGrid<SalesOrder>

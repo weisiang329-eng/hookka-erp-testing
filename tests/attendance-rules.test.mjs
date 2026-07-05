@@ -93,14 +93,16 @@ test("late + early are one combined shortfall, not double-counted", () => {
   assert.equal(d.shortfallMin, 50);
 });
 
-test("OT must exceed 15 min: 18:14 and 18:15 → 0, 18:16 → 15", () => {
+test("OT needs 30 min (owner 2026-07-04): 18:14/18:16/18:28/18:29 → 0, 18:30 → 30", () => {
   assert.equal(day("08:00", "18:14").otMin, 0);
   assert.equal(day("08:00", "18:15").otMin, 0);
-  assert.equal(day("08:00", "18:16").otMin, 15);
+  assert.equal(day("08:00", "18:16").otMin, 0); // was 15 pre-2026-07-04
+  assert.equal(day("08:00", "18:28").otMin, 0); // the owner's exact example
+  assert.equal(day("08:00", "18:30").otMin, 30);
 });
 
 test("OT rounding within the hour (18:30→30, 18:45→45, 18:59→45)", () => {
-  assert.equal(day("08:00", "18:29").otMin, 15);
+  assert.equal(day("08:00", "18:29").otMin, 0); // below the 30-min OT threshold
   assert.equal(day("08:00", "18:30").otMin, 30);
   assert.equal(day("08:00", "18:44").otMin, 30);
   assert.equal(day("08:00", "18:45").otMin, 45); // the table's deciding case
@@ -133,11 +135,16 @@ test("owner scenario: 30 min late + 2h OT (08:30 -> 20:00) -> no dock, engine pa
   // (10.5 logged - 9 std -> the payroll engine pays exactly 1.5h at the OT rate)
 });
 
-test("OT smaller than the shortfall -> only the remainder is docked (08:30 -> 18:20)", () => {
-  // 30 min late, 15 min rounded OT -> dock 15 min only.
-  const d = day("08:30", "18:20");
-  assert.equal(d.otMin, 15);
-  assert.equal(d.shortfallMin, 15);
+test("OT smaller than the shortfall -> only the remainder is docked (08:30 -> 18:35)", () => {
+  // 30 min late, 30 min rounded OT -> the evening covers the morning, dock 0.
+  const d = day("08:30", "18:35");
+  assert.equal(d.otMin, 30);
+  assert.equal(d.shortfallMin, 0);
+  // Sub-30-min tail no longer counts at all (owner 2026-07-04): 18:20 out is
+  // 0 OT, so the full 30-min morning gap is docked.
+  const e = day("08:30", "18:20");
+  assert.equal(e.otMin, 0);
+  assert.equal(e.shortfallMin, 30);
 });
 
 // ── Lunch (12:00–13:00) is deducted only for the overlap with the worked

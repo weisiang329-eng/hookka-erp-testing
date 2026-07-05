@@ -119,13 +119,30 @@ export async function autofillWorkingHoursFromPunch(
   if (inMin == null || outMin == null || outMin <= inMin) return { created: 0 };
 
   // Never overwrite — the office's rows (or a previous punch-out) win.
-  const existing = await db
+  // EXCEPTION (owner report 2026-07-04, the "AUNG KYAW SOE 1.33h day"): rows
+  // created by an APPROVED non-production request must NOT block the punch
+  // rows. When the approval landed BEFORE this autofill ran, the old blanket
+  // COUNT(*) gate skipped the whole day and the worker's ~9 punched hours
+  // were never logged — the day showed only the approved 1.33h. Those rows
+  // are recognisable by their notes prefix (working-hour-entries.ts approval
+  // INSERT). When they are the ONLY rows, still autofill — minus the hours
+  // the approval already claimed (its usual deduct-from-production step had
+  // nothing to deduct from at approval time).
+  const existingRes = await db
     .prepare(
-      "SELECT COUNT(*) AS n FROM working_hour_entries WHERE attendanceId = ?",
+      "SELECT hours, notes FROM working_hour_entries WHERE attendanceId = ?",
     )
     .bind(args.attendanceId)
-    .first<{ n: number }>();
-  if ((Number(existing?.n) || 0) > 0) return { created: 0 };
+    .all<{ hours: number; notes: string | null }>();
+  const existingRows = existingRes.results ?? [];
+  const nonProdApproved = existingRows.filter((r) =>
+    String(r.notes ?? "").startsWith("Non-production (approved)"),
+  );
+  if (existingRows.length > nonProdApproved.length) return { created: 0 };
+  const nonProdApprovedHours = nonProdApproved.reduce(
+    (s, r) => s + (Number(r.hours) || 0),
+    0,
+  );
 
   // Day hours — IDENTICAL to the office grid's punch auto-fill: the
   // effective-dated rules engine (lunch, late ceiling, OT floors, same-day
@@ -138,8 +155,14 @@ export async function autofillWorkingHoursFromPunch(
   }
   const rules = toAttendanceRules(resolvePayRulesAsOf(versions, args.date));
   const day = computeAttendanceDay(inMin, outMin, rules);
-  const totalHours =
-    Math.round(((day.regularWorkMin + day.otMin) / 60) * 100) / 100;
+  // Subtract hours an approved non-production request already claimed for
+  // this day (see the gate above) so the day's TOTAL stays the punch total.
+  const totalHours = Math.max(
+    0,
+    Math.round(
+      ((day.regularWorkMin + day.otMin) / 60 - nonProdApprovedHours) * 100,
+    ) / 100,
+  );
   if (totalHours <= 0) return { created: 0 };
 
   await ensureDeptScanEvents(db);

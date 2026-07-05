@@ -14,6 +14,7 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } from "@/types";
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
+import { matchesCompanyFilter } from "@/lib/company-dimension";
 import {
   Plus, ShoppingBag, Truck, Trash2, X, Package,
   FileText, Download, Filter, AlertTriangle,
@@ -816,6 +817,9 @@ export default function ProcurementPage() {
   // Filters — URL-synced so refresh / share-link land on the same view
   const [filterStatus, setFilterStatus] = useUrlState<string>("status", "");
   const [filterSupplier, setFilterSupplier] = useUrlState<string>("supplier", "");
+  // Multi-Company Phase 2 — company (purchase-org) filter. Default "" = ALL
+  // companies (today's view, nothing hidden). Narrows to one org code.
+  const [filterCompany, setFilterCompany] = useUrlState<string>("company", "");
   const [filterDateFrom, setFilterDateFrom] = useUrlState<string>("from", "");
   const [filterDateTo, setFilterDateTo] = useUrlState<string>("to", "");
   // Show/hide filter panel — sessionStorage so closing the tab forgets,
@@ -1281,7 +1285,7 @@ export default function ProcurementPage() {
   }, [selectedPOs, bulkGrnRunning, ineligibleReason, toast, refreshPOs]);
 
   // ---- Filters ----
-  const hasActiveFilters = filterStatus || filterSupplier || filterDateFrom || filterDateTo || filterOverdueOnly || gridSearch.trim();
+  const hasActiveFilters = filterStatus || filterSupplier || filterCompany || filterDateFrom || filterDateTo || filterOverdueOnly || gridSearch.trim();
 
   const clearFilters = () => {
     setSearchParams(
@@ -1289,6 +1293,7 @@ export default function ProcurementPage() {
         const out = new URLSearchParams(prev);
         out.delete("status");
         out.delete("supplier");
+        out.delete("company");
         out.delete("from");
         out.delete("to");
         return out;
@@ -1348,6 +1353,9 @@ export default function ProcurementPage() {
       if (filterOverdueOnly && !isOverdue(po)) return false;
       if (filterStatus && po.status !== filterStatus) return false;
       if (filterSupplier && po.supplierId !== filterSupplier) return false;
+      // Multi-Company Phase 2 — company filter. "" = ALL (default, nothing
+      // hidden). Pre-column rows read as HOOKKA (server default).
+      if (!matchesCompanyFilter(po.purchaseOrgCode, filterCompany)) return false;
       if (filterDateFrom) {
         const orderDate = po.orderDate?.split("T")[0] ?? "";
         if (orderDate < filterDateFrom) return false;
@@ -1358,7 +1366,7 @@ export default function ProcurementPage() {
       }
       return true;
     });
-  }, [purchaseOrders, filterStatus, filterSupplier, filterDateFrom, filterDateTo, filterOverdueOnly, isOverdue]);
+  }, [purchaseOrders, filterStatus, filterSupplier, filterCompany, filterDateFrom, filterDateTo, filterOverdueOnly, isOverdue]);
 
   // Tab filter — DRAFT shows only DRAFT POs, CONFIRMED shows everything else
   const filteredOrders = useMemo(() => {
@@ -1528,6 +1536,11 @@ export default function ProcurementPage() {
     }
     return out;
   }, [orgsResp]);
+  // Multi-Company Phase 2 — active companies for the company filter dropdown.
+  const activeOrgs = useMemo(
+    () => (orgsResp?.organisations ?? []).filter((o) => o.code),
+    [orgsResp],
+  );
 
   // ---- Columns ----
   const poGridColumns: Column<PurchaseOrder>[] = useMemo(() => [
@@ -1963,6 +1976,21 @@ export default function ProcurementPage() {
                     <option value="">All Suppliers</option>
                     {uniqueSuppliers.map(([id, name]) => (
                       <option key={id} value={id}>{name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  {/* Multi-Company Phase 2 — company filter. Default "All
+                      Companies" shows every PO (nothing hidden). */}
+                  <label className="block text-xs text-[#9CA3AF] mb-1">Company</label>
+                  <select
+                    value={filterCompany}
+                    onChange={(e) => setFilterCompany(e.target.value)}
+                    className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  >
+                    <option value="">All Companies</option>
+                    {activeOrgs.map((o) => (
+                      <option key={o.code} value={o.code}>{o.name || o.code}</option>
                     ))}
                   </select>
                 </div>

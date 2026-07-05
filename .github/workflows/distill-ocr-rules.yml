@@ -44,10 +44,13 @@ jobs:
           fi
 
           # Capture status + body so a 4xx/5xx surfaces in the job log
-          # rather than failing silently. 60s max-time covers cold start +
-          # the per-customer Anthropic round-trips.
+          # rather than failing silently. Was 60s — the per-entity Anthropic
+          # round-trips now exceed it as the gold pools grow, so the 2026-06-21
+          # and 06-28 runs timed out at 60s and OCR re-learning silently stopped.
+          # Raised to 280s (still under the 5-min job timeout). The endpoint is
+          # I/O-bound (awaiting Anthropic), which Workers allow well past 60s.
           response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
-            --max-time 60 \
+            --max-time 280 \
             --request POST \
             --header "Content-Type: application/json" \
             --header "x-cron-secret: $CRON_SECRET" \

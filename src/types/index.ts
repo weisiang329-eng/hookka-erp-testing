@@ -58,7 +58,17 @@ export type Customer = {
   contactName: string;
   phone: string;
   email: string;
+  // Multi-Company Phase 3 — dual-identity link. '' / undefined = a normal
+  // external customer (default). A group org code (e.g. "HOUZS") marks this
+  // customer as one of our group companies (pairs with Supplier.groupOrgCode).
+  groupOrgCode?: string;
   deliveryHubs: DeliveryHub[];
+  /**
+   * Multi-Company Phase 4 — optional default company (org code, e.g. "OHANA")
+   * for NEW sales orders from this customer. Empty string = no mapping → the
+   * SO create form falls back to HOOKKA. Never moves existing orders.
+   */
+  defaultCompanyCode?: string;
 };
 
 // --- BOM Types ---
@@ -278,6 +288,10 @@ export type SalesOrder = {
    *  Sales Orders list). The whole production cascade (PO / DO / Invoice)
    *  reuses unchanged. */
   isServiceOrder?: boolean;
+  /** Multi-Company Phase 2 — the company this SO is booked under (org code:
+   *  HOOKKA / OHANA / HOUZS / HKMFG …). Defaults to HOOKKA server-side, so
+   *  existing orders and the default list view are unchanged. */
+  salesOrgCode?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -527,6 +541,11 @@ export type Supplier = {
   // letterhead prints on the PO PDF. Default = "HOOKKA". The actual
   // legal / AP buyer is always HOOKKA — this is cosmetic.
   purchaseOrgCode?: string;
+  // Multi-Company Phase 3 — dual-identity link. '' / undefined = a normal
+  // external supplier (default). A group org code marks this supplier as one of
+  // our group companies (pairs with Customer.groupOrgCode). Setting it makes a
+  // HOOKKA PO to this supplier auto-raise a mirror SO under that sister company.
+  groupOrgCode?: string;
 };
 
 export type POItem = {

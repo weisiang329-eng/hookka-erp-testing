@@ -49,7 +49,10 @@ import {
   type SubDocRow,
 } from "../config/types";
 import { type FormSpec } from "../config/form-types";
-import { editSpecFor, newMailSpec } from "../config/forms";
+import { editSpecFor, newMailSpec, recordPaymentSpec, stockAdjustmentSpec } from "../config/forms";
+import { PodSheet } from "../components/PodSheet";
+import { GrnReceiveSheet } from "../components/GrnReceiveSheet";
+import type { ProofOfDelivery } from "@/types";
 import { mutateJson, refreshOne, refreshList } from "../config/mutate";
 import { str } from "../config/helpers";
 
@@ -124,6 +127,10 @@ function Inner({
   const [sheet, setSheet] = useState<null | "print">(null);
   // Edit / reply forms (FormSheet). When set, the prefilled form is open.
   const [formSpec, setFormSpec] = useState<FormSpec | null>(null);
+  // Proof-of-delivery capture sheet (delivery "Mark Delivered").
+  const [podOpen, setPodOpen] = useState(false);
+  // Goods-receipt sheet (procurement PO "Receive (GRN)").
+  const [grnOpen, setGrnOpen] = useState(false);
   // CTA action state (acknowledge / sign / mark-read) — inline busy + toast.
   const [ctaBusy, setCtaBusy] = useState(false);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; text: string } | null>(
@@ -369,6 +376,30 @@ function Inner({
         return { ok: true };
       };
       setFormSpec(spec);
+      return;
+    }
+
+    if (config.slug === "inventory" && primaryCta === "Reduce Stock") {
+      // Remove-only raw-material stock adjustment (FIFO-valued).
+      setFormSpec(stockAdjustmentSpec(doc, id));
+      return;
+    }
+
+    if (config.slug === "procurement" && primaryCta === "Receive (GRN)") {
+      // Receive goods against this PO — opens the per-line receive sheet.
+      setGrnOpen(true);
+      return;
+    }
+
+    if (config.slug === "delivery" && primaryCta === "Mark Delivered") {
+      // Open POD capture (signature + photos) — submit handled by onSubmit below.
+      setPodOpen(true);
+      return;
+    }
+
+    if (config.slug === "invoices" && primaryCta === "Record Payment") {
+      // Record a customer payment — same PUT the desktop invoice detail uses.
+      setFormSpec(recordPaymentSpec(doc, id));
       return;
     }
 
@@ -1115,6 +1146,40 @@ function Inner({
         }}
       />
 
+      {/* Proof of Delivery — same PUT the desktop DO detail uses. */}
+      <PodSheet
+        open={podOpen}
+        onClose={() => setPodOpen(false)}
+        onSubmit={async (pod: ProofOfDelivery) => {
+          const res = await mutateJson(
+            `/api/delivery-orders/${encodeURIComponent(id)}`,
+            "PUT",
+            { proofOfDelivery: pod, status: "DELIVERED" },
+          );
+          if (!res.ok) return { ok: false, error: res.error };
+          refreshOne(`/api/delivery-orders/${encodeURIComponent(id)}`);
+          refreshList("/api/delivery-orders");
+          setToast({ kind: "ok", text: "Delivered — proof captured." });
+          return { ok: true };
+        }}
+      />
+
+      {/* Goods Receipt — same POST /api/grn the desktop receive form uses. */}
+      <GrnReceiveSheet
+        open={grnOpen}
+        poId={id}
+        onClose={() => setGrnOpen(false)}
+        onSubmit={async (body) => {
+          const res = await mutateJson("/api/grn", "POST", body);
+          if (!res.ok) return { ok: false, error: res.error };
+          refreshOne(`/api/purchase-orders/${encodeURIComponent(id)}`);
+          refreshList("/api/grn");
+          refreshList("/api/purchase-orders");
+          setToast({ kind: "ok", text: "Goods received." });
+          return { ok: true };
+        }}
+      />
+
       {/* Print — no mobile print endpoint; desktop generates the PDF. */}
       <Sheet
         open={sheet === "print"}
@@ -1503,99 +1568,6 @@ function LineItemRow({
   );
 }
 
-function RelatedRow({
-  rel,
-  first,
-  onClick,
-}: {
-  rel: RelatedDocVM;
-  /** First row in the card — no top hairline. */
-  first?: boolean;
-  onClick?: () => void;
-}) {
-  const interactive = typeof onClick === "function";
-  return (
-    <div
-      onClick={onClick}
-      role={interactive ? "button" : undefined}
-      tabIndex={interactive ? 0 : undefined}
-      onKeyDown={
-        interactive
-          ? (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onClick?.();
-              }
-            }
-          : undefined
-      }
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "14px 16px",
-        borderTop: first ? "none" : `1px solid ${M.divider}`,
-        cursor: interactive ? "pointer" : "default",
-        WebkitTapHighlightColor: "transparent",
-      }}
-    >
-      {/* Parchment icon tile (design source). */}
-      <span
-        style={{
-          width: 38,
-          height: 38,
-          borderRadius: 10,
-          background: "#F4EFE6",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flex: "none",
-        }}
-      >
-        <FileText size={18} strokeWidth={1.75} color={M.taupe} />
-      </span>
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div
-          style={{
-            color: M.raisin,
-            fontSize: 13.5,
-            fontWeight: 600,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {rel.subLine || rel.group}
-        </div>
-        <div
-          style={{
-            color: M.muted,
-            fontSize: 11.5,
-            marginTop: 2,
-            fontVariantNumeric: "tabular-nums",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {rel.code}
-        </div>
-      </div>
-      {rel.status ? (
-        <StatusPill style={rel.status.style} label={rel.status.label} size="sm" />
-      ) : null}
-      {interactive ? (
-        <ChevronRight
-          size={18}
-          strokeWidth={1.75}
-          color="#C4BDB2"
-          style={{ flexShrink: 0 }}
-        />
-      ) : null}
-    </div>
-  );
-}
-
 function ActionBar({
   primaryCta,
   ctaBusy,
@@ -1639,12 +1611,16 @@ function ActionBar({
         }}
       >
         <SecondaryBtn label="Print" icon={<Printer size={16} strokeWidth={1.75} />} onClick={onPrint} />
-        <SecondaryBtn
-          label="Edit"
-          icon={<Pencil size={16} strokeWidth={1.75} />}
-          onClick={onEdit}
-          dim={!editable}
-        />
+        {/* Edit only when this doc type is actually editable on mobile. A
+            greyed, no-op Edit button (editing lives on desktop) read as broken
+            and left two oversized half-width buttons — owner 2026-07-04. */}
+        {editable ? (
+          <SecondaryBtn
+            label="Edit"
+            icon={<Pencil size={16} strokeWidth={1.75} />}
+            onClick={onEdit}
+          />
+        ) : null}
         {extraAction ? (
           <SecondaryBtn
             label={extraAction.label}

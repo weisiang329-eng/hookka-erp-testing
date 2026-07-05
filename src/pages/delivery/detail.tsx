@@ -219,6 +219,10 @@ export default function DeliveryDetailPage() {
       if (id) invalidateCache(`/api/delivery-orders/${id}`);
       invalidateCachePrefix("/api/sales-orders");
       invalidateCachePrefix("/api/production-orders");
+      // Advancing to DELIVERED auto-creates the invoice — broadcast so the
+      // Invoices list picks it up (2026-07-04 cache sweep; resolveIncomplete
+      // already did this, this POD path was the gap).
+      if (target === "DELIVERED") invalidateCachePrefix("/api/invoices");
     } catch (e) {
       if (e instanceof FetchJsonError) {
         const body = e.body as { error?: string } | undefined;

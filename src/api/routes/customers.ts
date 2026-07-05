@@ -12,8 +12,50 @@ import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { parseDebtorCode } from "../../lib/debtor";
+import { resolveCompanyCode } from "../../lib/company-dimension";
 
 const app = new Hono<Env>();
+
+// ---------------------------------------------------------------------------
+// Multi-Company Phase 4 — per-customer default company.
+//
+// `customers.default_company_code` (snake_case, runtime self-applied) holds an
+// OPTIONAL default company for NEW sales orders from this customer. Empty '' =
+// no mapping → the SO create form falls back to HOOKKA exactly as before. This
+// column NEVER moves existing orders; it only pre-fills the company selector.
+// Runtime-ensured (migration files are inert on deploy — see CLAUDE.md). Idempotent.
+// ---------------------------------------------------------------------------
+let customerCompanyColEnsured = false;
+async function ensureCustomerCompanyColumn(db: D1Database): Promise<void> {
+  if (customerCompanyColEnsured) return;
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS default_company_code TEXT NOT NULL DEFAULT ''",
+      )
+      .run();
+    customerCompanyColEnsured = true;
+  } catch (err) {
+    // Best-effort — a legacy engine without IF NOT EXISTS (or a concurrent
+    // add) shouldn't break the whole route; the read side dual-keys + defaults.
+    console.warn(
+      "[customers] ensureCustomerCompanyColumn:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+// Normalise a per-customer default company off a request body. Unlike
+// `resolveCompanyCode` (which defaults blank → HOOKKA), an empty / missing
+// value here means "NO mapping" and is stored as '' so the SO form falls back
+// to HOOKKA on its own — a customer with no default is NOT force-pinned to
+// HOOKKA. A provided value is canonicalised to an UPPERCASE org code.
+function normalizeDefaultCompany(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return "";
+  return resolveCompanyCode(trimmed);
+}
 
 // Debtor-code gate shared by POST + PUT. Returns the canonical (trimmed)
 // code on success, or an error string. Enforces: valid format (shared
@@ -64,7 +106,47 @@ type CustomerRow = {
   contactName: string | null;
   phone: string | null;
   email: string | null;
+  // Multi-Company Phase 4 — optional default company for NEW SOs. '' = none.
+  default_company_code?: string | null;
+  // Multi-Company Phase 3 — dual-identity link (mirror of suppliers.group_org_code).
+  // '' / null = a normal external customer (default). A group org code (e.g.
+  // "HOUZS") marks this customer as one of our group companies. Dual-keyed read.
+  groupOrgCode?: string | null;
+  group_org_code?: string | null;
 };
+
+// Multi-Company Phase 3 — dual-identity column on the customer side. snake_case,
+// default '' so nothing changes for a normal external customer. Runtime
+// self-apply (deploy does NOT replay migration files). Paired with
+// suppliers.group_org_code (ensured in purchase-orders.ts). See
+// src/lib/intercompany-mirror.ts.
+let custGroupColPromise: Promise<void> | null = null;
+function ensureCustomerGroupColumn(db: D1Database): Promise<void> {
+  if (custGroupColPromise) return custGroupColPromise;
+  custGroupColPromise = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE customers ADD COLUMN IF NOT EXISTS group_org_code TEXT NOT NULL DEFAULT ''",
+        )
+        .run();
+    } catch {
+      // best-effort — column may already exist
+    }
+  })();
+  return custGroupColPromise;
+}
+
+/** Read-side coalesce for the dual-identity code. '' = external customer. */
+function readCustomerGroupOrgCode(row: CustomerRow): string {
+  const v = row.groupOrgCode ?? row.group_org_code ?? "";
+  return typeof v === "string" && v.trim() ? v.trim().toUpperCase() : "";
+}
+
+/** Normalise an incoming group_org_code value (body → stored). '' = external. */
+function normaliseGroupOrgCode(raw: unknown): string {
+  return typeof raw === "string" && raw.trim() ? raw.trim().toUpperCase() : "";
+}
 
 type HubRow = {
   id: string;
@@ -93,6 +175,10 @@ function rowToCustomer(row: CustomerRow, hubs: HubRow[] = []) {
     contactName: row.contactName ?? "",
     phone: row.phone ?? "",
     email: row.email ?? "",
+    // Multi-Company Phase 4 — surfaced so the SO create form can pre-fill the
+    // company selector. Empty string when unmapped (→ HOOKKA fallback).
+    defaultCompanyCode: (row.default_company_code ?? "").trim().toUpperCase(),
+    groupOrgCode: readCustomerGroupOrgCode(row),
     deliveryHubs: hubs
       .filter((h) => h.customerId === row.id)
       .map((h) => ({
@@ -116,6 +202,7 @@ function genId(): string {
 // GET /api/customers — list all customers + their hubs (org-scoped)
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
+  await ensureCustomerCompanyColumn(c.var.DB);
   // Optional index-backed search (global Ctrl+K palette, ?search=). Partial
   // match on name/code; fires ONLY when present, so the Customers list page
   // (no search param) returns the full list exactly as before.
@@ -142,6 +229,7 @@ app.get("/", async (c) => {
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "customers", "create");
   if (denied) return denied;
+  await ensureCustomerCompanyColumn(c.var.DB);
   try {
     const body = await c.req.json();
     const { code, name } = body;
@@ -153,8 +241,10 @@ app.post("/", async (c) => {
     }
     const dv = await validateDebtorCode(c, body.code, null);
     if (!dv.ok) return c.json({ success: false, error: dv.error }, 400);
+    await ensureCustomerGroupColumn(c.var.DB);
     const id = genId();
     const isActive = body.isActive === false ? 0 : 1;
+    const groupOrgCode = normaliseGroupOrgCode(body.groupOrgCode);
 
     // Tier D D5 fix 2026-05-21 — back-door write removed.
     // outstandingSen is a derived A/R balance owned by the invoice +
@@ -167,8 +257,9 @@ app.post("/", async (c) => {
     // through the invoice / payment / CN / DN routes' atomic SQL.
     await c.var.DB.prepare(
       `INSERT INTO customers (id, code, name, ssmNo, companyAddress, creditTerms,
-         creditLimitSen, outstandingSen, isActive, contactName, phone, email)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         creditLimitSen, outstandingSen, isActive, contactName, phone, email,
+         default_company_code, group_org_code)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -183,6 +274,9 @@ app.post("/", async (c) => {
         body.contactName ?? "",
         body.phone ?? "",
         body.email ?? "",
+        // Multi-Company Phase 4 — optional default company ('' = none).
+        normalizeDefaultCompany(body.defaultCompanyCode),
+        groupOrgCode,
       )
       .run();
 
@@ -206,6 +300,7 @@ app.post("/", async (c) => {
 // GET /api/customers/:id — single customer + hubs
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
+  await ensureCustomerCompanyColumn(c.var.DB);
   const [cust, hubsRes] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM customers WHERE id = ?")
       .bind(id)
@@ -224,8 +319,10 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "customers", "update");
   if (denied) return denied;
+  await ensureCustomerCompanyColumn(c.var.DB);
   const id = c.req.param("id");
   try {
+    await ensureCustomerGroupColumn(c.var.DB);
     const existing = await c.var.DB.prepare(
       "SELECT * FROM customers WHERE id = ?",
     )
@@ -276,13 +373,26 @@ app.put("/:id", async (c) => {
       contactName: body.contactName ?? existing.contactName ?? "",
       phone: body.phone ?? existing.phone ?? "",
       email: body.email ?? existing.email ?? "",
+      // Multi-Company Phase 4 — only changes when the caller explicitly sends
+      // defaultCompanyCode; a header-only edit preserves the existing mapping.
+      // An explicit '' clears the mapping (→ HOOKKA fallback on new SOs).
+      default_company_code:
+        body.defaultCompanyCode !== undefined
+          ? normalizeDefaultCompany(body.defaultCompanyCode)
+          : (existing.default_company_code ?? ""),
+      // Multi-Company Phase 3 — dual-identity. Only changes when the body sends
+      // it; otherwise the existing flag is preserved (additive, opt-in).
+      groupOrgCode:
+        body.groupOrgCode === undefined
+          ? readCustomerGroupOrgCode(existing)
+          : normaliseGroupOrgCode(body.groupOrgCode),
     };
 
     await c.var.DB.prepare(
       `UPDATE customers SET
          code = ?, name = ?, ssmNo = ?, companyAddress = ?, creditTerms = ?,
          creditLimitSen = ?, outstandingSen = ?, isActive = ?,
-         contactName = ?, phone = ?, email = ?
+         contactName = ?, phone = ?, email = ?, default_company_code = ?, group_org_code = ?
        WHERE id = ?`,
     )
       .bind(
@@ -297,6 +407,8 @@ app.put("/:id", async (c) => {
         merged.contactName,
         merged.phone,
         merged.email,
+        merged.default_company_code,
+        merged.groupOrgCode,
         id,
       )
       .run();

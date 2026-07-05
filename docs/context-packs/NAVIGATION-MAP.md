@@ -219,8 +219,9 @@ Built to cut token usage: open the named file at the named line range instead of
   - Fixed Assets + Depreciation tab — L6447-6734
   - Cash Book / Bank Reconciliation tab — L6735-7076
   - Opening Balance tab — L7077-7480
-  - Balance Sheet tab (+ YearCloseCard) — L7481-7778
+  - Balance Sheet tab (+ YearCloseCard + GroupByCompanyCard) — L7481-7778
   - Cash Flow tab — L7779-7945
+  - Multi-company (Phase 2): `CompanySelect` + `GroupByCompanyCard` (index.tsx) and `useCompanyOptions`/`orgIdParam` (accounting/shared.ts). "" = All companies (group) → report URL unchanged (consolidated); a company appends `&orgId=<code>` (org CODE lower-cased, e.g. `hookka`/`ohana`, NOT org row id). Wired into Balance Sheet (`/pl`), Trial Balance (`/trial-balance`), Debtor/Creditor Aging (`/aging` + `/ar-control`/`/ap-control`). The rich P&L tab (`/pl-statement`) does NOT accept orgId — scoping it needs a backend change (companyFilter threaded through computePnlWindow/FIFO), deliberately out of scope.
 
 **Gotchas**
 - `document_lifecycle` JOIN is load-bearing: list endpoints (PV, journals, etc.) must return lifecycleState or the FE shows wrong actions — voided docs showed void/delete instead of unvoid/delete (commit 8221d726, F3 hotfix). When adding a list query, JOIN document_lifecycle and surface lifecycleState.

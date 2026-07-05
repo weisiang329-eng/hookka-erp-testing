@@ -37,8 +37,11 @@ import {
 
 const app = new Hono<Env>();
 
-// Age threshold for cold data — 90 days, per spec.
-const COLD_DAYS = 90;
+// Age threshold for cold data — 45 days (owner 2026-07-03, lowered from 90 to
+// demote completed/closed records to the archive tables sooner and keep the
+// hot working set smaller as data grows). Only COMPLETED POs / CLOSED-CANCELLED
+// SOs that haven't been touched in this many days become archivable.
+const COLD_DAYS = 45;
 
 type Counts = {
   production_orders: number;
@@ -149,6 +152,24 @@ app.post("/archive/run", async (c) => {
 
   const body = await c.req.json().catch(() => ({}));
   const confirm = body && typeof body === "object" && (body as { confirm?: unknown }).confirm === true;
+
+  // HARD-DISABLED per owner decision 2026-07-03: most read paths (search, detail,
+  // dashboards, accounting) and several write paths (invoice line lookup, cost
+  // cascade, status recompute) only see the hot tables, so a real archive run
+  // makes rows invisible and lets writes silently no-op — and there is no
+  // unarchive endpoint. Dry-run stays available for counting. Re-enabling
+  // requires removing this guard AND making every consumer archive-aware first.
+  if (!dryRun) {
+    console.error("[archive] real run blocked — hard-disabled per owner decision 2026-07-03");
+    return c.json(
+      {
+        success: false,
+        error:
+          "Archive execution is disabled. Search/detail/reporting and several write paths do not read the archive tables yet, so archived rows would disappear from the app. Dry-run (?dryRun=true) is still available.",
+      },
+      410,
+    );
+  }
 
   // Guardrail: only bypass the confirm flag when ENVIRONMENT === "production".
   // Literal reading of the phase-5 spec:
@@ -463,24 +484,26 @@ async function rebuildSingleSO(
     };
   }
 
-  // Real run: wipe fg_units + production_orders for this SO (job_cards
-  // cascades via FK), then run createProductionOrdersForSO against the
-  // current items + BOM and batch all statements together.
-  const wipeStmts: D1PreparedStatement[] = [
-    db
-      .prepare(
-        `DELETE FROM fg_units WHERE poId IN (SELECT id FROM production_orders WHERE salesOrderId = ?)`,
-      )
-      .bind(so.id),
-    db
-      .prepare("DELETE FROM production_orders WHERE salesOrderId = ?")
-      .bind(so.id),
-  ];
-  await db.batch(wipeStmts);
-
+  // Real run: build the regeneration statements FIRST (read-only — a broken
+  // BOM throws here before we touch anything), THEN commit the wipe + the
+  // re-INSERTs in ONE atomic db.batch. db.batch wraps every statement in a
+  // single Postgres transaction (supabase-compat.ts `sql.begin`), so a mid-
+  // rebuild failure rolls the whole thing back — the SO never ends up wiped
+  // of production with no replacement (the all-or-nothing money/cascade
+  // rule). This mirrors the correct teardown+rebuild pattern in
+  // sales-orders.ts (Option D re-explosion) and import-completion.ts, and
+  // fixes the earlier two-transaction gap where the wipe committed before the
+  // rebuild statements were even built (a throw left the SO stripped).
+  //
+  // forceRebuild:true so the builder's PO-level "preExisting" idempotency
+  // guard does NOT bail on the about-to-be-deleted production_orders — the
+  // DELETE runs FIRST inside the same batch, freeing the deterministic poIds
+  // before the INSERTs land.
   let genResult: Awaited<ReturnType<typeof createProductionOrdersForSO>>;
   try {
-    genResult = await createProductionOrdersForSO(db, so, items);
+    genResult = await createProductionOrdersForSO(db, so, items, {
+      forceRebuild: true,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -493,9 +516,22 @@ async function rebuildSingleSO(
     };
   }
 
-  if (genResult.statements.length > 0) {
-    await db.batch(genResult.statements);
-  }
+  // job_cards cascade via FK on the production_orders DELETE.
+  const wipeStmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `DELETE FROM fg_units WHERE poId IN (SELECT id FROM production_orders WHERE salesOrderId = ?)`,
+      )
+      .bind(so.id),
+    db
+      .prepare("DELETE FROM production_orders WHERE salesOrderId = ?")
+      .bind(so.id),
+  ];
+
+  // Wipe + re-INSERT in ONE transaction. Even when genResult produced no
+  // statements (SO legitimately has nothing to build), still run the wipe so
+  // the maintenance intent (clear stale POs) is honoured.
+  await db.batch([...wipeStmts, ...genResult.statements]);
 
   return {
     ok: true,

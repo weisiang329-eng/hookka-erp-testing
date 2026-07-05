@@ -118,12 +118,41 @@ export default function InvoicesPage() {
   // Filters — state declared above (before the list/stats fetches) so both
   // fetches carry them server-side.
 
+  // Batch "Email to Customer" — one button for the whole selection
+  // (2026-07-03, owner request: the old separate Send-to-Customer +
+  // Re-send-email pair was confusing). Drafts are finalised then emailed;
+  // already-sent invoices are re-emailed with the current PDF.
+  const [selectedInvoices, setSelectedInvoices] = useState<Invoice[]>([]);
+
   // Reset to page 1 when any filter changes (stale page could be empty).
+  // Also drop the checkbox selection — rows selected under the OLD filter may
+  // no longer be visible, and a stale "N selected" toolbar over a different
+  // result set made batch buttons count invisible rows (owner report
+  // 2026-07-03: "1 selected" over an empty list).
   /* eslint-disable react-hooks/set-state-in-effect -- derived pagination reset triggered by filter change */
   useEffect(() => {
     setPage(1);
+    setSelectedInvoices([]);
   }, [filterStatus, filterCustomer, filterDateFrom, filterDateTo]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Full customer list (id + name + email) for the filter dropdown AND the
+  // no-email pre-flight on the batch email dialog. The dropdown previously
+  // listed names harvested from the loaded invoice page only (incomplete) and
+  // used the NAME as the option value (broke the ?customerId= server filter).
+  const { data: custResp } = useCachedJson<{
+    success?: boolean;
+    data?: { id: string; name: string; email?: string | null }[];
+  }>("/api/customers");
+  const customers = useMemo(() => {
+    const list = custResp?.success ? custResp.data ?? [] : [];
+    return [...list].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  }, [custResp]);
+  const customerEmailById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of customers) if (c.email) m.set(c.id, c.email);
+    return m;
+  }, [customers]);
 
   // Tabs
   const [activeTab, setActiveTab] = useState<"list" | "aging">("list");
@@ -138,10 +167,8 @@ export default function InvoicesPage() {
   const [paymentMethod, setPaymentMethod] = useState("BANK_TRANSFER");
   const [paymentSubmitting, setPaymentSubmitting] = useState(false);
 
-  // Batch "Send to Customer" — confirm many DRAFT invoices in one go.
-  const [selectedInvoices, setSelectedInvoices] = useState<Invoice[]>([]);
-  const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
-  const [resendConfirmOpen, setResendConfirmOpen] = useState(false);
+  // selectedInvoices state is declared above the filter-reset effect.
+  const [emailConfirmOpen, setEmailConfirmOpen] = useState(false);
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchResult, setBatchResult] = useState<
     { ok: number; fail: number; errors: string[] } | null
@@ -212,53 +239,58 @@ export default function InvoicesPage() {
     [selectedDrafts]
   );
 
-  // Sequential on purpose: posting an invoice writes immutable journal
-  // entries + cascades the linked SO. One-at-a-time keeps a failure
-  // isolated (reported, not fatal) and avoids hammering the ledger writer.
-  const batchSendToCustomer = async () => {
-    if (selectedDrafts.length === 0) return;
-    setBatchRunning(true);
-    let ok = 0;
-    const errors: string[] = [];
-    for (const inv of selectedDrafts) {
-      try {
-        const data = await fetchJson(
-          `/api/invoices/${inv.id}`,
-          InvoiceMutationSchema,
-          { method: "PUT", body: { status: "SENT" } }
-        );
-        if (data.success) ok++;
-        else errors.push(`${inv.invoiceNo}: failed`);
-      } catch (e) {
-        errors.push(
-          `${inv.invoiceNo}: ${e instanceof Error ? e.message : "failed"}`
-        );
-      }
-    }
-    invalidateCachePrefix("/api/invoices");
-    invalidateCachePrefix("/api/delivery-orders");
-    invalidateCachePrefix("/api/sales-orders");
-    refreshInvoices();
-    refreshInvStats();
-    setBatchRunning(false);
-    setBatchConfirmOpen(false);
-    setSelectedInvoices([]);
-    setBatchResult({ ok, fail: errors.length, errors });
-  };
+  // Selected invoices whose customer has NO email on file — pre-flagged in
+  // the confirm dialog so the owner isn't surprised by silent skips. Only
+  // meaningful once the customers list has loaded (empty map → flag nothing;
+  // the server-side notice chain still skips-and-reports as a backstop).
+  const selectedNoEmail = useMemo(
+    () =>
+      customerEmailById.size === 0
+        ? []
+        : selectedInvoices.filter(
+            (i) => i.customerId && !customerEmailById.has(i.customerId)
+          ),
+    [selectedInvoices, customerEmailById]
+  );
 
-  // Re-send the customer invoice email for ANY selected invoice (including
-  // already-SENT — the owner edits an invoice, then re-sends it). Re-fires the
-  // linked DO's DELIVERED notice via /resend-notice, which now attaches the
-  // UNIFIED invoice PDF (same as the download).
-  const resendSelected = async () => {
+  // One-button "Email to Customer" (2026-07-03, owner request — replaces the
+  // separate Send-to-Customer and Re-send-email buttons). Per selected row:
+  //   • DRAFT → finalise first (PUT status SENT — journal entries created),
+  //     then email the unified PDF.
+  //   • already sent → just re-email the current PDF (post-edit re-send).
+  //   • no customer email on file → skipped, listed in the summary.
+  // Sequential on purpose: finalising writes immutable journal entries +
+  // cascades the linked SO; one-at-a-time keeps a failure isolated.
+  const emailSelected = async () => {
     if (selectedInvoices.length === 0) return;
-    setResendConfirmOpen(false);
+    setEmailConfirmOpen(false);
     setBatchRunning(true);
     let ok = 0;
     const errors: string[] = [];
-    const { renderUnifiedInvoiceBase64 } = await import("@/lib/unified-doc-download");
+    const { generateInvoicePdfBase64 } = await import("@/lib/generate-invoice-pdf");
     for (const inv of selectedInvoices) {
+      if (
+        customerEmailById.size > 0 &&
+        inv.customerId &&
+        !customerEmailById.has(inv.customerId)
+      ) {
+        errors.push(
+          `${inv.invoiceNo}: skipped — ${inv.customerName} has no email on file (add it on the Customer page, then try again)`
+        );
+        continue;
+      }
       try {
+        if (inv.status === "DRAFT") {
+          const fin = await fetchJson(
+            `/api/invoices/${inv.id}`,
+            InvoiceMutationSchema,
+            { method: "PUT", body: { status: "SENT" } }
+          );
+          if (!fin.success) {
+            errors.push(`${inv.invoiceNo}: couldn't finalise the draft — not emailed`);
+            continue;
+          }
+        }
         // Pull the FULL invoice (the list row is slim — no items / DO id) so we
         // can render the exact same PDF the detail page downloads.
         const ir = await fetch(`/api/invoices/${encodeURIComponent(inv.id)}`, {
@@ -273,9 +305,10 @@ export default function InvoicesPage() {
           errors.push(`${inv.invoiceNo}: no linked delivery order`);
           continue;
         }
-        // Render the UNIFIED invoice PDF client-side (same generator as the
-        // download + the delivered-notice email) so the re-sent email carries
-        // the exact edited document. print-extras adds the per-line spec detail.
+        // Render the invoice PDF client-side with the SAME jsPDF generator the
+        // detail-page download + the delivered-notice email now use, so the
+        // re-sent email carries the exact document the operator prints.
+        // print-extras adds the per-line spec detail.
         let pdfBase64: string | undefined;
         try {
           const er = await fetch(
@@ -286,9 +319,9 @@ export default function InvoicesPage() {
             success?: boolean;
             data?: unknown;
           };
-          pdfBase64 = await renderUnifiedInvoiceBase64(
+          pdfBase64 = generateInvoicePdfBase64(
             fullInv,
-            ej?.success ? (ej.data as Parameters<typeof renderUnifiedInvoiceBase64>[1]) : undefined
+            ej?.success ? (ej.data as Parameters<typeof generateInvoicePdfBase64>[1]) : undefined
           );
         } catch {
           // Render failed — send without the client PDF; the server renders its
@@ -319,6 +352,12 @@ export default function InvoicesPage() {
         errors.push(`${inv.invoiceNo}: ${e instanceof Error ? e.message : "failed"}`);
       }
     }
+    // Drafts may have been finalised above — refresh lists + stats everywhere.
+    invalidateCachePrefix("/api/invoices");
+    invalidateCachePrefix("/api/delivery-orders");
+    invalidateCachePrefix("/api/sales-orders");
+    refreshInvoices();
+    refreshInvStats();
     setBatchRunning(false);
     setSelectedInvoices([]);
     setBatchResult({ ok, fail: errors.length, errors });
@@ -419,17 +458,14 @@ export default function InvoicesPage() {
     setPaymentSubmitting(false);
   };
 
-  // Unique customers for filter
-  const customerNames = useMemo(
-    () => [...new Set(invoices.map((inv) => inv.customerName))].sort(),
-    [invoices]
-  );
-
-  // Filtered invoices
+  // Filtered invoices. filterCustomer holds a customer ID (BUG-2026-07-03-003:
+  // the dropdown used to put the customer NAME in filterCustomer while the
+  // server fetch sent it as ?customerId= — the SQL matched nothing and the
+  // list went blank the moment a customer was picked).
   const filteredInvoices = useMemo(() => {
     return invoices.filter((inv) => {
       if (filterStatus && inv.status !== filterStatus) return false;
-      if (filterCustomer && inv.customerName !== filterCustomer) return false;
+      if (filterCustomer && inv.customerId !== filterCustomer) return false;
       if (filterDateFrom && inv.invoiceDate < filterDateFrom) return false;
       if (filterDateTo && inv.invoiceDate > filterDateTo) return false;
       return true;
@@ -672,9 +708,9 @@ export default function InvoicesPage() {
                     onChange={(e) => setFilterCustomer(e.target.value)}
                   >
                     <option value="">All Customers</option>
-                    {customerNames.map((name) => (
-                      <option key={name} value={name}>
-                        {name}
+                    {customers.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
                       </option>
                     ))}
                   </select>
@@ -765,20 +801,12 @@ export default function InvoicesPage() {
                     <Button
                       variant="primary"
                       size="sm"
-                      disabled={selectedDrafts.length === 0}
-                      onClick={() => setBatchConfirmOpen(true)}
-                    >
-                      Send to Customer ({selectedDrafts.length})
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
                       disabled={batchRunning}
-                      onClick={() => setResendConfirmOpen(true)}
-                      title="Re-send the invoice email to the customer — works on already-sent invoices (e.g. after an edit)"
+                      onClick={() => setEmailConfirmOpen(true)}
+                      title="Email the invoice PDF to each customer — drafts are finalised first; already-sent invoices are re-emailed with the current PDF"
                     >
                       <Send className="w-4 h-4 mr-1" />
-                      Re-send email ({selectedInvoices.length})
+                      Email to Customer ({selectedInvoices.length})
                     </Button>
                   </div>
                 </div>
@@ -1099,23 +1127,39 @@ export default function InvoicesPage() {
         </div>
       )}
 
-      {/* Batch Send-to-Customer confirm */}
-      {batchConfirmOpen && (
+      {/* Email-to-Customer confirm (one dialog for drafts + re-sends) */}
+      {emailConfirmOpen && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
             <h2 className="text-lg font-bold text-[#1F1D1B] mb-2">
-              Send invoices to customer?
+              Email {selectedInvoices.length} invoice
+              {selectedInvoices.length === 1 ? "" : "s"} to customer
+              {selectedInvoices.length === 1 ? "" : "s"}?
             </h2>
-            <p className="text-sm text-[#4B5563] mb-4">
-              You are about to send{" "}
-              <span className="font-semibold">{selectedDrafts.length}</span>{" "}
-              draft invoice{selectedDrafts.length === 1 ? "" : "s"} totalling{" "}
-              <span className="font-semibold">
-                {formatCurrency(selectedDraftTotalSen)}
-              </span>
-              . This finalises them — accounting entries are created and this
-              cannot be undone.
-            </p>
+            {selectedDrafts.length > 0 && (
+              <p className="text-sm text-[#4B5563] mb-2">
+                <span className="font-semibold">{selectedDrafts.length}</span>{" "}
+                draft{selectedDrafts.length === 1 ? "" : "s"} totalling{" "}
+                <span className="font-semibold">
+                  {formatCurrency(selectedDraftTotalSen)}
+                </span>{" "}
+                will be finalised first — accounting entries are created and
+                this cannot be undone.
+              </p>
+            )}
+            {selectedInvoices.length > selectedDrafts.length && (
+              <p className="text-sm text-[#4B5563] mb-2">
+                Already-sent invoices are re-emailed with the current PDF.
+              </p>
+            )}
+            {selectedNoEmail.length > 0 && (
+              <p className="text-sm text-[#B91C1C] mb-2">
+                {selectedNoEmail.length} will be skipped — customer has no
+                email on file:{" "}
+                {[...new Set(selectedNoEmail.map((i) => i.customerName))].join(", ")}.
+                Add the email on the Customer page first.
+              </p>
+            )}
             {batchRunning && (
               <p className="text-sm text-[#9C6F1E] mb-4">
                 Sending… please don't close this window.
@@ -1124,57 +1168,22 @@ export default function InvoicesPage() {
             <div className="flex justify-end gap-2">
               <Button
                 variant="outline"
-                onClick={() => setBatchConfirmOpen(false)}
+                onClick={() => setEmailConfirmOpen(false)}
                 disabled={batchRunning}
               >
                 Cancel
               </Button>
               <Button
                 variant="primary"
-                onClick={batchSendToCustomer}
-                disabled={batchRunning || selectedDrafts.length === 0}
+                onClick={emailSelected}
+                disabled={
+                  batchRunning ||
+                  selectedInvoices.length - selectedNoEmail.length === 0
+                }
               >
                 {batchRunning
                   ? "Sending…"
-                  : `Send ${selectedDrafts.length} invoice${selectedDrafts.length === 1 ? "" : "s"}`}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Re-send email confirm */}
-      {resendConfirmOpen && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
-            <h2 className="text-lg font-bold text-[#1F1D1B] mb-2">
-              Re-send invoice email?
-            </h2>
-            <p className="text-sm text-[#4B5563] mb-4">
-              Re-send the invoice email (with the current PDF) to the customer for{" "}
-              <span className="font-semibold">{selectedInvoices.length}</span>{" "}
-              selected invoice{selectedInvoices.length === 1 ? "" : "s"}. Use this
-              after editing an invoice — it re-sends even already-sent ones.
-            </p>
-            {batchRunning && (
-              <p className="text-sm text-[#9C6F1E] mb-4">
-                Re-sending… please don't close this window.
-              </p>
-            )}
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="outline"
-                onClick={() => setResendConfirmOpen(false)}
-                disabled={batchRunning}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                onClick={resendSelected}
-                disabled={batchRunning || selectedInvoices.length === 0}
-              >
-                {batchRunning ? "Re-sending…" : "Re-send email"}
+                  : `Send ${selectedInvoices.length - selectedNoEmail.length} email${selectedInvoices.length - selectedNoEmail.length === 1 ? "" : "s"}`}
               </Button>
             </div>
           </div>

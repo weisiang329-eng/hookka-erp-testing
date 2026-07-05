@@ -719,11 +719,15 @@ async function renderDeliveredInvoicePdf(
     };
     const invoice = ij?.success ? ij.data : undefined;
     if (!invoice) return {};
-    const { renderUnifiedInvoiceBase64 } = await import(
-      "@/lib/unified-doc-download"
+    // Email the SAME jsPDF the operator prints. The pdf-lib "unified" render
+    // was a second engine that looked different from Print ("歪", owner
+    // 2026-07-04); generateInvoicePdfBase64 IS exactly what the Print button
+    // produces, so the customer now receives what the operator sees.
+    const { generateInvoicePdfBase64 } = await import(
+      "@/lib/generate-invoice-pdf"
     );
     return {
-      pdfBase64: await renderUnifiedInvoiceBase64(
+      pdfBase64: generateInvoicePdfBase64(
         invoice,
         ej?.success ? ej.data : undefined,
       ),
@@ -764,8 +768,14 @@ async function sendCustomerNotice(
       itemsBreakdown = buildDoComponentBreakdown(row.items, extras);
       customerPOIds = collectCustomerPOIds(row.items, extras, row.customerPOId);
       try {
-        const { renderUnifiedDoBase64 } = await import("@/lib/unified-doc-download");
-        pdfBase64 = await renderUnifiedDoBase64(row, extras);
+        // Email the SAME jsPDF the operator prints (owner 2026-07-04: the
+        // pdf-lib email version looked different/"歪"). Same row + extras the
+        // Print-DO handler passes — no delivery QR on the customer email.
+        const { generateDoPdfBase64 } = await import("@/lib/generate-do-pdf");
+        pdfBase64 = generateDoPdfBase64(
+          row as unknown as import("@/types").DeliveryOrder,
+          extras,
+        );
         pdfFilename = `${row.doNo.startsWith("DO-") ? row.doNo : `DO-${row.doNo}`}.pdf`;
       } catch {
         /* graceful — backend sends the notice without the attachment */
@@ -1126,7 +1136,14 @@ export default function DeliveryPage() {
   // needs uph JC statuses to compute Planning vs Pending Delivery). Cuts
   // the response from 2-6 MB to 200-600 KB.
   const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders?fields=minimal&include=jobCards");
-  const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string; customerSO?: string; customerPO?: string; reference?: string }[] }>("/api/sales-orders");
+  // Slim projection: this page joins Customer PO/SO + reference + expected-DD
+  // onto DO rows, plus a per-SO {productCode → unitPriceSen} price map for the
+  // PO-based Planning / Pending Delivery Sales-Figure fallback. ?fields=
+  // delivery-refs serves the SAME cached snapshot down to just those ref
+  // scalars + SLIM items (product code + unit price only — no scan image, no
+  // other line fields) — the full list was ~1.4MB; the slim variant is a
+  // fraction of that.
+  const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string; customerSO?: string; customerSOId?: string; customerPO?: string; customerPOId?: string; reference?: string; items?: { productCode?: string; unitPriceSen?: number }[] }[] }>("/api/sales-orders?fields=delivery-refs");
   // Exact per-PO Sales Figure from the server (same resolver the DO /
   // invoice path uses) so Planning / Pending Delivery reconcile to the
   // cent instead of the page guessing price by product code.
@@ -2914,6 +2931,14 @@ export default function DeliveryPage() {
       toast.success(`${doIds.length} delivery orders ${successVerb}`);
       setSelectedIds(new Set());
     }
+    // A bulk transition to DELIVERED auto-creates invoices + CLOSEs SOs on the
+    // backend; without these broadcasts the Invoices/Sales lists stay stale
+    // until a manual refresh (2026-07-04 cache sweep — matched the single
+    // invoice-gen path fixed earlier).
+    if (nextStatus === "DELIVERED") {
+      invalidateCachePrefix("/api/invoices");
+      invalidateCachePrefix("/api/sales-orders");
+    }
     fetchData();
     // Customer notices for every DO that actually transitioned — covers the
     // bulk buttons AND the PL-level bulk actions (runPlBulkTransition reuses
@@ -3111,6 +3136,13 @@ export default function DeliveryPage() {
       return; // keep the dialog open so the operator can retry
     }
     // Confirmed persisted → apply the optimistic INVOICED flip + close.
+    // Cross-tab freshness (2026-07-03 audit): invoice creation also CLOSEs the
+    // SO on the backend, and this handler previously invalidated NOTHING — an
+    // invoice generated here didn't show in the Invoices list (own tab or
+    // another) until the cache TTL. Broadcast all three affected prefixes.
+    invalidateCachePrefix("/api/invoices");
+    invalidateCachePrefix("/api/sales-orders");
+    invalidateCachePrefix("/api/delivery-orders");
     setDeliveryOrders((prev) =>
       prev.map((d) =>
         d.id === invoiceDialog.id && d.status === "DELIVERED"

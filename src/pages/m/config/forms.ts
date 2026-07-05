@@ -1128,6 +1128,114 @@ export function editSupplierSpec(doc: Record<string, unknown>, id: string): Form
 }
 
 // ===========================================================================
+// RECORD PAYMENT — Invoice. Reuses the EXACT desktop flow (invoices/detail.tsx):
+// PUT /api/invoices/:id { paidAmount: existing + amount, paymentMethod,
+// paymentDate, paymentReference }. The backend derives the delta, writes one
+// invoice_payments row and flips status → PARTIAL_PAID / PAID (invoices.ts:1707).
+// ===========================================================================
+const PAYMENT_METHOD_OPTS: SelectOption[] = [
+  { value: "BANK_TRANSFER", label: "Bank Transfer" },
+  { value: "CHEQUE", label: "Cheque" },
+  { value: "CASH", label: "Cash" },
+  { value: "CREDIT_CARD", label: "Credit Card" },
+  { value: "OTHER", label: "Other" },
+];
+
+export function recordPaymentSpec(doc: Record<string, unknown>, id: string): FormSpec {
+  const totalSen = n(doc.totalSen);
+  const paidSen = n(doc.paidAmount);
+  const balanceSen = Math.max(0, totalSen - paidSen);
+  return {
+    title: "Record Payment",
+    submitLabel: "Save Payment",
+    fields: [
+      { name: "amount", label: "Amount (RM)", kind: "money" as const, required: true, full: true },
+      { name: "paymentMethod", label: "Method", kind: "select" as const, options: PAYMENT_METHOD_OPTS, full: true },
+      { name: "paymentDate", label: "Payment Date", kind: "date" as const, full: true },
+      { name: "paymentReference", label: "Reference", kind: "text" as const, full: true },
+    ],
+    // Default to the full outstanding balance — the common case is "paid in full".
+    initial: {
+      amount: balanceSen,
+      paymentMethod: "BANK_TRANSFER",
+      paymentDate: "",
+      paymentReference: "",
+    },
+    submit: async (v) => {
+      const amountSen = n(v.amount);
+      if (amountSen <= 0) return { ok: false, error: "Enter a payment amount." };
+      const body = {
+        paidAmount: paidSen + amountSen,
+        paymentMethod: s(v.paymentMethod) || "BANK_TRANSFER",
+        paymentDate: s(v.paymentDate) || undefined,
+        paymentReference: s(v.paymentReference),
+      };
+      const res = await mutateJson(`/api/invoices/${encodeURIComponent(id)}`, "PUT", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshOne(`/api/invoices/${encodeURIComponent(id)}`);
+      refreshList("/api/invoices");
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
+// STOCK ADJUSTMENT (Raw Material, REMOVE-ONLY) — POST /api/stock-adjustments
+// { type:"RM", itemId, qtyDelta (negative), unitCostSen:0, reason, notes }.
+// Only negative deltas are exposed on mobile: the backend values a stock-OUT by
+// FIFO on the existing cost layers, so no unit cost is needed (the mobile RM API
+// doesn't return one). Positive "found" adjustments — which WOULD need a cost to
+// value the new stock — stay on desktop. Matches inventory/adjustments.tsx.
+// ===========================================================================
+const ADJUST_REASON_OPTS: SelectOption[] = [
+  { value: "COUNT_CORRECTION", label: "Count correction (reduce)" },
+  { value: "DAMAGED", label: "Damaged" },
+  { value: "WRITE_OFF", label: "Write-off" },
+];
+
+export function stockAdjustmentSpec(doc: Record<string, unknown>, id: string): FormSpec {
+  const balance = n(doc.balanceQty);
+  const uom = s(doc.baseUOM);
+  return {
+    title: "Reduce Stock",
+    submitLabel: "Confirm Adjustment",
+    fields: [
+      { name: "reason", label: "Reason", kind: "select" as const, options: ADJUST_REASON_OPTS, required: true, full: true },
+      {
+        name: "qty",
+        label: `Quantity to remove${uom ? ` (${uom})` : ""}${balance > 0 ? ` — in stock: ${balance}` : ""}`,
+        kind: "number" as const,
+        required: true,
+        full: true,
+      },
+      { name: "notes", label: "Notes", kind: "textarea" as const, full: true },
+    ],
+    initial: { reason: "COUNT_CORRECTION", qty: 0, notes: "" },
+    submit: async (v) => {
+      const qty = n(v.qty);
+      if (qty <= 0) return { ok: false, error: "Enter a quantity to remove." };
+      if (balance > 0 && qty > balance) {
+        return { ok: false, error: `Only ${balance} in stock — can't remove ${qty}.` };
+      }
+      const body = {
+        type: "RM",
+        itemId: id,
+        qtyDelta: -qty, // remove-only
+        unitCostSen: 0, // stock-OUT is FIFO-valued; cost not needed
+        reason: s(v.reason) || "COUNT_CORRECTION",
+        notes: s(v.notes) || null,
+      };
+      const res = await mutateJson("/api/stock-adjustments", "POST", body);
+      if (!res.ok) return { ok: false, error: res.error };
+      refreshOne(`/api/raw-materials/${encodeURIComponent(id)}`);
+      refreshList("/api/raw-materials");
+      refreshList("/api/stock-adjustments");
+      return { ok: true };
+    },
+  };
+}
+
+// ===========================================================================
 // 3PL PROVIDER — edit. Wires to PUT /api/drivers/:id (drivers.ts). Design's
 // "Edit provider" pencil. No cascade — a driver/provider is standalone master
 // data. Rates are integer sen (money kind); status ∈ ACTIVE/INACTIVE/ON_LEAVE.

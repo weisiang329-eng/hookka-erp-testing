@@ -836,18 +836,19 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     for (const row of selectedClaude) {
       const po = row.extracted;
       try {
-        // Few-shot integrity: confirm a sample either when the operator
-        // edited it, or when they explicitly marked it as a gold
-        // reference. Plain unedited Claude output is not stored back.
-        const wasEdited =
-          JSON.stringify(po) !== JSON.stringify(row.original);
-        if (wasEdited || row.markedGold) {
-          fetch(`/api/scan-po/samples/${row.sampleId}/confirm`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ correctedJson: po, gold: row.markedGold }),
-          }).catch(() => {});
-        }
+        // Record the OUTCOME of every import (2026-07-04, OCR accuracy
+        // dashboard): store the final imported JSON as correctedJson on ALL
+        // imports — edited or not — so a clean pass (correctedJson deep-equals
+        // rawExtracted) is countable, not just the edits. Previously only
+        // edited/gold rows were written, so successes were invisible and the
+        // accuracy rate couldn't be computed. `gold` still only flags the
+        // operator's explicit gold marks, so the few-shot/distill set (which
+        // reads WHERE isGold = 1) is unchanged.
+        fetch(`/api/scan-po/samples/${row.sampleId}/confirm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ correctedJson: po, gold: row.markedGold }),
+        }).catch(() => {});
 
         // Render the source PDF page(s) for this PO into a PNG attachment.
         // Done lazily here (rather than at parse time) so the UI doesn't
@@ -1228,12 +1229,26 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           });
         }
         if (additions.length === 0) return prev;
-        // Owner ruling 2026-06-30: cards must follow source PDF page order.
-        // Auto-split children are created sequentially so the earliest
-        // queue row = earliest PDF page. Sort by row's createdAt then docIdx.
+        // Owner ruling 2026-06-30 / clarified 2026-07-04: cards must follow
+        // the source PDF PAGE order so the operator's paper stack reconciles
+        // 1:1 and the SOs get their numbers in that order. Auto-split
+        // children are named "<base>-pi-<startPage>-<endPage>.pdf", so sort
+        // by the page baked into the filename FIRST — createdAt alone was
+        // unreliable (children are enqueued in a tight loop with
+        // near-identical timestamps and the 6 parallel workers finish OUT of
+        // page order, so a page-28 chunk could land before page-9). Same
+        // guard the supplier modal got on 2026-07-01. Fall back to enqueue
+        // time then docIdx for non-split files with no page suffix.
+        const pageOf = (fileName: string): number => {
+          const m = /-pi-(\d+)-\d+\.pdf$/i.exec(fileName || "");
+          return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+        };
         const rowCreated = new Map<string, string>();
         for (const item of r.data.items) rowCreated.set(item.id, item.createdAt);
         const combined = [...prev, ...additions].sort((a, b) => {
+          const aP = pageOf(a.file?.name ?? "");
+          const bP = pageOf(b.file?.name ?? "");
+          if (aP !== bP) return aP - bP;
           const aC = a.scanQueueRowId ? rowCreated.get(a.scanQueueRowId) ?? "" : "";
           const bC = b.scanQueueRowId ? rowCreated.get(b.scanQueueRowId) ?? "" : "";
           if (aC !== bC) return aC < bC ? -1 : 1;

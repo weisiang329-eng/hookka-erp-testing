@@ -16,7 +16,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { monthsOverdue, nextMonthDueDate } from "../../lib/terms";
-import { getOrgId } from "../lib/tenant";
+import { getOrgId, companyFilter } from "../lib/tenant";
 import {
   buildJournalEntryStatements,
   ledgerHasSource,
@@ -33,6 +33,7 @@ import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/
 import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "../lib/doc-number-service";
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
+import { ensureFinanceOrgColumns } from "../lib/ensure-finance-org";
 import { apRowBeforeOpening, legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
 import { applyOpeningSlice, windowCoversMonth } from "../../lib/opening-slice";
 import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
@@ -379,12 +380,24 @@ app.get("/aging", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   const orgId = getOrgId(c);
+  // Multi-company (Phase 1): OPTIONAL ?orgId= / ?company= scopes the aging to
+  // one sister company. Absent → no WHERE change → today's consolidated view.
+  // The column it filters on is runtime-ensured so this can never 500 on prod.
+  await ensureFinanceOrgColumns(c.var.DB);
+  const coFilter = companyFilter(c);
+  const arWhere = coFilter.active ? ` WHERE ${coFilter.sql}` : "";
+  const apWhere = coFilter.active ? ` WHERE ${coFilter.sql}` : "";
   const { withSnapshot } = await import("../lib/snapshot");
   // PR 7 — cache-aside snapshot. AR/AP aging is computed live from
   // unpaid invoices + purchase invoices, bucketed by months overdue
   // (the prod-correct source — the old ar_aging / ap_aging snapshot
   // tables are dead). The snapshot caches that computed result and
   // rebuilds whenever either source table changes.
+  //
+  // cacheKey partitions the consolidated ("") result from each per-company
+  // ("company:<orgId>") result so a filtered request never poisons the
+  // default cache — the default read stays byte-identical to today.
+  const cacheKey = coFilter.active ? `company:${coFilter.orgId}` : "";
   const data = await withSnapshot(
     c.var.DB,
     {
@@ -399,8 +412,10 @@ app.get("/aging", async (c) => {
     async () => {
       const [invRes, piRes] = await Promise.all([
         c.var.DB.prepare(
-          "SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening FROM invoices",
-        ).all<{
+          `SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening FROM invoices${arWhere}`,
+        )
+          .bind(...(coFilter.active ? [coFilter.param] : []))
+          .all<{
           customerId: string;
           customerName: string;
           totalSen: number;
@@ -411,8 +426,10 @@ app.get("/aging", async (c) => {
           isOpening: number | null;
         }>(),
         c.var.DB.prepare(
-          "SELECT id, supplierId, supplierName, amountSen, paidAmountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices",
-        ).all<{
+          `SELECT id, supplierId, supplierName, amountSen, paidAmountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices${apWhere}`,
+        )
+          .bind(...(coFilter.active ? [coFilter.param] : []))
+          .all<{
           id: string;
           supplierId: string;
           supplierName: string;
@@ -507,6 +524,7 @@ app.get("/aging", async (c) => {
         },
       };
     },
+    cacheKey,
   );
   return c.json({ success: true, ...data });
 });
@@ -1455,18 +1473,28 @@ app.delete("/journals/:id", async (c) => {
 app.get("/ar-control", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
+  // Multi-company (Phase 1): OPTIONAL ?orgId= / ?company= scopes the control
+  // account to one company. Absent → today's consolidated numbers, unchanged.
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const invWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const custWhere = coFilter.active ? ` WHERE ${coFilter.sql}` : "";
   const [coaRes, legRes, invRes, custRes] = await Promise.all([
     c.var.DB.prepare(
       "SELECT code, name, type, specialAccountType FROM chart_of_accounts WHERE specialAccountType = 'SDC'",
     ).all<{ code: string; name: string; type: string; specialAccountType: string }>(),
     c.var.DB.prepare(
-      "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
-    ).all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+      `SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     c.var.DB.prepare(
       `SELECT customerId, customerName, invoiceNo, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening
          FROM invoices
-        WHERE status NOT IN ('DRAFT','CANCELLED')`,
-    ).all<{
+        WHERE status NOT IN ('DRAFT','CANCELLED')${invWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{
       customerId: string;
       customerName: string;
       invoiceNo: string;
@@ -1478,8 +1506,10 @@ app.get("/ar-control", async (c) => {
       isOpening: number | null;
     }>(),
     c.var.DB.prepare(
-      "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM customers",
-    ).first<{ s: number }>(),
+      `SELECT COALESCE(SUM(outstandingSen),0) AS s FROM customers${custWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .first<{ s: number }>(),
   ]);
   const { docDate, openingDate: obDateAr } = await loadDocDateResolver(c.var.DB);
   const dr = new Map<string, number>();
@@ -2232,16 +2262,29 @@ app.get("/ap-control", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   await ensurePartialPaymentColumns(c.var.DB);
+  // Multi-company (Phase 1): OPTIONAL ?orgId= / ?company= scopes the payable
+  // control to one company. Absent → today's consolidated numbers, unchanged.
+  // Runtime-ensure org_id on suppliers / purchase_invoices so the filter cannot
+  // 500 on a prod where the migration file hasn't been applied.
+  await ensureFinanceOrgColumns(c.var.DB);
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const supWhere = coFilter.active ? ` WHERE ${coFilter.sql}` : "";
+  const piWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
   const [coaRes, legRes, supRes] = await Promise.all([
     c.var.DB.prepare(
       "SELECT code, name FROM chart_of_accounts WHERE specialAccountType = 'SCC'",
     ).all<{ code: string; name: string }>(),
     c.var.DB.prepare(
-      "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
-    ).all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+      `SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{ accountCode: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
     c.var.DB.prepare(
-      "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers",
-    ).first<{ s: number }>(),
+      `SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers${supWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .first<{ s: number }>(),
   ]);
   const { docDate, openingDate: obDateAp } = await loadDocDateResolver(c.var.DB);
   // PI subledger — defensive: prefer net outstanding (amount − paid, incl
@@ -2264,14 +2307,18 @@ app.get("/ap-control", async (c) => {
     piRes = await c.var.DB.prepare(
       `SELECT id, supplierId, supplierName, piNo, amountSen, paid_amount_sen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
-        WHERE status IN ('CONFIRMED', 'APPROVED', 'PARTIAL_PAID')`,
-    ).all<PiAgingRow>();
+        WHERE status IN ('CONFIRMED', 'APPROVED', 'PARTIAL_PAID')${piWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<PiAgingRow>();
   } catch {
     piRes = await c.var.DB.prepare(
       `SELECT id, supplierId, supplierName, piNo, amountSen, status, dueDate, invoiceDate, isOpening
          FROM purchase_invoices
-        WHERE status IN ('CONFIRMED', 'APPROVED')`,
-    ).all<PiAgingRow>();
+        WHERE status IN ('CONFIRMED', 'APPROVED')${piWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<PiAgingRow>();
   }
   // Posted purchase CNs reduce what we owe (the control account already absorbed
   // their DR 400-0000 legs). The ALLOCATED portion of each CN is already netted
@@ -3778,10 +3825,16 @@ app.get("/trial-balance", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   const asOf = c.req.query("asOf") || new Date().toISOString().slice(0, 10);
+  // Multi-company (Phase 1): OPTIONAL ?orgId= / ?company= scopes the TB to one
+  // company. Absent → today's consolidated trial balance, byte-identical.
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
   const [legRes, coaRes] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
-    ).all<{
+      `SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{
       accountCode: string;
       sourceId: string;
       debitSen: number;
@@ -4629,6 +4682,20 @@ async function stockSummaryRange(
 // opening/closing LIVE and overrides these SOS/SCS legs, so there is no
 // double count — the legs exist to put inventory on the Balance Sheet
 // and keep the trial balance whole.
+// Hex SHA-256 of a string — used to derive a content-deterministic ledger
+// source_id for the closing-stock post so a retried/double-fired re-post
+// collides on the immutable unique index (exactly-once) while a genuine
+// restate (changed stock snapshot → different hash) still posts.
+async function sha256Hex(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(input),
+  );
+  return [...new Uint8Array(buf)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 async function buildClosingStockLegs(
   db: Env["Variables"]["DB"],
   month: string,
@@ -4678,14 +4745,42 @@ app.post("/stock/close-post", async (c) => {
     const orgId = getOrgId(c);
     const actorUserId =
       (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
-    const stamp = Date.now();
+
+    // --- Idempotency (2026-07-04) -----------------------------------------
+    // Re-posting closing stock is an INTENTIONAL feature (re-base after a
+    // stock-take / RM-valuation-mode flip / next-month roll). But the old
+    // code keyed the ledger source_id on `Date.now()`, so the immutable
+    // UNIQUE(org,source_type,source_id,leg_no) index NEVER fired on a
+    // re-post — an accidental double-fire (network retry, double-click past
+    // the FE `posting` guard) appended a SECOND reversal+repost pair. The
+    // trial balance self-heals (each post first reverses ALL prior net), but
+    // the append-only ledger accumulated unbounded duplicate legs.
+    //
+    // Fix: derive the source_id from the CONTENT of the fresh legs (a hash
+    // of month + every (account,debit,credit) tuple) instead of the clock.
+    //   * An IDENTICAL re-post (same month, same computed closing snapshot)
+    //     → same source_id → collides on the unique index → we detect it via
+    //     ledgerHasSource and cleanly NO-OP. A double-fire posts exactly once.
+    //   * A GENUINE restate (stock/valuation actually changed → a different
+    //     closing snapshot) → different content hash → different source_id →
+    //     posts as a fresh reversal+repost, exactly as before.
+    // This preserves the re-post feature while making a retried double-fire
+    // exactly-once at the ledger level.
+    const { legs: freshLegs, closingTotalSen } = await buildClosingStockLegs(
+      db,
+      month,
+      orgId,
+      actorUserId,
+      "PENDING", // placeholder sourceId — rewritten below once we know the hash
+    );
+
     // Reverse the prior closing-stock net (any month) so a re-post or the
     // next month always lands the 330 stock accounts at THIS month's
     // closing — history-independent, like the opening-balance re-post.
     const prior = await db
       .prepare(
         `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
-          WHERE sourceType IN ('closing_stock','closing_stock_reversal') AND orgId = ?`,
+          WHERE sourceType IN ('closing_stock','closing_stock_reversal') AND orgId = ? AND hidden = 0`,
       )
       .bind(orgId)
       .all<{ accountCode: string; debitSen: number; creditSen: number }>();
@@ -4693,6 +4788,29 @@ app.post("/stock/close-post", async (c) => {
     for (const l of prior.results ?? []) {
       priorNet.set(l.accountCode, (priorNet.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
     }
+
+    // Content hash over the fresh closing snapshot + the prior net being
+    // reversed. Two identical re-posts against the same ledger state hash the
+    // same; anything that moved the stock value changes the hash.
+    const hashInput = [
+      month,
+      ...freshLegs.map((l) => `${l.accountCode}:${l.debitSen}:${l.creditSen}`),
+      "REV",
+      ...[...priorNet.entries()].map(([code, net]) => `${code}:${net}`),
+    ].join("|");
+    const contentHash = await sha256Hex(hashInput);
+    const postSourceId = `cs-${month}-${contentHash.slice(0, 16)}`;
+    const revSourceId = `cs-rev-${contentHash.slice(0, 16)}`;
+
+    // Already posted this exact snapshot? Clean no-op — a retry / double-fire
+    // returns success without appending a second identical pair.
+    if (await ledgerHasSource(db, orgId, "closing_stock", postSourceId)) {
+      return c.json({
+        success: true,
+        data: { month, closingTotalSen, alreadyPosted: true },
+      });
+    }
+
     const legs: LedgerEntryInput[] = [];
     let legNo = 1;
     for (const [code, net] of priorNet) {
@@ -4700,7 +4818,7 @@ app.post("/stock/close-post", async (c) => {
       legs.push({
         id: `lje-${crypto.randomUUID().slice(0, 12)}`,
         sourceType: "closing_stock_reversal",
-        sourceId: `cs-rev-${stamp}`,
+        sourceId: revSourceId,
         legNo: legNo++,
         accountCode: code,
         debitSen: net < 0 ? -net : 0,
@@ -4710,13 +4828,8 @@ app.post("/stock/close-post", async (c) => {
         orgId,
       });
     }
-    const { legs: freshLegs, closingTotalSen } = await buildClosingStockLegs(
-      db,
-      month,
-      orgId,
-      actorUserId,
-      `cs-${month}-${stamp}`,
-    );
+    // Re-stamp the fresh legs with the content-derived source_id.
+    for (const l of freshLegs) l.sourceId = postSourceId;
     if (freshLegs.length === 0 && legs.length === 0) {
       return c.json({ success: false, error: `No stock movements for ${month} — nothing to post.` }, 400);
     }
@@ -6760,6 +6873,12 @@ app.get("/pl", async (c) => {
   const productCategory = c.req.query("productCategory");
   const customerId = c.req.query("customerId");
   const state = c.req.query("state");
+  // Multi-company (Phase 1): OPTIONAL ?orgId= / ?company= scopes the P&L and
+  // Balance Sheet to one company. Absent → today's consolidated statements,
+  // byte-identical (the GL legs + operational-revenue cut both stay unfiltered).
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const invWhere = coFilter.active ? ` WHERE ${coFilter.sql}` : "";
 
   // --- chart of accounts lookup ---
   const coaRes = await c.var.DB.prepare(
@@ -6790,8 +6909,10 @@ app.get("/pl", async (c) => {
 
   // --- ledger legs ---
   const legRes = await c.var.DB.prepare(
-    "SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0",
-  ).all<{
+    `SELECT accountCode, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+  )
+    .bind(...(coFilter.active ? [coFilter.param] : []))
+    .all<{
     accountCode: string;
     sourceId: string;
     debitSen: number;
@@ -6974,8 +7095,10 @@ app.get("/pl", async (c) => {
   // --- operational revenue cuts from invoices (NOT the GL) ---
   const [invRes, itemRes, prodRes] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT id, customerName, totalSen, invoiceDate, customerId, customerState, status FROM invoices",
-    ).all<{
+      `SELECT id, customerName, totalSen, invoiceDate, customerId, customerState, status FROM invoices${invWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{
       id: string;
       customerName: string;
       totalSen: number;

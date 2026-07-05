@@ -1023,7 +1023,12 @@ async function buildDoDeliveredSoAndInvoice(
       statements.push(
         db
           .prepare(
-            "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ?",
+            // AND status = 'DELIVERED' (2026-07-04 audit): every legitimate
+            // path has the SO at DELIVERED by this point (advanced earlier in
+            // THIS batch, or already-DELIVERED on the resolve path). The guard
+            // makes a stale/concurrent re-fire a no-op instead of downgrading
+            // an already-INVOICED/CLOSED SO back to INVOICED.
+            "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ? AND status = 'DELIVERED'",
           )
           .bind(now, sid),
       );
@@ -1383,7 +1388,7 @@ app.get("/pending-sos", async (c) => {
   const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
     `SELECT id, companySO, companySOId, customerName, customerState,
-            customerPO, customerPOId, customerSO, customerSOId,
+            customerPO, customerPOId, customerSO, customerSOId, reference,
             hubName, hookkaExpectedDD, totalSen, status
        FROM sales_orders
       WHERE orgId = ?
@@ -3349,6 +3354,19 @@ async function createDeliveryOrderForPOs(
     let resolvedVehicleType = (body.vehicleType as string | undefined) ?? "";
     let resolvedDeliveryCostSen = Number(body.deliveryCostSen) || 0;
     const dropPointsForCost = Number(body.dropPoints) || 1;
+    // 0/0 hasRate guard (mirrors packing-lists.ts rateForDo, BUG-2026-06-25).
+    // A rate pair of 0/0 means "never keyed in 3PL Maintenance", NOT "free".
+    // Precedence stays vehicle-over-provider, but a RATE-LESS vehicle must fall
+    // THROUGH to its provider's rates instead of masking them with RM 0 — the
+    // exact latent DO-write bug BUG-2026-06-25 flagged as untouched (a 0/0
+    // vehicle used to "win" and silently persist deliveryCostSen = 0). We stage
+    // a provider-derived fallback here and only let a vehicle override it when
+    // the vehicle actually has a keyed rate. When neither side has a rate, the
+    // operator's explicit deliveryCostSen (or 0) stands untouched — additive,
+    // existing legitimately-0 DOs are unaffected.
+    const hasRatePair = (trip: number, drop: number): boolean =>
+      (Number(trip) || 0) > 0 || (Number(drop) || 0) > 0;
+    let providerRateCostSen: number | null = null;
 
     // Driver person lookup first — and the legacy-id fallback path needs
     // to know whether driverId hit a person row or not.
@@ -3414,12 +3432,17 @@ async function createDeliveryOrderForPOs(
         if (!resolvedVehicleId && provider.vehicleNo && !resolvedVehicleNo) {
           resolvedVehicleNo = provider.vehicleNo;
         }
-        // Provider-level rate fallback for cost — overridden below if a
-        // vehicle is picked (vehicle rates take precedence).
-        if (!resolvedVehicleId && !body.deliveryCostSen) {
-          resolvedDeliveryCostSen =
+        // Provider-level rate fallback for cost. Only meaningful when the
+        // provider actually has a keyed rate (0/0 = unset, not free). Staged
+        // into providerRateCostSen so the vehicle block below can fall through
+        // to it when the picked vehicle is itself rate-less.
+        if (!body.deliveryCostSen &&
+            hasRatePair(provider.ratePerTripSen, provider.ratePerExtraDropSen)) {
+          providerRateCostSen =
             provider.ratePerTripSen +
             Math.max(0, dropPointsForCost - 1) * provider.ratePerExtraDropSen;
+          // No vehicle picked → the provider rate IS the cost.
+          if (!resolvedVehicleId) resolvedDeliveryCostSen = providerRateCostSen;
         }
       }
     }
@@ -3441,9 +3464,18 @@ async function createDeliveryOrderForPOs(
         resolvedVehicleNo = vehicle.plateNo;
         resolvedVehicleType = vehicle.vehicleType ?? "";
         if (!body.deliveryCostSen) {
-          resolvedDeliveryCostSen =
-            vehicle.ratePerTripSen +
-            Math.max(0, dropPointsForCost - 1) * vehicle.ratePerExtraDropSen;
+          if (hasRatePair(vehicle.ratePerTripSen, vehicle.ratePerExtraDropSen)) {
+            // Vehicle has its own keyed rate → it wins (existing precedence).
+            resolvedDeliveryCostSen =
+              vehicle.ratePerTripSen +
+              Math.max(0, dropPointsForCost - 1) * vehicle.ratePerExtraDropSen;
+          } else if (providerRateCostSen !== null) {
+            // Rate-less vehicle (0/0 = unset) → fall through to the provider's
+            // keyed rate instead of masking it with RM 0 (BUG-2026-06-25 class).
+            resolvedDeliveryCostSen = providerRateCostSen;
+          }
+          // else: neither vehicle nor provider has a rate → leave the
+          // operator's explicit cost (or 0) as-is; don't invent a number.
         }
       } else {
         // Stored id no longer exists — null it out so the DO doesn't

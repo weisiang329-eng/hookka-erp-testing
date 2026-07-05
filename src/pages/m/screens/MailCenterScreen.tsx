@@ -13,7 +13,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Search, Plus, Paperclip } from "lucide-react";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { MobileHeader, FormSheet } from "../components";
 import { M, M_ACCENT } from "../theme";
 import { mailConfig } from "../config/modules";
@@ -160,9 +160,37 @@ export function MailThreadScreen() {
     `/api/mail-center/threads/${encodeURIComponent(id)}`,
   );
   const [composeSpec, setComposeSpec] = useState<FormSpec | null>(null);
+  const [signed, setSigned] = useState(false);
+  const [signing, setSigning] = useState(false);
 
   const thread = data?.thread ?? null;
   const messages = Array.isArray(data?.messages) ? (data!.messages as Record<string, unknown>[]) : [];
+
+  // "Sign receipt" (design, inbound mail) = acknowledge = mark the thread read +
+  // closed via the real PATCH /api/mail-center/threads/:id. Forward (the design's
+  // sent-side action) has no backend endpoint, so it's intentionally absent.
+  // window.fetch is globally CSRF-patched, so a raw fetch is fine.
+  const signReceipt = async () => {
+    if (signing) return;
+    setSigning(true);
+    try {
+      const r = await fetch(`/api/mail-center/threads/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "closed", unread: false }),
+      });
+      if (r.ok) {
+        setSigned(true);
+        // Broadcast so the mail lists (mobile + desktop Mail Center) drop the
+        // unread badge / show closed without a reload (2026-07-04 cache sweep).
+        invalidateCachePrefix("/api/mail-center");
+      } else window.alert("Couldn’t sign receipt.");
+    } catch {
+      window.alert("Network error.");
+    } finally {
+      setSigning(false);
+    }
+  };
 
   if (loading && !thread) return <Center text="Loading…" />;
   if (error && !thread) return <Center text="Couldn’t load this thread." />;
@@ -215,6 +243,19 @@ export function MailThreadScreen() {
       </div>
 
       <div style={{ position: "sticky", bottom: 0, background: M.card, borderTop: `1px solid ${M.divider}`, padding: "12px 16px calc(12px + env(safe-area-inset-bottom))", display: "flex", gap: 9 }}>
+        {signed || str(thread, "status") === "closed" ? (
+          <div style={{ flex: 1, height: 48, display: "flex", alignItems: "center", justifyContent: "center", border: `1px solid ${M.border}`, borderRadius: 12, background: M.card, color: "#4F7C3A", fontSize: 13.5, fontWeight: 700 }}>
+            Receipt signed ✓
+          </div>
+        ) : (
+          <button
+            onClick={signReceipt}
+            disabled={signing}
+            style={{ flex: 1, height: 48, border: `1px solid ${M.taupe}`, borderRadius: 12, background: M.card, color: M.taupe, fontFamily: "inherit", fontSize: 14, fontWeight: 700, cursor: signing ? "default" : "pointer" }}
+          >
+            {signing ? "Signing…" : "Sign receipt"}
+          </button>
+        )}
         <button
           onClick={() => setComposeSpec(newMailSpec())}
           style={{ flex: 1, height: 48, border: "none", borderRadius: 12, background: M.taupe, color: "#fff", fontFamily: "inherit", fontSize: 14, fontWeight: 700, cursor: "pointer" }}

@@ -3379,6 +3379,7 @@ function ARControlPanel({ company = "" }: { company?: string }) {
 
   // Multi-company (Phase 2): scope the control reconciliation to the selected
   // company. Absent (group) → URL unchanged = today's consolidated numbers.
+  const [ctlRev, setCtlRev] = useState(0);
   useEffect(() => {
     let stale = false;
     fetch(`/api/accounting/ar-control${company ? `?orgId=${encodeURIComponent(company)}` : ""}`)
@@ -3386,7 +3387,33 @@ function ARControlPanel({ company = "" }: { company?: string }) {
       .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
       .catch(() => {});
     return () => { stale = true; };
-  }, [company]);
+  }, [company, ctlRev]);
+
+  // One-shot counter rebuild (owner request 2026-07-06): reset every
+  // customer's running counter to its invoice-derived outstanding.
+  const { toast: ctlToast } = useToast();
+  const { confirm: ctlConfirm } = useConfirm();
+  const [rebuilding, setRebuilding] = useState(false);
+  const rebuildCounter = async () => {
+    if (!(await ctlConfirm({
+      title: "Recalculate customer counters?",
+      message: "Reset every customer's running counter to its invoice-derived outstanding (the same figure as the middle card). The old counter values are overwritten; the action is logged in the Audit Log.",
+      danger: false,
+    }))) return;
+    setRebuilding(true);
+    try {
+      const res = await fetch("/api/accounting/ar-control/rebuild-counter", { method: "POST" });
+      const j = (await res.json()) as { success?: boolean; error?: string; data?: { customersUpdated: number; beforeSen: number; afterSen: number } };
+      if (j?.success && j.data) {
+        ctlToast.success(`Counter rebuilt: ${j.data.customersUpdated} customer(s) updated, ${formatCurrency(j.data.beforeSen - j.data.afterSen)} of drift cleared.`);
+        setCtlRev((n) => n + 1);
+      } else ctlToast.error(j?.error || "Failed to rebuild the counter");
+    } catch {
+      ctlToast.error("Failed to rebuild the counter");
+    } finally {
+      setRebuilding(false);
+    }
+  };
 
   useEffect(() => {
     fetch("/api/customers")
@@ -3455,7 +3482,12 @@ ${rows}
           </Card>
           <Card>
             <CardContent className="p-4">
-              <p className="text-xs text-[#6B7280]">Customer running counter (outstandingSen)</p>
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-xs text-[#6B7280]">Customer running counter (outstandingSen)</p>
+                <Button variant="outline" size="sm" onClick={() => void rebuildCounter()} disabled={rebuilding} title="Reset every customer's counter to its invoice-derived outstanding (audited)">
+                  {rebuilding ? "Recalculating…" : "Recalculate"}
+                </Button>
+              </div>
               <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.customerCounterSen)}</p>
               <div className="mt-1">{drift(data.driftCounterVsInvoicesSen)}</div>
             </CardContent>

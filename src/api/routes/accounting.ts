@@ -2456,6 +2456,69 @@ app.get("/ap-control", async (c) => {
   });
 });
 
+// POST /ar-control/rebuild-counter — one-shot reset of every customer's
+// running counter (customers.outstandingSen) to its invoice-derived truth
+// (Σ max(0, total − paid) over non-DRAFT/CANCELLED invoices past the opening
+// floor — the same set /ar-control's second card sums). The counter is a
+// cascade-maintained tally that accumulated years of drift (pre-opening
+// invoices never un-counted, legacy void paths that skipped the decrement);
+// owner asked 2026-07-06 to make it accurate again. Owner-triggered via the
+// Recalculate button on the Debtor tab; audited; idempotent.
+app.post("/ar-control/rebuild-counter", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const [invRes, custRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT customerId, totalSen, paidAmount, invoiceDate, isOpening
+           FROM invoices WHERE status NOT IN ('DRAFT','CANCELLED')`,
+      )
+      .all<{ customerId: string; totalSen: number; paidAmount: number; invoiceDate: string | null; isOpening: number | null }>(),
+    db
+      .prepare("SELECT id, outstandingSen FROM customers")
+      .all<{ id: string; outstandingSen?: number | null; outstanding_sen?: number | null }>(),
+  ]);
+  const obDate = await getOpeningDate(db);
+  const truth = new Map<string, number>();
+  for (const inv of invRes.results ?? []) {
+    if (rowBeforeOpening(inv.invoiceDate, obDate, inv.isOpening)) continue;
+    const unpaid = Math.max(0, (Number(inv.totalSen) || 0) - (Number(inv.paidAmount) || 0));
+    if (unpaid === 0) continue;
+    truth.set(inv.customerId, (truth.get(inv.customerId) ?? 0) + unpaid);
+  }
+  let beforeSen = 0;
+  let afterSen = 0;
+  const statements: D1PreparedStatement[] = [];
+  for (const cu of custRes.results ?? []) {
+    const cur = Math.round(Number(cu.outstandingSen ?? cu.outstanding_sen) || 0);
+    const want = truth.get(cu.id) ?? 0;
+    beforeSen += cur;
+    afterSen += want;
+    if (cur !== want) {
+      statements.push(
+        db.prepare("UPDATE customers SET outstandingSen = ? WHERE id = ?").bind(want, cu.id),
+      );
+    }
+  }
+  if (statements.length) await db.batch(statements);
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: "ar_counter_rebuild",
+    action: "update",
+    after: {
+      customersUpdated: statements.length,
+      beforeSen,
+      afterSen,
+      driftClearedSen: beforeSen - afterSen,
+    },
+  });
+  return c.json({
+    success: true,
+    data: { customersUpdated: statements.length, beforeSen, afterSen },
+  });
+});
+
 app.get("/supplier-statement", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;

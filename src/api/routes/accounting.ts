@@ -2456,18 +2456,16 @@ app.get("/ap-control", async (c) => {
   });
 });
 
-// POST /ar-control/rebuild-counter — one-shot reset of every customer's
-// running counter (customers.outstandingSen) to its invoice-derived truth
-// (Σ max(0, total − paid) over non-DRAFT/CANCELLED invoices past the opening
-// floor — the same set /ar-control's second card sums). The counter is a
-// cascade-maintained tally that accumulated years of drift (pre-opening
-// invoices never un-counted, legacy void paths that skipped the decrement);
-// owner asked 2026-07-06 to make it accurate again. Owner-triggered via the
-// Recalculate button on the Debtor tab; audited; idempotent.
-app.post("/ar-control/rebuild-counter", async (c) => {
-  const denied = await requirePermission(c, "accounting", "update");
-  if (denied) return denied;
-  const db = c.var.DB;
+// Counter rebuilds (owner rule 2026-07-06 「让他不会漂」) — reset the
+// cascade-maintained running counters to their document-derived truth. The
+// counters accumulated years of drift (pre-opening docs never un-counted,
+// legacy void paths that skipped the decrement). Shared by the Debtor tab's
+// Recalculate button AND the nightly cron (worker.ts
+// /api/internal/nightly-counter-rebuild) so the counters self-heal daily.
+// Idempotent: only rows whose value differs are written.
+export async function rebuildArCounterSen(db: Env["Variables"]["DB"]): Promise<{
+  updated: number; beforeSen: number; afterSen: number;
+}> {
   const [invRes, custRes] = await Promise.all([
     db
       .prepare(
@@ -2502,20 +2500,74 @@ app.post("/ar-control/rebuild-counter", async (c) => {
     }
   }
   if (statements.length) await db.batch(statements);
+  return { updated: statements.length, beforeSen, afterSen };
+}
+
+// Supplier side: suppliers.outstandingSen := Σ (PI amount − paid) over
+// non-DRAFT/CANCELLED PIs past the opening floor (excluded pre-opening PIs
+// drop) — the same bills-only set /ap-control's piOutstandingSen sums, so
+// driftCounterVsPiSen reads 0 after a rebuild.
+export async function rebuildApCounterSen(db: Env["Variables"]["DB"]): Promise<{
+  updated: number; beforeSen: number; afterSen: number;
+}> {
+  const [piRes, supRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT id, supplierId, amountSen, paidAmountSen, invoiceDate, isOpening
+           FROM purchase_invoices WHERE status NOT IN ('DRAFT','CANCELLED')`,
+      )
+      .all<{ id: string; supplierId: string; amountSen: number; paidAmountSen?: number | null; paid_amount_sen?: number | null; invoiceDate: string | null; isOpening: number | null }>(),
+    db
+      .prepare("SELECT id, outstandingSen FROM suppliers")
+      .all<{ id: string; outstandingSen?: number | null; outstanding_sen?: number | null }>(),
+  ]);
+  const obDate = await getOpeningDate(db);
+  const excl = await loadOpeningApExcludes(db);
+  const truth = new Map<string, number>();
+  for (const pi of piRes.results ?? []) {
+    if (apRowBeforeOpening({ id: pi.id, date: pi.invoiceDate, isOpening: pi.isOpening }, obDate, excl)) continue;
+    const unpaid = (Number(pi.amountSen) || 0) - (Number(pi.paidAmountSen ?? pi.paid_amount_sen) || 0);
+    if (unpaid <= 0) continue;
+    truth.set(pi.supplierId, (truth.get(pi.supplierId) ?? 0) + unpaid);
+  }
+  let beforeSen = 0;
+  let afterSen = 0;
+  const statements: D1PreparedStatement[] = [];
+  for (const su of supRes.results ?? []) {
+    const cur = Math.round(Number(su.outstandingSen ?? su.outstanding_sen) || 0);
+    const want = truth.get(su.id) ?? 0;
+    beforeSen += cur;
+    afterSen += want;
+    if (cur !== want) {
+      statements.push(
+        db.prepare("UPDATE suppliers SET outstandingSen = ? WHERE id = ?").bind(want, su.id),
+      );
+    }
+  }
+  if (statements.length) await db.batch(statements);
+  return { updated: statements.length, beforeSen, afterSen };
+}
+
+// POST /ar-control/rebuild-counter — the Debtor tab's Recalculate button.
+// Audited; the nightly cron does the same thing automatically at 02:30 SGT.
+app.post("/ar-control/rebuild-counter", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const r = await rebuildArCounterSen(c.var.DB);
   await emitAudit(c, {
     resource: "accounting",
     resourceId: "ar_counter_rebuild",
     action: "update",
     after: {
-      customersUpdated: statements.length,
-      beforeSen,
-      afterSen,
-      driftClearedSen: beforeSen - afterSen,
+      customersUpdated: r.updated,
+      beforeSen: r.beforeSen,
+      afterSen: r.afterSen,
+      driftClearedSen: r.beforeSen - r.afterSen,
     },
   });
   return c.json({
     success: true,
-    data: { customersUpdated: statements.length, beforeSen, afterSen },
+    data: { customersUpdated: r.updated, beforeSen: r.beforeSen, afterSen: r.afterSen },
   });
 });
 

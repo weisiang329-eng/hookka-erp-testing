@@ -2571,6 +2571,29 @@ app.post("/ar-control/rebuild-counter", async (c) => {
   });
 });
 
+// POST /ap-control/rebuild-counter — supplier twin of the AR rebuild (owner
+// request 2026-07-06). Audited; the nightly cron does both sides at 02:30 SGT.
+app.post("/ap-control/rebuild-counter", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const r = await rebuildApCounterSen(c.var.DB);
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: "ap_counter_rebuild",
+    action: "update",
+    after: {
+      suppliersUpdated: r.updated,
+      beforeSen: r.beforeSen,
+      afterSen: r.afterSen,
+      driftClearedSen: r.beforeSen - r.afterSen,
+    },
+  });
+  return c.json({
+    success: true,
+    data: { suppliersUpdated: r.updated, beforeSen: r.beforeSen, afterSen: r.afterSen },
+  });
+});
+
 app.get("/supplier-statement", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;

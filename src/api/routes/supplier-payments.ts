@@ -446,6 +446,22 @@ app.post("/knock-off", async (c) => {
     if (advance.purchaseInvoiceId) {
       return c.json({ success: false, error: "This row is already tied to an invoice — not an unapplied advance" }, 400);
     }
+    // BUG-2026-07-08-003 family: rows of voided/deleted payments stay in the
+    // table (for unvoid) but must never be knocked off — the cash never
+    // "exists" while the voucher is inactive.
+    const advLc = await c.var.DB
+      .prepare(
+        `SELECT state FROM document_lifecycle
+          WHERE sourceType = 'supplier_payment' AND sourceId = ? AND orgId = ?`,
+      )
+      .bind(advance.paymentNo, orgId)
+      .first<{ state: string }>();
+    if (advLc && advLc.state !== "ACTIVE") {
+      return c.json(
+        { success: false, error: `Payment ${advance.paymentNo} is ${advLc.state} — unvoid it before knocking off its advance` },
+        400,
+      );
+    }
     const remainingAdvanceSen = Number(advance.amountSen) || 0;
     if (amountSen > remainingAdvanceSen) {
       return c.json({ success: false, error: `Amount exceeds the unapplied advance balance (RM ${(remainingAdvanceSen / 100).toFixed(2)})` }, 400);

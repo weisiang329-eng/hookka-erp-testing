@@ -5650,7 +5650,7 @@ type ScanFinanceResult = {
   totalSen: number | null;
   extraDocs: number;
 };
-function ScanPrefillButton({ label, onResult }: { label: string; onResult: (d: ScanFinanceResult) => void }) {
+function ScanPrefillButton({ label, onResult }: { label: string; onResult: (d: ScanFinanceResult) => void | Promise<void> }) {
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -5664,7 +5664,7 @@ function ScanPrefillButton({ label, onResult }: { label: string; onResult: (d: S
       const res = await fetch("/api/scan-finance/extract", { method: "POST", body: fd });
       const j = (await res.json()) as { success?: boolean; error?: string; data?: ScanFinanceResult };
       if (j?.success && j.data) {
-        onResult(j.data);
+        await onResult(j.data);
         if (j.data.extraDocs > 0) {
           toast.success(`Heads up: the file contains ${j.data.extraDocs + 1} documents — only the first was used.`);
         }
@@ -5870,10 +5870,44 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
     else toast.error(j?.error || `${verb} failed`);
   };
 
-  // OCR → prefill the bill form (party matched by letterhead name; the
-  // operator picks the counter account(s) and reviews before saving).
-  const applyScan = (d: ScanFinanceResult) => {
-    const hit = scanNameMatch(sideParties, d.partyName);
+  // OCR → prefill the bill form. Party matched by letterhead name; an
+  // UNKNOWN party offers one-click creation into the register (owner
+  // 2026-07-08); the account(s) prefill from the party's LATEST bill (same
+  // creditor almost always books to the same account) — still editable.
+  const [extraParties, setExtraParties] = useState<OtherParty[]>([]);
+  const allSideParties = [...sideParties, ...extraParties.filter((p) => p.type === side)];
+  const applyScan = async (d: ScanFinanceResult) => {
+    let hit = scanNameMatch(allSideParties, d.partyName);
+    if (!hit && d.partyName) {
+      const ok = await confirm({
+        title: side === "CREDITOR" ? "Create new creditor?" : "Create new debtor?",
+        message: `"${d.partyName}" is not in the register. Create it now and use it for this bill?`,
+        danger: false,
+      });
+      if (ok) {
+        try {
+          const res = await fetch("/api/accounting/other-parties", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: side, name: d.partyName }),
+          });
+          const j = (await res.json()) as { success?: boolean; error?: string; data?: OtherParty };
+          if (j?.success && j.data?.id) {
+            setExtraParties((p) => [...p, j.data as OtherParty]);
+            hit = j.data;
+            toast.success(`Created "${d.partyName}" in the ${side === "CREDITOR" ? "creditor" : "debtor"} register.`);
+          } else toast.error(j?.error || "Failed to create the party");
+        } catch {
+          toast.error("Failed to create the party");
+        }
+      }
+    }
+    // Last-used account for this party (latest bill's first line).
+    const lastAcct = hit
+      ? ((bills ?? [])
+          .filter((b) => b.partyId === hit!.id && b.items?.length)
+          .sort((a, b) => (b.billDate || "").localeCompare(a.billDate || ""))[0]?.items[0]?.counterAccount ?? "")
+      : "";
     setForm((f) => ({
       ...f,
       partyId: hit?.id ?? f.partyId,
@@ -5882,16 +5916,18 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
       description: d.partyName ? `${d.partyName}${d.docType ? ` · ${d.docType}` : ""}` : f.description,
       taxStr: d.taxSen ? (d.taxSen / 100).toFixed(2) : f.taxStr,
       lines: d.lines.length
-        ? d.lines.map((l) => ({ counterAccount: "", amountStr: (l.amountSen / 100).toFixed(2), description: l.description }))
+        ? d.lines.map((l) => ({ counterAccount: lastAcct, amountStr: (l.amountSen / 100).toFixed(2), description: l.description }))
         : d.totalSen
-          ? [{ counterAccount: "", amountStr: ((d.totalSen - (d.taxSen ?? 0)) / 100).toFixed(2), description: d.docType ?? "" }]
+          ? [{ counterAccount: lastAcct, amountStr: ((d.totalSen - (d.taxSen ?? 0)) / 100).toFixed(2), description: d.docType ?? "" }]
           : f.lines,
       isOpening: false,
     }));
     setShowForm(true);
     toast.success(
       hit
-        ? "Scanned — review the lines and pick the account(s)."
+        ? lastAcct
+          ? "Scanned — account prefilled from this party's last bill; review before saving."
+          : "Scanned — review the lines and pick the account(s)."
         : "Scanned — party not recognised, select it manually and review the lines.",
     );
   };
@@ -5913,7 +5949,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
               <select value={form.partyId} onChange={(e) => setForm({ ...form, partyId: e.target.value })}
                 className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm">
                 <option value="">Select…</option>
-                {sideParties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                {allSideParties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </div>
             <div>
@@ -7363,12 +7399,20 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
 
-  // OCR → prefill the voucher form (payee/date/lines; the operator picks the
-  // expense account(s) and reviews before posting). Receipts have no account
-  // info, so accounts stay blank on purpose. Amount = the printed line
-  // amounts; single-total docs (petrol slip) prefill one line with the total.
+  // OCR → prefill the voucher form (payee/date/lines). Receipts carry no GL
+  // account, so the account prefills from the SAME payee's latest voucher
+  // (same payee almost always books to the same expense account) — blank when
+  // the payee is new. Amount = the printed line amounts; single-total docs
+  // (petrol slip) prefill one line with the total.
   const applyScan = (d: ScanFinanceResult) => {
     setEditingId(null);
+    const normName = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const prior = d.partyName
+      ? (rows ?? [])
+          .filter((r) => r.status !== "VOID" && r.lines?.length && normName(r.payee ?? "") && normName(r.payee ?? "") === normName(d.partyName ?? ""))
+          .sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0]
+      : undefined;
+    const lastAcct = prior?.lines?.[0]?.accountCode ?? "";
     setForm((f) => ({
       ...f,
       date: d.docDate ?? new Date().toISOString().slice(0, 10),
@@ -7378,13 +7422,17 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     }));
     setLines(
       d.lines.length
-        ? d.lines.map((l) => ({ accountCode: "", description: l.description, amount: (l.amountSen / 100).toFixed(2) }))
+        ? d.lines.map((l) => ({ accountCode: lastAcct, description: l.description, amount: (l.amountSen / 100).toFixed(2) }))
         : d.totalSen
-          ? [{ accountCode: "", description: d.docNo ?? "", amount: (d.totalSen / 100).toFixed(2) }]
+          ? [{ accountCode: lastAcct, description: d.docNo ?? "", amount: (d.totalSen / 100).toFixed(2) }]
           : [{ accountCode: "", description: "", amount: "" }],
     );
     setShowForm(true);
-    toast.success("Scanned — review the lines and pick the expense account(s).");
+    toast.success(
+      lastAcct
+        ? "Scanned — account prefilled from this payee's last voucher; review before posting."
+        : "Scanned — review the lines and pick the expense account(s).",
+    );
   };
 
   return (

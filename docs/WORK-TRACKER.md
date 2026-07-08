@@ -9,7 +9,18 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-04 — 🔵 Multi-Company Phase 3: dual-identity + inter-company mirror (worktree branch, NOT pushed)
+## 2026-07-08 — 🔵 AP drift −966.60: server-side 400-0000 reconciliation endpoint
+
+Owner rule 「做账就是要准」 — the /ap-control drift card must break down to the
+sen. Prior hand-reconciliation across snapshots failed (identity gave +16.60 vs
+observed −966.60). Building the checkpoint's "唯一正确做法": GET
+/api/accounting/ap-reconciliation — one consistent read computing GL 400-0000
+by sourceType, per-PI GL-vs-face, per-payment GL-vs-subledger claim (lifecycle
+aware), advances, opening coverage, CN block, overpaid clamps — every item
+carries a driftContributionSen and Σ contributions ≡ drift (algebraic identity,
+enforced by tests). Pure fn `src/lib/ap-recon.ts` + tests/ap-recon.test.mjs.
+Known clues to confirm: subledger payments 152.40 over GL (VOID unfiltered?),
+GL purchase_invoice DR 15.06 stray leg.
 
 ADDITIVE-only, opt-in, default OFF. Finance-adjacent — built conservatively;
 external customers/suppliers/POs/SOs behave byte-identical.

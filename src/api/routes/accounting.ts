@@ -70,6 +70,12 @@ import {
   type FifoEvent,
   type CheckpointCum,
 } from "../../lib/material-cost-fifo";
+import {
+  buildApReconciliation,
+  type ApReconLeg,
+  type ApReconPi,
+  type ApReconPaymentRow,
+} from "../../lib/ap-recon";
 
 const app = new Hono<Env>();
 
@@ -2519,6 +2525,183 @@ app.get("/ap-control", async (c) => {
       driftControlVsPiSen: tradeControlSen - netOutstandingSen,
       driftCounterVsPiSen: supplierCounterSen - netSubledgerSen,
       aging,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /ap-reconciliation — itemized 400-0000 drift breakdown (owner rule
+// 2026-07-08 「做账就是要准」— the drift card must break down to the sen).
+// One request gathers the control legs, EVERY purchase invoice, EVERY
+// supplier-payment row (lifecycle-aware) and the purchase-CN totals under the
+// exact same floor/alias/company rules /ap-control uses, then the pure
+// buildApReconciliation (tests/ap-recon.test.mjs) decomposes control − net
+// into items whose contributions sum EXACTLY to the drift. Read-only.
+// ---------------------------------------------------------------------------
+app.get("/ap-reconciliation", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  await ensurePartialPaymentColumns(c.var.DB);
+  await ensureFinanceOrgColumns(c.var.DB);
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const piWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const orgId = getOrgId(c);
+
+  const [legRes, piRes, pcnRes] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>(),
+    c.var.DB.prepare(
+      `SELECT id, piNo, supplierName, status, amountSen, paid_amount_sen, invoiceDate, isOpening FROM purchase_invoices WHERE 1=1${piWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{
+        id: string; piNo?: string; pi_no?: string; supplierName?: string; supplier_name?: string;
+        status: string; amountSen?: number; amount_sen?: number;
+        paidAmountSen?: number | null; paid_amount_sen?: number | null;
+        invoiceDate?: string | null; invoice_date?: string | null;
+        isOpening?: number | null; is_opening?: number | null;
+      }>(),
+    c.var.DB.prepare(
+      "SELECT COALESCE(SUM(totalAmount),0) AS s FROM purchase_credit_notes WHERE status = 'POSTED'",
+    ).first<{ s: number }>(),
+  ]);
+  // Payment rows: EVERY row (cash + CN markers + voided/deleted) with its
+  // lifecycle state — the recon itemizes what the aging loaders would count
+  // vs what the GL shows, so nothing may be pre-filtered here.
+  let payRows: {
+    paymentNo?: string; payment_no?: string; supplierName?: string; supplier_name?: string;
+    purchaseInvoiceId?: string | null; purchase_invoice_id?: string | null;
+    date?: string; amountSen?: number; amount_sen?: number;
+    bookedSen?: number | null; booked_sen?: number | null;
+    method?: string; lifecycleState?: string | null; lifecyclestate?: string | null;
+  }[] = [];
+  try {
+    const payRes = await c.var.DB.prepare(
+      `SELECT sp.payment_no   AS payment_no,
+              sp.supplier_name AS supplier_name,
+              sp.purchase_invoice_id AS purchase_invoice_id,
+              sp.date         AS date,
+              sp.amount_sen   AS amount_sen,
+              sp.booked_sen   AS booked_sen,
+              COALESCE(sp.method, '') AS method,
+              dl.state        AS lifecycleState
+         FROM supplier_payments sp
+         LEFT JOIN document_lifecycle dl
+                ON dl.sourceType = 'supplier_payment'
+               AND dl.sourceId = sp.payment_no
+               AND dl.orgId = sp.org_id
+        WHERE sp.org_id = ?`,
+    )
+      .bind(orgId)
+      .all<(typeof payRows)[number]>();
+    payRows = payRes.results ?? [];
+  } catch {
+    payRows = []; // supplier_payments absent (pre-migration DB) → payment side reads empty
+  }
+  let cnAllocCtlSen = 0;
+  try {
+    const cnAllocRes = await c.var.DB.prepare(
+      "SELECT COALESCE(SUM(booked_sen),0) AS s FROM supplier_payments WHERE method = 'CREDIT_NOTE'",
+    ).first<{ s: number }>();
+    cnAllocCtlSen = Number(cnAllocRes?.s) || 0;
+  } catch {
+    cnAllocCtlSen = 0;
+  }
+
+  const { docDate, openingDate: obDateRc } = await loadDocDateResolver(c.var.DB);
+  const resolveRc = await loadAccountResolver(c.var.DB);
+  const apExclRc = await loadOpeningApExcludes(c.var.DB);
+
+  // 400-0000 legs, post-floor + alias-resolved — the same filter chain the
+  // /ap-control balance walks, so controlSen ties the card.
+  const legs400: ApReconLeg[] = [];
+  const drAll = new Map<string, number>();
+  const crAll = new Map<string, number>();
+  for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDateRc)) continue;
+    const code = resolveRc(l.accountCode);
+    drAll.set(code, (drAll.get(code) ?? 0) + (Number(l.debitSen) || 0));
+    crAll.set(code, (crAll.get(code) ?? 0) + (Number(l.creditSen) || 0));
+    if (code !== "400-0000") continue;
+    legs400.push({
+      sourceType: String(l.sourceType ?? ""),
+      sourceId: String(l.sourceId ?? ""),
+      debitSen: Number(l.debitSen) || 0,
+      creditSen: Number(l.creditSen) || 0,
+    });
+  }
+
+  const pis: ApReconPi[] = (piRes.results ?? []).map((r) => {
+    const id = String(r.id);
+    const invoiceDate = (r.invoiceDate ?? r.invoice_date ?? null) as string | null;
+    const isOpening = !!(r.isOpening ?? r.is_opening);
+    const floored = apRowBeforeOpening({ id, date: invoiceDate, isOpening }, obDateRc, apExclRc);
+    const preOpeningIncluded =
+      !floored && !isOpening && !!obDateRc && String(invoiceDate ?? "").slice(0, 10) < obDateRc;
+    return {
+      id,
+      piNo: String(r.piNo ?? r.pi_no ?? ""),
+      supplierName: String(r.supplierName ?? r.supplier_name ?? ""),
+      status: String(r.status ?? ""),
+      amountSen: Math.round(Number(r.amountSen ?? r.amount_sen) || 0),
+      paidSen: Math.round(Number(r.paidAmountSen ?? r.paid_amount_sen) || 0),
+      isOpening,
+      preOpeningIncluded,
+      floored,
+    };
+  });
+
+  const paymentRows: ApReconPaymentRow[] = payRows.map((r) => {
+    const state = String(r.lifecycleState ?? r.lifecyclestate ?? "") || "ACTIVE";
+    return {
+      paymentNo: String(r.paymentNo ?? r.payment_no ?? ""),
+      purchaseInvoiceId: (r.purchaseInvoiceId ?? r.purchase_invoice_id ?? null) as string | null,
+      bookedSen: Math.round(Number(r.bookedSen ?? r.booked_sen) || 0),
+      amountSen: Math.round(Number(r.amountSen ?? r.amount_sen) || 0),
+      method: String(r.method ?? ""),
+      active: state === "ACTIVE",
+      supplierName: String(r.supplierName ?? r.supplier_name ?? ""),
+      date: String(r.date ?? "").slice(0, 10),
+    };
+  });
+
+  const report = buildApReconciliation({
+    legs400,
+    pis,
+    paymentRows,
+    pcnPostedSen: Number(pcnRes?.s) || 0,
+    cnAllocCtlSen,
+  });
+
+  // SCC control balances (405 excluded from trade, mirroring /ap-control) so
+  // any gap between the card's tradeControlSen and pure 400-0000 is visible.
+  const coaRes = await c.var.DB.prepare(
+    "SELECT code, name FROM chart_of_accounts WHERE specialAccountType = 'SCC'",
+  ).all<{ code: string; name: string }>();
+  const controls = (coaRes.results ?? [])
+    .map((a) => ({
+      code: a.code,
+      name: a.name,
+      balanceSen: (crAll.get(a.code) ?? 0) - (drAll.get(a.code) ?? 0),
+    }))
+    .sort((a, b) => a.code.localeCompare(b.code));
+  const tradeControlSen = controls
+    .filter((a) => a.code !== "405-0000")
+    .reduce((s, a) => s + a.balanceSen, 0);
+
+  return c.json({
+    success: true,
+    data: {
+      asOf: new Date().toISOString().slice(0, 10),
+      openingDate: obDateRc ?? null,
+      controls,
+      tradeControlSen,
+      nonTrade400GapSen: tradeControlSen - report.controlSen,
+      ...report,
     },
   });
 });

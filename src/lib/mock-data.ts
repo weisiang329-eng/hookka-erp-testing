@@ -4062,6 +4062,13 @@ export type JournalEntry = {
   createdAt: string;
 };
 
+export type AgingDocDetail = {
+  no: string;
+  date: string;
+  mo: number; // bucket 0..4: current / 1 / 2 / 3 / 3+ months
+  amountSen: number; // negative = un-knocked advance
+};
+
 export type ARAgingEntry = {
   customerId: string;
   customerName: string;
@@ -4070,6 +4077,7 @@ export type ARAgingEntry = {
   days60Sen: number;
   days90Sen: number;
   over90Sen: number;
+  docs?: AgingDocDetail[];
 };
 
 export type APAgingEntry = {
@@ -4080,6 +4088,7 @@ export type APAgingEntry = {
   days60Sen: number;
   days90Sen: number;
   over90Sen: number;
+  docs?: AgingDocDetail[];
 };
 
 export const chartOfAccounts: ChartOfAccount[] = [];

@@ -114,6 +114,13 @@ type JournalLineRow = {
   description: string;
 };
 
+// Per-document detail row for the expandable aging (owner rule 2026-07-08:
+// 「可以点了展开看 detail」— his old system's Debtor Aging - Detail layout:
+// each open document under its party, amount in its aging column). `mo` is
+// the bucket index 0..4 (current / 1 / 2 / 3 / 3+ months); advances appear
+// as negative current-bucket docs.
+type AgingDocRow = { no: string; date: string; mo: number; amountSen: number };
+
 type ArAgingRow = {
   customerId: string;
   customerName: string;
@@ -122,6 +129,7 @@ type ArAgingRow = {
   days60Sen: number;
   days90Sen: number;
   over90Sen: number;
+  docs: AgingDocRow[];
 };
 
 type ApAgingRow = {
@@ -132,7 +140,10 @@ type ApAgingRow = {
   days60Sen: number;
   days90Sen: number;
   over90Sen: number;
+  docs: AgingDocRow[];
 };
+
+const agingBucketIdx = (mo: number): number => (mo <= 0 ? 0 : mo >= 4 ? 4 : mo);
 
 // ---------------------------------------------------------------------------
 // Row mappers — match the legacy mock-data shapes
@@ -350,24 +361,25 @@ function addToBucket(
 async function loadUnappliedSupplierAdvances(
   db: Env["Variables"]["DB"],
   orgId: string,
-): Promise<Map<string, { supplierName: string; sen: number }>> {
-  const out = new Map<string, { supplierName: string; sen: number }>();
+): Promise<Map<string, { supplierName: string; sen: number; items: { paymentNo: string; date: string; sen: number }[] }>> {
+  const out = new Map<string, { supplierName: string; sen: number; items: { paymentNo: string; date: string; sen: number }[] }>();
   try {
     const res = await db
       .prepare(
-        `SELECT supplierId, supplierName, amountSen FROM supplier_payments
+        `SELECT supplierId, supplierName, amountSen, paymentNo, date FROM supplier_payments
           WHERE orgId = ? AND purchaseInvoiceId IS NULL AND amountSen > 0`,
       )
       .bind(orgId)
-      .all<{ supplierId?: string; supplier_id?: string; supplierName?: string; supplier_name?: string; amountSen?: number; amount_sen?: number }>();
+      .all<{ supplierId?: string; supplier_id?: string; supplierName?: string; supplier_name?: string; amountSen?: number; amount_sen?: number; paymentNo?: string; payment_no?: string; date?: string }>();
     for (const r of res.results ?? []) {
       const id = String(r.supplierId ?? r.supplier_id ?? "");
       if (!id) continue;
       const sen = Math.round(Number(r.amountSen ?? r.amount_sen) || 0);
       if (sen <= 0) continue;
+      const item = { paymentNo: String(r.paymentNo ?? r.payment_no ?? ""), date: String(r.date ?? "").slice(0, 10), sen };
       const cur = out.get(id);
-      if (cur) cur.sen += sen;
-      else out.set(id, { supplierName: String(r.supplierName ?? r.supplier_name ?? ""), sen });
+      if (cur) { cur.sen += sen; cur.items.push(item); }
+      else out.set(id, { supplierName: String(r.supplierName ?? r.supplier_name ?? ""), sen, items: [item] });
     }
   } catch {
     /* supplier_payments unavailable → no advance rows */
@@ -412,12 +424,14 @@ app.get("/aging", async (c) => {
     async () => {
       const [invRes, piRes] = await Promise.all([
         c.var.DB.prepare(
-          `SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening FROM invoices${arWhere}`,
+          `SELECT customerId, customerName, invoiceNo, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening FROM invoices${arWhere}`,
         )
           .bind(...(coFilter.active ? [coFilter.param] : []))
           .all<{
           customerId: string;
           customerName: string;
+          invoiceNo?: string | null;
+          invoice_no?: string | null;
           totalSen: number;
           paidAmount: number;
           status: string;
@@ -426,13 +440,15 @@ app.get("/aging", async (c) => {
           isOpening: number | null;
         }>(),
         c.var.DB.prepare(
-          `SELECT id, supplierId, supplierName, amountSen, paidAmountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices${apWhere}`,
+          `SELECT id, supplierId, supplierName, piNo, amountSen, paidAmountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices${apWhere}`,
         )
           .bind(...(coFilter.active ? [coFilter.param] : []))
           .all<{
           id: string;
           supplierId: string;
           supplierName: string;
+          piNo?: string | null;
+          pi_no?: string | null;
           amountSen: number;
           paidAmountSen?: number | null;
           paid_amount_sen?: number | null;
@@ -462,10 +478,18 @@ app.get("/aging", async (c) => {
             days60Sen: 0,
             days90Sen: 0,
             over90Sen: 0,
+            docs: [],
           };
           arMap.set(i.customerId, row);
         }
-        addToBucket(row, monthsOverdue(i.invoiceDate ?? i.dueDate), outstanding);
+        const moAr = monthsOverdue(i.invoiceDate ?? i.dueDate);
+        addToBucket(row, moAr, outstanding);
+        row.docs.push({
+          no: String(i.invoiceNo ?? i.invoice_no ?? ""),
+          date: String(i.invoiceDate ?? "").slice(0, 10),
+          mo: agingBucketIdx(moAr),
+          amountSen: outstanding,
+        });
       }
 
       const apMap = new Map<string, ApAgingRow>();
@@ -489,13 +513,22 @@ app.get("/aging", async (c) => {
             days60Sen: 0,
             days90Sen: 0,
             over90Sen: 0,
+            docs: [],
           };
           apMap.set(p.supplierId, row);
         }
-        addToBucket(row, monthsOverdue(p.invoiceDate ?? p.dueDate), outstanding);
+        const moAp = monthsOverdue(p.invoiceDate ?? p.dueDate);
+        addToBucket(row, moAp, outstanding);
+        row.docs.push({
+          no: String(p.piNo ?? p.pi_no ?? ""),
+          date: String(p.invoiceDate ?? "").slice(0, 10),
+          mo: agingBucketIdx(moAp),
+          amountSen: outstanding,
+        });
       }
       // Unapplied supplier advances → NEGATIVE current-bucket rows (owner rule
       // 2026-07-05), so the AP aging total ties the 400-0000 control exactly.
+      // Each advance also joins the expandable detail as its own negative doc.
       for (const [supplierId, adv] of await loadUnappliedSupplierAdvances(c.var.DB, orgId)) {
         let row = apMap.get(supplierId);
         if (!row) {
@@ -507,11 +540,22 @@ app.get("/aging", async (c) => {
             days60Sen: 0,
             days90Sen: 0,
             over90Sen: 0,
+            docs: [],
           };
           apMap.set(supplierId, row);
         }
         row.currentSen -= adv.sen;
+        for (const it of adv.items) {
+          row.docs.push({
+            no: `${it.paymentNo} · Advance`,
+            date: it.date,
+            mo: 0,
+            amountSen: -it.sen,
+          });
+        }
       }
+      for (const row of arMap.values()) row.docs.sort((a, b) => a.mo - b.mo || a.date.localeCompare(b.date));
+      for (const row of apMap.values()) row.docs.sort((a, b) => a.mo - b.mo || a.date.localeCompare(b.date));
 
       return {
         data: {
@@ -2416,9 +2460,9 @@ app.get("/ap-control", async (c) => {
   }
   // Unapplied supplier advances → NEGATIVE not-due rows (owner rule 2026-07-05),
   // so the aging table's total ties the 400-0000 control exactly; knock-off
-  // clears both sides at once. (piOutstandingSen stays bills-only — the drift
-  // card = un-knocked advances, by design.)
-  for (const [supplierId, adv] of await loadUnappliedSupplierAdvances(c.var.DB, getOrgId(c))) {
+  // clears both sides at once.
+  const advMapCtl = await loadUnappliedSupplierAdvances(c.var.DB, getOrgId(c));
+  for (const [supplierId, adv] of advMapCtl) {
     let row = bySupplier.get(supplierId);
     if (!row) {
       row = {
@@ -2440,6 +2484,11 @@ app.get("/ap-control", async (c) => {
   const aging = [...bySupplier.values()].sort((a, b) => b.totalSen - a.totalSen);
   const supplierCounterSen = Number(supRes?.s) || 0;
   const netSubledgerSen = piOutstandingSen - pcnPostedSen;
+  // Owner rule 2026-07-08 (「卡改成净额」): the card figure is the NET owed —
+  // bills minus un-knocked advances — so it ties the control; the advance sum
+  // rides along as a reminder line instead of masquerading as drift.
+  const unappliedAdvanceSen = [...advMapCtl.values()].reduce((s, a) => s + a.sen, 0);
+  const netOutstandingSen = netSubledgerSen - unappliedAdvanceSen;
   return c.json({
     success: true,
     data: {
@@ -2448,8 +2497,10 @@ app.get("/ap-control", async (c) => {
       tradeControlSen,
       piOutstandingSen: netSubledgerSen,
       pcnPostedSen,
+      unappliedAdvanceSen,
+      netOutstandingSen,
       supplierCounterSen,
-      driftControlVsPiSen: tradeControlSen - netSubledgerSen,
+      driftControlVsPiSen: tradeControlSen - netOutstandingSen,
       driftCounterVsPiSen: supplierCounterSen - netSubledgerSen,
       aging,
     },

@@ -1,5 +1,5 @@
 ﻿import * as React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
@@ -3573,6 +3573,11 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
   const [paymentAmount, setPaymentAmount] = useState("");
   const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split("T")[0]);
   const [paymentRef, setPaymentRef] = useState("");
+  // Expandable detail (owner 2026-07-08): click a row to show every open
+  // document in its aging column — the old system's "Aging - Detail" layout.
+  const [openAging, setOpenAging] = useState<Set<string>>(new Set());
+  const toggleAging = (id: string) =>
+    setOpenAging((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   // Multi-company (Phase 2): "" = All companies (group). The consolidated
   // aging arrives via the arData prop (unchanged). Picking a company fetches
@@ -3648,14 +3653,21 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
               <tbody>
                 {rows.map((ar) => {
                   const total = ar.currentSen + ar.days30Sen + ar.days60Sen + ar.days90Sen + ar.over90Sen;
+                  const open = openAging.has(ar.customerId);
                   return (
-                    <tr key={ar.customerId} className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30">
-                      <td className="py-3 px-4 font-medium text-[#1F1D1B]">{ar.customerName}</td>
-                      <td className="py-3 px-4 text-right">{ar.currentSen > 0 ? formatCurrency(ar.currentSen) : "-"}</td>
-                      <td className="py-3 px-4 text-right">{ar.days30Sen > 0 ? formatCurrency(ar.days30Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ar.days60Sen > 0 ? "text-[#9C6F1E]" : ""}`}>{ar.days60Sen > 0 ? formatCurrency(ar.days60Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ar.days90Sen > 0 ? "text-[#B8601A] font-medium" : ""}`}>{ar.days90Sen > 0 ? formatCurrency(ar.days90Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ar.over90Sen > 0 ? "text-[#9A3A2D] font-medium" : ""}`}>{ar.over90Sen > 0 ? formatCurrency(ar.over90Sen) : "-"}</td>
+                    <Fragment key={ar.customerId}>
+                    <tr className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30">
+                      <td className="py-3 px-4 font-medium text-[#1F1D1B]">
+                        <button className="inline-flex items-center gap-1.5 text-left" onClick={() => toggleAging(ar.customerId)} title="Show the documents behind this balance">
+                          {open ? <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-[#6B5C32]" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[#6B5C32]" />}
+                          {ar.customerName}
+                        </button>
+                      </td>
+                      <td className={`py-3 px-4 text-right ${ar.currentSen < 0 ? "text-[#9A3A2D]" : ""}`}>{ar.currentSen !== 0 ? formatCurrency(ar.currentSen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ar.days30Sen < 0 ? "text-[#9A3A2D]" : ""}`}>{ar.days30Sen !== 0 ? formatCurrency(ar.days30Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ar.days60Sen < 0 ? "text-[#9A3A2D]" : ar.days60Sen > 0 ? "text-[#9C6F1E]" : ""}`}>{ar.days60Sen !== 0 ? formatCurrency(ar.days60Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ar.days90Sen < 0 ? "text-[#9A3A2D]" : ar.days90Sen > 0 ? "text-[#B8601A] font-medium" : ""}`}>{ar.days90Sen !== 0 ? formatCurrency(ar.days90Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ar.over90Sen !== 0 ? "text-[#9A3A2D] font-medium" : ""}`}>{ar.over90Sen !== 0 ? formatCurrency(ar.over90Sen) : "-"}</td>
                       <td className="py-3 px-4 text-right font-semibold text-[#1F1D1B]">{formatCurrency(total)}</td>
                       <td className="py-3 px-4 text-center">
                         {total > 0 && (
@@ -3669,6 +3681,24 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                         )}
                       </td>
                     </tr>
+                    {open && (ar.docs ?? []).map((d, i) => (
+                      <tr key={`d-${i}`} className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
+                        <td className="py-1.5 px-4 pl-10 text-[#6B7280]">{d.no}{d.date ? ` · ${d.date}` : ""}</td>
+                        {[0, 1, 2, 3, 4].map((b) => (
+                          <td key={b} className={`py-1.5 px-4 text-right tabular-nums ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>
+                            {d.mo === b ? formatCurrency(d.amountSen) : ""}
+                          </td>
+                        ))}
+                        <td className={`py-1.5 px-4 text-right tabular-nums font-medium ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>{formatCurrency(d.amountSen)}</td>
+                        <td></td>
+                      </tr>
+                    ))}
+                    {open && !(ar.docs ?? []).length && (
+                      <tr className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
+                        <td colSpan={8} className="py-1.5 px-4 pl-10 text-[#9CA3AF] italic">No document detail (refresh after the next aging rebuild)</td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -3754,6 +3784,8 @@ function APControlPanel({ company = "" }: { company?: string }) {
     controls: { code: string; name: string; balanceSen: number }[];
     tradeControlSen: number;
     piOutstandingSen: number;
+    unappliedAdvanceSen?: number;
+    netOutstandingSen?: number;
     driftControlVsPiSen: number;
   } | null>(null);
   const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
@@ -3814,9 +3846,16 @@ function APControlPanel({ company = "" }: { company?: string }) {
           </Card>
           <Card>
             <CardContent className="p-4">
-              <p className="text-xs text-[#6B7280]">Booked-unpaid purchase invoices (APPROVED)</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.piOutstandingSen)}</p>
-              <div className="mt-1">{drift(data.driftControlVsPiSen)}</div>
+              <p className="text-xs text-[#6B7280]">Net owed to suppliers (bills − advances)</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.netOutstandingSen ?? data.piOutstandingSen)}</p>
+              <div className="mt-1 flex items-center gap-2 flex-wrap">
+                {drift(data.driftControlVsPiSen)}
+                {(data.unappliedAdvanceSen ?? 0) > 0 && (
+                  <span className="text-xs text-[#6B7280]">
+                    bills {formatCurrency(data.piOutstandingSen)} − un-knocked advances {formatCurrency(data.unappliedAdvanceSen ?? 0)}
+                  </span>
+                )}
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -4353,6 +4392,11 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
   const [paymentAmount, setPaymentAmount] = useState("");
   const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split("T")[0]);
   const [paymentRef, setPaymentRef] = useState("");
+  // Expandable detail (owner 2026-07-08): click a row to show every open
+  // document in its aging column; un-knocked advances show as negative docs.
+  const [openAging, setOpenAging] = useState<Set<string>>(new Set());
+  const toggleAging = (id: string) =>
+    setOpenAging((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   // Multi-company (Phase 2): "" = All companies (group). Consolidated aging
   // arrives via apData prop (unchanged); a company scopes /aging locally.
@@ -4424,14 +4468,21 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
               <tbody>
                 {rows.map((ap) => {
                   const total = ap.currentSen + ap.days30Sen + ap.days60Sen + ap.days90Sen + ap.over90Sen;
+                  const open = openAging.has(ap.supplierId);
                   return (
-                    <tr key={ap.supplierId} className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30">
-                      <td className="py-3 px-4 font-medium text-[#1F1D1B]">{ap.supplierName}</td>
-                      <td className="py-3 px-4 text-right">{ap.currentSen > 0 ? formatCurrency(ap.currentSen) : "-"}</td>
-                      <td className="py-3 px-4 text-right">{ap.days30Sen > 0 ? formatCurrency(ap.days30Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ap.days60Sen > 0 ? "text-[#9C6F1E]" : ""}`}>{ap.days60Sen > 0 ? formatCurrency(ap.days60Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ap.days90Sen > 0 ? "text-[#B8601A] font-medium" : ""}`}>{ap.days90Sen > 0 ? formatCurrency(ap.days90Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ap.over90Sen > 0 ? "text-[#9A3A2D] font-medium" : ""}`}>{ap.over90Sen > 0 ? formatCurrency(ap.over90Sen) : "-"}</td>
+                    <Fragment key={ap.supplierId}>
+                    <tr className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30">
+                      <td className="py-3 px-4 font-medium text-[#1F1D1B]">
+                        <button className="inline-flex items-center gap-1.5 text-left" onClick={() => toggleAging(ap.supplierId)} title="Show the documents behind this balance">
+                          {open ? <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-[#6B5C32]" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[#6B5C32]" />}
+                          {ap.supplierName}
+                        </button>
+                      </td>
+                      <td className={`py-3 px-4 text-right ${ap.currentSen < 0 ? "text-[#9A3A2D]" : ""}`}>{ap.currentSen !== 0 ? formatCurrency(ap.currentSen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ap.days30Sen < 0 ? "text-[#9A3A2D]" : ""}`}>{ap.days30Sen !== 0 ? formatCurrency(ap.days30Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ap.days60Sen < 0 ? "text-[#9A3A2D]" : ap.days60Sen > 0 ? "text-[#9C6F1E]" : ""}`}>{ap.days60Sen !== 0 ? formatCurrency(ap.days60Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ap.days90Sen < 0 ? "text-[#9A3A2D]" : ap.days90Sen > 0 ? "text-[#B8601A] font-medium" : ""}`}>{ap.days90Sen !== 0 ? formatCurrency(ap.days90Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ap.over90Sen !== 0 ? "text-[#9A3A2D] font-medium" : ""}`}>{ap.over90Sen !== 0 ? formatCurrency(ap.over90Sen) : "-"}</td>
                       <td className="py-3 px-4 text-right font-semibold text-[#1F1D1B]">{formatCurrency(total)}</td>
                       <td className="py-3 px-4 text-center">
                         {total > 0 && (
@@ -4445,6 +4496,24 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                         )}
                       </td>
                     </tr>
+                    {open && (ap.docs ?? []).map((d, i) => (
+                      <tr key={`d-${i}`} className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
+                        <td className="py-1.5 px-4 pl-10 text-[#6B7280]">{d.no}{d.date ? ` · ${d.date}` : ""}</td>
+                        {[0, 1, 2, 3, 4].map((b) => (
+                          <td key={b} className={`py-1.5 px-4 text-right tabular-nums ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>
+                            {d.mo === b ? formatCurrency(d.amountSen) : ""}
+                          </td>
+                        ))}
+                        <td className={`py-1.5 px-4 text-right tabular-nums font-medium ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>{formatCurrency(d.amountSen)}</td>
+                        <td></td>
+                      </tr>
+                    ))}
+                    {open && !(ap.docs ?? []).length && (
+                      <tr className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
+                        <td colSpan={8} className="py-1.5 px-4 pl-10 text-[#9CA3AF] italic">No document detail (refresh after the next aging rebuild)</td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>

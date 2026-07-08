@@ -82,12 +82,11 @@ test("voided payment whose GL legs stayed visible → void_payment_gl_leak", () 
   invariant(r);
 });
 
-test("voided ADVANCE row still in the advance sum → +amount item", () => {
+test("voided ADVANCE row is excluded from the advance sum (BUG-2026-07-08-003) — no drift, no items", () => {
   const r = run({ paymentRows: [pay({ no: "HPV-2", amount: 95000, booked: 0, active: false })] });
-  assert.equal(r.unappliedAdvanceSen, 95000);
-  assert.equal(r.driftSen, 95000);
-  assert.equal(r.items[0].kind, "voided_advance_still_counted");
-  assert.equal(r.items[0].contributionSen, 95000);
+  assert.equal(r.unappliedAdvanceSen, 0);
+  assert.equal(r.driftSen, 0);
+  assert.deepEqual(r.items, []);
   invariant(r);
 });
 
@@ -182,7 +181,7 @@ test("PAID-status PI with face≠paid stays out of aging but not out of the GL �
   invariant(r);
 });
 
-test("kitchen sink — six independent defects sum exactly to the drift", () => {
+test("kitchen sink — independent defects sum exactly to the drift", () => {
   const r = run({
     legs400: [
       leg("opening_balance", "ob", 0, 500000), // covers 490000 of faces → +10000
@@ -199,12 +198,47 @@ test("kitchen sink — six independent defects sum exactly to the drift", () => 
     paymentRows: [
       pay({ no: "HPV-A", pi: "p2", booked: 60000 }),
       pay({ no: "HPV-B", pi: "p2", booked: 15240, active: false }),
-      pay({ no: "HPV-C", amount: 95000, booked: 0, active: false }), // voided advance → +95000
+      pay({ no: "HPV-C", amount: 95000, booked: 0, active: false }), // voided advance → filtered, no effect
     ],
   });
-  // drift = +10000 −1506 −15240 +700 +95000 = 88954
-  assert.equal(r.driftSen, 88954);
-  assert.equal(r.items.length, 5);
+  // drift = +10000 −1506 −15240 +700 = −6046
+  assert.equal(r.driftSen, -6046);
+  assert.equal(r.items.length, 4);
+  invariant(r);
+});
+
+test("prod shape 2026-07-08 — the −966.60 decomposition (GVP + INNOVATEX + voided-advance fix + edit-leg pair)", () => {
+  // Miniature of the live books the endpoint reconciled on 2026-07-08:
+  //   GVP 950 booked to an EXCLUDED pre-opening PI  → −950
+  //   INNOVATEX GL restate leg kept 836 vs claim 418 → −418
+  //   WF LEATHER voided advance 401.40 — after the loader fix it no longer
+  //   counts, so it contributes NOTHING (pre-fix it masked +401.40)
+  //   pi edit-leg pair ±15.06 cancels within one sourceId after suffix strip
+  const r = run({
+    legs400: [
+      leg("opening_balance", "ob", 0, 100000),
+      leg("supplier_payment", "HPV-2605-001", 95000, 0), // GVP: pays the excluded PI
+      leg("purchase_invoice", "pinv", 0, 41800),
+      leg("supplier_payment", "HPV-2607-009", 83600, 0), // INNOVATEX: GL kept 836
+      leg("purchase_invoice", "pinv:edit-1782106749028", 1506, 0), // edit-leg pair folds into
+      leg("purchase_invoice", "pinv:edit-1782106902862", 0, 1506), // the base PI → cancels
+    ],
+    pis: [
+      pi({ id: "pop", face: 100000, isOpening: true }),
+      pi({ id: "pgvp", piNo: "PI-2605-001", face: 95000, paid: 95000, floored: true }),
+      pi({ id: "pinv", piNo: "PI-2606-041", face: 41800, paid: 41800, status: "PAID" }),
+    ],
+    paymentRows: [
+      pay({ no: "HPV-2605-001", pi: "pgvp", booked: 95000 }),
+      pay({ no: "HPV-2607-009", pi: "pinv", booked: 41800 }),
+      pay({ no: "HPV-2607-026", amount: 40140, booked: 0, active: false }),
+    ],
+  });
+  assert.equal(r.driftSen, -95000 - 41800);
+  const byRef = Object.fromEntries(r.items.map((i) => [i.ref, i]));
+  assert.equal(byRef["HPV-2605-001"].contributionSen, -95000);
+  assert.equal(byRef["HPV-2607-009"].contributionSen, -41800);
+  assert.equal(r.unappliedAdvanceSen, 0);
   invariant(r);
 });
 

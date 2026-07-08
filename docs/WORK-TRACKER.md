@@ -9,18 +9,27 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-08 — 🔵 AP drift −966.60: server-side 400-0000 reconciliation endpoint
+## 2026-07-08 — ✅ AP drift −966.60 BROKEN TO THE SEN: /ap-reconciliation endpoint + BUG-003 fix
 
-Owner rule 「做账就是要准」 — the /ap-control drift card must break down to the
-sen. Prior hand-reconciliation across snapshots failed (identity gave +16.60 vs
-observed −966.60). Building the checkpoint's "唯一正确做法": GET
-/api/accounting/ap-reconciliation — one consistent read computing GL 400-0000
-by sourceType, per-PI GL-vs-face, per-payment GL-vs-subledger claim (lifecycle
-aware), advances, opening coverage, CN block, overpaid clamps — every item
-carries a driftContributionSen and Σ contributions ≡ drift (algebraic identity,
-enforced by tests). Pure fn `src/lib/ap-recon.ts` + tests/ap-recon.test.mjs.
-Known clues to confirm: subledger payments 152.40 over GL (VOID unfiltered?),
-GL purchase_invoice DR 15.06 stray leg.
+Owner rule 「做账就是要准」. Shipped `GET /api/accounting/ap-reconciliation`
+(read-only; pure `src/lib/ap-recon.ts`, 16 tests asserting Σ item contributions
+≡ drift — residual is structurally 0). First prod run itemized −966.60 EXACTLY:
+- **GVP −950.00** — HPV-2605-001 (ACTIVE) booked 950 to PI-2605-001 which sits
+  in opening_ap_excludes. 🟡 OWNER: once the GVP bill is recognised, include
+  PI-2605-001 back (Opening tab card) **and re-Post opening** → item clears.
+- **INNOVATEX −418.00** — HPV-2607-009 GL kept DR 836 vs subledger 418 (the
+  recompute-pi-paid fix corrected the rows, GL restate legs still say 836).
+  🟡 OWNER decision pending (07-08 known case): move 418 to duplicate
+  PI-2606-001 (restate with both PIs) or void the duplicate bill.
+- **WF LEATHER +401.40** — voided payment's advance row still counted →
+  **BUG-2026-07-08-003, FIXED** (lifecycle NOT-EXISTS in
+  loadUnappliedSupplierAdvances; heals /aging AP + /ap-control + advance card).
+- ±15.06 pi edit-leg pair — folds into base PI after sourceId suffix strip, no
+  effect (this was the "strange DR 15.06" clue; 152.40 clue = 401.40 advance
+  + prior-snapshot noise, both accounted).
+After the fix the card reads **−1,368.00 = GVP −950 + INNOVATEX −418** (both
+owner-pending data decisions, permanently itemized by the endpoint). The old
+"+16.60 identity" hand-math is obsolete — use the endpoint.
 
 ADDITIVE-only, opt-in, default OFF. Finance-adjacent — built conservatively;
 external customers/suppliers/POs/SOs behave byte-identical.

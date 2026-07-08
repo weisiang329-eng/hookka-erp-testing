@@ -34,6 +34,37 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-08-003 — Voided supplier payment's ADVANCE row still counted as an unapplied advance in both agings (lifecycle never filtered) `accounting`
+
+🟢 **Fixed — shipped with the /ap-reconciliation endpoint, verified live on prod 2026-07-08**
+
+- **Symptom**: WF LEATHER showed a −401.40 "advance" row in the creditor aging and
+  the AP net-outstanding card even though its payment HPV-2607-026 was VOIDED (its
+  GL legs were correctly hidden). The −966.60 drift on /ap-control was partially
+  MASKED by this: the true document-side gap is −1,368.00 (GVP −950 + INNOVATEX
+  −418), and the phantom advance hid +401.40 of it.
+- **Root cause**: `loadUnappliedSupplierAdvances` (accounting.ts) selected every
+  `purchaseInvoiceId IS NULL AND amountSen > 0` row with NO document_lifecycle
+  filter. Void/delete rolls back PI paid amounts and hides GL legs but keeps the
+  subledger rows (by design, for unvoid) — advance rows therefore need the same
+  NOT-EXISTS state filter the PI paid truth-guard uses.
+- **Found by**: `GET /api/accounting/ap-reconciliation` (new, same day) — the
+  itemized drift decomposition surfaced it as the only code-level item; the other
+  two items are data decisions pending the owner.
+- **Fix** (`src/api/routes/accounting.ts` loadUnappliedSupplierAdvances): rewrote
+  the query in pure snake_case with `AND NOT EXISTS (SELECT 1 FROM
+  document_lifecycle dl WHERE dl.source_type='supplier_payment' AND
+  dl.source_id=sp.payment_no AND dl.state<>'ACTIVE')` — the same shape as
+  buildPiPaidTruthStatement. One loader feeds /aging AP, /ap-control aging rows
+  and `unappliedAdvanceSen`, so all three heal together. The ap-recon mirror now
+  counts only ACTIVE advance rows (tests updated).
+- **Verify**: tests/ap-recon.test.mjs (16 green, incl. a miniature of the live
+  2026-07-08 books); live prod after deploy — advance sum 95,870.79 → 95,469.39,
+  drift card −966.60 → −1,368.00 (= GVP −950 + INNOVATEX −418, both itemized,
+  residual 0.00), WF LEATHER's phantom row gone from /ap-control aging. NOTE the
+  /aging snapshot rebuilds on the next supplier_payments/invoices/PI write — the
+  cached copy may show the old row until then.
+
 ## BUG-2026-07-05-001 — AR/AP Aging tab showed the FULL face amount for partially-paid purchase invoices (AP loop never subtracted paid) `accounting`
 
 🟢 **Fixed — shipped with the advance-rows-in-aging change, verified live on prod 2026-07-05**

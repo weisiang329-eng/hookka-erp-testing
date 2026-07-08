@@ -363,7 +363,11 @@ function addToBucket(
 // INCLUDE unapplied advances as NEGATIVE rows, so the aging total ties the
 // 400-0000 control exactly instead of drifting by the advance sum). An advance
 // is a supplier_payments row with NO purchaseInvoiceId; knock-off decrements
-// its amountSen, so amountSen > 0 = still unapplied.
+// its amountSen, so amountSen > 0 = still unapplied. Rows of VOIDED/DELETED
+// payments are excluded via document_lifecycle (BUG-2026-07-08-003: a voided
+// advance kept its −row in both agings while its GL was correctly hidden,
+// skewing the drift card by exactly that amount) — same NOT-EXISTS shape as
+// buildPiPaidTruthStatement, pure snake_case so the adapter passes it through.
 async function loadUnappliedSupplierAdvances(
   db: Env["Variables"]["DB"],
   orgId: string,
@@ -372,8 +376,16 @@ async function loadUnappliedSupplierAdvances(
   try {
     const res = await db
       .prepare(
-        `SELECT supplierId, supplierName, amountSen, paymentNo, date FROM supplier_payments
-          WHERE orgId = ? AND purchaseInvoiceId IS NULL AND amountSen > 0`,
+        `SELECT sp.supplier_id AS supplier_id, sp.supplier_name AS supplier_name,
+                sp.amount_sen AS amount_sen, sp.payment_no AS payment_no, sp.date AS date
+           FROM supplier_payments sp
+          WHERE sp.org_id = ? AND sp.purchase_invoice_id IS NULL AND sp.amount_sen > 0
+            AND NOT EXISTS (
+              SELECT 1 FROM document_lifecycle dl
+               WHERE dl.source_type = 'supplier_payment'
+                 AND dl.source_id = sp.payment_no
+                 AND dl.state <> 'ACTIVE'
+            )`,
       )
       .bind(orgId)
       .all<{ supplierId?: string; supplier_id?: string; supplierName?: string; supplier_name?: string; amountSen?: number; amount_sen?: number; paymentNo?: string; payment_no?: string; date?: string }>();

@@ -5676,34 +5676,69 @@ function ScanPrefillButton({ label, onResult }: { label: string; onResult: (d: S
       if (inputRef.current) inputRef.current.value = "";
     }
   };
-  // The button doubles as a drag-and-drop target (owner 2026-07-08:
-  // 「我希望也可以拖动进来」) — drop a PDF/photo straight onto it.
+  // Clicking the button opens an upload dialog with a big drop zone (owner
+  // 2026-07-08: 「我希望是这样点了打开 upload」— same pattern as the PI scan
+  // wizard). Drop a PDF/photo into the zone or click it to browse; the modal
+  // shows the scanning state and closes itself when the form is prefilled.
+  const [open, setOpen] = useState(false);
+  const startFile = (f: File | undefined) => {
+    void onFile(f).then(() => setOpen(false));
+  };
   return (
     <>
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={() => inputRef.current?.click()}
-        disabled={busy}
-        onDragOver={(e) => { e.preventDefault(); if (!busy) setDragOver(true); }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragOver(false);
-          if (busy) return;
-          void onFile(e.dataTransfer?.files?.[0] ?? undefined);
-        }}
-        className={dragOver ? "ring-2 ring-[#6B5C32] bg-[#F0ECE9]" : undefined}
-        title="Scan a PDF or photo — click to browse, or drag & drop the file onto this button. AI prefills the form for your review (takes ~30-90s)"
-      >
-        <Upload className="h-4 w-4 mr-1.5" /> {busy ? "Scanning…" : dragOver ? "Drop to scan" : label}
+      <Button variant="outline" size="sm" onClick={() => setOpen(true)} title="Scan a bill / receipt — AI prefills the form for your review">
+        <Upload className="h-4 w-4 mr-1.5" /> {label}
       </Button>
+      {open && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onClick={() => { if (!busy) setOpen(false); }}
+        >
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-[#E2DDD8]">
+              <div>
+                <h2 className="text-base font-semibold text-[#1F1D1B]">{label}</h2>
+                <p className="text-xs text-[#6B7280] mt-0.5">Upload a bill / receipt (PDF or photo) — AI prefills the form for your review; nothing posts automatically.</p>
+              </div>
+              <button
+                onClick={() => { if (!busy) setOpen(false); }}
+                className="text-[#9CA3AF] hover:text-[#6B7280] text-lg leading-none"
+                title={busy ? "Scanning — please wait" : "Close"}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-5">
+              <div
+                className={`rounded-lg border-2 border-dashed px-6 py-12 text-center cursor-pointer transition-colors ${dragOver ? "border-[#6B5C32] bg-[#F0ECE9]" : "border-[#E2DDD8] hover:bg-[#FAF8F6]"}`}
+                onClick={() => { if (!busy) inputRef.current?.click(); }}
+                onDragOver={(e) => { e.preventDefault(); if (!busy) setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOver(false);
+                  if (busy) return;
+                  startFile(e.dataTransfer?.files?.[0] ?? undefined);
+                }}
+              >
+                <Upload className="h-8 w-8 mx-auto text-[#B4B2A9]" />
+                <p className="mt-3 text-sm font-medium text-[#1F1D1B]">
+                  {busy ? "Scanning… (~30–90s, keep this open)" : dragOver ? "Drop to scan" : "Drop a PDF or photo here"}
+                </p>
+                {!busy && (
+                  <p className="mt-1 text-xs text-[#6B7280]">or click to browse — one document, max 32MB</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       <input
         ref={inputRef}
         type="file"
         accept=".pdf,image/*"
         className="sr-only"
-        onChange={(e) => void onFile(e.target.files?.[0] ?? undefined)}
+        onChange={(e) => startFile(e.target.files?.[0] ?? undefined)}
       />
     </>
   );

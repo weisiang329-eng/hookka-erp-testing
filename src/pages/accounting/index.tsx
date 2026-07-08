@@ -5653,6 +5653,7 @@ type ScanFinanceResult = {
 function ScanPrefillButton({ label, onResult }: { label: string; onResult: (d: ScanFinanceResult) => void }) {
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const onFile = async (f: File | undefined) => {
     if (!f) return;
@@ -5675,6 +5676,8 @@ function ScanPrefillButton({ label, onResult }: { label: string; onResult: (d: S
       if (inputRef.current) inputRef.current.value = "";
     }
   };
+  // The button doubles as a drag-and-drop target (owner 2026-07-08:
+  // 「我希望也可以拖动进来」) — drop a PDF/photo straight onto it.
   return (
     <>
       <Button
@@ -5682,9 +5685,18 @@ function ScanPrefillButton({ label, onResult }: { label: string; onResult: (d: S
         size="sm"
         onClick={() => inputRef.current?.click()}
         disabled={busy}
-        title="Scan a PDF or photo — AI reads the document and prefills the form for your review (takes ~30-90s)"
+        onDragOver={(e) => { e.preventDefault(); if (!busy) setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          if (busy) return;
+          void onFile(e.dataTransfer?.files?.[0] ?? undefined);
+        }}
+        className={dragOver ? "ring-2 ring-[#6B5C32] bg-[#F0ECE9]" : undefined}
+        title="Scan a PDF or photo — click to browse, or drag & drop the file onto this button. AI prefills the form for your review (takes ~30-90s)"
       >
-        <Upload className="h-4 w-4 mr-1.5" /> {busy ? "Scanning…" : label}
+        <Upload className="h-4 w-4 mr-1.5" /> {busy ? "Scanning…" : dragOver ? "Drop to scan" : label}
       </Button>
       <input
         ref={inputRef}

@@ -544,12 +544,16 @@ app.get("/aging", async (c) => {
           };
           apMap.set(supplierId, row);
         }
-        row.currentSen -= adv.sen;
+        // Bucket each advance by ITS payment date (owner 2026-07-08: a May
+        // advance belongs in the May column, not Current) — same month-based
+        // bucketing as the bills above.
         for (const it of adv.items) {
+          const moAdv = monthsOverdue(it.date || null);
+          addToBucket(row, moAdv, -it.sen);
           row.docs.push({
             no: `${it.paymentNo} · Advance`,
             date: it.date,
-            mo: 0,
+            mo: agingBucketIdx(moAdv),
             amountSen: -it.sen,
           });
         }
@@ -2478,8 +2482,20 @@ app.get("/ap-control", async (c) => {
       };
       bySupplier.set(supplierId, row);
     }
-    row.notDueSen -= adv.sen;
-    row.totalSen -= adv.sen;
+    // Bucket each advance by ITS payment date (owner 2026-07-08) — same
+    // day-based buckets as the bills above use for their due dates.
+    for (const it of adv.items) {
+      const d = it.date || today;
+      const days = d >= today ? 0 : Math.floor((new Date(`${today}T00:00:00Z`).getTime() - new Date(`${d}T00:00:00Z`).getTime()) / 86400000);
+      const amt = -it.sen;
+      if (days <= 0) row.notDueSen += amt;
+      else if (days <= 30) row.d30Sen += amt;
+      else if (days <= 60) row.d60Sen += amt;
+      else if (days <= 90) row.d90Sen += amt;
+      else if (days <= 120) row.d120Sen += amt;
+      else row.over120Sen += amt;
+      row.totalSen += amt;
+    }
   }
   const aging = [...bySupplier.values()].sort((a, b) => b.totalSen - a.totalSen);
   const supplierCounterSen = Number(supRes?.s) || 0;

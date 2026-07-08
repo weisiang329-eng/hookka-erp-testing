@@ -775,7 +775,50 @@ async function buildSupplierPaymentRestate(
       .bind(paymentNo, orgId, postSource),
   );
 
+  // 5. TRUTH GUARD (owner rule 2026-07-08 「确保以后没有这问题」/
+  //    BUG-2026-07-08-002: PI-2606-041 showed paid 836 on a 418 bill with
+  //    exactly ONE 418 payment row — a restate double-bump). The incremental
+  //    ± updates above can silently double-count if any read goes wrong, so
+  //    the batch ENDS by re-deriving each touched PI's paid_amount_sen
+  //    ABSOLUTELY from its live payment rows (rows of VOIDED/DELETED payments
+  //    excluded via document_lifecycle). Statements run in order, so this
+  //    final write wins no matter what the arithmetic before it did.
+  const touchedPiIds = new Set<string>();
+  for (const r of oldRows) if (r.purchaseInvoiceId) touchedPiIds.add(String(r.purchaseInvoiceId));
+  for (const a of allocations) if (a.piId) touchedPiIds.add(String(a.piId));
+  for (const piId of touchedPiIds) statements.push(buildPiPaidTruthStatement(db, piId));
+
   return statements;
+}
+
+// Re-derive ONE PI's paid_amount_sen + status from its live supplier_payments
+// rows (CN markers included — they legitimately count as applied; rows of
+// non-ACTIVE payments excluded via document_lifecycle). Pure snake_case SQL so
+// the adapter passes it through untranslated. Shared by the restate truth
+// guard and POST /recompute-pi-paid.
+function buildPiPaidTruthStatement(db: Env["Variables"]["DB"], piId: string): D1PreparedStatement {
+  const PAID_SQL = `(
+    SELECT COALESCE(SUM(sp.booked_sen), 0) FROM supplier_payments sp
+     WHERE sp.purchase_invoice_id = purchase_invoices.id
+       AND NOT EXISTS (
+         SELECT 1 FROM document_lifecycle dl
+          WHERE dl.source_type = 'supplier_payment'
+            AND dl.source_id = sp.payment_no
+            AND dl.state <> 'ACTIVE'
+       )
+  )`;
+  return db
+    .prepare(
+      `UPDATE purchase_invoices SET
+         paid_amount_sen = ${PAID_SQL},
+         status = CASE
+           WHEN ${PAID_SQL} >= amount_sen THEN 'PAID'
+           WHEN ${PAID_SQL} > 0 THEN 'PARTIAL_PAID'
+           ELSE (CASE WHEN status IN ('PAID','PARTIAL_PAID') THEN 'CONFIRMED' ELSE status END)
+         END
+       WHERE id = ?`,
+    )
+    .bind(piId);
 }
 
 // ---------------------------------------------------------------------------
@@ -879,6 +922,37 @@ app.post("/:paymentNo/lifecycle", async (c) => {
 // Edit a supplier payment IN PLACE — same voucher number; GL reversed +
 // re-posted (see buildSupplierPaymentRestate). Body mirrors the POST:
 // { supplierId, payFrom, date, reference, allocations }.
+// POST /recompute-pi-paid — one-shot repair: re-derive a PI's paid_amount_sen
+// from its live payment rows (the same truth-guard SQL the restate now ends
+// with). Owner-triggered for corrupted rows (e.g. PI-2606-041, BUG-2026-07-08-002).
+app.post("/recompute-pi-paid", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { piId?: string };
+  const piId = String(body.piId ?? "").trim();
+  if (!piId) return c.json({ success: false, error: "piId is required" }, 400);
+  const before = await c.var.DB
+    .prepare("SELECT pi_no, amount_sen, paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
+    .bind(piId)
+    .first<{ pi_no?: string; piNo?: string; amount_sen?: number; amountSen?: number; paid_amount_sen?: number; paidAmountSen?: number; status: string }>();
+  if (!before) return c.json({ success: false, error: "PI not found" }, 404);
+  await ensurePartialPaymentColumns(c.var.DB);
+  await c.var.DB.batch([buildPiPaidTruthStatement(c.var.DB, piId)]);
+  const after = await c.var.DB
+    .prepare("SELECT paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
+    .bind(piId)
+    .first<{ paid_amount_sen?: number; paidAmountSen?: number; status: string }>();
+  return c.json({
+    success: true,
+    data: {
+      piNo: before.piNo ?? before.pi_no ?? "",
+      beforePaidSen: Number(before.paidAmountSen ?? before.paid_amount_sen) || 0,
+      afterPaidSen: Number(after?.paidAmountSen ?? after?.paid_amount_sen) || 0,
+      status: after?.status ?? "",
+    },
+  });
+});
+
 app.post("/:paymentNo/restate", async (c) => {
   const denied = await requirePermission(c, "invoices", "update");
   if (denied) return denied;

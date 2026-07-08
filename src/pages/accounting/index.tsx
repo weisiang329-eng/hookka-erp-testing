@@ -5876,41 +5876,46 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   // creditor almost always books to the same account) — still editable.
   const [extraParties, setExtraParties] = useState<OtherParty[]>([]);
   const allSideParties = [...sideParties, ...extraParties.filter((p) => p.type === side)];
-  const applyScan = async (d: ScanFinanceResult) => {
-    let hit = scanNameMatch(allSideParties, d.partyName);
-    if (!hit && d.partyName) {
-      const ok = await confirm({
-        title: side === "CREDITOR" ? "Create new creditor?" : "Create new debtor?",
-        message: `"${d.partyName}" is not in the register. Create it now and use it for this bill?`,
-        danger: false,
+  // Unknown scanned party → a small NEW-PARTY dialog: name prefilled from the
+  // letterhead, every other field OPTIONAL and left to the operator (owner
+  // 2026-07-08: 「只是要让我决定要不要填」). Create → register + auto-select;
+  // Skip → pick manually.
+  const blankPartyDraft = { name: "", contactPerson: "", phone: "", email: "", tin: "", registrationNo: "", address: "", notes: "" };
+  const [newPartyDraft, setNewPartyDraft] = useState<typeof blankPartyDraft | null>(null);
+  const [creatingParty, setCreatingParty] = useState(false);
+  const createPartyFromDraft = async () => {
+    if (!newPartyDraft || !newPartyDraft.name.trim()) { toast.error("Name is required"); return; }
+    setCreatingParty(true);
+    try {
+      const res = await fetch("/api/accounting/other-parties", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: side, ...newPartyDraft }),
       });
-      if (ok) {
-        try {
-          const res = await fetch("/api/accounting/other-parties", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ type: side, name: d.partyName }),
-          });
-          const j = (await res.json()) as { success?: boolean; error?: string; data?: OtherParty };
-          if (j?.success && j.data?.id) {
-            setExtraParties((p) => [...p, j.data as OtherParty]);
-            hit = j.data;
-            toast.success(`Created "${d.partyName}" in the ${side === "CREDITOR" ? "creditor" : "debtor"} register.`);
-          } else toast.error(j?.error || "Failed to create the party");
-        } catch {
-          toast.error("Failed to create the party");
-        }
-      }
+      const j = (await res.json()) as { success?: boolean; error?: string; data?: OtherParty };
+      if (j?.success && j.data?.id) {
+        setExtraParties((p) => [...p, j.data as OtherParty]);
+        setForm((f) => ({ ...f, partyId: (j.data as OtherParty).id }));
+        setNewPartyDraft(null);
+        toast.success(`Created "${j.data.name}" and selected it for this bill.`);
+      } else toast.error(j?.error || "Failed to create the party");
+    } catch {
+      toast.error("Failed to create the party");
+    } finally {
+      setCreatingParty(false);
     }
+  };
+  const applyScan = (d: ScanFinanceResult) => {
+    const hit = scanNameMatch(allSideParties, d.partyName);
     // Last-used account for this party (latest bill's first line).
     const lastAcct = hit
       ? ((bills ?? [])
-          .filter((b) => b.partyId === hit!.id && b.items?.length)
+          .filter((b) => b.partyId === hit.id && b.items?.length)
           .sort((a, b) => (b.billDate || "").localeCompare(a.billDate || ""))[0]?.items[0]?.counterAccount ?? "")
       : "";
     setForm((f) => ({
       ...f,
-      partyId: hit?.id ?? f.partyId,
+      partyId: hit?.id ?? "",
       billDate: d.docDate ?? f.billDate,
       referenceNo: d.docNo ?? f.referenceNo,
       description: d.partyName ? `${d.partyName}${d.docType ? ` · ${d.docType}` : ""}` : f.description,
@@ -5923,12 +5928,16 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
       isOpening: false,
     }));
     setShowForm(true);
+    if (!hit && d.partyName) {
+      setNewPartyDraft({ ...blankPartyDraft, name: d.partyName });
+      return;
+    }
     toast.success(
       hit
         ? lastAcct
           ? "Scanned — account prefilled from this party's last bill; review before saving."
           : "Scanned — review the lines and pick the account(s)."
-        : "Scanned — party not recognised, select it manually and review the lines.",
+        : "Scanned — review the lines and pick the account(s).",
     );
   };
 
@@ -5940,6 +5949,62 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
           <Plus className="h-4 w-4" /> New Bill
         </Button>
       </div>
+
+      {newPartyDraft && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { if (!creatingParty) setNewPartyDraft(null); }}>
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-[#E2DDD8]">
+              <div>
+                <h2 className="text-base font-semibold text-[#1F1D1B]">{side === "CREDITOR" ? "New creditor from scan" : "New debtor from scan"}</h2>
+                <p className="text-xs text-[#6B7280] mt-0.5">Not in the register yet. Name comes from the scanned document; everything else is optional — fill what you want, or Skip and pick a party manually.</p>
+              </div>
+              <button onClick={() => { if (!creatingParty) setNewPartyDraft(null); }} className="text-[#9CA3AF] hover:text-[#6B7280] text-lg leading-none">✕</button>
+            </div>
+            <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div className="sm:col-span-2">
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Name *</label>
+                <input type="text" value={newPartyDraft.name} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, name: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Contact Person</label>
+                <input type="text" value={newPartyDraft.contactPerson} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, contactPerson: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Phone</label>
+                <input type="text" value={newPartyDraft.phone} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, phone: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Email</label>
+                <input type="text" value={newPartyDraft.email} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, email: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">TIN</label>
+                <input type="text" value={newPartyDraft.tin} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, tin: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Registration No</label>
+                <input type="text" value={newPartyDraft.registrationNo} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, registrationNo: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Address</label>
+                <input type="text" value={newPartyDraft.address} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, address: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Notes</label>
+                <input type="text" value={newPartyDraft.notes} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, notes: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 p-5 pt-0">
+              <Button variant="outline" size="sm" onClick={() => setNewPartyDraft(null)} disabled={creatingParty}>
+                Skip — pick manually
+              </Button>
+              <Button variant="primary" size="sm" onClick={() => void createPartyFromDraft()} disabled={creatingParty}>
+                {creatingParty ? "Creating…" : "Create & use"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showForm && (
         <Card><CardContent className="p-4 space-y-3">

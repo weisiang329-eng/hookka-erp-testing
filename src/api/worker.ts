@@ -962,6 +962,7 @@ import scheduling from "./routes/scheduling";
 import planningSchedule from "./routes/planning-schedule";
 import scanPo from "./routes/scan-po";
 import scanSupplier from "./routes/scan-supplier";
+import scanFinance from "./routes/scan-finance";
 import scanQueue, { sweepStuckScans } from "./routes/scan-queue";
 // One-shot historical job_card completion importer (Wei Siang's GS migration).
 // Server-only super-admin tool gated by production-orders:update; see
@@ -1184,6 +1185,7 @@ app.route("/api/scheduling", scheduling);
 app.route("/api/planning", planningSchedule);
 app.route("/api/scan-po", scanPo);
 app.route("/api/scan-supplier", scanSupplier);
+app.route("/api/scan-finance", scanFinance);
 // Background scan queue (async OCR). Upload returns a batchId IMMEDIATELY;
 // processBatch() drives Claude calls under waitUntil() so the user can
 // close the tab while a 100-file batch processes server-side. Same RBAC

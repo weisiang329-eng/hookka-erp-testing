@@ -5635,6 +5635,81 @@ function OtherPartyAging({ side }: { side: "DEBTOR" | "CREDITOR" }) {
   );
 }
 
+// OCR prefill (owner 2026-07-08): scan a bill / receipt (PDF or photo) → the
+// supplier-document AI extracts party / doc no / date / amount lines → the
+// caller PREFILLS its form for review. Nothing posts automatically — the
+// operator still picks the GL account(s) and saves through the normal flow.
+type ScanFinanceResult = {
+  partyName: string | null;
+  docType: string | null;
+  docNo: string | null;
+  docDate: string | null;
+  lines: { description: string; amountSen: number }[];
+  subtotalSen: number | null;
+  taxSen: number | null;
+  totalSen: number | null;
+  extraDocs: number;
+};
+function ScanPrefillButton({ label, onResult }: { label: string; onResult: (d: ScanFinanceResult) => void }) {
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const onFile = async (f: File | undefined) => {
+    if (!f) return;
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      const res = await fetch("/api/scan-finance/extract", { method: "POST", body: fd });
+      const j = (await res.json()) as { success?: boolean; error?: string; data?: ScanFinanceResult };
+      if (j?.success && j.data) {
+        onResult(j.data);
+        if (j.data.extraDocs > 0) {
+          toast.success(`Heads up: the file contains ${j.data.extraDocs + 1} documents — only the first was used.`);
+        }
+      } else toast.error(j?.error || "Scan failed");
+    } catch {
+      toast.error("Scan failed");
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+  return (
+    <>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => inputRef.current?.click()}
+        disabled={busy}
+        title="Scan a PDF or photo — AI reads the document and prefills the form for your review (takes ~30-90s)"
+      >
+        <Upload className="h-4 w-4 mr-1.5" /> {busy ? "Scanning…" : label}
+      </Button>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".pdf,image/*"
+        className="sr-only"
+        onChange={(e) => void onFile(e.target.files?.[0] ?? undefined)}
+      />
+    </>
+  );
+}
+// Loose company-name match for scan prefill: alnum-uppercase containment
+// either way ("TNB " vs "TENAGA NASIONAL BHD" won't match — operator picks
+// manually then; exact-ish letterheads do).
+function scanNameMatch<T extends { name: string }>(list: T[], name: string | null): T | undefined {
+  if (!name) return undefined;
+  const norm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const b = norm(name);
+  if (!b) return undefined;
+  return list.find((p) => {
+    const a = norm(p.name);
+    return !!a && (a.includes(b) || b.includes(a));
+  });
+}
+
 function OtherPartyBillsTab({ accounts, side }: { accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
   const parties = useOtherPartiesList();
   return (
@@ -5748,9 +5823,36 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
     else toast.error(j?.error || `${verb} failed`);
   };
 
+  // OCR → prefill the bill form (party matched by letterhead name; the
+  // operator picks the counter account(s) and reviews before saving).
+  const applyScan = (d: ScanFinanceResult) => {
+    const hit = scanNameMatch(sideParties, d.partyName);
+    setForm((f) => ({
+      ...f,
+      partyId: hit?.id ?? f.partyId,
+      billDate: d.docDate ?? f.billDate,
+      referenceNo: d.docNo ?? f.referenceNo,
+      description: d.partyName ? `${d.partyName}${d.docType ? ` · ${d.docType}` : ""}` : f.description,
+      taxStr: d.taxSen ? (d.taxSen / 100).toFixed(2) : f.taxStr,
+      lines: d.lines.length
+        ? d.lines.map((l) => ({ counterAccount: "", amountStr: (l.amountSen / 100).toFixed(2), description: l.description }))
+        : d.totalSen
+          ? [{ counterAccount: "", amountStr: ((d.totalSen - (d.taxSen ?? 0)) / 100).toFixed(2), description: d.docType ?? "" }]
+          : f.lines,
+      isOpening: false,
+    }));
+    setShowForm(true);
+    toast.success(
+      hit
+        ? "Scanned — review the lines and pick the account(s)."
+        : "Scanned — party not recognised, select it manually and review the lines.",
+    );
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-end gap-3">
+        <ScanPrefillButton label="Scan Bill" onResult={applyScan} />
         <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
           <Plus className="h-4 w-4" /> New Bill
         </Button>
@@ -7214,21 +7316,48 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
 
+  // OCR → prefill the voucher form (payee/date/lines; the operator picks the
+  // expense account(s) and reviews before posting). Receipts have no account
+  // info, so accounts stay blank on purpose. Amount = the printed line
+  // amounts; single-total docs (petrol slip) prefill one line with the total.
+  const applyScan = (d: ScanFinanceResult) => {
+    setEditingId(null);
+    setForm((f) => ({
+      ...f,
+      date: d.docDate ?? new Date().toISOString().slice(0, 10),
+      payee: d.partyName ?? f.payee,
+      description: [d.docType, d.docNo].filter(Boolean).join(" · ") || f.description,
+      accrued: false,
+    }));
+    setLines(
+      d.lines.length
+        ? d.lines.map((l) => ({ accountCode: "", description: l.description, amount: (l.amountSen / 100).toFixed(2) }))
+        : d.totalSen
+          ? [{ accountCode: "", description: d.docNo ?? "", amount: (d.totalSen / 100).toFixed(2) }]
+          : [{ accountCode: "", description: "", amount: "" }],
+    );
+    setShowForm(true);
+    toast.success("Scanned — review the lines and pick the expense account(s).");
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Payment / Expense</h2>
-        <Button variant="primary" size="sm" onClick={() => {
-          if (showForm) { setShowForm(false); setEditingId(null); }
-          else {
-            setEditingId(null);
-            setForm({ date: new Date().toISOString().slice(0, 10), payee: "", description: "", accrued: false, payFrom: "", accrualAccount: "", productLine: "" });
-            setLines([{ accountCode: "", description: "", amount: "" }]);
-            setShowForm(true);
-          }
-        }}>
-          <Plus className="h-4 w-4" /> New Payment
-        </Button>
+        <div className="flex items-center gap-2">
+          <ScanPrefillButton label="Scan Receipt" onResult={applyScan} />
+          <Button variant="primary" size="sm" onClick={() => {
+            if (showForm) { setShowForm(false); setEditingId(null); }
+            else {
+              setEditingId(null);
+              setForm({ date: new Date().toISOString().slice(0, 10), payee: "", description: "", accrued: false, payFrom: "", accrualAccount: "", productLine: "" });
+              setLines([{ accountCode: "", description: "", amount: "" }]);
+              setShowForm(true);
+            }
+          }}>
+            <Plus className="h-4 w-4" /> New Payment
+          </Button>
+        </div>
       </div>
       {migrationMissing && (
         <Card><CardContent className="p-4 text-sm text-[#9A3A2D]">Migration 0159 not applied yet — run the paste-version SQL first.</CardContent></Card>

@@ -9,6 +9,17 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-09 — ✅ Other-Party Bills editable in place (owner: 「开了无法edit,我要能edit」)
+
+`PUT /other-party-bills/:billNo` (restate: reverse visible GL + repost under
+`other_party_bill_restate_rev/post:<stamp>`, collapse; same number; party
+fixed; new total ≥ paid via pure `editedBillStatus`). Lifecycle void/delete/
+unvoid now pass the whole leg family (`otherPartyBillLegFamily`) so voiding an
+edited bill can't leak restate legs. FE: Edit button (ACTIVE rows), edit
+banner, locked party, New/Copy/Scan clear the edit state. GET returns
+`isOpening` for the prefill. 1461 tests green. Deployed + owner to exercise
+the first real edit (his ask) — verify GL via /ap-reconciliation ties after.
+
 ## 2026-07-08 — ✅ AP drift −966.60 BROKEN TO THE SEN: /ap-reconciliation endpoint + BUG-003 fix
 
 Owner rule 「做账就是要准」. Shipped `GET /api/accounting/ap-reconciliation`

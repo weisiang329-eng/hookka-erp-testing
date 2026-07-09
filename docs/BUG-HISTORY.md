@@ -34,6 +34,25 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-09-001 — Supplier payment restate rejected any payment whose PI it had fully paid (status PAID blocked + outstanding read 0) `accounting` `supplier-payments`
+
+🟢 **Fixed — restateHeadroom() in src/lib/supplier-payment-alloc.ts (+4 tests)**
+
+- **Symptom**: editing (restate) a payment that had fully settled its PI always
+  400'd — "PI not found or not in a payable status" (the PI is `PAID`), and even
+  with the status relaxed the allocation failed "amount exceeds outstanding"
+  (outstanding read `face − paid = 0`).
+- **Root cause**: buildSupplierPaymentRestate validated the NEW allocations
+  against the PI's CURRENT paid_amount_sen — but the same batch rolls back this
+  payment's own old rows first, so its own booking must count as available
+  headroom. Without it, same-amount edits (fix a date, correct the GL after the
+  BUG-2026-07-08-002 double-record) were impossible exactly when needed.
+- **Fix**: pure `restateHeadroom(pi, ownOldBookedSen)` — payable additionally
+  when `status === 'PAID' && ownOldBookedSen > 0`; outstanding =
+  `piOutstandingSen(pi) + ownOldBookedSen`. Wired into the restate build loop.
+- **Verify**: tests/supplier-payment-alloc.test.mjs (15 green); used live on
+  prod to re-state HPV-2607-009 (INNOVATEX) to its true RM 418.
+
 ## BUG-2026-07-08-003 — Voided supplier payment's ADVANCE row still counted as an unapplied advance in both agings (lifecycle never filtered) `accounting`
 
 🟢 **Fixed — shipped with the /ap-reconciliation endpoint, verified live on prod 2026-07-08**

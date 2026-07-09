@@ -27,6 +27,7 @@ import {
   computeAlloc,
   piOutstandingSen,
   readBookedSen,
+  restateHeadroom,
   groupSupplierPaymentRows,
   type RawSupplierPaymentRow,
 } from "../../lib/supplier-payment-alloc";
@@ -676,6 +677,16 @@ async function buildSupplierPaymentRestate(
   const supplierId = String(body.supplierId ?? "");
   const allocations: CreateAllocation[] = Array.isArray(body.allocations) ? body.allocations : [];
   const statements: D1PreparedStatement[] = [];
+  // This payment's own bookings are rolled back inside this same batch — the
+  // NEW allocations must validate against the PI as it will be AFTER that
+  // rollback (restateHeadroom, BUG-2026-07-09-001), or a payment that fully
+  // paid its PI could never be edited.
+  const oldBookedByPi = new Map<string, number>();
+  for (const r of oldRows) {
+    if (!r.purchaseInvoiceId) continue;
+    const k = String(r.purchaseInvoiceId);
+    oldBookedByPi.set(k, (oldBookedByPi.get(k) ?? 0) + readBookedSen(r));
+  }
 
   // 1. Roll the OLD PI paid amounts back.
   for (const r of oldRows) {
@@ -708,10 +719,11 @@ async function buildSupplierPaymentRestate(
       )
       .bind(piId)
       .first<PiRow>();
-    if (!pi || (pi.status !== "CONFIRMED" && pi.status !== "APPROVED" && pi.status !== "PARTIAL_PAID")) {
+    const headroom = pi ? restateHeadroom(pi, oldBookedByPi.get(piId) ?? 0) : null;
+    if (!pi || !headroom?.payable) {
       throw new Error(`PI ${piId} not found or not in a payable status (APPROVED / PARTIAL_PAID)`);
     }
-    const outstandingBookedSen = piOutstandingSen(pi);
+    const outstandingBookedSen = headroom.outstandingBookedSen;
     const currency = pi.currency ? String(pi.currency) : "MYR";
     const isForeign = !!pi.currency && currency.toUpperCase() !== "MYR";
     const fxRate = Number(pi.fxRate ?? pi.fx_rate) || 1;

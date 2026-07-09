@@ -103,3 +103,27 @@ test("groupSupplierPaymentRows — two lines under the same payment_no sum into 
   assert.equal(groups[0].totalBankSen, 500);
   assert.equal(groups[0].lines.length, 2);
 });
+
+test("restateHeadroom — PAID PI is editable when THIS payment booked it (BUG-2026-07-09-001)", () => {
+  // INNOVATEX shape: face 418, paid 418 (all by the payment being restated).
+  const r = m.restateHeadroom({ amountSen: 41800, paidAmountSen: 41800, status: "PAID" }, 41800);
+  assert.equal(r.payable, true);
+  assert.equal(r.outstandingBookedSen, 41800); // its own booking counts as available again
+});
+
+test("restateHeadroom — PAID PI stays locked for a payment that never touched it", () => {
+  const r = m.restateHeadroom({ amountSen: 41800, paidAmountSen: 41800, status: "PAID" }, 0);
+  assert.equal(r.payable, false);
+});
+
+test("restateHeadroom — PARTIAL_PAID adds its own old booking on top of the remaining outstanding", () => {
+  // face 1000, paid 700 of which THIS payment booked 400 → headroom 300 + 400.
+  const r = m.restateHeadroom({ amount_sen: 100000, paid_amount_sen: 70000, status: "PARTIAL_PAID" }, 40000);
+  assert.equal(r.payable, true);
+  assert.equal(r.outstandingBookedSen, 70000);
+});
+
+test("restateHeadroom — CANCELLED/DRAFT are never payable", () => {
+  assert.equal(m.restateHeadroom({ amountSen: 100, paidAmountSen: 0, status: "CANCELLED" }, 100).payable, false);
+  assert.equal(m.restateHeadroom({ amountSen: 100, paidAmountSen: 0, status: "DRAFT" }, 0).payable, false);
+});

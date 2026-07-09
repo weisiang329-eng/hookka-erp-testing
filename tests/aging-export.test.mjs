@@ -46,3 +46,11 @@ test("grand total sums every party; out-of-range bucket index clamps", () => {
   const yRow = aoa.find((r) => r[1] === "Y");
   assert.equal(yRow[7], 50); // mo 9 clamps into the >3-months column
 });
+
+test("agingRowKind — section / subtotal / grand banding classification", () => {
+  assert.equal(m.agingRowKind(["CHL FOAM", "", "", "", "", "", "", "", ""]), "section");
+  assert.equal(m.agingRowKind(["CHL FOAM — Total", "", "", 676.4, "", -640, "", "", 36.4]), "subtotal");
+  assert.equal(m.agingRowKind(["HOUZS", "", "", "", 12580.7, "", "", "", 12580.7]), "subtotal"); // docs-less single line
+  assert.equal(m.agingRowKind(["GRAND TOTAL", "", "", 1, 0, 0, 0, 0, 1]), "grand");
+  assert.equal(m.agingRowKind(["", "PI-2607-003", "2026-06-24", 320, "", "", "", "", 320]), undefined); // doc row
+});

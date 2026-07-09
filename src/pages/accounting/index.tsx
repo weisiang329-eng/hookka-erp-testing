@@ -14,8 +14,8 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { MoneyInput } from "@/components/ui/money-input";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
-import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa } from "@/lib/export-report";
-import { buildAgingExportAoa } from "@/lib/aging-export";
+import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa, type PdfRowKind } from "@/lib/export-report";
+import { buildAgingExportAoa, agingRowKind } from "@/lib/aging-export";
 import { isCleanImportShape, detectRawShape, parseRawStockTakeRows, impliedYmFromFilename, type ParsedRawItem } from "@/lib/stock-take-import";
 import { printVoucher, printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
 import { useRowSelection } from "@/lib/use-row-selection";
@@ -3639,7 +3639,7 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
             days60Sen: a.days60Sen, days90Sen: a.days90Sen, over90Sen: a.over90Sen, docs: a.docs,
           })))}
           filenameBase={`debtor-aging-${new Date().toISOString().slice(0, 10)}${company ? `-${company}` : ""}`}
-          title="Debtor Aging (AR)"
+          title="Debtor Aging (AR)" pdfRowKind={agingRowKind} moneyFormat
           subtitle={`As at ${new Date().toISOString().slice(0, 10)}${company ? ` · ${company}` : " · All companies"}`}
         />
       </div>
@@ -4463,7 +4463,7 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
             days60Sen: a.days60Sen, days90Sen: a.days90Sen, over90Sen: a.over90Sen, docs: a.docs,
           })))}
           filenameBase={`creditor-aging-${new Date().toISOString().slice(0, 10)}${company ? `-${company}` : ""}`}
-          title="Creditor Aging (AP)"
+          title="Creditor Aging (AP)" pdfRowKind={agingRowKind} moneyFormat
           subtitle={`As at ${new Date().toISOString().slice(0, 10)}${company ? ` · ${company}` : " · All companies"}`}
         />
       </div>
@@ -5123,12 +5123,19 @@ function MonthlyPlTab() {
 // Shared CSV / Excel / PDF export buttons for the finance reports. The tab
 // supplies a builder that returns the table as an array-of-arrays (header
 // row + body) plus a filename base + title.
-function ExportButtons({ build, filenameBase, title, subtitle }: { build: () => Aoa; filenameBase: string; title: string; subtitle: string }) {
+// `pdfRowKind` bands section / subtotal / grand rows in the PDF; `moneyFormat`
+// renders numbers as 1,392.50 in PDF+Excel (still real numbers in Excel so
+// SUM works) and fixes CSV numbers to 2 dp.
+function ExportButtons({ build, filenameBase, title, subtitle, pdfRowKind, moneyFormat }: {
+  build: () => Aoa; filenameBase: string; title: string; subtitle: string;
+  pdfRowKind?: (row: (string | number)[], idx: number) => PdfRowKind;
+  moneyFormat?: boolean;
+}) {
   return (
     <div className="flex items-center gap-1.5">
-      <button onClick={() => exportReportCsv(`${filenameBase}.csv`, build())} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">CSV</button>
-      <button onClick={() => exportReportXlsx(`${filenameBase}.xlsx`, title.slice(0, 28), build())} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">Excel</button>
-      <button onClick={() => exportReportPdf(`${filenameBase}.pdf`, title, subtitle, build())} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">PDF</button>
+      <button onClick={() => exportReportCsv(`${filenameBase}.csv`, build(), moneyFormat ? { moneyFormat: true } : undefined)} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">CSV</button>
+      <button onClick={() => exportReportXlsx(`${filenameBase}.xlsx`, title.slice(0, 28), build(), moneyFormat ? { moneyFormat: true } : undefined)} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">Excel</button>
+      <button onClick={() => exportReportPdf(`${filenameBase}.pdf`, title, subtitle, build(), pdfRowKind ? { rowKind: pdfRowKind } : undefined)} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">PDF</button>
     </div>
   );
 }

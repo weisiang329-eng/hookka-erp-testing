@@ -37,6 +37,18 @@ function bucketsOf(p: AgingExportParty): number[] {
   return [p.currentSen, p.days30Sen, p.days60Sen, p.days90Sen, p.over90Sen];
 }
 
+// Classify an export row for the PDF's banded styling: the party-name line
+// is a "section" band (clear company boundary), the "— Total" / docs-less
+// single-line parties are "subtotal" bands, GRAND TOTAL gets the dark band.
+export function agingRowKind(row: (string | number)[]): "section" | "subtotal" | "grand" | undefined {
+  const first = row[0];
+  if (first === "GRAND TOTAL") return "grand";
+  if (typeof first === "string" && first !== "") {
+    return row.slice(1).every((c) => c === "") ? "section" : "subtotal";
+  }
+  return undefined;
+}
+
 export function buildAgingExportAoa(
   partyHeader: string,
   parties: AgingExportParty[],

@@ -24,26 +24,61 @@ function csvEscape(v: string | number): string {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function exportReportCsv(filename: string, aoa: Aoa): void {
-  const csv = aoa.map((r) => r.map(csvEscape).join(",")).join("\r\n");
+export function exportReportCsv(
+  filename: string,
+  aoa: Aoa,
+  opts?: { moneyFormat?: boolean },
+): void {
+  // moneyFormat: fix numbers to 2 dp (1392.5 → 1392.50). No thousands
+  // separator in CSV — commas are column delimiters; Excel formats on open.
+  const cell = (v: string | number): string | number =>
+    opts?.moneyFormat && typeof v === "number" ? v.toFixed(2) : v;
+  const csv = aoa.map((r) => r.map((v) => csvEscape(cell(v))).join(",")).join("\r\n");
   // BOM so Excel reads UTF-8 correctly.
   downloadBlob(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }), filename);
 }
 
-export async function exportReportXlsx(filename: string, sheetName: string, aoa: Aoa): Promise<void> {
+export async function exportReportXlsx(
+  filename: string,
+  sheetName: string,
+  aoa: Aoa,
+  opts?: { moneyFormat?: boolean },
+): Promise<void> {
   const XLSX = await import("xlsx");
   const ws = XLSX.utils.aoa_to_sheet(aoa);
+  if (opts?.moneyFormat) {
+    // Give every numeric cell the accounting display format (1,392.50) —
+    // still a real number underneath, so SUM/filter keep working.
+    const range = XLSX.utils.decode_range(ws["!ref"] ?? "A1");
+    for (let r = range.s.r; r <= range.e.r; r++) {
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const cell = ws[XLSX.utils.encode_cell({ r, c })] as { t?: string; z?: string } | undefined;
+        if (cell && cell.t === "n") cell.z = "#,##0.00";
+      }
+    }
+  }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0, 31) || "Report");
   const out = XLSX.write(wb, { bookType: "xlsx", type: "array" }) as ArrayBuffer;
   downloadBlob(new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), filename);
 }
 
+// Optional per-row styling for the PDF (owner 2026-07-09: doc rows and
+// subtotal rows looked identical, party sections had no visible boundary).
+export type PdfRowKind = "section" | "subtotal" | "grand" | undefined;
+export type PdfExportOpts = {
+  /** Format numeric cells as 1,392.50 (default true — these are money reports). */
+  formatNumbers?: boolean;
+  /** Classify a BODY row (raw values, body index) for banded styling. */
+  rowKind?: (row: (string | number)[], idx: number) => PdfRowKind;
+};
+
 export async function exportReportPdf(
   filename: string,
   title: string,
   subtitle: string,
   aoa: Aoa,
+  opts?: PdfExportOpts,
 ): Promise<void> {
   const [{ default: jsPDF }, autoTableMod] = await Promise.all([
     import("jspdf"),
@@ -57,8 +92,15 @@ export async function exportReportPdf(
   doc.setFontSize(10);
   doc.text(title, 40, 54);
   if (subtitle) { doc.setFontSize(8); doc.setTextColor(120); doc.text(subtitle, 40, 67); doc.setTextColor(0); }
+  const useFmt = opts?.formatNumbers !== false;
+  const fmtCell = (v: string | number): string =>
+    useFmt && typeof v === "number"
+      ? v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : String(v);
   const head = aoa.length ? [aoa[0].map(String)] : [];
-  const body = aoa.slice(1).map((r) => r.map(String));
+  const rawBody = aoa.slice(1);
+  const body = rawBody.map((r) => r.map(fmtCell));
+  const kinds: PdfRowKind[] = opts?.rowKind ? rawBody.map((r, i) => opts.rowKind!(r, i)) : [];
   autoTable(doc, {
     head,
     body,
@@ -66,8 +108,26 @@ export async function exportReportPdf(
     styles: { fontSize: 7.5, cellPadding: 2 },
     headStyles: { fillColor: [107, 92, 50], textColor: 255 },
     columnStyles: { 0: { halign: "left" } },
-    didParseCell: (d: { column: { index: number }; cell: { styles: { halign: string } } }) => {
+    didParseCell: (d: {
+      section: string;
+      row: { index: number };
+      column: { index: number };
+      cell: { styles: { halign: string; fillColor?: number[] | number; textColor?: number[] | number; fontStyle?: string } };
+    }) => {
       if (d.column.index > 0) d.cell.styles.halign = "right";
+      if (d.section !== "body") return;
+      const k = kinds[d.row.index];
+      if (k === "section") {
+        d.cell.styles.fillColor = [226, 221, 216];
+        d.cell.styles.fontStyle = "bold";
+      } else if (k === "subtotal") {
+        d.cell.styles.fillColor = [240, 236, 233];
+        d.cell.styles.fontStyle = "bold";
+      } else if (k === "grand") {
+        d.cell.styles.fillColor = [107, 92, 50];
+        d.cell.styles.textColor = 255;
+        d.cell.styles.fontStyle = "bold";
+      }
     },
   });
   doc.save(filename);

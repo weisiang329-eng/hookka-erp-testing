@@ -543,6 +543,84 @@ app.post("/knock-off", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /un-knock — reverse of /knock-off: detach an allocation row from its
+// PI so the money returns to "unapplied advance" (owner case 2026-07-09: GVP
+// 950 sat allocated to an opening-EXCLUDED PI, so it showed neither as an
+// advance nor as a bill — the aging must show the advance again). Pure
+// subsidiary reattribution, exactly like knock-off: NO GL legs move (the
+// DR 400-0000 · CR bank posted at payment time stays put). The detached row
+// itself becomes the advance (purchaseInvoiceId → NULL; its amountSen is
+// already the bank amount); the PI's paid_amount_sen is re-derived absolutely
+// via the same truth-guard SQL the restate uses.
+// ---------------------------------------------------------------------------
+app.post("/un-knock", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  try {
+    const body = (await c.req.json()) as { rowId?: unknown };
+    const rowId = String(body.rowId ?? "").trim();
+    if (!rowId) return c.json({ success: false, error: "rowId is required" }, 400);
+
+    await ensurePartialPaymentColumns(c.var.DB);
+
+    const row = await c.var.DB
+      .prepare(
+        `SELECT id, paymentNo, supplierName, purchaseInvoiceId, amountSen, method
+           FROM supplier_payments WHERE id = ? AND orgId = ?`,
+      )
+      .bind(rowId, orgId)
+      .first<{
+        id: string; paymentNo: string; supplierName: string;
+        purchaseInvoiceId: string | null; amountSen: number; method: string | null;
+      }>();
+    if (!row) return c.json({ success: false, error: "Payment row not found" }, 404);
+    if ((row.method ?? "") === "CREDIT_NOTE") {
+      return c.json({ success: false, error: "This is a credit-note marker — void the purchase CN instead" }, 400);
+    }
+    const piId = row.purchaseInvoiceId;
+    if (!piId) {
+      return c.json({ success: false, error: "This row is already an unapplied advance" }, 400);
+    }
+    const lc = await c.var.DB
+      .prepare(
+        `SELECT state FROM document_lifecycle
+          WHERE sourceType = 'supplier_payment' AND sourceId = ? AND orgId = ?`,
+      )
+      .bind(row.paymentNo, orgId)
+      .first<{ state: string }>();
+    if (lc && lc.state !== "ACTIVE") {
+      return c.json({ success: false, error: `Payment ${row.paymentNo} is ${lc.state} — unvoid it first` }, 400);
+    }
+
+    await c.var.DB.batch([
+      c.var.DB
+        .prepare(`UPDATE supplier_payments SET purchaseInvoiceId = NULL WHERE id = ?`)
+        .bind(rowId),
+      buildPiPaidTruthStatement(c.var.DB, piId),
+    ]);
+    const pi = await c.var.DB
+      .prepare("SELECT pi_no, paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
+      .bind(piId)
+      .first<{ piNo?: string; pi_no?: string; paidAmountSen?: number; paid_amount_sen?: number; status: string }>();
+    return c.json({
+      success: true,
+      data: {
+        paymentNo: row.paymentNo,
+        restoredAdvanceSen: Number(row.amountSen) || 0,
+        piNo: pi?.piNo ?? pi?.pi_no ?? "",
+        piPaidSen: Number(pi?.paidAmountSen ?? pi?.paid_amount_sen) || 0,
+        piStatus: pi?.status ?? "",
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/supplier-payments/un-knock] failed:", msg, err);
+    return c.json({ success: false, error: msg || "Internal error detaching the allocation" }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // buildSupplierPaymentLifecycle — shared core for void/delete/unvoid (F3).
 // applyLifecycle (GL reversal + hidden flags + document_lifecycle state) plus
 // boundary-aware paid_amount_sen on each PI: rolled back when leaving ACTIVE

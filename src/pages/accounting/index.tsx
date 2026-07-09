@@ -15,6 +15,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { MoneyInput } from "@/components/ui/money-input";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa } from "@/lib/export-report";
+import { buildAgingExportAoa } from "@/lib/aging-export";
 import { isCleanImportShape, detectRawShape, parseRawStockTakeRows, impliedYmFromFilename, type ParsedRawItem } from "@/lib/stock-take-import";
 import { printVoucher, printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
 import { useRowSelection } from "@/lib/use-row-selection";
@@ -3632,6 +3633,15 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Receivable</h2>
           <p className="text-sm text-[#6B7280]">Total Outstanding: <span className="font-semibold text-[#9C6F1E]">{formatCurrency(totalOutstanding)}</span></p>
         </div>
+        <ExportButtons
+          build={() => buildAgingExportAoa("Customer", rows.map((a) => ({
+            name: a.customerName, currentSen: a.currentSen, days30Sen: a.days30Sen,
+            days60Sen: a.days60Sen, days90Sen: a.days90Sen, over90Sen: a.over90Sen, docs: a.docs,
+          })))}
+          filenameBase={`debtor-aging-${new Date().toISOString().slice(0, 10)}${company ? `-${company}` : ""}`}
+          title="Debtor Aging (AR)"
+          subtitle={`As at ${new Date().toISOString().slice(0, 10)}${company ? ` · ${company}` : " · All companies"}`}
+        />
       </div>
 
       <Card>
@@ -4447,6 +4457,15 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Payable</h2>
           <p className="text-sm text-[#6B7280]">Total Outstanding: <span className="font-semibold text-[#3E6570]">{formatCurrency(totalOutstanding)}</span></p>
         </div>
+        <ExportButtons
+          build={() => buildAgingExportAoa("Supplier", rows.map((a) => ({
+            name: a.supplierName, currentSen: a.currentSen, days30Sen: a.days30Sen,
+            days60Sen: a.days60Sen, days90Sen: a.days90Sen, over90Sen: a.over90Sen, docs: a.docs,
+          })))}
+          filenameBase={`creditor-aging-${new Date().toISOString().slice(0, 10)}${company ? `-${company}` : ""}`}
+          title="Creditor Aging (AP)"
+          subtitle={`As at ${new Date().toISOString().slice(0, 10)}${company ? ` · ${company}` : " · All companies"}`}
+        />
       </div>
 
       <Card>

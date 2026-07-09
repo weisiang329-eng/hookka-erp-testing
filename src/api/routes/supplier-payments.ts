@@ -373,6 +373,7 @@ app.post("/", async (c) => {
         legs,
       );
       statements.push(...ls);
+      statements.push(bumpSupplierPaymentsRev(c.var.DB));
 
       // 7. Execute the whole batch atomically (mirror purchase-invoices.ts).
       await c.var.DB.batch(statements);
@@ -529,6 +530,7 @@ app.post("/knock-off", async (c) => {
         )
         .bind(amountSen, amountSen, amountSen, piId),
     ];
+    statements.push(bumpSupplierPaymentsRev(c.var.DB));
     await c.var.DB.batch(statements);
 
     return c.json({
@@ -598,6 +600,7 @@ app.post("/un-knock", async (c) => {
         .prepare(`UPDATE supplier_payments SET purchaseInvoiceId = NULL WHERE id = ?`)
         .bind(rowId),
       buildPiPaidTruthStatement(c.var.DB, piId),
+      bumpSupplierPaymentsRev(c.var.DB),
     ]);
     const pi = await c.var.DB
       .prepare("SELECT pi_no, paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
@@ -719,6 +722,7 @@ async function buildSupplierPaymentLifecycle(
       }
     }
   }
+  statements.push(bumpSupplierPaymentsRev(db));
   return { statements, newState: lc.newState };
 }
 
@@ -893,8 +897,27 @@ async function buildSupplierPaymentRestate(
   for (const r of oldRows) if (r.purchaseInvoiceId) touchedPiIds.add(String(r.purchaseInvoiceId));
   for (const a of allocations) if (a.piId) touchedPiIds.add(String(a.piId));
   for (const piId of touchedPiIds) statements.push(buildPiPaidTruthStatement(db, piId));
+  statements.push(bumpSupplierPaymentsRev(db));
 
   return statements;
+}
+
+// The aging snapshot's freshness probe rides on tables with an updated_at
+// column; supplier_payments has none, and a lifecycle void/unvoid of an
+// advance-only payment writes NO probed source table at all — so the cached
+// aging kept showing a voided advance forever (BUG-2026-07-09-002). Every
+// payment mutation batch therefore bumps this kv row: kv_config IS in the
+// aging snapshot's sourceTables (same trick /opening-balance/ap-exclude uses).
+function bumpSupplierPaymentsRev(db: Env["Variables"]["DB"]): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO kv_config (key, value, updated_at)
+       VALUES ('supplier_payments_rev', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(JSON.stringify(Date.now()), new Date().toISOString());
 }
 
 // Re-derive ONE PI's paid_amount_sen + status from its live supplier_payments

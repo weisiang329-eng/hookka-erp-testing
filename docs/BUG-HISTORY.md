@@ -34,6 +34,28 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-09-002 — Voiding an advance-only supplier payment left it in the CACHED aging (snapshot never invalidated) `accounting` `supplier-payments` `snapshot`
+
+🟢 **Fixed — bumpSupplierPaymentsRev() in every payment mutation batch**
+
+- **Symptom**: owner voided BIG GREEN MANAGEMENT's advance HPV-2606-028 (−1,560)
+  and the Aging tab still showed it. The live loaders were already correct
+  (BUG-2026-07-08-003 filter) — the SNAPSHOT was stale.
+- **Root cause**: `/aging` is snapshot-cached on MAX(updated_at/created_at)
+  over invoices / purchase_invoices / supplier_payments / kv_config. A
+  lifecycle void/unvoid of an advance-only payment writes NONE of those
+  (ledger hidden flags + document_lifecycle only), and supplier_payments has
+  no probed updated_at anyway (UPDATEs like knock-off/un-knock were invisible
+  too — only INSERTs registered via created_at).
+- **Fix** (`src/api/routes/supplier-payments.ts`): `bumpSupplierPaymentsRev()`
+  upserts kv_config `supplier_payments_rev` inside the SAME batch for every
+  payment mutation — create, knock-off, un-knock, void/delete/unvoid
+  (buildSupplierPaymentLifecycle) and restate. kv_config is in the snapshot's
+  sourceTables and has updated_at, so the next aging read always recomputes.
+  Same trick /opening-balance/ap-exclude already used.
+- **Verify**: prod — after deploy, one bump; aging no longer shows the voided
+  HPV-2606-028 row; card totals match /ap-control (live).
+
 ## BUG-2026-07-09-001 — Supplier payment restate rejected any payment whose PI it had fully paid (status PAID blocked + outstanding read 0) `accounting` `supplier-payments`
 
 🟢 **Fixed — restateHeadroom() in src/lib/supplier-payment-alloc.ts (+4 tests)**

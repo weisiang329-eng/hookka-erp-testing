@@ -71,6 +71,12 @@ export type PdfExportOpts = {
   formatNumbers?: boolean;
   /** Classify a BODY row (raw values, body index) for banded styling. */
   rowKind?: (row: (string | number)[], idx: number) => PdfRowKind;
+  /** Column indexes that hold TEXT (left-aligned). Default: only column 0 —
+   *  every other column right-aligns, which is wrong for Doc No / Date. */
+  leftCols?: number[];
+  /** Fixed column widths in pt (landscape A4 ≈ 762pt usable). Unlisted
+   *  columns keep autotable's auto width. */
+  colWidths?: Record<number, number>;
 };
 
 export async function exportReportPdf(
@@ -101,20 +107,26 @@ export async function exportReportPdf(
   const rawBody = aoa.slice(1);
   const body = rawBody.map((r) => r.map(fmtCell));
   const kinds: PdfRowKind[] = opts?.rowKind ? rawBody.map((r, i) => opts.rowKind!(r, i)) : [];
+  const leftCols = new Set([0, ...(opts?.leftCols ?? [])]);
+  const columnStyles: Record<number, { halign?: string; cellWidth?: number }> = {};
+  for (const c of leftCols) columnStyles[c] = { halign: "left" };
+  for (const [c, w] of Object.entries(opts?.colWidths ?? {})) {
+    columnStyles[Number(c)] = { ...columnStyles[Number(c)], cellWidth: w };
+  }
   autoTable(doc, {
     head,
     body,
     startY: 76,
     styles: { fontSize: 7.5, cellPadding: 2 },
     headStyles: { fillColor: [107, 92, 50], textColor: 255 },
-    columnStyles: { 0: { halign: "left" } },
+    columnStyles,
     didParseCell: (d: {
       section: string;
       row: { index: number };
       column: { index: number };
       cell: { styles: { halign: string; fillColor?: number[] | number; textColor?: number[] | number; fontStyle?: string } };
     }) => {
-      if (d.column.index > 0) d.cell.styles.halign = "right";
+      if (!leftCols.has(d.column.index)) d.cell.styles.halign = "right";
       if (d.section !== "body") return;
       const k = kinds[d.row.index];
       if (k === "section") {

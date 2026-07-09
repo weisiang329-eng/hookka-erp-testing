@@ -17,10 +17,18 @@ Owner rule 「做账就是要准」. Shipped `GET /api/accounting/ap-reconciliat
 - **GVP −950.00** — HPV-2605-001 (ACTIVE) booked 950 to PI-2605-001 which sits
   in opening_ap_excludes. 🟡 OWNER: once the GVP bill is recognised, include
   PI-2605-001 back (Opening tab card) **and re-Post opening** → item clears.
-- **INNOVATEX −418.00** — HPV-2607-009 GL kept DR 836 vs subledger 418 (the
-  recompute-pi-paid fix corrected the rows, GL restate legs still say 836).
-  🟡 OWNER decision pending (07-08 known case): move 418 to duplicate
-  PI-2606-001 (restate with both PIs) or void the duplicate bill.
+- **INNOVATEX −418.00** — HPV-2607-009 GL kept DR 836 vs subledger 418.
+  ✅ OWNER CONFIRMED 2026-07-09 「我只付RM418罢了」→ the 836 is the system's
+  double-record: BOTH the original supplier_payment legs AND the 07-06
+  restate_post legs stayed visible (that restate's hide-old-legs step didn't
+  bite). Repair = re-run restate with the true 418 (its rev nets out whatever
+  is visible — bounded: worst case unchanged, never worse). Was blocked by
+  **BUG-2026-07-09-001** (restate rejected fully-paid PIs) — fixed
+  (restateHeadroom), deployed, then executed live. Bank 310-0010 was
+  overstated by the same 418; heals together.
+  🟡 Remaining owner question: duplicate bill PI-2606-001 (CONFIRMED, unpaid,
+  418, same supplier/date/amount as PI-2606-041) — void it? It sits in the
+  creditor aging as a real-looking 418 payable until decided.
 - **WF LEATHER +401.40** — voided payment's advance row still counted →
   **BUG-2026-07-08-003, FIXED** (lifecycle NOT-EXISTS in
   loadUnappliedSupplierAdvances; heals /aging AP + /ap-control + advance card).
@@ -30,6 +38,8 @@ Owner rule 「做账就是要准」. Shipped `GET /api/accounting/ap-reconciliat
 After the fix the card reads **−1,368.00 = GVP −950 + INNOVATEX −418** (both
 owner-pending data decisions, permanently itemized by the endpoint). The old
 "+16.60 identity" hand-math is obsolete — use the endpoint.
+
+## 2026-07-04 — 🔵 Multi-Company Phase 3: dual-identity + inter-company mirror (worktree branch, NOT pushed)
 
 ADDITIVE-only, opt-in, default OFF. Finance-adjacent — built conservatively;
 external customers/suppliers/POs/SOs behave byte-identical.

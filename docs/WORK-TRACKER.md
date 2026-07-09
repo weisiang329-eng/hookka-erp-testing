@@ -22,11 +22,9 @@ Owner rule 「做账就是要准」. Shipped `GET /api/accounting/ap-reconciliat
   SQL). This matches the old accountant's TB (GVP −950 credit balance).
   **DRIFT NOW 0.00 — control = net = 195,692.69; recon items empty; residual
   0.00 (verified live).**
-  🟡 Follow-up (owner asking his accountant): whether to RECOGNISE PI-2604-010
-  into the opening — the old books missed that bill, so recognising it means
-  opening +950 CR plus a DR line the owner must pick, and the opening total
-  then differs from the old TB by 950. If yes: include the PI + add the DR row
-  + re-Post opening + knock the 950 advance onto it.
+  ✅ CLOSED 2026-07-09: owner ruled 「不认，继续当预付款，过后我会进回这张单」 —
+  the advance state IS the final state; the owner will enter the bill himself
+  later and knock the 950 onto it via the normal Knock-off flow. No action.
 - **INNOVATEX −418.00** — HPV-2607-009 GL kept DR 836 vs subledger 418.
   ✅ OWNER CONFIRMED 2026-07-09 「我只付RM418罢了」→ the 836 is the system's
   double-record: BOTH the original supplier_payment legs AND the 07-06
@@ -36,9 +34,9 @@ Owner rule 「做账就是要准」. Shipped `GET /api/accounting/ap-reconciliat
   **BUG-2026-07-09-001** (restate rejected fully-paid PIs) — fixed
   (restateHeadroom), deployed, then executed live. Bank 310-0010 was
   overstated by the same 418; heals together.
-  🟡 Remaining owner question: duplicate bill PI-2606-001 (CONFIRMED, unpaid,
-  418, same supplier/date/amount as PI-2606-041) — void it? It sits in the
-  creditor aging as a real-looking 418 payable until decided.
+  ✅ CLOSED 2026-07-09: owner ruled 「不理它」 — PI-2606-001 stays
+  CONFIRMED/unpaid 418 in the creditor aging BY OWNER CHOICE. Do not re-raise;
+  not a bug.
 - **WF LEATHER +401.40** — voided payment's advance row still counted →
   **BUG-2026-07-08-003, FIXED** (lifecycle NOT-EXISTS in
   loadUnappliedSupplierAdvances; heals /aging AP + /ap-control + advance card).

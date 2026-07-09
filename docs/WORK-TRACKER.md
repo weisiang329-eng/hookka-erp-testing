@@ -9,6 +9,17 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-09 — ✅ Aging snapshot invalidation (BUG-2026-07-09-002)
+
+Voiding an advance-only payment writes no probed source table, so the cached
+/aging kept phantom advance rows (BIG GREEN −1,560, AUN CHING YAP −3,570)
+after the owner voided them. bumpSupplierPaymentsRev() now rides in every
+payment mutation batch (create/void/unvoid/knock/un-knock/restate) bumping
+kv_config. Verified live: phantoms gone; aging Σ = /ap-control net = GL
+400-0000 = 242,798.69. Owner then voided all four GVP payments himself
+(reorganising GVP start-to-finish) — PI-2605-011 back to 2,650 outstanding is
+EXPECTED; GVP is owner-managed now, hands off.
+
 ## 2026-07-09 — ✅ Other-Party Bills editable in place (owner: 「开了无法edit,我要能edit」)
 
 `PUT /other-party-bills/:billNo` (restate: reverse visible GL + repost under

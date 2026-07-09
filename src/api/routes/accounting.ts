@@ -45,6 +45,7 @@ import {
   computeBillTotals,
   validateBillShape,
   buildBillLegs,
+  editedBillStatus,
   type PartyType,
   type BillItemInput,
 } from "../../lib/other-party-bill";
@@ -61,7 +62,7 @@ import { buildHistIdentityRemap } from "../../lib/pnl-hist-remap";
 import { rmLineOf, rmScale } from "../../lib/product-line-rm";
 import { buildInventoryOpeningSeed, applyOpeningSeed, type InventoryOpeningRow } from "../../lib/inventory-opening";
 import { bucketAging } from "../../lib/other-party-aging";
-import { applyLifecycle } from "../lib/document-lifecycle";
+import { applyLifecycle, getDocState } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import {
   computeMaterialCheckpoints,
@@ -3451,6 +3452,165 @@ app.post("/other-party-bills", async (c) => {
   }
 });
 
+// PUT /other-party-bills/:billNo — edit IN PLACE, same bill number (owner
+// request 2026-07-09 「开了无法edit,我要能edit」; until now "edit" was Copy-to-
+// new-bill). Restate pattern, mirroring the supplier-payment edit: reverse
+// whatever GL is currently visible (other_party_bill_restate_rev:<stamp>),
+// post fresh legs from the edited fields (…_restate_post:<stamp>), hide all
+// but the new post. Party is FIXED (it drives the number prefix + control
+// account — Copy for a different party). Payments survive: the new total may
+// not drop below paidAmountSen (editedBillStatus), status re-derived.
+app.put("/other-party-bills/:billNo", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  await ensureOtherPartyBillOpening(c.var.DB);
+  try {
+    const orgId = getOrgId(c);
+    const billNo = c.req.param("billNo");
+    const bill = await c.var.DB.prepare(
+      "SELECT * FROM other_party_bills WHERE billNo = ? AND orgId = ?",
+    ).bind(billNo, orgId).first<OtherPartyBillRow & { is_opening?: number | null; isOpening?: number | null }>();
+    if (!bill) return c.json({ success: false, error: "Bill not found" }, 404);
+
+    const state = await getDocState(c.var.DB, orgId, "other_party_bill", billNo);
+    if (state !== "ACTIVE") {
+      return c.json({ success: false, error: `Bill is ${state} — restore (unvoid) it before editing` }, 400);
+    }
+    // A bill that was voided AND restored carries reversal legs pinned to its
+    // OLD amounts; a later re-void would reuse them and leak the difference.
+    // Rare corner — refuse the edit, Copy covers it.
+    if (await ledgerHasSource(c.var.DB, orgId, "other_party_bill_void", billNo)) {
+      return c.json({ success: false, error: "This bill was voided and restored before — its void trail is pinned to the old figures. Copy it to a new bill instead of editing." }, 400);
+    }
+
+    const body = (await c.req.json()) as {
+      billDate?: string;
+      referenceNo?: string;
+      description?: string;
+      taxSen?: number;
+      items?: { counterAccount?: string; amountSen?: number; description?: string }[];
+      isOpening?: boolean;
+    };
+    const billDate = String(body.billDate ?? "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(billDate))
+      return c.json({ success: false, error: "billDate must be YYYY-MM-DD" }, 400);
+
+    const items: BillItemInput[] = (body.items ?? []).map((it) => ({
+      counterAccount: String(it.counterAccount ?? "").trim(),
+      amountSen: Math.round(Number(it.amountSen ?? 0)),
+      description: it.description ? String(it.description) : "",
+    }));
+    const taxSen = Math.round(Number(body.taxSen ?? 0));
+    const shapeErr = validateBillShape(items, taxSen);
+    if (shapeErr) return c.json({ success: false, error: shapeErr }, 400);
+    for (const code of [...new Set(items.map((i) => i.counterAccount))]) {
+      const acct = await c.var.DB.prepare(
+        "SELECT code, isPostable FROM chart_of_accounts WHERE code = ?",
+      ).bind(code).first<{ code: string; isPostable: number }>();
+      if (!acct) return c.json({ success: false, error: `Account ${code} not found` }, 400);
+      if (acct.isPostable !== 1)
+        return c.json({ success: false, error: `Account ${code} is not postable` }, 400);
+    }
+
+    const partyType = bill.partyType as PartyType;
+    const { subtotalSen, totalSen } = computeBillTotals(items, taxSen);
+    const paidAmountSen = Math.round(Number(bill.paidAmountSen) || 0);
+    const st = editedBillStatus(totalSen, paidAmountSen);
+    if (!st.ok) return c.json({ success: false, error: st.error }, 400);
+    const isOpening = body.isOpening === undefined
+      ? Math.round(Number(bill.isOpening ?? bill.is_opening) || 0)
+      : (body.isOpening ? 1 : 0);
+
+    const now = new Date().toISOString();
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const statements: D1PreparedStatement[] = [
+      c.var.DB.prepare(
+        `UPDATE other_party_bills
+            SET billDate = ?, referenceNo = ?, description = ?,
+                subtotalSen = ?, taxSen = ?, totalSen = ?, status = ?,
+                is_opening = ?, updatedAt = ?
+          WHERE id = ?`,
+      ).bind(
+        billDate, body.referenceNo ?? null, body.description ?? null,
+        subtotalSen, taxSen, totalSen, st.status, isOpening, now, bill.id,
+      ),
+      c.var.DB.prepare("DELETE FROM other_party_bill_items WHERE billId = ?").bind(bill.id),
+    ];
+    items.forEach((it, idx) => {
+      statements.push(
+        c.var.DB.prepare(
+          `INSERT INTO other_party_bill_items
+             (id, billId, counterAccount, amountSen, description, lineNo, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          `opbi-${crypto.randomUUID().slice(0, 10)}`,
+          bill.id, it.counterAccount, it.amountSen, it.description ?? null, idx + 1, now,
+        ),
+      );
+    });
+
+    // GL: reverse the visible legs + post the corrected ones, collapse to the
+    // newest post (same shape as the supplier-payment restate).
+    const stamp = Date.now();
+    const postSource = `other_party_bill_restate_post:${stamp}`;
+    const cur =
+      (
+        await c.var.DB.prepare(
+          `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+            WHERE sourceId = ? AND orgId = ? AND hidden = 0 AND sourceType LIKE 'other_party_bill%'`,
+        ).bind(billNo, orgId).all<{ accountCode: string; debitSen: number; creditSen: number }>()
+      ).results ?? [];
+    const legs: LedgerEntryInput[] = cur.map((l, i) => ({
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType: `other_party_bill_restate_rev:${stamp}`,
+      sourceId: billNo,
+      legNo: i + 1,
+      accountCode: l.accountCode,
+      debitSen: Number(l.creditSen) || 0,
+      creditSen: Number(l.debitSen) || 0,
+      description: `Restate rev · ${billNo}`,
+      actorUserId,
+      orgId,
+    }));
+    buildBillLegs({ partyType, billNo, partyName: bill.partyName, items, taxSen }).forEach((l) => {
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: postSource,
+        sourceId: billNo,
+        legNo: l.legNo,
+        accountCode: l.accountCode,
+        debitSen: l.debitSen,
+        creditSen: l.creditSen,
+        description: `${l.description} (edited)`,
+        actorUserId,
+        orgId,
+      });
+    });
+    const { statements: ledgerStmts } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+    statements.push(...ledgerStmts);
+    statements.push(
+      c.var.DB.prepare(
+        `UPDATE ledger_journal_entries SET hidden = 1
+          WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'other_party_bill%' AND sourceType <> ?`,
+      ).bind(billNo, orgId, postSource),
+    );
+
+    await c.var.DB.batch(statements);
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: billNo,
+      action: "update",
+      before: { totalSen: bill.totalSen, billDate: bill.billDate },
+      after: { totalSen, billDate, status: st.status, lines: items.length },
+    });
+    return c.json({ success: true, data: { billNo, totalSen, status: st.status } });
+  } catch (e) {
+    console.error("[PUT /other-party-bills/:billNo] failed:", e);
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
 app.get("/other-party-bills", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
@@ -3501,6 +3661,7 @@ app.get("/other-party-bills", async (c) => {
     paidAmountSen: b.paidAmountSen,
     outstandingSen: b.totalSen - b.paidAmountSen,
     status: b.status,
+    isOpening: !!Number((b as { isOpening?: number | null; is_opening?: number | null }).isOpening ?? (b as { is_opening?: number | null }).is_opening ?? 0),
     lifecycleState: b.lifecycleState ?? "ACTIVE",
     items: (itemsByBill.get(b.id) ?? []).map((i) => ({
       counterAccount: i.counterAccount,
@@ -3531,7 +3692,7 @@ app.delete("/other-party-bills/:billNo", async (c) => {
   // Soft delete: keep the row, build the reversal + state=DELETED via the lifecycle helper.
   let lc: { statements: D1PreparedStatement[]; newState: string };
   try {
-    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: ["other_party_bill"], voidSourceType: "other_party_bill_void", sourceId: billNo, action: "delete", actorUserId, descriptionTag: `DELETE · ${billNo}` });
+    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: await otherPartyBillLegFamily(c.var.DB, orgId, billNo), voidSourceType: "other_party_bill_void", sourceId: billNo, action: "delete", actorUserId, descriptionTag: `DELETE · ${billNo}` });
   } catch (e) {
     console.error(`[ledger] other_party_bill ${billNo} delete lifecycle build failed — aborting:`, e);
     return c.json({ success: false, error: (e as Error).message }, 400);
@@ -3539,6 +3700,32 @@ app.delete("/other-party-bills/:billNo", async (c) => {
   await c.var.DB.batch(lc.statements);
   return c.json({ success: true });
 });
+
+// An EDITED bill's live GL sits on other_party_bill_restate_rev/post:<stamp>
+// legs — applyLifecycle exact-matches sourceTypes, so void/delete/unvoid must
+// receive the whole family or the restate legs would survive a void (the
+// exact GL-leak class BUG-2026-07-08-002 was). Original type stays FIRST — it
+// is the document_lifecycle key.
+async function otherPartyBillLegFamily(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  billNo: string,
+): Promise<string[]> {
+  const fam = ["other_party_bill"];
+  try {
+    const res = await db
+      .prepare(
+        `SELECT DISTINCT sourceType FROM ledger_journal_entries
+          WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'other_party_bill_restate_%'`,
+      )
+      .bind(billNo, orgId)
+      .all<{ sourceType: string }>();
+    for (const r of res.results ?? []) fam.push(r.sourceType);
+  } catch {
+    /* ledger unavailable — plain family */
+  }
+  return fam;
+}
 
 app.post("/other-party-bills/:billNo/lifecycle", async (c) => {
   const denied = await requirePermission(c, "accounting", "update");
@@ -3562,7 +3749,7 @@ app.post("/other-party-bills/:billNo/lifecycle", async (c) => {
     (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
   let lc: { statements: D1PreparedStatement[]; newState: string };
   try {
-    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: ["other_party_bill"], voidSourceType: "other_party_bill_void", sourceId: billNo, action, actorUserId, descriptionTag: `${action.toUpperCase()} · ${billNo}` });
+    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: await otherPartyBillLegFamily(c.var.DB, orgId, billNo), voidSourceType: "other_party_bill_void", sourceId: billNo, action, actorUserId, descriptionTag: `${action.toUpperCase()} · ${billNo}` });
   } catch (e) { return c.json({ success: false, error: (e as Error).message }, 400); }
 
   // No status-column change: other_party_bills.status carries payment progress

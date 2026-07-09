@@ -5845,7 +5845,7 @@ type OtherPartyBill = {
   id: string; billNo: string; partyId: string; partyType: "DEBTOR" | "CREDITOR";
   partyName: string; billDate: string; referenceNo: string; description: string;
   subtotalSen: number; taxSen: number; totalSen: number; paidAmountSen: number;
-  outstandingSen: number; status: string; lifecycleState?: string;
+  outstandingSen: number; status: string; isOpening?: boolean; lifecycleState?: string;
   items: { counterAccount: string; amountSen: number; description: string; lineNo: number }[];
 };
 
@@ -5856,6 +5856,9 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   const [showForm, setShowForm] = useState(false);
   const [q, setQ] = useState("");
   const [openBill, setOpenBill] = useState<string | null>(null);
+  // Edit-in-place (owner 2026-07-09): non-null = the form saves via PUT to
+  // this bill number instead of creating a new bill.
+  const [editingBillNo, setEditingBillNo] = useState<string | null>(null);
   const today = new Date().toISOString().slice(0, 10);
   const blankLine = (): BillLineDraft => ({ counterAccount: "", amountStr: "", description: "" });
   const [form, setForm] = useState({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()], isOpening: false });
@@ -5880,27 +5883,35 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   const totalSen = subtotalSen + toSen(form.taxStr);
 
   const submit = async () => {
-    if (!form.partyId) { toast.error("Select a party"); return; }
+    if (!editingBillNo && !form.partyId) { toast.error("Select a party"); return; }
     const items = form.lines
       .filter((l) => l.counterAccount && toSen(l.amountStr) > 0)
       .map((l) => ({ counterAccount: l.counterAccount, amountSen: toSen(l.amountStr), description: l.description }));
     if (items.length === 0) { toast.error("Add at least one line with account + amount"); return; }
-    const res = await fetch("/api/accounting/other-party-bills", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ partyId: form.partyId, billDate: form.billDate, referenceNo: form.referenceNo, description: form.description, taxSen: toSen(form.taxStr), items, isOpening: form.isOpening }),
-    });
+    const payload = { partyId: form.partyId, billDate: form.billDate, referenceNo: form.referenceNo, description: form.description, taxSen: toSen(form.taxStr), items, isOpening: form.isOpening };
+    const res = editingBillNo
+      ? await fetch(`/api/accounting/other-party-bills/${encodeURIComponent(editingBillNo)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+      : await fetch("/api/accounting/other-party-bills", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
     const j = asMutationResponse(await res.json());
     if (j?.success) {
       setShowForm(false);
+      setEditingBillNo(null);
       setForm({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()], isOpening: false });
       load();
-    } else toast.error(j?.error || "Failed to create bill");
+    } else toast.error(j?.error || (editingBillNo ? "Failed to save changes" : "Failed to create bill"));
   };
 
-  // Copy = open a fresh bill prefilled from an existing one (bills are
-  // immutable, so "edit" is really "copy to a new bill"). F4 #1.
+  // Copy = open a fresh bill prefilled from an existing one. F4 #1.
   const copyBill = (b: OtherPartyBill) => {
+    setEditingBillNo(null);
     setForm({
       partyId: b.partyId,
       billDate: today,
@@ -5911,6 +5922,24 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
         ? b.items.map((it) => ({ counterAccount: it.counterAccount, amountStr: (it.amountSen / 100).toString(), description: it.description ?? "" }))
         : [blankLine()],
       isOpening: false,
+    });
+    setShowForm(true);
+  };
+
+  // Edit-in-place: same bill number, GL reversed + re-posted server-side
+  // (owner 2026-07-09 「开了无法edit,我要能edit」). Party stays fixed.
+  const editBill = (b: OtherPartyBill) => {
+    setEditingBillNo(b.billNo);
+    setForm({
+      partyId: b.partyId,
+      billDate: b.billDate,
+      referenceNo: b.referenceNo ?? "",
+      description: b.description ?? "",
+      taxStr: b.taxSen ? (b.taxSen / 100).toString() : "",
+      lines: b.items.length
+        ? b.items.map((it) => ({ counterAccount: it.counterAccount, amountStr: (it.amountSen / 100).toString(), description: it.description ?? "" }))
+        : [blankLine()],
+      isOpening: !!b.isOpening,
     });
     setShowForm(true);
   };
@@ -5975,6 +6004,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
     }
   };
   const applyScan = (d: ScanFinanceResult) => {
+    setEditingBillNo(null); // a scan always drafts a NEW bill, never overwrites an edit
     const hit = scanNameMatch(allSideParties, d.partyName);
     // Last-used account for this party (latest bill's first line).
     const lastAcct = hit
@@ -6014,7 +6044,13 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-end gap-3">
         <ScanPrefillButton label="Scan Bill" onResult={applyScan} />
-        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+        <Button variant="primary" size="sm" onClick={() => {
+          if (editingBillNo) {
+            setEditingBillNo(null);
+            setForm({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()], isOpening: false });
+            setShowForm(true);
+          } else setShowForm(!showForm);
+        }}>
           <Plus className="h-4 w-4" /> New Bill
         </Button>
       </div>
@@ -6077,11 +6113,16 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
 
       {showForm && (
         <Card><CardContent className="p-4 space-y-3">
+          {editingBillNo && (
+            <div className="text-xs font-medium text-[#6B5C32] bg-[#F6F1E7] rounded-md px-3 py-2">
+              Editing {editingBillNo} — saving reverses its ledger entry and posts the corrected one under the same number. The party cannot change (Copy for that).
+            </div>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <div>
               <label className="text-xs font-medium text-[#6B7280] mb-1 block">{side === "CREDITOR" ? "Creditor" : "Debtor"}</label>
-              <select value={form.partyId} onChange={(e) => setForm({ ...form, partyId: e.target.value })}
-                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm">
+              <select value={form.partyId} onChange={(e) => setForm({ ...form, partyId: e.target.value })} disabled={!!editingBillNo}
+                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm disabled:bg-[#F5F3F0] disabled:text-[#9CA3AF]">
                 <option value="">Select…</option>
                 {allSideParties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
@@ -6167,8 +6208,8 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="primary" size="sm" onClick={submit}>Save &amp; Post</Button>
-            <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
+            <Button variant="primary" size="sm" onClick={submit}>{editingBillNo ? "Save Changes (re-post)" : "Save & Post"}</Button>
+            <Button variant="outline" size="sm" onClick={() => { setShowForm(false); setEditingBillNo(null); }}>Cancel</Button>
           </div>
         </CardContent></Card>
       )}
@@ -6237,6 +6278,9 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
                     </td>
                     <td className="px-4 py-1.5 text-right whitespace-nowrap">
                       <button onClick={() => printVoucher(buildOtherPartyBillVoucher(b, accounts))} title="Print bill voucher" className="inline-flex items-center gap-1 text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3"><Printer className="h-3 w-3" />print</button>
+                      {(b.lifecycleState ?? "ACTIVE") === "ACTIVE" && (
+                        <button onClick={() => editBill(b)} className="text-[#6B5C32] hover:underline text-xs mr-3">Edit</button>
+                      )}
                       <button onClick={() => copyBill(b)} className="text-[#6B5C32] hover:underline text-xs mr-3">Copy</button>
                       <LifecycleActions
                         state={b.lifecycleState}

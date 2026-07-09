@@ -6,6 +6,7 @@ import {
   validateBillShape,
   buildBillLegs,
   reverseLegs,
+  editedBillStatus,
   OTHER_DEBTOR_CONTROL,
   OTHER_CREDITOR_CONTROL,
   OUTPUT_SST_ACCT,
@@ -88,4 +89,13 @@ test("reverseLegs swaps DR/CR, renumbers, prefixes REVERSAL", () => {
   assert.equal(sum(rev, "debitSen"), sum(legs, "creditSen"));
   assert.equal(sum(rev, "creditSen"), sum(legs, "debitSen"));
   rev.forEach((l, i) => { assert.equal(l.legNo, i + 1); assert.match(l.description, /^REVERSAL · /); });
+});
+
+test("editedBillStatus — paid below/equal/above the new total (edit-in-place guard)", () => {
+  assert.deepEqual(editedBillStatus(10000, 0), { ok: true, status: "OPEN" });
+  assert.deepEqual(editedBillStatus(10000, 4000), { ok: true, status: "PARTIAL_PAID" });
+  assert.deepEqual(editedBillStatus(10000, 10000), { ok: true, status: "PAID" });
+  const over = editedBillStatus(10000, 12000);
+  assert.equal(over.ok, false);
+  assert.match(over.error, /already paid/);
 });

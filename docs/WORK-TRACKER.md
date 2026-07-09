@@ -15,8 +15,18 @@ Owner rule 「做账就是要准」. Shipped `GET /api/accounting/ap-reconciliat
 (read-only; pure `src/lib/ap-recon.ts`, 16 tests asserting Σ item contributions
 ≡ drift — residual is structurally 0). First prod run itemized −966.60 EXACTLY:
 - **GVP −950.00** — HPV-2605-001 (ACTIVE) booked 950 to PI-2605-001 which sits
-  in opening_ap_excludes. 🟡 OWNER: once the GVP bill is recognised, include
-  PI-2605-001 back (Opening tab card) **and re-Post opening** → item clears.
+  in opening_ap_excludes. ✅ RESOLVED 2026-07-09: owner ruled the payment is NOT
+  for PI-2605-001 ("还另外一张单" — likely PI-2604-010, also excluded); detached
+  back to an unapplied advance via the new `POST /supplier-payments/un-knock`
+  (subsidiary-only reverse of knock-off; PI paid re-derived via the truth-guard
+  SQL). This matches the old accountant's TB (GVP −950 credit balance).
+  **DRIFT NOW 0.00 — control = net = 195,692.69; recon items empty; residual
+  0.00 (verified live).**
+  🟡 Follow-up (owner asking his accountant): whether to RECOGNISE PI-2604-010
+  into the opening — the old books missed that bill, so recognising it means
+  opening +950 CR plus a DR line the owner must pick, and the opening total
+  then differs from the old TB by 950. If yes: include the PI + add the DR row
+  + re-Post opening + knock the 950 advance onto it.
 - **INNOVATEX −418.00** — HPV-2607-009 GL kept DR 836 vs subledger 418.
   ✅ OWNER CONFIRMED 2026-07-09 「我只付RM418罢了」→ the 836 is the system's
   double-record: BOTH the original supplier_payment legs AND the 07-06

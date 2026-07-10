@@ -124,6 +124,38 @@ Entries themselves stay newest-first.
   sourceTables so knock-offs rebuild it.
 - **Verify**: live — /ap-control aging total == GL 400-0000 to the sen; GVP/CHL/INFAB
   show −950/−640/−10 not-due rows; partially-paid PIs show net outstanding.
+
+---
+
+## BUG-2026-07-05-001 — Mobile Production / Warehouse / Delivery search couldn't find a record by customer PO / SO / our Company SOID `ui-frontend` `mobile` `search`
+
+🟢 **Fixed on main**
+
+**Symptom (owner):** on `/m`, searching a customer PO/SO reference or our Company
+SOID returned "No matching production orders" — couldn't find what stage a
+product is at (Production), where it is (Delivery), or which rack holds it
+(Warehouse). Screenshot: Production search "9159" → nothing.
+
+**Root cause:** `applyFilters` (m/config/helpers.ts) builds the free-text
+haystack from a source's declared `columns` ONLY. The cards DISPLAYED the
+identifiers (Our SO / Cust PO / Cust SO / Ref via `toVM` metas) but those fields
+were NOT declared as searchable `columns`, so a reference query never matched.
+Production searched only poNo/product/customer; the Warehouse source searched
+rack/zone/status (never reaching the items stored on the rack); the Delivery DO
+source lacked customerSO.
+
+**Fix (`src/pages/m/config/modules.ts`):** added the identifier fields as
+searchable text columns — Production: companySO/customerPO/customerSO/reference;
+Delivery DO source: customerSO; Warehouse: a "Contents" column concatenating
+every rack item's customerPOId / customerSO / companySOID / productCode /
+productName / customerName so a rack is findable by what it holds. Verified the
+`?fields=minimal` production payload carries companySOId + customerPOId (so the
+search matches). Pending/Planning SO source already had all five. Desktop
+haystacks already cover these (delivery `haystackByPo`/DO haystack, production
+`haystackByPo` with companySOId+customerPOId+customerReference) — untouched.
+
+---
+
 ## BUG-2026-07-04-008 — DO create path could silently persist a 0/0 (RM 0) 3PL rate: a rate-less vehicle masked its provider's real rate `delivery-orders` `3pl`
 
 🟡 **Fixed on worktree branch (not yet merged)**

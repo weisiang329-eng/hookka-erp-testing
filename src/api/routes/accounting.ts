@@ -577,8 +577,10 @@ app.get("/aging", async (c) => {
           });
         }
       }
-      for (const row of arMap.values()) row.docs.sort((a, b) => a.mo - b.mo || a.date.localeCompare(b.date));
-      for (const row of apMap.values()) row.docs.sort((a, b) => a.mo - b.mo || a.date.localeCompare(b.date));
+      // Owner rule 2026-07-09: within each aging bucket the NEWEST document
+      // sits on top (bucket ascending, date descending).
+      for (const row of arMap.values()) row.docs.sort((a, b) => a.mo - b.mo || b.date.localeCompare(a.date));
+      for (const row of apMap.values()) row.docs.sort((a, b) => a.mo - b.mo || b.date.localeCompare(a.date));
 
       return {
         data: {

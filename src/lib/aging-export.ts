@@ -53,8 +53,10 @@ export function buildAgingExportAoa(
   partyHeader: string,
   parties: AgingExportParty[],
 ): AgingAoa {
+  // Date before Doc No (owner 2026-07-09), matching the on-screen detail rows;
+  // doc order arrives pre-sorted from /aging (bucket asc, newest first inside).
   const aoa: AgingAoa = [
-    [partyHeader, "Doc No", "Date", "Current", "1 Month", "2 Months", "3 Months", "> 3 Months", "Total (RM)"],
+    [partyHeader, "Date", "Doc No", "Current", "1 Month", "2 Months", "3 Months", "> 3 Months", "Total (RM)"],
   ];
   const grand = [0, 0, 0, 0, 0];
   for (const p of parties) {
@@ -72,7 +74,7 @@ export function buildAgingExportAoa(
       const cells: (string | number)[] = ["", "", "", "", ""];
       const b = Math.min(Math.max(Math.round(d.mo) || 0, 0), 4);
       cells[b] = rm(d.amountSen);
-      aoa.push(["", d.no, d.date, ...cells, rm(d.amountSen)]);
+      aoa.push(["", d.date, d.no, ...cells, rm(d.amountSen)]);
     }
     aoa.push([`${p.name} — Total`, "", "", ...buckets.map((v) => (v !== 0 ? rm(v) : "")), rm(total)]);
   }

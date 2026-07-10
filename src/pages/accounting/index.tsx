@@ -3639,7 +3639,7 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
             days60Sen: a.days60Sen, days90Sen: a.days90Sen, over90Sen: a.over90Sen, docs: a.docs,
           })))}
           filenameBase={`debtor-aging-${new Date().toISOString().slice(0, 10)}${company ? `-${company}` : ""}`}
-          title="Debtor Aging (AR)" pdfOpts={{ rowKind: agingRowKind, leftCols: [1, 2], colWidths: { 0: 168, 1: 118, 2: 62, 3: 66, 4: 66, 5: 66, 6: 66, 7: 66, 8: 78 } }} moneyFormat
+          title="Debtor Aging (AR)" pdfOpts={{ rowKind: agingRowKind, leftCols: [1, 2], colWidths: { 0: 168, 1: 62, 2: 118, 3: 66, 4: 66, 5: 66, 6: 66, 7: 66, 8: 78 } }} moneyFormat
           subtitle={`As at ${new Date().toISOString().slice(0, 10)}${company ? ` · ${company}` : " · All companies"}`}
         />
       </div>
@@ -3693,7 +3693,7 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                     </tr>
                     {open && (ar.docs ?? []).map((d, i) => (
                       <tr key={`d-${i}`} className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
-                        <td className="py-1.5 px-4 pl-10 text-[#6B7280]">{d.no}{d.date ? ` · ${d.date}` : ""}</td>
+                        <td className="py-1.5 px-4 pl-10 text-[#6B7280]"><span className="tabular-nums text-[#9CA3AF]">{d.date}</span><span className="ml-4">{d.no}</span></td>
                         {[0, 1, 2, 3, 4].map((b) => (
                           <td key={b} className={`py-1.5 px-4 text-right tabular-nums ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>
                             {d.mo === b ? formatCurrency(d.amountSen) : ""}
@@ -4463,7 +4463,7 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
             days60Sen: a.days60Sen, days90Sen: a.days90Sen, over90Sen: a.over90Sen, docs: a.docs,
           })))}
           filenameBase={`creditor-aging-${new Date().toISOString().slice(0, 10)}${company ? `-${company}` : ""}`}
-          title="Creditor Aging (AP)" pdfOpts={{ rowKind: agingRowKind, leftCols: [1, 2], colWidths: { 0: 168, 1: 118, 2: 62, 3: 66, 4: 66, 5: 66, 6: 66, 7: 66, 8: 78 } }} moneyFormat
+          title="Creditor Aging (AP)" pdfOpts={{ rowKind: agingRowKind, leftCols: [1, 2], colWidths: { 0: 168, 1: 62, 2: 118, 3: 66, 4: 66, 5: 66, 6: 66, 7: 66, 8: 78 } }} moneyFormat
           subtitle={`As at ${new Date().toISOString().slice(0, 10)}${company ? ` · ${company}` : " · All companies"}`}
         />
       </div>
@@ -4517,7 +4517,7 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                     </tr>
                     {open && (ap.docs ?? []).map((d, i) => (
                       <tr key={`d-${i}`} className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
-                        <td className="py-1.5 px-4 pl-10 text-[#6B7280]">{d.no}{d.date ? ` · ${d.date}` : ""}</td>
+                        <td className="py-1.5 px-4 pl-10 text-[#6B7280]"><span className="tabular-nums text-[#9CA3AF]">{d.date}</span><span className="ml-4">{d.no}</span></td>
                         {[0, 1, 2, 3, 4].map((b) => (
                           <td key={b} className={`py-1.5 px-4 text-right tabular-nums ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>
                             {d.mo === b ? formatCurrency(d.amountSen) : ""}

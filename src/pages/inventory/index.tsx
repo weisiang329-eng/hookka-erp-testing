@@ -10,7 +10,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import {
   Boxes, AlertTriangle, Package, Layers, Plus, X,
-  Search, Archive, Upload, Trash2, Pencil,
+  Search, Archive, Upload, Trash2, Pencil, Check,
 } from "lucide-react";
 import { BatchImportDialog, type ImportColumn } from "@/components/ui/batch-import-dialog";
 // NOTE: mock arrays were previously imported here and used as the page data
@@ -23,6 +23,20 @@ import {
   INVENTORY_TYPE_COLOR,
   getStockSemantic, getWipAgeSemantic,
 } from "@/lib/design-tokens";
+import {
+  fetchVariantsConfig,
+  getVariantsConfigSync,
+  type VariantsConfig,
+} from "@/lib/kv-config";
+import {
+  DEFAULT_BEDFRAME_SIZES,
+  DEFAULT_SOFA_COMPARTMENTS,
+  bedframeVariantCode,
+  bedframeVariantName,
+  sofaVariantCode,
+  sofaVariantName,
+  type BedframeSize,
+} from "@/lib/fg-variants";
 
 // -- FIFO cost column helpers ----------------------------------------------
 // These USED to read from the module-scope `rmBatches`/`fgBatches` mock
@@ -1117,6 +1131,126 @@ export default function InventoryPage() {
   const [fgForm, setFgForm] = useState<CreateFGForm>(EMPTY_FG_FORM);
   const [fgCopySourceId, setFgCopySourceId] = useState<string>("");
   const [fgSaving, setFgSaving] = useState(false);
+  // Add FG "Bulk generate" mode (owner 2026-07-11): enter Base Model + Name +
+  // Category, tick sizes (bedframe) / compartments (sofa), and create every
+  // variant at once — Code / Size Code / Size Label / Name auto-derived, Fabric
+  // + prices left blank for Batch Edit. bulkTicked holds the ticked codes;
+  // variantsCfg supplies the catalogs (seed defaults until the owner customises
+  // them in Products → Maintenance).
+  const [fgBulkMode, setFgBulkMode] = useState(false);
+  const [fgBulkTicked, setFgBulkTicked] = useState<Set<string>>(new Set());
+  const [fgBulkBusy, setFgBulkBusy] = useState(false);
+  const [variantsCfg, setVariantsCfg] = useState<VariantsConfig | null>(() => getVariantsConfigSync());
+  useEffect(() => {
+    void fetchVariantsConfig().then((v) => setVariantsCfg(v));
+  }, []);
+
+  // --- Add FG bulk-generate derivation (recomputed per render; cheap) --------
+  const bulkBedSizes: BedframeSize[] =
+    (variantsCfg?.bedframeSizes as BedframeSize[] | undefined) ?? DEFAULT_BEDFRAME_SIZES;
+  const bulkSofaComps: string[] =
+    (variantsCfg?.sofaCompartments as string[] | undefined) ?? DEFAULT_SOFA_COMPARTMENTS;
+  const bulkIsBed = fgForm.category === "BEDFRAME";
+  const bulkIsSofa = fgForm.category === "SOFA";
+  // The pool of tickable option codes for the chosen category.
+  const bulkPoolCodes: string[] = bulkIsBed
+    ? bulkBedSizes.map((s) => s.code).filter(Boolean)
+    : bulkIsSofa
+      ? bulkSofaComps.filter(Boolean)
+      : [];
+  const bulkBase = fgForm.code.trim();
+  // Ticked → the concrete variants that would be created (code + name + size
+  // fields auto-derived). Filtered to the current pool so switching category
+  // never carries stale ticks across.
+  const bulkPreview = [...fgBulkTicked]
+    .filter((c) => bulkPoolCodes.includes(c))
+    .map((c) => {
+      if (bulkIsBed) {
+        const sz = bulkBedSizes.find((s) => s.code === c) ?? { code: c, label: "", dimensions: "" };
+        return {
+          code: bedframeVariantCode(bulkBase, sz.code),
+          name: bedframeVariantName(fgForm.name, sz),
+          sizeCode: sz.code,
+          sizeLabel: sz.label,
+        };
+      }
+      return {
+        code: sofaVariantCode(bulkBase, c),
+        name: sofaVariantName(fgForm.name, bulkBase, c),
+        sizeCode: c,
+        sizeLabel: c,
+      };
+    });
+
+  function toggleBulkTick(code: string) {
+    setFgBulkTicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      return next;
+    });
+  }
+
+  async function runBulkGenerate() {
+    if (fgBulkBusy) return;
+    const base = fgForm.code.trim();
+    if (!base || bulkPreview.length === 0) return;
+    setFgBulkBusy(true);
+    let created = 0;
+    let skipped = 0;
+    let failed = 0;
+    const newProducts: Product[] = [];
+    // Sequential — one validated POST per variant reuses the server's duplicate
+    // + bedframe-sizeCode checks; existing codes are SKIPPED (reported), never
+    // abort the batch.
+    for (const v of bulkPreview) {
+      try {
+        const res = await fetch("/api/products", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            code: v.code,
+            name: v.name,
+            category: fgForm.category,
+            baseModel: base,
+            sizeCode: v.sizeCode,
+            sizeLabel: v.sizeLabel,
+          }),
+        });
+        const j = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          data?: Product;
+          error?: string;
+        };
+        if (res.ok && j.success) {
+          created++;
+          if (j.data) newProducts.push(j.data);
+        } else if ((j.error || "").toLowerCase().includes("already exists")) {
+          skipped++;
+        } else {
+          failed++;
+        }
+      } catch {
+        failed++;
+      }
+    }
+    setFgBulkBusy(false);
+    if (newProducts.length) setProducts((prev) => [...prev, ...newProducts]);
+    invalidateCachePrefix("/api/products");
+    invalidateCachePrefix("/api/inventory");
+    const parts = [`${created} created`];
+    if (skipped) parts.push(`${skipped} already existed`);
+    if (failed) parts.push(`${failed} failed`);
+    const msg = parts.join(" · ");
+    if (failed) toast.error(msg);
+    else toast.success(msg);
+    if (created > 0 && failed === 0) {
+      setShowCreateFG(false);
+      setFgForm(EMPTY_FG_FORM);
+      setFgBulkTicked(new Set());
+      setFgBulkMode(false);
+    }
+  }
 
   // Create RM modal
   const [showCreateRM, setShowCreateRM] = useState(false);
@@ -1888,6 +2022,72 @@ export default function InventoryPage() {
                 </div>
               </CardHeader>
               <CardContent>
+                {/* Single vs Bulk generate (owner 2026-07-11). Bulk: enter Base
+                    Model + Name + Category, tick sizes/compartments, create all
+                    variants at once (Code/Size auto-derived; prices via Batch). */}
+                <div className="mb-4 inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
+                  <button onClick={() => setFgBulkMode(false)} className={`px-3.5 py-1.5 text-sm ${!fgBulkMode ? "bg-[#6B5C32] text-white font-medium" : "text-gray-500 hover:bg-[#FAF9F7]"}`}>Single</button>
+                  <button onClick={() => setFgBulkMode(true)} className={`px-3.5 py-1.5 text-sm ${fgBulkMode ? "bg-[#6B5C32] text-white font-medium" : "text-gray-500 hover:bg-[#FAF9F7]"}`}>Bulk generate</button>
+                </div>
+                {fgBulkMode ? (
+                  <div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Base Model *</label>
+                        <input value={fgForm.code} onChange={e => setFgForm(f => ({ ...f, code: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. 2990" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Name{bulkIsBed ? " *" : " (optional)"}</label>
+                        <input value={fgForm.name} onChange={e => setFgForm(f => ({ ...f, name: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder={bulkIsBed ? "e.g. ROMA BEDFRAME" : "blank → SOFA <model> <compartment>"} />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Category</label>
+                        <select value={fgForm.category} onChange={e => { const v = e.target.value; setFgForm(f => ({ ...f, category: v })); setFgBulkTicked(new Set()); }} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none">
+                          <option value="BEDFRAME">Bedframe</option>
+                          <option value="SOFA">Sofa</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {bulkIsBed || bulkIsSofa ? (
+                      <>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-sm font-medium text-[#374151]">{bulkIsBed ? "Which sizes does this model come in?" : `Which compartments does ${bulkBase || "this model"} have?`}</span>
+                          <button
+                            onClick={() => { const all = bulkPoolCodes.length > 0 && bulkPoolCodes.every(c => fgBulkTicked.has(c)); setFgBulkTicked(all ? new Set() : new Set(bulkPoolCodes)); }}
+                            className="text-xs text-[#6B5C32] font-medium hover:underline"
+                          >
+                            {bulkPoolCodes.length > 0 && bulkPoolCodes.every(c => fgBulkTicked.has(c)) ? "Clear all" : "Select all"}
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+                          {bulkPoolCodes.map(code => {
+                            const on = fgBulkTicked.has(code);
+                            const bf = bulkIsBed ? bulkBedSizes.find(s => s.code === code) : undefined;
+                            return (
+                              <button key={code} onClick={() => toggleBulkTick(code)} className={`flex items-center gap-2 border rounded px-2.5 py-1.5 text-sm text-left ${on ? "border-[#6B5C32] bg-[#F4EFE3]" : "border-[#E2DDD8] bg-white text-gray-600 hover:bg-[#FAF9F7]"}`}>
+                                <span className={`w-4 h-4 flex-shrink-0 rounded-sm border flex items-center justify-center ${on ? "bg-[#6B5C32] border-[#6B5C32] text-white" : "border-gray-300"}`}>{on ? <Check className="w-3 h-3" /> : null}</span>
+                                <span className="min-w-0">
+                                  <span className="font-mono">{code}</span>
+                                  {bf?.label ? <span className="block text-[10px] text-gray-400 truncate">{bf.label} · {bf.dimensions}</span> : null}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="bg-[#FAF6EF] border border-[#E2DDD8] rounded-md p-3">
+                          <div className="text-xs text-gray-500 mb-2">Will create <b className="text-[#6B5C32]">{bulkPreview.length}</b> product{bulkPreview.length === 1 ? "" : "s"} — Fabric Usage + prices left blank (fill later via Batch Edit)</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {bulkPreview.map(v => <span key={v.code} className="text-xs font-mono bg-white border border-[#E2DDD8] rounded px-2 py-0.5" title={v.name}>{v.code}</span>)}
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-sm text-gray-400 py-6 text-center">Bulk generate is for Bedframe + Sofa. Pick a category above.</div>
+                    )}
+                  </div>
+                ) : (
+                <>
                 {/* Copy-from-existing: lazy-person shortcut. Picking a product
                     clones every field that makes sense (category / baseModel /
                     sizeCode / sizeLabel / description / prices / unitM3 /
@@ -2025,8 +2225,20 @@ export default function InventoryPage() {
                     {fgForm.pieces ? <div>· Pieces breakdown</div> : null}
                   </div>
                 )}
+                </>
+                )}
                 <div className="flex justify-end gap-2 pt-4">
-                  <Button variant="outline" size="sm" onClick={() => setShowCreateFG(false)} disabled={fgSaving}>Cancel</Button>
+                  <Button variant="outline" size="sm" onClick={() => { setShowCreateFG(false); setFgBulkTicked(new Set()); }} disabled={fgSaving || fgBulkBusy}>Cancel</Button>
+                  {fgBulkMode ? (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={!fgForm.code.trim() || bulkPreview.length === 0 || fgBulkBusy}
+                    onClick={() => { void runBulkGenerate(); }}
+                  >
+                    {fgBulkBusy ? "Generating…" : `Generate ${bulkPreview.length} product${bulkPreview.length === 1 ? "" : "s"}`}
+                  </Button>
+                  ) : (
                   <Button
                     variant="primary"
                     size="sm"
@@ -2087,6 +2299,7 @@ export default function InventoryPage() {
                   >
                     {fgSaving ? "Saving…" : "Save Product"}
                   </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>

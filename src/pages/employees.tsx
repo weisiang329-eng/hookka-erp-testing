@@ -9310,6 +9310,18 @@ function LaborCostTab({
             </CardContent>
           </Card>
           <Card>
+            <CardContent className="p-3" title="Labor for the non-production depts — Warehousing / Repair / Maintenance / Production Shortfall / R&D — plus any office / sales / admin salaries. These don't earn revenue directly.">
+              <p className="text-xs text-[#6B7280]">Non-Production Labor Cost</p>
+              <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(totalLaborCostSen - productionLaborCostSen)}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-3" title="Production + Non-Production — the full labor bill for the period.">
+              <p className="text-xs text-[#6B7280]">Total Labor Cost</p>
+              <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(totalLaborCostSen)}</p>
+            </CardContent>
+          </Card>
+          <Card>
             <CardContent className="p-3">
               <p className="text-xs text-[#6B7280]">Total Revenue</p>
               <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(totalRevenueSen)}</p>
@@ -9325,22 +9337,6 @@ function LaborCostTab({
                 {totalRevenueSen > 0 || productionLaborCostSen > 0
                   ? formatCurrency(totalRevenueSen - productionLaborCostSen)
                   : "—"}
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-3" title="Hours billed to WAREHOUSING — workers lent to warehouse, off the production line">
-              <p className="text-xs text-[#6B7280]">Borrowed (Warehousing)</p>
-              <p className={`text-lg font-bold ${warehousingLaborCostSen > 0 ? "text-[#9C6F1E]" : "text-[#1F1D1B]"}`}>
-                {formatCurrency(warehousingLaborCostSen)}
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-3" title="Hours billed to PRODUCTION_SHORTFALL — paid time with no work to do">
-              <p className="text-xs text-[#6B7280]">Shortfall</p>
-              <p className={`text-lg font-bold ${shortfallLaborCostSen > 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
-                {formatCurrency(shortfallLaborCostSen)}
               </p>
             </CardContent>
           </Card>
@@ -10259,7 +10255,13 @@ function PunchThumb({
     </button>
   );
 }
-function AttendanceTab() {
+function AttendanceTab({
+  workers,
+  productionDeptCodes,
+}: {
+  workers: Worker[];
+  productionDeptCodes: Set<string>;
+}) {
   const [date, setDate] = useState<string>(() => {
     // Malaysia (UTC+8) "today" so the default matches the worker's punch date.
     const d = new Date(Date.now() + 8 * 60 * 60 * 1000);
@@ -10276,8 +10278,100 @@ function AttendanceTab() {
       attPunchLoc(r.clockInLat, r.clockInLng) === "out" ||
       attPunchLoc(r.clockOutLat, r.clockOutLng) === "out",
   ).length;
+
+  // ---- Whole-month KPI dashboard (owner 2026-07-04) --------------------------
+  // The Attendance tab now opens on a month dashboard (not just the day's
+  // punches). Metrics cover the calendar month that contains the selected date:
+  // # active workers, this-month avg efficiency, avg salary/worker, avg working
+  // hours, avg production hours. Same two summary endpoints the Efficiency tab
+  // uses (server-side GROUP BY), so it's a thin client aggregate.
+  const monthStr = date.slice(0, 7); // YYYY-MM
+  const monthFrom = `${monthStr}-01`;
+  const monthTo = (() => {
+    const [my, mm] = monthStr.split("-").map(Number);
+    const last = my && mm ? new Date(my, mm, 0).getDate() : 28;
+    return `${monthStr}-${String(last).padStart(2, "0")}`;
+  })();
+  const { data: hoursSummaryResp } = useCachedJson<{ data?: WorkerHoursSummary[] }>(
+    `/api/working-hour-entries/summary?from=${monthFrom}&to=${monthTo}`,
+  );
+  const { data: jcSummaryResp } = useCachedJson<{ data?: { workerId: string; productionMinutes: number }[] }>(
+    `/api/job-cards/summary?from=${monthFrom}&to=${monthTo}`,
+  );
+  const monthKpis = useMemo(() => {
+    const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
+    // Active, non-TEST workers only — mirrors the Payroll active-only rule.
+    const activeWorkers = workers.filter(
+      (w) => w.status === "ACTIVE" && !/^TEST/i.test(w.empNo || ""),
+    );
+    const activeCount = activeWorkers.length;
+    const avgSalarySen = activeCount
+      ? Math.round(activeWorkers.reduce((s, w) => s + (w.basicSalarySen || 0), 0) / activeCount)
+      : 0;
+    const prodMinsByWorker = new Map<string, number>();
+    for (const r of jcSummaryResp?.data ?? []) prodMinsByWorker.set(r.workerId, r.productionMinutes || 0);
+    let totalHours = 0;
+    let totalProdHours = 0;
+    let present = 0;
+    const effVals: number[] = [];
+    for (const row of hoursSummaryResp?.data ?? []) {
+      totalHours += row.totalHours;
+      const prodHours = Object.entries(row.byDept).reduce(
+        (s, [code, h]) => (prodCodes.has(code) ? s + h : s),
+        0,
+      );
+      totalProdHours += prodHours;
+      if (row.totalHours > 0) present++;
+      if (prodHours > 0 && row.daysWithEntries > 0) {
+        const pm = prodMinsByWorker.get(row.workerId) ?? 0;
+        effVals.push((pm / (prodHours * 60)) * 100);
+      }
+    }
+    const avgEff = effVals.length ? effVals.reduce((s, v) => s + v, 0) / effVals.length : 0;
+    return {
+      activeCount,
+      avgEff,
+      avgSalarySen,
+      avgWorkingHours: present ? totalHours / present : 0,
+      avgProdHours: present ? totalProdHours / present : 0,
+    };
+  }, [workers, productionDeptCodes, hoursSummaryResp, jcSummaryResp]);
+
   return (
     <>
+    {/* Whole-month KPI dashboard (owner 2026-07-04) */}
+    <div className="grid gap-3 grid-cols-2 md:grid-cols-5 mb-4 max-sm:grid-cols-2">
+      <Card>
+        <CardContent className="p-3" title="Workers with an ACTIVE status (test accounts excluded).">
+          <p className="text-xs text-[#6B7280]">Active Workers</p>
+          <p className="text-lg font-bold text-[#1F1D1B]">{monthKpis.activeCount}</p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="p-3" title="Production minutes ÷ production-dept clocked hours, averaged across workers — this calendar month to date.">
+          <p className="text-xs text-[#6B7280]">Avg Efficiency <span className="text-[#9CA3AF]">(this month)</span></p>
+          <p className={`text-lg font-bold ${monthKpis.avgEff >= 100 ? "text-[#15803D]" : monthKpis.avgEff >= 60 ? "text-[#9C6F1E]" : "text-[#9A3A2D]"}`}>{monthKpis.avgEff.toFixed(1)}%</p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="p-3" title="Average basic monthly salary across active workers.">
+          <p className="text-xs text-[#6B7280]">Avg Salary / Worker</p>
+          <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(monthKpis.avgSalarySen)}</p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="p-3" title="Average working hours logged per worker who has entries this month.">
+          <p className="text-xs text-[#6B7280]">Avg Working Hours</p>
+          <p className="text-lg font-bold text-[#1F1D1B]">{monthKpis.avgWorkingHours.toFixed(1)}h</p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="p-3" title="Average production-dept hours per worker who has entries this month (the efficiency denominator).">
+          <p className="text-xs text-[#6B7280]">Avg Production Hours</p>
+          <p className="text-lg font-bold text-[#1F1D1B]">{monthKpis.avgProdHours.toFixed(1)}h</p>
+        </CardContent>
+      </Card>
+    </div>
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -10640,7 +10734,9 @@ export default function EmployeesPage() {
         />
       )}
 
-      {activeTab === "attendance" && <AttendanceTab />}
+      {activeTab === "attendance" && (
+        <AttendanceTab workers={workers} productionDeptCodes={productionDeptCodes} />
+      )}
 
       {activeTab === "employee-master" && (
         <EmployeeMasterTab workers={workers} refreshWorkers={fetchWorkers} departments={departments} />

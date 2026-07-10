@@ -264,6 +264,9 @@ export default function WorkerMePage() {
     jobCardId?: string;
     createdAt?: string;
     decidedAt?: string;
+    // Owner 2026-07-04: office decision detail shown back to the worker.
+    rejectReason?: string;
+    approvedHours?: number | null;
   };
   const [npDepts, setNpDepts] = useState<NonprodDept[]>([]);
   const [prodDepts, setProdDepts] = useState<NonprodDept[]>([]);
@@ -1063,6 +1066,31 @@ export default function WorkerMePage() {
                       </span>
                     </p>
                     <p className="text-xs text-[#8A8680]">{r.date}</p>
+                    {/* Partial approval — office approved less than requested. */}
+                    {r.status === "APPROVED" &&
+                      r.approvedHours != null &&
+                      Math.round(r.approvedHours * 60) < totalMin && (
+                        <p className="text-xs text-[#2A6B4A]">
+                          {t("timeadj.approvedAmount")}{" "}
+                          {(() => {
+                            const am = Math.round((r.approvedHours ?? 0) * 60);
+                            const ah = Math.floor(am / 60);
+                            const amm = am % 60;
+                            return am < 60
+                              ? `${am} ${t("timeadj.minSuffix")}`
+                              : amm === 0
+                                ? `${ah}h`
+                                : `${ah}h ${amm}${t("timeadj.minSuffix")}`;
+                          })()}{" "}
+                          {t("timeadj.ofRequested")} {durLabel}
+                        </p>
+                      )}
+                    {/* Rejection reason from the office. */}
+                    {r.status === "REJECTED" && r.rejectReason && (
+                      <p className="text-xs text-[#9A3A2D]">
+                        {t("timeadj.rejectedReason")}: {r.rejectReason}
+                      </p>
+                    )}
                   </div>
                   <span
                     className={`shrink-0 text-xs px-2 py-0.5 rounded font-semibold ${

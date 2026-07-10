@@ -967,6 +967,24 @@ const dict: Dict = {
     zh: '已批准（额外工时）',
     my: 'အတည်ပြုပြီး (ထပ်ဆောင်းအချိန်)',
   },
+  'timeadj.rejectedReason': {
+    en: 'Office reason',
+    ms: 'Sebab pejabat',
+    zh: '办公室理由',
+    my: 'ရုံးအကြောင်းပြချက်',
+  },
+  'timeadj.approvedAmount': {
+    en: 'Approved',
+    ms: 'Diluluskan',
+    zh: '已批准',
+    my: 'အတည်ပြုပြီး',
+  },
+  'timeadj.ofRequested': {
+    en: 'of',
+    ms: 'daripada',
+    zh: '/',
+    my: '/',
+  },
 
   // ---- Leaves ----
   'leave.title': {

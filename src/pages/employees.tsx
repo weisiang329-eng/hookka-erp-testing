@@ -504,7 +504,152 @@ type NonprodReq = {
   //              the hours to the efficiency numerator (no hours row written).
   kind?: "NONPROD" | "ADD_PROD";
   jobCardId?: string;
+  // Owner 2026-07-04: partial-approve + reject-reason.
+  //   approvedHours — hours actually approved (may be < requested `hours`).
+  //   rejectReason  — required note shown back to the worker on REJECT.
+  approvedHours?: number | null;
+  rejectReason?: string;
 };
+
+// One PENDING time-adjustment row (owner 2026-07-04). Holds its own local state
+// so the office can (a) approve a SPECIFIC amount — default = the requested
+// minutes, editable down (asked 1h20m, approve 1h) — and (b) reject only with a
+// required reason, which the worker then sees on their portal.
+function fmtMin(min: number): string {
+  const m = Math.max(0, Math.round(min));
+  const hh = Math.floor(m / 60);
+  const mm = m % 60;
+  return m < 60 ? `${m} min` : mm === 0 ? `${hh}h` : `${hh}h ${mm}min`;
+}
+function PendingReqRow({
+  r,
+  deptLabel,
+  busy,
+  onApprove,
+  onReject,
+}: {
+  r: NonprodReq;
+  deptLabel: string;
+  busy: boolean;
+  onApprove: (approvedHours: number) => void;
+  onReject: (reason: string) => void;
+}) {
+  const requestedMin = Math.max(1, Math.round((r.hours ?? 0) * 60));
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState("");
+  const [approveMin, setApproveMin] = useState<number>(requestedMin);
+  const clampedApprove = Math.max(1, Math.min(requestedMin, Math.round(approveMin) || 0));
+  const partial = clampedApprove !== requestedMin;
+  return (
+    <div className="rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium truncate">
+            {r.workerName} · {fmtMin(requestedMin)} · {deptLabel}
+            <span
+              className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                r.kind === "ADD_PROD"
+                  ? "bg-[#E4ECF5] text-[#2A5A8A]"
+                  : "bg-[#F0ECE9] text-[#6B5C32]"
+              }`}
+            >
+              {r.kind === "ADD_PROD" ? "Extra production time" : "Non-production"}
+            </span>
+          </p>
+          <p className="text-xs text-[#8A8680]">
+            {r.date}
+            {r.kind === "ADD_PROD" && r.jobCardId ? ` · Job: ${r.jobCardId}` : ""}
+            {r.note ? ` — ${r.note}` : ""}
+          </p>
+        </div>
+        {!rejecting && (
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setRejecting(true)}
+              disabled={busy}
+              title="Reject this request (a reason is required)"
+            >
+              <XCircle className="h-4 w-4 mr-1" /> Reject
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => onApprove(clampedApprove / 60)}
+              disabled={busy}
+              title={
+                partial
+                  ? `Approve ${fmtMin(clampedApprove)} of the ${fmtMin(requestedMin)} requested`
+                  : r.kind === "ADD_PROD"
+                    ? "Approve — credits the extra production time to efficiency"
+                    : "Approve — adds the non-production hours so efficiency stays fair"
+              }
+            >
+              <Check className="h-4 w-4 mr-1" />
+              {busy ? "…" : partial ? `Approve ${fmtMin(clampedApprove)}` : "Approve"}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Approve a specific amount — default = requested, editable down. */}
+      {!rejecting && (
+        <div className="mt-2 flex items-center gap-2 text-xs text-[#6B7280]">
+          <span>Approve</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={requestedMin}
+            value={String(approveMin)}
+            onChange={(e) => setApproveMin(Number(e.target.value) || 0)}
+            className="h-7 w-20 rounded border border-[#E2DDD8] px-2 text-right tabular-nums text-[#1F1D1B]"
+          />
+          <span>
+            min of {requestedMin} requested
+            {partial ? ` — approving ${fmtMin(clampedApprove)}` : ""}
+          </span>
+        </div>
+      )}
+
+      {/* Reject with a required reason — the worker sees this on their portal. */}
+      {rejecting && (
+        <div className="mt-2">
+          <textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Reason for rejection (the worker will see this)…"
+            rows={2}
+            className="w-full rounded border border-[#E2DDD8] px-2 py-1 text-xs text-[#1F1D1B]"
+          />
+          <div className="mt-1.5 flex items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setRejecting(false);
+                setReason("");
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => onReject(reason.trim())}
+              disabled={busy || !reason.trim()}
+              title={!reason.trim() ? "Enter a reason first" : "Confirm rejection"}
+            >
+              {busy ? "…" : "Confirm Reject"}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function NonprodApprovalsCard({
   departments,
@@ -555,12 +700,20 @@ function NonprodApprovalsCard({
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const decide = useCallback(
-    async (id: string, action: "approve" | "reject" | "remove") => {
+    async (
+      id: string,
+      action: "approve" | "reject" | "remove",
+      body?: Record<string, unknown>,
+    ) => {
       setBusyId(id);
       try {
         const res = await fetch(
           `/api/working-hour-entries/nonprod-requests/${id}/${action}`,
-          { method: "POST" },
+          {
+            method: "POST",
+            headers: body ? { "Content-Type": "application/json" } : undefined,
+            body: body ? JSON.stringify(body) : undefined,
+          },
         );
         const j = (await res.json()) as { success?: boolean; error?: string };
         if (!res.ok || !j?.success) {
@@ -629,74 +782,16 @@ function NonprodApprovalsCard({
           <p className="text-sm text-[#8A8680]">Loading…</p>
         ) : (
           <div className="space-y-2">
-            {reqs.map((r) => {
-              // Owner 2026-06-27: workers enter/read MINUTES. Stored `hours`
-              // × 60 = minutes; show "X min" under an hour, else "Xh Ym".
-              const totalMin = Math.round((r.hours ?? 0) * 60);
-              const hh = Math.floor(totalMin / 60);
-              const mm = totalMin % 60;
-              const durLabel =
-                totalMin < 60
-                  ? `${totalMin} min`
-                  : mm === 0
-                    ? `${hh}h`
-                    : `${hh}h ${mm}min`;
-              return (
-              <div
+            {reqs.map((r) => (
+              <PendingReqRow
                 key={r.id}
-                className="flex items-center justify-between gap-3 rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
-              >
-                <div className="min-w-0">
-                  <p className="text-sm font-medium truncate">
-                    {r.workerName} · {durLabel} · {deptName(r.departmentCode)}
-                    <span
-                      className={`ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold ${
-                        r.kind === "ADD_PROD"
-                          ? "bg-[#E4ECF5] text-[#2A5A8A]"
-                          : "bg-[#F0ECE9] text-[#6B5C32]"
-                      }`}
-                    >
-                      {r.kind === "ADD_PROD"
-                        ? "Extra production time"
-                        : "Non-production"}
-                    </span>
-                  </p>
-                  <p className="text-xs text-[#8A8680]">
-                    {r.date}
-                    {r.kind === "ADD_PROD" && r.jobCardId
-                      ? ` · Job: ${r.jobCardId}`
-                      : ""}
-                    {r.note ? ` — ${r.note}` : ""}
-                  </p>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void decide(r.id, "reject")}
-                    disabled={busyId === r.id}
-                    title="Reject this request"
-                  >
-                    <XCircle className="h-4 w-4 mr-1" /> Reject
-                  </Button>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={() => void decide(r.id, "approve")}
-                    disabled={busyId === r.id}
-                    title={
-                      r.kind === "ADD_PROD"
-                        ? "Approve — credits the extra production time to efficiency"
-                        : "Approve — adds the non-production hours so efficiency stays fair"
-                    }
-                  >
-                    <Check className="h-4 w-4 mr-1" />
-                    {busyId === r.id ? "…" : "Approve"}
-                  </Button>
-                </div>
-              </div>
-              );
-            })}
+                r={r}
+                deptLabel={deptName(r.departmentCode)}
+                busy={busyId === r.id}
+                onApprove={(approvedHours) => void decide(r.id, "approve", { approvedHours })}
+                onReject={(reason) => void decide(r.id, "reject", { reason })}
+              />
+            ))}
 
             {/* Approved adjustments — the office can REMOVE a bad one
                 (e.g. a 20h ADD_PROD entered before the minutes fix). */}

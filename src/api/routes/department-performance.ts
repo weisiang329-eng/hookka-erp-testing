@@ -481,7 +481,7 @@ app.get("/", async (c) => {
         apBinds.push(departmentCode);
       }
       const apRes = await c.var.DB.prepare(
-        `SELECT worker_id AS workerId, date, hours
+        `SELECT worker_id AS workerId, date, COALESCE(approved_hours, hours) AS hours
            FROM worker_nonprod_requests
           WHERE ${apWhere.join(" AND ")}`,
       )

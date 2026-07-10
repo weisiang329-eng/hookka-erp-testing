@@ -1364,7 +1364,7 @@ app.get("/history", async (c) => {
   try {
     await ensureNonprodRequests(c.var.DB);
     const apRes = await c.var.DB.prepare(
-      `SELECT hours, job_card_id AS jobCardId
+      `SELECT COALESCE(approved_hours, hours) AS hours, job_card_id AS jobCardId
          FROM worker_nonprod_requests
         WHERE worker_id = ? AND kind = 'ADD_PROD' AND status = 'APPROVED'
           AND date >= ? AND date <= ?`,
@@ -2332,6 +2332,23 @@ export function ensureNonprodRequests(db: D1Database): Promise<void> {
         "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS job_card_id TEXT",
       )
       .run();
+    // Reject-with-reason + partial-approve (owner 2026-07-04). Additive:
+    //   reject_reason  — required note the office gives when REJECTing; shown
+    //                    back to the worker on their portal so they know why.
+    //   approved_hours — the amount actually approved (may be LESS than the
+    //                    requested `hours`, e.g. asked 1h20m, approved 1h).
+    //                    NULL for legacy / not-yet-approved rows → full `hours`.
+    // snake_case = no column-rename-map entry needed.
+    await db
+      .prepare(
+        "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS reject_reason TEXT",
+      )
+      .run();
+    await db
+      .prepare(
+        "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS approved_hours DOUBLE PRECISION",
+      )
+      .run();
   })();
   return _nonprodReqMig;
 }
@@ -2350,6 +2367,8 @@ type NonprodRequestRow = {
   entry_id: string | null;
   kind: string | null;
   job_card_id: string | null;
+  reject_reason: string | null;
+  approved_hours: number | string | null;
 };
 
 // Dual-key the snake_case row (the db-pg toCamel transform also exposes camelCase
@@ -2379,6 +2398,11 @@ function rowToNonprodRequest(r: NonprodRequestRow & Record<string, unknown>) {
     decidedBy: str(r.decidedBy, r.decided_by),
     kind: kindRaw === "ADD_PROD" ? "ADD_PROD" : "NONPROD",
     jobCardId: str(r.jobCardId, r.job_card_id),
+    rejectReason: str(r.rejectReason, r.reject_reason),
+    approvedHours: (() => {
+      const v = r.approvedHours ?? r.approved_hours;
+      return v === null || v === undefined || v === "" ? null : Number(v);
+    })(),
   };
 }
 

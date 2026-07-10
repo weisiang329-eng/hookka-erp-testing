@@ -7191,9 +7191,18 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between flex-wrap gap-3">
-            <CardTitle className="flex items-center gap-2">
-              <DollarSign className="h-5 w-5 text-[#6B5C32]" /> Payroll Processing - {months[selectedMonth - 1]} {selectedYear}
-            </CardTitle>
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <DollarSign className="h-5 w-5 text-[#6B5C32]" /> Payroll Processing - {months[selectedMonth - 1]} {selectedYear}
+              </CardTitle>
+              {payslipData.length > 0 && (
+                <p className="mt-1 text-xs text-[#6B7280]">
+                  <span className="font-semibold text-[#1F1D1B]">{payslipData.length}</span> active worker{payslipData.length === 1 ? "" : "s"}
+                  {" · total salary "}<span className="font-semibold text-[#1F1D1B]">{formatCurrency(totals.basicSalary)}</span>
+                  {" · total pay "}<span className="font-semibold text-[#6B5C32]">{formatCurrency(totalPayrollCost)}</span>
+                </p>
+              )}
+            </div>
             <div className="flex items-center gap-3">
               <select
                 value={selectedMonth}
@@ -7302,6 +7311,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">EIS</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">PCB</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Net Pay</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap" title="Real company outlay for this worker — Net Pay plus every statutory contribution (employee + employer EPF / SOCSO / EIS + PCB). Equals Gross + employer EPF / SOCSO / EIS.">Total Pay</th>
                     <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Status</th>
                     <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Print</th>
                   </tr>
@@ -7342,6 +7352,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                         <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{formatCurrency(r.eisEmployee)}</td>
                         <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{r.pcb > 0 ? formatCurrency(r.pcb) : "-"}</td>
                         <td className="h-10 px-3 text-right font-bold text-[#1F1D1B] whitespace-nowrap">{formatCurrency(r.netPay)}</td>
+                        <td className="h-10 px-3 text-right font-bold text-[#6B5C32] whitespace-nowrap" title="Net Pay + all EPF / SOCSO / EIS / PCB = real company outlay for this worker">{formatCurrency(r.grossPay + r.epfEmployer + r.socsoEmployer + r.eisEmployer)}</td>
                         <td className="h-10 px-2 text-center">
                           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${getStatusStyle(r.status)}`}>
                             {r.status}
@@ -7360,7 +7371,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                       {/* Expanded Detail Row */}
                       {expandedRow === r.id && (
                         <tr className="bg-[#FDFCFB]">
-                          <td colSpan={20} className="px-6 py-4">
+                          <td colSpan={21} className="px-6 py-4">
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                               {/* OT Calculation Breakdown */}
                               <div className="space-y-2">
@@ -7565,6 +7576,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                     <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{formatCurrency(totals.eisEmployee)}</td>
                     <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{totals.pcb > 0 ? formatCurrency(totals.pcb) : "-"}</td>
                     <td className="h-10 px-3 text-right font-bold">{formatCurrency(totals.netPay)}</td>
+                    <td className="h-10 px-3 text-right font-bold text-[#6B5C32]" title="Real company outlay = Net Pay + all EPF / SOCSO / EIS / PCB = Total Payroll Cost">{formatCurrency(totalPayrollCost)}</td>
                     <td className="h-10 px-2"></td>
                     <td className="h-10 px-2"></td>
                   </tr>

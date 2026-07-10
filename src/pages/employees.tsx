@@ -52,7 +52,6 @@ import {
   Eye,
   KeyRound,
   Copy,
-  AlertTriangle,
 } from "lucide-react";
 
 // --------------- TYPES ---------------
@@ -331,133 +330,6 @@ function csvCell(value: string): string {
   return needsQuote ? `"${escaped}"` : escaped;
 }
 
-// Per-day breakdown row + aggregates returned by buildWorkerDayBreakdown.
-// Shared so the two drill-in panels render identically.
-type WorkerDayRow = {
-  date: string;
-  logged: number;
-  expected: number;
-  short: number;
-  /** RM value of the short hours at the worker's ÷working-days hourly rate
-   *  (what the auto-dock removes). Meaningful for "under" rows. */
-  shortValueSen: number;
-  type: "absent" | "under" | "pending" | "ok";
-};
-type WorkerDayBreakdown = {
-  rows: WorkerDayRow[];
-  totalShort: number;
-  expected: number;
-  absentDays: number;
-  absenceDeductionSen: number;
-  underHours: number;
-  pendingDays: number;
-  perDayDeductionSen: number;
-};
-
-// Shared drill-in panel (READ-ONLY, owner 2026-07-04 FULL auto): splits a
-// worker's per-day shortfall into Absent (salary deduction), Under-recorded
-// (auto-docked from the shift rules / unlogged hours), and Pending (recent
-// 0-logged days still inside the 2-working-day grace window). There is NO manual
-// Keep-pay / Deduct choice any more — every under-logged day auto-settles; this
-// panel just SHOWS what the system did. Used by both the payroll-residual and
-// the range-based unlogged-hours tables.
-function WorkerDayDrillIn({
-  name,
-  idPrefix,
-  breakdown,
-  emptyLabel,
-}: {
-  name: string;
-  idPrefix: string;
-  breakdown: WorkerDayBreakdown;
-  emptyLabel: string;
-}) {
-  return (
-    <>
-      <p className="text-xs font-semibold text-[#4B5563] mb-1">
-        Per-day Working Hours for {name} — absent days are settled by the salary deduction; under-recorded days auto-dock their shortfall (no manual choice)
-      </p>
-      <p className="text-[11px] text-[#4B5563] mb-1.5">
-        Absent: {breakdown.absentDays} day(s) · −{formatRM(breakdown.absenceDeductionSen)}{" "}
-        <span className="text-[#9CA3AF]">(already deducted in Payroll)</span>
-        {"   |   "}
-        <span className="font-semibold text-[#B45309]">Under-recorded (auto-docked): {breakdown.underHours.toFixed(1)} h</span>
-        {breakdown.pendingDays > 0 ? `   |   Pending: ${breakdown.pendingDays} day(s)` : ""}
-      </p>
-      <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b border-[#E2DDD8] text-[#6B7280]">
-              <th className="py-1 px-2 text-left font-medium">Date</th>
-              <th className="py-1 px-2 text-left font-medium">Type</th>
-              <th className="py-1 px-2 text-right font-medium">Logged hrs</th>
-              <th className="py-1 px-2 text-right font-medium">Expected hrs</th>
-              <th className="py-1 px-2 text-right font-medium">Auto-settled</th>
-            </tr>
-          </thead>
-          <tbody>
-            {breakdown.rows
-              .filter((d) => d.type !== "ok" && d.type !== "absent")
-              .map((d) => {
-                const chip =
-                  d.type === "under"
-                    ? { label: "Under-recorded", cls: "bg-[#FBEFD4] text-[#B45309]" }
-                    : { label: "Pending", cls: "bg-[#EFEDEA] text-[#6B7280]" };
-                return (
-                  <tr
-                    key={`${idPrefix}-${d.date}`}
-                    className={`border-b border-[#F0EDE9] ${d.type === "under" ? "bg-[#FDF6E3]" : ""}`}
-                  >
-                    <td className="py-1 px-2 text-[#1F1D1B]">{d.date}</td>
-                    <td className="py-1 px-2">
-                      <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${chip.cls}`}>
-                        {chip.label}
-                      </span>
-                    </td>
-                    <td className={`py-1 px-2 text-right tabular-nums ${d.logged <= 0 ? "text-[#9A3A2D] font-semibold" : "text-[#4B5563]"}`}>
-                      {d.logged.toFixed(1)}
-                    </td>
-                    <td className="py-1 px-2 text-right tabular-nums text-[#6B7280]">{d.expected.toFixed(1)}</td>
-                    <td className={`py-1 px-2 text-right tabular-nums font-semibold ${
-                      d.type === "under" ? "text-[#B45309]" : "text-[#6B7280]"
-                    }`}>
-                      {d.type === "under"
-                        ? `−${d.short.toFixed(1)} h · −${formatRM(d.shortValueSen)}`
-                        : "— (recent)"}
-                    </td>
-                  </tr>
-                );
-              })}
-            {breakdown.rows.filter((d) => d.type !== "ok" && d.type !== "absent").length === 0 && (
-              <tr>
-                <td colSpan={5} className="py-2 px-2 text-center text-[#9CA3AF]">
-                  {emptyLabel}
-                </td>
-              </tr>
-            )}
-          </tbody>
-          <tfoot>
-            <tr className="border-t border-[#E2DDD8]">
-              <td className="py-1 px-2 font-semibold text-[#1F1D1B]" colSpan={4}>
-                Absence deduction (in Payroll) · Under-recorded hours (auto-docked)
-              </td>
-              <td className="py-1 px-2 text-right tabular-nums font-bold text-[#9A3A2D]">
-                −{formatRM(breakdown.absenceDeductionSen)} · {breakdown.underHours.toFixed(1)} h
-              </td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>
-      <p className="mt-1 text-[11px] text-[#9CA3AF]">
-        Working days are Mon–Sat, excluding Sundays and declared public holidays.
-        Absent days are a salary deduction; under-recorded days <span className="text-[#3F6B4A]">auto-dock</span> their shortfall
-        (the shift rules — ≥9h, late past grace, OT from 30 min past 18:00 — settle every day, no manual pick).
-        Pending days are too recent to confirm (within 2 working days) and are not yet deducted.
-        To restore pay on a day that was really full, key the correct hours in the Working Hours grid — the auto-dock clears on the next settle.
-      </p>
-    </>
-  );
-}
 
 // Lightweight projection of /api/departments for in-page use. Full Department
 // type lives in src/types/index.ts; we only need these fields for dropdowns
@@ -8327,8 +8199,6 @@ function LaborCostTab({
   const [showProduction, setShowProduction] = useState(true);
   const [showOverhead, setShowOverhead] = useState(false);
   const [showRevenueRaw, setShowRevenueRaw] = useState(false);
-  // The "unlogged hours data gap" table — collapsible so the owner can hide it.
-  const [showRangeGapTbl, setShowRangeGapTbl] = useState(true);
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
   // `period` keeps the existing month dropdown working as a quick-jump preset.
   // When the user picks a month, we re-derive from/to. When they tweak the
@@ -8385,11 +8255,6 @@ function LaborCostTab({
   // operators don't lose sight of them.
   const [categoryFilter, setCategoryFilter] = useState<"" | "SOFA" | "BEDFRAME" | "ACCESSORY">("");
 
-  // Accordion: which under-logged factory worker's per-day breakdown is open.
-  // Only one at a time — clicking a row toggles it; clicking again or another
-  // row collapses / switches. Keyed by the worker's employeeId (the worker
-  // record id), which is stable across the period.
-  const [expandedGapWorkerId, setExpandedGapWorkerId] = useState<string | null>(null);
 
   const handlePeriodChange = useCallback((p: string) => {
     setPeriod(p);
@@ -8971,11 +8836,6 @@ function LaborCostTab({
   const periodFinished = monthIsFinished(fullSingleMonth ? from.slice(0, 7) : (period || from).slice(0, 7));
   const showReconciliation =
     hasPayroll && !categoryFilter && fullSingleMonth && periodFinished;
-  // Range-based unlogged-hours data gap — shown whenever we are NOT showing the
-  // payroll reconciliation (custom / partial / multi-month range), so the owner
-  // can check missing Working Hours for any window (e.g. weekly). Independent of
-  // payslips; computed purely from logged vs expected hours over the range.
-  const showRangeGap = !showReconciliation && !categoryFilter;
   // The fully-burdened bucket display (each department's labor carries its own
   // workers' EPF + ÷-rate adjustment, leaving ONLY the under-recorded gap on its
   // own line) is computed AFTER the per-employee itemisation below, so it can
@@ -9054,180 +8914,7 @@ function LaborCostTab({
     return out;
   }, [entriesResp, workersById, period, from, holidayList, effSalaryOf, payRuleVersions]);
 
-  // Per-(worker, date) logged HOURS — used by the per-worker drill-in so the
-  // owner can see which DAY each worker's hours weren't recorded. This is a
-  // pure hours sum (regular + OT, i.e. the raw `hours` field), NOT a money
-  // value — the drill-in compares logged hours against the worker's standard
-  // daily hours. Keyed "workerId|YYYY-MM-DD".
-  const loggedHoursByWorkerDate = useMemo(() => {
-    const out = new Map<string, number>();
-    const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
-    for (const e of entries) {
-      const key = `${e.workerId}|${e.date}`;
-      out.set(key, (out.get(key) ?? 0) + (Number(e.hours) || 0));
-    }
-    return out;
-  }, [entriesResp]);
 
-  // Working days (Mon–Sat, excluding declared public holidays) in the selected
-  // period — the calendar the drill-in walks to flag short / missing days. We
-  // use the same holiday list the labor calc already consumes and the same
-  // Mon–Sat convention (Sunday = 0 is non-working). Built from the actual
-  // from/to range so a custom (non-month) window still drills in correctly.
-  const periodWorkingDays = useMemo(() => {
-    const holidaySet = new Set(holidayList);
-    const days: string[] = [];
-    if (!from || !to) return days;
-    const start = new Date(`${from}T00:00:00`);
-    const end = new Date(`${to}T00:00:00`);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return days;
-    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-      const dow = d.getDay();
-      if (dow === 0) continue; // Sunday — non-working
-      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      if (holidaySet.has(iso)) continue; // declared public holiday
-      days.push(iso);
-    }
-    return days;
-  }, [from, to, holidayList]);
-
-  // Build the per-day shortfall breakdown for one worker on demand (only the
-  // open accordion row is computed). For each working day in the period:
-  // logged = Σ that worker's hours that date; expected = the worker's standard
-  // daily hours (the SAME workingHoursPerDay the labor calc uses, defaulting
-  // to 9); short = max(0, expected − logged). A day with 0 logged is fully
-  // missing.
-  const buildWorkerDayBreakdown = useCallback(
-    (workerId: string): WorkerDayBreakdown => {
-      const w = workersById.get(workerId);
-      const expected = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
-      // Salary = the month's EFFECTIVE (day-weighted) figure, matching payroll.
-      const effSalarySen = w ? effSalaryOf(w) : 0;
-      // Per-day salary deduction for a full no-show: one day's basic pay
-      // (salary ÷ working days per month, default 26 days).
-      const perDayDeductionSen = w
-        ? Math.round(effSalarySen / (w.workingDaysPerMonth || 26))
-        : 0;
-      // Hourly rate for valuing under-recorded short hours -- div-working-days
-      // basis (the same rate a Deduct docks): salary / actualWorkingDays / std,
-      // where actualWorkingDays = ACTUAL Mon-Sat days this month minus holidays.
-      const [hbY, hbM] = (period || from).slice(0, 7).split("-").map(Number);
-      const actualWorkingDays =
-        hbY && hbM
-          ? Math.max(1, countElapsedWorkingDays(hbY, hbM, new Date(hbY, hbM, 0).getDate(), holidayList))
-          : 26;
-      const costingHourlyRateSen =
-        w && effSalarySen
-          ? effSalarySen / actualWorkingDays / Math.max(1, expected)
-          : 0;
-      // Resigned workers: days AFTER their last day (resignedAt, inclusive) are
-      // neither worked nor absent — they have left. Such days are skipped so the
-      // breakdown never shows post-departure "absences".
-      const leftIso =
-        w && w.status === "RESIGNED" && /^\d{4}-\d{2}-\d{2}$/.test(w.resignedAt ?? "")
-          ? (w.resignedAt as string)
-          : null;
-      // Symmetric to resignation: days BEFORE the worker joined (joinDate,
-      // inclusive) are neither worked nor absent — they had not started yet.
-      const joinedIso =
-        w && /^\d{4}-\d{2}-\d{2}$/.test(w.joinDate ?? "")
-          ? (w.joinDate as string)
-          : null;
-
-      // Grace window: a 0-logged working day is NOT yet a confirmed absence
-      // until it is at least 2 WORKING days in the past. Walk the working-day
-      // calendar (capped at the period end) up to "today" and treat the last
-      // 2 such days as the pending grace window. Any 0-logged day strictly
-      // AFTER the cutoff is "pending"; on/before the cutoff is a confirmed
-      // "absent". This is view code (not the pure engine), so reading the real
-      // current date here is fine.
-      const isoOf = (t: Date) =>
-        `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
-      const todayIso = isoOf(new Date());
-      // cutoffDate = the calendar date 2 WORKING days before today (Mon–Sat,
-      // skipping Sundays and public holidays) — measured against the REAL
-      // calendar, NOT the selected period. A 0-logged working day is "pending"
-      // (maybe just not keyed yet) only when it is strictly after this cutoff
-      // and on/before today; everything on/before the cutoff is a confirmed
-      // absence. For a closed past month the cutoff sits in the current month,
-      // so no day in that month is pending — the whole month is confirmed.
-      // Matches the backend absenceCutoffDay(today, 2, publicHolidays).
-      const cutoffDate = (() => {
-        const holidaySet = new Set(holidayList);
-        const d = new Date();
-        d.setHours(0, 0, 0, 0);
-        let remaining = Math.max(
-          0,
-          Math.round(
-            resolvePayRulesAsOf(payRuleVersions, todayYmdMY())
-              .absenceGraceWorkingDays,
-          ),
-        );
-        while (remaining > 0) {
-          d.setDate(d.getDate() - 1);
-          const dow = d.getDay();
-          if (dow === 0) continue; // Sunday — non-working
-          if (holidaySet.has(isoOf(d))) continue; // public holiday
-          remaining -= 1;
-        }
-        return isoOf(d);
-      })();
-
-      let totalShort = 0;
-      let absentDays = 0;
-      let underHours = 0;
-      let pendingDays = 0;
-      const rows = periodWorkingDays.map((date) => {
-        const logged = loggedHoursByWorkerDate.get(`${workerId}|${date}`) ?? 0;
-        // Outside the employment window (before joining or after leaving) →
-        // excluded (not absent, not short).
-        if ((leftIso && date > leftIso) || (joinedIso && date < joinedIso)) {
-          return { date, logged, expected, short: 0, shortValueSen: 0, type: "ok" as const };
-        }
-        const short = Math.max(0, expected - logged);
-        totalShort += short;
-        let type: "absent" | "under" | "pending" | "ok";
-        if (logged <= 0) {
-          // Full no-show. Pending if it is in the 2-working-day grace window
-          // (i.e. <= today AND strictly after the cutoff working day).
-          const isWithinGrace =
-            date <= todayIso && (cutoffDate === null || date > cutoffDate);
-          if (isWithinGrace) {
-            type = "pending";
-            pendingDays += 1;
-          } else {
-            type = "absent";
-            absentDays += 1;
-          }
-        } else if (logged < expected) {
-          type = "under";
-          underHours += short;
-        } else {
-          type = "ok";
-        }
-        return {
-          date,
-          logged,
-          expected,
-          short,
-          shortValueSen: Math.round(short * costingHourlyRateSen),
-          type,
-        };
-      });
-      const absenceDeductionSen = absentDays * perDayDeductionSen;
-      return {
-        rows,
-        totalShort,
-        expected,
-        absentDays,
-        absenceDeductionSen,
-        underHours,
-        pendingDays,
-        perDayDeductionSen,
-      };
-    },
-    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList, period, from, effSalaryOf, payRuleVersions],
-  );
 
   // Set of department codes the labor buckets cover (the 8 production depts +
   // WAREHOUSING + PRODUCTION_SHORTFALL + REPAIR + MAINTENANCE + R_AND_D). A
@@ -9238,133 +8925,6 @@ function LaborCostTab({
     [allDepts],
   );
 
-  // ---- Range-based unlogged-hours data gap (payslip-INDEPENDENT) ----------
-  // For any window that is NOT a full single calendar month (e.g. a single
-  // week), we can't reconcile to a monthly payroll. Instead we surface a pure
-  // hours gap computed over the selected From→To range: for each active factory
-  // worker, expected = Σ the worker's standard daily hours across the working
-  // days in the range (the SAME periodWorkingDays the drill-in walks — Mon–Sat
-  // minus public holidays), logged = Σ their logged hours in range (from
-  // loggedHoursByWorkerDate), short = max(0, expected − logged). We list only
-  // workers with short > 0, and value the gap at the worker's regular hourly
-  // rate (basicSalary ÷ regular days ÷ std hours) — the SAME rate the labor
-  // calc derives — purely as an indicative RM figure. No payslips involved, so
-  // it is correct for any range. Per-worker per-day drill-in is unchanged (it
-  // already walks periodWorkingDays, so it is range-aware in both modes).
-  const rangeHoursGap = useMemo(() => {
-    const out: Array<{
-      id: string;
-      workerId: string;
-      name: string;
-      deptCode: string;
-      deptName: string;
-      expectedHours: number;
-      loggedHours: number;
-      absentDays: number;
-      shortHours: number;
-      shortValueSen: number;
-    }> = [];
-    if (!showRangeGap || periodWorkingDays.length === 0) {
-      return { rows: out, totalShortHours: 0, totalShortValueSen: 0 };
-    }
-    // Public holidays in the range's month — drive the regular day rate exactly
-    // as the labor calc does, so the indicative short value matches the bucket
-    // rate. Use the same (period || from) month the labor calc uses.
-    const [hYear, hMonth] = (period || from).slice(0, 7).split("-").map(Number);
-    const actualWorkingDays =
-      hYear && hMonth
-        ? Math.max(1, countElapsedWorkingDays(hYear, hMonth, new Date(hYear, hMonth, 0).getDate(), holidayList))
-        : 26;
-    // Only count days that have ELAPSED and cleared the 2-working-day grace — the
-    // SAME cutoff the per-worker drill-down uses. Future days (not yet worked) and
-    // the last couple of working days (maybe just not keyed yet) are NOT counted
-    // as short, so a not-yet-finished month doesn't show everyone hugely short.
-    const cutoffIso = (() => {
-      const iso = (t: Date) =>
-        `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
-      const holidaySet = new Set(holidayList);
-      const d = new Date();
-      d.setHours(0, 0, 0, 0);
-      let remaining = Math.max(
-        0,
-        Math.round(
-          resolvePayRulesAsOf(payRuleVersions, todayYmdMY())
-            .absenceGraceWorkingDays,
-        ),
-      );
-      while (remaining > 0) {
-        d.setDate(d.getDate() - 1);
-        if (d.getDay() === 0) continue; // Sunday — non-working
-        if (holidaySet.has(iso(d))) continue; // public holiday
-        remaining -= 1;
-      }
-      return iso(d);
-    })();
-    for (const w of workers) {
-      if (w.status !== "ACTIVE") continue;
-      // Only factory-department workers are expected to log Working Hours; a
-      // worker whose department isn't a factory dept (office / sales / admin /
-      // drivers / QC) logs none by design and is not a data gap.
-      if (!factoryDeptCodes.has(w.departmentCode)) continue;
-      const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
-      // Classify each confirmed day the way the per-day drill-in does:
-      //   0 logged  → ABSENT — the salary deduction already settled it in
-      //               Payroll, so it carries NO "short value" here.
-      //   partially logged → UNDER-RECORDED — these are the only hours that
-      //               genuinely need filling (or Keep/Deduct), so only they
-      //               are valued. (Owner 2026-06-11: "明明只是 short 36.44,
-      //               为什么显示 short 了 58 小时那么多钱".)
-      let expectedHours = 0;
-      let loggedHours = 0;
-      let absentDays = 0;
-      let underHours = 0;
-      for (const date of periodWorkingDays) {
-        if (date > cutoffIso) continue; // future / within-grace → not yet "short"
-        const lg = loggedHoursByWorkerDate.get(`${w.id}|${date}`) ?? 0;
-        expectedHours += stdHours;
-        loggedHours += lg;
-        if (lg <= 0) absentDays++;
-        else if (lg < stdHours) underHours += stdHours - lg;
-      }
-      const shortHours = Math.round(underHours * 100) / 100;
-      if (absentDays === 0 && shortHours <= 0.0001) continue;
-      // Indicative value of the missing hours at the worker's regular rate.
-      const regularDays = actualWorkingDays;
-      const effSalarySen = effSalaryOf(w);
-      const regularRateSen = effSalarySen
-        ? effSalarySen / regularDays / stdHours
-        : 0;
-      const dept = deptByCode.get(w.departmentCode);
-      out.push({
-        id: w.id,
-        workerId: w.id,
-        name: w.name,
-        deptCode: w.departmentCode,
-        deptName: dept?.name ?? w.departmentCode,
-        expectedHours,
-        loggedHours,
-        absentDays,
-        shortHours,
-        shortValueSen: Math.round(shortHours * regularRateSen),
-      });
-    }
-    out.sort((a, b) => b.shortHours - a.shortHours);
-    const totalShortHours = out.reduce((s, r) => s + r.shortHours, 0);
-    const totalShortValueSen = out.reduce((s, r) => s + r.shortValueSen, 0);
-    return { rows: out, totalShortHours, totalShortValueSen };
-  }, [
-    showRangeGap,
-    periodWorkingDays,
-    loggedHoursByWorkerDate,
-    workers,
-    factoryDeptCodes,
-    allDepts,
-    period,
-    from,
-    holidayList,
-    effSalaryOf,
-    payRuleVersions,
-  ]);
 
   // Classify every active worker with a payslip into one of the two lists.
   const employeeResidual = useMemo(() => {
@@ -9831,7 +9391,7 @@ function LaborCostTab({
                   <tr className="border-b border-[#E2DDD8]">
                     <td
                       className="py-1.5 pr-3 text-[#4B5563]"
-                      title="Hours short on days the worker DID work — auto-docked at the ÷26 hourly rate. Click a worker in the panel below to see the per-day settlement; key the real hours to restore pay."
+                      title="Hours short on days the worker DID work — auto-docked at the ÷26 hourly rate. Key the real hours in the Working Hours grid to restore pay."
                     >
                       Under-recorded hours <span className="text-[#9CA3AF]">(auto-docked)</span>
                     </td>
@@ -9851,8 +9411,8 @@ function LaborCostTab({
               Each department&rsquo;s line carries the full cost of its own people &mdash; their logged Working Hours plus their
               EPF / SOCSO / EIS and the small ÷26-vs-÷working-days adjustment on absent days &mdash; so no separate statutory line is
               needed. The only amount left on its own line is <span className="font-medium text-[#4B5563]">Under-recorded hours</span>:
-              pay already issued for hours not yet entered. Record those hours (or deduct them) in the panel below and the line drops
-              to zero. Total Payroll Cost matches the Payroll tab for {payrollMonthLabel}.
+              pay already issued for hours not yet entered. It auto-docks at the ÷26 rate and clears once the real hours are keyed in
+              the Working Hours grid. Total Payroll Cost matches the Payroll tab for {payrollMonthLabel}.
             </p>
           </div>
         )}
@@ -9921,205 +9481,7 @@ function LaborCostTab({
           </div>
         )}
 
-        {/* Per-employee itemisation of the Non-production salary residual.
-            Splits the residual into (1) genuine non-production staff who log no
-            factory hours — expected — and (2) factory workers who were paid more
-            than their logged Working Hours value — a DATA GAP to fix. Same guard
-            as the panel above (un-filtered single month only). */}
-        {showReconciliation && (
-          <div className="mb-4 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-4">
-            <h3 className="text-sm font-semibold text-[#1F1D1B] mb-1">
-              Under-recorded hours — who &amp; why
-            </h3>
-            <p className="text-xs text-[#6B7280] leading-relaxed mb-3">
-              {employeeResidual.nonProductionStaff.length > 0 ? (
-                <>
-                  The <span className="font-medium text-[#9A3A2D]">Under-recorded hours</span> line
-                  ({formatCurrency(underRecordedReconSen)}) is the pay issued to
-                  {" "}<span className="font-medium text-[#9A3A2D]">factory workers paid more than their logged Working Hours</span>
-                  {" "}— a data gap to fix by recording the missing hours. Separately,
-                  {" "}<span className="font-medium text-[#4B5563]">non-production staff</span> (admin / sales /
-                  management / drivers / QC) who log no factory hours are folded into the Overhead line above — expected,
-                  not a gap.
-                </>
-              ) : (
-                <>
-                  The <span className="font-medium text-[#9A3A2D]">Under-recorded hours</span> line
-                  ({formatCurrency(underRecordedReconSen)}) is pay issued to
-                  {" "}<span className="font-medium text-[#9A3A2D]">factory workers paid more than their logged Working Hours</span>
-                  {" "}— a data gap to fix by recording the missing hours. Click a worker to see which days are short.
-                </>
-              )}
-            </p>
 
-            {/* 1. Genuine non-production staff — whole salary is the residual.
-                Hidden entirely when there are none (this factory is all
-                production workers, so the table is usually empty). */}
-            {employeeResidual.nonProductionStaff.length > 0 && (
-              <div className="mb-4">
-                <p className="text-xs font-semibold text-[#4B5563] mb-1">
-                  Non-production staff (no factory hours — expected)
-                </p>
-                <div className="overflow-x-auto rounded-md border border-[#E2DDD8] bg-white">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                        <th className="py-1.5 px-3 text-left font-medium">Employee</th>
-                        <th className="py-1.5 px-3 text-left font-medium">Department</th>
-                        <th className="py-1.5 px-3 text-right font-medium">Salary</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {employeeResidual.nonProductionStaff.map((e) => (
-                        <tr key={`np-staff-${e.id}`} className="border-b border-[#F0EDE9]">
-                          <td className="py-1.5 px-3 text-[#1F1D1B]">{e.name}</td>
-                          <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
-                          <td className="py-1.5 px-3 text-right tabular-nums text-[#1F1D1B]">{formatCurrency(e.grossSen)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot>
-                      <tr className="border-t border-[#E2DDD8]">
-                        <td className="py-1.5 px-3 font-semibold text-[#1F1D1B]" colSpan={2}>Subtotal</td>
-                        <td className="py-1.5 px-3 text-right tabular-nums font-bold text-[#1F1D1B]">
-                          {formatCurrency(employeeResidual.nonProdSubtotalSen)}
-                        </td>
-                      </tr>
-                    </tfoot>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {/* Under-logged worker panel REMOVED (owner 2026-07-04): every
-                under-logged/To-fill day now auto-docks at the ÷26 rate — there
-                is no manual action to take, so the review table is gone. The
-                dock still shows per-worker on payslips; the labor-cost total
-                still includes it (employeeResidual.underLoggedSubtotalSen feeds
-                the reconciliation + the Settle-from-punches button). */}
-          </div>
-        )}
-
-        {/* Range-based unlogged-hours data gap. Shown for any window that is
-            NOT a full single calendar month (custom / partial / multi-month) —
-            e.g. a single week — so the owner can check who under-logged Working
-            Hours for the selected dates. Computed purely from logged vs
-            expected hours over the range, INDEPENDENT of monthly payslips. The
-            per-worker per-day drill-in is the same one the monthly panel uses
-            (already range-aware via periodWorkingDays). */}
-        {showRangeGap && (
-          <div className="mb-4 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-4">
-            <div className="mb-1 flex items-center justify-between flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => setShowRangeGapTbl((v) => !v)}
-                className="text-sm font-semibold text-[#9A3A2D] flex items-center gap-2 hover:opacity-80"
-                title={showRangeGapTbl ? "Hide this section" : "Show this section"}
-              >
-                {showRangeGapTbl ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                <AlertTriangle className="h-4 w-4" />
-                Factory workers with under-logged hours (auto-docked — key the real hours to restore pay)
-              </button>
-              <span className="text-xs font-normal text-[#6B7280]">
-                {from} → {to}
-              </span>
-            </div>
-            {showRangeGapTbl && (
-            <>
-            <p className="text-xs text-[#6B7280] leading-relaxed mb-3">
-              For this range, days with NOTHING logged are <span className="font-medium">Absent</span> —
-              the salary deduction already settles them in Payroll, so they carry no value here.
-              <span className="font-medium"> To-fill hours</span> (days the worker DID work but logged
-              less than a full day) are <span className="text-[#3F6B4A]">auto-docked</span> at the ÷26
-              hourly rate — no manual pick. To restore pay on a day that was really full, key the correct
-              hours in the Working Hours grid and re-settle. Payroll reconciliation is monthly and shows
-              once a full calendar month is selected. Working days are Mon–Sat, excluding Sundays and
-              declared public holidays.
-            </p>
-
-            <div className="overflow-x-auto rounded-md border border-[#E7C9C1] bg-[#FCF4F2]">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-[#E7C9C1] text-xs text-[#9A3A2D]">
-                    <th className="py-1.5 px-3 text-left font-medium">Employee</th>
-                    <th className="py-1.5 px-3 text-left font-medium">Department</th>
-                    <th className="py-1.5 px-3 text-right font-medium">Expected hrs</th>
-                    <th className="py-1.5 px-3 text-right font-medium">Logged hrs</th>
-                    <th className="py-1.5 px-3 text-right font-medium" title="Days with NOTHING logged — the salary deduction already settles these in Payroll, so they carry no value here">Absent (settled)</th>
-                    <th className="py-1.5 px-3 text-right font-medium" title="Hours short on days the worker DID work — auto-docked at the ÷26 hourly rate (key the real hours to restore pay)">To-fill hrs</th>
-                    <th className="py-1.5 px-3 text-right font-medium">To-fill value</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rangeHoursGap.rows.map((e) => {
-                    const canDrill = workersById.has(e.workerId);
-                    const isOpen = canDrill && expandedGapWorkerId === e.workerId;
-                    const breakdown = isOpen ? buildWorkerDayBreakdown(e.workerId) : null;
-                    return (
-                      <Fragment key={`range-gap-${e.id}`}>
-                        <tr
-                          className={`border-b border-[#F1DDD7] ${canDrill ? "cursor-pointer hover:bg-[#FBEAE5]" : ""}`}
-                          onClick={canDrill ? () => setExpandedGapWorkerId(isOpen ? null : e.workerId) : undefined}
-                        >
-                          <td className="py-1.5 px-3 text-[#1F1D1B]">
-                            <span className="inline-flex items-center gap-1.5">
-                              {canDrill && (
-                                isOpen
-                                  ? <ChevronDown className="h-3.5 w-3.5 text-[#9A3A2D]" />
-                                  : <ChevronRight className="h-3.5 w-3.5 text-[#9A3A2D]" />
-                              )}
-                              {e.name}
-                            </span>
-                          </td>
-                          <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
-                          <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{e.expectedHours.toFixed(1)}</td>
-                          <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{e.loggedHours.toFixed(1)}</td>
-                          <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{e.absentDays > 0 ? `${e.absentDays}d` : "-"}</td>
-                          <td className="py-1.5 px-3 text-right tabular-nums font-semibold text-[#B45309]">{e.shortHours > 0 ? e.shortHours.toFixed(1) : "-"}</td>
-                          <td className="py-1.5 px-3 text-right tabular-nums text-[#B45309]">{e.shortValueSen > 0 ? formatCurrency(e.shortValueSen) : "-"}</td>
-                        </tr>
-                        {isOpen && breakdown && (
-                          <tr className="border-b border-[#F1DDD7] bg-white">
-                            <td colSpan={7} className="px-3 py-2">
-                              <WorkerDayDrillIn
-                                name={e.name}
-                                idPrefix={`range-gap-day-${e.id}`}
-                                breakdown={breakdown}
-                                emptyLabel="No absent or under-recorded days in this range"
-                              />
-                            </td>
-                          </tr>
-                        )}
-                      </Fragment>
-                    );
-                  })}
-                  {rangeHoursGap.rows.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="py-3 px-3 text-center text-xs text-[#4F7C3A]">
-                        {periodWorkingDays.length === 0
-                          ? "No working days in this range"
-                          : "All factory workers fully logged for this range — no unlogged hours"}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-                <tfoot>
-                  <tr className="border-t border-[#E7C9C1]">
-                    <td className="py-1.5 px-3 font-semibold text-[#1F1D1B]" colSpan={5}>Total</td>
-                    <td className="py-1.5 px-3 text-right tabular-nums font-bold text-[#9A3A2D]">
-                      {rangeHoursGap.totalShortHours.toFixed(1)}
-                    </td>
-                    <td className="py-1.5 px-3 text-right tabular-nums font-bold text-[#9A3A2D]">
-                      {formatCurrency(rangeHoursGap.totalShortValueSen)}
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-            </>
-            )}
-          </div>
-        )}
 
         {/* Production-vs-overhead ratio note */}
         <div className="mb-3 text-xs text-[#6B7280]">

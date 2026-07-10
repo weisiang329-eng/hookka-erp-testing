@@ -24,11 +24,55 @@
 // repeatedly for the same PO is a no-op after the first success.
 // ---------------------------------------------------------------------------
 import { generateFGUnitsForPO } from "../routes/fg-units";
+import { applyPackingRack } from "./packing-rack-write";
 import {
   backfillFGBatchCost,
   consumeRawMaterialsForPO,
   postWIPCompletionMarker,
 } from "./po-cost-cascade";
+
+// Default packing → Floor (owner 2026-07-11): once a PO is fully produced,
+// every PACKING card that hasn't been assigned a rack lands on the "Floor"
+// staging location by default so the packed goods appear in the warehouse
+// straight away; the operator reassigns to a specific rack afterward. Runs
+// through applyPackingRack (the ONE validated + idempotent rack writer) so the
+// rack_items occupancy mirror is written exactly like a manual pick. Only
+// touches cards whose rackingNumber is still blank, so it NEVER overrides a
+// manual pick (or a Floor default already applied) and is safe to replay with
+// postProductionOrderCompletion. Best-effort: a warehouse hiccup must never
+// block the completion cascade.
+async function defaultUnrackedPackingCardsToFloor(
+  db: D1Database,
+  poId: string,
+): Promise<void> {
+  try {
+    const floor = await db
+      .prepare("SELECT rack FROM rack_locations WHERE LOWER(rack) = 'floor' LIMIT 1")
+      .first<{ rack: string }>();
+    if (!floor?.rack) return; // no Floor location configured → nothing to default to
+    const unracked = await db
+      .prepare(
+        `SELECT id FROM job_cards
+           WHERE productionOrderId = ? AND departmentCode = 'PACKING'
+             AND (rackingNumber IS NULL OR rackingNumber = '')`,
+      )
+      .bind(poId)
+      .all<{ id: string }>();
+    for (const card of unracked.results ?? []) {
+      try {
+        await applyPackingRack(db, card.id, floor.rack);
+      } catch (e) {
+        console.warn(
+          "[postProductionOrderCompletion] Floor default skipped for card",
+          card.id,
+          e,
+        );
+      }
+    }
+  } catch (e) {
+    console.warn("[postProductionOrderCompletion] Floor default step skipped", e);
+  }
+}
 
 export async function postProductionOrderCompletion(
   db: D1Database,
@@ -128,6 +172,10 @@ export async function postProductionOrderCompletion(
   const fgCostResult = await backfillFGBatchCost(db, poId);
   // Light WIP marker — full tracking is TODO(wip-phase-2).
   await postWIPCompletionMarker(db, poId, quantity);
+
+  // Default any still-unracked PACKING cards to the Floor staging location so
+  // the freshly packed goods show in the warehouse without a manual rack pick.
+  await defaultUnrackedPackingCardsToFloor(db, poId);
 
   return {
     fgUnitsGenerated: fgResult.generated,

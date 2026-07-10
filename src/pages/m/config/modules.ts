@@ -151,6 +151,16 @@ function richItemVM(it: RawRow, i: number): LineItemVM {
   if (size) specs.push({ label: "Size", value: size });
   const fabric = str(it, "fabricCode", "fabric");
   if (fabric) specs.push({ label: "Fabric", value: fabric });
+  // Per-line customer identifiers — only DO items carry these (the detail
+  // endpoint joins each line's own sales order), so they surface on a
+  // consolidated DO's line items and stay absent on SO / invoice / PI lines
+  // (owner 2026-07-11: every line must show whose Cust PO / SO it is).
+  const lineSO = str(it, "salesOrderNo");
+  if (lineSO) specs.push({ label: "SO", value: lineSO });
+  const lineCustPO = str(it, "customerPOId", "customerPO");
+  if (lineCustPO) specs.push({ label: "Cust PO", value: lineCustPO });
+  const lineCustSO = str(it, "customerSO", "customerSOId");
+  if (lineCustSO) specs.push({ label: "Cust SO", value: lineCustSO });
   if (unit > 0) specs.push({ label: "Unit Price", value: money(unit) });
 
   return {
@@ -460,6 +470,8 @@ export const salesConfig: ModuleConfig = {
 const deliveryOrdersSource: DataSource = {
   url: "/api/delivery-orders",
   select: selectData,
+  // Part of the delivery cross-source search group (DO side of an order's life).
+  crossSearch: true,
   // v17 card shape (line ~1744): code · customer · "hub · vehicle/driver" · [Dispatch · SO]
   toVM: (r): RowVM => {
     const hub = str(r, "hubName", "hubShortName");
@@ -509,23 +521,34 @@ const deliveryOrdersSource: DataSource = {
 const pendingSosSource: DataSource = {
   url: "/api/delivery-orders/pending-sos",
   select: selectData,
+  // Part of the delivery cross-source search group (Sales-Order side — an order
+  // still in Planning / Pending Delivery, before any DO exists).
+  crossSearch: true,
   // Owner 2026-07-04: a Planning/Pending card must show all five identifiers
   // he reconciles against — our SO number (the big code), customer name, and
   // Customer PO / Reference / Customer SO as metas (DocCard flows 4 metas
   // 3-across + 1). Exp DD rides along as the 4th meta.
-  toVM: (r): RowVM => ({
-    id: str(r, "id", "companySO", "companySOId"),
-    code: str(r, "companySO", "companySOId") || "—",
-    title: str(r, "customerName") || "—",
-    items: str(r, "hubName") ? `Ship to · ${str(r, "hubName")}` : undefined,
-    metas: [
-      { label: "Cust PO", value: str(r, "customerPO", "customerPOId") || "—" },
-      { label: "Reference", value: str(r, "reference") || "—" },
-      { label: "Cust SO", value: str(r, "customerSO", "customerSOId") || "—" },
-      { label: "Exp DD", value: shortDate(dateOnly(r, "hookkaExpectedDD")) || "—" },
-    ],
-    status: resolveStatus(str(r, "status"), STATUS_MAPS.so),
-  }),
+  // Owner 2026-07-11: the card code must show the REAL SO id he reconciles
+  // against (SO-2607-090), not the "Sales Order 090" label. Reference rides on
+  // the same line (SO-2607-090 · ZNT5377) so he can tell orders apart at a
+  // glance; Cust PO / Cust SO / Exp DD / Amount fill the footer metas.
+  toVM: (r): RowVM => {
+    const soid = str(r, "companySOId", "companySO") || "—";
+    const ref = str(r, "reference");
+    return {
+      id: str(r, "id", "companySO", "companySOId"),
+      code: ref ? `${soid} · ${ref}` : soid,
+      title: str(r, "customerName") || "—",
+      items: str(r, "hubName") ? `Ship to · ${str(r, "hubName")}` : undefined,
+      metas: [
+        { label: "Cust PO", value: str(r, "customerPO", "customerPOId") || "—" },
+        { label: "Cust SO", value: str(r, "customerSO", "customerSOId") || "—" },
+        { label: "Exp DD", value: shortDate(dateOnly(r, "hookkaExpectedDD")) || "—" },
+        { label: "Amount", value: money(num(r, "totalSen")) },
+      ],
+      status: resolveStatus(str(r, "status"), STATUS_MAPS.so),
+    };
+  },
   columns: [
     textCol("companySO", "Company SO", (r) => str(r, "companySO", "companySOId")),
     textCol("customer", "Customer", (r) => str(r, "customerName")),
@@ -619,8 +642,13 @@ const deliveryDetail: DetailConfig = {
     current: (d) => str(d, "status"),
   },
   fields: [
-    fld("Company SO", (d) => str(d, "companySO", "companySOId")),
+    // A DO can consolidate several sales orders — the backend joins them into
+    // salesOrderNos ("SO-x, SO-y") and aggregates the customer identifiers so a
+    // consolidated DO no longer shows a blank header (owner 2026-07-11).
+    fld("Sales Order", (d) => str(d, "salesOrderNos", "companySO", "companySOId")),
     fld("Customer", (d) => str(d, "customerName")),
+    fld("Customer PO", (d) => str(d, "customerPOId", "customerPO")),
+    fld("Customer SO", (d) => str(d, "customerSO", "customerSOId")),
     fld("State", (d) => str(d, "hubState", "customerState")),
     fld("Expected DD", (d) => dateOnly(d, "deliveryDate", "hookkaExpectedDD")),
     fld("Driver", (d) => str(d, "driverName")),
@@ -683,6 +711,10 @@ export const deliveryConfig: ModuleConfig = {
         : null,
   detail: deliveryDetail,
   sources: [pendingSosSource, deliveryOrdersSource, packingListsSource, threePlSource],
+  // One search finds an order whether it's still a Sales Order (Planning /
+  // Pending Delivery) or already a Delivery Order (owner 2026-07-11). Merges
+  // matches from the two crossSearch sources above.
+  crossSourceSearch: true,
 };
 
 // ---------------------------------------------------------------------------

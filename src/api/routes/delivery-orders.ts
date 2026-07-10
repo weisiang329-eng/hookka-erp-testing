@@ -223,6 +223,51 @@ type DeliveryOrderItemRow = {
   salesOrderNo: string | null;
 };
 
+// Per-SO customer identifiers, keyed by the SO number (companySOId, e.g.
+// "SO-2607-007"). A DO can consolidate lines from SEVERAL sales orders (see
+// DO-2607-043 — 3 distinct SOs), so its header companySO/customerPO/customerSO/
+// reference are blank; the identifiers the operator reconciles against live on
+// each line's own sales order. This mirrors what the DESKTOP delivery list does
+// client-side (src/pages/delivery/index.tsx ~340: SO id → {customerPO,
+// customerSO, reference} map) — the mobile single-DO GET now joins it server-side
+// so the detail header + line items carry the same info. Additive: only the
+// detail path (fetchOrderWithItems) passes the map; the list path omits it and
+// its output is byte-identical.
+type SoRefs = {
+  companySO: string;
+  companySOId: string;
+  customerName: string;
+  customerPO: string;
+  customerPOId: string;
+  customerSO: string;
+  customerSOId: string;
+  reference: string;
+};
+
+async function loadSoRefsMap(
+  db: D1Database,
+  soNos: Array<string | null | undefined>,
+): Promise<Map<string, SoRefs>> {
+  const ids = [...new Set(soNos.filter((s): s is string => !!s))];
+  const map = new Map<string, SoRefs>();
+  if (!ids.length) return map;
+  const placeholders = ids.map(() => "?").join(",");
+  // Same camelCase columns the /pending-sos SELECT already reads — proven safe
+  // against the unquoted-identifier fold (no column-rename-map entry needed).
+  const res = await db
+    .prepare(
+      `SELECT companySO, companySOId, customerName,
+              customerPO, customerPOId, customerSO, customerSOId, reference
+         FROM sales_orders WHERE companySOId IN (${placeholders})`,
+    )
+    .bind(...ids)
+    .all<SoRefs>();
+  for (const r of res.results ?? []) {
+    if (r.companySOId) map.set(r.companySOId, r);
+  }
+  return map;
+}
+
 function parseJson<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback;
   try {
@@ -250,7 +295,13 @@ function rowToItem(
   row: DeliveryOrderItemRow,
   productM3Map?: Map<string, number>,
   repairScopeByPo?: Map<string, string | null>,
+  soRefs?: Map<string, SoRefs>,
 ) {
+  // Per-line customer identifiers, resolved from THIS line's own sales order
+  // (owner 2026-07-11: a consolidated DO's line items must each show whose
+  // Cust PO / Cust SO / Reference they belong to). Empty when no map supplied
+  // (list path) or the line's SO isn't found.
+  const so = soRefs && row.salesOrderNo ? soRefs.get(row.salesOrderNo) : undefined;
   return {
     id: row.id,
     productionOrderId: row.productionOrderId ?? "",
@@ -264,6 +315,9 @@ function rowToItem(
     rackingNumber: row.rackingNumber ?? "",
     packingStatus: row.packingStatus ?? "PENDING",
     salesOrderNo: row.salesOrderNo ?? "",
+    customerPOId: so?.customerPOId || so?.customerPO || "",
+    customerSO: so?.customerSO || so?.customerSOId || "",
+    reference: so?.reference || "",
     // Partial-repair scope (raw JSON) from the line's production order, for the
     // DO detail "Repair: <parts> (code)" badge. null when no map is supplied
     // (list path) or the PO has no scope.
@@ -387,9 +441,30 @@ function rowToOrder(
   productM3Map?: Map<string, number>,
   hubStateMap?: Map<string, string>,
   repairScopeByPo?: Map<string, string | null>,
+  soRefs?: Map<string, SoRefs>,
 ) {
   const pod = parseJson<Record<string, unknown> | null>(row.proofOfDelivery, null);
   const fgUnitIds = parseJson<string[]>(row.fgUnitIds, []);
+  // The distinct sales orders this DO consolidates (from its line items). Used
+  // to (a) show "Sales Orders: SO-x, SO-y" on a multi-SO DO whose header
+  // companySO is blank, and (b) backfill the header customer identifiers by
+  // aggregating across those SOs. Empty when soRefs isn't supplied (list path).
+  const myItems = items.filter((i) => i.deliveryOrderId === row.id);
+  const distinctSoNos = [
+    ...new Set(myItems.map((i) => i.salesOrderNo).filter((s): s is string => !!s)),
+  ];
+  const salesOrderNos = distinctSoNos.join(", ");
+  const aggr = (pick: (r: SoRefs) => string): string => {
+    if (!soRefs) return "";
+    const vals = [
+      ...new Set(
+        distinctSoNos
+          .map((n) => (soRefs.get(n) ? pick(soRefs.get(n)!) : ""))
+          .filter(Boolean),
+      ),
+    ];
+    return vals.join(", ");
+  };
   // hubState is the state code stored on delivery_hubs.state (resolved via hubId).
   // Kept separate from customerState — they're semantically different (the customer's
   // billing state vs the destination hub's geographic state). Frontend's State column
@@ -401,13 +476,20 @@ function rowToOrder(
     id: row.id,
     doNo: row.doNo,
     salesOrderId: row.salesOrderId ?? "",
-    companySO: row.companySO ?? "",
-    companySOId: row.companySOId ?? "",
+    // Backfill the header from the DO's line SOs when it's a consolidated DO
+    // with a blank header (single SO → adopt it; multiple → salesOrderNos lists
+    // them and the customer identifiers aggregate across all of them). Gated on
+    // soRefs so ONLY the detail path (fetchOrderWithItems) enriches — the list
+    // path (rowToOrderList) stays byte-identical to before, protecting the many
+    // desktop + mobile consumers of GET /api/delivery-orders.
+    companySO: row.companySO || (soRefs && distinctSoNos.length === 1 ? distinctSoNos[0]! : ""),
+    companySOId: row.companySOId || (soRefs && distinctSoNos.length === 1 ? distinctSoNos[0]! : ""),
+    salesOrderNos: soRefs ? salesOrderNos : "",
     customerId: row.customerId,
-    customerPOId: row.customerPOId ?? "",
+    customerPOId: row.customerPOId || aggr((r) => r.customerPOId || r.customerPO),
     customerSOId: row.customerSOId ?? "",
-    customerSO: row.customerSO ?? "",
-    reference: row.reference ?? "",
+    customerSO: row.customerSO || aggr((r) => r.customerSO || r.customerSOId),
+    reference: row.reference || aggr((r) => r.reference),
     customerName: row.customerName,
     customerState: row.customerState ?? "",
     hubState,
@@ -431,7 +513,7 @@ function rowToOrder(
     vehicleType: row.vehicleType ?? "",
     items: items
       .filter((i) => i.deliveryOrderId === row.id)
-      .map((it) => rowToItem(it, productM3Map, repairScopeByPo)),
+      .map((it) => rowToItem(it, productM3Map, repairScopeByPo, soRefs)),
     // Recompute totalM3 on read using live product unitM3 — legacy DOs
     // were persisted with itemM3=0 / totalM3=0 before BUG-2026-04-27 fix.
     totalM3: productM3Map
@@ -1067,12 +1149,13 @@ async function fetchOrderWithItems(db: D1Database, id: string) {
   ]);
   if (!order) return null;
   const items = itemsRes.results ?? [];
-  const [m3Map, hubStateMap, repairScopeByPo] = await Promise.all([
+  const [m3Map, hubStateMap, repairScopeByPo, soRefs] = await Promise.all([
     loadProductM3Map(db, items.map((i) => i.productCode)),
     loadHubStateMap(db, [order.hubId]),
     loadRepairScopeByPo(db, items.map((i) => i.productionOrderId)),
+    loadSoRefsMap(db, items.map((i) => i.salesOrderNo)),
   ]);
-  return rowToOrder(order, items, m3Map, hubStateMap, repairScopeByPo);
+  return rowToOrder(order, items, m3Map, hubStateMap, repairScopeByPo, soRefs);
 }
 
 // GET /api/delivery-orders — list all, nested items

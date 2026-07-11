@@ -9,6 +9,47 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-11 — ⚪ Add FG: bulk auto-generate variants from Model (owner)
+Owner wants Inventory → Finished Products → "Add FG" to STOP creating variants one
+by one. Flow: he adds Sofa Compartments / Bedframe Sizes in Products → Maintenance,
+then on Add FG he enters only Code + Name + Category (+ picks the Model, e.g. 2990).
+The system auto-generates ALL variants from the Maintenance config:
+  • Bedframe → one FG per Bedframe Size (K/Q/S/SS/SK), auto-filling Base Model /
+    Size Code / Size Label.
+  • Sofa → one FG per Sofa Compartment (1A(LHF), 1A(RHF), 1B…, 2A…, etc.).
+Fabric Usage + Base Price left blank — filled later via Batch Edit (batch-by-batch),
+for BOTH sofa and bedframe. Goal: "open all compartments/sizes at once", not one by
+one. Feature → staging + mockup first. Config lives at /api/kv-config/variants-config.
+
+---
+
+## 2026-07-10 — 🔵 Mobile Delivery + Warehouse UX batch (owner 7 asks + screenshots)
+**STATUS: all 6 built + committed (branch mobile-delivery-warehouse-ux 86130bdf),
+build:strict + tests green. NOT yet on prod — awaiting owner's explicit "ship"
+(default-Floor changes live inventory behavior; hold per no-merge-without-command).**
+Diagnosis correction: the "blank DO detail / no QR / squished" report did NOT
+reproduce at 390px — the detail shows Customer/State/Driver/barcode/QR fine; the
+real gap was a consolidated (multi-SO) DO's blank HEADER, now backfilled.
+Owner reviewed /m Delivery & Warehouse. Captured asks (do not drop any):
+1. **Planning & Pending Delivery cards** → richer, like the detailed SO card (screenshot: NICO
+   TEST — code+ref on one line, customer, 🏠 hub, Processing→Delivery dates, created, amount).
+   Card structure already carries the 5 IDs (code=our SO, Cust PO/Ref/Cust SO metas); gap is
+   DATA (reference/customerSO showing "—") + a richer layout.
+2. **Delivery search "040"** — searching one status doesn't make clear the same number also lives
+   in Dispatched; want it obvious a match spans statuses.
+3. **Search delivery by customer SO / Reference** — must actually find the order (data present).
+4. **Mobile DO detail** (DO-2607-043) shows BLANK Company SO/Customer/State/Expected DD/Driver/
+   Vehicle; **line items** carry NO customer info (Cust PO/SO/Ref, our SOID); layout squished;
+   **QR/barcode** on desktop DO — bring parity to /m. (Detail config is complete → root cause is
+   payload fields empty OR Draft DO genuinely lacks them — verify live.)
+5. **Default packing → "Floor"**: when packing done, by default stock-in to the Floor location;
+   operator reassigns to a specific rack later.
+6. (Warehouse, carried) search by **Company SOID** — rack item payload lacks companySOId/customerSO.
+7. (Delivery, carried) **cross-source unified search** — one query finds an order whether it's still
+   a Sales Order (Planning/Pending Delivery) or already a DO (Pending Dispatch/Dispatched/Delivered).
+
+---
+
 ## 2026-07-09 — ✅ Aging snapshot invalidation (BUG-2026-07-09-002)
 
 Voiding an advance-only payment writes no probed source table, so the cached

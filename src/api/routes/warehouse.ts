@@ -50,6 +50,10 @@ type RackItemRow = {
   // degrades gracefully when they're absent.
   customerPOId?: string | null;
   poCustomerName?: string | null;
+  // Joined from production_orders.salesOrderNo — our own SO number (companySOId,
+  // e.g. "SO-2607-062"). Lets the warehouse be searched by Company SOID (owner
+  // 2026-07-11); rack_items itself never stored it.
+  salesOrderNo?: string | null;
 };
 
 type StockMovementRow = {
@@ -78,6 +82,7 @@ type RackItemApi = {
   sizeLabel?: string;
   customerName?: string;
   customerPOId?: string;
+  companySOId?: string;
   qty?: number;
   stockedInDate?: string;
   notes?: string;
@@ -102,6 +107,7 @@ function itemRowToApi(r: RackItemRow): RackItemApi {
     // back to the production order's snapshot name so the grid always shows it.
     customerName: r.customerName || r.poCustomerName || "",
     customerPOId: r.customerPOId ?? "",
+    companySOId: r.salesOrderNo ?? "",
     qty: r.qty ?? 1,
     stockedInDate: r.stockedInDate ?? "",
     notes: r.notes ?? "",
@@ -252,7 +258,8 @@ app.get("/", async (c) => {
         // PO customer name to snake_case so toCamel recovers it as poCustomerName
         // (an unquoted camelCase alias folds to lowercase and is lost — the
         // column-rename-map folded-lowercase trap).
-        `SELECT ri.*, po.customerPOId AS customerPOId, po.customerName AS po_customer_name
+        `SELECT ri.*, po.customerPOId AS customerPOId, po.customerName AS po_customer_name,
+                po.salesOrderNo AS salesOrderNo
            FROM rack_items ri
            LEFT JOIN production_orders po ON po.id = ri.productionOrderId`,
       )

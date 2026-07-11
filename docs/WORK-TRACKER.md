@@ -9,7 +9,25 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-11 — 🔵 Hookka Report program (Daily / Weekly / Monthly) — DESIGN APPROVED (newspaper), BUILDING
+## 2026-07-11 — 🔵 Hookka Report program — BUILT + ON STAGING (verified real data)
+Operations Report LIVE on staging (staging.hookka-erp-testing.pages.dev/reports,
+default "Operations" tab). Backend collector src/api/lib/operations-report.ts (11
+sections, per-section guard → one bad query degrades not 500s, _errors diagnostics)
++ GET /api/reports/operations.json?period=daily|weekly|monthly&date=. Newspaper
+frontend src/pages/operations-report.tsx wired into src/pages/reports.tsx. Feature
+branch feature/ops-report → merged to staging (NOT main/prod yet — needs owner OK).
+VERIFIED live 200 with real numbers: 176 bf + 28 sofa units, 96 overdue, sales
+RM128k, 36 workers/11 bonus, RM9.47M stock, RM1.09M AR aging, delivery 42 DOs
+(1.4d→0.8d). Fixed en route: delivery `do` reserved-word alias; newProducts
+self-applies products.created_at.
+**Honest gaps to raise with owner:** (1) on-time 21% is real (dispatch vs internal
+hookka_expected_dd) — looks alarming, confirm the target basis; (2) foam/other
+material cost = 0 (partial month OR wrong foam itemGroup code — need owner's real
+foam category); (3) low-stock = 0 because raw_materials.minStock reorder points are
+unset — owner must set them; (4) still UNBUILT sub-metrics: dept-cost analysis
+(highest dept + Prod vs Non-prod), RM-category analysis, QC defect %, service open,
+supplier on-time rate, price-rise alerts, attendance %, new-product photos.
+Prior spec + caveats below.
 Owner approved newspaper/broadsheet design (Artifact monthly-gazette-v1) + full content
 + "就这样 proceed". Liked inventory (dead-stock idle days) content specifically. Build =
 in-app "Operations Report" page (Daily/Weekly/Monthly tabs), newspaper CSS ported into

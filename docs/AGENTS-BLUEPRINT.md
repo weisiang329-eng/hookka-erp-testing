@@ -98,7 +98,19 @@ Owner + Fable 5 定稿于 2026-07-12。这是全公司 Agent 化的执行大纲�
 
 ## 执行顺序（owner 定案 2026-07-12：先做两个）
 
-**第一优先：① Production Agent（排产）+ ② Delivery Agent（TMS）** —— 其余按下表顺延。
+**第一梯队（owner 定案）：① Production ② Delivery ③ Customer Service** —— Procurement 暂缓（数据不齐）。
+
+**Customer Service Agent（总调度，owner 2026-07-12 定义）**：客户问「几时可以送货？」→
+CS Agent 自己跑循环：问 Production Agent（排程链算几时生产好）→ 问 Delivery Agent
+（装车/派车窗口算几时送到）→ 若缺原料 → 问 Procurement Agent（几时到货）→ 拿到料期
+回头重问 Production → Delivery → 汇总一个真实承诺日期回答客户。
+实现要点：CS Agent = LLM 调度器，其"问其他 agent" = 调用各 agent 的引擎工具
+（get_production_schedule 已有 / promise-date / MRP 库存 / 3PL 派车窗口）；
+每一步留痕，答案附推理链（料→产→送）。
+
+**Procurement Agent（暂缓）**：循环里被 CS 调用的角色。启用前提（数据补齐清单）：
+①每种原料的供应商交期（lead time）维护齐 ②PO expectedDate 填写纪律 ③MRP 库存
+准确率验收。数据齐了即可启用，架构上先留接口。
 
 **Delivery Agent（TMS 式，owner 原话范围）**：管整条送货生命线
 pending delivery → 装车/派车（拼车建议、3PL vs 自车、州费率、hub 规则、PL-first）

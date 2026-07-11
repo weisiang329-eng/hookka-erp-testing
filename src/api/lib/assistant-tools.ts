@@ -32,6 +32,7 @@ import {
 } from "./attachment-parser";
 import { computeDeptSchedule } from "../routes/planning-schedule";
 import type { Cell } from "./planning-scheduler";
+import { promiseDelivery } from "./cs-agent";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -6185,6 +6186,76 @@ const getProductionScheduleTool: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// v1.8 — CS Agent: reasoned delivery promise (materials → production →
+// delivery chain). Read-only orchestration over the SAME engines the
+// Planning pages use — see src/api/lib/cs-agent.ts for the red lines
+// (never invent a date; unknown stage → promiseDate null).
+// ---------------------------------------------------------------------------
+
+const getDeliveryPromiseTool: ToolDefinition = {
+  schema: {
+    name: "get_delivery_promise",
+    description:
+      "Compute a REAL delivery promise date for a sales order (or a what-if product + qty) by chaining three checks: MATERIALS (BOM needs vs raw-material stock; shortages only get an ETA from an actual open-PO expected date), PRODUCTION (the live department chain engine's PACKING completion day for this order given the current WAITING queue — the same engine as get_production_schedule; orders not in the queue get a clearly-marked capacity ESTIMATE), and DELIVERY (next dispatch working day + a per-state transit allowance). Use this to answer 'when can SO-XXXX be delivered?' (in any language the user asks). The answer includes the full step-by-step reasoning chain. HONESTY GUARD: if any stage lacks real data the promiseDate is null and the steps say exactly which data is missing — never invent a date to fill the gap, and tell the user what is missing instead.",
+    input_schema: {
+      type: "object",
+      properties: {
+        soRef: {
+          type: "string",
+          description:
+            "Sales order reference as the user knows it, e.g. 'SO-2607-012', or the internal id like 'so-4e5f8592'. Provide EITHER soRef OR productCode.",
+        },
+        productCode: {
+          type: "string",
+          description:
+            "What-if mode: a product code (with qty) instead of an SO — 'if a customer orders 2x MODEL-X today, when could we deliver?'",
+        },
+        qty: {
+          type: "number",
+          description: "Quantity for the what-if productCode mode. Default 1.",
+        },
+        stateCode: {
+          type: "string",
+          description:
+            "Optional destination state for the transit allowance — canonical Malaysia code (KUL, SGR, PNG, JHR, MLK, NSN, PHG, PRK, PLS, KDH, KTN, TRG, SBH, SWK, PJY, LBN) or common shorthand (KL/PG/JB). When omitted for an SO, the customer's default delivery hub state is used.",
+        },
+      },
+      required: [],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const soRef = strOrNull(args.soRef);
+    const productCode = strOrNull(args.productCode);
+    if (!soRef && !productCode) {
+      return {
+        ok: false,
+        error: "Provide soRef (e.g. 'SO-2607-012') or productCode (+ qty).",
+      };
+    }
+    const qty =
+      typeof args.qty === "number" && Number.isFinite(args.qty) && args.qty >= 1
+        ? Math.floor(args.qty)
+        : 1;
+    const result = await promiseDelivery(c.var.DB, {
+      soRef,
+      productCode,
+      qty,
+      stateCode: strOrNull(args.stateCode),
+      orgId,
+    });
+    return {
+      ok: true,
+      ...result,
+      note:
+        result.promiseDate === null
+          ? "No promise date could be given — relay the missing-data reasons in `steps`/`caveats` honestly; do NOT invent a date."
+          : `Promise date ${result.promiseDate} (confidence: ${result.confidence}). Present the 3-step reasoning chain (materials → production → delivery) so the answer is auditable.`,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -6267,6 +6338,8 @@ export const TOOLS: ToolDefinition[] = [
   runReportTemplateTool,
   // v1.7 — live production schedule (Planning day-by-day plan)
   getProductionScheduleTool,
+  // v1.8 — CS Agent reasoned delivery promise (materials → production → delivery)
+  getDeliveryPromiseTool,
 ];
 
 const TOOL_BY_NAME = new Map<string, ToolDefinition>(

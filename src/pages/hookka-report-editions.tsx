@@ -73,10 +73,13 @@ interface OperationsReport {
     otherConsumedSen: number;
     fabricMetres: number;
     fabricCostPerMetreSen: number | null;
+    byGroup: { itemGroup: string; consumedSen: number }[];
   };
   workforce: {
     activeWorkers: number | null;
     bonusEarned: number | null;
+    attendancePct: number | null;
+    serviceOpen: number;
     topEfficiency: WorkerEff[];
     bottomEfficiency: WorkerEff[];
   };
@@ -366,6 +369,18 @@ export function OperationsEdition({ edition }: { edition: Edition }) {
                   ? `${r.workforce.bonusEarned ?? 0} / ${r.workforce.activeWorkers}`
                   : (r.workforce.bonusEarned ?? "—"),
               ],
+              [
+                "Attendance",
+                r.workforce.attendancePct == null
+                  ? "—"
+                  : `${r.workforce.attendancePct}%`,
+              ],
+              [
+                "Open service cases",
+                <span className={r.workforce.serviceOpen > 0 ? "text-[#9A3A2D]" : ""}>
+                  {r.workforce.serviceOpen}
+                </span>,
+              ],
             ]}
           />
           {r.workforce.topEfficiency.length > 0 && (
@@ -512,6 +527,18 @@ export function OperationsEdition({ edition }: { edition: Edition }) {
               ["Foam consumed", `RM ${rm(r.material.foamConsumedSen)}`],
             ]}
           />
+          {r.material.byGroup.length > 0 && (
+            <>
+              <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[#6B5C32]">
+                By category · cost
+              </p>
+              <Rows
+                rows={r.material.byGroup
+                  .slice(0, 5)
+                  .map((g) => [g.itemGroup, `RM ${rm(g.consumedSen)}`])}
+              />
+            </>
+          )}
         </Desk>
 
         {isMonthly && (

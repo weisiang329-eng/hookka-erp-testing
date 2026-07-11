@@ -219,6 +219,9 @@ export interface OperationsReport {
   newProducts: NewProductsSection;
   delivery: DeliverySection;
   receivables: ReceivablesSection;
+  quality: QualitySection;
+  supplier: SupplierSection;
+  priceAlerts: PriceAlert[];
   // Per-section failures (staging diagnostics); undefined when all succeeded.
   _errors?: string[];
 }
@@ -243,6 +246,19 @@ export interface ReceivablesSection {
   totalOutstandingSen: number;
   billedSen: number;
   collectedSen: number;
+}
+
+export interface QualitySection {
+  defectPct: number | null; // FAIL items / graded items over the window
+  inspected: number;
+}
+export interface SupplierSection {
+  onTimePct: number | null; // received-on-time / received in the window
+  sampleSize: number;
+}
+export interface PriceAlert {
+  materialCode: string;
+  pctChange: number; // % increase vs the prior binding price
 }
 
 type Db = D1Database;
@@ -924,6 +940,90 @@ async function collectReceivables(
   };
 }
 
+async function collectQuality(
+  db: Db,
+  p: ResolvedPeriod,
+): Promise<QualitySection> {
+  // Defect rate = FAIL items / graded (PASS+FAIL) items on inspections whose
+  // creation date falls in the window. qc tables are single-tenant.
+  const row = await db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(CASE WHEN ii.result = 'FAIL' THEN 1 ELSE 0 END),0) AS "fails",
+         COALESCE(SUM(CASE WHEN ii.result IN ('PASS','FAIL') THEN 1 ELSE 0 END),0) AS "graded"
+         FROM qc_inspection_items ii
+         JOIN qc_inspections qi ON qi.id = ii.inspectionId
+        WHERE substr(qi.created_at::text, 1, 10) >= ?
+          AND substr(qi.created_at::text, 1, 10) <= ?`,
+    )
+    .bind(p.startYmd, p.endYmd)
+    .first<{ fails: number; graded: number }>();
+  const graded = Number(row?.graded ?? 0);
+  return {
+    defectPct:
+      graded > 0 ? Math.round((Number(row?.fails ?? 0) / graded) * 1000) / 10 : null,
+    inspected: graded,
+  };
+}
+
+async function collectSupplier(
+  db: Db,
+  orgId: string,
+  p: ResolvedPeriod,
+): Promise<SupplierSection> {
+  // On-time = receivedDate <= expectedDate, over POs received in the window
+  // (same test as the supplier scorecard's isReceivedOnTime).
+  const row = await db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(CASE WHEN receivedDate <= expectedDate THEN 1 ELSE 0 END),0) AS "onTime",
+         COUNT(*) AS "total"
+         FROM purchase_orders
+        WHERE orgId = ? AND status IN ('RECEIVED','CLOSED')
+          AND receivedDate IS NOT NULL AND receivedDate <> ''
+          AND expectedDate IS NOT NULL AND expectedDate <> ''
+          AND substr(receivedDate::text, 1, 10) >= ?
+          AND substr(receivedDate::text, 1, 10) <= ?`,
+    )
+    .bind(orgId, p.startYmd, p.endYmd)
+    .first<{ onTime: number; total: number }>();
+  const total = Number(row?.total ?? 0);
+  return {
+    onTimePct:
+      total > 0 ? Math.round((Number(row?.onTime ?? 0) / total) * 1000) / 10 : null,
+    sampleSize: total,
+  };
+}
+
+async function collectPriceAlerts(
+  db: Db,
+  p: ResolvedPeriod,
+): Promise<PriceAlert[]> {
+  // Binding price increases effective in the window. oldPrice/newPrice are the
+  // binding unit price (plain numbers, NOT sen) — only % change is reported so
+  // the scale never matters. Opening rows (oldPrice 0) are excluded.
+  const rows = await db
+    .prepare(
+      `SELECT materialCode AS "materialCode",
+              oldPrice AS "oldPrice", newPrice AS "newPrice"
+         FROM price_histories
+        WHERE oldPrice > 0 AND newPrice > oldPrice
+          AND substr(COALESCE(effectiveFrom, changedDate)::text, 1, 10) >= ?
+          AND substr(COALESCE(effectiveFrom, changedDate)::text, 1, 10) <= ?
+        ORDER BY (newPrice - oldPrice) / oldPrice DESC
+        LIMIT 8`,
+    )
+    .bind(p.startYmd, p.endYmd)
+    .all<{ materialCode: string; oldPrice: number; newPrice: number }>();
+  return (rows.results ?? []).map((r) => ({
+    materialCode: r.materialCode,
+    pctChange:
+      r.oldPrice > 0
+        ? Math.round(((r.newPrice - r.oldPrice) / r.oldPrice) * 1000) / 10
+        : 0,
+  }));
+}
+
 // -- assembler --------------------------------------------------------------
 
 export async function collectOperationsReport(
@@ -955,6 +1055,9 @@ export async function collectOperationsReport(
     newProducts,
     delivery,
     receivables,
+    quality,
+    supplier,
+    priceAlerts,
   ] = await Promise.all([
     guard("production", () => collectProduction(db, orgId, p), {
       bedframeUnits: 0,
@@ -1016,6 +1119,15 @@ export async function collectOperationsReport(
       billedSen: 0,
       collectedSen: 0,
     }),
+    guard("quality", () => collectQuality(db, p), {
+      defectPct: null,
+      inspected: 0,
+    }),
+    guard("supplier", () => collectSupplier(db, orgId, p), {
+      onTimePct: null,
+      sampleSize: 0,
+    }),
+    guard("priceAlerts", () => collectPriceAlerts(db, p), []),
   ]);
 
   // On-time % is a delivery-derived figure; surface it on the production
@@ -1035,6 +1147,9 @@ export async function collectOperationsReport(
     newProducts,
     delivery,
     receivables,
+    quality,
+    supplier,
+    priceAlerts,
     _errors: errors.length ? errors : undefined,
   };
 }

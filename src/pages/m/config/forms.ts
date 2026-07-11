@@ -183,6 +183,14 @@ export type SOCreatePrefill = {
     basePriceSen?: number;
     unitPriceSen?: number;
   }>;
+  // OCR accuracy wiring (owner audit 2026-07-11): when the form was prefilled
+  // from a scan, carry the sample id + the RAW extraction so the submit can
+  // report the FINAL imported values back to /api/scan-po/samples/:id/confirm
+  // — same semantics as the desktop scan modal (clean pass = success, edits =
+  // fail reasons). Without this, mobile scans never reached the OCR accuracy
+  // dashboard at all.
+  scanSampleId?: string;
+  scanRaw?: Record<string, unknown>;
 };
 
 export function newSalesOrderSpec(prefill?: SOCreatePrefill): FormSpec {
@@ -234,6 +242,35 @@ export function newSalesOrderSpec(prefill?: SOCreatePrefill): FormSpec {
         "Idempotency-Key": uuid(),
       });
       if (!res.ok) return { ok: false, error: res.error };
+      // OCR accuracy: report the FINAL imported values against the raw scan.
+      // Overlay the comparable fields onto the raw extraction so the diff in
+      // ocr-accuracy-core compares like-for-like (same shape the desktop
+      // stores). Best-effort — a failure here must never block the SO.
+      if (prefill?.scanSampleId && prefill.scanRaw) {
+        const corrected = {
+          ...prefill.scanRaw,
+          customerPO: s(v.customerPOId),
+          customerSO: s(v.customerSOId),
+          deliveryDate: s(v.customerDeliveryDate),
+          items: arr(v.items).map((it) => {
+            const r = it as Record<string, unknown>;
+            return {
+              productCode: s(r.productCode),
+              productName: s(r.productName),
+              itemCategory: s(r.itemCategory),
+              sizeLabel: s(r.sizeLabel),
+              fabricCode: s(r.fabricCode),
+              quantity: n(r.quantity),
+              basePriceSen: n(r.basePriceSen),
+            };
+          }),
+        };
+        fetch(`/api/scan-po/samples/${encodeURIComponent(prefill.scanSampleId)}/confirm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ correctedJson: corrected, gold: false }),
+        }).catch(() => {});
+      }
       refreshList("/api/sales-orders", "/api/production-orders");
       const id = newIdOf(res.body);
       return { ok: true, navigateTo: id ? `/m/sales/${encodeURIComponent(id)}` : undefined };

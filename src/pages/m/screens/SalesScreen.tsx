@@ -320,7 +320,7 @@ export function SalesScreen() {
       <ScanPOSheet
         open={scanOpen}
         onClose={() => setScanOpen(false)}
-        onResult={(extracted) => {
+        onResult={(extracted, sampleId) => {
           setScanOpen(false);
           const prefill: SOCreatePrefill = {
             customerId: extracted.customerId ?? "",
@@ -329,6 +329,9 @@ export function SalesScreen() {
             customerDeliveryDate: (extracted.deliveryDate ?? "").slice(0, 10),
             hookkaExpectedDD: (extracted.deliveryDate ?? "").slice(0, 10),
             items: extracted.items,
+            // OCR accuracy: report the FINAL imported values on submit.
+            scanSampleId: sampleId,
+            scanRaw: extracted as unknown as Record<string, unknown>,
           };
           setCreateSpec(newSalesOrderSpec(prefill));
         }}

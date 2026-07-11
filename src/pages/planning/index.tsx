@@ -988,10 +988,15 @@ export default function PlanningPage() {
       const sofaBacklog = sofaActive.reduce((s, jc) => s + jcMinutes(jc, false), 0);
       const bfBacklog = bfActive.reduce((s, jc) => s + jcMinutes(jc, false), 0);
       const totalBacklog = sofaBacklog + bfBacklog;
-      const denomCapacity = dailyCapacity > 0 ? dailyCapacity : 1;
-      const sofaBacklogDays = Math.round((sofaBacklog / denomCapacity) * 10) / 10;
-      const bfBacklogDays = Math.round((bfBacklog / denomCapacity) * 10) / 10;
-      const totalBacklogDays = Math.round((totalBacklog / denomCapacity) * 10) / 10;
+      // Div-zero guard (owner audit 2026-07-11): a dept with zero completions
+      // in the rolling window used to divide by 1 MINUTE → thousands of fake
+      // "days". With no capacity to measure against, show 0 days — the dept's
+      // backlog HOURS stay visible and truthful on the same card.
+      const safeDays = (mins: number) =>
+        dailyCapacity > 0 ? Math.round((mins / dailyCapacity) * 10) / 10 : 0;
+      const sofaBacklogDays = safeDays(sofaBacklog);
+      const bfBacklogDays = safeDays(bfBacklog);
+      const totalBacklogDays = safeDays(totalBacklog);
 
       // Wei Siang 2026-05-15: {Scope}'s Load = JCs with dueDate
       // <= scopeTo, still active. Includes overdue (dueDate before

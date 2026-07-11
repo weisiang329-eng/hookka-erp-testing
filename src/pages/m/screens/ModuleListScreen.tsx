@@ -692,7 +692,7 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
         <ScanPOSheet
           open={scanPOOpen}
           onClose={() => setScanPOOpen(false)}
-          onResult={(extracted) => {
+          onResult={(extracted, sampleId) => {
             setScanPOOpen(false);
             const prefill: SOCreatePrefill = {
               customerId: extracted.customerId ?? "",
@@ -701,6 +701,9 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
               customerDeliveryDate: (extracted.deliveryDate ?? "").slice(0, 10),
               hookkaExpectedDD: (extracted.deliveryDate ?? "").slice(0, 10),
               items: extracted.items,
+              // OCR accuracy: report the FINAL imported values on submit.
+              scanSampleId: sampleId,
+              scanRaw: extracted as unknown as Record<string, unknown>,
             };
             setCreateSpec(newSalesOrderSpec(prefill));
           }}

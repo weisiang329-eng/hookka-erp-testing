@@ -9,6 +9,32 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-11 — 🔵 Data-tally fixes P1-P3 (owner "全做" after 4-agent audit)
+Branch `data/tally-fixes-0711`. Full audit findings in memory
+`project_data_accuracy_audit_0711.md`. Scope approved by owner:
+**P1 real bugs:** OCR accuracy never populated (confirm step unwired + 'T' vs space
+date clip in ocr-accuracy.ts:72); process-skips same-dept false positives
+(compliance-report.ts:971-1010, "PACKING ahead of PACKING"); "153 Closed Sales"
+mislabeled DELIVERED + RM0 service-order overcount; delivered-cohort drops
+consolidated DOs (dashboard-overview.ts:1013-1048); div-by-zero backlog blow-ups
+(dashboard-overview.ts:893, planning/index.tsx:991); future-dated fabric RM_ISSUE
+rows (2026-09 148.7m BF, 2026-12 28m sofa) — prod data fix, locate + propose first.
+**P2 unify:** efficiency → department-performance ratio-of-sums everywhere
+(Attendance card fetches dept-perf totals; low-eff threshold 60 shared); backlog
+headline = backlogGrandMin basis so dashboard 9.4d == drill == planning 9.1d;
+mobile Home Daily-Report chips → read /api/reports/compliance.json (kill client
+re-derivations incl. 70-vs-60); workforce excludes TEST everywhere (owner OK'd);
+sales month excludes ON_HOLD (align to so-status CONFIRMED set).
+**P3 labels/defaults:** Planning "Today's Capacity"→queued-work label, "Used %"→
+backlog-pressure; dashboard QUEUE LOAD label, "Below Pace Today"→yesterday,
+"153" headline wording; employees ALL tabs default current month (clamp persisted);
+remove stale "full data parity" footer + dead planning capacity legend; daily-cap
+divisor excludes today (partial day).
+**P4 (parked, needs owner design):** forward scheduling wiring, bottleneck-based
+lead time, daily/weekly/monthly Hookka Report program.
+
+---
+
 ## 2026-07-11 — ⚪ Add FG: bulk auto-generate variants from Model (owner)
 Owner wants Inventory → Finished Products → "Add FG" to STOP creating variants one
 by one. Flow: he adds Sofa Compartments / Bedframe Sizes in Products → Maintenance,

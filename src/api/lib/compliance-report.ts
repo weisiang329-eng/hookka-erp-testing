@@ -577,9 +577,13 @@ async function checkSoNoInvoice(
         // gap. CLOSED orders are already done/paid; including them flooded the
         // list with linkage false-positives (invoice anchored to the combined
         // DO / lead SO), so they're excluded (Wei Siang 2026-05-29).
+        // RM0 orders excluded too (owner audit 2026-07-11): service orders are
+        // free by default and legitimately never invoiced — counting them
+        // inflated the headline with non-actionable rows.
         `SELECT id, companySOId, customerName, status
            FROM sales_orders
           WHERE status = 'DELIVERED'
+            AND COALESCE(totalSen, 0) > 0
           ORDER BY companySOId ASC`,
       )
       .bind()
@@ -981,6 +985,13 @@ async function checkProcessSkips(
         for (let j = 0; j < i; j++) {
           const earlier = arr[j];
           if (earlier.sequence >= card.sequence) continue;
+          // Same-department earlier card = another PIECE of the same product
+          // (multi-unit PO: HB+Divan, multi-seat sofa) still queued at that
+          // station. Piece B finishing before piece A is normal parallel work,
+          // NOT an SOP skip — those rows were pure noise ("PACKING ahead of
+          // PACKING", owner audit 2026-07-11). Only a DIFFERENT upstream dept
+          // still pending counts as a real skipped step.
+          if (earlier.departmentCode === card.departmentCode) continue;
           if (!JC_DONE_STATUSES.has(earlier.status)) {
             blockedBy = {
               departmentCode: earlier.departmentCode,

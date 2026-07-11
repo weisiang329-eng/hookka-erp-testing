@@ -70,13 +70,15 @@ type Overview = {
     completedYesterday: JobsBreakdown;
     completedLast7: { date: string; bedframeUnits: number; sofaSets: number }[];
     capacityDays: { date: string; minutes: number; workers: number }[];
+    // backlogDays: null = "stalled" (zero completions in the rolling window —
+    // no honest way to express the queue in days).
     backlogByDept: {
       dept: string;
       sofaMin: number;
       bedframeMin: number;
       totalMin: number;
       dailyCapMin: number;
-      backlogDays: number;
+      backlogDays: number | null;
     }[];
     backlogGrandMin: number;
   };
@@ -1415,7 +1417,7 @@ export default function DashboardBPage() {
                           hm(d.bedframeMin),
                           hm(d.totalMin),
                           `${hm(d.dailyCapMin)}/d`,
-                          `${d.backlogDays.toLocaleString()}d`,
+                          d.backlogDays == null ? "stalled" : `${d.backlogDays.toLocaleString()}d`,
                         ])}
                       />
                     ),
@@ -2401,14 +2403,22 @@ export default function DashboardBPage() {
               // segments now sum to `showDays` and each row's total bar
               // width is proportional to the biggest dept's wait days.
               const rows = (prod?.backlogByDept ?? []).map((d) => {
-                const cap = d.dailyCapMin > 0 ? d.dailyCapMin : 1;
-                const sofaDays = sofaOn ? d.sofaMin / cap : 0;
-                const bedDays = bedOn ? d.bedframeMin / cap : 0;
+                // dailyCapMin === 0 → "stalled" (no completions in the rolling
+                // window). Never divide by a 1-minute fallback — that painted
+                // thousands of fake days (owner audit 2026-07-11).
+                const stalled = !(d.dailyCapMin > 0);
+                const cap = stalled ? 1 : d.dailyCapMin;
+                const sofaDays = sofaOn && !stalled ? d.sofaMin / cap : 0;
+                const bedDays = bedOn && !stalled ? d.bedframeMin / cap : 0;
                 const filtered = !(sofaOn && bedOn);
-                const showDays = filtered ? sofaDays + bedDays : d.backlogDays;
+                const showDays = stalled
+                  ? null
+                  : filtered
+                    ? sofaDays + bedDays
+                    : d.backlogDays;
                 return { d, sofaDays, bedDays, showDays };
               });
-              const mxDays = Math.max(1, ...rows.map((r) => r.showDays));
+              const mxDays = Math.max(1, ...rows.map((r) => r.showDays ?? 0));
               return rows.map(({ d, sofaDays, bedDays, showDays }) => (
                 <div
                   key={d.dept}
@@ -2437,8 +2447,8 @@ export default function DashboardBPage() {
                       />
                     )}
                   </div>
-                  <span className="w-12 text-right text-xs font-semibold text-[#DC2626] tabular-nums">
-                    {showDays.toFixed(1)}d
+                  <span className="w-12 text-right text-xs font-semibold text-[#DC2626] tabular-nums" title={showDays == null ? "No completions in the last 7 working days — queue can't be sized in days" : undefined}>
+                    {showDays == null ? "stalled" : `${showDays.toFixed(1)}d`}
                   </span>
                 </div>
               ));

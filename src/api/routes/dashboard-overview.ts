@@ -890,18 +890,25 @@ app.get("/", async (c) => {
       }
       const dailyCapMin = Math.round(windowTotal / 7);
       const totalMin = sofaMin + bedframeMin;
-      const denom = dailyCapMin > 0 ? dailyCapMin : 1;
+      // Div-zero guard (owner audit 2026-07-11): a dept with backlog but ZERO
+      // completions in the rolling window used to divide by 1 MINUTE, showing
+      // thousands of "days" and topping the bottleneck sort. backlogDays = null
+      // now means "stalled — no recent throughput to measure against"; the FE
+      // renders it as such instead of a fake number.
+      const backlogDays =
+        dailyCapMin > 0 ? Math.round((totalMin / dailyCapMin) * 10) / 10 : null;
       return {
         dept: name,
         sofaMin,
         bedframeMin,
         totalMin,
         dailyCapMin,
-        backlogDays: Math.round((totalMin / denom) * 10) / 10,
+        backlogDays,
       };
     })
       .filter((d) => d.totalMin > 0 || d.dailyCapMin > 0)
-      .sort((a, b) => b.backlogDays - a.backlogDays);
+      // null (stalled) sorts first — it IS a bottleneck flag, just not a number.
+      .sort((a, b) => (b.backlogDays ?? Infinity) - (a.backlogDays ?? Infinity));
     const backlogGrandMin = backlogByDept.reduce(
       (s, d) => s + d.totalMin,
       0,
@@ -1042,7 +1049,15 @@ app.get("/", async (c) => {
       if (kpiAllTime || info.ym === period) thisMonthDeliveredSen += val;
       // "Delivered of this month's orders" = the cohort funnel: shipped value
       // whose SO was CONFIRMED in the selected month, regardless of ship date.
-      if (!kpiAllTime && soConfirmYm.get(info.soId) === period) {
+      // Cohort key resolves PER ITEM: a CONSOLIDATED DO (header salesOrderId
+      // NULL, many SOs on one truck) used to fall out of the funnel entirely,
+      // understating the delivered % (owner audit 2026-07-11). The item's own
+      // production order → SO link is authoritative; header SO is the fallback.
+      const itemSoId =
+        (di.productionOrderId
+          ? soPriceIdx.poById.get(di.productionOrderId)?.salesOrderId
+          : "") || info.soId;
+      if (!kpiAllTime && soConfirmYm.get(itemSoId) === period) {
         deliveredOfMonthOrdersSen += val;
       }
     }
@@ -1843,18 +1858,23 @@ app.get("/", async (c) => {
               monthCompletedMin / reconMonthWorkingDays,
             );
             const totalMin = sofaMin + bedframeMin;
-            const denom = dailyCapMin > 0 ? dailyCapMin : 1;
+            // Same div-zero guard as the live path: null = stalled, never a
+            // 1-minute fallback (owner audit 2026-07-11).
+            const backlogDays =
+              dailyCapMin > 0
+                ? Math.round((totalMin / dailyCapMin) * 10) / 10
+                : null;
             return {
               dept: name,
               sofaMin,
               bedframeMin,
               totalMin,
               dailyCapMin,
-              backlogDays: Math.round((totalMin / denom) * 10) / 10,
+              backlogDays,
             };
           })
             .filter((d) => d.totalMin > 0 || d.dailyCapMin > 0)
-            .sort((a, b) => b.backlogDays - a.backlogDays);
+            .sort((a, b) => (b.backlogDays ?? Infinity) - (a.backlogDays ?? Infinity));
           const reconBacklogGrandMin = reconBacklogByDept.reduce(
             (s, d) => s + d.totalMin,
             0,

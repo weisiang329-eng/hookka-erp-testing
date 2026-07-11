@@ -144,7 +144,8 @@ type OverviewResp = {
       dept: string;
       totalMin: number;
       dailyCapMin: number;
-      backlogDays: number;
+      // null = stalled (zero completions in the rolling window)
+      backlogDays: number | null;
     }[];
   };
 };
@@ -786,14 +787,18 @@ export default function MobileHome() {
   const deptBacklog = useMemo(() => {
     const depts = overview?.production?.backlogByDept ?? [];
     if (depts.length === 0) return null;
-    const sorted = depts.slice().sort((a, b) => b.backlogDays - a.backlogDays);
-    const max = Math.max(...sorted.map((d) => d.backlogDays), 1);
+    // backlogDays === null = "stalled" (no completions in the window) — sorts
+    // first as the loudest flag, rendered as text instead of a fake number.
+    const sorted = depts
+      .slice()
+      .sort((a, b) => (b.backlogDays ?? Infinity) - (a.backlogDays ?? Infinity));
+    const max = Math.max(...sorted.map((d) => d.backlogDays ?? 0), 1);
     return sorted.map((d, i) => ({
       dept: d.dept,
-      days: `${d.backlogDays.toFixed(1)}d`,
-      pct: Math.round((d.backlogDays / max) * 100),
+      days: d.backlogDays == null ? "stalled" : `${d.backlogDays.toFixed(1)}d`,
+      pct: d.backlogDays == null ? 100 : Math.round((d.backlogDays / max) * 100),
       // Bottleneck (#1) red; hot (>20d) gold; rest brown — matches the design.
-      color: i === 0 ? "#9A3A2D" : d.backlogDays > 20 ? "#C9A961" : "#5E5129",
+      color: i === 0 ? "#9A3A2D" : (d.backlogDays ?? Infinity) > 20 ? "#C9A961" : "#5E5129",
       dColor: i === 0 ? "#9A3A2D" : M.ink,
     }));
   }, [overview]);

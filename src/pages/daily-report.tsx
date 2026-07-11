@@ -771,8 +771,12 @@ function buildHookkaArticles(
     const rows = [...groups.overdueOrders].sort((a, b) => b.daysOverdue - a.daysOverdue);
     const w = rows[0];
     arts.push({
-      key: "overdueOrders", desk: "Delivery Desk",
-      headline: `${counts.overdueOrders} Order${plS(counts.overdueOrders)} Now Past Due`,
+      // Production Desk, not Delivery: this counts orders still IN PRODUCTION
+      // (DRAFT/CONFIRMED/IN_PRODUCTION/ON_HOLD) past the customer-promised date.
+      // Once READY_TO_SHIP it leaves this list — shipping lateness is a
+      // different (delivery-side) measure. Relabeled owner audit 2026-07-11.
+      key: "overdueOrders", desk: "Production Desk",
+      headline: `${counts.overdueOrders} Order${plS(counts.overdueOrders)} Now Past Due (still in production)`,
       lead: `${w.customerName} has waited longest — ${w.daysOverdue} day${plS(w.daysOverdue)} beyond the promised date.${rows.length > 1 ? ` ${counts.overdueOrders} orders sit late across the book.` : ""}`,
       count: counts.overdueOrders, score: 950 + counts.overdueOrders,
       records: rows.slice(0, 4).map((r) => ({ primary: r.companySOId, secondary: `${r.customerName}${r.productSummary ? ` · ${r.productSummary}` : ""}`, to: `/sales/${r.salesOrderId}`, tag: `${r.daysOverdue}d late` })),
@@ -794,8 +798,8 @@ function buildHookkaArticles(
     const rows = groups.soNoInvoice;
     arts.push({
       key: "soNoInvoice", desk: "Billing Desk",
-      headline: `${counts.soNoInvoice} Closed Sale${plS(counts.soNoInvoice)} Still Awaiting an Invoice`,
-      lead: `Completed orders that haven't been billed yet — revenue waiting to be booked.`,
+      headline: `${counts.soNoInvoice} Delivered Sale${plS(counts.soNoInvoice)} Still Awaiting an Invoice`,
+      lead: `Delivered orders that haven't been billed yet — revenue waiting to be booked. (RM0 service orders excluded.)`,
       count: counts.soNoInvoice, score: 820 + counts.soNoInvoice,
       records: rows.slice(0, 4).map((r) => ({ primary: r.companySOId, secondary: `${r.customerName} · ${r.status}`, to: `/sales/${r.id}`, tag: r.days ? `${r.days}d` : undefined })),
       total: rows.length, moreTo: "/sales",
@@ -861,7 +865,7 @@ function buildHookkaArticles(
     const rows = [...groups.lowEfficiencyWorkers].sort((a, b) => a.efficiencyPct - b.efficiencyPct);
     arts.push({
       key: "lowEfficiencyWorkers", desk: "The Floor",
-      headline: `${counts.lowEfficiencyWorkers} on the Floor Below Pace Today`,
+      headline: `${counts.lowEfficiencyWorkers} on the Floor Below Pace Yesterday`,
       lead: `${rows[0].name} (${rows[0].departmentName}) came in lowest at ${rows[0].efficiencyPct}% of standard.`,
       count: counts.lowEfficiencyWorkers, score: 440 + counts.lowEfficiencyWorkers,
       records: rows.slice(0, 4).map((r) => ({ primary: r.name, secondary: r.departmentName, tag: `${r.efficiencyPct}%` })),

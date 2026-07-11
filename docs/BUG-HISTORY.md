@@ -34,6 +34,44 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-11-001 — Full-system data-accuracy audit: 20+ findings across dashboard/planning/daily-report/OCR (P1-P3 shipped same day) `dashboard` `planning` `data-quality`
+
+- **Status:** 🟢 Fixed (commits 04fa1593, c1cb3bb0 + prod data repair)
+- **Symptom:** owner-run audit found same metrics showing different numbers across
+  pages (backlog 9.1d vs 9.4d, efficiency 87.4% vs 92% vs 372%, workforce 38 vs 36),
+  misleading labels (Planning "Today's Capacity" = demand; "Used %" >400%), and real
+  bugs: OCR accuracy panel always empty for mobile scans; "PACKING ahead of PACKING"
+  process-skip false positives; delivered-cohort dropped consolidated DOs; div-by-1-
+  minute backlog blow-ups; RM0 service orders inflating "awaiting invoice";
+  FUTURE-dated completions (2026-09/12) polluting fabric/monthly charts.
+- **Root causes:** independent per-surface reimplementations of the same metric
+  (mean-of-ratios vs ratio-of-sums; different status sets/date columns/windows);
+  missing guards; the 2026-05-25 Google-Sheets completion import parsed dd/mm as
+  mm/dd producing future dates (same importer bug family as the fix-misparsed-dates
+  endpoints, the future-date half was never repaired).
+- **Fixes (P1)**: same-dept process-skip noise filter (compliance-report.ts); RM0 +
+  label fix for awaiting-invoice; backlog div-zero → null/"stalled" (dashboard live +
+  reconstructed + planning + mobile); OCR date-portion compare + mobile scan→confirm
+  wiring (ScanPOSheet/forms.ts); consolidated-DO per-item SO resolution
+  (dashboard-overview.ts). **(P2)**: backlog headline unified to backlogGrandMin
+  basis (gauge==drill==Planning); efficiency card reads department-performance
+  ratio-of-sums; mobile Home chips read compliance.json (60% threshold);
+  workforce excludes TEST everywhere; sales lenses exclude ON_HOLD (owner ruling:
+  ON_HOLD + CANCELLED both out). **(P3)**: honest labels (Queued Work / Backlog
+  Pressure / Queue vs 14d), employees tabs default current month (persisted ranges
+  clamped), capacity divisor excludes the partial today.
+- **Data repair (prod, owner-confirmed 確認對調):** 9 UPDATEs + 1 follow-up moved all
+  future-dated job_cards.completed_date + cost_ledger.date to real past dates;
+  verified future_jc=0, future_cl=0. NOTE: the 137-card 09-04 group landed on
+  2026-05-19 (their real dispatch batch day) rather than the swapped 04-09 —
+  something also wrote these rows concurrently (no DB triggers on job_cards;
+  suspected concurrent in-app edit); harmless (valid past date) but the
+  mechanism was not pinned down.
+- **Verify:** live prod checks (Payroll 36 active, tally'd suppliers/PO spend,
+  reconcile RM0) + staging E2E (partial approve 80→60min, reject-reason 400,
+  June payslips 37/0 TEST, reconciled badge). Full audit archive:
+  memory/project_data_accuracy_audit_0711.md.
+
 ## BUG-2026-07-09-002 — Voiding an advance-only supplier payment left it in the CACHED aging (snapshot never invalidated) `accounting` `supplier-payments` `snapshot`
 
 🟢 **Fixed — bumpSupplierPaymentsRev() in every payment mutation batch**

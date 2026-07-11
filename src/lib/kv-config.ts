@@ -537,6 +537,11 @@ export type VariantsConfig = {
   sofaCompartments?: string[];
   // Add RM bulk-generate: raw-material category (itemGroup) → variant suffixes.
   materialVariants?: Record<string, string[]>;
+  // Add FG bulk-generate per-variant defaults, keyed by size code (bedframe:
+  // K/Q/…) or compartment code (sofa: 1A(LHF)/…). defaultBom = the source BOM
+  // template productCode to copy from on generate (its {PRODUCT_CODE} etc.
+  // placeholders re-resolve to the new variant); unitM3 = default cubic metres.
+  variantBomDefaults?: Record<string, { defaultBom?: string; unitM3?: number }>;
   [extra: string]: unknown;
 };
 

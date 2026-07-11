@@ -166,10 +166,6 @@ type WorkersResp = {
 };
 // Subset of /api/purchase-orders row shape — only the fields the Daily Report
 // "PO not received" chip needs.
-type PurchaseOrdersResp = {
-  success?: boolean;
-  data?: { id: string; status?: string; expectedDate?: string }[];
-};
 type SOListResp = { success?: boolean; data?: SalesOrder[] };
 type InventoryResp = {
   success?: boolean;
@@ -396,11 +392,22 @@ export default function MobileHome() {
   const { data: workersRaw } = useCachedJson<WorkersResp>(
     pdEnabled ? "/api/workers" : null,
   );
-  // Tiny purchase-orders fetch for the Daily Report "PO not received" chip.
-  // Gated on pdEnabled like the rest of the post-first-paint analytics.
-  const { data: purchaseOrdersRaw } = useCachedJson<PurchaseOrdersResp>(
-    pdEnabled ? "/api/purchase-orders" : null,
-  );
+  // Daily Report chips now read the SAME compliance engine the desktop Daily
+  // Report + Command Center card use (owner tally audit 2026-07-11). The old
+  // client-side re-derivations used different date columns / status sets / a
+  // 70% low-efficiency bar (desktop uses 60%), so the phone's total never
+  // matched the desktop's. One source of truth: /api/reports/compliance.json.
+  const { data: complianceRaw } = useCachedJson<{
+    success?: boolean;
+    data?: {
+      counts?: {
+        overdueOrders?: number;
+        soNoDo?: number;
+        poNotReceived?: number;
+        lowEfficiencyWorkers?: number;
+      };
+    };
+  }>(pdEnabled ? "/api/reports/compliance.json" : null);
 
   // ---- KPI: This Month Sales (confirmed-SO value, current month) ----
   const salesThisMonthSen = overview?.salesThisMonthSen ?? 0;
@@ -498,41 +505,13 @@ export default function MobileHome() {
       }));
   }, [orders]);
 
-  // ---- Daily Report — dc12 design v12 full chip set (4 exceptions). ----
-  // Each chip's count is derived from the SAME data the cards above already
-  // fetch (no new endpoints) PLUS one tiny purchase-orders fetch for
-  // "PO not received". No fabricated numbers — chips with 0 hide.
-  const overdueCount = useMemo(() => {
-    const today = todayISO();
-    return orders.filter(
-      (so) =>
-        !TERMINAL_STATUSES.has(so.status) &&
-        !!so.hookkaExpectedDD &&
-        (so.hookkaExpectedDD || "").slice(0, 10) < today,
-    ).length;
-  }, [orders]);
-  // SO no DO: SOs that are READY_TO_SHIP but no DO dispatch yet. Uses the
-  // already-loaded soList. (Strictly "ready but not on a DO" needs cross-
-  // referencing /api/delivery-orders — using READY_TO_SHIP status is the
-  // semantic proxy the owner cares about: ship-ready and waiting.)
-  const soNoDoCount = useMemo(
-    () => orders.filter((so) => so.status === "READY_TO_SHIP").length,
-    [orders],
-  );
-  // PO not received: purchase orders past their expected receive date and
-  // still in DRAFT/AWAITING/PARTIAL. Tiny extra fetch, gated on pdEnabled.
-  const poNotReceivedCount = useMemo(() => {
-    const today = todayISO();
-    const list = purchaseOrdersRaw?.success ? purchaseOrdersRaw.data ?? [] : [];
-    return list.filter((po) => {
-      const status = po.status || "";
-      const expected = (po.expectedDate || "").slice(0, 10);
-      if (!expected || expected >= today) return false;
-      return ["DRAFT", "AWAITING", "PARTIAL"].includes(status);
-    }).length;
-  }, [purchaseOrdersRaw]);
-  // (Low efficiency count + dailyReportTotal + dailyChips are computed after
-  // `workerEff` is declared further down — they need that data.)
+  // ---- Daily Report — dc12 design v12 chip set (4 exceptions). ----
+  // Counts come straight from the compliance engine so phone == desktop
+  // (owner tally audit 2026-07-11). Chips with 0 hide.
+  const complianceCounts = complianceRaw?.data?.counts;
+  const overdueCount = complianceCounts?.overdueOrders ?? 0;
+  const soNoDoCount = complianceCounts?.soNoDo ?? 0;
+  const poNotReceivedCount = complianceCounts?.poNotReceived ?? 0;
 
   // ---- Order Pipeline (this month) — Confirmed / Outstanding / Delivered. ----
   // Real figures off /api/sales-orders/stats (the SAME totals the desktop
@@ -690,7 +669,10 @@ export default function MobileHome() {
   // band Worker Efficiency card colours red). Daily-report chips + total
   // assembled here once all source counts (above + workerEff just-declared)
   // are in scope.
-  const lowEffCount = workerEff?.low.filter((w) => w.pct < 70).length ?? 0;
+  // Low-efficiency threshold + population come from the compliance engine
+  // (60%, yesterday's window) — the phone previously used 70% on live data,
+  // so its count never matched the desktop Daily Report.
+  const lowEffCount = complianceCounts?.lowEfficiencyWorkers ?? 0;
   const dailyReportTotal =
     overdueCount + soNoDoCount + poNotReceivedCount + lowEffCount;
   const dailyChips = [

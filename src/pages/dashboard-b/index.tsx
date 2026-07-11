@@ -1320,9 +1320,12 @@ export default function DashboardBPage() {
                   {ov.employee?.activeHeadcount ?? 0}
                 </p>
               </div>
-              <div className="rounded-lg bg-[#F7F4EF] px-3 py-2">
+              <div
+                className="rounded-lg bg-[#F7F4EF] px-3 py-2"
+                title="Queue length as a share of a 2-week (14-day) buffer — 100% means two full weeks of work are queued. Not a machine/worker utilization figure."
+              >
                 <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
-                  Queue load
+                  Queue vs 14d
                 </p>
                 <p
                   className="text-lg font-bold tabular-nums"
@@ -2501,7 +2504,7 @@ export default function DashboardBPage() {
       <OcrAccuracyCard period={period} range={period === "all" ? null : monthWindow(period)} />
 
       <p className="text-center text-[11px] text-[#9CA3AF] pt-2">
-        Dashboard B · experimental view · full data parity with Dashboard
+        Hookka Command Center
       </p>
 
       {drill && (

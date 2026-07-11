@@ -940,7 +940,13 @@ export default function PlanningPage() {
     };
 
     return DEPARTMENTS.map((dept) => {
-      const deptWorkers = workers.filter((w) => w.departmentCode === dept.code && w.status === "ACTIVE");
+      // TEST accounts excluded (owner 2026-07-11) — same rule as Payroll.
+      const deptWorkers = workers.filter(
+        (w) =>
+          w.departmentCode === dept.code &&
+          w.status === "ACTIVE" &&
+          !/^TEST/i.test(w.empNo || ""),
+      );
       const workerCount = deptWorkers.length;
       // Average working hours per day across this dept's active
       // workers (some may be part-time). Used for the per-card
@@ -1933,9 +1939,16 @@ export default function PlanningPage() {
               className="cursor-pointer transition-shadow hover:shadow-md"
               onClick={() => pushDrilldown({ kind: "load-by-dept" })}
             >
-              <CardContent className="p-3">
+              <CardContent
+                className="p-3"
+                title="Work QUEUED for this scope — every active job due in (or before) the window, overdue included. This is demand, not capacity: compare it against the Daily Capacity card on the left."
+              >
+                {/* Relabeled (owner audit 2026-07-11): this figure is the
+                    queued LOAD (demand incl. overdue), not capacity — the old
+                    "…'s Capacity" title sat next to the real capacity card
+                    and read as a contradiction. */}
                 <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
-                  <span>{scopeRange.label}&apos;s Capacity</span>
+                  <span>{scopeRange.label}&apos;s Queued Work</span>
                   <TrendingUp className="h-4 w-4 text-[#3E6570]" />
                 </p>
                 <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
@@ -1994,9 +2007,12 @@ export default function PlanningPage() {
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-3">
+              <CardContent
+                className="p-3"
+                title="Backlog pressure = queued work (incl. overdue) ÷ one scope of rolling capacity. Over 100% simply means more than one scope's worth of work is queued — it is NOT a worker-utilization figure. SOFA/BF share the same factory-wide denominator (they partition the total)."
+              >
                 <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
-                  <span>{scopeRange.label}&apos;s Capacity Used %</span>
+                  <span>{scopeRange.label}&apos;s Backlog Pressure</span>
                   <Clock className="h-4 w-4 text-[#6B5C32]" />
                 </p>
                 <p className={`text-xl font-bold ${utilizationColor(totalScopeUtilization).text}`}>
@@ -2097,7 +2113,7 @@ export default function PlanningPage() {
                     <div className="grid grid-cols-3 gap-2 items-baseline">
                       <span className="text-[10px] font-semibold text-[#9A3A2D]">SOFA</span>
                       <div>
-                        <span className="text-[9px] text-[#6B7280]">Capacity · Used %</span>
+                        <span className="text-[9px] text-[#6B7280]" title="Queued work for this category · backlog pressure vs the dept's one-day rolling capacity (whole-dept denominator — >100% = more than a day queued, not overwork)">Queued · Pressure %</span>
                         <p className="font-medium text-[#1F1D1B] tabular-nums">
                           {formatHours(dept.sofaScopeLoad)}
                           <span className={`ml-1.5 ${utilizationColor(dept.sofaScopeUtilization).text}`}>
@@ -2115,7 +2131,7 @@ export default function PlanningPage() {
                     <div className="grid grid-cols-3 gap-2 items-baseline">
                       <span className="text-[10px] font-semibold text-[#3E6570]">BEDFRAME</span>
                       <div>
-                        <span className="text-[9px] text-[#6B7280]">Capacity · Used %</span>
+                        <span className="text-[9px] text-[#6B7280]" title="Queued work for this category · backlog pressure vs the dept's one-day rolling capacity (whole-dept denominator — >100% = more than a day queued, not overwork)">Queued · Pressure %</span>
                         <p className="font-medium text-[#1F1D1B] tabular-nums">
                           {formatHours(dept.bfScopeLoad)}
                           <span className={`ml-1.5 ${utilizationColor(dept.bfScopeUtilization).text}`}>
@@ -2588,7 +2604,10 @@ export default function PlanningPage() {
             </div>
             <div className="flex items-center gap-1.5">
               <CheckCircle2 className="h-3 w-3 text-[#6B5C32]" />
-              <span>Formula: Workers x 9hrs x 60min x 0.85 efficiency</span>
+              {/* Legend updated (owner audit 2026-07-11): the theoretical
+                  workers×9h×0.85 formula was retired — capacity is the
+                  rolling actual average now. */}
+              <span>Capacity = rolling {ROLLING_WINDOW_DAYS}-working-day actual output average</span>
             </div>
           </div>
         </div>

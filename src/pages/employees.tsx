@@ -290,6 +290,20 @@ function readPersistedDateRange(key: string): { from?: string; to?: string } {
   }
 }
 
+// Owner ruling 2026-07-11: EVERY tab opens on the CURRENT calendar month.
+// A persisted range only survives if it falls INSIDE the current month (the
+// operator's pick from earlier today/this month); anything older — e.g. a
+// May range left over from last week — is discarded so the page never opens
+// on a stale month again. Mid-session picks still persist across tab
+// switches because they're inside the month.
+function readPersistedDateRangeThisMonth(key: string): { from: string; to: string } {
+  const cur = calendarMonthRange(0);
+  const p = readPersistedDateRange(key);
+  const inMonth = (d?: string) => !!d && d >= cur.from && d <= cur.to;
+  if (inMonth(p.from) && inMonth(p.to)) return { from: p.from!, to: p.to! };
+  return { from: cur.from, to: cur.to };
+}
+
 // Per-tab persisted date-range localStorage keys. The top summary follows the
 // ACTIVE tab's range by reading its key on tab switch — keep in sync with each
 // tab's writePersistedDateRange(...) key.
@@ -973,10 +987,10 @@ function WorkingHoursTab({
   // window they were last working on instead of being snapped back to
   // today every visit.
   const [dateFrom, setDateFrom] = useState<string>(() =>
-    readPersistedDateRange("employees:working-hours:dateRange").from ?? todayStr()
+    readPersistedDateRangeThisMonth("employees:working-hours:dateRange").from
   );
   const [dateTo, setDateTo] = useState<string>(() =>
-    readPersistedDateRange("employees:working-hours:dateRange").to ?? todayStr()
+    readPersistedDateRangeThisMonth("employees:working-hours:dateRange").to
   );
   useEffect(() => {
     writePersistedDateRange("employees:working-hours:dateRange", dateFrom, dateTo);
@@ -3981,10 +3995,10 @@ function EfficiencyOverviewTab({
   // persisted in localStorage so revisiting the tab keeps the operator's
   // chosen window. Per-tab key avoids cross-tab interference.
   const [dateFrom, setDateFrom] = useState<string>(() =>
-    readPersistedDateRange("employees:efficiency-overview:dateRange").from ?? todayStr()
+    readPersistedDateRangeThisMonth("employees:efficiency-overview:dateRange").from
   );
   const [dateTo, setDateTo] = useState<string>(() =>
-    readPersistedDateRange("employees:efficiency-overview:dateRange").to ?? todayStr()
+    readPersistedDateRangeThisMonth("employees:efficiency-overview:dateRange").to
   );
   useEffect(() => {
     writePersistedDateRange("employees:efficiency-overview:dateRange", dateFrom, dateTo);
@@ -4545,18 +4559,21 @@ function DepartmentLaborTab({
   // calendar popups jumping back to a month they don't care about.
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
   const persistedDeptLabor = useMemo(
-    () => readPersistedDateRange("employees:department-labor:dateRange"),
+    () => readPersistedDateRangeThisMonth("employees:department-labor:dateRange"),
     [],
   );
   const persistedDeptLaborPeriod = useMemo(() => {
     if (typeof window === "undefined") return null;
     try {
       const raw = window.localStorage.getItem("employees:department-labor:period");
-      return typeof raw === "string" ? raw : null;
+      // Owner ruling 2026-07-11: a persisted PAST month (e.g. May) no longer
+      // survives a reload — the tab always opens on the current month.
+      const cur = periodOptions[0]?.value ?? "";
+      return typeof raw === "string" && raw === cur ? raw : null;
     } catch {
       return null;
     }
-  }, []);
+  }, [periodOptions]);
   const [period, setPeriod] = useState<string>(
     () => persistedDeptLaborPeriod ?? (periodOptions[0]?.value ?? ""),
   );
@@ -5502,10 +5519,10 @@ function EmployeeDetailTab({
   // current month. Persisted per-tab in localStorage so reopening the tab
   // restores the operator's last window without forcing them to re-pick.
   const [dateFrom, setDateFrom] = useState<string>(() =>
-    readPersistedDateRange("employees:employee-detail:dateRange").from ?? todayStr()
+    readPersistedDateRangeThisMonth("employees:employee-detail:dateRange").from
   );
   const [dateTo, setDateTo] = useState<string>(() =>
-    readPersistedDateRange("employees:employee-detail:dateRange").to ?? todayStr()
+    readPersistedDateRangeThisMonth("employees:employee-detail:dateRange").to
   );
   useEffect(() => {
     writePersistedDateRange("employees:employee-detail:dateRange", dateFrom, dateTo);
@@ -6154,14 +6171,8 @@ type DeptPerfResponse = {
   };
 };
 
-// Default range = last 7 days inclusive (today − 6 .. today). Computed once
-// at module scope so the localStorage fallback below stays cheap and the
-// per-render call sites stay readable.
-function sevenDaysAgoStr(): string {
-  const d = new Date();
-  d.setDate(d.getDate() - 6);
-  return d.toISOString().split("T")[0];
-}
+// (sevenDaysAgoStr removed 2026-07-11 — every tab now defaults to the current
+// calendar month via readPersistedDateRangeThisMonth, owner ruling.)
 
 function DepartmentPerformanceTab({
   departments,
@@ -6194,10 +6205,10 @@ function DepartmentPerformanceTab({
   // reopening the page restores the operator's window. Mirrors the pattern
   // every other tab on this page uses.
   const [dateFrom, setDateFrom] = useState<string>(() =>
-    readPersistedDateRange("employees:dept-perf:dateRange").from ?? sevenDaysAgoStr()
+    readPersistedDateRangeThisMonth("employees:dept-perf:dateRange").from
   );
   const [dateTo, setDateTo] = useState<string>(() =>
-    readPersistedDateRange("employees:dept-perf:dateRange").to ?? todayStr()
+    readPersistedDateRangeThisMonth("employees:dept-perf:dateRange").to
   );
   useEffect(() => {
     writePersistedDateRange("employees:dept-perf:dateRange", dateFrom, dateTo);
@@ -8389,18 +8400,21 @@ function LaborCostTab({
   // selection (period + explicit from/to) is persisted in localStorage so
   // tab-switching keeps the operator's chosen window.
   const persistedLaborCost = useMemo(
-    () => readPersistedDateRange("employees:labor-cost:dateRange"),
+    () => readPersistedDateRangeThisMonth("employees:labor-cost:dateRange"),
     [],
   );
   const persistedLaborCostPeriod = useMemo(() => {
     if (typeof window === "undefined") return null;
     try {
       const raw = window.localStorage.getItem("employees:labor-cost:period");
-      return typeof raw === "string" ? raw : null;
+      // Owner ruling 2026-07-11: a persisted PAST month no longer survives a
+      // reload — the tab always opens on the current month.
+      const cur = periodOptions[0]?.value ?? "";
+      return typeof raw === "string" && raw === cur ? raw : null;
     } catch {
       return null;
     }
-  }, []);
+  }, [periodOptions]);
   const [period, setPeriod] = useState<string>(
     () => persistedLaborCostPeriod ?? (periodOptions[0]?.value ?? ""),
   );
@@ -10465,8 +10479,13 @@ function AttendanceTab({
   const { data: hoursSummaryResp } = useCachedJson<{ data?: WorkerHoursSummary[] }>(
     `/api/working-hour-entries/summary?from=${monthFrom}&to=${monthTo}`,
   );
-  const { data: jcSummaryResp } = useCachedJson<{ data?: { workerId: string; productionMinutes: number }[] }>(
-    `/api/job-cards/summary?from=${monthFrom}&to=${monthTo}`,
+  // Avg Efficiency comes from the SAME engine as the Department Performance
+  // tab (ratio-of-sums: Σ production minutes ÷ Σ production-dept clocked
+  // minutes) — the unified company-wide definition (owner 2026-07-11). The
+  // old per-worker mean-of-ratios let a 5-minute worker weigh as much as a
+  // 200-hour one (87.4% here vs 92% there for the same month).
+  const { data: monthPerfResp } = useCachedJson<DeptPerfResponse>(
+    `/api/department-performance?from=${monthFrom}&to=${monthTo}`,
   );
   const monthKpis = useMemo(() => {
     const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
@@ -10478,12 +10497,9 @@ function AttendanceTab({
     const avgSalarySen = activeCount
       ? Math.round(activeWorkers.reduce((s, w) => s + (w.basicSalarySen || 0), 0) / activeCount)
       : 0;
-    const prodMinsByWorker = new Map<string, number>();
-    for (const r of jcSummaryResp?.data ?? []) prodMinsByWorker.set(r.workerId, r.productionMinutes || 0);
     let totalHours = 0;
     let totalProdHours = 0;
     let totalDays = 0; // Σ each worker's days-with-entries = total worker-days
-    const effVals: number[] = [];
     for (const row of hoursSummaryResp?.data ?? []) {
       totalHours += row.totalHours;
       const prodHours = Object.entries(row.byDept).reduce(
@@ -10492,12 +10508,9 @@ function AttendanceTab({
       );
       totalProdHours += prodHours;
       totalDays += row.daysWithEntries || 0;
-      if (prodHours > 0 && row.daysWithEntries > 0) {
-        const pm = prodMinsByWorker.get(row.workerId) ?? 0;
-        effVals.push((pm / (prodHours * 60)) * 100);
-      }
     }
-    const avgEff = effVals.length ? effVals.reduce((s, v) => s + v, 0) / effVals.length : 0;
+    // Unified efficiency: the Department Performance engine's ratio-of-sums.
+    const avgEff = monthPerfResp?.data?.totals?.efficiencyPct ?? 0;
     return {
       activeCount,
       avgEff,
@@ -10507,7 +10520,7 @@ function AttendanceTab({
       avgWorkingHours: totalDays ? totalHours / totalDays : 0,
       avgProdHours: totalDays ? totalProdHours / totalDays : 0,
     };
-  }, [workers, productionDeptCodes, hoursSummaryResp, jcSummaryResp]);
+  }, [workers, productionDeptCodes, hoursSummaryResp, monthPerfResp]);
 
   return (
     <>
@@ -10775,8 +10788,11 @@ export default function EmployeesPage() {
   // Summary stats — driven by `summaryRange` (the Working Hours date pick).
   // Headcount counts only currently-employed staff: resigned (and otherwise
   // inactive) workers are excluded so the "Total Workers" / "Present" KPIs drop
-  // the moment someone is marked Resigned.
-  const totalWorkers = workers.filter((w) => w.status === "ACTIVE").length;
+  // the moment someone is marked Resigned. TEST accounts excluded too (owner
+  // 2026-07-11) — same rule as Payroll, so headcount tallies system-wide.
+  const totalWorkers = workers.filter(
+    (w) => w.status === "ACTIVE" && !/^TEST/i.test(w.empNo || ""),
+  ).length;
   const presentCount = summaryTotals?.workerCount ?? 0;
   const summaryWorkingMinutes = summaryTotals?.workingMinutes ?? 0;
   const avgEfficiency =

@@ -37,6 +37,7 @@ import {
   Layers,
   FlaskConical,
   Settings,
+  Printer,
   X,
 } from "lucide-react";
 
@@ -1028,13 +1029,22 @@ export default function DailyReportPage() {
         <div className="flex items-center justify-between px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6B7280]">
           <span>Hookka Manufacturing</span>
           <span className="hidden sm:inline">Daily Factory Edition</span>
-          <button
-            type="button"
-            onClick={() => setSettingsOpen(true)}
-            className="inline-flex items-center gap-1 hover:text-[#1F1D1B]"
-          >
-            <Settings className="h-3 w-3" /> Settings
-          </button>
+          <span className="inline-flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-1 hover:text-[#1F1D1B] print:hidden"
+            >
+              <Printer className="h-3 w-3" /> Print
+            </button>
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              className="inline-flex items-center gap-1 hover:text-[#1F1D1B] print:hidden"
+            >
+              <Settings className="h-3 w-3" /> Settings
+            </button>
+          </span>
         </div>
         <h1 className="mt-1 text-center font-serif text-4xl font-black tracking-tight text-[#1F1D1B] sm:text-5xl">
           The Hookka Report

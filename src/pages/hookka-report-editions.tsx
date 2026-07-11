@@ -110,6 +110,9 @@ interface OperationsReport {
     billedSen: number;
     collectedSen: number;
   };
+  quality: { defectPct: number | null; inspected: number };
+  supplier: { onTimePct: number | null; sampleSize: number };
+  priceAlerts: { materialCode: string; pctChange: number }[];
 }
 type Resp = { success?: boolean; data?: OperationsReport };
 
@@ -381,6 +384,12 @@ export function OperationsEdition({ edition }: { edition: Edition }) {
                   {r.workforce.serviceOpen}
                 </span>,
               ],
+              [
+                "QC defect rate",
+                r.quality.defectPct == null
+                  ? "—"
+                  : `${r.quality.defectPct}% · ${r.quality.inspected} checked`,
+              ],
             ]}
           />
           {r.workforce.topEfficiency.length > 0 && (
@@ -438,8 +447,27 @@ export function OperationsEdition({ edition }: { edition: Edition }) {
             rows={[
               ["PO spend", `RM ${rm(r.purchasing.poSpendSen)}`],
               ["PO count", r.purchasing.poCount],
+              [
+                "Supplier on-time",
+                r.supplier.onTimePct == null
+                  ? "—"
+                  : `${r.supplier.onTimePct}%`,
+              ],
             ]}
           />
+          {r.priceAlerts.length > 0 && (
+            <>
+              <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[#9A3A2D]">
+                Price watch · rises
+              </p>
+              <Rows
+                rows={r.priceAlerts.map((a) => [
+                  a.materialCode,
+                  <span className="text-[#9A3A2D]">▲ {a.pctChange}%</span>,
+                ])}
+              />
+            </>
+          )}
           {r.purchasing.topSuppliers.length > 0 && (
             <>
               <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[#6B5C32]">

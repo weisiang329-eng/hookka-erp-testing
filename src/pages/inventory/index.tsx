@@ -33,8 +33,10 @@ import {
   DEFAULT_SOFA_COMPARTMENTS,
   bedframeVariantCode,
   bedframeVariantName,
+  bedframeVariantDescription,
   sofaVariantCode,
   sofaVariantName,
+  sofaVariantDescription,
   type BedframeSize,
 } from "@/lib/fg-variants";
 
@@ -1172,6 +1174,7 @@ export default function InventoryPage() {
           name: bedframeVariantName(fgForm.name, sz),
           sizeCode: sz.code,
           sizeLabel: sz.label,
+          description: bedframeVariantDescription(fgForm.name, sz),
         };
       }
       return {
@@ -1179,6 +1182,7 @@ export default function InventoryPage() {
         name: sofaVariantName(fgForm.name, bulkBase, c),
         sizeCode: c,
         sizeLabel: c,
+        description: sofaVariantDescription(bulkBase, c),
       };
     });
 
@@ -1215,6 +1219,7 @@ export default function InventoryPage() {
             baseModel: base,
             sizeCode: v.sizeCode,
             sizeLabel: v.sizeLabel,
+            description: v.description,
           }),
         });
         const j = (await res.json().catch(() => ({}))) as {

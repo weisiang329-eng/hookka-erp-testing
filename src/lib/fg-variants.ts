@@ -64,3 +64,36 @@ export function sofaVariantName(baseName: string, baseModel: string, compartment
   const b = baseName.trim();
   return b ? `${b} ${compartment.trim()}` : `SOFA ${baseModel.trim()} ${compartment.trim()}`;
 }
+
+// Bedframe size CODE → the human size word used in the auto description
+// ("hilton bedframe KING 6ft (183x190cm)"). Unknown codes drop the word.
+const BEDFRAME_SIZE_WORDS: Record<string, string> = {
+  K: "king",
+  Q: "queen",
+  S: "single",
+  SS: "super single",
+  SK: "super king",
+  SP: "special",
+};
+
+/** Bedframe variant description — lowercase "`{baseName} {sizeWord} {label}
+ * ({dimensions})`" (matches the live catalog, e.g.
+ * "hilton bedframe king 6ft (183x190cm)"). */
+export function bedframeVariantDescription(baseName: string, size: BedframeSize): string {
+  const word = BEDFRAME_SIZE_WORDS[size.code.trim().toUpperCase()] ?? "";
+  return [
+    baseName.trim(),
+    word,
+    size.label.trim(),
+    size.dimensions.trim() ? `(${size.dimensions.trim()})` : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+/** Sofa variant description — "`sofa {model} module {compartment}`" (matches the
+ * live catalog, e.g. "sofa 5530 module 1NA"; the compartment keeps its case). */
+export function sofaVariantDescription(baseModel: string, compartment: string): string {
+  return `sofa ${baseModel.trim()} module ${compartment.trim()}`;
+}

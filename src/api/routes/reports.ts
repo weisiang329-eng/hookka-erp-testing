@@ -37,6 +37,11 @@ import {
   renderOverdueEmailText,
 } from "../lib/schedule-overdue-report";
 import { collectComplianceData } from "../lib/compliance-report";
+import {
+  collectBriefData,
+  renderBriefHtml,
+  renderBriefEmailText,
+} from "../lib/production-brief";
 
 const app = new Hono<Env>();
 export default app;
@@ -332,6 +337,73 @@ app.get("/overdue.json", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Production Morning Brief (Production Agent Phase 1).
+//   GET  /api/reports/brief        — HTML (open in tab / print)
+//   GET  /api/reports/brief.json   — JSON for the dashboard card
+//   POST /api/reports/brief/send   — manual send-now
+//   POST /api/internal/reports/brief-trigger — 07:00 MYT cron (see below)
+// ---------------------------------------------------------------------------
+
+async function buildBrief(
+  c: {
+    env: Env["Bindings"];
+    var: Env["Variables"];
+    req: { query(name: string): string | undefined };
+  },
+  includeAi: boolean,
+) {
+  const date = parseDateParam(c.req.query("date"), todayYmdSgt);
+  const holidays = await loadPublicHolidays(c);
+  const prev = previousWorkingDay(date, holidays);
+  return collectBriefData(
+    c.var.DB,
+    date,
+    prev,
+    includeAi
+      ? (c.env as { ANTHROPIC_API_KEY?: string }).ANTHROPIC_API_KEY
+      : undefined,
+  );
+}
+
+app.get("/brief", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  try {
+    // Full HTML view includes the AI focus paragraph (one Claude call).
+    const data = await buildBrief(c, true);
+    return new Response(renderBriefHtml(data), {
+      status: 200,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch (err) {
+    console.error("[reports/brief] failed:", err);
+    return c.json({ success: false, error: "report generation failed" }, 500);
+  }
+});
+
+app.get("/brief.json", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  try {
+    // Dashboard-card variant: NO AI call (fast + free on every page load).
+    const data = await buildBrief(c, false);
+    return c.json({ success: true, data });
+  } catch (err) {
+    console.error("[reports/brief.json] failed:", err);
+    return c.json({ success: false, error: "report generation failed" }, 500);
+  }
+});
+
+app.post("/brief/send", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  return c.json(await dispatchReport(c, "brief"));
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/reports/compliance.json — Daily Report. Process / SOP exceptions
 // across the order → delivery → invoice + procurement chains, plus overdue
 // orders and low-efficiency workers. JSON only (no HTML / email / cron for v1).
@@ -356,7 +428,7 @@ app.get("/compliance.json", async (c) => {
 
 export const internal = new Hono<Env>();
 
-type ReportKind = "efficiency" | "schedule" | "overdue";
+type ReportKind = "efficiency" | "schedule" | "overdue" | "brief";
 
 async function authCron(c: {
   env: Env["Bindings"];
@@ -467,6 +539,12 @@ internal.post("/overdue-trigger", async (c) => {
   return c.json(await dispatchReport(c, "overdue"));
 });
 
+internal.post("/brief-trigger", async (c) => {
+  const gated = await cronGate(c, "brief");
+  if (gated) return gated;
+  return c.json(await dispatchReport(c, "brief"));
+});
+
 // Manual send-now endpoints for schedule + overdue (parallel to /efficiency/send).
 app.post("/schedule/send", async (c) => {
   const denied = await requirePermission(c, "production-orders", "read");
@@ -501,7 +579,21 @@ async function runAndSendReport(
   let text: string;
   let subject: string;
 
-  if (kind === "efficiency") {
+  if (kind === "brief") {
+    // Morning Brief (Production Agent Phase 1): today's plan + CNC queue +
+    // overdue + yesterday's actuals + drift + optional AI focus.
+    const holidays = await loadPublicHolidays(c);
+    const prev = previousWorkingDay(date, holidays);
+    const data = await collectBriefData(
+      c.var.DB,
+      date,
+      prev,
+      (c.env as { ANTHROPIC_API_KEY?: string }).ANTHROPIC_API_KEY,
+    );
+    html = renderBriefHtml(data);
+    text = renderBriefEmailText(data);
+    subject = `[Hookka] Production Morning Brief — ${date} (${data.overdue.totals.salesOrders} overdue · CNC ~${data.cnc.referenceDays}d)`;
+  } else if (kind === "efficiency") {
     const data = await collectEfficiencyData(c.var.DB, date);
     html = renderEfficiencyHtml(data);
     text = renderEfficiencyEmailText(data);

@@ -10,7 +10,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import {
   Boxes, AlertTriangle, Package, Layers, Plus, X,
-  Search, Archive, Upload, Trash2, Pencil,
+  Search, Archive, Upload, Trash2, Pencil, Check,
 } from "lucide-react";
 import { BatchImportDialog, type ImportColumn } from "@/components/ui/batch-import-dialog";
 // NOTE: mock arrays were previously imported here and used as the page data
@@ -23,6 +23,28 @@ import {
   INVENTORY_TYPE_COLOR,
   getStockSemantic, getWipAgeSemantic,
 } from "@/lib/design-tokens";
+import {
+  fetchVariantsConfig,
+  getVariantsConfigSync,
+  patchVariantsConfig,
+  type VariantsConfig,
+} from "@/lib/kv-config";
+import {
+  DEFAULT_MATERIAL_VARIANTS,
+  materialVariantCode,
+  materialVariantDescription,
+} from "@/lib/material-variants";
+import {
+  DEFAULT_BEDFRAME_SIZES,
+  DEFAULT_SOFA_COMPARTMENTS,
+  bedframeVariantCode,
+  bedframeVariantName,
+  bedframeVariantDescription,
+  sofaVariantCode,
+  sofaVariantName,
+  sofaVariantDescription,
+  type BedframeSize,
+} from "@/lib/fg-variants";
 
 // -- FIFO cost column helpers ----------------------------------------------
 // These USED to read from the module-scope `rmBatches`/`fgBatches` mock
@@ -1117,11 +1139,312 @@ export default function InventoryPage() {
   const [fgForm, setFgForm] = useState<CreateFGForm>(EMPTY_FG_FORM);
   const [fgCopySourceId, setFgCopySourceId] = useState<string>("");
   const [fgSaving, setFgSaving] = useState(false);
+  // Add FG "Bulk generate" mode (owner 2026-07-11): enter Base Model + Name +
+  // Category, tick sizes (bedframe) / compartments (sofa), and create every
+  // variant at once — Code / Size Code / Size Label / Name auto-derived, Fabric
+  // + prices left blank for Batch Edit. bulkTicked holds the ticked codes;
+  // variantsCfg supplies the catalogs (seed defaults until the owner customises
+  // them in Products → Maintenance).
+  const [fgBulkMode, setFgBulkMode] = useState(false);
+  const [fgBulkTicked, setFgBulkTicked] = useState<Set<string>>(new Set());
+  const [fgBulkBusy, setFgBulkBusy] = useState(false);
+  const [variantsCfg, setVariantsCfg] = useState<VariantsConfig | null>(() => getVariantsConfigSync());
+  useEffect(() => {
+    void fetchVariantsConfig().then((v) => setVariantsCfg(v));
+  }, []);
 
-  // Create RM modal
+  // --- Add FG bulk-generate derivation (recomputed per render; cheap) --------
+  const bulkBedSizes: BedframeSize[] =
+    (variantsCfg?.bedframeSizes as BedframeSize[] | undefined) ?? DEFAULT_BEDFRAME_SIZES;
+  const bulkSofaComps: string[] =
+    (variantsCfg?.sofaCompartments as string[] | undefined) ?? DEFAULT_SOFA_COMPARTMENTS;
+  const bulkIsBed = fgForm.category === "BEDFRAME";
+  const bulkIsSofa = fgForm.category === "SOFA";
+  // The pool of tickable option codes for the chosen category.
+  const bulkPoolCodes: string[] = bulkIsBed
+    ? bulkBedSizes.map((s) => s.code).filter(Boolean)
+    : bulkIsSofa
+      ? bulkSofaComps.filter(Boolean)
+      : [];
+  const bulkBase = fgForm.code.trim();
+  // Per-variant BOM/M3 defaults keyed by size code (bedframe) / compartment
+  // (sofa) — set in Products → Maintenance. On generate each variant fills its
+  // Unit M3 and clones the chosen source BOM template (owner 2026-07-11).
+  const bomDefaults = (variantsCfg?.variantBomDefaults ?? {}) as Record<
+    string,
+    { defaultBom?: string; unitM3?: number }
+  >;
+  // Ticked → the concrete variants that would be created (code + name + size
+  // fields auto-derived). Filtered to the current pool so switching category
+  // never carries stale ticks across.
+  const bulkPreview = [...fgBulkTicked]
+    .filter((c) => bulkPoolCodes.includes(c))
+    .map((c) => {
+      const meta = bomDefaults[c];
+      if (bulkIsBed) {
+        const sz = bulkBedSizes.find((s) => s.code === c) ?? { code: c, label: "", dimensions: "" };
+        return {
+          code: bedframeVariantCode(bulkBase, sz.code),
+          name: bedframeVariantName(fgForm.name, sz),
+          sizeCode: sz.code,
+          sizeLabel: sz.label,
+          description: bedframeVariantDescription(fgForm.name, sz),
+          unitM3: meta?.unitM3,
+          defaultBom: meta?.defaultBom,
+        };
+      }
+      return {
+        code: sofaVariantCode(bulkBase, c),
+        name: sofaVariantName(fgForm.name, bulkBase, c),
+        sizeCode: c,
+        sizeLabel: c,
+        description: sofaVariantDescription(bulkBase, c),
+        unitM3: meta?.unitM3,
+        defaultBom: meta?.defaultBom,
+      };
+    });
+
+  function toggleBulkTick(code: string) {
+    setFgBulkTicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      return next;
+    });
+  }
+
+  async function runBulkGenerate() {
+    if (fgBulkBusy) return;
+    const base = fgForm.code.trim();
+    if (!base || bulkPreview.length === 0) return;
+    setFgBulkBusy(true);
+    let created = 0;
+    let skipped = 0;
+    let failed = 0;
+    const newProducts: Product[] = [];
+    // Pre-load the chosen source BOM templates once (only when some variant has a
+    // default BOM) so each generated variant can clone its l1Processes +
+    // wipComponents — the {PRODUCT_CODE} placeholders re-resolve to the new code.
+    const bomTplByCode = new Map<string, { l1Processes: unknown; wipComponents: unknown }>();
+    if (bulkPreview.some((v) => v.defaultBom)) {
+      try {
+        const tr = (await (await fetch("/api/bom/templates", { credentials: "include" })).json()) as {
+          data?: Array<{ productCode: string; l1Processes: unknown; wipComponents: unknown }>;
+        };
+        for (const t of tr.data ?? []) bomTplByCode.set(t.productCode, t);
+      } catch {
+        /* best-effort — skip the BOM clone if the template list can't load */
+      }
+    }
+    // Sequential — one validated POST per variant reuses the server's duplicate
+    // + bedframe-sizeCode checks; existing codes are SKIPPED (reported), never
+    // abort the batch.
+    for (const v of bulkPreview) {
+      try {
+        const res = await fetch("/api/products", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            code: v.code,
+            name: v.name,
+            category: fgForm.category,
+            baseModel: base,
+            sizeCode: v.sizeCode,
+            sizeLabel: v.sizeLabel,
+            description: v.description,
+            ...(v.unitM3 != null ? { unitM3: v.unitM3 } : {}),
+          }),
+        });
+        const j = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          data?: Product;
+          error?: string;
+        };
+        if (res.ok && j.success) {
+          created++;
+          if (j.data) newProducts.push(j.data);
+          // Clone the size's chosen default BOM template onto this new variant
+          // (best-effort — the FG is created regardless of whether the BOM copy
+          // succeeds; a missing source template just skips the copy).
+          if (v.defaultBom) {
+            const src = bomTplByCode.get(v.defaultBom);
+            if (src) {
+              await fetch("/api/bom/templates", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  productCode: v.code,
+                  baseModel: base,
+                  category: fgForm.category,
+                  l1Processes: src.l1Processes,
+                  wipComponents: src.wipComponents,
+                }),
+              }).catch(() => {});
+            }
+          }
+        } else if ((j.error || "").toLowerCase().includes("already exists")) {
+          skipped++;
+        } else {
+          failed++;
+        }
+      } catch {
+        failed++;
+      }
+    }
+    setFgBulkBusy(false);
+    if (newProducts.length) setProducts((prev) => [...prev, ...newProducts]);
+    invalidateCachePrefix("/api/products");
+    invalidateCachePrefix("/api/inventory");
+    const parts = [`${created} created`];
+    if (skipped) parts.push(`${skipped} already existed`);
+    if (failed) parts.push(`${failed} failed`);
+    const msg = parts.join(" · ");
+    if (failed) toast.error(msg);
+    else toast.success(msg);
+    if (created > 0 && failed === 0) {
+      setShowCreateFG(false);
+      setFgForm(EMPTY_FG_FORM);
+      setFgBulkTicked(new Set());
+      setFgBulkMode(false);
+    }
+  }
+
+  // Create RM modal state (declared here so the bulk-generate helpers below can
+  // read rmForm / drive showCreateRM).
   const [showCreateRM, setShowCreateRM] = useState(false);
   const [rmForm, setRmForm] = useState<CreateRMForm>({ itemCode: "", description: "", baseUOM: "PCS", itemGroup: "PLYWOOD", balanceQty: 0 });
   const [rmSaving, setRmSaving] = useState(false);
+
+  // ---- Add RM bulk-generate (owner 2026-07-11) -----------------------------
+  // Mirrors Add FG: pick a category (itemGroup) + a BASE code, tick the
+  // category's variants, and create one material per tick — code = base/variant
+  // ("NC36/50" + "6mm" → "NC36/50/6mm"). The per-category variant list lives on
+  // variants-config.materialVariants and is edited inline here (this bulk form
+  // doubles as the "Material Categories" maintenance the owner asked for).
+  const [rmBulkMode, setRmBulkMode] = useState(false);
+  const [rmBulkTicked, setRmBulkTicked] = useState<Set<string>>(new Set());
+  const [rmBulkBusy, setRmBulkBusy] = useState(false);
+  const [rmNewVariant, setRmNewVariant] = useState("");
+  // Dedicated Material Categories maintenance (owner 2026-07-11) — a standalone
+  // modal to set up each category's variant list up front (the same lists the
+  // Add RM bulk form reads).
+  const [showMaterialCats, setShowMaterialCats] = useState(false);
+  const [matCatSel, setMatCatSel] = useState<string>("");
+  const [matCatNewVar, setMatCatNewVar] = useState("");
+  const rmVariantsAll: Record<string, string[]> =
+    (variantsCfg?.materialVariants as Record<string, string[]> | undefined) ?? DEFAULT_MATERIAL_VARIANTS;
+  const rmCatVariants: string[] =
+    rmVariantsAll[rmForm.itemGroup] ?? DEFAULT_MATERIAL_VARIANTS[rmForm.itemGroup] ?? [];
+  const rmBulkBase = rmForm.itemCode.trim();
+  const rmBulkPreview = [...rmBulkTicked]
+    .filter((v) => rmCatVariants.includes(v))
+    .map((v) => ({
+      code: materialVariantCode(rmBulkBase, v),
+      description: materialVariantDescription(rmForm.description, v),
+    }));
+  function toggleRmTick(v: string) {
+    setRmBulkTicked((prev) => {
+      const n = new Set(prev);
+      if (n.has(v)) n.delete(v);
+      else n.add(v);
+      return n;
+    });
+  }
+  function saveRmVariants(next: Record<string, string[]>) {
+    setVariantsCfg((prev) => ({ ...(prev ?? {}), materialVariants: next }) as VariantsConfig);
+    patchVariantsConfig({ materialVariants: next });
+  }
+  function catVariants(cat: string): string[] {
+    return rmVariantsAll[cat] ?? DEFAULT_MATERIAL_VARIANTS[cat] ?? [];
+  }
+  function addVariantToCat(cat: string, val: string) {
+    const v = val.trim();
+    const cur = catVariants(cat);
+    if (!v || cur.includes(v)) return;
+    saveRmVariants({ ...rmVariantsAll, [cat]: [...cur, v] });
+  }
+  function removeVariantFromCat(cat: string, val: string) {
+    saveRmVariants({ ...rmVariantsAll, [cat]: catVariants(cat).filter((x) => x !== val) });
+  }
+  function addRmVariant() {
+    const v = rmNewVariant.trim();
+    if (!v || rmCatVariants.includes(v)) {
+      setRmNewVariant("");
+      return;
+    }
+    saveRmVariants({ ...rmVariantsAll, [rmForm.itemGroup]: [...rmCatVariants, v] });
+    setRmBulkTicked((prev) => new Set(prev).add(v));
+    setRmNewVariant("");
+  }
+  function removeRmVariant(v: string) {
+    saveRmVariants({ ...rmVariantsAll, [rmForm.itemGroup]: rmCatVariants.filter((x) => x !== v) });
+    setRmBulkTicked((prev) => {
+      const n = new Set(prev);
+      n.delete(v);
+      return n;
+    });
+  }
+  async function runRmBulkGenerate() {
+    if (rmBulkBusy) return;
+    const base = rmForm.itemCode.trim();
+    if (!base || rmBulkPreview.length === 0) return;
+    setRmBulkBusy(true);
+    let created = 0;
+    let skipped = 0;
+    let failed = 0;
+    const newRMs: RawMaterial[] = [];
+    for (const v of rmBulkPreview) {
+      // Client-side dup guard — RM item codes can duplicate at the API, so skip
+      // any code already present rather than create a second copy.
+      if (liveRawMaterials.some((r) => (r.itemCode || "") === v.code)) {
+        skipped++;
+        continue;
+      }
+      try {
+        const res = await fetch("/api/raw-materials", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            itemCode: v.code,
+            description: v.description,
+            baseUOM: rmForm.baseUOM,
+            itemGroup: rmForm.itemGroup,
+            balanceQty: 0,
+          }),
+        });
+        const j = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          data?: RawMaterial;
+          error?: string;
+        };
+        if (res.ok && j.success) {
+          created++;
+          if (j.data) newRMs.push(j.data);
+        } else {
+          failed++;
+        }
+      } catch {
+        failed++;
+      }
+    }
+    setRmBulkBusy(false);
+    if (newRMs.length) setLiveRawMaterials((prev) => [...prev, ...newRMs]);
+    invalidateCachePrefix("/api/raw-materials");
+    invalidateCachePrefix("/api/inventory");
+    const parts = [`${created} created`];
+    if (skipped) parts.push(`${skipped} already existed`);
+    if (failed) parts.push(`${failed} failed`);
+    const msg = parts.join(" · ");
+    if (failed) toast.error(msg);
+    else toast.success(msg);
+    if (created > 0 && failed === 0) {
+      setShowCreateRM(false);
+      setRmBulkTicked(new Set());
+      setRmBulkMode(false);
+    }
+  }
+
+  // (Create RM modal state moved up — see near the Add RM bulk-generate helpers.)
 
   // ---- Live data fetched from D1 ----
   //
@@ -1888,6 +2211,72 @@ export default function InventoryPage() {
                 </div>
               </CardHeader>
               <CardContent>
+                {/* Single vs Bulk generate (owner 2026-07-11). Bulk: enter Base
+                    Model + Name + Category, tick sizes/compartments, create all
+                    variants at once (Code/Size auto-derived; prices via Batch). */}
+                <div className="mb-4 inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
+                  <button onClick={() => setFgBulkMode(false)} className={`px-3.5 py-1.5 text-sm ${!fgBulkMode ? "bg-[#6B5C32] text-white font-medium" : "text-gray-500 hover:bg-[#FAF9F7]"}`}>Single</button>
+                  <button onClick={() => setFgBulkMode(true)} className={`px-3.5 py-1.5 text-sm ${fgBulkMode ? "bg-[#6B5C32] text-white font-medium" : "text-gray-500 hover:bg-[#FAF9F7]"}`}>Bulk generate</button>
+                </div>
+                {fgBulkMode ? (
+                  <div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Base Model *</label>
+                        <input value={fgForm.code} onChange={e => setFgForm(f => ({ ...f, code: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder={bulkIsBed ? "e.g. 1003" : "e.g. 5535"} />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Name{bulkIsBed ? " *" : " (optional)"}</label>
+                        <input value={fgForm.name} onChange={e => setFgForm(f => ({ ...f, name: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder={bulkIsBed ? "e.g. ROMA BEDFRAME" : "blank → SOFA <model> <compartment>"} />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Category</label>
+                        <select value={fgForm.category} onChange={e => { const v = e.target.value; setFgForm(f => ({ ...f, category: v })); setFgBulkTicked(new Set()); }} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none">
+                          <option value="BEDFRAME">Bedframe</option>
+                          <option value="SOFA">Sofa</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {bulkIsBed || bulkIsSofa ? (
+                      <>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-sm font-medium text-[#374151]">{bulkIsBed ? "Which sizes does this model come in?" : `Which compartments does ${bulkBase || "this model"} have?`}</span>
+                          <button
+                            onClick={() => { const all = bulkPoolCodes.length > 0 && bulkPoolCodes.every(c => fgBulkTicked.has(c)); setFgBulkTicked(all ? new Set() : new Set(bulkPoolCodes)); }}
+                            className="text-xs text-[#6B5C32] font-medium hover:underline"
+                          >
+                            {bulkPoolCodes.length > 0 && bulkPoolCodes.every(c => fgBulkTicked.has(c)) ? "Clear all" : "Select all"}
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+                          {bulkPoolCodes.map(code => {
+                            const on = fgBulkTicked.has(code);
+                            const bf = bulkIsBed ? bulkBedSizes.find(s => s.code === code) : undefined;
+                            return (
+                              <button key={code} onClick={() => toggleBulkTick(code)} className={`flex items-center gap-2 border rounded px-2.5 py-1.5 text-sm text-left ${on ? "border-[#6B5C32] bg-[#F4EFE3]" : "border-[#E2DDD8] bg-white text-gray-600 hover:bg-[#FAF9F7]"}`}>
+                                <span className={`w-4 h-4 flex-shrink-0 rounded-sm border flex items-center justify-center ${on ? "bg-[#6B5C32] border-[#6B5C32] text-white" : "border-gray-300"}`}>{on ? <Check className="w-3 h-3" /> : null}</span>
+                                <span className="min-w-0">
+                                  <span className="font-mono">{code}</span>
+                                  {bf?.label ? <span className="block text-[10px] text-gray-400 truncate">{bf.label} · {bf.dimensions}</span> : null}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="bg-[#FAF6EF] border border-[#E2DDD8] rounded-md p-3">
+                          <div className="text-xs text-gray-500 mb-2">Will create <b className="text-[#6B5C32]">{bulkPreview.length}</b> product{bulkPreview.length === 1 ? "" : "s"} — Fabric Usage + prices left blank (fill later via Batch Edit)</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {bulkPreview.map(v => <span key={v.code} className="text-xs font-mono bg-white border border-[#E2DDD8] rounded px-2 py-0.5" title={v.name}>{v.code}</span>)}
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-sm text-gray-400 py-6 text-center">Bulk generate is for Bedframe + Sofa. Pick a category above.</div>
+                    )}
+                  </div>
+                ) : (
+                <>
                 {/* Copy-from-existing: lazy-person shortcut. Picking a product
                     clones every field that makes sense (category / baseModel /
                     sizeCode / sizeLabel / description / prices / unitM3 /
@@ -2025,8 +2414,20 @@ export default function InventoryPage() {
                     {fgForm.pieces ? <div>· Pieces breakdown</div> : null}
                   </div>
                 )}
+                </>
+                )}
                 <div className="flex justify-end gap-2 pt-4">
-                  <Button variant="outline" size="sm" onClick={() => setShowCreateFG(false)} disabled={fgSaving}>Cancel</Button>
+                  <Button variant="outline" size="sm" onClick={() => { setShowCreateFG(false); setFgBulkTicked(new Set()); }} disabled={fgSaving || fgBulkBusy}>Cancel</Button>
+                  {fgBulkMode ? (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={!fgForm.code.trim() || bulkPreview.length === 0 || fgBulkBusy}
+                    onClick={() => { void runBulkGenerate(); }}
+                  >
+                    {fgBulkBusy ? "Generating…" : `Generate ${bulkPreview.length} product${bulkPreview.length === 1 ? "" : "s"}`}
+                  </Button>
+                  ) : (
                   <Button
                     variant="primary"
                     size="sm"
@@ -2087,6 +2488,7 @@ export default function InventoryPage() {
                   >
                     {fgSaving ? "Saving…" : "Save Product"}
                   </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -2223,6 +2625,9 @@ export default function InventoryPage() {
             <Button variant="outline" size="sm" onClick={() => setShowBatchImportRM(true)}>
               <Upload className="h-4 w-4" /> Batch Import
             </Button>
+            <Button variant="outline" size="sm" onClick={() => { setMatCatSel(matCatSel || RM_ITEM_GROUPS[0]); setShowMaterialCats(true); }}>
+              <Layers className="h-4 w-4" /> Categories
+            </Button>
             <Button variant="primary" size="sm" onClick={() => setShowCreateRM(true)}>
               <Plus className="h-4 w-4" /> Add RM
             </Button>
@@ -2238,6 +2643,69 @@ export default function InventoryPage() {
                 </div>
               </CardHeader>
               <CardContent>
+                {/* Single vs Bulk generate (owner 2026-07-11). Bulk: pick a
+                    category + base code, tick the category's variants, create
+                    one material per tick (code = base/variant). */}
+                <div className="mb-4 inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
+                  <button onClick={() => setRmBulkMode(false)} className={`px-3.5 py-1.5 text-sm ${!rmBulkMode ? "bg-[#6B5C32] text-white font-medium" : "text-gray-500 hover:bg-[#FAF9F7]"}`}>Single</button>
+                  <button onClick={() => setRmBulkMode(true)} className={`px-3.5 py-1.5 text-sm ${rmBulkMode ? "bg-[#6B5C32] text-white font-medium" : "text-gray-500 hover:bg-[#FAF9F7]"}`}>Bulk generate</button>
+                </div>
+                {rmBulkMode ? (
+                  <div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Item Group (category)</label>
+                        <select value={rmForm.itemGroup} onChange={e => { setRmForm(f => ({ ...f, itemGroup: e.target.value })); setRmBulkTicked(new Set()); }} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none">
+                          {RM_ITEM_GROUPS.map(g => <option key={g} value={g}>{g}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Base Code *</label>
+                        <input value={rmForm.itemCode} onChange={e => setRmForm(f => ({ ...f, itemCode: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. NC36/50" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Base UOM</label>
+                        <select value={rmForm.baseUOM} onChange={e => setRmForm(f => ({ ...f, baseUOM: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none">
+                          {["PCS", "MTR", "ROLL", "BOX", "CTN", "SET", "KG", "PAIR"].map(u => <option key={u} value={u}>{u}</option>)}
+                        </select>
+                      </div>
+                      <div className="sm:col-span-3">
+                        <label className="block text-xs text-[#6B7280] mb-1">Description (base — variant appended per item)</label>
+                        <input value={rmForm.description} onChange={e => setRmForm(f => ({ ...f, description: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. Foam Sheet" />
+                      </div>
+                    </div>
+
+                    <div className="text-sm font-medium text-[#374151] mb-2">Which {rmForm.itemGroup} variants? <span className="text-xs text-gray-400 font-normal">(tick to include · these are this category's saved list)</span></div>
+                    <div className="flex flex-wrap gap-2 mb-2">
+                      {rmCatVariants.map(v => {
+                        const on = rmBulkTicked.has(v);
+                        return (
+                          <span key={v} className={`inline-flex items-center gap-1.5 border rounded px-2.5 py-1 text-sm ${on ? "border-[#6B5C32] bg-[#F4EFE3]" : "border-[#E2DDD8] bg-white text-gray-600 hover:bg-[#FAF9F7]"}`}>
+                            <button onClick={() => toggleRmTick(v)} className="inline-flex items-center gap-1.5">
+                              <span className={`w-4 h-4 flex-shrink-0 rounded-sm border flex items-center justify-center ${on ? "bg-[#6B5C32] border-[#6B5C32] text-white" : "border-gray-300"}`}>{on ? <Check className="w-3 h-3" /> : null}</span>
+                              <span className="font-mono">{v}</span>
+                            </button>
+                            <button onClick={() => removeRmVariant(v)} className="text-[#9A3A2D]/50 hover:text-[#9A3A2D]" title="Remove this variant from the category">
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        );
+                      })}
+                      {rmCatVariants.length === 0 && <span className="text-sm text-gray-400">No variants yet for {rmForm.itemGroup} — add one below.</span>}
+                    </div>
+                    <div className="flex gap-2 mb-4 max-w-sm">
+                      <input value={rmNewVariant} onChange={e => setRmNewVariant(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addRmVariant(); } }} className="flex-1 border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder={`Add a ${rmForm.itemGroup} variant (e.g. 6mm)`} />
+                      <Button variant="outline" size="sm" onClick={addRmVariant} disabled={!rmNewVariant.trim()}><Plus className="h-4 w-4" /> Add</Button>
+                    </div>
+
+                    <div className="bg-[#FAF6EF] border border-[#E2DDD8] rounded-md p-3">
+                      <div className="text-xs text-gray-500 mb-2">Will create <b className="text-[#6B5C32]">{rmBulkPreview.length}</b> material{rmBulkPreview.length === 1 ? "" : "s"} — Balance Qty starts 0</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {rmBulkPreview.map(v => <span key={v.code} className="text-xs font-mono bg-white border border-[#E2DDD8] rounded px-2 py-0.5" title={v.description}>{v.code}</span>)}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs text-[#6B7280] mb-1">Item Code *</label>
@@ -2264,8 +2732,19 @@ export default function InventoryPage() {
                     <input type="number" onFocus={(e) => e.currentTarget.select()} value={rmForm.balanceQty || ""} onChange={e => setRmForm(f => ({ ...f, balanceQty: Number(e.target.value) }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="0" />
                   </div>
                 </div>
+                )}
                 <div className="flex justify-end gap-2 pt-4">
-                  <Button variant="outline" size="sm" onClick={() => setShowCreateRM(false)} disabled={rmSaving}>Cancel</Button>
+                  <Button variant="outline" size="sm" onClick={() => { setShowCreateRM(false); setRmBulkTicked(new Set()); }} disabled={rmSaving || rmBulkBusy}>Cancel</Button>
+                  {rmBulkMode ? (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={!rmForm.itemCode.trim() || rmBulkPreview.length === 0 || rmBulkBusy}
+                    onClick={() => { void runRmBulkGenerate(); }}
+                  >
+                    {rmBulkBusy ? "Generating…" : `Generate ${rmBulkPreview.length} material${rmBulkPreview.length === 1 ? "" : "s"}`}
+                  </Button>
+                  ) : (
                   <Button
                     variant="primary"
                     size="sm"
@@ -2313,9 +2792,53 @@ export default function InventoryPage() {
                   >
                     {rmSaving ? "Saving..." : "Save Material"}
                   </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>
+          )}
+
+          {/* Material Categories maintenance modal (owner 2026-07-11) — set up
+              each category's variant list up front; Add RM → Bulk reads them. */}
+          {showMaterialCats && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowMaterialCats(false)}>
+              <div className="bg-white rounded-xl shadow-xl w-[560px] max-w-[92vw] max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
+                  <div>
+                    <h2 className="text-lg font-bold text-[#111827]">Material Categories</h2>
+                    <p className="text-xs text-gray-500">Each category's variant list — used by Add RM → Bulk generate. Changes save automatically.</p>
+                  </div>
+                  <button onClick={() => setShowMaterialCats(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5 text-gray-400" /></button>
+                </div>
+                <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Category</label>
+                    <select value={matCatSel} onChange={(e) => setMatCatSel(e.target.value)} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none">
+                      {RM_ITEM_GROUPS.map((g) => <option key={g} value={g}>{g}{catVariants(g).length ? ` (${catVariants(g).length})` : ""}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div className="text-xs text-[#6B7280] mb-1.5">Variants for <span className="font-mono text-[#1F1D1B]">{matCatSel}</span></div>
+                    <div className="flex flex-wrap gap-2 mb-2">
+                      {catVariants(matCatSel).map((v) => (
+                        <span key={v} className="inline-flex items-center gap-1.5 border border-[#E2DDD8] rounded px-2.5 py-1 text-sm bg-[#FAF9F7]">
+                          <span className="font-mono">{v}</span>
+                          <button onClick={() => removeVariantFromCat(matCatSel, v)} className="text-[#9A3A2D]/50 hover:text-[#9A3A2D]" title="Remove"><X className="w-3 h-3" /></button>
+                        </span>
+                      ))}
+                      {catVariants(matCatSel).length === 0 && <span className="text-sm text-gray-400">No variants yet.</span>}
+                    </div>
+                    <div className="flex gap-2">
+                      <input value={matCatNewVar} onChange={(e) => setMatCatNewVar(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addVariantToCat(matCatSel, matCatNewVar); setMatCatNewVar(""); } }} className="flex-1 border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder={`Add a ${matCatSel} variant (e.g. 6mm)`} />
+                      <Button variant="outline" size="sm" onClick={() => { addVariantToCat(matCatSel, matCatNewVar); setMatCatNewVar(""); }} disabled={!matCatNewVar.trim()}><Plus className="h-4 w-4" /> Add</Button>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
+                  <Button variant="primary" size="sm" onClick={() => setShowMaterialCats(false)}>Done</Button>
+                </div>
+              </div>
+            </div>
           )}
 
           {/* DataGrid */}

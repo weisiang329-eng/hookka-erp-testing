@@ -222,6 +222,7 @@ export interface OperationsReport {
   quality: QualitySection;
   supplier: SupplierSection;
   priceAlerts: PriceAlert[];
+  deptCost: DeptCostSection;
   // Per-section failures (staging diagnostics); undefined when all succeeded.
   _errors?: string[];
 }
@@ -259,6 +260,18 @@ export interface SupplierSection {
 export interface PriceAlert {
   materialCode: string;
   pctChange: number; // % increase vs the prior binding price
+}
+
+export interface DeptCost {
+  dept: string;
+  sen: number;
+}
+export interface DeptCostSection {
+  month: string; // YYYY-MM — payroll is monthly, so this section is month-based
+  byDept: DeptCost[]; // highest first
+  highestDept: string | null;
+  productionSen: number;
+  nonProductionSen: number;
 }
 
 type Db = D1Database;
@@ -1024,6 +1037,52 @@ async function collectPriceAlerts(
   }));
 }
 
+async function collectDeptCost(
+  db: Db,
+  p: ResolvedPeriod,
+): Promise<DeptCostSection> {
+  // Department cost = payroll (gross) by department for the period's month.
+  // Payroll is monthly, so this is month-based even in the weekly edition.
+  // Prod vs Non-prod split via departments.isProduction — office/sales/admin
+  // staff live here (they are NOT in the production cost ledger).
+  const ym = p.endYmd.slice(0, 7);
+
+  const deptRes = await db
+    .prepare("SELECT code, isProduction FROM departments")
+    .bind()
+    .all<{ code: string; isProduction: number | boolean | null }>();
+  const prodSet = new Set<string>();
+  for (const d of deptRes.results ?? []) if (d.isProduction) prodSet.add(d.code);
+
+  const rows = await db
+    .prepare(
+      `SELECT departmentCode AS "dept", COALESCE(SUM(grossPaySen),0) AS "sen"
+         FROM payslips
+        WHERE substr(period::text, 1, 7) = ? AND status <> 'DRAFT'
+        GROUP BY departmentCode
+        ORDER BY COALESCE(SUM(grossPaySen),0) DESC`,
+    )
+    .bind(ym)
+    .all<{ dept: string; sen: number }>();
+
+  let productionSen = 0;
+  let nonProductionSen = 0;
+  const byDept: DeptCost[] = (rows.results ?? []).map((r) => {
+    const sen = Number(r.sen ?? 0);
+    if (prodSet.has(r.dept)) productionSen += sen;
+    else nonProductionSen += sen;
+    return { dept: r.dept || "—", sen };
+  });
+
+  return {
+    month: ym,
+    byDept: byDept.slice(0, 8),
+    highestDept: byDept[0]?.dept ?? null,
+    productionSen,
+    nonProductionSen,
+  };
+}
+
 // -- assembler --------------------------------------------------------------
 
 export async function collectOperationsReport(
@@ -1058,6 +1117,7 @@ export async function collectOperationsReport(
     quality,
     supplier,
     priceAlerts,
+    deptCost,
   ] = await Promise.all([
     guard("production", () => collectProduction(db, orgId, p), {
       bedframeUnits: 0,
@@ -1128,6 +1188,13 @@ export async function collectOperationsReport(
       sampleSize: 0,
     }),
     guard("priceAlerts", () => collectPriceAlerts(db, p), []),
+    guard("deptCost", () => collectDeptCost(db, p), {
+      month: "",
+      byDept: [],
+      highestDept: null,
+      productionSen: 0,
+      nonProductionSen: 0,
+    }),
   ]);
 
   // On-time % is a delivery-derived figure; surface it on the production
@@ -1150,6 +1217,7 @@ export async function collectOperationsReport(
     quality,
     supplier,
     priceAlerts,
+    deptCost,
     _errors: errors.length ? errors : undefined,
   };
 }

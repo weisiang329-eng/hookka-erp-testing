@@ -6,8 +6,13 @@
 // daily edition; data comes from GET /api/reports/operations.json (collector
 // src/api/lib/operations-report.ts), which reuses the system's own calc logic.
 // ===========================================================================
+import { useMemo } from "react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { Loader2, Printer } from "lucide-react";
+
+// Modular product photos (same source as the catalog) — resourceId = baseModel.
+type FileRow = { id: string; resourceId?: string; isCover?: boolean };
+type FilesResp = FileRow[] | { files?: FileRow[]; data?: FileRow[] };
 
 export type Edition = "daily" | "weekly" | "monthly";
 
@@ -113,6 +118,13 @@ interface OperationsReport {
   quality: { defectPct: number | null; inspected: number };
   supplier: { onTimePct: number | null; sampleSize: number };
   priceAlerts: { materialCode: string; pctChange: number }[];
+  deptCost: {
+    month: string;
+    byDept: { dept: string; sen: number }[];
+    highestDept: string | null;
+    productionSen: number;
+    nonProductionSen: number;
+  };
 }
 type Resp = { success?: boolean; data?: OperationsReport };
 
@@ -216,6 +228,23 @@ export function OperationsEdition({ edition }: { edition: Edition }) {
     `/api/reports/operations.json?period=${edition}&date=${todayYmd()}`,
   );
   const r = raw?.data ?? null;
+
+  // baseModel → representative photo file id (cover preferred).
+  const { data: filesRaw } = useCachedJson<FilesResp>(
+    "/api/files?resourceType=modular",
+  );
+  const photoByModel = useMemo(() => {
+    const list: FileRow[] = Array.isArray(filesRaw)
+      ? filesRaw
+      : (filesRaw?.files ?? filesRaw?.data ?? []);
+    const map = new Map<string, string>();
+    for (const f of list) {
+      const rid = f.resourceId;
+      if (!rid || !f.id) continue;
+      if (!map.has(rid) || f.isCover) map.set(rid, f.id);
+    }
+    return map;
+  }, [filesRaw]);
 
   if (loading && !r) {
     return (
@@ -569,6 +598,29 @@ export function OperationsEdition({ edition }: { edition: Edition }) {
           )}
         </Desk>
 
+        {r.deptCost.byDept.length > 0 && (
+          <Desk desk="Cost Desk" headline="Department Cost">
+            <p className="mb-1.5 text-[10px] uppercase tracking-[0.1em] text-[#8A8171]">
+              Payroll ({r.deptCost.month}) · highest:{" "}
+              <b className="text-[#1F1D1B]">{r.deptCost.highestDept ?? "—"}</b>
+            </p>
+            <Rows
+              rows={[
+                ["Production depts", `RM ${rm(r.deptCost.productionSen)}`],
+                ["Non-production", `RM ${rm(r.deptCost.nonProductionSen)}`],
+              ]}
+            />
+            <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[#6B5C32]">
+              By department
+            </p>
+            <Rows
+              rows={r.deptCost.byDept
+                .slice(0, 6)
+                .map((d) => [d.dept, `RM ${rm(d.sen)}`])}
+            />
+          </Desk>
+        )}
+
         {isMonthly && (
           <Desk desk="People Desk" headline="Who Joined, Who Left">
             <p className="mt-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[#6B5C32]">
@@ -600,15 +652,39 @@ export function OperationsEdition({ edition }: { edition: Edition }) {
                 creation date.
               </p>
             ) : (
-              <Rows
-                rows={r.newProducts.map((np) => [
-                  <span>
-                    <b>{np.code}</b>{" "}
-                    <span className="text-[#6B7280]">· {np.name}</span>
-                  </span>,
-                  np.category,
-                ])}
-              />
+              <div className="grid grid-cols-2 gap-2">
+                {r.newProducts.map((np) => {
+                  const fileId = np.baseModel
+                    ? photoByModel.get(np.baseModel)
+                    : undefined;
+                  return (
+                    <div
+                      key={np.code}
+                      className="border border-[#E4DCCB] rounded overflow-hidden"
+                    >
+                      <div className="h-16 bg-[#F4EFE3] flex items-center justify-center overflow-hidden">
+                        {fileId ? (
+                          <img
+                            src={`/api/files/${fileId}/download`}
+                            alt={np.name}
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <span className="text-[#C9BEA6] text-lg">▦</span>
+                        )}
+                      </div>
+                      <div className="px-1.5 py-1">
+                        <div className="font-mono text-[11px] font-bold text-[#1F1D1B] truncate">
+                          {np.code}
+                        </div>
+                        <div className="text-[10px] text-[#6B7280] truncate">
+                          {np.category}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </Desk>
         )}

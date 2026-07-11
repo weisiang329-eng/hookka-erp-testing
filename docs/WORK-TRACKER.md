@@ -9,6 +9,57 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-11 — 🔵 Hookka Report program — BUILT + ON STAGING (verified real data)
+Operations Report LIVE on staging (staging.hookka-erp-testing.pages.dev/reports,
+default "Operations" tab). Backend collector src/api/lib/operations-report.ts (11
+sections, per-section guard → one bad query degrades not 500s, _errors diagnostics)
++ GET /api/reports/operations.json?period=daily|weekly|monthly&date=. Newspaper
+frontend src/pages/operations-report.tsx wired into src/pages/reports.tsx. Feature
+branch feature/ops-report → merged to staging (NOT main/prod yet — needs owner OK).
+VERIFIED live 200 with real numbers: 176 bf + 28 sofa units, 96 overdue, sales
+RM128k, 36 workers/11 bonus, RM9.47M stock, RM1.09M AR aging, delivery 42 DOs
+(1.4d→0.8d). Fixed en route: delivery `do` reserved-word alias; newProducts
+self-applies products.created_at.
+**Honest gaps to raise with owner:** (1) on-time 21% is real (dispatch vs internal
+hookka_expected_dd) — looks alarming, confirm the target basis; (2) foam/other
+material cost = 0 (partial month OR wrong foam itemGroup code — need owner's real
+foam category); (3) low-stock = 0 because raw_materials.minStock reorder points are
+unset — owner must set them; (4) still UNBUILT sub-metrics: dept-cost analysis
+(highest dept + Prod vs Non-prod), RM-category analysis, QC defect %, service open,
+supplier on-time rate, price-rise alerts, attendance %, new-product photos.
+Prior spec + caveats below.
+Owner approved newspaper/broadsheet design (Artifact monthly-gazette-v1) + full content
++ "就这样 proceed". Liked inventory (dead-stock idle days) content specifically. Build =
+in-app "Operations Report" page (Daily/Weekly/Monthly tabs), newspaper CSS ported into
+app (English UI), reuse EXISTING module calc helpers for口径 consistency, Print→PDF via
+existing print engine + unified letterhead. Feature → staging first, then prod on owner OK.
+Data-source mapping via 4 read-only agents in progress. Prior spec below.
+Owner wants an official daily/weekly/monthly operations report, freshly designed
+(claudedesign). Same section set, time-window + emphasis shifts (daily = act-now
+queues + per-person efficiency; weekly = trends/SLA/rankings; monthly = totals +
+analysis + cumulative). 9 base sections (owner's 5 + my 4 additions):
+1 Production (on-time %, overdue, output, production cost) ·
+2 Purchasing (PO total, top suppliers, supplier on-time, price-rise alerts) ·
+3 Delivery SOP — 3-stage SLA (produce→ship, ship→dispatch, dispatch→deliver) + pain pts ·
+4 Employee/QC (attendance, efficiency [daily=per-person, weekly=top/bottom-5, monthly=
+   cumulative bonus gate], QC defect %, Service issues) ·
+5 Sales (top-seller SKU, sales analysis + insights, one-off specials) ·
+6 Inventory (low-stock reorder alerts, FG buffer, stock value, dead stock) — MY ADD ·
+7 Finance/AR (aging 30/60/90, billed vs collected) — MY ADD ·
+8 Material variance (actual vs BOM standard = waste, fabric cost/meter) — MY ADD ·
+9 Supplier performance (on-time rate, price-rise) — MY ADD (folds into Purchasing).
+**Monthly-only additions (owner):** People changes (new hires + leavers named lists;
+promotions = no system data, skip) · New products showcase (this month's new products,
+one representative per category + product photo).
+**Weekly-only additions (owner):** Dept cost analysis (highest-cost dept + Production
+vs Non-production comparison) · Raw-material analysis (highest-cost/share RM category).
+**Dept split (owner confirmed):** Production = the 8 shop-floor depts (Sew/Cut/Uph/
+Frame…); Non-production = office/admin/sales/delivery.
+Data all from mature modules (reuse existing endpoints). NEXT: monthly mockup → owner
+approves layout → build. Not started coding.
+
+---
+
 ## 2026-07-11 — ✅ Data-tally fixes P1-P3 (owner "全做" after 4-agent audit) — ALL SHIPPED
 P2+P3 shipped in c1cb3bb0 (unify metrics + honest labels + month defaults + OCR
 confirm wiring + date clip + div-zero + consolidated-DO + 153/RM0 + same-dept skip).

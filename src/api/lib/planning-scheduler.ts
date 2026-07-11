@@ -64,6 +64,23 @@ export interface CutCard {
 /** A snapshot cell — string or number (mirrors the static JSON). */
 export type Cell = string | number;
 
+/**
+ * Machine-readable (card, day) assignment emitted to an optional collector
+ * (Phase 2 due-date proposals). `date` is the LOCAL YYYY-MM-DD of the batch's
+ * LAST scheduled cut day — the day this card's fabric finishes cutting, the
+ * same day the downstream chain couples on (cutLastDay).
+ */
+export interface CutAssignment {
+  dept: "FAB_CUT";
+  soPo: string;
+  lane: Lane;
+  fabric: string;
+  sets: number;
+  date: string;
+  /** The exact input CutCard object — an identity key for caller-side maps. */
+  card: CutCard;
+}
+
 export interface SchedulerInput {
   cards: CutCard[];
   config: CapacityConfig;
@@ -73,6 +90,12 @@ export interface SchedulerInput {
   startDate: string;
   /** Date the schedule was generated, YYYY-MM-DD (for the snapshot header). */
   generatedAt: string;
+  /**
+   * OPTIONAL collector — called once per scheduled card AFTER placement, with
+   * the machine-readable assignment. Purely additive: when omitted (every
+   * pre-Phase-2 call site) the run is byte-identical to the old behaviour.
+   */
+  collect?: (a: CutAssignment) => void;
 }
 
 export interface ScheduleSnapshot {
@@ -312,7 +335,7 @@ function buildGroups(laneRows: CutCard[], lane: Lane, cal: Calendar, cfg: Capaci
   const cap = cfg.setupCap[lane];
   const buckets = new Map<string, CutCard[]>();
   for (const r of laneRows) {
-    const key = `${r.config} ${r.size}`;
+    const key = `${r.config}\u0000${r.size}`;
     const arr = buckets.get(key) ?? [];
     arr.push(r);
     buckets.set(key, arr);
@@ -757,6 +780,16 @@ export function runCutting(input: SchedulerInput): CuttingRun {
     for (const g of laneGroups[lane]) {
       const gEnd = g.days.length ? g.days[g.days.length - 1] : g.end;
       for (const it of g.items) {
+        // Optional Phase-2 collector — additive, no effect on scheduling.
+        input.collect?.({
+          dept: "FAB_CUT",
+          soPo: it.soPo,
+          lane,
+          fabric: it.fabric,
+          sets: it.sets,
+          date: fmtIso(gEnd),
+          card: it,
+        });
         const po = it.soPo;
         if (!po) continue;
         const prev = cutLastDay.get(po);

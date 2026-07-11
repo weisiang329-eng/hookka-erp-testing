@@ -23,7 +23,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
-import { loadCapacityConfig, type Lane } from "../lib/planning-capacity";
+import { loadCapacityConfig, type CapacityConfig, type Lane } from "../lib/planning-capacity";
 import { scheduleCutting, type CutCard } from "../lib/planning-scheduler";
 import {
   computeChain,
@@ -224,6 +224,8 @@ const DEPT_CODE_TO_CHAIN: Record<string, ChainDept> = {
 };
 
 interface ChainRawRow {
+  jobCardId: string;
+  dueDate: string | null;
   departmentCode: string | null;
   status: string | null;
   wipLabel: string | null;
@@ -306,20 +308,35 @@ function normalizeChainCard(r: ChainRawRow, dept: ChainDept): ChainCard {
   };
 }
 
-// Reusable: load WAITING cards, run the full chain ONCE, and return the
-// snapshot-shaped output for ONE department. Shared by the GET route AND the
-// assistant's get_production_schedule tool so both see byte-identical plans.
-// Returns null for an unknown slug.
-export async function computeDeptSchedule(
-  db: D1Database,
-  slug: string,
-): Promise<ChainOutput[keyof ChainOutput] | null> {
-  const which = DEPT_SLUGS[slug];
-  if (!which) return null;
+// Per-card link back to the source job card, keyed by the exact normalized
+// card OBJECT (each raw row becomes exactly one CutCard / ChainCard here, so
+// object identity is a loss-free key).
+interface CardJcMeta {
+  jcId: string;
+  poId: string;
+  /** The job card's CURRENT persisted dueDate (YYYY-MM-DD) or null. */
+  currentDue: string | null;
+}
 
-  // ── ONE batched query: every WAITING production card + order + SO dates ────
+interface LoadedChainInputs {
+  cutCards: CutCard[];
+  chainCards: ChainCard[];
+  meta: Map<CutCard | ChainCard, CardJcMeta>;
+  config: CapacityConfig;
+  holidays: string[];
+  startDate: string;
+  generatedAt: string;
+}
+
+// ONE batched load of every WAITING production card + order + SO dates,
+// normalized into the chain engine's inputs. Shared by computeDeptSchedule
+// (display sheets) and computeChainWithAssignments (Phase 2 proposals) so
+// both always see the identical card set.
+async function loadChainInputs(db: D1Database): Promise<LoadedChainInputs> {
   const sql = `
-    SELECT jc.departmentCode AS departmentCode,
+    SELECT jc.id             AS jobCardId,
+           jc.dueDate        AS dueDate,
+           jc.departmentCode AS departmentCode,
            jc.status         AS status,
            jc.wipLabel       AS wipLabel,
            jc.wipCode        AS wipCode,
@@ -352,13 +369,19 @@ export async function computeDeptSchedule(
 
   const cutCards: CutCard[] = [];
   const chainCards: ChainCard[] = [];
+  const meta = new Map<CutCard | ChainCard, CardJcMeta>();
   for (const r of raw) {
     if (EXCLUDED_ORDER_STATUSES.has((r.orderStatus ?? "").toUpperCase())) continue;
     const code = (r.departmentCode ?? "").toUpperCase();
+    const jcMeta: CardJcMeta = {
+      jcId: r.jobCardId,
+      poId: r.poId,
+      currentDue: (r.dueDate ?? "").slice(0, 10) || null,
+    };
     if (code === FAB_CUT) {
       const lane = laneOf(r);
       if (lane) {
-        cutCards.push({
+        const card: CutCard = {
           soPo: soPoOfChain(r),
           customer: r.customerName ?? "",
           label: r.wipLabel ?? "",
@@ -369,18 +392,38 @@ export async function computeDeptSchedule(
           sets: Math.max(1, r.wipQty ?? 1),
           customerDd: (r.customerDeliveryDate ?? "").slice(0, 10) || null,
           expectedDd: (r.hookkaExpectedDD ?? "").slice(0, 10) || null,
-        });
+        };
+        cutCards.push(card);
+        meta.set(card, jcMeta);
       }
       continue;
     }
     const chainDept = DEPT_CODE_TO_CHAIN[code];
     if (!chainDept) continue;
     if (!laneOf(r)) continue;
-    chainCards.push(normalizeChainCard(r, chainDept));
+    const card = normalizeChainCard(r, chainDept);
+    chainCards.push(card);
+    meta.set(card, jcMeta);
   }
 
   const config = await loadCapacityConfig(db);
   const { holidays, startDate, generatedAt } = await loadCalendarWindow(db);
+  return { cutCards, chainCards, meta, config, holidays, startDate, generatedAt };
+}
+
+// Reusable: load WAITING cards, run the full chain ONCE, and return the
+// snapshot-shaped output for ONE department. Shared by the GET route AND the
+// assistant's get_production_schedule tool so both see byte-identical plans.
+// Returns null for an unknown slug.
+export async function computeDeptSchedule(
+  db: D1Database,
+  slug: string,
+): Promise<ChainOutput[keyof ChainOutput] | null> {
+  const which = DEPT_SLUGS[slug];
+  if (!which) return null;
+
+  const { cutCards, chainCards, config, holidays, startDate, generatedAt } =
+    await loadChainInputs(db);
 
   const out = computeChain({
     cutCards,
@@ -392,6 +435,71 @@ export async function computeDeptSchedule(
   });
 
   return out[which];
+}
+
+// ── Phase 2: machine-readable engine assignments (due-date proposals) ────────
+
+/** One engine-scheduled assignment tied back to its source job card(s). */
+export interface EngineAssignment {
+  /**
+   * Source job card ids. Today each normalized card maps 1:1 to a job card,
+   * so this is a single-element array; kept an array for future card-level
+   * aggregation (same line + dept collapsing).
+   */
+  jcIds: string[];
+  poId: string;
+  dept: ChainDept | "FAB_CUT";
+  soPo: string;
+  soId: string;
+  lane: string;
+  fabric: string;
+  sets: number;
+  /** Engine-scheduled working day, YYYY-MM-DD. */
+  date: string;
+  /** The job card's CURRENT persisted dueDate (YYYY-MM-DD) or null. */
+  currentDue: string | null;
+}
+
+/**
+ * Run the FULL chain once with a collector and return every (job card, day)
+ * assignment. Reuses the exact card-building of computeDeptSchedule, so the
+ * proposals always agree with the department schedule pages.
+ */
+export async function computeChainWithAssignments(db: D1Database): Promise<{
+  generatedAt: string;
+  startDate: string;
+  assignments: EngineAssignment[];
+}> {
+  const { cutCards, chainCards, meta, config, holidays, startDate, generatedAt } =
+    await loadChainInputs(db);
+
+  const assignments: EngineAssignment[] = [];
+  computeChain({
+    cutCards,
+    chainCards,
+    config,
+    holidays,
+    startDate,
+    generatedAt,
+    collect: (a) => {
+      const m = meta.get(a.card);
+      if (!m) return;
+      assignments.push({
+        jcIds: [m.jcId],
+        poId: m.poId,
+        dept: a.dept,
+        soPo: a.soPo,
+        soId: a.soId,
+        lane: a.lane,
+        fabric: a.fabric,
+        sets: a.sets,
+        date: a.date,
+        currentDue: m.currentDue,
+      });
+    },
+  });
+
+  return { generatedAt, startDate, assignments };
 }
 
 app.get("/schedule/:dept", async (c) => {

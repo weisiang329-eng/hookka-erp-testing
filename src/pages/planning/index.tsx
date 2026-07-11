@@ -198,6 +198,7 @@ const TABS = [
   { id: "loading", label: "Capacity Loading", icon: Gauge },
   { id: "leadtimes", label: "Lead Times", icon: Clock },
   { id: "tracker", label: "Master Tracker", icon: ClipboardList },
+  { id: "proposals", label: "Schedule Proposals", icon: Calendar },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -3140,6 +3141,11 @@ export default function PlanningPage() {
         </div>
       )}
 
+      {/* ═══════════════════════════════════════════ */}
+      {/* TAB 5: SCHEDULE PROPOSALS (Agent Phase 2)  */}
+      {/* ═══════════════════════════════════════════ */}
+      {activeTab === "proposals" && <ScheduleProposalsTab />}
+
       <LeadTimeHistoryDialog
         open={historyOpen}
         onClose={() => setHistoryOpen(false)}
@@ -3199,6 +3205,271 @@ export default function PlanningPage() {
       {/* In-app confirm for the auto-schedule toggle (owner rule: no naked
           toggle). Rendered once; awaited by requestToggleAutoSchedule. */}
       {confirmDialog}
+    </div>
+  );
+}
+
+// ── Schedule Proposals tab (Production Agent Phase 2) ──
+// The chain engine's per-job-card due-date PROPOSALS: generate → review →
+// approve (writes job_cards.dueDate) or reject. Read/write via
+// /api/planning/proposals*; nothing touches job cards until Approve.
+
+type ScheduleProposal = {
+  id: string;
+  generatedAt: string;
+  jcId: string;
+  poId: string;
+  dept: string;
+  soRef: string;
+  lane: string;
+  fabric: string;
+  currentDue: string | null;
+  proposedDue: string;
+  reason: string;
+  status: string;
+};
+
+const PROPOSAL_DEPT_LABEL: Record<string, string> = {
+  FAB_CUT: "Fabric Cutting",
+  FAB_SEW: "Fabric Sewing",
+  WOOD_CUT: "Wood Cutting",
+  FRAMING: "Framing",
+  WEBBING: "Webbing",
+  FOAM: "Foam Bonding",
+  UPHOLSTERY: "Upholstery",
+  PACKING: "Packing",
+};
+
+function ScheduleProposalsTab() {
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  // Same cached-GET pattern as the rest of this page (useCachedJson).
+  const {
+    data: propsResp,
+    loading,
+    refresh,
+  } = useCachedJson<{ success?: boolean; data?: ScheduleProposal[] }>(
+    "/api/planning/proposals?status=PENDING",
+  );
+  const rows = useMemo(() => propsResp?.data ?? [], [propsResp]);
+
+  const load = useCallback(() => {
+    invalidateCachePrefix("/api/planning/proposals");
+    setSelected(new Set());
+    refresh();
+  }, [refresh]);
+
+  const generate = async () => {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/planning/proposals/generate", {
+        method: "POST",
+        headers: csrfHeaders(),
+        credentials: "include",
+      });
+      const j = (await res.json()) as {
+        success?: boolean;
+        error?: string;
+        data?: { proposed?: number; unscheduled?: number; overdue?: number; superseded?: number };
+      };
+      if (!res.ok || !j?.success) throw new Error(j?.error || `HTTP ${res.status}`);
+      const d = j.data ?? {};
+      toast.success(
+        `Generated ${d.proposed ?? 0} proposal${(d.proposed ?? 0) === 1 ? "" : "s"} ` +
+          `(${d.unscheduled ?? 0} unscheduled · ${d.overdue ?? 0} overdue · ${d.superseded ?? 0} superseded).`,
+      );
+      load();
+    } catch (err) {
+      toast.error(`Generate failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const decide = async (action: "approve" | "reject") => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/planning/proposals/${action}`, {
+        method: "POST",
+        headers: csrfHeaders(),
+        body: JSON.stringify({ ids }),
+        credentials: "include",
+      });
+      const j = (await res.json()) as {
+        success?: boolean;
+        error?: string;
+        data?: { approved?: number; rejected?: number };
+      };
+      if (!res.ok || !j?.success) throw new Error(j?.error || `HTTP ${res.status}`);
+      if (action === "approve") {
+        toast.success(
+          `Approved ${j.data?.approved ?? ids.length} — job-card due dates updated.`,
+        );
+      } else {
+        toast.success(`Rejected ${j.data?.rejected ?? ids.length}.`);
+      }
+      load();
+    } catch (err) {
+      toast.error(
+        `${action === "approve" ? "Approve" : "Reject"} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const allSelected = rows.length > 0 && selected.size === rows.length;
+  const toggleAll = () => {
+    setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.id)));
+  };
+  const toggleOne = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const generatedAt = rows.length > 0 ? rows[0].generatedAt : null;
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-[#1F1D1B]">
+                <Calendar className="h-5 w-5" />
+                Schedule Proposals
+              </CardTitle>
+              <p className="mt-1 text-xs text-[#6B5C32]">
+                The planning engine's proposed due date for every waiting job card
+                that is unscheduled, overdue, or off the engine's plan. Nothing is
+                written until you approve.
+                {generatedAt && (
+                  <span className="ml-1 text-[#6B7280]">
+                    Last generated {formatDate(generatedAt)}.
+                  </span>
+                )}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" disabled={busy} onClick={generate}>
+                {busy ? (
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                ) : (
+                  <Gauge className="h-4 w-4 mr-1" />
+                )}
+                Generate now
+              </Button>
+              <Button
+                size="sm"
+                disabled={busy || selected.size === 0}
+                onClick={() => decide("approve")}
+                className="bg-[#4F7C3A] hover:bg-[#3F632E] text-white"
+              >
+                <CheckCircle2 className="h-4 w-4 mr-1" />
+                Approve selected ({selected.size})
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy || selected.size === 0}
+                onClick={() => decide("reject")}
+                className="text-[#9A3A2D]"
+              >
+                <X className="h-4 w-4 mr-1" />
+                Reject
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <div className="flex items-center justify-center py-10 text-[#6B7280]">
+              <Loader2 className="h-5 w-5 animate-spin mr-2" />
+              Loading proposals…
+            </div>
+          ) : rows.length === 0 ? (
+            <div className="py-10 text-center text-sm text-[#6B7280]">
+              No pending proposals. Click <b>Generate now</b> to run the planning
+              engine over all waiting job cards.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-[#F0ECE9]">
+                  <tr className="border-b border-[#E2DDD8]">
+                    <th className="h-9 px-3 text-left">
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={toggleAll}
+                        aria-label="Select all proposals"
+                      />
+                    </th>
+                    <th className="h-9 px-3 text-left font-medium text-[#374151]">SO / PO</th>
+                    <th className="h-9 px-3 text-left font-medium text-[#374151]">Dept</th>
+                    <th className="h-9 px-3 text-left font-medium text-[#374151]">Lane</th>
+                    <th className="h-9 px-3 text-left font-medium text-[#374151]">Fabric</th>
+                    <th className="h-9 px-3 text-left font-medium text-[#374151]">Current due</th>
+                    <th className="h-9 px-3 text-left font-medium text-[#374151]">Proposed</th>
+                    <th className="h-9 px-3 text-left font-medium text-[#374151]">Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr
+                      key={r.id}
+                      className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
+                      onClick={() => toggleOne(r.id)}
+                    >
+                      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(r.id)}
+                          onChange={() => toggleOne(r.id)}
+                          aria-label={`Select ${r.soRef}`}
+                        />
+                      </td>
+                      <td className="px-3 py-2 font-medium text-[#1F1D1B] whitespace-nowrap">
+                        {r.soRef}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {PROPOSAL_DEPT_LABEL[r.dept] ?? r.dept}
+                      </td>
+                      <td className="px-3 py-2">{r.lane}</td>
+                      <td className="px-3 py-2">{r.fabric || "—"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {r.currentDue ? (
+                          <span
+                            className={
+                              r.currentDue < r.proposedDue ? "text-[#9A3A2D]" : "text-[#1F1D1B]"
+                            }
+                          >
+                            {r.currentDue}
+                          </span>
+                        ) : (
+                          <span className="text-[#9CA3AF]">unscheduled</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap font-medium text-[#4F7C3A]">
+                        {r.proposedDue}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-[#6B7280]">{r.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

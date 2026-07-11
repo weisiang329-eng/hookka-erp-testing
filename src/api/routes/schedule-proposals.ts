@@ -36,6 +36,17 @@ interface ProposalRow {
   status: string;
   decided_at: string | null;
   decided_by: string | null;
+  // db-pg adapter folds snake_case columns to camelCase in results — every
+  // read below is dual-keyed (r.camelCase ?? r.snake_case), the codebase-wide
+  // column-rename-map rule. Reading only snake made approve write NULL dates.
+  generatedAt?: string;
+  jcId?: string;
+  poId?: string | null;
+  soRef?: string | null;
+  currentDue?: string | null;
+  proposedDue?: string;
+  decidedAt?: string | null;
+  decidedBy?: string | null;
 }
 
 function actorId(c: { get: (k: string) => unknown }): string | null {

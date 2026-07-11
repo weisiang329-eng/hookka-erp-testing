@@ -162,6 +162,42 @@ export interface WorkforceSection {
   bottomEfficiency: WorkerEff[];
 }
 
+export interface LowStockItem {
+  itemCode: string;
+  itemGroup: string;
+  balanceQty: number;
+  minStock: number;
+}
+export interface DeadStockItem {
+  itemCode: string;
+  itemGroup: string;
+  idleDays: number;
+  lastMovement: string;
+}
+export interface InventorySection {
+  rmStockValueSen: number;
+  lowStockCount: number;
+  lowStock: LowStockItem[];
+  deadStock: DeadStockItem[];
+}
+
+export interface PersonChange {
+  name: string;
+  department: string | null;
+}
+export interface PeopleSection {
+  joined: PersonChange[];
+  left: PersonChange[];
+}
+
+export interface NewProduct {
+  category: string;
+  code: string;
+  name: string;
+  baseModel: string | null;
+}
+export type NewProductsSection = NewProduct[];
+
 export interface OperationsReport {
   period: ResolvedPeriod;
   production: ProductionSection;
@@ -170,12 +206,12 @@ export interface OperationsReport {
   purchasing: PurchasingSection;
   material: MaterialSection;
   workforce: WorkforceSection;
-  // Filled in later passes — stable placeholders so the frontend contract holds.
+  inventory: InventorySection;
+  people: PeopleSection;
+  newProducts: NewProductsSection;
+  // Filled in the delivery pass — stable placeholders so the contract holds.
   delivery: null;
-  inventory: null;
   receivables: null;
-  people: null;
-  newProducts: null;
 }
 
 type Db = D1Database;
@@ -488,6 +524,176 @@ async function collectWorkforce(
   };
 }
 
+function daysBetweenYmd(fromYmd: string, toYmd: string): number {
+  const a = new Date(fromYmd + "T00:00:00Z").getTime();
+  const b = new Date(toYmd + "T00:00:00Z").getTime();
+  return Math.round((b - a) / 86400000);
+}
+
+async function collectInventory(db: Db, orgId: string): Promise<InventorySection> {
+  // Live snapshot — reorder status has no time dimension. Reference "today"
+  // (UTC date is close enough for idle-day bucketing).
+  const todayYmd = new Date().toISOString().slice(0, 10);
+
+  // Raw-material stock value = Σ remaining FIFO layers × unit cost.
+  const valueRow = await db
+    .prepare(
+      `SELECT COALESCE(SUM(b.remaining_qty * b.unit_cost_sen),0) AS "v"
+         FROM rm_batches b
+         JOIN raw_materials rm ON rm.id = b.rm_id
+        WHERE rm.orgId = ?`,
+    )
+    .bind(orgId)
+    .first<{ v: number }>();
+
+  // Low stock — replicates the procurement page's lowStockRMs filter
+  // (minStock > 0 AND balanceQty <= minStock; minStock 0 = "no threshold set").
+  const lowRows = await db
+    .prepare(
+      `SELECT itemCode AS "itemCode", itemGroup AS "itemGroup",
+              balanceQty AS "balanceQty", minStock AS "minStock"
+         FROM raw_materials
+        WHERE orgId = ? AND minStock > 0 AND balanceQty <= minStock
+        ORDER BY (balanceQty - minStock) ASC
+        LIMIT 12`,
+    )
+    .bind(orgId)
+    .all<{
+      itemCode: string;
+      itemGroup: string;
+      balanceQty: number;
+      minStock: number;
+    }>();
+
+  const lowCountRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM raw_materials
+        WHERE orgId = ? AND minStock > 0 AND balanceQty <= minStock`,
+    )
+    .bind(orgId)
+    .first<{ n: number }>();
+
+  // Dead stock — last movement per RM from the cost ledger; idle > 90 days.
+  // RMs with no ledger movement can't be dated, so they don't appear.
+  const moveRows = await db
+    .prepare(
+      `SELECT rm.itemCode AS "itemCode", rm.itemGroup AS "itemGroup",
+              MAX(substr(cl.date::text, 1, 10)) AS "lastMovement"
+         FROM cost_ledger cl
+         JOIN raw_materials rm ON rm.id = cl.itemId
+        WHERE rm.orgId = ?
+        GROUP BY rm.itemCode, rm.itemGroup`,
+    )
+    .bind(orgId)
+    .all<{ itemCode: string; itemGroup: string; lastMovement: string | null }>();
+
+  const deadStock: DeadStockItem[] = [];
+  for (const r of moveRows.results ?? []) {
+    if (!r.lastMovement) continue;
+    const idle = daysBetweenYmd(r.lastMovement, todayYmd);
+    if (idle > 90) {
+      deadStock.push({
+        itemCode: r.itemCode,
+        itemGroup: r.itemGroup,
+        idleDays: idle,
+        lastMovement: r.lastMovement,
+      });
+    }
+  }
+  deadStock.sort((a, b) => b.idleDays - a.idleDays);
+
+  return {
+    rmStockValueSen: Number(valueRow?.v ?? 0),
+    lowStockCount: Number(lowCountRow?.n ?? 0),
+    lowStock: (lowRows.results ?? []).map((r) => ({
+      itemCode: r.itemCode,
+      itemGroup: r.itemGroup,
+      balanceQty: Number(r.balanceQty ?? 0),
+      minStock: Number(r.minStock ?? 0),
+    })),
+    deadStock: deadStock.slice(0, 8),
+  };
+}
+
+async function collectPeople(db: Db, p: ResolvedPeriod): Promise<PeopleSection> {
+  // SELECT * — the workers table 500s on a camelCase column projection
+  // (see MEMORY worker_punch_clock); read dual-keyed off the full row.
+  const rows = await db
+    .prepare("SELECT * FROM workers")
+    .bind()
+    .all<Record<string, unknown>>();
+
+  const inWindow = (v: unknown): boolean => {
+    if (typeof v !== "string" || v.length < 7) return false;
+    const d = v.slice(0, 10);
+    return d >= p.startYmd && d <= p.endYmd;
+  };
+  const pick = (r: Record<string, unknown>, ...keys: string[]): unknown => {
+    for (const k of keys) if (r[k] != null) return r[k];
+    return null;
+  };
+  const dept = (r: Record<string, unknown>): string | null => {
+    const d = pick(r, "department", "departmentCode", "dept");
+    return typeof d === "string" && d ? d : null;
+  };
+  const name = (r: Record<string, unknown>): string =>
+    String(pick(r, "name", "empName", "workerName") ?? "—");
+
+  const joined: PersonChange[] = [];
+  const left: PersonChange[] = [];
+  for (const r of rows.results ?? []) {
+    const empNo = String(pick(r, "empNo", "emp_no") ?? "");
+    if (empNo.startsWith("TEST")) continue;
+    if (inWindow(pick(r, "joinDate", "join_date"))) {
+      joined.push({ name: name(r), department: dept(r) });
+    }
+    const status = String(pick(r, "status") ?? "");
+    if (status === "RESIGNED" && inWindow(pick(r, "resignedAt", "resigned_at"))) {
+      left.push({ name: name(r), department: dept(r) });
+    }
+  }
+  return { joined, left };
+}
+
+async function collectNewProducts(
+  db: Db,
+  p: ResolvedPeriod,
+): Promise<NewProductsSection> {
+  // products has no orgId (global catalog). created_at was added for this
+  // report — historical rows are NULL and simply don't appear.
+  const rows = await db
+    .prepare(
+      `SELECT code, name, category, baseModel AS "baseModel"
+         FROM products
+        WHERE created_at IS NOT NULL
+          AND substr(created_at, 1, 10) >= ? AND substr(created_at, 1, 10) <= ?
+        ORDER BY created_at ASC`,
+    )
+    .bind(p.startYmd, p.endYmd)
+    .all<{
+      code: string;
+      name: string;
+      category: string;
+      baseModel: string | null;
+    }>();
+
+  // One representative per category — the first created that month.
+  const seen = new Set<string>();
+  const out: NewProduct[] = [];
+  for (const r of rows.results ?? []) {
+    const cat = r.category || "OTHER";
+    if (seen.has(cat)) continue;
+    seen.add(cat);
+    out.push({
+      category: cat,
+      code: r.code,
+      name: r.name,
+      baseModel: r.baseModel ?? null,
+    });
+  }
+  return out;
+}
+
 // -- assembler --------------------------------------------------------------
 
 export async function collectOperationsReport(
@@ -498,15 +704,27 @@ export async function collectOperationsReport(
 ): Promise<OperationsReport> {
   const p = resolvePeriod(period, anchorYmd);
 
-  const [production, productionCost, sales, purchasing, material, workforce] =
-    await Promise.all([
-      collectProduction(db, orgId, p),
-      collectProductionCost(db, orgId, p),
-      collectSales(db, orgId, p),
-      collectPurchasing(db, orgId, p),
-      collectMaterial(db, orgId, p),
-      collectWorkforce(db, orgId, p),
-    ]);
+  const [
+    production,
+    productionCost,
+    sales,
+    purchasing,
+    material,
+    workforce,
+    inventory,
+    people,
+    newProducts,
+  ] = await Promise.all([
+    collectProduction(db, orgId, p),
+    collectProductionCost(db, orgId, p),
+    collectSales(db, orgId, p),
+    collectPurchasing(db, orgId, p),
+    collectMaterial(db, orgId, p),
+    collectWorkforce(db, orgId, p),
+    collectInventory(db, orgId),
+    collectPeople(db, p),
+    collectNewProducts(db, p),
+  ]);
 
   return {
     period: p,
@@ -516,10 +734,10 @@ export async function collectOperationsReport(
     purchasing,
     material,
     workforce,
+    inventory,
+    people,
+    newProducts,
     delivery: null,
-    inventory: null,
     receivables: null,
-    people: null,
-    newProducts: null,
   };
 }

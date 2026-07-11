@@ -1324,7 +1324,6 @@ export default function InventoryPage() {
   const [rmBulkMode, setRmBulkMode] = useState(false);
   const [rmBulkTicked, setRmBulkTicked] = useState<Set<string>>(new Set());
   const [rmBulkBusy, setRmBulkBusy] = useState(false);
-  const [rmNewVariant, setRmNewVariant] = useState("");
   // Dedicated Material Categories maintenance (owner 2026-07-11) — a standalone
   // modal to set up each category's variant list up front (the same lists the
   // Add RM bulk form reads).
@@ -1365,24 +1364,6 @@ export default function InventoryPage() {
   }
   function removeVariantFromCat(cat: string, val: string) {
     saveRmVariants({ ...rmVariantsAll, [cat]: catVariants(cat).filter((x) => x !== val) });
-  }
-  function addRmVariant() {
-    const v = rmNewVariant.trim();
-    if (!v || rmCatVariants.includes(v)) {
-      setRmNewVariant("");
-      return;
-    }
-    saveRmVariants({ ...rmVariantsAll, [rmForm.itemGroup]: [...rmCatVariants, v] });
-    setRmBulkTicked((prev) => new Set(prev).add(v));
-    setRmNewVariant("");
-  }
-  function removeRmVariant(v: string) {
-    saveRmVariants({ ...rmVariantsAll, [rmForm.itemGroup]: rmCatVariants.filter((x) => x !== v) });
-    setRmBulkTicked((prev) => {
-      const n = new Set(prev);
-      n.delete(v);
-      return n;
-    });
   }
   async function runRmBulkGenerate() {
     if (rmBulkBusy) return;
@@ -2685,18 +2666,12 @@ export default function InventoryPage() {
                               <span className={`w-4 h-4 flex-shrink-0 rounded-sm border flex items-center justify-center ${on ? "bg-[#6B5C32] border-[#6B5C32] text-white" : "border-gray-300"}`}>{on ? <Check className="w-3 h-3" /> : null}</span>
                               <span className="font-mono">{v}</span>
                             </button>
-                            <button onClick={() => removeRmVariant(v)} className="text-[#9A3A2D]/50 hover:text-[#9A3A2D]" title="Remove this variant from the category">
-                              <X className="w-3 h-3" />
-                            </button>
                           </span>
                         );
                       })}
-                      {rmCatVariants.length === 0 && <span className="text-sm text-gray-400">No variants yet for {rmForm.itemGroup} — add one below.</span>}
+                      {rmCatVariants.length === 0 && <span className="text-sm text-gray-400">No variants for {rmForm.itemGroup} yet — add them in the Categories manager (toolbar), then come back here.</span>}
                     </div>
-                    <div className="flex gap-2 mb-4 max-w-sm">
-                      <input value={rmNewVariant} onChange={e => setRmNewVariant(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addRmVariant(); } }} className="flex-1 border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder={`Add a ${rmForm.itemGroup} variant (e.g. 6mm)`} />
-                      <Button variant="outline" size="sm" onClick={addRmVariant} disabled={!rmNewVariant.trim()}><Plus className="h-4 w-4" /> Add</Button>
-                    </div>
+                    <div className="text-xs text-gray-400 mb-4">Tick which variants to generate. To add or remove the variants themselves, use the <b>Categories</b> button — the preset is locked here so it can't be changed by accident.</div>
 
                     <div className="bg-[#FAF6EF] border border-[#E2DDD8] rounded-md p-3">
                       <div className="text-xs text-gray-500 mb-2">Will create <b className="text-[#6B5C32]">{rmBulkPreview.length}</b> material{rmBulkPreview.length === 1 ? "" : "s"} — Balance Qty starts 0</div>

@@ -123,6 +123,28 @@ export interface CapacityConfig {
   laneConfirmed: Record<Lane, boolean>;
   /** Downstream-chain capacities + handoffs (sew → … → packing). */
   chain: ChainConfig;
+  /**
+   * CNC cutting model (owner 2026-07-11). Fabric Cutting moved from the
+   * slot-based "cuts/day" model to ONE CNC machine cutting in MINUTES:
+   *   - a bedframe SET (Headboard + Divan together) ≈ 8 min
+   *   - a sofa SET ≈ 20 min
+   *   - an accessory / pillow piece ≈ 4 min
+   *   - every fabric/colour change ≈ 10 min re-rigging — so scheduling must
+   *     batch SAME-FABRIC work together (fabric is the primary grouping key).
+   * Machine count 1; daily runtime follows demand (no hard cap) — the
+   * `referenceDayMin` is only a reporting yardstick (≈ one 9h shift) for
+   * "today's CNC load ≈ X hours" style displays, not a scheduling ceiling.
+   * These feed the Morning Brief now and Scheduler v2 (fabric-first batching)
+   * next; the legacy slot fields above stay until v2 replaces them.
+   */
+  cnc: {
+    bedframeSetMin: number;
+    sofaSetMin: number;
+    accessoryPieceMin: number;
+    fabricChangeMin: number;
+    machines: number;
+    referenceDayMin: number;
+  };
 }
 
 /**
@@ -150,6 +172,14 @@ export const DEFAULT_CAPACITY_CONFIG: CapacityConfig = {
   clusterLanes: ["BEDFRAME", "SOFA"],
   laneConfirmed: { BEDFRAME: true, SOFA: true, ACCESSORY: false },
   chain: DEFAULT_CHAIN_CONFIG,
+  cnc: {
+    bedframeSetMin: 8,
+    sofaSetMin: 20,
+    accessoryPieceMin: 4,
+    fabricChangeMin: 10,
+    machines: 1,
+    referenceDayMin: 9 * 60,
+  },
 };
 
 /** Minimal DB shape — mirrors the `.first()` accessor used across routes. */
@@ -180,6 +210,7 @@ function cloneDefaults(): CapacityConfig {
     clusterLanes: [...DEFAULT_CAPACITY_CONFIG.clusterLanes],
     laneConfirmed: { ...DEFAULT_CAPACITY_CONFIG.laneConfirmed },
     chain: cloneChain(),
+    cnc: { ...DEFAULT_CAPACITY_CONFIG.cnc },
   };
 }
 
@@ -309,6 +340,24 @@ export function mergeCapacityConfig(override: unknown): CapacityConfig {
     }
   }
   mergeChain(cfg.chain, o.chain);
+  // CNC model overrides (owner-tunable per-key; invalid values keep defaults).
+  if (typeof o.cnc === "object" && o.cnc !== null) {
+    const oc = o.cnc as Record<string, unknown>;
+    const keys = [
+      "bedframeSetMin",
+      "sofaSetMin",
+      "accessoryPieceMin",
+      "fabricChangeMin",
+      "machines",
+      "referenceDayMin",
+    ] as const;
+    for (const k of keys) {
+      const v = oc[k];
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+        cfg.cnc[k] = k === "machines" ? Math.max(1, Math.floor(v)) : v;
+      }
+    }
+  }
   return cfg;
 }
 

@@ -249,6 +249,31 @@ type ComplianceResp = {
   };
 };
 
+// Morning Brief JSON — minimal projection of production-brief.ts BriefData.
+type BriefResp = {
+  success?: boolean;
+  data?: {
+    date: string;
+    schedule: { totals: { jobCards: number; prodMinutes: number } };
+    cnc: {
+      bedframeSets: number;
+      sofaSets: number;
+      accessoryPieces: number;
+      fabricCount: number;
+      changeoverMinutes: number;
+      totalMinutes: number;
+      referenceDays: number;
+    };
+    drift: Array<{
+      category: string;
+      configuredMin: number;
+      actualMin: number | null;
+      driftPct: number | null;
+      flagged: boolean;
+    }>;
+  };
+};
+
 const PROD_DEPTS = new Set([
   "FAB_CUT",
   "FAB_SEW",
@@ -740,6 +765,11 @@ export default function DashboardBPage() {
   const { data: compRaw, loading: compL } =
     useCachedJson<ComplianceResp>("/api/reports/compliance.json");
   const compCounts = compRaw?.data?.counts;
+  // Production Morning Brief (Agent Phase 1) — the no-AI JSON variant, so the
+  // card is fast + free; the full HTML (with AI focus) opens in a new tab.
+  const { data: briefRaw, loading: briefL } =
+    useCachedJson<BriefResp>("/api/reports/brief.json");
+  const brief = briefRaw?.data;
 
   // Progressive render — the page used to block on ALL nine fetches before
   // painting anything. Now it gates only on the overview fetch, which is
@@ -1211,6 +1241,67 @@ export default function DashboardBPage() {
                 View Daily Report
                 <ArrowUpRight className="h-3.5 w-3.5" />
               </Link>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Production Morning Brief (Production Agent Phase 1) — CNC queue in
+          the new minutes model + today's plan headline. Full brief (with the
+          AI focus paragraph) opens as HTML in a new tab; emailed 07:00 MYT. */}
+      <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+        <CardContent className="p-5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-4">
+              <div className="rounded-xl bg-[#F5F2ED] p-3">
+                <Factory className="h-6 w-6 text-[#6B5C32]" />
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550]">
+                  Morning Brief · CNC Queue
+                </p>
+                {briefL && !brief ? (
+                  <Skeleton height={30} width={96} className="mt-1" />
+                ) : (
+                  <p className="mt-0.5 text-3xl font-[800] tabular-nums leading-none text-[#1F1D1B]">
+                    {brief ? `${brief.cnc.referenceDays}d` : "—"}
+                  </p>
+                )}
+                <p className="text-xs text-[#9CA3AF] mt-1">
+                  {brief
+                    ? `${brief.cnc.bedframeSets} BF + ${brief.cnc.sofaSets} sofa + ${brief.cnc.accessoryPieces} acc over ${brief.cnc.fabricCount} fabrics · ${Math.round(brief.cnc.changeoverMinutes)}m changeovers`
+                    : "cutting queue at the CNC minute rates"}
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {brief &&
+                brief.drift
+                  .filter((x) => x.flagged)
+                  .map((x) => (
+                    <span
+                      key={x.category}
+                      title={`Actual ${x.actualMin}m/set vs configured ${x.configuredMin}m — update the CNC config if this is the new normal`}
+                      className="inline-flex items-center gap-1 rounded-full border border-[#FCD34D] bg-[#FEF3C7] px-2.5 py-1 text-[11px] font-semibold text-[#92400E]"
+                    >
+                      {x.category} speed {x.driftPct! > 0 ? "+" : ""}
+                      {x.driftPct}%
+                    </span>
+                  ))}
+              {brief && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-[#E2DDD8] bg-[#F7F4EF] px-2.5 py-1 text-[11px] font-semibold text-[#5A5550]">
+                  Today {brief.schedule.totals.jobCards} cards
+                </span>
+              )}
+              <a
+                href="/api/reports/brief"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 rounded-md bg-[#6B5C32] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#4D4224]"
+              >
+                Open Morning Brief
+                <ArrowUpRight className="h-3.5 w-3.5" />
+              </a>
             </div>
           </div>
         </CardContent>

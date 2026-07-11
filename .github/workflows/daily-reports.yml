@@ -1,4 +1,4 @@
-name: Daily Reports — Schedule / Efficiency / Overdue
+name: Daily Reports — Brief / Schedule / Efficiency / Overdue
 
 # Hits the three /api/internal/reports/*-trigger endpoints at fixed SGT
 # times. Times in cron syntax are UTC, so:
@@ -18,6 +18,7 @@ name: Daily Reports — Schedule / Efficiency / Overdue
 
 on:
   schedule:
+    - cron: '0 23 * * *'  # 07:00 SGT (next day) — Production Morning Brief
     - cron: '0 0 * * *'   # 08:00 SGT — Production Schedule
     - cron: '0 4 * * *'   # 12:00 SGT — Efficiency Report
     - cron: '0 9 * * *'   # 17:00 SGT — Overdue Report
@@ -30,6 +31,7 @@ on:
         default: 'all'
         options:
           - all
+          - brief
           - schedule
           - efficiency
           - overdue
@@ -53,17 +55,19 @@ jobs:
         run: |
           if [ "$GH_EVENT" = "workflow_dispatch" ]; then
             case "${KIND_INPUT:-all}" in
+              brief)      echo "kinds=brief" >> "$GITHUB_OUTPUT" ;;
               schedule)   echo "kinds=schedule" >> "$GITHUB_OUTPUT" ;;
               efficiency) echo "kinds=efficiency" >> "$GITHUB_OUTPUT" ;;
               overdue)    echo "kinds=overdue" >> "$GITHUB_OUTPUT" ;;
-              *)          echo "kinds=schedule efficiency overdue" >> "$GITHUB_OUTPUT" ;;
+              *)          echo "kinds=brief schedule efficiency overdue" >> "$GITHUB_OUTPUT" ;;
             esac
           else
             case "$CRON_EXPR" in
+              "0 23 * * *") echo "kinds=brief"     >> "$GITHUB_OUTPUT" ;;
               "0 0 * * *") echo "kinds=schedule"   >> "$GITHUB_OUTPUT" ;;
               "0 4 * * *") echo "kinds=efficiency" >> "$GITHUB_OUTPUT" ;;
               "0 9 * * *") echo "kinds=overdue"    >> "$GITHUB_OUTPUT" ;;
-              *)           echo "kinds=schedule efficiency overdue" >> "$GITHUB_OUTPUT" ;;
+              *)           echo "kinds=brief schedule efficiency overdue" >> "$GITHUB_OUTPUT" ;;
             esac
           fi
 

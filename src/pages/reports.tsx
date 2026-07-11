@@ -14,9 +14,7 @@ import {
   Download,
   Loader2,
   FileSpreadsheet,
-  Newspaper,
 } from "lucide-react";
-import OperationsReportTab from "./operations-report";
 
 // ── Types mirroring API response shapes ──────────────────────────────
 
@@ -298,11 +296,6 @@ function ReportTable({
 // ── Tab definitions ──────────────────────────────────────────────────
 
 const TABS = [
-  {
-    id: "operations",
-    label: "Operations",
-    icon: <Newspaper className="h-4 w-4" />,
-  },
   { id: "sales", label: "Sales", icon: <ShoppingCart className="h-4 w-4" /> },
   {
     id: "production",
@@ -1333,7 +1326,7 @@ export default function ReportsPage() {
   const isValidTab = (t: string | null): t is TabId =>
     !!t && (TABS as readonly { id: string }[]).some((x) => x.id === t);
   const [activeTab, setActiveTabState] = useState<TabId>(
-    isValidTab(tabFromUrl) ? tabFromUrl : "operations",
+    isValidTab(tabFromUrl) ? tabFromUrl : "sales",
   );
   // Whenever the URL ?tab= changes (back / forward / external nav),
   // sync activeTab to it so the visible pane matches the address bar.
@@ -1350,7 +1343,7 @@ export default function ReportsPage() {
       setSearchParams(
         (prev) => {
           const params = new URLSearchParams(prev);
-          if (next === "operations") params.delete("tab");
+          if (next === "sales") params.delete("tab");
           else params.set("tab", next);
           return params;
         },
@@ -1392,7 +1385,6 @@ export default function ReportsPage() {
 
       {/* Tab Content */}
       <div>
-        {activeTab === "operations" && <OperationsReportTab />}
         {activeTab === "sales" && <SalesReportTab />}
         {activeTab === "production" && <ProductionReportTab />}
         {activeTab === "inventory" && <InventoryReportTab />}

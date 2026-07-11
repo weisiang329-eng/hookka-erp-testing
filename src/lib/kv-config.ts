@@ -532,6 +532,11 @@ export type VariantsConfig = {
   sofaLegHeights?: unknown[];
   sofaSpecials?: unknown[];
   sofaSizes?: string[];
+  // Add FG bulk-generate catalogs (owner 2026-07-11).
+  bedframeSizes?: unknown[];
+  sofaCompartments?: string[];
+  // Add RM bulk-generate: raw-material category (itemGroup) → variant suffixes.
+  materialVariants?: Record<string, string[]>;
   [extra: string]: unknown;
 };
 

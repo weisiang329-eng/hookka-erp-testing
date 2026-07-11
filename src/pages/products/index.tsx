@@ -1224,9 +1224,14 @@ function MaintenanceView() {
   // Bedframe Sizes is the one object-shaped list (code · label · dimensions);
   // it gets its own 3-column inline editor instead of the value/price row.
   const isBedframeSizesTab = tab === "bedframeSizes";
-  const currentStringList = !isFabricsTab && !isPricedTab && !isBedframeSizesTab ? (config[tab as MaintenanceListKey] as string[]) : [];
+  // Sofa Compartments is a plain string list, but its editor also carries the
+  // per-compartment Default BOM + Unit M3 controls (owner 2026-07-11), so it
+  // gets its own render branch rather than the bare string editor.
+  const isSofaCompartmentsTab = tab === "sofaCompartments";
+  const currentStringList = !isFabricsTab && !isPricedTab && !isBedframeSizesTab && !isSofaCompartmentsTab ? (config[tab as MaintenanceListKey] as string[]) : [];
   const currentPricedList = !isFabricsTab && isPricedTab ? (config[tab as MaintenanceListKey] as PricedOption[]) : [];
   const currentBedframeSizes = isBedframeSizesTab ? config.bedframeSizes : [];
+  const currentSofaCompartments = isSofaCompartmentsTab ? config.sofaCompartments : [];
 
   function addEntry() {
     if (isFabricsTab || !editMode) return;
@@ -1675,7 +1680,35 @@ function MaintenanceView() {
 
               {/* List */}
               <div className="space-y-1.5">
-                {isBedframeSizesTab ? (
+                {isSofaCompartmentsTab ? (
+                  currentSofaCompartments.length === 0 ? (
+                    <div className="text-center py-10 text-sm text-gray-400 bg-[#FAF9F7] rounded-md border border-dashed border-[#E2DDD8]">
+                      {editMode ? "No compartments yet. Add one above." : "No compartments."}
+                    </div>
+                  ) : (
+                    currentSofaCompartments.map((code, idx) => (
+                      <div key={`sofacomp-${idx}`} className="flex items-center gap-2 px-3 py-2 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md hover:bg-white transition-colors">
+                        <span className="text-[10px] text-gray-400 font-mono w-6 flex-shrink-0">{idx + 1}</span>
+                        <span className="text-sm font-mono font-medium text-[#111827] w-28 flex-shrink-0">{code}</span>
+                        {editMode ? (
+                          <>
+                            <select value={variantBomDefaults[code]?.defaultBom ?? ""} onChange={(e) => updateVariantDefault(code, { defaultBom: e.target.value || undefined })} title="Default BOM to copy from on Add FG generate" className="text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-40 flex-shrink-0">
+                              <option value="">BOM: —</option>
+                              {bomTemplateList.filter((t) => (t.category || "").toUpperCase() === "SOFA").map((t) => <option key={t.productCode} value={t.productCode}>{t.productCode}</option>)}
+                            </select>
+                            <input type="number" step="0.001" min={0} onFocus={(e) => e.currentTarget.select()} value={variantBomDefaults[code]?.unitM3 ?? ""} onChange={(e) => updateVariantDefault(code, { unitM3: e.target.value === "" ? undefined : parseFloat(e.target.value) })} placeholder="M³" title="Default Unit M3" className="text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-20 flex-shrink-0" />
+                            <button onClick={() => removeEntry(idx)} className="ml-auto p-1.5 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded flex-shrink-0" title="Remove"><Trash2 className="w-4 h-4" /></button>
+                          </>
+                        ) : (
+                          <span className="text-sm text-gray-500">
+                            {variantBomDefaults[code]?.defaultBom ? <>BOM <span className="font-mono text-[#6B5C32]">{variantBomDefaults[code]?.defaultBom}</span></> : "—"}
+                            {variantBomDefaults[code]?.unitM3 != null ? <span className="text-gray-400"> · M³ {variantBomDefaults[code]?.unitM3}</span> : null}
+                          </span>
+                        )}
+                      </div>
+                    ))
+                  )
+                ) : isBedframeSizesTab ? (
                   currentBedframeSizes.length === 0 ? (
                     <div className="text-center py-10 text-sm text-gray-400 bg-[#FAF9F7] rounded-md border border-dashed border-[#E2DDD8]">
                       {editMode ? "No sizes yet. Click Add size to start." : "No sizes."}

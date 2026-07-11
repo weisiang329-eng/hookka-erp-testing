@@ -961,6 +961,7 @@ import rdTeamMembers from "./routes/rd-team-members";
 import scheduling from "./routes/scheduling";
 import planningSchedule from "./routes/planning-schedule";
 import scheduleProposals from "./routes/schedule-proposals";
+import deliveryAgent, { internal as deliveryAgentInternal } from "./routes/delivery-agent";
 import scanPo from "./routes/scan-po";
 import scanSupplier from "./routes/scan-supplier";
 import scanFinance from "./routes/scan-finance";
@@ -1187,6 +1188,12 @@ app.route("/api/planning", planningSchedule);
 // Phase 2 due-date proposals share the /api/planning prefix (Hono composes
 // multiple sub-routers on one path; the paths don't overlap).
 app.route("/api/planning", scheduleProposals);
+// Delivery Agent (TMS) — brief + LOAD_PLAN/INVOICE_GAP/POD_CHASE proposals.
+// Proposal-only: approve never creates/dispatches DOs (see routes file).
+// The /api/internal/delivery-agent/* trigger is public-path + CRON_SECRET-
+// gated (PUBLIC_PREFIXES in auth-middleware), mirroring /api/internal/reports.
+app.route("/api/delivery-agent", deliveryAgent);
+app.route("/api/internal/delivery-agent", deliveryAgentInternal);
 app.route("/api/scan-po", scanPo);
 app.route("/api/scan-supplier", scanSupplier);
 app.route("/api/scan-finance", scanFinance);
@@ -1226,6 +1233,13 @@ app.route("/api/internal/reports", reportsInternal);
 // query helpers in src/api/lib/assistant-tools.ts. See routes/assistant.ts.
 import assistant from "./routes/assistant";
 app.route("/api/assistant", assistant);
+
+// Agent Console (Production Agent Phase 3) — SUPER_ADMIN-only status +
+// one-click controls (run-now / pause / kill-all / rollback / approval gate)
+// for every agent. Mounted AFTER reports so ./routes/agent-console.ts can
+// import dispatchReport from ./routes/reports without a cycle at runtime.
+import agentConsole from "./routes/agent-console";
+app.route("/api/agents", agentConsole);
 
 // Catch-all error handler (Sprint 5). Hono's default behaviour is to surface
 // a 500 with the error message — fine for dev, but in prod we want every

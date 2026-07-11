@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useInterval } from "@/lib/scheduler";
 import {
   Activity,
+  Bot,
   LayoutDashboard,
   ShoppingCart,
   Factory,
@@ -289,6 +290,15 @@ const SUPER_ADMIN_HEALTH_LINK: NavItem = {
   href: "/admin/health",
   icon: Activity,
 };
+// Agent Console (Production Agent Phase 3) — SUPER_ADMIN-only mission
+// control for the agents (status lights + run-now / pause / kill-all /
+// rollback / approval gate). Gated by RequireRole in dashboard-routes.tsx
+// AND requireSuperAdmin on every /api/agents route.
+const SUPER_ADMIN_AGENTS_LINK: NavItem = {
+  name: "Agent Console",
+  href: "/agents",
+  icon: Bot,
+};
 
 type OrgInfo = {
   id: string;
@@ -515,6 +525,7 @@ export function Sidebar({
         ...items.slice(0, insertAt),
         SUPER_ADMIN_LINK,
         SUPER_ADMIN_HEALTH_LINK,
+        SUPER_ADMIN_AGENTS_LINK,
         ...items.slice(insertAt),
       ];
     }

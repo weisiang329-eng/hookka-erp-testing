@@ -153,6 +153,9 @@ const SettingsUsers = lazy(() => import('./pages/settings/Users'))
 
 // Admin (SUPER_ADMIN-only screens — system health, etc.)
 const AdminHealth = lazy(() => import('./pages/admin/health'))
+// Agent Console (Production Agent Phase 3) — SUPER_ADMIN-only status +
+// one-click controls for every agent (run-now / pause / kill-all / rollback).
+const AgentConsole = lazy(() => import('./pages/agents'))
 
 // 2FA setup (any authenticated user — soft-prompt destination from /login).
 const Setup2FA = lazy(() => import('./pages/setup-2fa'))
@@ -466,6 +469,17 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
     ),
   },
 
+  // Agent Console — SUPER_ADMIN only, same defense-in-depth as /admin/health
+  // (RequireRole here + requireSuperAdmin on every /api/agents route).
+  {
+    path: '/agents',
+    element: (
+      <RequireRole role="SUPER_ADMIN">
+        <S><AgentConsole /></S>
+      </RequireRole>
+    ),
+  },
+
   // 2FA setup — any authenticated user (RequireAuth on the parent layout
   // already gates it). The page reads location.state.severity to decide
   // whether to show the "Skip for now" link (omitted when severity = "hard").
@@ -571,6 +585,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/settings/organisations': () => import('./pages/settings/organisations'),
   '/settings/users': () => import('./pages/settings/Users'),
   '/admin/health': () => import('./pages/admin/health'),
+  '/agents': () => import('./pages/agents'),
 }
 
 // Per-path dedupe — once a chunk has been requested we never request it

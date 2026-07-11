@@ -171,6 +171,7 @@ async function buildCustomerPaymentRestate(
     method?: string | null;
     reference?: string | null;
     bankAccount?: string;
+    date?: string | null;
     allocations?: Allocation[];
   },
   actorUserId: string | null,
@@ -316,17 +317,23 @@ async function buildCustomerPaymentRestate(
       .bind(id, orgId, `payment_restate_post:${stamp}`),
   );
 
-  // 5. Update the receipt row in place (same id + receiptNumber).
+  // 5. Update the receipt row in place (same id + receiptNumber). The document
+  //    date is editable too (owner 2026-07-07) — the GL month follows it via
+  //    the doc-date family (payment_records.date), no leg rewrite needed.
+  const restateDate = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? "").trim())
+    ? String(body.date).trim()
+    : existing.date;
   statements.push(
     db
       .prepare(
-        `UPDATE payment_records SET amount = ?, method = ?, reference = ?, allocations = ? WHERE id = ?`,
+        `UPDATE payment_records SET amount = ?, method = ?, reference = ?, allocations = ?, date = ? WHERE id = ?`,
       )
       .bind(
         newTotal,
         body.method ?? existing.method,
         body.reference ?? existing.reference,
         JSON.stringify(newAllocs),
+        restateDate,
         id,
       ),
   );
@@ -576,7 +583,14 @@ app.post("/", async (c) => {
     }
 
     const id = genPaymentId();
-    const date = new Date().toISOString().split("T")[0];
+    // Document date (owner 2026-07-07): the operator dates the receipt (money
+    // often lands days before it's keyed in) — falls back to today. Drives the
+    // receipt number's month, payment_records/invoice_payments dates and the
+    // GL month bucket (doc-date family 'payment' reads payment_records.date).
+    const bodyDate = String(body.date ?? "").trim();
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(bodyDate)
+      ? bodyDate
+      : new Date().toISOString().split("T")[0];
     const receiptNumber = body.receiptNumber || (await issueDocNumber(c.var.DB, {
       bankAccountCode: depositAcct,
       direction: "in",

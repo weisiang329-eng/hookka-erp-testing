@@ -183,6 +183,10 @@ const EXPECTED_PRE_AUTH_ROUTES = [
   // like the rest of /api/internal/*; idempotent re-run of the owner's
   // "Post to GL" button so 400-0000 can't silently drift again.
   "POST /api/internal/nightly-pi-gl-backfill",
+  // Nightly AR/AP running-counter rebuild (added 2026-07-06). CRON_SECRET-
+  // gated; resets customers/suppliers outstandingSen to document truth so
+  // the counters cannot silently drift (same fns as the Recalculate button).
+  "POST /api/internal/nightly-counter-rebuild",
   "POST /api/qc-pending/trigger",
   "POST /api/mail-center/inbound",
 ];

@@ -1,5 +1,5 @@
 ﻿import * as React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
@@ -14,7 +14,8 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { MoneyInput } from "@/components/ui/money-input";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
-import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa } from "@/lib/export-report";
+import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa, type PdfExportOpts } from "@/lib/export-report";
+import { buildAgingExportAoa, agingRowKind } from "@/lib/aging-export";
 import { isCleanImportShape, detectRawShape, parseRawStockTakeRows, impliedYmFromFilename, type ParsedRawItem } from "@/lib/stock-take-import";
 import { printVoucher, printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
 import { useRowSelection } from "@/lib/use-row-selection";
@@ -59,8 +60,40 @@ import type {
 // Shared helpers + per-tab components extracted from this file (2026-07-04
 // split of the ~9.6k-line Accounting page; behaviour-identical, more tabs
 // to follow).
-import { asMutationResponse } from "./shared";
+import { asMutationResponse, useCompanyOptions, orgIdParam, type CompanyOption } from "./shared";
 import { AuditLogTab } from "./tabs/AuditLogTab";
+
+// =============== MULTI-COMPANY (Phase 2) — company selector ===============
+//
+// A compact company dropdown that matches the existing period selector's
+// styling (rounded-md border, bg-white, px-3 py-1.5, text-sm). DEFAULT is
+// "All companies (group)" (value "") — the report then fetches with NO orgId
+// param, i.e. today's consolidated numbers, byte-identical to before. Picking
+// a company appends `&orgId=<code>` and scopes the report to that one entity.
+function CompanySelect({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: CompanyOption[];
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="text-xs font-semibold text-[#1F1D1B]">Company</label>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+      >
+        {options.map((o) => (
+          <option key={o.value || "__all__"} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
 
 // =============== TYPES ===============
 
@@ -3324,7 +3357,7 @@ function JournalEntryForm({
 // Three numbers that must agree: the SDC control accounts in the ledger,
 // the invoice-derived outstanding (gross of SST), and the running
 // customers.outstandingSen counter. Drift badges make divergence loud.
-function ARControlPanel() {
+function ARControlPanel({ company = "" }: { company?: string }) {
   const [data, setData] = useState<{
     asOf: string;
     controls: { code: string; name: string; balanceSen: number }[];
@@ -3345,11 +3378,45 @@ function ARControlPanel() {
     rows: { date: string; ref: string; type: string; debitSen: number; creditSen: number; runningSen: number }[];
   } | null>(null);
 
+  // Multi-company (Phase 2): scope the control reconciliation to the selected
+  // company. Absent (group) → URL unchanged = today's consolidated numbers.
+  const [ctlRev, setCtlRev] = useState(0);
   useEffect(() => {
-    fetch("/api/accounting/ar-control")
+    let stale = false;
+    fetch(`/api/accounting/ar-control${company ? `?orgId=${encodeURIComponent(company)}` : ""}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: typeof data }>)
-      .then((j) => { if (j?.success && j.data) setData(j.data); })
+      .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
       .catch(() => {});
+    return () => { stale = true; };
+  }, [company, ctlRev]);
+
+  // One-shot counter rebuild (owner request 2026-07-06): reset every
+  // customer's running counter to its invoice-derived outstanding.
+  const { toast: ctlToast } = useToast();
+  const { confirm: ctlConfirm } = useConfirm();
+  const [rebuilding, setRebuilding] = useState(false);
+  const rebuildCounter = async () => {
+    if (!(await ctlConfirm({
+      title: "Recalculate customer counters?",
+      message: "Reset every customer's running counter to its invoice-derived outstanding (the same figure as the middle card). The old counter values are overwritten; the action is logged in the Audit Log.",
+      danger: false,
+    }))) return;
+    setRebuilding(true);
+    try {
+      const res = await fetch("/api/accounting/ar-control/rebuild-counter", { method: "POST" });
+      const j = (await res.json()) as { success?: boolean; error?: string; data?: { customersUpdated: number; beforeSen: number; afterSen: number } };
+      if (j?.success && j.data) {
+        ctlToast.success(`Counter rebuilt: ${j.data.customersUpdated} customer(s) updated, ${formatCurrency(j.data.beforeSen - j.data.afterSen)} of drift cleared.`);
+        setCtlRev((n) => n + 1);
+      } else ctlToast.error(j?.error || "Failed to rebuild the counter");
+    } catch {
+      ctlToast.error("Failed to rebuild the counter");
+    } finally {
+      setRebuilding(false);
+    }
+  };
+
+  useEffect(() => {
     fetch("/api/customers")
       .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; name: string }[] }>)
       .then((j) => { if (j?.success) setCustomers((j.data ?? []).map((c2) => ({ id: c2.id, name: c2.name }))); })
@@ -3416,7 +3483,12 @@ ${rows}
           </Card>
           <Card>
             <CardContent className="p-4">
-              <p className="text-xs text-[#6B7280]">Customer running counter (outstandingSen)</p>
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-xs text-[#6B7280]">Customer running counter (outstandingSen)</p>
+                <Button variant="outline" size="sm" onClick={() => void rebuildCounter()} disabled={rebuilding} title="Reset every customer's counter to its invoice-derived outstanding (audited)">
+                  {rebuilding ? "Recalculating…" : "Recalculate"}
+                </Button>
+              </div>
               <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.customerCounterSen)}</p>
               <div className="mt-1">{drift(data.driftCounterVsInvoicesSen)}</div>
             </CardContent>
@@ -3502,6 +3574,32 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
   const [paymentAmount, setPaymentAmount] = useState("");
   const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split("T")[0]);
   const [paymentRef, setPaymentRef] = useState("");
+  // Expandable detail (owner 2026-07-08): click a row to show every open
+  // document in its aging column — the old system's "Aging - Detail" layout.
+  const [openAging, setOpenAging] = useState<Set<string>>(new Set());
+  const toggleAging = (id: string) =>
+    setOpenAging((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+
+  // Multi-company (Phase 2): "" = All companies (group). The consolidated
+  // aging arrives via the arData prop (unchanged). Picking a company fetches
+  // a company-scoped /aging locally and shows that instead — additive, the
+  // group path is untouched.
+  const [company, setCompany] = useState("");
+  const companyOptions = useCompanyOptions();
+  const [scopedAr, setScopedAr] = useState<ARAgingEntry[] | null>(null);
+  // Clearing scoped state on de-select happens in the selector's onChange (not
+  // in the effect) to keep the effect side-effect-free per lint.
+  const pickCompany = (v: string) => { setCompany(v); if (!v) setScopedAr(null); };
+  useEffect(() => {
+    if (!company) return;
+    let stale = false;
+    fetch(`/api/accounting/aging?orgId=${encodeURIComponent(company)}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { ar: ARAgingEntry[] } }>)
+      .then((j) => { if (!stale && j?.success && j.data) setScopedAr(j.data.ar ?? []); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [company]);
+  const rows = company ? (scopedAr ?? []) : arData;
 
   const handlePayment = async (customerId: string) => {
     const amountSen = Math.round(Number(paymentAmount) * 100);
@@ -3519,19 +3617,31 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
     onRefresh();
   };
 
-  const totalOutstanding = arData.reduce(
+  const totalOutstanding = rows.reduce(
     (s, a) => s + a.currentSen + a.days30Sen + a.days60Sen + a.days90Sen + a.over90Sen,
     0
   );
 
   return (
     <div className="space-y-4">
-      <ARControlPanel />
+      <div className="flex justify-end">
+        <CompanySelect value={company} onChange={pickCompany} options={companyOptions} />
+      </div>
+      <ARControlPanel company={company} />
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Receivable</h2>
           <p className="text-sm text-[#6B7280]">Total Outstanding: <span className="font-semibold text-[#9C6F1E]">{formatCurrency(totalOutstanding)}</span></p>
         </div>
+        <ExportButtons
+          build={() => buildAgingExportAoa("Customer", rows.map((a) => ({
+            name: a.customerName, currentSen: a.currentSen, days30Sen: a.days30Sen,
+            days60Sen: a.days60Sen, days90Sen: a.days90Sen, over90Sen: a.over90Sen, docs: a.docs,
+          })))}
+          filenameBase={`debtor-aging-${new Date().toISOString().slice(0, 10)}${company ? `-${company}` : ""}`}
+          title="Debtor Aging (AR)" pdfOpts={{ rowKind: agingRowKind, leftCols: [1, 2], colWidths: { 0: 168, 1: 62, 2: 118, 3: 66, 4: 66, 5: 66, 6: 66, 7: 66, 8: 78 } }} moneyFormat
+          subtitle={`As at ${new Date().toISOString().slice(0, 10)}${company ? ` · ${company}` : " · All companies"}`}
+        />
       </div>
 
       <Card>
@@ -3551,16 +3661,23 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                 </tr>
               </thead>
               <tbody>
-                {arData.map((ar) => {
+                {rows.map((ar) => {
                   const total = ar.currentSen + ar.days30Sen + ar.days60Sen + ar.days90Sen + ar.over90Sen;
+                  const open = openAging.has(ar.customerId);
                   return (
-                    <tr key={ar.customerId} className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30">
-                      <td className="py-3 px-4 font-medium text-[#1F1D1B]">{ar.customerName}</td>
-                      <td className="py-3 px-4 text-right">{ar.currentSen > 0 ? formatCurrency(ar.currentSen) : "-"}</td>
-                      <td className="py-3 px-4 text-right">{ar.days30Sen > 0 ? formatCurrency(ar.days30Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ar.days60Sen > 0 ? "text-[#9C6F1E]" : ""}`}>{ar.days60Sen > 0 ? formatCurrency(ar.days60Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ar.days90Sen > 0 ? "text-[#B8601A] font-medium" : ""}`}>{ar.days90Sen > 0 ? formatCurrency(ar.days90Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ar.over90Sen > 0 ? "text-[#9A3A2D] font-medium" : ""}`}>{ar.over90Sen > 0 ? formatCurrency(ar.over90Sen) : "-"}</td>
+                    <Fragment key={ar.customerId}>
+                    <tr className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30">
+                      <td className="py-3 px-4 font-medium text-[#1F1D1B]">
+                        <button className="inline-flex items-center gap-1.5 text-left" onClick={() => toggleAging(ar.customerId)} title="Show the documents behind this balance">
+                          {open ? <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-[#6B5C32]" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[#6B5C32]" />}
+                          {ar.customerName}
+                        </button>
+                      </td>
+                      <td className={`py-3 px-4 text-right ${ar.currentSen < 0 ? "text-[#9A3A2D]" : ""}`}>{ar.currentSen !== 0 ? formatCurrency(ar.currentSen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ar.days30Sen < 0 ? "text-[#9A3A2D]" : ""}`}>{ar.days30Sen !== 0 ? formatCurrency(ar.days30Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ar.days60Sen < 0 ? "text-[#9A3A2D]" : ar.days60Sen > 0 ? "text-[#9C6F1E]" : ""}`}>{ar.days60Sen !== 0 ? formatCurrency(ar.days60Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ar.days90Sen < 0 ? "text-[#9A3A2D]" : ar.days90Sen > 0 ? "text-[#B8601A] font-medium" : ""}`}>{ar.days90Sen !== 0 ? formatCurrency(ar.days90Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ar.over90Sen !== 0 ? "text-[#9A3A2D] font-medium" : ""}`}>{ar.over90Sen !== 0 ? formatCurrency(ar.over90Sen) : "-"}</td>
                       <td className="py-3 px-4 text-right font-semibold text-[#1F1D1B]">{formatCurrency(total)}</td>
                       <td className="py-3 px-4 text-center">
                         {total > 0 && (
@@ -3574,17 +3691,35 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                         )}
                       </td>
                     </tr>
+                    {open && (ar.docs ?? []).map((d, i) => (
+                      <tr key={`d-${i}`} className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
+                        <td className="py-1.5 px-4 pl-10 text-[#6B7280]"><span className="tabular-nums text-[#9CA3AF]">{d.date}</span><span className="ml-4">{d.no}</span></td>
+                        {[0, 1, 2, 3, 4].map((b) => (
+                          <td key={b} className={`py-1.5 px-4 text-right tabular-nums ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>
+                            {d.mo === b ? formatCurrency(d.amountSen) : ""}
+                          </td>
+                        ))}
+                        <td className={`py-1.5 px-4 text-right tabular-nums font-medium ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>{formatCurrency(d.amountSen)}</td>
+                        <td></td>
+                      </tr>
+                    ))}
+                    {open && !(ar.docs ?? []).length && (
+                      <tr className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
+                        <td colSpan={8} className="py-1.5 px-4 pl-10 text-[#9CA3AF] italic">No document detail (refresh after the next aging rebuild)</td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>
               <tfoot>
                 <tr className="bg-[#F0ECE9]/50 font-semibold">
                   <td className="py-3 px-4 text-[#1F1D1B]">Total</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(arData.reduce((s, a) => s + a.currentSen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(arData.reduce((s, a) => s + a.days30Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(arData.reduce((s, a) => s + a.days60Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(arData.reduce((s, a) => s + a.days90Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(arData.reduce((s, a) => s + a.over90Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.currentSen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days30Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days60Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days90Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.over90Sen, 0))}</td>
                   <td className="py-3 px-4 text-right">{formatCurrency(totalOutstanding)}</td>
                   <td></td>
                 </tr>
@@ -3596,7 +3731,7 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
           {paymentForm && (
             <div className="border-t border-[#E2DDD8] p-4 bg-[#F0ECE9]/30">
               <h4 className="text-sm font-medium text-[#1F1D1B] mb-3">
-                Record Payment - {arData.find((a) => a.customerId === paymentForm)?.customerName}
+                Record Payment - {rows.find((a) => a.customerId === paymentForm)?.customerName}
               </h4>
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
                 <div>
@@ -3654,11 +3789,13 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
 // running counter (outstandingSen)" card was removed (2026-06-25) — suppliers
 // .outstandingSen is never maintained on PI approve/pay, so it only ever showed
 // a false drift. The real reconciliation is Creditor-control-ledger vs PI.
-function APControlPanel() {
+function APControlPanel({ company = "" }: { company?: string }) {
   const [data, setData] = useState<{
     controls: { code: string; name: string; balanceSen: number }[];
     tradeControlSen: number;
     piOutstandingSen: number;
+    unappliedAdvanceSen?: number;
+    netOutstandingSen?: number;
     driftControlVsPiSen: number;
   } | null>(null);
   const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
@@ -3671,11 +3808,17 @@ function APControlPanel() {
     closingSen: number;
     rows: { date: string; ref: string; type: string; debitSen: number; creditSen: number; runningSen: number }[];
   } | null>(null);
+  // Multi-company (Phase 2): scope the creditor-control reconciliation to the
+  // selected company. Absent (group) → URL unchanged = consolidated numbers.
   useEffect(() => {
-    fetch("/api/accounting/ap-control")
+    let stale = false;
+    fetch(`/api/accounting/ap-control${company ? `?orgId=${encodeURIComponent(company)}` : ""}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: typeof data }>)
-      .then((j) => { if (j?.success && j.data) setData(j.data); })
+      .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
       .catch(() => {});
+    return () => { stale = true; };
+  }, [company]);
+  useEffect(() => {
     fetch("/api/suppliers")
       .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; name: string }[] }>)
       .then((j) => { if (j?.success) setSuppliers((j.data ?? []).map((s) => ({ id: s.id, name: s.name }))); })
@@ -3713,9 +3856,16 @@ function APControlPanel() {
           </Card>
           <Card>
             <CardContent className="p-4">
-              <p className="text-xs text-[#6B7280]">Booked-unpaid purchase invoices (APPROVED)</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.piOutstandingSen)}</p>
-              <div className="mt-1">{drift(data.driftControlVsPiSen)}</div>
+              <p className="text-xs text-[#6B7280]">Net owed to suppliers (bills − advances)</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.netOutstandingSen ?? data.piOutstandingSen)}</p>
+              <div className="mt-1 flex items-center gap-2 flex-wrap">
+                {drift(data.driftControlVsPiSen)}
+                {(data.unappliedAdvanceSen ?? 0) > 0 && (
+                  <span className="text-xs text-[#6B7280]">
+                    bills {formatCurrency(data.piOutstandingSen)} − un-knocked advances {formatCurrency(data.unappliedAdvanceSen ?? 0)}
+                  </span>
+                )}
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -4252,6 +4402,28 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
   const [paymentAmount, setPaymentAmount] = useState("");
   const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split("T")[0]);
   const [paymentRef, setPaymentRef] = useState("");
+  // Expandable detail (owner 2026-07-08): click a row to show every open
+  // document in its aging column; un-knocked advances show as negative docs.
+  const [openAging, setOpenAging] = useState<Set<string>>(new Set());
+  const toggleAging = (id: string) =>
+    setOpenAging((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+
+  // Multi-company (Phase 2): "" = All companies (group). Consolidated aging
+  // arrives via apData prop (unchanged); a company scopes /aging locally.
+  const [company, setCompany] = useState("");
+  const companyOptions = useCompanyOptions();
+  const [scopedAp, setScopedAp] = useState<APAgingEntry[] | null>(null);
+  const pickCompany = (v: string) => { setCompany(v); if (!v) setScopedAp(null); };
+  useEffect(() => {
+    if (!company) return;
+    let stale = false;
+    fetch(`/api/accounting/aging?orgId=${encodeURIComponent(company)}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { ap: APAgingEntry[] } }>)
+      .then((j) => { if (!stale && j?.success && j.data) setScopedAp(j.data.ap ?? []); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [company]);
+  const rows = company ? (scopedAp ?? []) : apData;
 
   const handlePayment = async (supplierId: string) => {
     const amountSen = Math.round(Number(paymentAmount) * 100);
@@ -4269,19 +4441,31 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
     onRefresh();
   };
 
-  const totalOutstanding = apData.reduce(
+  const totalOutstanding = rows.reduce(
     (s, a) => s + a.currentSen + a.days30Sen + a.days60Sen + a.days90Sen + a.over90Sen,
     0
   );
 
   return (
     <div className="space-y-4">
-      <APControlPanel />
+      <div className="flex justify-end">
+        <CompanySelect value={company} onChange={pickCompany} options={companyOptions} />
+      </div>
+      <APControlPanel company={company} />
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Payable</h2>
           <p className="text-sm text-[#6B7280]">Total Outstanding: <span className="font-semibold text-[#3E6570]">{formatCurrency(totalOutstanding)}</span></p>
         </div>
+        <ExportButtons
+          build={() => buildAgingExportAoa("Supplier", rows.map((a) => ({
+            name: a.supplierName, currentSen: a.currentSen, days30Sen: a.days30Sen,
+            days60Sen: a.days60Sen, days90Sen: a.days90Sen, over90Sen: a.over90Sen, docs: a.docs,
+          })))}
+          filenameBase={`creditor-aging-${new Date().toISOString().slice(0, 10)}${company ? `-${company}` : ""}`}
+          title="Creditor Aging (AP)" pdfOpts={{ rowKind: agingRowKind, leftCols: [1, 2], colWidths: { 0: 168, 1: 62, 2: 118, 3: 66, 4: 66, 5: 66, 6: 66, 7: 66, 8: 78 } }} moneyFormat
+          subtitle={`As at ${new Date().toISOString().slice(0, 10)}${company ? ` · ${company}` : " · All companies"}`}
+        />
       </div>
 
       <Card>
@@ -4301,16 +4485,23 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                 </tr>
               </thead>
               <tbody>
-                {apData.map((ap) => {
+                {rows.map((ap) => {
                   const total = ap.currentSen + ap.days30Sen + ap.days60Sen + ap.days90Sen + ap.over90Sen;
+                  const open = openAging.has(ap.supplierId);
                   return (
-                    <tr key={ap.supplierId} className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30">
-                      <td className="py-3 px-4 font-medium text-[#1F1D1B]">{ap.supplierName}</td>
-                      <td className="py-3 px-4 text-right">{ap.currentSen > 0 ? formatCurrency(ap.currentSen) : "-"}</td>
-                      <td className="py-3 px-4 text-right">{ap.days30Sen > 0 ? formatCurrency(ap.days30Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ap.days60Sen > 0 ? "text-[#9C6F1E]" : ""}`}>{ap.days60Sen > 0 ? formatCurrency(ap.days60Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ap.days90Sen > 0 ? "text-[#B8601A] font-medium" : ""}`}>{ap.days90Sen > 0 ? formatCurrency(ap.days90Sen) : "-"}</td>
-                      <td className={`py-3 px-4 text-right ${ap.over90Sen > 0 ? "text-[#9A3A2D] font-medium" : ""}`}>{ap.over90Sen > 0 ? formatCurrency(ap.over90Sen) : "-"}</td>
+                    <Fragment key={ap.supplierId}>
+                    <tr className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30">
+                      <td className="py-3 px-4 font-medium text-[#1F1D1B]">
+                        <button className="inline-flex items-center gap-1.5 text-left" onClick={() => toggleAging(ap.supplierId)} title="Show the documents behind this balance">
+                          {open ? <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-[#6B5C32]" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[#6B5C32]" />}
+                          {ap.supplierName}
+                        </button>
+                      </td>
+                      <td className={`py-3 px-4 text-right ${ap.currentSen < 0 ? "text-[#9A3A2D]" : ""}`}>{ap.currentSen !== 0 ? formatCurrency(ap.currentSen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ap.days30Sen < 0 ? "text-[#9A3A2D]" : ""}`}>{ap.days30Sen !== 0 ? formatCurrency(ap.days30Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ap.days60Sen < 0 ? "text-[#9A3A2D]" : ap.days60Sen > 0 ? "text-[#9C6F1E]" : ""}`}>{ap.days60Sen !== 0 ? formatCurrency(ap.days60Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ap.days90Sen < 0 ? "text-[#9A3A2D]" : ap.days90Sen > 0 ? "text-[#B8601A] font-medium" : ""}`}>{ap.days90Sen !== 0 ? formatCurrency(ap.days90Sen) : "-"}</td>
+                      <td className={`py-3 px-4 text-right ${ap.over90Sen !== 0 ? "text-[#9A3A2D] font-medium" : ""}`}>{ap.over90Sen !== 0 ? formatCurrency(ap.over90Sen) : "-"}</td>
                       <td className="py-3 px-4 text-right font-semibold text-[#1F1D1B]">{formatCurrency(total)}</td>
                       <td className="py-3 px-4 text-center">
                         {total > 0 && (
@@ -4324,17 +4515,35 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                         )}
                       </td>
                     </tr>
+                    {open && (ap.docs ?? []).map((d, i) => (
+                      <tr key={`d-${i}`} className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
+                        <td className="py-1.5 px-4 pl-10 text-[#6B7280]"><span className="tabular-nums text-[#9CA3AF]">{d.date}</span><span className="ml-4">{d.no}</span></td>
+                        {[0, 1, 2, 3, 4].map((b) => (
+                          <td key={b} className={`py-1.5 px-4 text-right tabular-nums ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>
+                            {d.mo === b ? formatCurrency(d.amountSen) : ""}
+                          </td>
+                        ))}
+                        <td className={`py-1.5 px-4 text-right tabular-nums font-medium ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>{formatCurrency(d.amountSen)}</td>
+                        <td></td>
+                      </tr>
+                    ))}
+                    {open && !(ap.docs ?? []).length && (
+                      <tr className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
+                        <td colSpan={8} className="py-1.5 px-4 pl-10 text-[#9CA3AF] italic">No document detail (refresh after the next aging rebuild)</td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>
               <tfoot>
                 <tr className="bg-[#F0ECE9]/50 font-semibold">
                   <td className="py-3 px-4 text-[#1F1D1B]">Total</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(apData.reduce((s, a) => s + a.currentSen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(apData.reduce((s, a) => s + a.days30Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(apData.reduce((s, a) => s + a.days60Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(apData.reduce((s, a) => s + a.days90Sen, 0))}</td>
-                  <td className="py-3 px-4 text-right">{formatCurrency(apData.reduce((s, a) => s + a.over90Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.currentSen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days30Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days60Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days90Sen, 0))}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.over90Sen, 0))}</td>
                   <td className="py-3 px-4 text-right">{formatCurrency(totalOutstanding)}</td>
                   <td></td>
                 </tr>
@@ -4346,7 +4555,7 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
           {paymentForm && (
             <div className="border-t border-[#E2DDD8] p-4 bg-[#F0ECE9]/30">
               <h4 className="text-sm font-medium text-[#1F1D1B] mb-3">
-                Record Payment - {apData.find((a) => a.supplierId === paymentForm)?.supplierName}
+                Record Payment - {rows.find((a) => a.supplierId === paymentForm)?.supplierName}
               </h4>
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
                 <div>
@@ -4914,12 +5123,20 @@ function MonthlyPlTab() {
 // Shared CSV / Excel / PDF export buttons for the finance reports. The tab
 // supplies a builder that returns the table as an array-of-arrays (header
 // row + body) plus a filename base + title.
-function ExportButtons({ build, filenameBase, title, subtitle }: { build: () => Aoa; filenameBase: string; title: string; subtitle: string }) {
+// `pdfOpts` controls the PDF: banded rows (rowKind), text columns kept
+// left-aligned (leftCols) and fixed column widths; `moneyFormat` renders
+// numbers as 1,392.50 in PDF+Excel (still real numbers in Excel so SUM
+// works) and fixes CSV numbers to 2 dp.
+function ExportButtons({ build, filenameBase, title, subtitle, pdfOpts, moneyFormat }: {
+  build: () => Aoa; filenameBase: string; title: string; subtitle: string;
+  pdfOpts?: PdfExportOpts;
+  moneyFormat?: boolean;
+}) {
   return (
     <div className="flex items-center gap-1.5">
-      <button onClick={() => exportReportCsv(`${filenameBase}.csv`, build())} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">CSV</button>
-      <button onClick={() => exportReportXlsx(`${filenameBase}.xlsx`, title.slice(0, 28), build())} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">Excel</button>
-      <button onClick={() => exportReportPdf(`${filenameBase}.pdf`, title, subtitle, build())} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">PDF</button>
+      <button onClick={() => exportReportCsv(`${filenameBase}.csv`, build(), moneyFormat ? { moneyFormat: true } : undefined)} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">CSV</button>
+      <button onClick={() => exportReportXlsx(`${filenameBase}.xlsx`, title.slice(0, 28), build(), moneyFormat ? { moneyFormat: true } : undefined)} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">Excel</button>
+      <button onClick={() => exportReportPdf(`${filenameBase}.pdf`, title, subtitle, build(), pdfOpts)} className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">PDF</button>
     </div>
   );
 }
@@ -5514,6 +5731,128 @@ function OtherPartyAging({ side }: { side: "DEBTOR" | "CREDITOR" }) {
   );
 }
 
+// OCR prefill (owner 2026-07-08): scan a bill / receipt (PDF or photo) → the
+// supplier-document AI extracts party / doc no / date / amount lines → the
+// caller PREFILLS its form for review. Nothing posts automatically — the
+// operator still picks the GL account(s) and saves through the normal flow.
+type ScanFinanceResult = {
+  partyName: string | null;
+  docType: string | null;
+  docNo: string | null;
+  docDate: string | null;
+  lines: { description: string; amountSen: number }[];
+  subtotalSen: number | null;
+  taxSen: number | null;
+  totalSen: number | null;
+  extraDocs: number;
+};
+function ScanPrefillButton({ label, onResult }: { label: string; onResult: (d: ScanFinanceResult) => void | Promise<void> }) {
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const onFile = async (f: File | undefined) => {
+    if (!f) return;
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      const res = await fetch("/api/scan-finance/extract", { method: "POST", body: fd });
+      const j = (await res.json()) as { success?: boolean; error?: string; data?: ScanFinanceResult };
+      if (j?.success && j.data) {
+        await onResult(j.data);
+        if (j.data.extraDocs > 0) {
+          toast.success(`Heads up: the file contains ${j.data.extraDocs + 1} documents — only the first was used.`);
+        }
+      } else toast.error(j?.error || "Scan failed");
+    } catch {
+      toast.error("Scan failed");
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+  // Clicking the button opens an upload dialog with a big drop zone (owner
+  // 2026-07-08: 「我希望是这样点了打开 upload」— same pattern as the PI scan
+  // wizard). Drop a PDF/photo into the zone or click it to browse; the modal
+  // shows the scanning state and closes itself when the form is prefilled.
+  const [open, setOpen] = useState(false);
+  const startFile = (f: File | undefined) => {
+    void onFile(f).then(() => setOpen(false));
+  };
+  return (
+    <>
+      <Button variant="outline" size="sm" onClick={() => setOpen(true)} title="Scan a bill / receipt — AI prefills the form for your review">
+        <Upload className="h-4 w-4 mr-1.5" /> {label}
+      </Button>
+      {open && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onClick={() => { if (!busy) setOpen(false); }}
+        >
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-[#E2DDD8]">
+              <div>
+                <h2 className="text-base font-semibold text-[#1F1D1B]">{label}</h2>
+                <p className="text-xs text-[#6B7280] mt-0.5">Upload a bill / receipt (PDF or photo) — AI prefills the form for your review; nothing posts automatically.</p>
+              </div>
+              <button
+                onClick={() => { if (!busy) setOpen(false); }}
+                className="text-[#9CA3AF] hover:text-[#6B7280] text-lg leading-none"
+                title={busy ? "Scanning — please wait" : "Close"}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-5">
+              <div
+                className={`rounded-lg border-2 border-dashed px-6 py-12 text-center cursor-pointer transition-colors ${dragOver ? "border-[#6B5C32] bg-[#F0ECE9]" : "border-[#E2DDD8] hover:bg-[#FAF8F6]"}`}
+                onClick={() => { if (!busy) inputRef.current?.click(); }}
+                onDragOver={(e) => { e.preventDefault(); if (!busy) setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOver(false);
+                  if (busy) return;
+                  startFile(e.dataTransfer?.files?.[0] ?? undefined);
+                }}
+              >
+                <Upload className="h-8 w-8 mx-auto text-[#B4B2A9]" />
+                <p className="mt-3 text-sm font-medium text-[#1F1D1B]">
+                  {busy ? "Scanning… (~30–90s, keep this open)" : dragOver ? "Drop to scan" : "Drop a PDF or photo here"}
+                </p>
+                {!busy && (
+                  <p className="mt-1 text-xs text-[#6B7280]">or click to browse — one document, max 32MB</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".pdf,image/*"
+        className="sr-only"
+        onChange={(e) => startFile(e.target.files?.[0] ?? undefined)}
+      />
+    </>
+  );
+}
+// Loose company-name match for scan prefill: alnum-uppercase containment
+// either way ("TNB " vs "TENAGA NASIONAL BHD" won't match — operator picks
+// manually then; exact-ish letterheads do).
+function scanNameMatch<T extends { name: string }>(list: T[], name: string | null): T | undefined {
+  if (!name) return undefined;
+  const norm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const b = norm(name);
+  if (!b) return undefined;
+  return list.find((p) => {
+    const a = norm(p.name);
+    return !!a && (a.includes(b) || b.includes(a));
+  });
+}
+
 function OtherPartyBillsTab({ accounts, side }: { accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
   const parties = useOtherPartiesList();
   return (
@@ -5533,7 +5872,7 @@ type OtherPartyBill = {
   id: string; billNo: string; partyId: string; partyType: "DEBTOR" | "CREDITOR";
   partyName: string; billDate: string; referenceNo: string; description: string;
   subtotalSen: number; taxSen: number; totalSen: number; paidAmountSen: number;
-  outstandingSen: number; status: string; lifecycleState?: string;
+  outstandingSen: number; status: string; isOpening?: boolean; lifecycleState?: string;
   items: { counterAccount: string; amountSen: number; description: string; lineNo: number }[];
 };
 
@@ -5544,6 +5883,9 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   const [showForm, setShowForm] = useState(false);
   const [q, setQ] = useState("");
   const [openBill, setOpenBill] = useState<string | null>(null);
+  // Edit-in-place (owner 2026-07-09): non-null = the form saves via PUT to
+  // this bill number instead of creating a new bill.
+  const [editingBillNo, setEditingBillNo] = useState<string | null>(null);
   const today = new Date().toISOString().slice(0, 10);
   const blankLine = (): BillLineDraft => ({ counterAccount: "", amountStr: "", description: "" });
   const [form, setForm] = useState({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()], isOpening: false });
@@ -5568,27 +5910,35 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   const totalSen = subtotalSen + toSen(form.taxStr);
 
   const submit = async () => {
-    if (!form.partyId) { toast.error("Select a party"); return; }
+    if (!editingBillNo && !form.partyId) { toast.error("Select a party"); return; }
     const items = form.lines
       .filter((l) => l.counterAccount && toSen(l.amountStr) > 0)
       .map((l) => ({ counterAccount: l.counterAccount, amountSen: toSen(l.amountStr), description: l.description }));
     if (items.length === 0) { toast.error("Add at least one line with account + amount"); return; }
-    const res = await fetch("/api/accounting/other-party-bills", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ partyId: form.partyId, billDate: form.billDate, referenceNo: form.referenceNo, description: form.description, taxSen: toSen(form.taxStr), items, isOpening: form.isOpening }),
-    });
+    const payload = { partyId: form.partyId, billDate: form.billDate, referenceNo: form.referenceNo, description: form.description, taxSen: toSen(form.taxStr), items, isOpening: form.isOpening };
+    const res = editingBillNo
+      ? await fetch(`/api/accounting/other-party-bills/${encodeURIComponent(editingBillNo)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+      : await fetch("/api/accounting/other-party-bills", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
     const j = asMutationResponse(await res.json());
     if (j?.success) {
       setShowForm(false);
+      setEditingBillNo(null);
       setForm({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()], isOpening: false });
       load();
-    } else toast.error(j?.error || "Failed to create bill");
+    } else toast.error(j?.error || (editingBillNo ? "Failed to save changes" : "Failed to create bill"));
   };
 
-  // Copy = open a fresh bill prefilled from an existing one (bills are
-  // immutable, so "edit" is really "copy to a new bill"). F4 #1.
+  // Copy = open a fresh bill prefilled from an existing one. F4 #1.
   const copyBill = (b: OtherPartyBill) => {
+    setEditingBillNo(null);
     setForm({
       partyId: b.partyId,
       billDate: today,
@@ -5599,6 +5949,24 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
         ? b.items.map((it) => ({ counterAccount: it.counterAccount, amountStr: (it.amountSen / 100).toString(), description: it.description ?? "" }))
         : [blankLine()],
       isOpening: false,
+    });
+    setShowForm(true);
+  };
+
+  // Edit-in-place: same bill number, GL reversed + re-posted server-side
+  // (owner 2026-07-09 「开了无法edit,我要能edit」). Party stays fixed.
+  const editBill = (b: OtherPartyBill) => {
+    setEditingBillNo(b.billNo);
+    setForm({
+      partyId: b.partyId,
+      billDate: b.billDate,
+      referenceNo: b.referenceNo ?? "",
+      description: b.description ?? "",
+      taxStr: b.taxSen ? (b.taxSen / 100).toString() : "",
+      lines: b.items.length
+        ? b.items.map((it) => ({ counterAccount: it.counterAccount, amountStr: (it.amountSen / 100).toString(), description: it.description ?? "" }))
+        : [blankLine()],
+      isOpening: !!b.isOpening,
     });
     setShowForm(true);
   };
@@ -5627,23 +5995,163 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
     else toast.error(j?.error || `${verb} failed`);
   };
 
+  // OCR → prefill the bill form. Party matched by letterhead name; an
+  // UNKNOWN party offers one-click creation into the register (owner
+  // 2026-07-08); the account(s) prefill from the party's LATEST bill (same
+  // creditor almost always books to the same account) — still editable.
+  const [extraParties, setExtraParties] = useState<OtherParty[]>([]);
+  const allSideParties = [...sideParties, ...extraParties.filter((p) => p.type === side)];
+  // Unknown scanned party → a small NEW-PARTY dialog: name prefilled from the
+  // letterhead, every other field OPTIONAL and left to the operator (owner
+  // 2026-07-08: 「只是要让我决定要不要填」). Create → register + auto-select;
+  // Skip → pick manually.
+  const blankPartyDraft = { name: "", contactPerson: "", phone: "", email: "", tin: "", registrationNo: "", address: "", notes: "" };
+  const [newPartyDraft, setNewPartyDraft] = useState<typeof blankPartyDraft | null>(null);
+  const [creatingParty, setCreatingParty] = useState(false);
+  const createPartyFromDraft = async () => {
+    if (!newPartyDraft || !newPartyDraft.name.trim()) { toast.error("Name is required"); return; }
+    setCreatingParty(true);
+    try {
+      const res = await fetch("/api/accounting/other-parties", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: side, ...newPartyDraft }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string; data?: OtherParty };
+      if (j?.success && j.data?.id) {
+        setExtraParties((p) => [...p, j.data as OtherParty]);
+        setForm((f) => ({ ...f, partyId: (j.data as OtherParty).id }));
+        setNewPartyDraft(null);
+        toast.success(`Created "${j.data.name}" and selected it for this bill.`);
+      } else toast.error(j?.error || "Failed to create the party");
+    } catch {
+      toast.error("Failed to create the party");
+    } finally {
+      setCreatingParty(false);
+    }
+  };
+  const applyScan = (d: ScanFinanceResult) => {
+    setEditingBillNo(null); // a scan always drafts a NEW bill, never overwrites an edit
+    const hit = scanNameMatch(allSideParties, d.partyName);
+    // Last-used account for this party (latest bill's first line).
+    const lastAcct = hit
+      ? ((bills ?? [])
+          .filter((b) => b.partyId === hit.id && b.items?.length)
+          .sort((a, b) => (b.billDate || "").localeCompare(a.billDate || ""))[0]?.items[0]?.counterAccount ?? "")
+      : "";
+    setForm((f) => ({
+      ...f,
+      partyId: hit?.id ?? "",
+      billDate: d.docDate ?? f.billDate,
+      referenceNo: d.docNo ?? f.referenceNo,
+      description: d.partyName ? `${d.partyName}${d.docType ? ` · ${d.docType}` : ""}` : f.description,
+      taxStr: d.taxSen ? (d.taxSen / 100).toFixed(2) : f.taxStr,
+      lines: d.lines.length
+        ? d.lines.map((l) => ({ counterAccount: lastAcct, amountStr: (l.amountSen / 100).toFixed(2), description: l.description }))
+        : d.totalSen
+          ? [{ counterAccount: lastAcct, amountStr: ((d.totalSen - (d.taxSen ?? 0)) / 100).toFixed(2), description: d.docType ?? "" }]
+          : f.lines,
+      isOpening: false,
+    }));
+    setShowForm(true);
+    if (!hit && d.partyName) {
+      setNewPartyDraft({ ...blankPartyDraft, name: d.partyName });
+      return;
+    }
+    toast.success(
+      hit
+        ? lastAcct
+          ? "Scanned — account prefilled from this party's last bill; review before saving."
+          : "Scanned — review the lines and pick the account(s)."
+        : "Scanned — review the lines and pick the account(s).",
+    );
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-end gap-3">
-        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+        <ScanPrefillButton label="Scan Bill" onResult={applyScan} />
+        <Button variant="primary" size="sm" onClick={() => {
+          if (editingBillNo) {
+            setEditingBillNo(null);
+            setForm({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()], isOpening: false });
+            setShowForm(true);
+          } else setShowForm(!showForm);
+        }}>
           <Plus className="h-4 w-4" /> New Bill
         </Button>
       </div>
 
+      {newPartyDraft && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { if (!creatingParty) setNewPartyDraft(null); }}>
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-[#E2DDD8]">
+              <div>
+                <h2 className="text-base font-semibold text-[#1F1D1B]">{side === "CREDITOR" ? "New creditor from scan" : "New debtor from scan"}</h2>
+                <p className="text-xs text-[#6B7280] mt-0.5">Not in the register yet. Name comes from the scanned document; everything else is optional — fill what you want, or Skip and pick a party manually.</p>
+              </div>
+              <button onClick={() => { if (!creatingParty) setNewPartyDraft(null); }} className="text-[#9CA3AF] hover:text-[#6B7280] text-lg leading-none">✕</button>
+            </div>
+            <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div className="sm:col-span-2">
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Name *</label>
+                <input type="text" value={newPartyDraft.name} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, name: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Contact Person</label>
+                <input type="text" value={newPartyDraft.contactPerson} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, contactPerson: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Phone</label>
+                <input type="text" value={newPartyDraft.phone} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, phone: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Email</label>
+                <input type="text" value={newPartyDraft.email} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, email: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">TIN</label>
+                <input type="text" value={newPartyDraft.tin} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, tin: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Registration No</label>
+                <input type="text" value={newPartyDraft.registrationNo} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, registrationNo: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Address</label>
+                <input type="text" value={newPartyDraft.address} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, address: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Notes</label>
+                <input type="text" value={newPartyDraft.notes} onChange={(e) => setNewPartyDraft({ ...newPartyDraft, notes: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 p-5 pt-0">
+              <Button variant="outline" size="sm" onClick={() => setNewPartyDraft(null)} disabled={creatingParty}>
+                Skip — pick manually
+              </Button>
+              <Button variant="primary" size="sm" onClick={() => void createPartyFromDraft()} disabled={creatingParty}>
+                {creatingParty ? "Creating…" : "Create & use"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showForm && (
         <Card><CardContent className="p-4 space-y-3">
+          {editingBillNo && (
+            <div className="text-xs font-medium text-[#6B5C32] bg-[#F6F1E7] rounded-md px-3 py-2">
+              Editing {editingBillNo} — saving reverses its ledger entry and posts the corrected one under the same number. The party cannot change (Copy for that).
+            </div>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <div>
               <label className="text-xs font-medium text-[#6B7280] mb-1 block">{side === "CREDITOR" ? "Creditor" : "Debtor"}</label>
-              <select value={form.partyId} onChange={(e) => setForm({ ...form, partyId: e.target.value })}
-                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm">
+              <select value={form.partyId} onChange={(e) => setForm({ ...form, partyId: e.target.value })} disabled={!!editingBillNo}
+                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm disabled:bg-[#F5F3F0] disabled:text-[#9CA3AF]">
                 <option value="">Select…</option>
-                {sideParties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                {allSideParties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </div>
             <div>
@@ -5727,8 +6235,8 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="primary" size="sm" onClick={submit}>Save &amp; Post</Button>
-            <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
+            <Button variant="primary" size="sm" onClick={submit}>{editingBillNo ? "Save Changes (re-post)" : "Save & Post"}</Button>
+            <Button variant="outline" size="sm" onClick={() => { setShowForm(false); setEditingBillNo(null); }}>Cancel</Button>
           </div>
         </CardContent></Card>
       )}
@@ -5797,6 +6305,9 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
                     </td>
                     <td className="px-4 py-1.5 text-right whitespace-nowrap">
                       <button onClick={() => printVoucher(buildOtherPartyBillVoucher(b, accounts))} title="Print bill voucher" className="inline-flex items-center gap-1 text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3"><Printer className="h-3 w-3" />print</button>
+                      {(b.lifecycleState ?? "ACTIVE") === "ACTIVE" && (
+                        <button onClick={() => editBill(b)} className="text-[#6B5C32] hover:underline text-xs mr-3">Edit</button>
+                      )}
                       <button onClick={() => copyBill(b)} className="text-[#6B5C32] hover:underline text-xs mr-3">Copy</button>
                       <LifecycleActions
                         state={b.lifecycleState}
@@ -6213,6 +6724,10 @@ function sourceHref(sourceType: string, sourceId: string): string | null {
 // statement, no inquiry attached.
 function TrialBalanceTab() {
   const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  // Multi-company (Phase 2): "" = All companies (group). trial-balance accepts
+  // ?orgId= — absent = today's consolidated TB, unchanged.
+  const [company, setCompany] = useState("");
+  const companyOptions = useCompanyOptions();
   const [tb, setTb] = useState<{
     rows: TbRow[];
     totalDr: number;
@@ -6223,18 +6738,21 @@ function TrialBalanceTab() {
 
   useEffect(() => {
     let stale = false;
-    fetch(`/api/accounting/trial-balance?asOf=${asOf}`)
+    fetch(`/api/accounting/trial-balance?asOf=${asOf}${orgIdParam(company)}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: { rows: TbRow[]; totalDr: number; totalCr: number; balanced: boolean } }>)
       .then((j) => { if (!stale && j?.success && j.data) setTb(j.data); })
       .catch(() => {});
     return () => { stale = true; };
-  }, [asOf]);
+  }, [asOf, company]);
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Trial Balance</h2>
         <div className="flex items-end gap-3">
+          <div className="pb-0.5">
+            <CompanySelect value={company} onChange={setCompany} options={companyOptions} />
+          </div>
           <div>
             <label className="text-xs font-medium text-[#6B7280] mb-1 block">As of</label>
             <input
@@ -7086,21 +7604,60 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
 
+  // OCR → prefill the voucher form (payee/date/lines). Receipts carry no GL
+  // account, so the account prefills from the SAME payee's latest voucher
+  // (same payee almost always books to the same expense account) — blank when
+  // the payee is new. Amount = the printed line amounts; single-total docs
+  // (petrol slip) prefill one line with the total.
+  const applyScan = (d: ScanFinanceResult) => {
+    setEditingId(null);
+    const normName = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const prior = d.partyName
+      ? (rows ?? [])
+          .filter((r) => r.status !== "VOID" && r.lines?.length && normName(r.payee ?? "") && normName(r.payee ?? "") === normName(d.partyName ?? ""))
+          .sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0]
+      : undefined;
+    const lastAcct = prior?.lines?.[0]?.accountCode ?? "";
+    setForm((f) => ({
+      ...f,
+      date: d.docDate ?? new Date().toISOString().slice(0, 10),
+      payee: d.partyName ?? f.payee,
+      description: [d.docType, d.docNo].filter(Boolean).join(" · ") || f.description,
+      accrued: false,
+    }));
+    setLines(
+      d.lines.length
+        ? d.lines.map((l) => ({ accountCode: lastAcct, description: l.description, amount: (l.amountSen / 100).toFixed(2) }))
+        : d.totalSen
+          ? [{ accountCode: lastAcct, description: d.docNo ?? "", amount: (d.totalSen / 100).toFixed(2) }]
+          : [{ accountCode: "", description: "", amount: "" }],
+    );
+    setShowForm(true);
+    toast.success(
+      lastAcct
+        ? "Scanned — account prefilled from this payee's last voucher; review before posting."
+        : "Scanned — review the lines and pick the expense account(s).",
+    );
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Payment / Expense</h2>
-        <Button variant="primary" size="sm" onClick={() => {
-          if (showForm) { setShowForm(false); setEditingId(null); }
-          else {
-            setEditingId(null);
-            setForm({ date: new Date().toISOString().slice(0, 10), payee: "", description: "", accrued: false, payFrom: "", accrualAccount: "", productLine: "" });
-            setLines([{ accountCode: "", description: "", amount: "" }]);
-            setShowForm(true);
-          }
-        }}>
-          <Plus className="h-4 w-4" /> New Payment
-        </Button>
+        <div className="flex items-center gap-2">
+          <ScanPrefillButton label="Scan Receipt" onResult={applyScan} />
+          <Button variant="primary" size="sm" onClick={() => {
+            if (showForm) { setShowForm(false); setEditingId(null); }
+            else {
+              setEditingId(null);
+              setForm({ date: new Date().toISOString().slice(0, 10), payee: "", description: "", accrued: false, payFrom: "", accrualAccount: "", productLine: "" });
+              setLines([{ accountCode: "", description: "", amount: "" }]);
+              setShowForm(true);
+            }
+          }}>
+            <Plus className="h-4 w-4" /> New Payment
+          </Button>
+        </div>
       </div>
       {migrationMissing && (
         <Card><CardContent className="p-4 text-sm text-[#9A3A2D]">Migration 0159 not applied yet — run the paste-version SQL first.</CardContent></Card>
@@ -9577,8 +10134,112 @@ function YearCloseCard() {
 
 type CashFlowResp = { operating: number; investing: number; financing: number; netChange: number; note: string };
 
+// Multi-company (Phase 2) — compact "by company" breakdown for the group view.
+// Fetches /pl per active company IN PARALLEL and shows each one's Net Profit
+// (P&L for the period) and Total Equity (net worth as at period end), so the
+// owner sees the consolidated group split into its sister companies at a
+// glance. Purely additive: it reuses the SAME /pl?orgId= endpoint the drill
+// already uses and never touches the consolidated statement above it. All
+// money is integer sen (formatCurrency divides by 100).
+function GroupByCompanyCard({ period, options }: { period: string; options: CompanyOption[] }) {
+  // Only real companies (drop the "" group option). useCompanyOptions returns
+  // a fresh array each render, so key the memo/effect off a STABLE string of
+  // the company codes (not the array identity) to avoid a re-fetch loop.
+  const companyKey = options.filter((o) => o.value !== "").map((o) => o.value).join(",");
+  const companies = useMemo(
+    () => options.filter((o) => o.value !== ""),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- companyKey is the stable identity of `options`
+    [companyKey],
+  );
+  const [rows, setRows] = useState<{ value: string; label: string; netProfitSen: number; equitySen: number }[] | null>(null);
+
+  useEffect(() => {
+    if (companies.length === 0) return;
+    let stale = false;
+    Promise.all(
+      companies.map(async (co) => {
+        try {
+          const r = await fetch(`/api/accounting/pl?period=${period}${orgIdParam(co.value)}`);
+          const j = (await r.json()) as {
+            success?: boolean;
+            data?: { totals?: { netProfit?: number }; balanceSheet?: { category: string; balance: number }[] };
+          };
+          const netProfitSen = j?.data?.totals?.netProfit ?? 0;
+          const equitySen = (j?.data?.balanceSheet ?? [])
+            .filter((e) => e.category === "EQUITY")
+            .reduce((s, e) => s + (e.balance || 0), 0);
+          return { value: co.value, label: co.label, netProfitSen, equitySen };
+        } catch {
+          return { value: co.value, label: co.label, netProfitSen: 0, equitySen: 0 };
+        }
+      }),
+    ).then((res) => { if (!stale) setRows(res); });
+    return () => { stale = true; };
+  }, [period, companies]);
+
+  if (companies.length === 0) return null;
+
+  const totalNet = (rows ?? []).reduce((s, r) => s + r.netProfitSen, 0);
+  const totalEquity = (rows ?? []).reduce((s, r) => s + r.equitySen, 0);
+
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <h3 className="text-sm font-semibold text-[#1F1D1B] mb-1">
+          Group P&amp;L by company
+          <span className="font-normal text-[#6B7280]"> — net profit for {period} &amp; net worth at period-end, per sister company</span>
+        </h3>
+        {rows === null ? (
+          <p className="text-sm text-[#6B7280] py-2">Loading company breakdown…</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">Company</th>
+                  <th className="px-3 py-2 text-right">Net Profit ({period})</th>
+                  <th className="px-3 py-2 text-right">Total Equity (net worth)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.value} className="border-b border-[#F0ECE9]">
+                    <td className="px-3 py-1.5 text-[#1F1D1B]">{r.label}</td>
+                    <td className={`px-3 py-1.5 text-right font-medium ${r.netProfitSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                      {r.netProfitSen < 0 ? `(${formatCurrency(Math.abs(r.netProfitSen))})` : formatCurrency(r.netProfitSen)}
+                    </td>
+                    <td className={`px-3 py-1.5 text-right font-medium ${r.equitySen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                      {r.equitySen < 0 ? `(${formatCurrency(Math.abs(r.equitySen))})` : formatCurrency(r.equitySen)}
+                    </td>
+                  </tr>
+                ))}
+                <tr className="border-t-2 border-[#1F1D1B] font-semibold">
+                  <td className="px-3 py-2 text-[#1F1D1B]">Group total</td>
+                  <td className={`px-3 py-2 text-right ${totalNet < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                    {totalNet < 0 ? `(${formatCurrency(Math.abs(totalNet))})` : formatCurrency(totalNet)}
+                  </td>
+                  <td className={`px-3 py-2 text-right ${totalEquity < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                    {totalEquity < 0 ? `(${formatCurrency(Math.abs(totalEquity))})` : formatCurrency(totalEquity)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p className="mt-2 text-[11px] text-[#B4B2A9]">
+              Each row = that company scoped via ?orgId=. Today all data sits under HOOKKA, so sister companies read near-zero until their books are posted. The consolidated statement below is unchanged.
+            </p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function BalanceSheetTab() {
   const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
+  // Multi-company (Phase 2): "" = All companies (group) → URL unchanged =
+  // today's consolidated sheet. A company code scopes /pl via &orgId=.
+  const [company, setCompany] = useState("");
+  const companyOptions = useCompanyOptions();
   const months: string[] = [];
   {
     const now = new Date();
@@ -9587,7 +10248,7 @@ function BalanceSheetTab() {
       months.push(d.toISOString().slice(0, 7));
     }
   }
-  const { data: bsResp, loading: bsLoading, refresh: bsRefresh } = useCachedJson<{ success?: boolean; data?: { balanceSheet?: BalanceSheetEntry[]; cashFlow?: CashFlowResp } }>(`/api/accounting/pl?period=${period}`);
+  const { data: bsResp, loading: bsLoading, refresh: bsRefresh } = useCachedJson<{ success?: boolean; data?: { balanceSheet?: BalanceSheetEntry[]; cashFlow?: CashFlowResp } }>(`/api/accounting/pl?period=${period}${orgIdParam(company)}`);
   const bsData: BalanceSheetEntry[] = useMemo(
     () => (bsResp?.success && bsResp.data?.balanceSheet ? bsResp.data.balanceSheet : []),
     [bsResp]
@@ -9684,12 +10345,16 @@ function BalanceSheetTab() {
         <select value={period} onChange={(e) => setPeriod(e.target.value)} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
           {months.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>
+        <CompanySelect value={company} onChange={setCompany} options={companyOptions} />
         <button onClick={() => setEdit((v) => !v)}
           className={`ml-2 rounded-md border px-3 py-1.5 text-sm cursor-pointer ${edit ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>
           {edit ? "Done" : "Edit"}
         </button>
         {edit && <span className="text-[11px] text-[#6B5C32]">Drag an account row onto a target section to reclassify it · Assets ↔ Liabilities is allowed too (the sign flips on the move, the statement still balances) · all months recompute under the new rule · drag back to undo</span>}
       </div>
+      {/* Group P&L / net-worth by company — only on the consolidated (group)
+          view; picking a single company hides it (you're already scoped). */}
+      {company === "" && <GroupByCompanyCard period={period} options={companyOptions} />}
       {/* Balance equation */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
         <Card>

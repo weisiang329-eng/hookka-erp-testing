@@ -71,6 +71,28 @@ export function readBookedSen(row: DualKeyBookedRow): number {
 }
 
 // ---------------------------------------------------------------------------
+// Restate headroom (BUG-2026-07-09-001). Restate edits a payment IN PLACE:
+// its own old rows are rolled back inside the same batch, so validating the
+// NEW allocations against the PI's current paid_amount_sen double-counts the
+// very amount being edited — a payment that fully paid its PI could never be
+// restated (status PAID was rejected AND outstanding read 0). The PI must be
+// treated as if this payment's old booking were already rolled back.
+// ---------------------------------------------------------------------------
+export function restateHeadroom(
+  pi: DualKeyPiRow & { status?: string | null },
+  ownOldBookedSen: number,
+): { payable: boolean; outstandingBookedSen: number } {
+  const status = String(pi.status ?? "");
+  const own = Math.max(0, Math.round(Number(ownOldBookedSen) || 0));
+  const payable =
+    status === "CONFIRMED" ||
+    status === "APPROVED" ||
+    status === "PARTIAL_PAID" ||
+    (status === "PAID" && own > 0);
+  return { payable, outstandingBookedSen: piOutstandingSen(pi) + own };
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/supplier-payments row grouping — pure so it's directly testable
 // with the camelCase-only shape the live adapter actually produces (see
 // BUG-2026-07-01-003: the old inline loop read snake_case and silently

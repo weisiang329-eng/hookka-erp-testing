@@ -108,3 +108,27 @@ export function reverseLegs(legs: AccountingLeg[]): AccountingLeg[] {
     description: `REVERSAL · ${l.description}`,
   }));
 }
+
+// ---------------------------------------------------------------------------
+// Edit-in-place guard (owner request 2026-07-09: bills must be editable).
+// An edited bill keeps its number and its payments; the new total therefore
+// may never drop below what has already been paid, and the payment-progress
+// status is re-derived from the surviving paid amount.
+// ---------------------------------------------------------------------------
+export type EditedBillStatus =
+  | { ok: true; status: "OPEN" | "PARTIAL_PAID" | "PAID" }
+  | { ok: false; error: string };
+
+export function editedBillStatus(totalSen: number, paidAmountSen: number): EditedBillStatus {
+  const paid = Math.round(Number(paidAmountSen) || 0);
+  const total = Math.round(Number(totalSen) || 0);
+  if (paid > total) {
+    return {
+      ok: false,
+      error: `RM ${(paid / 100).toFixed(2)} is already paid against this bill — the new total cannot be below that. Void the settlement first if the bill really shrank.`,
+    };
+  }
+  if (paid <= 0) return { ok: true, status: "OPEN" };
+  if (paid < total) return { ok: true, status: "PARTIAL_PAID" };
+  return { ok: true, status: "PAID" };
+}

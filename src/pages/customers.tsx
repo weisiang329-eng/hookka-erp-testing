@@ -3208,6 +3208,13 @@ export default function CustomersPage() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const { data: customersResp, loading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
+  // Multi-Company Phase 4 — active companies for the per-customer default
+  // company dropdown in the edit dialog.
+  const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; isActive?: boolean }> }>("/api/organisations");
+  const activeOrgs = useMemo(
+    () => (orgsResp?.organisations ?? []).filter((o) => o.isActive !== false && o.code),
+    [orgsResp],
+  );
   const initialCustomers: Customer[] = useMemo(
     () => (customersResp?.success ? customersResp.data ?? [] : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
@@ -3223,7 +3230,7 @@ export default function CustomersPage() {
 
   // edit customer dialog state
   const [editCustomer, setEditCustomer] = useState<Customer | null>(null);
-  const [editCustForm, setEditCustForm] = useState({ code: "", name: "", ssmNo: "", companyAddress: "", contactName: "", phone: "", email: "", creditTerms: "", creditLimitSen: 0 });
+  const [editCustForm, setEditCustForm] = useState({ code: "", name: "", ssmNo: "", companyAddress: "", contactName: "", phone: "", email: "", creditTerms: "", creditLimitSen: 0, defaultCompanyCode: "" });
   // Guards the Save Changes button so a double-tap on tablet doesn't fire two
   // PUTs. persistCustomer already does the optimistic-update + rollback dance,
   // but without this guard the operator can still hammer the network.
@@ -3365,6 +3372,7 @@ export default function CustomersPage() {
       email: cust.email,
       creditTerms: cust.creditTerms,
       creditLimitSen: cust.creditLimitSen,
+      defaultCompanyCode: cust.defaultCompanyCode || "",
     });
   };
 
@@ -3995,6 +4003,25 @@ export default function CustomersPage() {
                   <label className="block text-xs text-[#6B7280] mb-1">Credit Limit (RM)</label>
                   <Input type="number" onFocus={(e) => e.currentTarget.select()} value={editCustForm.creditLimitSen / 100} onChange={(e) => setEditCustForm(f => ({ ...f, creditLimitSen: Math.round(Number(e.target.value) * 100) }))} />
                 </div>
+                {/* Multi-Company Phase 4 — default company for NEW sales orders
+                    from this customer. Empty = no default (falls back to
+                    HOOKKA). Does NOT move existing orders. */}
+                {activeOrgs.length > 0 && (
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Default Company (new orders)</label>
+                    <select
+                      value={editCustForm.defaultCompanyCode}
+                      onChange={(e) => setEditCustForm(f => ({ ...f, defaultCompanyCode: e.target.value }))}
+                      className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
+                      aria-label="Default company for new sales orders"
+                    >
+                      <option value="">No default (Hookka)</option>
+                      {activeOrgs.map((o) => (
+                        <option key={o.code} value={o.code}>{o.name || o.code}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </div>
             </div>
             <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">

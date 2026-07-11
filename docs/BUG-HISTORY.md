@@ -34,6 +34,128 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-09-002 — Voiding an advance-only supplier payment left it in the CACHED aging (snapshot never invalidated) `accounting` `supplier-payments` `snapshot`
+
+🟢 **Fixed — bumpSupplierPaymentsRev() in every payment mutation batch**
+
+- **Symptom**: owner voided BIG GREEN MANAGEMENT's advance HPV-2606-028 (−1,560)
+  and the Aging tab still showed it. The live loaders were already correct
+  (BUG-2026-07-08-003 filter) — the SNAPSHOT was stale.
+- **Root cause**: `/aging` is snapshot-cached on MAX(updated_at/created_at)
+  over invoices / purchase_invoices / supplier_payments / kv_config. A
+  lifecycle void/unvoid of an advance-only payment writes NONE of those
+  (ledger hidden flags + document_lifecycle only), and supplier_payments has
+  no probed updated_at anyway (UPDATEs like knock-off/un-knock were invisible
+  too — only INSERTs registered via created_at).
+- **Fix** (`src/api/routes/supplier-payments.ts`): `bumpSupplierPaymentsRev()`
+  upserts kv_config `supplier_payments_rev` inside the SAME batch for every
+  payment mutation — create, knock-off, un-knock, void/delete/unvoid
+  (buildSupplierPaymentLifecycle) and restate. kv_config is in the snapshot's
+  sourceTables and has updated_at, so the next aging read always recomputes.
+  Same trick /opening-balance/ap-exclude already used.
+- **Verify**: prod — after deploy, one bump; aging no longer shows the voided
+  HPV-2606-028 row; card totals match /ap-control (live).
+
+## BUG-2026-07-09-001 — Supplier payment restate rejected any payment whose PI it had fully paid (status PAID blocked + outstanding read 0) `accounting` `supplier-payments`
+
+🟢 **Fixed — restateHeadroom() in src/lib/supplier-payment-alloc.ts (+4 tests)**
+
+- **Symptom**: editing (restate) a payment that had fully settled its PI always
+  400'd — "PI not found or not in a payable status" (the PI is `PAID`), and even
+  with the status relaxed the allocation failed "amount exceeds outstanding"
+  (outstanding read `face − paid = 0`).
+- **Root cause**: buildSupplierPaymentRestate validated the NEW allocations
+  against the PI's CURRENT paid_amount_sen — but the same batch rolls back this
+  payment's own old rows first, so its own booking must count as available
+  headroom. Without it, same-amount edits (fix a date, correct the GL after the
+  BUG-2026-07-08-002 double-record) were impossible exactly when needed.
+- **Fix**: pure `restateHeadroom(pi, ownOldBookedSen)` — payable additionally
+  when `status === 'PAID' && ownOldBookedSen > 0`; outstanding =
+  `piOutstandingSen(pi) + ownOldBookedSen`. Wired into the restate build loop.
+- **Verify**: tests/supplier-payment-alloc.test.mjs (15 green); used live on
+  prod to re-state HPV-2607-009 (INNOVATEX) to its true RM 418.
+
+## BUG-2026-07-08-003 — Voided supplier payment's ADVANCE row still counted as an unapplied advance in both agings (lifecycle never filtered) `accounting`
+
+🟢 **Fixed — shipped with the /ap-reconciliation endpoint, verified live on prod 2026-07-08**
+
+- **Symptom**: WF LEATHER showed a −401.40 "advance" row in the creditor aging and
+  the AP net-outstanding card even though its payment HPV-2607-026 was VOIDED (its
+  GL legs were correctly hidden). The −966.60 drift on /ap-control was partially
+  MASKED by this: the true document-side gap is −1,368.00 (GVP −950 + INNOVATEX
+  −418), and the phantom advance hid +401.40 of it.
+- **Root cause**: `loadUnappliedSupplierAdvances` (accounting.ts) selected every
+  `purchaseInvoiceId IS NULL AND amountSen > 0` row with NO document_lifecycle
+  filter. Void/delete rolls back PI paid amounts and hides GL legs but keeps the
+  subledger rows (by design, for unvoid) — advance rows therefore need the same
+  NOT-EXISTS state filter the PI paid truth-guard uses.
+- **Found by**: `GET /api/accounting/ap-reconciliation` (new, same day) — the
+  itemized drift decomposition surfaced it as the only code-level item; the other
+  two items are data decisions pending the owner.
+- **Fix** (`src/api/routes/accounting.ts` loadUnappliedSupplierAdvances): rewrote
+  the query in pure snake_case with `AND NOT EXISTS (SELECT 1 FROM
+  document_lifecycle dl WHERE dl.source_type='supplier_payment' AND
+  dl.source_id=sp.payment_no AND dl.state<>'ACTIVE')` — the same shape as
+  buildPiPaidTruthStatement. One loader feeds /aging AP, /ap-control aging rows
+  and `unappliedAdvanceSen`, so all three heal together. The ap-recon mirror now
+  counts only ACTIVE advance rows (tests updated).
+- **Verify**: tests/ap-recon.test.mjs (16 green, incl. a miniature of the live
+  2026-07-08 books); live prod after deploy — advance sum 95,870.79 → 95,469.39,
+  drift card −966.60 → −1,368.00 (= GVP −950 + INNOVATEX −418, both itemized,
+  residual 0.00), WF LEATHER's phantom row gone from /ap-control aging. NOTE the
+  /aging snapshot rebuilds on the next supplier_payments/invoices/PI write — the
+  cached copy may show the old row until then.
+
+## BUG-2026-07-05-001 — AR/AP Aging tab showed the FULL face amount for partially-paid purchase invoices (AP loop never subtracted paid) `accounting`
+
+🟢 **Fixed — shipped with the advance-rows-in-aging change, verified live on prod 2026-07-05**
+
+- **Symptom**: the Aging tab (`GET /api/accounting/aging`, snapshot-cached) overstated
+  supplier balances — a PARTIAL_PAID PI (or one reduced by a knocked-off supplier CN)
+  appeared at its full `amountSen`.
+- **Root cause**: the AP loop used `outstanding = amountSen` and didn't even SELECT
+  `paid_amount_sen`; the AR loop right above always netted `totalSen − paidAmount`.
+  Found during the owner-requested full-module audit (2026-07-05) by diffing the two
+  loops — /ap-control's aging was already netting, so only this tab was wrong.
+- **Fix** (`src/api/routes/accounting.ts` /aging builder): SELECT `paidAmountSen`
+  (dual-key read) and net it; while there, unapplied supplier advances now join BOTH
+  agings as negative current/not-due rows (owner rule 2026-07-05: aging total must tie
+  the 400-0000 control exactly), and `supplier_payments` joined the snapshot's
+  sourceTables so knock-offs rebuild it.
+- **Verify**: live — /ap-control aging total == GL 400-0000 to the sen; GVP/CHL/INFAB
+  show −950/−640/−10 not-due rows; partially-paid PIs show net outstanding.
+
+---
+
+## BUG-2026-07-05-001 — Mobile Production / Warehouse / Delivery search couldn't find a record by customer PO / SO / our Company SOID `ui-frontend` `mobile` `search`
+
+🟢 **Fixed on main**
+
+**Symptom (owner):** on `/m`, searching a customer PO/SO reference or our Company
+SOID returned "No matching production orders" — couldn't find what stage a
+product is at (Production), where it is (Delivery), or which rack holds it
+(Warehouse). Screenshot: Production search "9159" → nothing.
+
+**Root cause:** `applyFilters` (m/config/helpers.ts) builds the free-text
+haystack from a source's declared `columns` ONLY. The cards DISPLAYED the
+identifiers (Our SO / Cust PO / Cust SO / Ref via `toVM` metas) but those fields
+were NOT declared as searchable `columns`, so a reference query never matched.
+Production searched only poNo/product/customer; the Warehouse source searched
+rack/zone/status (never reaching the items stored on the rack); the Delivery DO
+source lacked customerSO.
+
+**Fix (`src/pages/m/config/modules.ts`):** added the identifier fields as
+searchable text columns — Production: companySO/customerPO/customerSO/reference;
+Delivery DO source: customerSO; Warehouse: a "Contents" column concatenating
+every rack item's customerPOId / customerSO / companySOID / productCode /
+productName / customerName so a rack is findable by what it holds. Verified the
+`?fields=minimal` production payload carries companySOId + customerPOId (so the
+search matches). Pending/Planning SO source already had all five. Desktop
+haystacks already cover these (delivery `haystackByPo`/DO haystack, production
+`haystackByPo` with companySOId+customerPOId+customerReference) — untouched.
+
+---
+
 ## BUG-2026-07-04-008 — DO create path could silently persist a 0/0 (RM 0) 3PL rate: a rate-less vehicle masked its provider's real rate `delivery-orders` `3pl`
 
 🟡 **Fixed on worktree branch (not yet merged)**

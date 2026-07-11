@@ -1385,6 +1385,57 @@ export async function backfillPiGlPostings(
 //   ?dry=1   → report what WOULD post, write nothing.
 //   ?limit=N → post at most N new PIs (incremental verification).
 // ---------------------------------------------------------------------------
+// POST /repair-gl-visibility — one-shot repair (BUG-2026-07-08-003, OCEAN SKY
+// "2605-922" RM 723): an ACTIVE purchase invoice whose GL legs are ALL hidden
+// (a void/restore cycle that missed the unhide) is invisible to every report
+// AND to the backfill (ledgerHasSource sees hidden rows too). If the document
+// is ACTIVE and has base legs but zero visible ones, unhide the base legs.
+app.post("/repair-gl-visibility", async (c) => {
+  const denied = await requirePermission(c, "purchase-invoices", "update");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { piId?: string };
+  const piId = String(body.piId ?? "").trim();
+  if (!piId) return c.json({ success: false, error: "piId is required" }, 400);
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+  const pi = await db
+    .prepare("SELECT id, pi_no, status FROM purchase_invoices WHERE id = ?")
+    .bind(piId)
+    .first<{ id: string; pi_no?: string; piNo?: string; status: string }>();
+  if (!pi) return c.json({ success: false, error: "PI not found" }, 404);
+  if (["DRAFT", "CANCELLED"].includes(pi.status)) {
+    return c.json({ success: false, error: `PI is ${pi.status} — nothing to repair` }, 400);
+  }
+  const legs =
+    (
+      await db
+        .prepare(
+          `SELECT id, hidden FROM ledger_journal_entries
+            WHERE source_id = ? AND org_id = ? AND source_type = 'purchase_invoice'`,
+        )
+        .bind(piId, orgId)
+        .all<{ id: string; hidden?: number }>()
+    ).results ?? [];
+  const total = legs.length;
+  const visible = legs.filter((l) => Number(l.hidden) !== 1).length;
+  if (total === 0) return c.json({ success: false, error: "No base GL legs exist — use Post to GL instead" }, 400);
+  if (visible > 0) return c.json({ success: false, error: `Legs already visible (${visible}/${total}) — nothing to repair` }, 400);
+  await db
+    .prepare(
+      `UPDATE ledger_journal_entries SET hidden = 0
+        WHERE source_id = ? AND org_id = ? AND source_type = 'purchase_invoice'`,
+    )
+    .bind(piId, orgId)
+    .run();
+  await emitAudit(c, {
+    resource: "purchase-invoices",
+    resourceId: piId,
+    action: "update",
+    after: { repair: "gl-visibility", piNo: pi.piNo ?? pi.pi_no ?? "", legsUnhidden: total },
+  });
+  return c.json({ success: true, data: { piNo: pi.piNo ?? pi.pi_no ?? "", legsUnhidden: total } });
+});
+
 app.post("/backfill-gl-postings", async (c) => {
   const denied = await requirePermission(c, "purchase-invoices", "update");
   if (denied) return denied;

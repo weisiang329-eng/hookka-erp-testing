@@ -27,6 +27,7 @@ import {
   computeAlloc,
   piOutstandingSen,
   readBookedSen,
+  restateHeadroom,
   groupSupplierPaymentRows,
   type RawSupplierPaymentRow,
 } from "../../lib/supplier-payment-alloc";
@@ -372,6 +373,7 @@ app.post("/", async (c) => {
         legs,
       );
       statements.push(...ls);
+      statements.push(bumpSupplierPaymentsRev(c.var.DB));
 
       // 7. Execute the whole batch atomically (mirror purchase-invoices.ts).
       await c.var.DB.batch(statements);
@@ -446,6 +448,22 @@ app.post("/knock-off", async (c) => {
     if (advance.purchaseInvoiceId) {
       return c.json({ success: false, error: "This row is already tied to an invoice — not an unapplied advance" }, 400);
     }
+    // BUG-2026-07-08-003 family: rows of voided/deleted payments stay in the
+    // table (for unvoid) but must never be knocked off — the cash never
+    // "exists" while the voucher is inactive.
+    const advLc = await c.var.DB
+      .prepare(
+        `SELECT state FROM document_lifecycle
+          WHERE sourceType = 'supplier_payment' AND sourceId = ? AND orgId = ?`,
+      )
+      .bind(advance.paymentNo, orgId)
+      .first<{ state: string }>();
+    if (advLc && advLc.state !== "ACTIVE") {
+      return c.json(
+        { success: false, error: `Payment ${advance.paymentNo} is ${advLc.state} — unvoid it before knocking off its advance` },
+        400,
+      );
+    }
     const remainingAdvanceSen = Number(advance.amountSen) || 0;
     if (amountSen > remainingAdvanceSen) {
       return c.json({ success: false, error: `Amount exceeds the unapplied advance balance (RM ${(remainingAdvanceSen / 100).toFixed(2)})` }, 400);
@@ -512,6 +530,7 @@ app.post("/knock-off", async (c) => {
         )
         .bind(amountSen, amountSen, amountSen, piId),
     ];
+    statements.push(bumpSupplierPaymentsRev(c.var.DB));
     await c.var.DB.batch(statements);
 
     return c.json({
@@ -522,6 +541,85 @@ app.post("/knock-off", async (c) => {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[POST /api/supplier-payments/knock-off] failed:", msg, err);
     return c.json({ success: false, error: msg || "Internal error applying the advance" }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /un-knock — reverse of /knock-off: detach an allocation row from its
+// PI so the money returns to "unapplied advance" (owner case 2026-07-09: GVP
+// 950 sat allocated to an opening-EXCLUDED PI, so it showed neither as an
+// advance nor as a bill — the aging must show the advance again). Pure
+// subsidiary reattribution, exactly like knock-off: NO GL legs move (the
+// DR 400-0000 · CR bank posted at payment time stays put). The detached row
+// itself becomes the advance (purchaseInvoiceId → NULL; its amountSen is
+// already the bank amount); the PI's paid_amount_sen is re-derived absolutely
+// via the same truth-guard SQL the restate uses.
+// ---------------------------------------------------------------------------
+app.post("/un-knock", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  try {
+    const body = (await c.req.json()) as { rowId?: unknown };
+    const rowId = String(body.rowId ?? "").trim();
+    if (!rowId) return c.json({ success: false, error: "rowId is required" }, 400);
+
+    await ensurePartialPaymentColumns(c.var.DB);
+
+    const row = await c.var.DB
+      .prepare(
+        `SELECT id, paymentNo, supplierName, purchaseInvoiceId, amountSen, method
+           FROM supplier_payments WHERE id = ? AND orgId = ?`,
+      )
+      .bind(rowId, orgId)
+      .first<{
+        id: string; paymentNo: string; supplierName: string;
+        purchaseInvoiceId: string | null; amountSen: number; method: string | null;
+      }>();
+    if (!row) return c.json({ success: false, error: "Payment row not found" }, 404);
+    if ((row.method ?? "") === "CREDIT_NOTE") {
+      return c.json({ success: false, error: "This is a credit-note marker — void the purchase CN instead" }, 400);
+    }
+    const piId = row.purchaseInvoiceId;
+    if (!piId) {
+      return c.json({ success: false, error: "This row is already an unapplied advance" }, 400);
+    }
+    const lc = await c.var.DB
+      .prepare(
+        `SELECT state FROM document_lifecycle
+          WHERE sourceType = 'supplier_payment' AND sourceId = ? AND orgId = ?`,
+      )
+      .bind(row.paymentNo, orgId)
+      .first<{ state: string }>();
+    if (lc && lc.state !== "ACTIVE") {
+      return c.json({ success: false, error: `Payment ${row.paymentNo} is ${lc.state} — unvoid it first` }, 400);
+    }
+
+    await c.var.DB.batch([
+      c.var.DB
+        .prepare(`UPDATE supplier_payments SET purchaseInvoiceId = NULL WHERE id = ?`)
+        .bind(rowId),
+      buildPiPaidTruthStatement(c.var.DB, piId),
+      bumpSupplierPaymentsRev(c.var.DB),
+    ]);
+    const pi = await c.var.DB
+      .prepare("SELECT pi_no, paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
+      .bind(piId)
+      .first<{ piNo?: string; pi_no?: string; paidAmountSen?: number; paid_amount_sen?: number; status: string }>();
+    return c.json({
+      success: true,
+      data: {
+        paymentNo: row.paymentNo,
+        restoredAdvanceSen: Number(row.amountSen) || 0,
+        piNo: pi?.piNo ?? pi?.pi_no ?? "",
+        piPaidSen: Number(pi?.paidAmountSen ?? pi?.paid_amount_sen) || 0,
+        piStatus: pi?.status ?? "",
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/supplier-payments/un-knock] failed:", msg, err);
+    return c.json({ success: false, error: msg || "Internal error detaching the allocation" }, 500);
   }
 });
 
@@ -624,6 +722,7 @@ async function buildSupplierPaymentLifecycle(
       }
     }
   }
+  statements.push(bumpSupplierPaymentsRev(db));
   return { statements, newState: lc.newState };
 }
 
@@ -660,6 +759,16 @@ async function buildSupplierPaymentRestate(
   const supplierId = String(body.supplierId ?? "");
   const allocations: CreateAllocation[] = Array.isArray(body.allocations) ? body.allocations : [];
   const statements: D1PreparedStatement[] = [];
+  // This payment's own bookings are rolled back inside this same batch — the
+  // NEW allocations must validate against the PI as it will be AFTER that
+  // rollback (restateHeadroom, BUG-2026-07-09-001), or a payment that fully
+  // paid its PI could never be edited.
+  const oldBookedByPi = new Map<string, number>();
+  for (const r of oldRows) {
+    if (!r.purchaseInvoiceId) continue;
+    const k = String(r.purchaseInvoiceId);
+    oldBookedByPi.set(k, (oldBookedByPi.get(k) ?? 0) + readBookedSen(r));
+  }
 
   // 1. Roll the OLD PI paid amounts back.
   for (const r of oldRows) {
@@ -692,10 +801,11 @@ async function buildSupplierPaymentRestate(
       )
       .bind(piId)
       .first<PiRow>();
-    if (!pi || (pi.status !== "CONFIRMED" && pi.status !== "APPROVED" && pi.status !== "PARTIAL_PAID")) {
+    const headroom = pi ? restateHeadroom(pi, oldBookedByPi.get(piId) ?? 0) : null;
+    if (!pi || !headroom?.payable) {
       throw new Error(`PI ${piId} not found or not in a payable status (APPROVED / PARTIAL_PAID)`);
     }
-    const outstandingBookedSen = piOutstandingSen(pi);
+    const outstandingBookedSen = headroom.outstandingBookedSen;
     const currency = pi.currency ? String(pi.currency) : "MYR";
     const isForeign = !!pi.currency && currency.toUpperCase() !== "MYR";
     const fxRate = Number(pi.fxRate ?? pi.fx_rate) || 1;
@@ -775,7 +885,69 @@ async function buildSupplierPaymentRestate(
       .bind(paymentNo, orgId, postSource),
   );
 
+  // 5. TRUTH GUARD (owner rule 2026-07-08 「确保以后没有这问题」/
+  //    BUG-2026-07-08-002: PI-2606-041 showed paid 836 on a 418 bill with
+  //    exactly ONE 418 payment row — a restate double-bump). The incremental
+  //    ± updates above can silently double-count if any read goes wrong, so
+  //    the batch ENDS by re-deriving each touched PI's paid_amount_sen
+  //    ABSOLUTELY from its live payment rows (rows of VOIDED/DELETED payments
+  //    excluded via document_lifecycle). Statements run in order, so this
+  //    final write wins no matter what the arithmetic before it did.
+  const touchedPiIds = new Set<string>();
+  for (const r of oldRows) if (r.purchaseInvoiceId) touchedPiIds.add(String(r.purchaseInvoiceId));
+  for (const a of allocations) if (a.piId) touchedPiIds.add(String(a.piId));
+  for (const piId of touchedPiIds) statements.push(buildPiPaidTruthStatement(db, piId));
+  statements.push(bumpSupplierPaymentsRev(db));
+
   return statements;
+}
+
+// The aging snapshot's freshness probe rides on tables with an updated_at
+// column; supplier_payments has none, and a lifecycle void/unvoid of an
+// advance-only payment writes NO probed source table at all — so the cached
+// aging kept showing a voided advance forever (BUG-2026-07-09-002). Every
+// payment mutation batch therefore bumps this kv row: kv_config IS in the
+// aging snapshot's sourceTables (same trick /opening-balance/ap-exclude uses).
+function bumpSupplierPaymentsRev(db: Env["Variables"]["DB"]): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO kv_config (key, value, updated_at)
+       VALUES ('supplier_payments_rev', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(JSON.stringify(Date.now()), new Date().toISOString());
+}
+
+// Re-derive ONE PI's paid_amount_sen + status from its live supplier_payments
+// rows (CN markers included — they legitimately count as applied; rows of
+// non-ACTIVE payments excluded via document_lifecycle). Pure snake_case SQL so
+// the adapter passes it through untranslated. Shared by the restate truth
+// guard and POST /recompute-pi-paid.
+function buildPiPaidTruthStatement(db: Env["Variables"]["DB"], piId: string): D1PreparedStatement {
+  const PAID_SQL = `(
+    SELECT COALESCE(SUM(sp.booked_sen), 0) FROM supplier_payments sp
+     WHERE sp.purchase_invoice_id = purchase_invoices.id
+       AND NOT EXISTS (
+         SELECT 1 FROM document_lifecycle dl
+          WHERE dl.source_type = 'supplier_payment'
+            AND dl.source_id = sp.payment_no
+            AND dl.state <> 'ACTIVE'
+       )
+  )`;
+  return db
+    .prepare(
+      `UPDATE purchase_invoices SET
+         paid_amount_sen = ${PAID_SQL},
+         status = CASE
+           WHEN ${PAID_SQL} >= amount_sen THEN 'PAID'
+           WHEN ${PAID_SQL} > 0 THEN 'PARTIAL_PAID'
+           ELSE (CASE WHEN status IN ('PAID','PARTIAL_PAID') THEN 'CONFIRMED' ELSE status END)
+         END
+       WHERE id = ?`,
+    )
+    .bind(piId);
 }
 
 // ---------------------------------------------------------------------------
@@ -879,6 +1051,37 @@ app.post("/:paymentNo/lifecycle", async (c) => {
 // Edit a supplier payment IN PLACE — same voucher number; GL reversed +
 // re-posted (see buildSupplierPaymentRestate). Body mirrors the POST:
 // { supplierId, payFrom, date, reference, allocations }.
+// POST /recompute-pi-paid — one-shot repair: re-derive a PI's paid_amount_sen
+// from its live payment rows (the same truth-guard SQL the restate now ends
+// with). Owner-triggered for corrupted rows (e.g. PI-2606-041, BUG-2026-07-08-002).
+app.post("/recompute-pi-paid", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { piId?: string };
+  const piId = String(body.piId ?? "").trim();
+  if (!piId) return c.json({ success: false, error: "piId is required" }, 400);
+  const before = await c.var.DB
+    .prepare("SELECT pi_no, amount_sen, paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
+    .bind(piId)
+    .first<{ pi_no?: string; piNo?: string; amount_sen?: number; amountSen?: number; paid_amount_sen?: number; paidAmountSen?: number; status: string }>();
+  if (!before) return c.json({ success: false, error: "PI not found" }, 404);
+  await ensurePartialPaymentColumns(c.var.DB);
+  await c.var.DB.batch([buildPiPaidTruthStatement(c.var.DB, piId)]);
+  const after = await c.var.DB
+    .prepare("SELECT paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
+    .bind(piId)
+    .first<{ paid_amount_sen?: number; paidAmountSen?: number; status: string }>();
+  return c.json({
+    success: true,
+    data: {
+      piNo: before.piNo ?? before.pi_no ?? "",
+      beforePaidSen: Number(before.paidAmountSen ?? before.paid_amount_sen) || 0,
+      afterPaidSen: Number(after?.paidAmountSen ?? after?.paid_amount_sen) || 0,
+      status: after?.status ?? "",
+    },
+  });
+});
+
 app.post("/:paymentNo/restate", async (c) => {
   const denied = await requirePermission(c, "invoices", "update");
   if (denied) return denied;

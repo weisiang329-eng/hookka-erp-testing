@@ -69,6 +69,11 @@ type SupplierRow = {
   phone2: string | null;
   mobile: string | null;
   fax: string | null;
+  // Multi-Company Phase 3 — dual-identity link. '' / null = normal external
+  // supplier (default). A group org code marks this supplier as one of our group
+  // companies (pairs with customers.group_org_code). Dual-keyed on read.
+  groupOrgCode?: string | null;
+  group_org_code?: string | null;
 };
 
 type SupplierMaterialRow = {
@@ -139,6 +144,9 @@ function rowToSupplier(
     creditTerm: row.creditTerm ?? "C.O.D.",
     isActive: row.isActive !== 0,
     isGroupCompany: row.isGroupCompany === 1,
+    groupOrgCode:
+      (row.groupOrgCode ?? row.group_org_code ?? "").toString().trim().toUpperCase() ||
+      "",
     outstandingSen: row.outstandingSen ?? 0,
     secondDescription: row.secondDescription ?? "",
     phone2: row.phone2 ?? "",
@@ -214,6 +222,40 @@ function normalisePurchaseOrgCode(v: unknown): string {
     return v.trim().toUpperCase();
   }
   return "HOOKKA";
+}
+
+// Multi-Company Phase 3 — best-effort write of the dual-identity link on a
+// supplier. Kept OUT of the main INSERT/UPDATE shape (which has its own
+// legacy-column fallback dance) so it can't destabilise supplier saves. Only
+// fires when the body actually carries `groupOrgCode`; ensures the column, then
+// UPDATEs the one row. Any failure is swallowed — additive + non-blocking.
+async function writeSupplierGroupOrgCode(
+  db: D1Database,
+  id: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  if (!("groupOrgCode" in body)) return;
+  const code =
+    typeof body.groupOrgCode === "string" && body.groupOrgCode.trim()
+      ? body.groupOrgCode.trim().toUpperCase()
+      : "";
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS group_org_code TEXT NOT NULL DEFAULT ''",
+      )
+      .run();
+  } catch {
+    /* column may already exist */
+  }
+  try {
+    await db
+      .prepare("UPDATE suppliers SET group_org_code = ? WHERE id = ?")
+      .bind(code, id)
+      .run();
+  } catch {
+    /* best-effort — never fail the supplier save on this */
+  }
 }
 
 // GET /api/suppliers — list all suppliers + their materials
@@ -336,6 +378,9 @@ app.post("/", async (c) => {
         throw e;
       }
     }
+
+    // Phase 3 dual-identity link (best-effort, non-blocking).
+    await writeSupplierGroupOrgCode(c.var.DB, id, body);
 
     const [created, matsRes] = await Promise.all([
       c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
@@ -563,6 +608,9 @@ app.put("/:id", async (c) => {
         throw e;
       }
     }
+
+    // Phase 3 dual-identity link (best-effort, non-blocking).
+    await writeSupplierGroupOrgCode(c.var.DB, id, body);
 
     const [updated, matsRes] = await Promise.all([
       c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")

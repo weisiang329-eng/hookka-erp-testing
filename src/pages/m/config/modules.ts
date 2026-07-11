@@ -482,6 +482,7 @@ const deliveryOrdersSource: DataSource = {
     // customerPO + reference kept searchable (owner 2026-07-04: "PO 也 search
     // 不到" — the DO tabs lacked these columns, so a PO/reference query missed).
     textCol("customerPO", "Customer PO", (r) => str(r, "customerPO", "customerPOId")),
+    textCol("customerSO", "Customer SO", (r) => str(r, "customerSO", "customerSOId")),
     textCol("reference", "Reference", (r) => str(r, "reference")),
     textCol("customer", "Customer", (r) => str(r, "customerName")),
     textCol("state", "State", (r) => str(r, "customerState")),
@@ -1295,6 +1296,14 @@ const productionSource: DataSource = {
     textCol("poNo", "Reference", (r) => str(r, "poNo")),
     textCol("product", "Customer", (r) => str(r, "productName", "productCode")),
     textCol("customer", "Customer", (r) => str(r, "customerName")),
+    // Owner 2026-07-05 ("9159 search 不到"): the PO metas (Our SO / Cust PO /
+    // Cust SO / Ref) were DISPLAYED but not in the searchable columns, so a
+    // customer PO/SO or Company SOID query missed. Add them so the operator can
+    // find "what stage is this product at" by any of its reference numbers.
+    textCol("companySO", "Our SO", (r) => str(r, "companySO", "companySOId")),
+    textCol("customerPO", "Cust PO", (r) => str(r, "customerPO", "customerPOId")),
+    textCol("customerSO", "Cust SO", (r) => str(r, "customerSO", "customerSOId")),
+    textCol("reference", "Ref", (r) => str(r, "reference")),
     numCol("qty", "Qty", (r) => num(r, "quantity")),
     dateCol("targetEndDate", "Expected DD", (r) => dateOnly(r, "targetEndDate")),
     enumCol("status", "Status", (r) => str(r, "status"), PROD_STATUSES),
@@ -1575,6 +1584,27 @@ function warehouseSource(key: string, label: string): DataSource {
       textCol("zone", "State", (r) => str(r, "zone", "area")),
       numCol("items", "Items", (r) => (Array.isArray(r.items) ? (r.items as unknown[]).length : 0)),
       enumCol("status", "Status", (r) => str(r, "status"), ["EMPTY", "OCCUPIED", "RESERVED"]),
+      // Owner 2026-07-05: find which rack a product sits on by the customer
+      // PO/SO, our Company SOID, product code or customer name of ANY item on
+      // the rack. Concatenate every item's identifiers into one searchable
+      // column (str() no-ops on absent fields, so it degrades gracefully).
+      textCol("contents", "Contents", (r) => {
+        const items = Array.isArray(r.items) ? (r.items as RawRow[]) : [];
+        return items
+          .map((it) =>
+            [
+              str(it, "customerPOId", "customerPO"),
+              str(it, "customerSO", "customerSOId"),
+              str(it, "companySOId", "companySO"),
+              str(it, "productCode"),
+              str(it, "productName"),
+              str(it, "customerName"),
+            ]
+              .filter(Boolean)
+              .join(" "),
+          )
+          .join(" ");
+      }),
     ],
     defaultSort: { key: "rack", dir: "asc" },
     subTabs: [{ key, label, match: () => true }],

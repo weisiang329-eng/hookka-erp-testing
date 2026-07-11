@@ -87,6 +87,9 @@ export default function PaymentsPage() {
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
   const [method, setMethod] = useState<PaymentRecord["method"]>("BANK_TRANSFER");
   const [reference, setReference] = useState("");
+  // Document date (owner 2026-07-07): receipts are often keyed in days after
+  // the money landed — the operator picks the real date; defaults to today.
+  const [payDate, setPayDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   // Owner: the receipt deposits into a SPECIFIC bank/cash account, not a
   // method-derived default. Options = SBK/SCH accounts from the COA.
   const [bankAccount, setBankAccount] = useState("");
@@ -164,6 +167,7 @@ export default function PaymentsPage() {
           method,
           reference,
           bankAccount,
+          date: payDate,
           allocations,
         },
       });
@@ -171,6 +175,7 @@ export default function PaymentsPage() {
         setSelectedCustomerId("");
         setMethod("BANK_TRANSFER");
         setReference("");
+        setPayDate(new Date().toISOString().slice(0, 10));
         setAllocations([]);
         invalidateCachePrefix("/api/payments");
         invalidateCachePrefix("/api/invoices");
@@ -226,6 +231,7 @@ export default function PaymentsPage() {
     setAllocations(p.allocations.map((a) => ({ invoiceId: a.invoiceId, amount: a.amount })));
     setMethod(p.method);
     setReference(p.reference ?? "");
+    setPayDate((p.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10));
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -235,6 +241,7 @@ export default function PaymentsPage() {
     setSelectedCustomerId("");
     setAllocations([]);
     setReference("");
+    setPayDate(new Date().toISOString().slice(0, 10));
   };
 
   // Save: create a new receipt, or — in edit mode — re-state the existing one in
@@ -247,7 +254,7 @@ export default function PaymentsPage() {
       const res = await fetch(`/api/payments/${encodeURIComponent(editingId)}/restate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ method, reference, bankAccount, allocations }),
+        body: JSON.stringify({ method, reference, bankAccount, date: payDate, allocations }),
       });
       const j = (await res.json()) as { success?: boolean; error?: string };
       if (res.ok && j.success) {
@@ -448,7 +455,19 @@ export default function PaymentsPage() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 max-sm:grid-cols-1">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4 max-sm:grid-cols-1">
+                {/* Document date — the day the money actually landed (receipts
+                    are often keyed in later); drives the GL month bucket. */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                  <input
+                    type="date"
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                    value={payDate}
+                    onChange={(e) => setPayDate(e.target.value)}
+                  />
+                </div>
+
                 {/* Deposit To — the actual bank/cash account the money lands
                     in (drives the GL bank leg; Method stays as metadata). */}
                 <div>

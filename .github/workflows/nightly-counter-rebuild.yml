@@ -1,0 +1,52 @@
+name: Nightly AR/AP counter rebuild
+
+# Resets customers.outstandingSen / suppliers.outstandingSen to their
+# document-derived truth every night (owner rule 2026-07-06: the running
+# counters must not silently drift). Delegates to the SAME
+# rebuildAr/ApCounterSen functions the Debtor tab's Recalculate button uses
+# (src/api/routes/accounting.ts), so the two paths can never diverge.
+# Idempotent — only rows whose value differs are written.
+#
+# Protected by the same CRON_SECRET + x-cron-secret header pattern as
+# nightly-pi-gl-backfill.yml. The Pages worker rejects with 503 if
+# CRON_SECRET is missing server-side, and 403 if the header doesn't match.
+
+on:
+  schedule:
+    # 02:30 SGT daily (18:30 UTC the prior day) — offset from the 02:00
+    # PI->GL backfill so the two never contend.
+    - cron: '30 18 * * *'
+  # Manual trigger for ops.
+  workflow_dispatch:
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/internal/nightly-counter-rebuild
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty. See refresh-mvs.yml header for setup."
+            exit 1
+          fi
+
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 120 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-cron-secret: $CRON_SECRET" \
+            --data '{}' \
+            'https://hookka-erp-testing.pages.dev/api/internal/nightly-counter-rebuild')
+
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+
+          echo "Status: $status"
+          echo "Body: $body"
+
+          if [ "$status" -ne 200 ]; then
+            echo "::error::nightly-counter-rebuild failed with HTTP $status"
+            exit 1
+          fi

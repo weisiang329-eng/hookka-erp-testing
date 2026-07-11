@@ -339,16 +339,9 @@ type WorkerDayRow = {
   expected: number;
   short: number;
   /** RM value of the short hours at the worker's ÷working-days hourly rate
-   *  (what a Deduct would dock). Meaningful for "under" rows. */
+   *  (what the auto-dock removes). Meaningful for "under" rows. */
   shortValueSen: number;
   type: "absent" | "under" | "pending" | "ok";
-  /** AUTO-SETTLED (owner 2026-07-04): the day has a complete real punch
-   *  (clock-in + clock-out), so the shift algorithm already settled it — the
-   *  office gets NO manual Keep-pay/Deduct choice, only a read-only outcome. */
-  autoSettled?: boolean;
-  /** Hours the system already auto-docked for this day (source=AUTO), shown
-   *  read-only when autoSettled. 0 = punch was a full day (nothing docked). */
-  autoDockHours?: number;
 };
 type WorkerDayBreakdown = {
   rows: WorkerDayRow[];
@@ -361,43 +354,34 @@ type WorkerDayBreakdown = {
   perDayDeductionSen: number;
 };
 
-// Shared drill-in panel: splits a worker's per-day shortfall into Absent
-// (real money lost, shown as an RM deduction), Under-recorded (a data-entry
-// gap shown as short hours), and Pending (recent 0-logged days still inside
-// the 2-working-day grace window). Used by both the payroll-residual and the
-// range-based unlogged-hours tables.
+// Shared drill-in panel (READ-ONLY, owner 2026-07-04 FULL auto): splits a
+// worker's per-day shortfall into Absent (salary deduction), Under-recorded
+// (auto-docked from the shift rules / unlogged hours), and Pending (recent
+// 0-logged days still inside the 2-working-day grace window). There is NO manual
+// Keep-pay / Deduct choice any more — every under-logged day auto-settles; this
+// panel just SHOWS what the system did. Used by both the payroll-residual and
+// the range-based unlogged-hours tables.
 function WorkerDayDrillIn({
   name,
   idPrefix,
   breakdown,
   emptyLabel,
-  workerId,
-  onAction,
-  busyKey,
 }: {
   name: string;
   idPrefix: string;
   breakdown: WorkerDayBreakdown;
   emptyLabel: string;
-  workerId?: string;
-  onAction?: (
-    action: "idle" | "deduct",
-    workerId: string,
-    date: string,
-    shortHours: number,
-  ) => void;
-  busyKey?: string | null;
 }) {
   return (
     <>
       <p className="text-xs font-semibold text-[#4B5563] mb-1">
-        Per-day Working Hours for {name} — absent days are already settled in Payroll; days with a real punch auto-settle from the shift rules; only under-recorded days with NO punch need a manual choice here
+        Per-day Working Hours for {name} — absent days are settled by the salary deduction; under-recorded days auto-dock their shortfall (no manual choice)
       </p>
       <p className="text-[11px] text-[#4B5563] mb-1.5">
         Absent: {breakdown.absentDays} day(s) · −{formatRM(breakdown.absenceDeductionSen)}{" "}
         <span className="text-[#9CA3AF]">(already deducted in Payroll)</span>
         {"   |   "}
-        <span className="font-semibold text-[#B45309]">Under-recorded: {breakdown.underHours.toFixed(1)} h to fill</span>
+        <span className="font-semibold text-[#B45309]">Under-recorded (auto-docked): {breakdown.underHours.toFixed(1)} h</span>
         {breakdown.pendingDays > 0 ? `   |   Pending: ${breakdown.pendingDays} day(s)` : ""}
       </p>
       <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
@@ -408,8 +392,7 @@ function WorkerDayDrillIn({
               <th className="py-1 px-2 text-left font-medium">Type</th>
               <th className="py-1 px-2 text-right font-medium">Logged hrs</th>
               <th className="py-1 px-2 text-right font-medium">Expected hrs</th>
-              <th className="py-1 px-2 text-right font-medium">Short</th>
-              {onAction && <th className="py-1 px-2 text-right font-medium">Action</th>}
+              <th className="py-1 px-2 text-right font-medium">Auto-settled</th>
             </tr>
           </thead>
           <tbody>
@@ -417,21 +400,13 @@ function WorkerDayDrillIn({
               .filter((d) => d.type !== "ok" && d.type !== "absent")
               .map((d) => {
                 const chip =
-                  d.type === "absent"
-                    ? { label: "Absent", cls: "bg-[#FCE4E0] text-[#9A3A2D]" }
-                    : d.type === "under"
-                      ? { label: "Under-recorded", cls: "bg-[#FBEFD4] text-[#B45309]" }
-                      : { label: "Pending", cls: "bg-[#EFEDEA] text-[#6B7280]" };
+                  d.type === "under"
+                    ? { label: "Under-recorded", cls: "bg-[#FBEFD4] text-[#B45309]" }
+                    : { label: "Pending", cls: "bg-[#EFEDEA] text-[#6B7280]" };
                 return (
                   <tr
                     key={`${idPrefix}-${d.date}`}
-                    className={`border-b border-[#F0EDE9] ${
-                      d.type === "absent"
-                        ? "bg-[#FCEDE9]"
-                        : d.type === "under"
-                          ? "bg-[#FDF6E3]"
-                          : ""
-                    }`}
+                    className={`border-b border-[#F0EDE9] ${d.type === "under" ? "bg-[#FDF6E3]" : ""}`}
                   >
                     <td className="py-1 px-2 text-[#1F1D1B]">{d.date}</td>
                     <td className="py-1 px-2">
@@ -444,64 +419,18 @@ function WorkerDayDrillIn({
                     </td>
                     <td className="py-1 px-2 text-right tabular-nums text-[#6B7280]">{d.expected.toFixed(1)}</td>
                     <td className={`py-1 px-2 text-right tabular-nums font-semibold ${
-                      d.type === "absent" ? "text-[#9A3A2D]" : d.type === "under" ? "text-[#B45309]" : "text-[#6B7280]"
+                      d.type === "under" ? "text-[#B45309]" : "text-[#6B7280]"
                     }`}>
-                      {d.type === "absent"
-                        ? `−${formatRM(breakdown.perDayDeductionSen)}`
-                        : d.type === "under"
-                          ? `${d.short.toFixed(1)} h · −${formatRM(d.shortValueSen)}`
-                          : "— (recent)"}
+                      {d.type === "under"
+                        ? `−${d.short.toFixed(1)} h · −${formatRM(d.shortValueSen)}`
+                        : "— (recent)"}
                     </td>
-                    {onAction && (
-                      <td className="py-1 px-2 text-right whitespace-nowrap">
-                        {d.type === "under" && workerId ? (
-                          d.autoSettled ? (
-                            // AUTO-SETTLED (owner 2026-07-04): a real punch
-                            // already decided this day — no manual choice. Show
-                            // the system's outcome read-only.
-                            <span
-                              className="inline-block rounded bg-[#E7F0E9] px-1.5 py-0.5 text-[10px] font-medium text-[#3F6B4A]"
-                              title={
-                                (d.autoDockHours ?? 0) > 0
-                                  ? `Settled from the worker's punch — the system already docked ${(d.autoDockHours ?? 0).toFixed(2)}h for this short day (≥9h / late / OT rules). No manual choice.`
-                                  : "Settled from the worker's punch — the shift rules applied automatically. No manual choice."
-                              }
-                            >
-                              {(d.autoDockHours ?? 0) > 0
-                                ? `Auto-docked ${(d.autoDockHours ?? 0).toFixed(2)}h`
-                                : "Auto-settled"}
-                            </span>
-                          ) : (
-                            <span className="inline-flex gap-1 justify-end">
-                              <button
-                                type="button"
-                                onClick={() => onAction("idle", workerId, d.date, d.short)}
-                                disabled={!!busyKey}
-                                title="No punch for this day — decide manually. Came but had no work to do → keep paying for these hours (standby / waiting, not the worker's fault). Logged as idle; pay unchanged."
-                                className="rounded border border-[#D8D2CC] px-1.5 py-0.5 text-[10px] text-[#4B5563] hover:bg-[#F0EDE9] disabled:opacity-40"
-                              >
-                                {busyKey === `${workerId}|${d.date}|idle` ? "…" : "Keep pay"}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onAction("deduct", workerId, d.date, d.short)}
-                                disabled={!!busyKey}
-                                title="No punch for this day — decide manually. Did not work these hours and won't be paid for them → docks them from this month's pay."
-                                className="rounded border border-[#E2B8AE] px-1.5 py-0.5 text-[10px] text-[#9A3A2D] hover:bg-[#FBEAE6] disabled:opacity-40"
-                              >
-                                {busyKey === `${workerId}|${d.date}|deduct` ? "…" : "Deduct"}
-                              </button>
-                            </span>
-                          )
-                        ) : null}
-                      </td>
-                    )}
                   </tr>
                 );
               })}
             {breakdown.rows.filter((d) => d.type !== "ok" && d.type !== "absent").length === 0 && (
               <tr>
-                <td colSpan={onAction ? 6 : 5} className="py-2 px-2 text-center text-[#9CA3AF]">
+                <td colSpan={5} className="py-2 px-2 text-center text-[#9CA3AF]">
                   {emptyLabel}
                 </td>
               </tr>
@@ -510,21 +439,21 @@ function WorkerDayDrillIn({
           <tfoot>
             <tr className="border-t border-[#E2DDD8]">
               <td className="py-1 px-2 font-semibold text-[#1F1D1B]" colSpan={4}>
-                Absence deduction (in Payroll) · Under-recorded hours (to fill)
+                Absence deduction (in Payroll) · Under-recorded hours (auto-docked)
               </td>
               <td className="py-1 px-2 text-right tabular-nums font-bold text-[#9A3A2D]">
                 −{formatRM(breakdown.absenceDeductionSen)} · {breakdown.underHours.toFixed(1)} h
               </td>
-              {onAction && <td />}
             </tr>
           </tfoot>
         </table>
       </div>
       <p className="mt-1 text-[11px] text-[#9CA3AF]">
         Working days are Mon–Sat, excluding Sundays and declared public holidays.
-        Absent days are a salary deduction; under-recorded days just need the missing hours keyed in.
+        Absent days are a salary deduction; under-recorded days <span className="text-[#3F6B4A]">auto-dock</span> their shortfall
+        (the shift rules — ≥9h, late past grace, OT from 30 min past 18:00 — settle every day, no manual pick).
         Pending days are too recent to confirm (within 2 working days) and are not yet deducted.
-        Days with a real punch are <span className="text-[#3F6B4A]">auto-settled</span> — the shift rules (≥9h, late past grace, OT from 30 min past 18:00) already ran on punch-out, so there is no manual Keep-pay / Deduct choice for them.
+        To restore pay on a day that was really full, key the correct hours in the Working Hours grid — the auto-dock clears on the next settle.
       </p>
     </>
   );
@@ -8484,7 +8413,7 @@ function LaborCostTab({
     () => `/api/working-hour-entries?from=${from}&to=${to}`,
     [from, to],
   );
-  const { data: entriesResp, loading: entriesLoading, refresh: refreshEntries } = useCachedJson<{
+  const { data: entriesResp, loading: entriesLoading } = useCachedJson<{
     success?: boolean;
     data?: WorkingHourEntry[];
   }>(entriesUrl);
@@ -8597,130 +8526,14 @@ function LaborCostTab({
   }>(payrollPeriod ? `/api/payroll-hour-deductions?period=${payrollPeriod}` : null);
   // Effective-dated pay rules (multipliers / hour divisor / grace per date).
   const payRuleVersions = usePayRuleVersions();
-  // Which "workerId|date|action" write is mid-flight, so its button disables.
-  const [underActionBusy, setUnderActionBusy] = useState<string | null>(null);
 
-  // AUTO-SETTLEMENT (owner 2026-07-04): a day with a REAL punch (clock-in AND
-  // clock-out) is settled by the system, not by a manual Keep-pay/Deduct pick.
-  // The worker punch-out already ran the shift algorithm (≥9h, late past grace,
-  // OT from 30min past 18:00, day-typed multipliers) and wrote an AUTO
-  // short-hour dock via maybeApplyAutoPunchDock, so the day is DONE. We pull the
-  // period's punches so the drill-in can label those days "auto-settled" and
-  // HIDE the manual buttons — the office can no longer override the punch truth.
-  // Days with NO punch (pure office-keyed, no attendance record) keep the manual
-  // choice: there is no punch evidence to auto-derive from, so silently docking
-  // would be a guess (the conservative direction — never auto-dock a no-evidence
-  // day). Best-effort: if this fetch fails, every day just falls back to the old
-  // manual behaviour rather than blocking the screen.
-  const { data: periodAttendanceResp } = useCachedJson<{
-    data?: Array<{
-      employeeId?: string;
-      date?: string;
-      clockIn?: string | null;
-      clockOut?: string | null;
-    }>;
-  }>(from && to ? `/api/attendance?from=${from}&to=${to}` : null);
-  // "workerId|YYYY-MM-DD" → true when that day has a complete punch (in + out),
-  // i.e. the shift algorithm could settle it. A punch with only a clock-in is
-  // NOT settled (forgot to punch out) — it stays manual, mirroring the
-  // maybeApplyAutoPunchDock "no clock-out → never dock" guard.
-  const punchSettledByWorkerDate = useMemo(() => {
-    const s = new Set<string>();
-    for (const a of periodAttendanceResp?.data ?? []) {
-      if (!a.employeeId || !a.date) continue;
-      if (a.clockIn && a.clockOut) s.add(`${a.employeeId}|${a.date}`);
-    }
-    return s;
-  }, [periodAttendanceResp]);
-  // "workerId|YYYY-MM-DD" → the hours the system already auto-docked for that
-  // day (source=AUTO). Lets the drill-in show the settled dock inline instead of
-  // an actionable "short" figure.
-  const autoDockByWorkerDate = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of deductionsResp?.data ?? []) {
-      if ((r.source ?? "MANUAL") !== "AUTO") continue;
-      m.set(`${r.workerId}|${r.date}`, (m.get(`${r.workerId}|${r.date}`) ?? 0) + (Number(r.hours) || 0));
-    }
-    return m;
-  }, [deductionsResp]);
-
-  // Resolve an under-recorded short day. "idle" = came but no work, still paid →
-  // log the short hours to PRODUCTION_SHORTFALL so they land in the Idle bucket
-  // and the worker's gap closes (no pay change). "deduct" = came but didn't work
-  // and won't be paid → write a dock + regenerate the month so the worker's
-  // gross drops by exactly the unlogged value. Both refresh the screen.
-  const handleUnderAction = useCallback(
-    async (
-      action: "idle" | "deduct",
-      workerId: string,
-      date: string,
-      shortHours: number,
-    ) => {
-      const hrs = Math.round(shortHours * 100) / 100;
-      if (!workerId || !/^\d{4}-\d{2}-\d{2}$/.test(date) || hrs <= 0) return;
-      // "deduct" docks pay + regenerates the payslip — confirm before the write.
-      // ("idle" only logs idle hours with no pay change, so it stays one-click.)
-      if (action === "deduct") {
-        const who = workersById.get(workerId)?.name ?? workerId;
-        if (
-          !(await confirm({
-            title: "Dock pay and regenerate payslip?",
-            message: `Dock ${hrs.toFixed(2)} h from ${who} on ${date} and regenerate this person's payslip for the period? This lowers their pay.`,
-            confirmLabel: "Dock pay",
-            tone: "danger",
-          }))
-        ) {
-          return;
-        }
-      }
-      setUnderActionBusy(`${workerId}|${date}|${action}`);
-      try {
-        if (action === "idle") {
-          const r = await fetch("/api/working-hour-entries", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              workerId,
-              date,
-              departmentCode: "PRODUCTION_SHORTFALL",
-              category: "",
-              hours: hrs,
-              notes: "Keep pay — no work (Labor Cost review)",
-            }),
-          });
-          if (!r.ok) throw new Error(`idle ${r.status}`);
-          invalidateCachePrefix("/api/working-hour-entries");
-          refreshEntries?.();
-        } else {
-          const r = await fetch("/api/payroll-hour-deductions", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              workerId,
-              date,
-              hours: hrs,
-              note: "Short-hour dock — Labor Cost review",
-            }),
-          });
-          if (!r.ok) throw new Error(`deduct ${r.status}`);
-          await fetch("/api/payslips", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ period: payrollPeriod, regenerate: true }),
-          });
-          invalidateCachePrefix("/api/payslips");
-          invalidateCachePrefix("/api/payroll-hour-deductions");
-          refreshDeductions?.();
-          refreshRecon?.();
-        }
-      } catch (e) {
-        console.error("[under-action]", e);
-      } finally {
-        setUnderActionBusy(null);
-      }
-    },
-    [payrollPeriod, refreshEntries, refreshRecon, refreshDeductions, confirm, workersById],
-  );
+  // Owner 2026-07-04 (FULL auto): the manual Keep-pay / Deduct choice is retired.
+  // Every under-settled day auto-docks its shortfall (POST /settle-period, run
+  // live on punch-out and on demand via "Settle from punches"). The drill-in
+  // panels are now READ-ONLY summaries of what the system settled; the only
+  // remaining action is Undo on a stored dock (handleUndoDeduction below), which
+  // still restores pay for a wrong auto-dock.
+  const [undoBusy, setUndoBusy] = useState<string | null>(null);
 
   // Undo a dock → delete it + regenerate so the worker's pay is restored.
   const handleUndoDeduction = useCallback(
@@ -8735,7 +8548,7 @@ function LaborCostTab({
       ) {
         return;
       }
-      setUnderActionBusy(`undo|${id}`);
+      setUndoBusy(`undo|${id}`);
       try {
         const r = await fetch(`/api/payroll-hour-deductions/${id}`, {
           method: "DELETE",
@@ -8753,27 +8566,27 @@ function LaborCostTab({
       } catch (e) {
         console.error("[undo-deduction]", e);
       } finally {
-        setUnderActionBusy(null);
+        setUndoBusy(null);
       }
     },
     [payrollPeriod, refreshRecon, refreshDeductions, confirm],
   );
 
-  // AUTO-settle the whole month from real punches (owner 2026-07-04). Replays the
-  // shift algorithm over every punch in the period so days settle without a
-  // manual pick — then regenerates once so pay reflects the docks. Idempotent
-  // and heavily guarded server-side (no clock-out → skip, finalised month →
-  // skip, a MANUAL dock is never overridden). Live punch-out already settles day
-  // by day; this is for catching up a month of existing punches at once.
+  // FULL-AUTO settle the whole month (owner 2026-07-04, A). Docks every
+  // under-settled day — from the punch shift rules AND from under-logged
+  // Working Hours (expected − logged) — then regenerates once so pay reflects
+  // the docks. Idempotent and heavily guarded server-side (finalised month →
+  // skip, a MANUAL dock is never overridden, full day clears stale AUTO). Live
+  // punch-out already settles day by day; this catches up a whole month at once.
   const [settleBusy, setSettleBusy] = useState(false);
   const [settleResult, setSettleResult] = useState<string | null>(null);
   const handleSettleFromPunches = useCallback(async () => {
     if (!payrollPeriod) return;
     if (
       !(await confirm({
-        title: "Auto-settle this month from punches?",
-        message: `Apply the shift rules (≥9h, late past grace, OT from 30 min past 18:00) to every real punch in ${payrollMonthLabel} and regenerate payslips? Days with a real punch are settled automatically — a full day docks nothing, a short/late day docks the shortfall. Your own MANUAL Keep-pay / Deduct decisions are never overridden, and an already-approved month is not touched.`,
-        confirmLabel: "Settle from punches",
+        title: "Auto-settle this month?",
+        message: `Apply the shift rules (≥9h, late past grace, OT from 30 min past 18:00) to every punch AND auto-dock under-logged (To-fill) days in ${payrollMonthLabel}, then regenerate payslips? Every under-settled day docks its shortfall at the ÷26 hourly rate — no manual pick. Your own MANUAL Keep-pay / Deduct decisions are never overridden, and an already-approved month is not touched.`,
+        confirmLabel: "Settle now",
       }))
     ) {
       return;
@@ -8788,17 +8601,28 @@ function LaborCostTab({
       });
       const j = (await r.json()) as {
         success?: boolean;
-        data?: { punches: number; applied: number; "no-shortfall": number; "period-locked": number; "manual-exists": number; dockedHours: number };
+        data?: {
+          applied: number;
+          "no-shortfall": number;
+          "period-locked": number;
+          "manual-exists": number;
+          "punch-source": number;
+          "logged-source": number;
+          dockedHours: number;
+          periodLocked: boolean;
+        };
         error?: string;
       };
       if (!r.ok || !j.success) throw new Error(j.error || `settle ${r.status}`);
       const d = j.data;
       if (d) {
         setSettleResult(
-          `${d.punches} punch day(s) settled — ${d.applied} docked (${d.dockedHours}h), ${d["no-shortfall"]} full day(s), ${d["manual-exists"]} left on your manual pick${d["period-locked"] > 0 ? `, ${d["period-locked"]} skipped (month locked)` : ""}.`,
+          d.periodLocked
+            ? "Month already finalised — nothing changed (un-approve first to re-settle)."
+            : `${d.applied} day(s) auto-docked (${d.dockedHours}h — ${d["punch-source"]} from punches, ${d["logged-source"]} from under-logged hours), ${d["no-shortfall"]} full day(s), ${d["manual-exists"]} left on your manual pick.`,
         );
       }
-      // Regenerate once so the docks land in pay (same as a single Deduct).
+      // Regenerate once so the docks land in pay (same as a single dock).
       await fetch("/api/payslips", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -9381,14 +9205,6 @@ function LaborCostTab({
         } else {
           type = "ok";
         }
-        // AUTO-SETTLED: this day has a COMPLETE real punch, so the shift
-        // algorithm already decided it (an AUTO short-hour dock, or a full day).
-        // The manual Keep-pay/Deduct choice is removed for these — the panel
-        // shows the settled outcome read-only. A day with only a clock-in (no
-        // clock-out) is NOT settled (forgot to punch out) and stays manual.
-        const wdKey = `${workerId}|${date}`;
-        const autoSettled = punchSettledByWorkerDate.has(wdKey);
-        const autoDockHours = autoDockByWorkerDate.get(wdKey) ?? 0;
         return {
           date,
           logged,
@@ -9396,8 +9212,6 @@ function LaborCostTab({
           short,
           shortValueSen: Math.round(short * costingHourlyRateSen),
           type,
-          autoSettled,
-          autoDockHours,
         };
       });
       const absenceDeductionSen = absentDays * perDayDeductionSen;
@@ -9412,7 +9226,7 @@ function LaborCostTab({
         perDayDeductionSen,
       };
     },
-    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList, period, from, effSalaryOf, payRuleVersions, punchSettledByWorkerDate, autoDockByWorkerDate],
+    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList, period, from, effSalaryOf, payRuleVersions],
   );
 
   // Set of department codes the labor buckets cover (the 8 production depts +
@@ -9628,19 +9442,8 @@ function LaborCostTab({
     return { nonProductionStaff, underLoggedFactory, nonProdSubtotalSen, underLoggedSubtotalSen };
   }, [showReconciliation, reconPayslips, allDepts, workersById, factoryDeptCodes, loggedValueByWorker, absenceLeniencyByPayslip, otAdjustmentByPayslip, lateDockAdjByPayslip]);
 
-  // Clean per-department under-logged total — aggregated from the PER-WORKER
-  // gaps (each worker's gross − their OWN logged value), so it is NOT polluted
-  // by cross-department borrowing the way the old gross-minus-bucketed
-  // breakdown was. Sums to the unlogged-factory subtotal below.
-  const underLoggedByDept = useMemo(() => {
-    const m = new Map<string, { code: string; name: string; gapSen: number }>();
-    for (const e of employeeResidual.underLoggedFactory) {
-      const cur = m.get(e.deptCode) ?? { code: e.deptCode, name: e.deptName, gapSen: 0 };
-      cur.gapSen += e.gapSen;
-      m.set(e.deptCode, cur);
-    }
-    return [...m.values()].sort((a, b) => b.gapSen - a.gapSen);
-  }, [employeeResidual.underLoggedFactory]);
+  // (The per-department under-logged roll-up that used to live here was removed
+  // with the under-logged worker panel — owner 2026-07-04, now fully auto-docked.)
 
   // ---- Fully-burdened department buckets --------------------------------
   // The owner wants each department's labor line to carry the FULL cost of its
@@ -9906,9 +9709,9 @@ function LaborCostTab({
                 size="sm"
                 onClick={handleSettleFromPunches}
                 disabled={settleBusy || !payrollPeriod}
-                title="Apply the shift rules to every real punch this month and regenerate payslips. Days with a punch settle automatically (a short/late day docks its shortfall; a full day docks nothing). Your manual Keep-pay / Deduct picks are never overridden."
+                title="Auto-settle this month: apply the shift rules to every punch AND auto-dock under-logged (To-fill) days, then regenerate payslips. Every under-settled day docks its shortfall — no manual pick. Your manual Keep-pay / Deduct picks are never overridden."
               >
-                <Clock className="h-4 w-4 mr-1" /> {settleBusy ? "Settling…" : "Settle from punches"}
+                <Clock className="h-4 w-4 mr-1" /> {settleBusy ? "Settling…" : "Settle month"}
               </Button>
             )}
             <Button variant="outline" size="sm" onClick={handlePrint} title="Print the production labor breakdown for the selected period">
@@ -10028,9 +9831,9 @@ function LaborCostTab({
                   <tr className="border-b border-[#E2DDD8]">
                     <td
                       className="py-1.5 pr-3 text-[#4B5563]"
-                      title="Pay already issued for hours not yet entered in Working Hours. Click a worker in the panel below to keep-pay (idle) or deduct each short day."
+                      title="Hours short on days the worker DID work — auto-docked at the ÷26 hourly rate. Click a worker in the panel below to see the per-day settlement; key the real hours to restore pay."
                     >
-                      Under-recorded hours <span className="text-[#9CA3AF]">(paid, not yet logged)</span>
+                      Under-recorded hours <span className="text-[#9CA3AF]">(auto-docked)</span>
                     </td>
                     <td className={`py-1.5 text-right tabular-nums font-medium ${underRecordedReconSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
                       {formatCurrency(underRecordedReconSen)}
@@ -10104,10 +9907,10 @@ function LaborCostTab({
                           <button
                             type="button"
                             onClick={() => handleUndoDeduction(d.id)}
-                            disabled={!!underActionBusy}
+                            disabled={!!undoBusy}
                             className="rounded border border-[#D8D2CC] px-1.5 py-0.5 text-[10px] text-[#4B5563] hover:bg-[#F0EDE9] disabled:opacity-40"
                           >
-                            {underActionBusy === `undo|${d.id}` ? "…" : "Undo"}
+                            {undoBusy === `undo|${d.id}` ? "…" : "Undo"}
                           </button>
                         </td>
                       </tr>
@@ -10188,142 +9991,12 @@ function LaborCostTab({
               </div>
             )}
 
-            {/* 2. Factory workers with unlogged hours — the DATA GAP. */}
-            <div className="mb-3">
-              <button
-                type="button"
-                onClick={() => setShowRangeGapTbl((v) => !v)}
-                className="text-xs font-semibold text-[#9A3A2D] mb-1 flex items-center gap-1.5 hover:opacity-80"
-                title={showRangeGapTbl ? "Hide this section" : "Show this section"}
-              >
-                {showRangeGapTbl ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                <AlertTriangle className="h-3.5 w-3.5" />
-                Factory workers with unlogged hours (data gap — record their Working Hours)
-              </button>
-              {showRangeGapTbl && (
-              <>
-              {/* Clean per-department roll-up of the under-logged gaps (sums to
-                  the Subtotal below). This is the real "by department" figure —
-                  the misleading one on the reconciliation line above was removed. */}
-              {underLoggedByDept.length > 0 && (
-                <div className="mb-2 rounded-md border border-[#E7C9C1] bg-white px-3 py-2">
-                  <p className="mb-1 text-[11px] font-medium text-[#6B7280]">By department</p>
-                  <div className="space-y-0.5">
-                    {underLoggedByDept.map((d) => (
-                      <div
-                        key={`ul-dept-${d.code}`}
-                        className="flex items-center justify-between text-xs"
-                      >
-                        <span className="text-[#6B7280]">↳ {d.name}</span>
-                        <span className="tabular-nums font-medium text-[#9A3A2D]">
-                          {formatCurrency(d.gapSen)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div className="overflow-x-auto rounded-md border border-[#E7C9C1] bg-[#FCF4F2]">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-[#E7C9C1] text-xs text-[#9A3A2D]">
-                      <th className="py-1.5 px-3 text-left font-medium">Employee</th>
-                      <th className="py-1.5 px-3 text-left font-medium">Department</th>
-                      <th className="py-1.5 px-3 text-right font-medium">Paid</th>
-                      <th className="py-1.5 px-3 text-right font-medium">Logged</th>
-                      <th className="py-1.5 px-3 text-right font-medium">Gap</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {employeeResidual.underLoggedFactory.map((e) => {
-                      // Drill-in keys on the worker record id (employeeId), not
-                      // the payslip id, since the per-day hours map is keyed by
-                      // workerId. Rows whose payslip has no linked employeeId
-                      // can't be drilled — render them non-interactive.
-                      const drillWorkerId = e.workerId;
-                      const canDrill = !!drillWorkerId && workersById.has(drillWorkerId);
-                      const isOpen = canDrill && expandedGapWorkerId === drillWorkerId;
-                      const breakdown = isOpen ? buildWorkerDayBreakdown(drillWorkerId!) : null;
-                      return (
-                        <Fragment key={`ul-fac-${e.id}`}>
-                          <tr
-                            className={`border-b border-[#F1DDD7] ${canDrill ? "cursor-pointer hover:bg-[#FBEAE5]" : ""}`}
-                            onClick={canDrill ? () => setExpandedGapWorkerId(isOpen ? null : drillWorkerId!) : undefined}
-                          >
-                            <td className="py-1.5 px-3 text-[#1F1D1B]">
-                              <span className="inline-flex items-center gap-1.5">
-                                {canDrill && (
-                                  isOpen
-                                    ? <ChevronDown className="h-3.5 w-3.5 text-[#9A3A2D]" />
-                                    : <ChevronRight className="h-3.5 w-3.5 text-[#9A3A2D]" />
-                                )}
-                                {e.name}
-                              </span>
-                            </td>
-                            <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums text-[#1F1D1B]">{formatCurrency(e.grossSen)}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{formatCurrency(e.loggedValueSen)}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums font-semibold text-[#9A3A2D]">{formatCurrency(e.gapSen)}</td>
-                          </tr>
-                          {isOpen && breakdown && (
-                            <tr className="border-b border-[#F1DDD7] bg-white">
-                              <td colSpan={5} className="px-3 py-2">
-                                <WorkerDayDrillIn
-                                  name={e.name}
-                                  idPrefix={`gap-day-${e.id}`}
-                                  breakdown={breakdown}
-                                  emptyLabel="No absent or under-recorded days in this period"
-                                  workerId={drillWorkerId ?? undefined}
-                                  onAction={handleUnderAction}
-                                  busyKey={underActionBusy}
-                                />
-                              </td>
-                            </tr>
-                          )}
-                        </Fragment>
-                      );
-                    })}
-                    {employeeResidual.underLoggedFactory.length === 0 && (
-                      <tr>
-                        <td colSpan={5} className="py-2 px-3 text-center text-xs text-[#4F7C3A]">
-                          All factory workers fully reconciled — no unlogged hours
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                  <tfoot>
-                    <tr className="border-t border-[#E7C9C1]">
-                      <td className="py-1.5 px-3 font-semibold text-[#1F1D1B]" colSpan={4}>Subtotal (unrecorded)</td>
-                      <td className="py-1.5 px-3 text-right tabular-nums font-bold text-[#9A3A2D]">
-                        {formatCurrency(employeeResidual.underLoggedSubtotalSen)}
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-              </>
-              )}
-            </div>
-
-            {/* Prove the itemised gap equals the Under-recorded reconciliation
-                line above (identical figure by construction). Any genuine
-                non-production staff salary sits in Overhead, noted here. */}
-            <div className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-xs">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[#6B7280]">
-                  Unlogged factory hours {formatCurrency(employeeResidual.underLoggedSubtotalSen)}
-                  {employeeResidual.nonProdSubtotalSen > 0 && (
-                    <> {" "}(non-production staff {formatCurrency(employeeResidual.nonProdSubtotalSen)} sits in Overhead)</>
-                  )}
-                </span>
-                <span className="inline-flex items-center gap-1.5 font-semibold text-[#1F1D1B]">
-                  = Under-recorded hours {formatCurrency(underRecordedReconSen)}
-                  <span className="inline-flex items-center gap-1 rounded-full bg-[#EEF3E4] px-2 py-0.5 text-[#4F7C3A]">
-                    <Check className="h-3 w-3" /> matches
-                  </span>
-                </span>
-              </div>
-            </div>
+            {/* Under-logged worker panel REMOVED (owner 2026-07-04): every
+                under-logged/To-fill day now auto-docks at the ÷26 rate — there
+                is no manual action to take, so the review table is gone. The
+                dock still shows per-worker on payslips; the labor-cost total
+                still includes it (employeeResidual.underLoggedSubtotalSen feeds
+                the reconciliation + the Settle-from-punches button). */}
           </div>
         )}
 
@@ -10345,7 +10018,7 @@ function LaborCostTab({
               >
                 {showRangeGapTbl ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                 <AlertTriangle className="h-4 w-4" />
-                Factory workers with unlogged hours (data gap — record their Working Hours)
+                Factory workers with under-logged hours (auto-docked — key the real hours to restore pay)
               </button>
               <span className="text-xs font-normal text-[#6B7280]">
                 {from} → {to}
@@ -10355,11 +10028,13 @@ function LaborCostTab({
             <>
             <p className="text-xs text-[#6B7280] leading-relaxed mb-3">
               For this range, days with NOTHING logged are <span className="font-medium">Absent</span> —
-              the salary deduction already settles them in Payroll, so they carry no value here. Only
+              the salary deduction already settles them in Payroll, so they carry no value here.
               <span className="font-medium"> To-fill hours</span> (days the worker DID work but logged
-              less than a full day) genuinely need action: key the missing hours, or Keep/Deduct in the
-              drill-down. Payroll reconciliation is monthly and shows once a full calendar month is
-              selected. Working days are Mon–Sat, excluding Sundays and declared public holidays.
+              less than a full day) are <span className="text-[#3F6B4A]">auto-docked</span> at the ÷26
+              hourly rate — no manual pick. To restore pay on a day that was really full, key the correct
+              hours in the Working Hours grid and re-settle. Payroll reconciliation is monthly and shows
+              once a full calendar month is selected. Working days are Mon–Sat, excluding Sundays and
+              declared public holidays.
             </p>
 
             <div className="overflow-x-auto rounded-md border border-[#E7C9C1] bg-[#FCF4F2]">
@@ -10371,7 +10046,7 @@ function LaborCostTab({
                     <th className="py-1.5 px-3 text-right font-medium">Expected hrs</th>
                     <th className="py-1.5 px-3 text-right font-medium">Logged hrs</th>
                     <th className="py-1.5 px-3 text-right font-medium" title="Days with NOTHING logged — the salary deduction already settles these in Payroll, so they carry no value here">Absent (settled)</th>
-                    <th className="py-1.5 px-3 text-right font-medium" title="Hours short on days the worker DID work — these are the only hours that genuinely need filling (or Keep/Deduct)">To-fill hrs</th>
+                    <th className="py-1.5 px-3 text-right font-medium" title="Hours short on days the worker DID work — auto-docked at the ÷26 hourly rate (key the real hours to restore pay)">To-fill hrs</th>
                     <th className="py-1.5 px-3 text-right font-medium">To-fill value</th>
                   </tr>
                 </thead>
@@ -10411,9 +10086,6 @@ function LaborCostTab({
                                 idPrefix={`range-gap-day-${e.id}`}
                                 breakdown={breakdown}
                                 emptyLabel="No absent or under-recorded days in this range"
-                                workerId={e.workerId}
-                                onAction={handleUnderAction}
-                                busyKey={underActionBusy}
                               />
                             </td>
                           </tr>

@@ -45,6 +45,7 @@ import {
   computeBillTotals,
   validateBillShape,
   buildBillLegs,
+  editedBillStatus,
   type PartyType,
   type BillItemInput,
 } from "../../lib/other-party-bill";
@@ -61,7 +62,7 @@ import { buildHistIdentityRemap } from "../../lib/pnl-hist-remap";
 import { rmLineOf, rmScale } from "../../lib/product-line-rm";
 import { buildInventoryOpeningSeed, applyOpeningSeed, type InventoryOpeningRow } from "../../lib/inventory-opening";
 import { bucketAging } from "../../lib/other-party-aging";
-import { applyLifecycle } from "../lib/document-lifecycle";
+import { applyLifecycle, getDocState } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import {
   computeMaterialCheckpoints,
@@ -70,6 +71,12 @@ import {
   type FifoEvent,
   type CheckpointCum,
 } from "../../lib/material-cost-fifo";
+import {
+  buildApReconciliation,
+  type ApReconLeg,
+  type ApReconPi,
+  type ApReconPaymentRow,
+} from "../../lib/ap-recon";
 
 const app = new Hono<Env>();
 
@@ -114,6 +121,13 @@ type JournalLineRow = {
   description: string;
 };
 
+// Per-document detail row for the expandable aging (owner rule 2026-07-08:
+// 「可以点了展开看 detail」— his old system's Debtor Aging - Detail layout:
+// each open document under its party, amount in its aging column). `mo` is
+// the bucket index 0..4 (current / 1 / 2 / 3 / 3+ months); advances appear
+// as negative current-bucket docs.
+type AgingDocRow = { no: string; date: string; mo: number; amountSen: number };
+
 type ArAgingRow = {
   customerId: string;
   customerName: string;
@@ -122,6 +136,7 @@ type ArAgingRow = {
   days60Sen: number;
   days90Sen: number;
   over90Sen: number;
+  docs: AgingDocRow[];
 };
 
 type ApAgingRow = {
@@ -132,7 +147,10 @@ type ApAgingRow = {
   days60Sen: number;
   days90Sen: number;
   over90Sen: number;
+  docs: AgingDocRow[];
 };
+
+const agingBucketIdx = (mo: number): number => (mo <= 0 ? 0 : mo >= 4 ? 4 : mo);
 
 // ---------------------------------------------------------------------------
 // Row mappers — match the legacy mock-data shapes
@@ -342,6 +360,52 @@ function addToBucket(
 // invoices / purchase invoices bucketed by days past due. Replaces the
 // dead manual ar_aging/ap_aging snapshot tables (response shape kept so
 // the AR/AP/Overview tabs are unchanged).
+// Un-knocked supplier advances (owner rule 2026-07-05: the creditor aging must
+// INCLUDE unapplied advances as NEGATIVE rows, so the aging total ties the
+// 400-0000 control exactly instead of drifting by the advance sum). An advance
+// is a supplier_payments row with NO purchaseInvoiceId; knock-off decrements
+// its amountSen, so amountSen > 0 = still unapplied. Rows of VOIDED/DELETED
+// payments are excluded via document_lifecycle (BUG-2026-07-08-003: a voided
+// advance kept its −row in both agings while its GL was correctly hidden,
+// skewing the drift card by exactly that amount) — same NOT-EXISTS shape as
+// buildPiPaidTruthStatement, pure snake_case so the adapter passes it through.
+async function loadUnappliedSupplierAdvances(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+): Promise<Map<string, { supplierName: string; sen: number; items: { paymentNo: string; date: string; sen: number }[] }>> {
+  const out = new Map<string, { supplierName: string; sen: number; items: { paymentNo: string; date: string; sen: number }[] }>();
+  try {
+    const res = await db
+      .prepare(
+        `SELECT sp.supplier_id AS supplier_id, sp.supplier_name AS supplier_name,
+                sp.amount_sen AS amount_sen, sp.payment_no AS payment_no, sp.date AS date
+           FROM supplier_payments sp
+          WHERE sp.org_id = ? AND sp.purchase_invoice_id IS NULL AND sp.amount_sen > 0
+            AND NOT EXISTS (
+              SELECT 1 FROM document_lifecycle dl
+               WHERE dl.source_type = 'supplier_payment'
+                 AND dl.source_id = sp.payment_no
+                 AND dl.state <> 'ACTIVE'
+            )`,
+      )
+      .bind(orgId)
+      .all<{ supplierId?: string; supplier_id?: string; supplierName?: string; supplier_name?: string; amountSen?: number; amount_sen?: number; paymentNo?: string; payment_no?: string; date?: string }>();
+    for (const r of res.results ?? []) {
+      const id = String(r.supplierId ?? r.supplier_id ?? "");
+      if (!id) continue;
+      const sen = Math.round(Number(r.amountSen ?? r.amount_sen) || 0);
+      if (sen <= 0) continue;
+      const item = { paymentNo: String(r.paymentNo ?? r.payment_no ?? ""), date: String(r.date ?? "").slice(0, 10), sen };
+      const cur = out.get(id);
+      if (cur) { cur.sen += sen; cur.items.push(item); }
+      else out.set(id, { supplierName: String(r.supplierName ?? r.supplier_name ?? ""), sen, items: [item] });
+    }
+  } catch {
+    /* supplier_payments unavailable → no advance rows */
+  }
+  return out;
+}
+
 app.get("/aging", async (c) => {
   // RBAC gate (P3.3-followup) — accounting:read.
   const denied = await requirePermission(c, "accounting", "read");
@@ -371,18 +435,22 @@ app.get("/aging", async (c) => {
       tableName: "accounting_aging_snapshot",
       // kv_config so the snapshot rebuilds when opening_date (the pre-opening
       // floor) is saved — not just when invoices/PIs change.
-      sourceTables: ["invoices", "purchase_invoices", "kv_config"],
+      // supplier_payments included so knocking off an advance rebuilds the
+      // snapshot (advances appear as negative rows below).
+      sourceTables: ["invoices", "purchase_invoices", "supplier_payments", "kv_config"],
     },
     orgId,
     async () => {
       const [invRes, piRes] = await Promise.all([
         c.var.DB.prepare(
-          `SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening FROM invoices${arWhere}`,
+          `SELECT customerId, customerName, invoiceNo, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening FROM invoices${arWhere}`,
         )
           .bind(...(coFilter.active ? [coFilter.param] : []))
           .all<{
           customerId: string;
           customerName: string;
+          invoiceNo?: string | null;
+          invoice_no?: string | null;
           totalSen: number;
           paidAmount: number;
           status: string;
@@ -391,14 +459,18 @@ app.get("/aging", async (c) => {
           isOpening: number | null;
         }>(),
         c.var.DB.prepare(
-          `SELECT id, supplierId, supplierName, amountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices${apWhere}`,
+          `SELECT id, supplierId, supplierName, piNo, amountSen, paidAmountSen, status, dueDate, invoiceDate, isOpening FROM purchase_invoices${apWhere}`,
         )
           .bind(...(coFilter.active ? [coFilter.param] : []))
           .all<{
           id: string;
           supplierId: string;
           supplierName: string;
+          piNo?: string | null;
+          pi_no?: string | null;
           amountSen: number;
+          paidAmountSen?: number | null;
+          paid_amount_sen?: number | null;
           status: string;
           dueDate: string | null;
           invoiceDate: string | null;
@@ -425,10 +497,18 @@ app.get("/aging", async (c) => {
             days60Sen: 0,
             days90Sen: 0,
             over90Sen: 0,
+            docs: [],
           };
           arMap.set(i.customerId, row);
         }
-        addToBucket(row, monthsOverdue(i.invoiceDate ?? i.dueDate), outstanding);
+        const moAr = monthsOverdue(i.invoiceDate ?? i.dueDate);
+        addToBucket(row, moAr, outstanding);
+        row.docs.push({
+          no: String(i.invoiceNo ?? i.invoice_no ?? ""),
+          date: String(i.invoiceDate ?? "").slice(0, 10),
+          mo: agingBucketIdx(moAr),
+          amountSen: outstanding,
+        });
       }
 
       const apMap = new Map<string, ApAgingRow>();
@@ -436,7 +516,11 @@ app.get("/aging", async (c) => {
         // Pre-opening PIs count as opening by default; only excluded ones drop.
         if (apRowBeforeOpening({ id: p.id, date: p.invoiceDate, isOpening: p.isOpening }, obDateAg, apExclAg)) continue;
         if (["DRAFT", "CANCELLED", "PAID"].includes(p.status)) continue;
-        const outstanding = Number(p.amountSen) || 0;
+        // Net outstanding = face − paid (BUG-2026-07-05-001: this tab showed the
+        // FULL face amount for partially-paid PIs — the AR loop above always
+        // netted, the AP loop didn't).
+        const outstanding =
+          (Number(p.amountSen) || 0) - (Number(p.paidAmountSen ?? p.paid_amount_sen) || 0);
         if (outstanding <= 0) continue;
         let row = apMap.get(p.supplierId);
         if (!row) {
@@ -448,11 +532,55 @@ app.get("/aging", async (c) => {
             days60Sen: 0,
             days90Sen: 0,
             over90Sen: 0,
+            docs: [],
           };
           apMap.set(p.supplierId, row);
         }
-        addToBucket(row, monthsOverdue(p.invoiceDate ?? p.dueDate), outstanding);
+        const moAp = monthsOverdue(p.invoiceDate ?? p.dueDate);
+        addToBucket(row, moAp, outstanding);
+        row.docs.push({
+          no: String(p.piNo ?? p.pi_no ?? ""),
+          date: String(p.invoiceDate ?? "").slice(0, 10),
+          mo: agingBucketIdx(moAp),
+          amountSen: outstanding,
+        });
       }
+      // Unapplied supplier advances → NEGATIVE current-bucket rows (owner rule
+      // 2026-07-05), so the AP aging total ties the 400-0000 control exactly.
+      // Each advance also joins the expandable detail as its own negative doc.
+      for (const [supplierId, adv] of await loadUnappliedSupplierAdvances(c.var.DB, orgId)) {
+        let row = apMap.get(supplierId);
+        if (!row) {
+          row = {
+            supplierId,
+            supplierName: adv.supplierName || "Unknown",
+            currentSen: 0,
+            days30Sen: 0,
+            days60Sen: 0,
+            days90Sen: 0,
+            over90Sen: 0,
+            docs: [],
+          };
+          apMap.set(supplierId, row);
+        }
+        // Bucket each advance by ITS payment date (owner 2026-07-08: a May
+        // advance belongs in the May column, not Current) — same month-based
+        // bucketing as the bills above.
+        for (const it of adv.items) {
+          const moAdv = monthsOverdue(it.date || null);
+          addToBucket(row, moAdv, -it.sen);
+          row.docs.push({
+            no: `${it.paymentNo} · Advance`,
+            date: it.date,
+            mo: agingBucketIdx(moAdv),
+            amountSen: -it.sen,
+          });
+        }
+      }
+      // Owner rule 2026-07-09: within each aging bucket the NEWEST document
+      // sits on top (bucket ascending, date descending).
+      for (const row of arMap.values()) row.docs.sort((a, b) => a.mo - b.mo || b.date.localeCompare(a.date));
+      for (const row of apMap.values()) row.docs.sort((a, b) => a.mo - b.mo || b.date.localeCompare(a.date));
 
       return {
         data: {
@@ -2355,9 +2483,49 @@ app.get("/ap-control", async (c) => {
     else row.over120Sen += amt;
     row.totalSen += amt;
   }
+  // Unapplied supplier advances → NEGATIVE not-due rows (owner rule 2026-07-05),
+  // so the aging table's total ties the 400-0000 control exactly; knock-off
+  // clears both sides at once.
+  const advMapCtl = await loadUnappliedSupplierAdvances(c.var.DB, getOrgId(c));
+  for (const [supplierId, adv] of advMapCtl) {
+    let row = bySupplier.get(supplierId);
+    if (!row) {
+      row = {
+        supplierId,
+        supplierName: adv.supplierName || "Unknown",
+        notDueSen: 0,
+        d30Sen: 0,
+        d60Sen: 0,
+        d90Sen: 0,
+        d120Sen: 0,
+        over120Sen: 0,
+        totalSen: 0,
+      };
+      bySupplier.set(supplierId, row);
+    }
+    // Bucket each advance by ITS payment date (owner 2026-07-08) — same
+    // day-based buckets as the bills above use for their due dates.
+    for (const it of adv.items) {
+      const d = it.date || today;
+      const days = d >= today ? 0 : Math.floor((new Date(`${today}T00:00:00Z`).getTime() - new Date(`${d}T00:00:00Z`).getTime()) / 86400000);
+      const amt = -it.sen;
+      if (days <= 0) row.notDueSen += amt;
+      else if (days <= 30) row.d30Sen += amt;
+      else if (days <= 60) row.d60Sen += amt;
+      else if (days <= 90) row.d90Sen += amt;
+      else if (days <= 120) row.d120Sen += amt;
+      else row.over120Sen += amt;
+      row.totalSen += amt;
+    }
+  }
   const aging = [...bySupplier.values()].sort((a, b) => b.totalSen - a.totalSen);
   const supplierCounterSen = Number(supRes?.s) || 0;
   const netSubledgerSen = piOutstandingSen - pcnPostedSen;
+  // Owner rule 2026-07-08 (「卡改成净额」): the card figure is the NET owed —
+  // bills minus un-knocked advances — so it ties the control; the advance sum
+  // rides along as a reminder line instead of masquerading as drift.
+  const unappliedAdvanceSen = [...advMapCtl.values()].reduce((s, a) => s + a.sen, 0);
+  const netOutstandingSen = netSubledgerSen - unappliedAdvanceSen;
   return c.json({
     success: true,
     data: {
@@ -2366,11 +2534,328 @@ app.get("/ap-control", async (c) => {
       tradeControlSen,
       piOutstandingSen: netSubledgerSen,
       pcnPostedSen,
+      unappliedAdvanceSen,
+      netOutstandingSen,
       supplierCounterSen,
-      driftControlVsPiSen: tradeControlSen - netSubledgerSen,
+      driftControlVsPiSen: tradeControlSen - netOutstandingSen,
       driftCounterVsPiSen: supplierCounterSen - netSubledgerSen,
       aging,
     },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /ap-reconciliation — itemized 400-0000 drift breakdown (owner rule
+// 2026-07-08 「做账就是要准」— the drift card must break down to the sen).
+// One request gathers the control legs, EVERY purchase invoice, EVERY
+// supplier-payment row (lifecycle-aware) and the purchase-CN totals under the
+// exact same floor/alias/company rules /ap-control uses, then the pure
+// buildApReconciliation (tests/ap-recon.test.mjs) decomposes control − net
+// into items whose contributions sum EXACTLY to the drift. Read-only.
+// ---------------------------------------------------------------------------
+app.get("/ap-reconciliation", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  await ensurePartialPaymentColumns(c.var.DB);
+  await ensureFinanceOrgColumns(c.var.DB);
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const piWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const orgId = getOrgId(c);
+
+  const [legRes, piRes, pcnRes] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>(),
+    c.var.DB.prepare(
+      `SELECT id, piNo, supplierName, status, amountSen, paid_amount_sen, invoiceDate, isOpening FROM purchase_invoices WHERE 1=1${piWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{
+        id: string; piNo?: string; pi_no?: string; supplierName?: string; supplier_name?: string;
+        status: string; amountSen?: number; amount_sen?: number;
+        paidAmountSen?: number | null; paid_amount_sen?: number | null;
+        invoiceDate?: string | null; invoice_date?: string | null;
+        isOpening?: number | null; is_opening?: number | null;
+      }>(),
+    c.var.DB.prepare(
+      "SELECT COALESCE(SUM(totalAmount),0) AS s FROM purchase_credit_notes WHERE status = 'POSTED'",
+    ).first<{ s: number }>(),
+  ]);
+  // Payment rows: EVERY row (cash + CN markers + voided/deleted) with its
+  // lifecycle state — the recon itemizes what the aging loaders would count
+  // vs what the GL shows, so nothing may be pre-filtered here.
+  let payRows: {
+    paymentNo?: string; payment_no?: string; supplierName?: string; supplier_name?: string;
+    purchaseInvoiceId?: string | null; purchase_invoice_id?: string | null;
+    date?: string; amountSen?: number; amount_sen?: number;
+    bookedSen?: number | null; booked_sen?: number | null;
+    method?: string; lifecycleState?: string | null; lifecyclestate?: string | null;
+  }[] = [];
+  try {
+    const payRes = await c.var.DB.prepare(
+      `SELECT sp.payment_no   AS payment_no,
+              sp.supplier_name AS supplier_name,
+              sp.purchase_invoice_id AS purchase_invoice_id,
+              sp.date         AS date,
+              sp.amount_sen   AS amount_sen,
+              sp.booked_sen   AS booked_sen,
+              COALESCE(sp.method, '') AS method,
+              dl.state        AS lifecycleState
+         FROM supplier_payments sp
+         LEFT JOIN document_lifecycle dl
+                ON dl.sourceType = 'supplier_payment'
+               AND dl.sourceId = sp.payment_no
+               AND dl.orgId = sp.org_id
+        WHERE sp.org_id = ?`,
+    )
+      .bind(orgId)
+      .all<(typeof payRows)[number]>();
+    payRows = payRes.results ?? [];
+  } catch {
+    payRows = []; // supplier_payments absent (pre-migration DB) → payment side reads empty
+  }
+  let cnAllocCtlSen = 0;
+  try {
+    const cnAllocRes = await c.var.DB.prepare(
+      "SELECT COALESCE(SUM(booked_sen),0) AS s FROM supplier_payments WHERE method = 'CREDIT_NOTE'",
+    ).first<{ s: number }>();
+    cnAllocCtlSen = Number(cnAllocRes?.s) || 0;
+  } catch {
+    cnAllocCtlSen = 0;
+  }
+
+  const { docDate, openingDate: obDateRc } = await loadDocDateResolver(c.var.DB);
+  const resolveRc = await loadAccountResolver(c.var.DB);
+  const apExclRc = await loadOpeningApExcludes(c.var.DB);
+
+  // 400-0000 legs, post-floor + alias-resolved — the same filter chain the
+  // /ap-control balance walks, so controlSen ties the card.
+  const legs400: ApReconLeg[] = [];
+  const drAll = new Map<string, number>();
+  const crAll = new Map<string, number>();
+  for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDateRc)) continue;
+    const code = resolveRc(l.accountCode);
+    drAll.set(code, (drAll.get(code) ?? 0) + (Number(l.debitSen) || 0));
+    crAll.set(code, (crAll.get(code) ?? 0) + (Number(l.creditSen) || 0));
+    if (code !== "400-0000") continue;
+    legs400.push({
+      sourceType: String(l.sourceType ?? ""),
+      sourceId: String(l.sourceId ?? ""),
+      debitSen: Number(l.debitSen) || 0,
+      creditSen: Number(l.creditSen) || 0,
+    });
+  }
+
+  const pis: ApReconPi[] = (piRes.results ?? []).map((r) => {
+    const id = String(r.id);
+    const invoiceDate = (r.invoiceDate ?? r.invoice_date ?? null) as string | null;
+    const isOpening = !!(r.isOpening ?? r.is_opening);
+    const floored = apRowBeforeOpening({ id, date: invoiceDate, isOpening }, obDateRc, apExclRc);
+    const preOpeningIncluded =
+      !floored && !isOpening && !!obDateRc && String(invoiceDate ?? "").slice(0, 10) < obDateRc;
+    return {
+      id,
+      piNo: String(r.piNo ?? r.pi_no ?? ""),
+      supplierName: String(r.supplierName ?? r.supplier_name ?? ""),
+      status: String(r.status ?? ""),
+      amountSen: Math.round(Number(r.amountSen ?? r.amount_sen) || 0),
+      paidSen: Math.round(Number(r.paidAmountSen ?? r.paid_amount_sen) || 0),
+      isOpening,
+      preOpeningIncluded,
+      floored,
+    };
+  });
+
+  const paymentRows: ApReconPaymentRow[] = payRows.map((r) => {
+    const state = String(r.lifecycleState ?? r.lifecyclestate ?? "") || "ACTIVE";
+    return {
+      paymentNo: String(r.paymentNo ?? r.payment_no ?? ""),
+      purchaseInvoiceId: (r.purchaseInvoiceId ?? r.purchase_invoice_id ?? null) as string | null,
+      bookedSen: Math.round(Number(r.bookedSen ?? r.booked_sen) || 0),
+      amountSen: Math.round(Number(r.amountSen ?? r.amount_sen) || 0),
+      method: String(r.method ?? ""),
+      active: state === "ACTIVE",
+      supplierName: String(r.supplierName ?? r.supplier_name ?? ""),
+      date: String(r.date ?? "").slice(0, 10),
+    };
+  });
+
+  const report = buildApReconciliation({
+    legs400,
+    pis,
+    paymentRows,
+    pcnPostedSen: Number(pcnRes?.s) || 0,
+    cnAllocCtlSen,
+  });
+
+  // SCC control balances (405 excluded from trade, mirroring /ap-control) so
+  // any gap between the card's tradeControlSen and pure 400-0000 is visible.
+  const coaRes = await c.var.DB.prepare(
+    "SELECT code, name FROM chart_of_accounts WHERE specialAccountType = 'SCC'",
+  ).all<{ code: string; name: string }>();
+  const controls = (coaRes.results ?? [])
+    .map((a) => ({
+      code: a.code,
+      name: a.name,
+      balanceSen: (crAll.get(a.code) ?? 0) - (drAll.get(a.code) ?? 0),
+    }))
+    .sort((a, b) => a.code.localeCompare(b.code));
+  const tradeControlSen = controls
+    .filter((a) => a.code !== "405-0000")
+    .reduce((s, a) => s + a.balanceSen, 0);
+
+  return c.json({
+    success: true,
+    data: {
+      asOf: new Date().toISOString().slice(0, 10),
+      openingDate: obDateRc ?? null,
+      controls,
+      tradeControlSen,
+      nonTrade400GapSen: tradeControlSen - report.controlSen,
+      ...report,
+    },
+  });
+});
+
+// Counter rebuilds (owner rule 2026-07-06 「让他不会漂」) — reset the
+// cascade-maintained running counters to their document-derived truth. The
+// counters accumulated years of drift (pre-opening docs never un-counted,
+// legacy void paths that skipped the decrement). Shared by the Debtor tab's
+// Recalculate button AND the nightly cron (worker.ts
+// /api/internal/nightly-counter-rebuild) so the counters self-heal daily.
+// Idempotent: only rows whose value differs are written.
+export async function rebuildArCounterSen(db: Env["Variables"]["DB"]): Promise<{
+  updated: number; beforeSen: number; afterSen: number;
+}> {
+  const [invRes, custRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT customerId, totalSen, paidAmount, invoiceDate, isOpening
+           FROM invoices WHERE status NOT IN ('DRAFT','CANCELLED')`,
+      )
+      .all<{ customerId: string; totalSen: number; paidAmount: number; invoiceDate: string | null; isOpening: number | null }>(),
+    db
+      .prepare("SELECT id, outstandingSen FROM customers")
+      .all<{ id: string; outstandingSen?: number | null; outstanding_sen?: number | null }>(),
+  ]);
+  const obDate = await getOpeningDate(db);
+  const truth = new Map<string, number>();
+  for (const inv of invRes.results ?? []) {
+    if (rowBeforeOpening(inv.invoiceDate, obDate, inv.isOpening)) continue;
+    const unpaid = Math.max(0, (Number(inv.totalSen) || 0) - (Number(inv.paidAmount) || 0));
+    if (unpaid === 0) continue;
+    truth.set(inv.customerId, (truth.get(inv.customerId) ?? 0) + unpaid);
+  }
+  let beforeSen = 0;
+  let afterSen = 0;
+  const statements: D1PreparedStatement[] = [];
+  for (const cu of custRes.results ?? []) {
+    const cur = Math.round(Number(cu.outstandingSen ?? cu.outstanding_sen) || 0);
+    const want = truth.get(cu.id) ?? 0;
+    beforeSen += cur;
+    afterSen += want;
+    if (cur !== want) {
+      statements.push(
+        db.prepare("UPDATE customers SET outstandingSen = ? WHERE id = ?").bind(want, cu.id),
+      );
+    }
+  }
+  if (statements.length) await db.batch(statements);
+  return { updated: statements.length, beforeSen, afterSen };
+}
+
+// Supplier side: suppliers.outstandingSen := Σ (PI amount − paid) over
+// non-DRAFT/CANCELLED PIs past the opening floor (excluded pre-opening PIs
+// drop) — the same bills-only set /ap-control's piOutstandingSen sums, so
+// driftCounterVsPiSen reads 0 after a rebuild.
+export async function rebuildApCounterSen(db: Env["Variables"]["DB"]): Promise<{
+  updated: number; beforeSen: number; afterSen: number;
+}> {
+  const [piRes, supRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT id, supplierId, amountSen, paidAmountSen, invoiceDate, isOpening
+           FROM purchase_invoices WHERE status NOT IN ('DRAFT','CANCELLED')`,
+      )
+      .all<{ id: string; supplierId: string; amountSen: number; paidAmountSen?: number | null; paid_amount_sen?: number | null; invoiceDate: string | null; isOpening: number | null }>(),
+    db
+      .prepare("SELECT id, outstandingSen FROM suppliers")
+      .all<{ id: string; outstandingSen?: number | null; outstanding_sen?: number | null }>(),
+  ]);
+  const obDate = await getOpeningDate(db);
+  const excl = await loadOpeningApExcludes(db);
+  const truth = new Map<string, number>();
+  for (const pi of piRes.results ?? []) {
+    if (apRowBeforeOpening({ id: pi.id, date: pi.invoiceDate, isOpening: pi.isOpening }, obDate, excl)) continue;
+    const unpaid = (Number(pi.amountSen) || 0) - (Number(pi.paidAmountSen ?? pi.paid_amount_sen) || 0);
+    if (unpaid <= 0) continue;
+    truth.set(pi.supplierId, (truth.get(pi.supplierId) ?? 0) + unpaid);
+  }
+  let beforeSen = 0;
+  let afterSen = 0;
+  const statements: D1PreparedStatement[] = [];
+  for (const su of supRes.results ?? []) {
+    const cur = Math.round(Number(su.outstandingSen ?? su.outstanding_sen) || 0);
+    const want = truth.get(su.id) ?? 0;
+    beforeSen += cur;
+    afterSen += want;
+    if (cur !== want) {
+      statements.push(
+        db.prepare("UPDATE suppliers SET outstandingSen = ? WHERE id = ?").bind(want, su.id),
+      );
+    }
+  }
+  if (statements.length) await db.batch(statements);
+  return { updated: statements.length, beforeSen, afterSen };
+}
+
+// POST /ar-control/rebuild-counter — the Debtor tab's Recalculate button.
+// Audited; the nightly cron does the same thing automatically at 02:30 SGT.
+app.post("/ar-control/rebuild-counter", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const r = await rebuildArCounterSen(c.var.DB);
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: "ar_counter_rebuild",
+    action: "update",
+    after: {
+      customersUpdated: r.updated,
+      beforeSen: r.beforeSen,
+      afterSen: r.afterSen,
+      driftClearedSen: r.beforeSen - r.afterSen,
+    },
+  });
+  return c.json({
+    success: true,
+    data: { customersUpdated: r.updated, beforeSen: r.beforeSen, afterSen: r.afterSen },
+  });
+});
+
+// POST /ap-control/rebuild-counter — supplier twin of the AR rebuild (owner
+// request 2026-07-06). Audited; the nightly cron does both sides at 02:30 SGT.
+app.post("/ap-control/rebuild-counter", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const r = await rebuildApCounterSen(c.var.DB);
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: "ap_counter_rebuild",
+    action: "update",
+    after: {
+      suppliersUpdated: r.updated,
+      beforeSen: r.beforeSen,
+      afterSen: r.afterSen,
+      driftClearedSen: r.beforeSen - r.afterSen,
+    },
+  });
+  return c.json({
+    success: true,
+    data: { suppliersUpdated: r.updated, beforeSen: r.beforeSen, afterSen: r.afterSen },
   });
 });
 
@@ -2969,6 +3454,165 @@ app.post("/other-party-bills", async (c) => {
   }
 });
 
+// PUT /other-party-bills/:billNo — edit IN PLACE, same bill number (owner
+// request 2026-07-09 「开了无法edit,我要能edit」; until now "edit" was Copy-to-
+// new-bill). Restate pattern, mirroring the supplier-payment edit: reverse
+// whatever GL is currently visible (other_party_bill_restate_rev:<stamp>),
+// post fresh legs from the edited fields (…_restate_post:<stamp>), hide all
+// but the new post. Party is FIXED (it drives the number prefix + control
+// account — Copy for a different party). Payments survive: the new total may
+// not drop below paidAmountSen (editedBillStatus), status re-derived.
+app.put("/other-party-bills/:billNo", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  await ensureOtherPartyBillOpening(c.var.DB);
+  try {
+    const orgId = getOrgId(c);
+    const billNo = c.req.param("billNo");
+    const bill = await c.var.DB.prepare(
+      "SELECT * FROM other_party_bills WHERE billNo = ? AND orgId = ?",
+    ).bind(billNo, orgId).first<OtherPartyBillRow & { is_opening?: number | null; isOpening?: number | null }>();
+    if (!bill) return c.json({ success: false, error: "Bill not found" }, 404);
+
+    const state = await getDocState(c.var.DB, orgId, "other_party_bill", billNo);
+    if (state !== "ACTIVE") {
+      return c.json({ success: false, error: `Bill is ${state} — restore (unvoid) it before editing` }, 400);
+    }
+    // A bill that was voided AND restored carries reversal legs pinned to its
+    // OLD amounts; a later re-void would reuse them and leak the difference.
+    // Rare corner — refuse the edit, Copy covers it.
+    if (await ledgerHasSource(c.var.DB, orgId, "other_party_bill_void", billNo)) {
+      return c.json({ success: false, error: "This bill was voided and restored before — its void trail is pinned to the old figures. Copy it to a new bill instead of editing." }, 400);
+    }
+
+    const body = (await c.req.json()) as {
+      billDate?: string;
+      referenceNo?: string;
+      description?: string;
+      taxSen?: number;
+      items?: { counterAccount?: string; amountSen?: number; description?: string }[];
+      isOpening?: boolean;
+    };
+    const billDate = String(body.billDate ?? "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(billDate))
+      return c.json({ success: false, error: "billDate must be YYYY-MM-DD" }, 400);
+
+    const items: BillItemInput[] = (body.items ?? []).map((it) => ({
+      counterAccount: String(it.counterAccount ?? "").trim(),
+      amountSen: Math.round(Number(it.amountSen ?? 0)),
+      description: it.description ? String(it.description) : "",
+    }));
+    const taxSen = Math.round(Number(body.taxSen ?? 0));
+    const shapeErr = validateBillShape(items, taxSen);
+    if (shapeErr) return c.json({ success: false, error: shapeErr }, 400);
+    for (const code of [...new Set(items.map((i) => i.counterAccount))]) {
+      const acct = await c.var.DB.prepare(
+        "SELECT code, isPostable FROM chart_of_accounts WHERE code = ?",
+      ).bind(code).first<{ code: string; isPostable: number }>();
+      if (!acct) return c.json({ success: false, error: `Account ${code} not found` }, 400);
+      if (acct.isPostable !== 1)
+        return c.json({ success: false, error: `Account ${code} is not postable` }, 400);
+    }
+
+    const partyType = bill.partyType as PartyType;
+    const { subtotalSen, totalSen } = computeBillTotals(items, taxSen);
+    const paidAmountSen = Math.round(Number(bill.paidAmountSen) || 0);
+    const st = editedBillStatus(totalSen, paidAmountSen);
+    if (!st.ok) return c.json({ success: false, error: st.error }, 400);
+    const isOpening = body.isOpening === undefined
+      ? Math.round(Number(bill.isOpening ?? bill.is_opening) || 0)
+      : (body.isOpening ? 1 : 0);
+
+    const now = new Date().toISOString();
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const statements: D1PreparedStatement[] = [
+      c.var.DB.prepare(
+        `UPDATE other_party_bills
+            SET billDate = ?, referenceNo = ?, description = ?,
+                subtotalSen = ?, taxSen = ?, totalSen = ?, status = ?,
+                is_opening = ?, updatedAt = ?
+          WHERE id = ?`,
+      ).bind(
+        billDate, body.referenceNo ?? null, body.description ?? null,
+        subtotalSen, taxSen, totalSen, st.status, isOpening, now, bill.id,
+      ),
+      c.var.DB.prepare("DELETE FROM other_party_bill_items WHERE billId = ?").bind(bill.id),
+    ];
+    items.forEach((it, idx) => {
+      statements.push(
+        c.var.DB.prepare(
+          `INSERT INTO other_party_bill_items
+             (id, billId, counterAccount, amountSen, description, lineNo, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          `opbi-${crypto.randomUUID().slice(0, 10)}`,
+          bill.id, it.counterAccount, it.amountSen, it.description ?? null, idx + 1, now,
+        ),
+      );
+    });
+
+    // GL: reverse the visible legs + post the corrected ones, collapse to the
+    // newest post (same shape as the supplier-payment restate).
+    const stamp = Date.now();
+    const postSource = `other_party_bill_restate_post:${stamp}`;
+    const cur =
+      (
+        await c.var.DB.prepare(
+          `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+            WHERE sourceId = ? AND orgId = ? AND hidden = 0 AND sourceType LIKE 'other_party_bill%'`,
+        ).bind(billNo, orgId).all<{ accountCode: string; debitSen: number; creditSen: number }>()
+      ).results ?? [];
+    const legs: LedgerEntryInput[] = cur.map((l, i) => ({
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType: `other_party_bill_restate_rev:${stamp}`,
+      sourceId: billNo,
+      legNo: i + 1,
+      accountCode: l.accountCode,
+      debitSen: Number(l.creditSen) || 0,
+      creditSen: Number(l.debitSen) || 0,
+      description: `Restate rev · ${billNo}`,
+      actorUserId,
+      orgId,
+    }));
+    buildBillLegs({ partyType, billNo, partyName: bill.partyName, items, taxSen }).forEach((l) => {
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: postSource,
+        sourceId: billNo,
+        legNo: l.legNo,
+        accountCode: l.accountCode,
+        debitSen: l.debitSen,
+        creditSen: l.creditSen,
+        description: `${l.description} (edited)`,
+        actorUserId,
+        orgId,
+      });
+    });
+    const { statements: ledgerStmts } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+    statements.push(...ledgerStmts);
+    statements.push(
+      c.var.DB.prepare(
+        `UPDATE ledger_journal_entries SET hidden = 1
+          WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'other_party_bill%' AND sourceType <> ?`,
+      ).bind(billNo, orgId, postSource),
+    );
+
+    await c.var.DB.batch(statements);
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: billNo,
+      action: "update",
+      before: { totalSen: bill.totalSen, billDate: bill.billDate },
+      after: { totalSen, billDate, status: st.status, lines: items.length },
+    });
+    return c.json({ success: true, data: { billNo, totalSen, status: st.status } });
+  } catch (e) {
+    console.error("[PUT /other-party-bills/:billNo] failed:", e);
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
 app.get("/other-party-bills", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
@@ -3019,6 +3663,7 @@ app.get("/other-party-bills", async (c) => {
     paidAmountSen: b.paidAmountSen,
     outstandingSen: b.totalSen - b.paidAmountSen,
     status: b.status,
+    isOpening: !!Number((b as { isOpening?: number | null; is_opening?: number | null }).isOpening ?? (b as { is_opening?: number | null }).is_opening ?? 0),
     lifecycleState: b.lifecycleState ?? "ACTIVE",
     items: (itemsByBill.get(b.id) ?? []).map((i) => ({
       counterAccount: i.counterAccount,
@@ -3049,7 +3694,7 @@ app.delete("/other-party-bills/:billNo", async (c) => {
   // Soft delete: keep the row, build the reversal + state=DELETED via the lifecycle helper.
   let lc: { statements: D1PreparedStatement[]; newState: string };
   try {
-    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: ["other_party_bill"], voidSourceType: "other_party_bill_void", sourceId: billNo, action: "delete", actorUserId, descriptionTag: `DELETE · ${billNo}` });
+    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: await otherPartyBillLegFamily(c.var.DB, orgId, billNo), voidSourceType: "other_party_bill_void", sourceId: billNo, action: "delete", actorUserId, descriptionTag: `DELETE · ${billNo}` });
   } catch (e) {
     console.error(`[ledger] other_party_bill ${billNo} delete lifecycle build failed — aborting:`, e);
     return c.json({ success: false, error: (e as Error).message }, 400);
@@ -3057,6 +3702,32 @@ app.delete("/other-party-bills/:billNo", async (c) => {
   await c.var.DB.batch(lc.statements);
   return c.json({ success: true });
 });
+
+// An EDITED bill's live GL sits on other_party_bill_restate_rev/post:<stamp>
+// legs — applyLifecycle exact-matches sourceTypes, so void/delete/unvoid must
+// receive the whole family or the restate legs would survive a void (the
+// exact GL-leak class BUG-2026-07-08-002 was). Original type stays FIRST — it
+// is the document_lifecycle key.
+async function otherPartyBillLegFamily(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  billNo: string,
+): Promise<string[]> {
+  const fam = ["other_party_bill"];
+  try {
+    const res = await db
+      .prepare(
+        `SELECT DISTINCT sourceType FROM ledger_journal_entries
+          WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'other_party_bill_restate_%'`,
+      )
+      .bind(billNo, orgId)
+      .all<{ sourceType: string }>();
+    for (const r of res.results ?? []) fam.push(r.sourceType);
+  } catch {
+    /* ledger unavailable — plain family */
+  }
+  return fam;
+}
 
 app.post("/other-party-bills/:billNo/lifecycle", async (c) => {
   const denied = await requirePermission(c, "accounting", "update");
@@ -3080,7 +3751,7 @@ app.post("/other-party-bills/:billNo/lifecycle", async (c) => {
     (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
   let lc: { statements: D1PreparedStatement[]; newState: string };
   try {
-    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: ["other_party_bill"], voidSourceType: "other_party_bill_void", sourceId: billNo, action, actorUserId, descriptionTag: `${action.toUpperCase()} · ${billNo}` });
+    lc = await applyLifecycle(c.var.DB, { orgId, baseSourceTypes: await otherPartyBillLegFamily(c.var.DB, orgId, billNo), voidSourceType: "other_party_bill_void", sourceId: billNo, action, actorUserId, descriptionTag: `${action.toUpperCase()} · ${billNo}` });
   } catch (e) { return c.json({ success: false, error: (e as Error).message }, 400); }
 
   // No status-column change: other_party_bills.status carries payment progress

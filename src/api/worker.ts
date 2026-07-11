@@ -519,6 +519,33 @@ app.post("/api/internal/nightly-pi-gl-backfill", async (c) => {
   }
 });
 
+// Nightly AR/AP running-counter rebuild (owner rule 2026-07-06 「让他不会漂」).
+// Resets customers.outstandingSen / suppliers.outstandingSen to their
+// document-derived truth every night so the cascade-maintained tallies can
+// never silently drift again. Same CRON_SECRET pattern as the endpoints
+// above; delegates to rebuildAr/ApCounterSen (accounting.ts) — the same
+// functions the Debtor tab's Recalculate button uses, so the two paths can
+// never diverge. .github/workflows/nightly-counter-rebuild.yml hits this.
+app.post("/api/internal/nightly-counter-rebuild", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[nightly-counter-rebuild] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  try {
+    const ar = await rebuildArCounterSen(c.var.DB);
+    const ap = await rebuildApCounterSen(c.var.DB);
+    return c.json({ ok: true, ar, ap });
+  } catch (e) {
+    console.error("[nightly-counter-rebuild] error:", e);
+    return c.json({ ok: false, error: "rebuild failed" }, 500);
+  }
+});
+
 // Weekly OCR rule-distill cron entry. Same CRON_SECRET pattern as the
 // internal endpoints above. The cron workflow at
 // .github/workflows/distill-ocr-rules.yml hits this every Sunday night; the
@@ -897,7 +924,7 @@ import { apiRateLimit } from "./lib/api-rate-limit";
 // route below has since been migrated to real D1 / Supabase persistence
 // (verified 2026-04-26). The import block name is kept for git-history
 // continuity; the routes themselves are fully durable.
-import accounting from "./routes/accounting";
+import accounting, { rebuildArCounterSen, rebuildApCounterSen } from "./routes/accounting";
 import attendance from "./routes/attendance";
 import workingHourEntries from "./routes/working-hour-entries";
 import payrollHourDeductions from "./routes/payroll-hour-deductions";
@@ -935,6 +962,7 @@ import scheduling from "./routes/scheduling";
 import planningSchedule from "./routes/planning-schedule";
 import scanPo from "./routes/scan-po";
 import scanSupplier from "./routes/scan-supplier";
+import scanFinance from "./routes/scan-finance";
 import scanQueue, { sweepStuckScans } from "./routes/scan-queue";
 // One-shot historical job_card completion importer (Wei Siang's GS migration).
 // Server-only super-admin tool gated by production-orders:update; see
@@ -1157,6 +1185,7 @@ app.route("/api/scheduling", scheduling);
 app.route("/api/planning", planningSchedule);
 app.route("/api/scan-po", scanPo);
 app.route("/api/scan-supplier", scanSupplier);
+app.route("/api/scan-finance", scanFinance);
 // Background scan queue (async OCR). Upload returns a batchId IMMEDIATELY;
 // processBatch() drives Claude calls under waitUntil() so the user can
 // close the tab while a 100-file batch processes server-side. Same RBAC

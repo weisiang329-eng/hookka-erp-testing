@@ -9,10 +9,188 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-04 — 🟡 Full-auto Keep-pay / Deduct settlement (staging branch, NOT pushed)
+## 2026-07-09 — ✅ Aging snapshot invalidation (BUG-2026-07-09-002)
 
-Item #3 of the labor batch. Built on a worktree branch, staging-oriented, NOT
-merged to main / never touched prod (PAY = can't verify on prod).
+Voiding an advance-only payment writes no probed source table, so the cached
+/aging kept phantom advance rows (BIG GREEN −1,560, AUN CHING YAP −3,570)
+after the owner voided them. bumpSupplierPaymentsRev() now rides in every
+payment mutation batch (create/void/unvoid/knock/un-knock/restate) bumping
+kv_config. Verified live: phantoms gone; aging Σ = /ap-control net = GL
+400-0000 = 242,798.69. Owner then voided all four GVP payments himself
+(reorganising GVP start-to-finish) — PI-2605-011 back to 2,650 outstanding is
+EXPECTED; GVP is owner-managed now, hands off.
+
+## 2026-07-09 — ✅ Other-Party Bills editable in place (owner: 「开了无法edit,我要能edit」)
+
+`PUT /other-party-bills/:billNo` (restate: reverse visible GL + repost under
+`other_party_bill_restate_rev/post:<stamp>`, collapse; same number; party
+fixed; new total ≥ paid via pure `editedBillStatus`). Lifecycle void/delete/
+unvoid now pass the whole leg family (`otherPartyBillLegFamily`) so voiding an
+edited bill can't leak restate legs. FE: Edit button (ACTIVE rows), edit
+banner, locked party, New/Copy/Scan clear the edit state. GET returns
+`isOpening` for the prefill. 1461 tests green. Deployed + owner to exercise
+the first real edit (his ask) — verify GL via /ap-reconciliation ties after.
+
+## 2026-07-08 — ✅ AP drift −966.60 BROKEN TO THE SEN: /ap-reconciliation endpoint + BUG-003 fix
+
+Owner rule 「做账就是要准」. Shipped `GET /api/accounting/ap-reconciliation`
+(read-only; pure `src/lib/ap-recon.ts`, 16 tests asserting Σ item contributions
+≡ drift — residual is structurally 0). First prod run itemized −966.60 EXACTLY:
+- **GVP −950.00** — HPV-2605-001 (ACTIVE) booked 950 to PI-2605-001 which sits
+  in opening_ap_excludes. ✅ RESOLVED 2026-07-09: owner ruled the payment is NOT
+  for PI-2605-001 ("还另外一张单" — likely PI-2604-010, also excluded); detached
+  back to an unapplied advance via the new `POST /supplier-payments/un-knock`
+  (subsidiary-only reverse of knock-off; PI paid re-derived via the truth-guard
+  SQL). This matches the old accountant's TB (GVP −950 credit balance).
+  **DRIFT NOW 0.00 — control = net = 195,692.69; recon items empty; residual
+  0.00 (verified live).**
+  ✅ CLOSED 2026-07-09: owner ruled 「不认，继续当预付款，过后我会进回这张单」 —
+  the advance state IS the final state; the owner will enter the bill himself
+  later and knock the 950 onto it via the normal Knock-off flow. No action.
+- **INNOVATEX −418.00** — HPV-2607-009 GL kept DR 836 vs subledger 418.
+  ✅ OWNER CONFIRMED 2026-07-09 「我只付RM418罢了」→ the 836 is the system's
+  double-record: BOTH the original supplier_payment legs AND the 07-06
+  restate_post legs stayed visible (that restate's hide-old-legs step didn't
+  bite). Repair = re-run restate with the true 418 (its rev nets out whatever
+  is visible — bounded: worst case unchanged, never worse). Was blocked by
+  **BUG-2026-07-09-001** (restate rejected fully-paid PIs) — fixed
+  (restateHeadroom), deployed, then executed live. Bank 310-0010 was
+  overstated by the same 418; heals together.
+  ✅ CLOSED 2026-07-09: owner ruled 「不理它」 — PI-2606-001 stays
+  CONFIRMED/unpaid 418 in the creditor aging BY OWNER CHOICE. Do not re-raise;
+  not a bug.
+- **WF LEATHER +401.40** — voided payment's advance row still counted →
+  **BUG-2026-07-08-003, FIXED** (lifecycle NOT-EXISTS in
+  loadUnappliedSupplierAdvances; heals /aging AP + /ap-control + advance card).
+- ±15.06 pi edit-leg pair — folds into base PI after sourceId suffix strip, no
+  effect (this was the "strange DR 15.06" clue; 152.40 clue = 401.40 advance
+  + prior-snapshot noise, both accounted).
+After the fix the card reads **−1,368.00 = GVP −950 + INNOVATEX −418** (both
+owner-pending data decisions, permanently itemized by the endpoint). The old
+"+16.60 identity" hand-math is obsolete — use the endpoint.
+
+## 2026-07-04 — 🔵 Multi-Company Phase 3: dual-identity + inter-company mirror (worktree branch, NOT pushed)
+
+ADDITIVE-only, opt-in, default OFF. Finance-adjacent — built conservatively;
+external customers/suppliers/POs/SOs behave byte-identical.
+
+**Delivered (foundation of inter-company flow):**
+- **Dual-identity link** — new snake_case `group_org_code` on BOTH `customers`
+  and `suppliers` (default ''). A customer and a supplier that share the same
+  code (e.g. 'HOUZS') are the one real group company wearing its two hats
+  (AR/customer + AP/supplier stay separate streams). Reuses the existing
+  `suppliers.is_group_company`; the mirror decision also name-matches legacy
+  rows flagged only via is_group_company. Runtime-ensured, backfilled off.
+- **PO→SO mirror** — when a PO's seller is a flagged SISTER group company (not
+  HOOKKA) and the global `auto_create_mirror_docs` config is ON, PO create
+  auto-raises a mirror SALES ORDER under that sister (`sales_org_code` = sister,
+  buyer HOOKKA as customer, PO lines copied 1:1 in sen, status DRAFT — a doc
+  record, NO production cascade). Idempotent via `intercompany_mirror_log`
+  (UNIQUE source_type+source_id → retry never double-creates). Non-blocking:
+  any mirror failure is logged + swallowed so PO create never breaks. External
+  POs never reach the DB work (pure decision short-circuits).
+- Pure decision logic in `src/lib/intercompany-mirror.ts` (12 unit tests,
+  `tests/intercompany-mirror.test.mjs`, wired into `npm test`).
+- DO/Invoice customer auto-send: UNTOUCHED (no code near it changed).
+
+**TODO'd (deliberately deferred):** consolidated-P&L intra-group profit
+elimination (`TODO(intercompany-pnl-elimination)`); GRN mirror
+(`TODO(grn-mirror)` — needs inventory-safe design since GRN posts stock+cost).
+
+**Risk note:** mirror SO customer resolution requires HOOKKA to exist as a
+CUSTOMER of the sister in the catalog — if absent the mirror SKIPS (no back-door
+customer creation) and releases its log claim so a later retry succeeds.
+
+---
+
+## 2026-07-04 — 🔵 Multi-Company Phase 2: company dimension on SO + PO (worktree branch, NOT pushed)
+
+ADDITIVE-only. Company selector on create + Company column + Company filter on
+the Sales Orders and Purchase Orders lists. Existing docs → Hookka; default list
+view shows EVERYTHING; filter defaults to ALL companies.
+
+**Findings (verified before coding):**
+- PO side largely DONE already: `/procurement/create` full-page form has the
+  "Purchase company" dropdown (persists `purchaseOrgCode` via POST); PO list has a
+  "Purchase co" column. Only the PO list **company filter** is missing.
+- SO side: `sales_orders.orgId` is the TENANT-isolation column and the SO list is
+  tenant-scoped (`withOrgScope` → `WHERE orgId=?` bound to users.orgId='hookka').
+  Writing a non-hookka `orgId` would HIDE the SO → violates "show everything".
+  → Company dimension for SO is a NEW snake_case `sales_org_code` column (mirrors
+  PO's `purchase_org_code`), leaving `orgId` untouched.
+
+**Plan:** (1) SO create dropdown → sales_org_code; (2) SO list column + filter;
+(3) PO list filter. Runtime ensure + DEFAULT 'HOOKKA' backfill for sales_org_code.
+
+**DONE (worktree, NOT pushed):**
+- New pure helper `src/lib/company-dimension.ts` (resolveCompanyCode /
+  readCompanyCode / matchesCompanyFilter) + `tests/company-dimension.test.mjs`.
+- Backend `sales-orders.ts`: `sales_org_code` runtime ensure + DEFAULT 'HOOKKA'
+  backfill; POST INSERT + PUT UPDATE persist it; SalesOrderRow type + rowToSO
+  read (dual-keyed). PO backend already accepted purchaseOrgCode — untouched.
+- SO create `sales/create.tsx`: "Company" dropdown (defaults HOOKKA), payload +
+  localStorage draft. PO create `/procurement/create` already had it.
+- SO list `sales/index.tsx`: "Company" column (code→name) + "Company" filter
+  (default All Companies). PO list `procurement/index.tsx`: "Company" filter
+  added (column already existed).
+- `SalesOrder` type in `src/types/index.ts` gained `salesOrgCode?`.
+- build:strict clean; company-dimension + so-category + sql-write-column-coverage
+  + delivery-refs + sofa-combo tests green.
+
+---
+
+## 2026-07-04 — 🟡 FULL-auto payroll settlement, manual panel REMOVED (staging branch, NOT pushed)
+
+Owner picked (A): FULL auto — auto-dock the shortfall on partial/under-logged
+days too, and REMOVE the manual Keep-pay/Deduct review panel entirely. Delta
+built on top of the prior-round auto-settle, on the worktree branch (NOT pushed).
+
+**Delta this round:**
+1. **Under-logged (To-fill) days now auto-dock.** New pure helper
+   `computeUnderLoggedShortfallHours(logged, expected)` (= expected − logged on a
+   partial day; 0 logged = absence, left to the salary deduction). Extracted the
+   shared guard/apply core `maybeApplyAutoDayDock` (MANUAL never overridden,
+   finalised month skipped, full day clears stale AUTO); `maybeApplyAutoPunchDock`
+   now delegates to it (byte-identical — all prior tests green).
+2. **`POST /settle-period` rewritten** to a unified per-day settle over ALL factory
+   workers × working days: dock = max(punch shortfall, under-logged shortfall).
+   Returns punch-source vs logged-source counts. `Settle month` button + confirm
+   text updated; live punch-out path unchanged.
+3. **Manual panel removed.** `WorkerDayDrillIn` is now READ-ONLY (dropped
+   onAction/busyKey/workerId, the Action column, Keep-pay/Deduct buttons). Removed
+   `handleUnderAction` + `underActionBusy` + the auto-settle-chip code + the
+   period-attendance fetch. Panels re-labelled "under-logged (auto-docked)". Undo
+   on a stored dock kept (restores pay for a wrong auto-dock).
+3b. Historical MANUAL overrides respected (guard) + finalised months never
+   re-settled.
+
+**FULL-auto month recompute (June 2026, before=nothing docked → after=full auto):**
+- AH SENG perfect → RM0.00 (byte-identical).
+- MEI 15m-late (punch) → −RM51.25 (6.5h, already auto last round).
+- **ZAW LIN under-logged, NO punch → −RM33.12 (4.2h To-fill) — NEW this round**
+  (previously waited for a manual Deduct click).
+- KUMAR mixed → −RM29.57 (0.75h punch + 3h To-fill; forgot-punch-out day logged
+  full so NOT docked; OT paid).
+- Crew Δ −RM113.94; of which **7.2h is NEW To-fill/under-logged auto-dock** (the
+  hours the manual panel used to hold — ~RM57 on this crew, in the ballpark of the
+  ~RM52.73 To-fill the owner cited).
+
+**Tests:** `tests/settle-period-punch.test.mjs` rewritten (13 cases: To-fill maths,
+day-dock core guards, unified mixed month, ZAW-LIN under-log, idempotent,
+MANUAL-survives, approved-skip, corrected-clears). Full suite 1387 pass / 0 fail;
+strict typecheck clean; eslint 0 errors.
+
+**RISK owner explicitly ACCEPTED (do not re-litigate):** weak wifi → a worker who
+worked full but whose punch-out failed AND whose office grid logs fewer hours
+will now be auto-docked. His call; the office fixes it by keying the real hours
+(clears the dock on next settle) or a MANUAL Keep-pay row.
+
+---
+
+## 2026-07-04 — (superseded) Auto-settle with manual panel kept for no-punch days
+
+Prior round (before owner picked A): punched days auto-settled, no-punch days kept
+a manual choice. Superseded by the FULL-auto entry above.
 
 **What already existed (verified):** the shift algorithm + auto short-hour dock
 (`maybeApplyAutoPunchDock`, `attendance-deduct.ts`) already runs on EVERY worker

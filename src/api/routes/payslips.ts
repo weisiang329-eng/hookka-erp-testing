@@ -354,6 +354,12 @@ app.get("/", async (c) => {
   if (employeeId) {
     clauses.push("employeeId = ?");
     binds.push(employeeId);
+  } else {
+    // Payroll / Labor Cost admin lists exclude TEST accounts (e.g. TEST-001,
+    // TEST-002) — they are not real payees, so they must not inflate the active
+    // worker count or the payroll totals (owner 2026-07-04). Single-worker
+    // lookups (employeeId set, e.g. the worker portal) are unaffected.
+    clauses.push("employeeNo NOT LIKE 'TEST%'");
   }
   const sql = `SELECT * FROM payslips WHERE ${clauses.join(" AND ")} ORDER BY period DESC, employeeNo`;
   const res = await c.var.DB.prepare(sql).bind(...binds).all<PayslipRow>();
@@ -407,7 +413,7 @@ app.get("/projected", async (c) => {
 
   // Same worker scope as POST: ACTIVE, plus RESIGNED in their final month.
   const wres = await c.var.DB.prepare(
-    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
+    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
   )
     .bind(`${period}-%`)
     .all<WorkerRow>();
@@ -698,7 +704,7 @@ app.post("/", async (c) => {
       // partial, month) — the existing absence math prorates the days after
       // they left. Later months exclude them because resignedAt no longer
       // matches the period. Earlier months were generated while still ACTIVE.
-      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
+      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
     )
       .bind(`${period}-%`)
       .all<WorkerRow>();

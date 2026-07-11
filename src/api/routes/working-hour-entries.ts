@@ -1120,6 +1120,8 @@ type NonprodReqRow = {
   entry_id: string | null;
   kind: string | null;
   job_card_id: string | null;
+  reject_reason: string | null;
+  approved_hours: number | string | null;
 };
 
 function reqRowToJson(r: NonprodReqRow & Record<string, unknown>) {
@@ -1139,6 +1141,11 @@ function reqRowToJson(r: NonprodReqRow & Record<string, unknown>) {
     decidedBy: String(pick(r.decidedBy, r.decided_by) ?? ""),
     kind: kindRaw === "ADD_PROD" ? "ADD_PROD" : "NONPROD",
     jobCardId: String(pick(r.jobCardId, r.job_card_id) ?? ""),
+    rejectReason: String(pick(r.rejectReason, r.reject_reason) ?? ""),
+    approvedHours: (() => {
+      const v = pick(r.approvedHours, r.approved_hours);
+      return v === null || v === undefined || v === "" ? null : Number(v);
+    })(),
   };
 }
 
@@ -1198,6 +1205,29 @@ app.post("/nonprod-requests/:id/approve", async (c) => {
     );
   }
 
+  // Owner 2026-07-04: the office may approve LESS than the worker requested
+  // (e.g. asked 1h20m, approve 1h). `approvedHours` defaults to the full
+  // request and is clamped to (0, requested]. Everything the approval writes —
+  // the non-prod WHE row, the production-hours split, and the ADD_PROD
+  // efficiency credit — uses `approvedHours`, and we persist it on the row.
+  const approveBody = await c.req
+    .json<{ approvedHours?: unknown }>()
+    .catch(() => ({}) as { approvedHours?: unknown });
+  const rawApproved =
+    approveBody.approvedHours === undefined || approveBody.approvedHours === null
+      ? reqJson.hours
+      : Number(approveBody.approvedHours);
+  if (!Number.isFinite(rawApproved) || rawApproved <= 0) {
+    return c.json({ success: false, error: "Approved hours must be greater than 0." }, 400);
+  }
+  if (rawApproved > reqJson.hours + 1e-9) {
+    return c.json(
+      { success: false, error: `Cannot approve more than the ${reqJson.hours}h requested.` },
+      400,
+    );
+  }
+  const approvedHours = Math.round(rawApproved * 100) / 100;
+
   // ----- ADD_PROD (extra production time) -----
   // Owner 2026-06-26: a worker claims extra production time on a PRODUCTION
   // dept (a job that overran its WIP standard). Approving simply marks the
@@ -1227,10 +1257,10 @@ app.post("/nonprod-requests/:id/approve", async (c) => {
     const decidedBy = getUserId(c);
     await c.var.DB.prepare(
       `UPDATE worker_nonprod_requests
-         SET status = 'APPROVED', decided_at = ?, decided_by = ?
+         SET status = 'APPROVED', decided_at = ?, decided_by = ?, approved_hours = ?
        WHERE id = ?`,
     )
-      .bind(new Date().toISOString(), decidedBy, id)
+      .bind(new Date().toISOString(), decidedBy, approvedHours, id)
       .run();
     // The efficiency NUMERATOR for the office Efficiency Overview is served via
     // the cached /api/job-cards/summary snapshot, which keys freshness on the
@@ -1299,7 +1329,7 @@ app.post("/nonprod-requests/:id/approve", async (c) => {
   const v = validateEntry({
     departmentCode: reqJson.departmentCode,
     category: "",
-    hours: reqJson.hours,
+    hours: approvedHours,
     notes: reqJson.note
       ? `Non-production (approved): ${reqJson.note}`
       : "Non-production (approved)",
@@ -1368,7 +1398,7 @@ app.post("/nonprod-requests/:id/approve", async (c) => {
       .filter((r) => prodDeptCodes.has(r.departmentCode) && r.hours > 0)
       .sort((a, b) => b.hours - a.hours);
 
-    let remaining = reqJson.hours;
+    let remaining = approvedHours;
     for (const e of prodEntries) {
       if (remaining <= 0) break;
       const take = Math.min(e.hours, remaining);
@@ -1393,15 +1423,15 @@ app.post("/nonprod-requests/:id/approve", async (c) => {
   const decidedBy = getUserId(c);
   await c.var.DB.prepare(
     `UPDATE worker_nonprod_requests
-       SET status = 'APPROVED', decided_at = ?, decided_by = ?, entry_id = ?
+       SET status = 'APPROVED', decided_at = ?, decided_by = ?, entry_id = ?, approved_hours = ?
      WHERE id = ?`,
   )
-    .bind(new Date().toISOString(), decidedBy, entryId, id)
+    .bind(new Date().toISOString(), decidedBy, entryId, approvedHours, id)
     .run();
 
   return c.json({
     success: true,
-    data: { id, status: "APPROVED", entryId },
+    data: { id, status: "APPROVED", entryId, approvedHours },
   });
 });
 
@@ -1422,15 +1452,28 @@ app.post("/nonprod-requests/:id/reject", async (c) => {
       409,
     );
   }
+  // Owner 2026-07-04: a rejection MUST carry a reason — the worker sees it on
+  // their portal so they know why (and can re-apply correctly). Reject an empty
+  // reason rather than silently blanking it.
+  const body = await c.req
+    .json<{ reason?: unknown }>()
+    .catch(() => ({}) as { reason?: unknown });
+  const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+  if (!reason) {
+    return c.json(
+      { success: false, error: "A reason is required to reject this request." },
+      400,
+    );
+  }
   const decidedBy = getUserId(c);
   await c.var.DB.prepare(
     `UPDATE worker_nonprod_requests
-       SET status = 'REJECTED', decided_at = ?, decided_by = ?
+       SET status = 'REJECTED', decided_at = ?, decided_by = ?, reject_reason = ?
      WHERE id = ?`,
   )
-    .bind(new Date().toISOString(), decidedBy, id)
+    .bind(new Date().toISOString(), decidedBy, reason, id)
     .run();
-  return c.json({ success: true, data: { id, status: "REJECTED" } });
+  return c.json({ success: true, data: { id, status: "REJECTED", rejectReason: reason } });
 });
 
 // ---------------------------------------------------------------------------

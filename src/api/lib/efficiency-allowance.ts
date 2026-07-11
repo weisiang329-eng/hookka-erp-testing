@@ -130,7 +130,7 @@ export async function computeApprovedAddProdMinutesByWorker(
   try {
     const res = await db
       .prepare(
-        `SELECT worker_id AS workerId, hours
+        `SELECT worker_id AS workerId, COALESCE(approved_hours, hours) AS hours
            FROM worker_nonprod_requests
           WHERE kind = 'ADD_PROD'
             AND status = 'APPROVED'

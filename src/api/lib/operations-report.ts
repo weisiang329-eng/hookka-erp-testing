@@ -684,7 +684,15 @@ async function collectNewProducts(
   p: ResolvedPeriod,
 ): Promise<NewProductsSection> {
   // products has no orgId (global catalog). created_at was added for this
-  // report — historical rows are NULL and simply don't appear.
+  // report; the products POST self-applies it, but the report may read before
+  // any product is created, so ensure it here too (idempotent, best-effort).
+  try {
+    await db
+      .prepare("ALTER TABLE products ADD COLUMN IF NOT EXISTS created_at TEXT")
+      .run();
+  } catch {
+    /* column may already exist / engine lacks IF NOT EXISTS — non-fatal */
+  }
   const rows = await db
     .prepare(
       `SELECT code, name, category, baseModel AS "baseModel"

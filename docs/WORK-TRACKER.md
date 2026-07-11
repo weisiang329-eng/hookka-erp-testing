@@ -9,8 +9,15 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-11 — 🔵 Data-tally fixes P1-P3 (owner "全做" after 4-agent audit)
-Branch `data/tally-fixes-0711`. Full audit findings in memory
+## 2026-07-11 — ✅ Data-tally fixes P1-P3 (owner "全做" after 4-agent audit) — ALL SHIPPED
+P2+P3 shipped in c1cb3bb0 (unify metrics + honest labels + month defaults + OCR
+confirm wiring + date clip + div-zero + consolidated-DO + 153/RM0 + same-dept skip).
+P1 last item shipped: future-dated PO completedDate → 26 POs re-dated to updated_at
+(one-shot POST /api/admin/fix-future-completion-dates, RUN on prod + REMOVED after;
+0 future RM_ISSUE rows remain, 148.7m/28m fabric moved back to real months) + a
+guard capping job-card completedDate at today. P4 (forward scheduling / bottleneck
+lead time / Hookka Report program) still parked — needs owner design.
+Branch `data/tally-fixes-0711` (P2+P3), `data/tally-fixes-p1` (P1). Findings in memory
 `project_data_accuracy_audit_0711.md`. Scope approved by owner:
 **P1 real bugs:** OCR accuracy never populated (confirm step unwired + 'T' vs space
 date clip in ocr-accuracy.ts:72); process-skips same-dept false positives

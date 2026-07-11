@@ -4104,7 +4104,13 @@ async function applyPoUpdate(
     // explicit "remove completion date" can also wipe the scan stamps below.
     const jcWasCompleted = !!updated.completedDate;
     if (body.completedDate !== undefined) {
-      updated.completedDate = body.completedDate || null;
+      // Guard (owner data-tally audit 2026-07-11): never store a FUTURE
+      // completion date — work can't be completed in the future, and a stray
+      // future date dates the RM_ISSUE / FG_COMPLETED cost_ledger rows into
+      // future months (the 148.7m-BF-in-2026-09 bug). Cap at today; an empty
+      // string still clears the date as before.
+      const cd = body.completedDate || null;
+      updated.completedDate = cd && String(cd).slice(0, 10) > today ? today : cd;
     }
 
     // Snapshot the PICs BEFORE the body's change is applied, so a PIC swap can

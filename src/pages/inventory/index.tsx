@@ -1167,12 +1167,20 @@ export default function InventoryPage() {
       ? bulkSofaComps.filter(Boolean)
       : [];
   const bulkBase = fgForm.code.trim();
+  // Per-variant BOM/M3 defaults keyed by size code (bedframe) / compartment
+  // (sofa) — set in Products → Maintenance. On generate each variant fills its
+  // Unit M3 and clones the chosen source BOM template (owner 2026-07-11).
+  const bomDefaults = (variantsCfg?.variantBomDefaults ?? {}) as Record<
+    string,
+    { defaultBom?: string; unitM3?: number }
+  >;
   // Ticked → the concrete variants that would be created (code + name + size
   // fields auto-derived). Filtered to the current pool so switching category
   // never carries stale ticks across.
   const bulkPreview = [...fgBulkTicked]
     .filter((c) => bulkPoolCodes.includes(c))
     .map((c) => {
+      const meta = bomDefaults[c];
       if (bulkIsBed) {
         const sz = bulkBedSizes.find((s) => s.code === c) ?? { code: c, label: "", dimensions: "" };
         return {
@@ -1181,6 +1189,8 @@ export default function InventoryPage() {
           sizeCode: sz.code,
           sizeLabel: sz.label,
           description: bedframeVariantDescription(fgForm.name, sz),
+          unitM3: meta?.unitM3,
+          defaultBom: meta?.defaultBom,
         };
       }
       return {
@@ -1189,6 +1199,8 @@ export default function InventoryPage() {
         sizeCode: c,
         sizeLabel: c,
         description: sofaVariantDescription(bulkBase, c),
+        unitM3: meta?.unitM3,
+        defaultBom: meta?.defaultBom,
       };
     });
 
@@ -1210,6 +1222,20 @@ export default function InventoryPage() {
     let skipped = 0;
     let failed = 0;
     const newProducts: Product[] = [];
+    // Pre-load the chosen source BOM templates once (only when some variant has a
+    // default BOM) so each generated variant can clone its l1Processes +
+    // wipComponents — the {PRODUCT_CODE} placeholders re-resolve to the new code.
+    const bomTplByCode = new Map<string, { l1Processes: unknown; wipComponents: unknown }>();
+    if (bulkPreview.some((v) => v.defaultBom)) {
+      try {
+        const tr = (await (await fetch("/api/bom/templates", { credentials: "include" })).json()) as {
+          data?: Array<{ productCode: string; l1Processes: unknown; wipComponents: unknown }>;
+        };
+        for (const t of tr.data ?? []) bomTplByCode.set(t.productCode, t);
+      } catch {
+        /* best-effort — skip the BOM clone if the template list can't load */
+      }
+    }
     // Sequential — one validated POST per variant reuses the server's duplicate
     // + bedframe-sizeCode checks; existing codes are SKIPPED (reported), never
     // abort the batch.
@@ -1226,6 +1252,7 @@ export default function InventoryPage() {
             sizeCode: v.sizeCode,
             sizeLabel: v.sizeLabel,
             description: v.description,
+            ...(v.unitM3 != null ? { unitM3: v.unitM3 } : {}),
           }),
         });
         const j = (await res.json().catch(() => ({}))) as {
@@ -1236,6 +1263,25 @@ export default function InventoryPage() {
         if (res.ok && j.success) {
           created++;
           if (j.data) newProducts.push(j.data);
+          // Clone the size's chosen default BOM template onto this new variant
+          // (best-effort — the FG is created regardless of whether the BOM copy
+          // succeeds; a missing source template just skips the copy).
+          if (v.defaultBom) {
+            const src = bomTplByCode.get(v.defaultBom);
+            if (src) {
+              await fetch("/api/bom/templates", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  productCode: v.code,
+                  baseModel: base,
+                  category: fgForm.category,
+                  l1Processes: src.l1Processes,
+                  wipComponents: src.wipComponents,
+                }),
+              }).catch(() => {});
+            }
+          }
         } else if ((j.error || "").toLowerCase().includes("already exists")) {
           skipped++;
         } else {

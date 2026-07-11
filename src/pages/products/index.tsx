@@ -1080,6 +1080,32 @@ function MaintenanceView() {
   // edit mode is off, the inline RM inputs render as read-only text.
   const [savedConfig, setSavedConfig] = useState<MaintenanceConfig>(DEFAULT_MAINTENANCE_CONFIG);
   const [config, setConfig] = useState<MaintenanceConfig>(DEFAULT_MAINTENANCE_CONFIG);
+  // Per-variant BOM/M3 defaults (owner 2026-07-11) — keyed by size code
+  // (bedframe) / compartment (sofa). Add FG bulk-generate reads these to fill
+  // Unit M3 + clone the chosen source BOM template onto each variant. Stored on
+  // variants-config; patched immediately on change (independent of the Save
+  // Snapshot flow, like the material-variant edits on the RM side).
+  const [variantBomDefaults, setVariantBomDefaults] = useState<
+    Record<string, { defaultBom?: string; unitM3?: number }>
+  >({});
+  const [bomTemplateList, setBomTemplateList] = useState<{ productCode: string; category: string }[]>([]);
+  /* eslint-disable react-hooks/set-state-in-effect -- mount-time hydrate of BOM defaults + template list */
+  useEffect(() => {
+    void fetchVariantsConfig().then((v) => {
+      setVariantBomDefaults(
+        (v?.variantBomDefaults as Record<string, { defaultBom?: string; unitM3?: number }> | undefined) ?? {},
+      );
+    });
+    void cachedFetchJson<{ data?: { productCode: string; category: string }[] }>("/api/bom/templates")
+      .then((d) => setBomTemplateList(d?.data ?? []))
+      .catch(() => {});
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+  function updateVariantDefault(code: string, patch: { defaultBom?: string; unitM3?: number }) {
+    const next = { ...variantBomDefaults, [code]: { ...variantBomDefaults[code], ...patch } };
+    setVariantBomDefaults(next);
+    patchVariantsConfig({ variantBomDefaults: next });
+  }
   const [tab, setTab] = useState<MaintenanceTab>("divanHeights");
   const [newValue, setNewValue] = useState("");
   const [newPriceSen, setNewPriceSen] = useState(0);
@@ -1666,6 +1692,13 @@ function MaintenanceView() {
                             <input value={entry.code} onChange={(e) => updateBedframeSize(idx, "code", e.target.value)} placeholder="K" className="text-sm font-medium border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-20" />
                             <input value={entry.label} onChange={(e) => updateBedframeSize(idx, "label", e.target.value)} placeholder="6FT" className="text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-24" />
                             <input value={entry.dimensions} onChange={(e) => updateBedframeSize(idx, "dimensions", e.target.value)} placeholder="183X190CM" className="text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] flex-1" />
+                            {/* Default BOM to copy from + default Unit M3 — Add FG
+                                bulk-generate applies these per size (owner 2026-07-11). */}
+                            <select value={variantBomDefaults[entry.code]?.defaultBom ?? ""} onChange={(e) => updateVariantDefault(entry.code, { defaultBom: e.target.value || undefined })} title="Default BOM to copy from on Add FG generate" className="text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-40 flex-shrink-0">
+                              <option value="">BOM: —</option>
+                              {bomTemplateList.filter((t) => (t.category || "").toUpperCase() === "BEDFRAME").map((t) => <option key={t.productCode} value={t.productCode}>{t.productCode}</option>)}
+                            </select>
+                            <input type="number" step="0.001" min={0} onFocus={(e) => e.currentTarget.select()} value={variantBomDefaults[entry.code]?.unitM3 ?? ""} onChange={(e) => updateVariantDefault(entry.code, { unitM3: e.target.value === "" ? undefined : parseFloat(e.target.value) })} placeholder="M³" title="Default Unit M3" className="text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-20 flex-shrink-0" />
                             <button onClick={() => removeEntry(idx)} className="p-1.5 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded flex-shrink-0" title="Remove"><Trash2 className="w-4 h-4" /></button>
                           </>
                         ) : (
@@ -1673,6 +1706,8 @@ function MaintenanceView() {
                             <span className="font-mono">{entry.code}</span>
                             <span className="text-gray-400"> · </span>{entry.label}
                             <span className="text-gray-400"> · </span><span className="text-gray-500">{entry.dimensions}</span>
+                            {variantBomDefaults[entry.code]?.defaultBom ? <span className="text-gray-400"> · BOM <span className="font-mono text-[#6B5C32]">{variantBomDefaults[entry.code]?.defaultBom}</span></span> : null}
+                            {variantBomDefaults[entry.code]?.unitM3 != null ? <span className="text-gray-400"> · M³ {variantBomDefaults[entry.code]?.unitM3}</span> : null}
                           </span>
                         )}
                       </div>

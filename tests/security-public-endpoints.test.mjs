@@ -63,6 +63,11 @@ const EXPECTED_PREFIXES = [
   // CRON_SECRET check (constant-time SHA-256). External cron service can
   // POST in at 12pm SGT without a dashboard session.
   "/api/internal/reports/",
+  // 2026-07-12 — Delivery Agent cron trigger (proposals + daily brief
+  // snapshot). Same model as /api/internal/reports/: the handler does its own
+  // constant-time CRON_SECRET check; no dashboard session exists at cron time.
+  // See routes/delivery-agent.ts `internal`.
+  "/api/internal/delivery-agent/",
   // 2026-06-12 — public QR dispatch/deliver scan flow for DOs/PLs. Drivers
   // scan with a normal phone camera, so no session exists. The handler's
   // gate is the unguessable 64-hex qrtoken (migration 0167); the surface is

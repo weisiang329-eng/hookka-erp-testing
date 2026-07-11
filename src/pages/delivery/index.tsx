@@ -31,7 +31,9 @@ import {
   Save,
   QrCode,
   Mail,
+  Bot,
 } from "lucide-react";
+import DeliveryAgentTab from "./agent-tab";
 import type { DeliveryOrder, ProofOfDelivery, ThreePLProvider, Customer } from "@/types";
 import PODDialog from "@/components/delivery/POD-dialog";
 import DoQrDialog from "@/components/delivery/do-qr-dialog";
@@ -819,9 +821,9 @@ async function sendCustomerNotice(
 export default function DeliveryPage() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
-  // Top-level "Orders" / "3PL" tab — URL-synced so refresh and back/forward
-  // both keep the user where they were.
-  const [pageTab, setPageTab] = useUrlState<"orders" | "3pl">("section", "orders");
+  // Top-level "Orders" / "3PL" / "Agent" tab — URL-synced so refresh and
+  // back/forward both keep the user where they were.
+  const [pageTab, setPageTab] = useUrlState<"orders" | "3pl" | "agent">("section", "orders");
   const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrderRow[]>([]);
   // Whole-table search matches (across every status), populated only while a
   // search is active. Separate from deliveryOrders so the browse-derived
@@ -4384,7 +4386,20 @@ export default function DeliveryPage() {
         >
           <Users className="h-4 w-4" /> 3PL Providers
         </button>
+        <button
+          onClick={() => setPageTab("agent")}
+          className={`flex items-center gap-2 px-4 pb-3 pt-1 text-sm font-medium border-b-2 transition-colors cursor-pointer ${
+            pageTab === "agent"
+              ? "border-[#6B5C32] text-[#6B5C32]"
+              : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
+          }`}
+        >
+          <Bot className="h-4 w-4" /> Delivery Agent
+        </button>
       </div>
+
+      {/* Delivery Agent — proposal-first TMS surface (see agent-tab.tsx). */}
+      {pageTab === "agent" && <DeliveryAgentTab />}
 
       {pageTab === "orders" && <>
       {/* Header */}

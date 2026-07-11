@@ -95,6 +95,25 @@ export interface ChainCard {
   noCutStep: boolean;
 }
 
+/**
+ * Machine-readable (card, day) assignment emitted to an optional collector
+ * (Phase 2 due-date proposals). `date` is the LOCAL YYYY-MM-DD working day the
+ * engine scheduled this card's department work on (for FAB_CUT: the batch's
+ * last cut day, same coupling as cutLastDay).
+ */
+export interface ChainAssignment {
+  dept: ChainDept | "FAB_CUT";
+  soPo: string;
+  /** Company SO id; "" for FAB_CUT cards (CutCard carries no soId). */
+  soId: string;
+  lane: string;
+  fabric: string;
+  sets: number;
+  date: string;
+  /** The exact input card object — an identity key for caller-side maps. */
+  card: ChainCard | CutCard;
+}
+
 export interface ChainInput {
   /** WAITING FAB_CUT cards (lane BEDFRAME/SOFA/ACCESSORY) — the cutting input. */
   cutCards: CutCard[];
@@ -104,6 +123,12 @@ export interface ChainInput {
   holidays: string[];
   startDate: string;
   generatedAt: string;
+  /**
+   * OPTIONAL collector — called once per scheduled (card, day) across ALL
+   * departments after the chain is computed. Purely additive: when omitted
+   * (every pre-Phase-2 call site) the run is byte-identical.
+   */
+  collect?: (a: ChainAssignment) => void;
 }
 
 export interface ChainOutput {
@@ -362,7 +387,7 @@ function renderSewing(
   for (const { day, lane, c } of allc) {
     if (day !== curDate) {
       curDate = day;
-      curSo = " ";
+      curSo = "\u0000";
       const tag = SEW_LANE_ORDER.map((l) => {
         const placed = sew.loadByLane[l].get(day) ?? 0;
         return placed
@@ -1748,12 +1773,27 @@ function renderWebbing(
 // ORCHESTRATOR — run the whole chain ONCE, expose each dept's snapshot.
 // =============================================================================
 export function computeChain(input: ChainInput): ChainOutput {
+  const emit = input.collect;
   const cut = runCutting({
     cards: input.cutCards,
     config: input.config,
     holidays: input.holidays,
     startDate: input.startDate,
     generatedAt: input.generatedAt,
+    // Forward the cut-head assignments to the chain-level collector.
+    collect: emit
+      ? (a) =>
+          emit({
+            dept: "FAB_CUT",
+            soPo: a.soPo,
+            soId: "",
+            lane: a.lane,
+            fabric: a.fabric,
+            sets: a.sets,
+            date: a.date,
+            card: a.card,
+          })
+      : undefined,
   });
   const cal = cut.cal;
   const chain = input.config.chain;
@@ -1773,6 +1813,42 @@ export function computeChain(input: ChainInput): ChainOutput {
     chain,
     wood.woodDay,
   );
+
+  // ── Optional Phase-2 collector: one call per scheduled (card, day) ────────
+  // Emitted from the computed structures (the same day every calendar sheet
+  // row is rendered from), NOT from inside the renderers — so the collector
+  // can never disturb the display output. Purely additive.
+  if (emit) {
+    const send = (dept: ChainDept, c: ChainCard, day: number): void =>
+      emit({
+        dept,
+        soPo: c.soPo,
+        soId: c.soId,
+        lane: c.lane,
+        fabric: c.fabric,
+        sets: c.sets,
+        date: fmtIso(day),
+        card: c,
+      });
+    for (const lane of SEW_LANE_ORDER) {
+      for (const sc of sew.byLane[lane]) send("FAB_SEW", sc.card, sc.day);
+    }
+    for (const lane of CHAIN_LANES) {
+      for (const u of wood.byLane[lane]) for (const c of u.cards) send("WOOD_CUT", c, u.day);
+    }
+    for (const u of fr.units) {
+      for (const c of u.cards) send("FRAMING", c, u.day);
+      // Webbing + HB-foam ride the SAME day as the SO's framing.
+      for (const c of u.web) send("WEBBING", c, u.day);
+      for (const c of u.hbf) send("FOAM", c, u.day);
+    }
+    for (const u of fr.foamUnits) {
+      // Base + armrest consume the foam cap; back cushion rides the same day.
+      for (const c of [...u.base, ...u.arm, ...u.cush]) send("FOAM", c, u.foamDay);
+    }
+    for (const u of fr.uphUnits) for (const c of u.cards) send("UPHOLSTERY", c, u.uphDay);
+    for (const u of fr.packUnits) for (const c of u.cards) send("PACKING", c, u.packDay);
+  }
 
   return {
     cutting: cut.snapshot,

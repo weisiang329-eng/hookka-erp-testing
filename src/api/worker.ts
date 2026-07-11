@@ -960,6 +960,7 @@ import rdProjects from "./routes/rd-projects";
 import rdTeamMembers from "./routes/rd-team-members";
 import scheduling from "./routes/scheduling";
 import planningSchedule from "./routes/planning-schedule";
+import scheduleProposals from "./routes/schedule-proposals";
 import scanPo from "./routes/scan-po";
 import scanSupplier from "./routes/scan-supplier";
 import scanFinance from "./routes/scan-finance";
@@ -1183,6 +1184,9 @@ app.route("/api/rd-projects", rdProjects);
 app.route("/api/rd-team-members", rdTeamMembers);
 app.route("/api/scheduling", scheduling);
 app.route("/api/planning", planningSchedule);
+// Phase 2 due-date proposals share the /api/planning prefix (Hono composes
+// multiple sub-routers on one path; the paths don't overlap).
+app.route("/api/planning", scheduleProposals);
 app.route("/api/scan-po", scanPo);
 app.route("/api/scan-supplier", scanSupplier);
 app.route("/api/scan-finance", scanFinance);

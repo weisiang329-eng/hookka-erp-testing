@@ -88,7 +88,28 @@ export interface BriefData {
   cnc: CncQueue;
   cncConfig: CapacityConfig["cnc"];
   drift: CutRateDrift[];
+  /** Phase 2: PENDING due-date proposals awaiting the owner's approval. */
+  proposals: { pending: number };
   aiFocus: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — pending due-date proposals (Planning > Schedule Proposals).
+// The table is a runtime self-apply owned by schedule-proposals.ts; if it
+// hasn't been created yet on this environment the count is simply 0 — the
+// brief NEVER fails because of the proposals feature.
+// ---------------------------------------------------------------------------
+
+async function collectPendingProposals(db: DbLike): Promise<number> {
+  try {
+    const r = await db
+      .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
+      .bind()
+      .first<{ n: number | string }>();
+    return Number(r?.n) || 0;
+  } catch {
+    return 0; // table not self-applied yet
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +298,7 @@ async function generateAiFocus(
         lowWorkers: data.lowWorkers.slice(0, 5),
       },
       cutRateDrift: data.drift.filter((d) => d.flagged),
+      pendingScheduleProposals: data.proposals.pending,
     };
     const res = await fetch(ANTHROPIC_URL, {
       method: "POST",
@@ -328,12 +350,13 @@ export async function collectBriefData(
   anthropicApiKey?: string,
 ): Promise<BriefData> {
   const cfg = await loadCapacityConfig(db);
-  const [schedule, overdue, efficiency, cnc, drift] = await Promise.all([
+  const [schedule, overdue, efficiency, cnc, drift, pendingProposals] = await Promise.all([
     collectScheduleData(db as never, date),
     collectOverdueData(db as never, date),
     collectEfficiencyData(db as never, prevDate),
     collectCncQueue(db, cfg.cnc),
     collectCutRateDrift(db, cfg.cnc, date),
+    collectPendingProposals(db),
   ]);
   const lowWorkers = efficiency.workers
     .filter((w) => w.workingMinutes > 0 && w.efficiencyPct < 60)
@@ -355,6 +378,7 @@ export async function collectBriefData(
     cnc,
     cncConfig: cfg.cnc,
     drift,
+    proposals: { pending: pendingProposals },
   };
   const aiFocus = await generateAiFocus(anthropicApiKey, base);
   return { ...base, aiFocus };
@@ -443,6 +467,7 @@ export function renderBriefHtml(d: BriefData): string {
   <div style="font:12px Arial;color:#6B7280;margin-top:2px">${d.date} · plan for today, actuals from ${d.prevDate}</div>
 </div>
 ${d.aiFocus ? `<div style="background:#FBF7EC;border:1px solid #E2D9C3;border-radius:8px;padding:12px 14px;font:14px/1.6 Arial;color:#4B3F1D;margin:14px 0">${esc(d.aiFocus)}</div>` : ""}
+${d.proposals.pending > 0 ? `<div style="background:#EEF3EA;border:1px solid #CBDCC0;border-radius:8px;padding:10px 14px;font:13px/1.5 Arial;color:#33512A;margin:14px 0">排产提案：<b>${d.proposals.pending}</b> 张卡待批准排产 — Planning &gt; Schedule Proposals 里一键批准后写入交期。</div>` : ""}
 <h2 ${h2}>1 · Today's Plan — ${d.schedule.totals.jobCards} job cards · ${hm(d.schedule.totals.prodMinutes)}</h2>
 <table ${table}><tr><th ${th}>Department</th><th ${thR}>Cards</th><th ${thR}>Units</th><th ${thR}>Time</th></tr>${deptRows || `<tr><td colspan="4" style="padding:8px 10px;color:#9CA3AF">Nothing due today.</td></tr>`}</table>
 <h2 ${h2}>2 · CNC Cutting Queue — ${hm(d.cnc.totalMinutes)} (≈ ${d.cnc.referenceDays} days)</h2>
@@ -485,6 +510,9 @@ export function renderBriefEmailText(d: BriefData): string {
         .map((x) => `${x.category} actual ${x.actualMin}m vs configured ${x.configuredMin}m (${x.driftPct}%)`)
         .join("; ")} — consider updating the CNC config.`,
     );
+  }
+  if (d.proposals.pending > 0) {
+    lines.push(`排产提案: ${d.proposals.pending} 张卡待批准排产 (Planning > Schedule Proposals).`);
   }
   return lines.join("\n");
 }

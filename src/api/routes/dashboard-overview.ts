@@ -260,9 +260,17 @@ app.get("/", async (c) => {
     let windowDays: string[];
     if (monthScope) {
       windowDays = [];
+      // Capacity averaging counts COMPLETE days only: the in-progress today is
+      // excluded (it deflated the month average all day long — owner audit
+      // 2026-07-11). monthScope.end itself stays "today" because the Completed
+      // widgets DO want today's completions; only this divisor window differs.
+      const capEnd =
+        monthScope.end === fmtISO(new Date(today)) && !isPastMonth
+          ? fmtISO(new Date(new Date(today).getTime() - 24 * 60 * 60 * 1000))
+          : monthScope.end;
       const cur = new Date(`${monthScope.start}T00:00:00`);
       let guard = 0;
-      while (fmtISO(cur) <= monthScope.end && guard < 40) {
+      while (fmtISO(cur) <= capEnd && guard < 40) {
         guard++;
         const iso = fmtISO(cur);
         if (cur.getDay() !== 0 && !holidaySet.has(iso)) windowDays.push(iso);
@@ -434,7 +442,7 @@ app.get("/", async (c) => {
                   MAX(CASE WHEN si.itemCategory = 'SOFA' THEN 1 ELSE 0 END) AS "hasSofa"
              FROM sales_orders so
              JOIN sales_order_items si ON si.salesOrderId = so.id
-            WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED')
+            WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED','ON_HOLD')
             GROUP BY so.id, so.customerName, so.companySODate, so.totalSen`,
         )
         .bind(orgId)
@@ -460,7 +468,7 @@ app.get("/", async (c) => {
                   COALESCE(SUM(si.lineTotalSen),0) AS "valueSen"
              FROM sales_order_items si
              JOIN sales_orders so ON so.id = si.salesOrderId
-            WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED')
+            WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED','ON_HOLD')
               AND si.itemCategory = 'BEDFRAME'
             GROUP BY si.productCode, so.customerName,
                      substr(so.companySODate::text, 1, 7)`,
@@ -484,7 +492,7 @@ app.get("/", async (c) => {
                   substr(so.companySODate::text, 1, 7) AS "ym"
              FROM sales_order_items si
              JOIN sales_orders so ON so.id = si.salesOrderId
-            WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED')
+            WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED','ON_HOLD')
               AND si.itemCategory = 'SOFA'`,
         )
         .bind(orgId)
@@ -776,7 +784,9 @@ app.get("/", async (c) => {
       // route never filters by org). Do not add `WHERE orgId = ?` here.
       db
         .prepare(
-          "SELECT departmentCode AS dept, COUNT(*) AS n FROM workers WHERE status = 'ACTIVE' GROUP BY departmentCode",
+          // TEST accounts excluded (owner 2026-07-11): they are not real
+          // headcount — same rule the Payroll queries use.
+          "SELECT departmentCode AS dept, COUNT(*) AS n FROM workers WHERE status = 'ACTIVE' AND empNo NOT LIKE 'TEST%' GROUP BY departmentCode",
         )
         .all<{ dept: string; n: number }>(),
     ]);
@@ -784,7 +794,6 @@ app.get("/", async (c) => {
     // ---- Production ----
     let capacityMin = 0; // capacity over the Daily-Capacity widget window
     let capacityMin7 = 0; // capacity over the rolling 7 working days (Backlog)
-    let backlogMin = 0;
     const capByDay = new Map<string, number>();
     // Distinct workers (PIC1/PIC2 ids) credited on the job cards COMPLETED
     // each day — the denominator for the per-worker capacity figure in the
@@ -816,13 +825,9 @@ app.get("/", async (c) => {
           if (jc.pic2Id) wset.add(jc.pic2Id);
         }
       }
-      if (
-        jc.status !== "COMPLETED" &&
-        jc.status !== "TRANSFERRED" &&
-        jc.status !== "CANCELLED"
-      ) {
-        backlogMin += jcMinutesTotal(jc.estMinutes ?? 0, jc);
-      }
+      // (The old all-JC backlogMin accumulation was removed 2026-07-11: the
+      // headline backlog now derives from backlogGrandMin — the per-dept,
+      // PO-filtered SOFA+BEDFRAME total — so gauge == drill-down == Planning.)
     }
     // Widget divisor = the window's working-day count (7 for all-time /
     // current; the month's working days for a selected month). Guard the
@@ -831,12 +836,11 @@ app.get("/", async (c) => {
     const capacityDivisor = windowDays.length || 1;
     const dailyCapacityMin = Math.round(capacityMin / capacityDivisor);
     // Backlog days uses the rolling-7 capacity (state metric — unchanged by
-    // the month selector). Divisor stays a fixed 7.
-    const backlogDailyCapacityMin = Math.round(capacityMin7 / 7);
-    const backlogDays =
-      backlogDailyCapacityMin > 0
-        ? Math.round((backlogMin / backlogDailyCapacityMin) * 10) / 10
-        : 0;
+    // the month selector). Divisor stays a fixed 7. The headline DAYS figure
+    // itself is derived BELOW from backlogGrandMin (the per-dept, PO-filtered
+    // SOFA+BEDFRAME total) so gauge == drill-down == Planning — the old
+    // all-JC numerator made the gauge read higher than both (9.4d vs 9.1d,
+    // owner tally audit 2026-07-11).
     // Daily Capacity drill-down: the widget window's working days, oldest
     // first (rolling 7 for all-time / current; the month for a selection).
     const capacityDays = [...windowDays]
@@ -890,22 +894,37 @@ app.get("/", async (c) => {
       }
       const dailyCapMin = Math.round(windowTotal / 7);
       const totalMin = sofaMin + bedframeMin;
-      const denom = dailyCapMin > 0 ? dailyCapMin : 1;
+      // Div-zero guard (owner audit 2026-07-11): a dept with backlog but ZERO
+      // completions in the rolling window used to divide by 1 MINUTE, showing
+      // thousands of "days" and topping the bottleneck sort. backlogDays = null
+      // now means "stalled — no recent throughput to measure against"; the FE
+      // renders it as such instead of a fake number.
+      const backlogDays =
+        dailyCapMin > 0 ? Math.round((totalMin / dailyCapMin) * 10) / 10 : null;
       return {
         dept: name,
         sofaMin,
         bedframeMin,
         totalMin,
         dailyCapMin,
-        backlogDays: Math.round((totalMin / denom) * 10) / 10,
+        backlogDays,
       };
     })
       .filter((d) => d.totalMin > 0 || d.dailyCapMin > 0)
-      .sort((a, b) => b.backlogDays - a.backlogDays);
+      // null (stalled) sorts first — it IS a bottleneck flag, just not a number.
+      .sort((a, b) => (b.backlogDays ?? Infinity) - (a.backlogDays ?? Infinity));
     const backlogGrandMin = backlogByDept.reduce(
       (s, d) => s + d.totalMin,
       0,
     );
+    // Unified headline (owner tally audit 2026-07-11): SOFA+BEDFRAME work on
+    // IN_PROGRESS/PENDING orders ÷ rolling-7 capacity — the SAME population
+    // the drill-down table and the Planning page use.
+    const backlogDailyCapacityMin = Math.round(capacityMin7 / 7);
+    const backlogDays =
+      backlogDailyCapacityMin > 0
+        ? Math.round((backlogGrandMin / backlogDailyCapacityMin) * 10) / 10
+        : 0;
 
     // ---- Active Jobs (pending) & Completed Yesterday ----
     // Bedframe counts as units (Σ qty); Sofa as sets (distinct SO).
@@ -1042,7 +1061,15 @@ app.get("/", async (c) => {
       if (kpiAllTime || info.ym === period) thisMonthDeliveredSen += val;
       // "Delivered of this month's orders" = the cohort funnel: shipped value
       // whose SO was CONFIRMED in the selected month, regardless of ship date.
-      if (!kpiAllTime && soConfirmYm.get(info.soId) === period) {
+      // Cohort key resolves PER ITEM: a CONSOLIDATED DO (header salesOrderId
+      // NULL, many SOs on one truck) used to fall out of the funnel entirely,
+      // understating the delivered % (owner audit 2026-07-11). The item's own
+      // production order → SO link is authoritative; header SO is the fallback.
+      const itemSoId =
+        (di.productionOrderId
+          ? soPriceIdx.poById.get(di.productionOrderId)?.salesOrderId
+          : "") || info.soId;
+      if (!kpiAllTime && soConfirmYm.get(itemSoId) === period) {
         deliveredOfMonthOrdersSen += val;
       }
     }
@@ -1271,7 +1298,7 @@ app.get("/", async (c) => {
           `SELECT ${bucketExpr("companySODate")} AS "yw",
                   COALESCE(SUM(totalSen),0) AS "revenueSen"
              FROM sales_orders
-            WHERE orgId = ? AND status NOT IN ('DRAFT','CANCELLED')
+            WHERE orgId = ? AND status NOT IN ('DRAFT','CANCELLED','ON_HOLD')
               AND companySODate IS NOT NULL
               AND ${weekDateClause("companySODate")}
             GROUP BY 1`,
@@ -1687,7 +1714,9 @@ app.get("/", async (c) => {
     // (source=live, isHistorical=false → no tag).
     let stateProduction = {
       dailyCapacityMin,
-      backlogMin,
+      // backlogMin now reports the SAME population as backlogDays and the
+      // drill-down (SOFA+BF on active orders) so "Xd · Yh" is one number pair.
+      backlogMin: backlogGrandMin,
       backlogDays,
       activeJobs,
       completedYesterday,
@@ -1843,18 +1872,23 @@ app.get("/", async (c) => {
               monthCompletedMin / reconMonthWorkingDays,
             );
             const totalMin = sofaMin + bedframeMin;
-            const denom = dailyCapMin > 0 ? dailyCapMin : 1;
+            // Same div-zero guard as the live path: null = stalled, never a
+            // 1-minute fallback (owner audit 2026-07-11).
+            const backlogDays =
+              dailyCapMin > 0
+                ? Math.round((totalMin / dailyCapMin) * 10) / 10
+                : null;
             return {
               dept: name,
               sofaMin,
               bedframeMin,
               totalMin,
               dailyCapMin,
-              backlogDays: Math.round((totalMin / denom) * 10) / 10,
+              backlogDays,
             };
           })
             .filter((d) => d.totalMin > 0 || d.dailyCapMin > 0)
-            .sort((a, b) => b.backlogDays - a.backlogDays);
+            .sort((a, b) => (b.backlogDays ?? Infinity) - (a.backlogDays ?? Infinity));
           const reconBacklogGrandMin = reconBacklogByDept.reduce(
             (s, d) => s + d.totalMin,
             0,

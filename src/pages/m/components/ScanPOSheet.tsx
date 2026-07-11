@@ -62,8 +62,10 @@ type Resp = {
 type Props = {
   open: boolean;
   onClose: () => void;
-  /** Fires when the operator picks one of the extracted POs. */
-  onResult: (extracted: ScanPOExtracted) => void;
+  /** Fires when the operator picks one of the extracted POs. sampleId lets
+   *  the caller report the FINAL imported values back to
+   *  /api/scan-po/samples/:id/confirm (OCR accuracy dashboard). */
+  onResult: (extracted: ScanPOExtracted, sampleId: string) => void;
 };
 
 export function ScanPOSheet({ open, onClose, onResult }: Props) {
@@ -265,7 +267,7 @@ export function ScanPOSheet({ open, onClose, onResult }: Props) {
                   <button
                     key={s.sampleId}
                     onClick={() => {
-                      onResult(e);
+                      onResult(e, s.sampleId);
                       reset();
                     }}
                     style={{

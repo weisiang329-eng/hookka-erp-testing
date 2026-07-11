@@ -69,7 +69,11 @@ app.get("/", async (c) => {
     const parts: string[] = ["correctedJson IS NOT NULL"];
     const binds: string[] = [];
     if (from) { parts.push(`${col} >= ?`); binds.push(from); }
-    if (to) { parts.push(`${col} <= ?`); binds.push(`${to} 23:59:59`); }
+    // Compare on the DATE PORTION only. The old `<= '<to> 23:59:59'` bound
+    // silently dropped every row on the `to` day when createdAt is stored as
+    // ISO with a 'T' separator ('T' 0x54 > ' ' 0x20 lexically) — the last day
+    // of any selected month never counted (owner audit 2026-07-11).
+    if (to) { parts.push(`substr(${col}::text, 1, 10) <= ?`); binds.push(to); }
     return { sql: parts.join(" AND "), binds };
   };
 

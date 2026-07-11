@@ -4795,18 +4795,23 @@ export default function ProductionPage({
         {s.divan && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
         {s.leg && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
         {s.totalHeight && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
-        <div className="flex items-baseline gap-1">
-          <span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
-          <span
-            className="flex-1 min-w-0 truncate"
-            style={{
-              fontSize: "11px",
-              lineHeight: 1.2,
-            }}
-          >: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
-        </div>
       </div>
-      <div className="mt-auto pt-1 border-t border-dashed border-[#6B5C32]">
+      {/* Notes fills the space above the QR block and wraps into it. flex-1 +
+          overflow-hidden: on a field-heavy BEDFRAME sticker (Gap/Divan/Leg/Total
+          H rows) a long note clips ITSELF rather than pushing the QR + Fab Cut/
+          Sew + Qty block off the card (owner 2026-07-11). Sofa (fewer rows) just
+          shows more note lines in the bigger gap. */}
+      <div className="flex items-start gap-1 flex-1 min-h-0 overflow-hidden text-[13px] leading-tight text-[#1F1D1B] pt-[2px]">
+        <span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
+        <span
+          className="flex-1 min-w-0 whitespace-normal break-words"
+          style={{
+            fontSize: "11px",
+            lineHeight: 1.2,
+          }}
+        >: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
+      </div>
+      <div className="pt-1 border-t border-dashed border-[#6B5C32]">
         <div className="flex items-end gap-2 pt-1">
           <QRImg data={s.qrPayload} size={84} alt="Job card QR" className="block shrink-0" />
           <div className="flex-1 min-w-0 self-stretch flex flex-col justify-between text-[11px]">
@@ -9137,27 +9142,20 @@ export default function ProductionPage({
                     {s.divan && <div><span className="inline-block w-[35mm] font-semibold">Divan</span>: {s.divan}</div>}
                     {s.leg && <div><span className="inline-block w-[35mm] font-semibold">Leg</span>: {s.leg}</div>}
                     {s.totalHeight && <div><span className="inline-block w-[35mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
-                    <div className="flex items-baseline gap-[1mm]">
-                      <span className="font-semibold shrink-0" style={{ width: "35mm", color: "#9A3A2D" }}>Notes</span>
-                      <span
-                        className="flex-1 min-w-0 truncate"
-                        style={{
-                          fontSize: "11pt",
-                          lineHeight: 1.2,
-                        }}
-                      >
-                        : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
-                      </span>
-                    </div>
                   </div>
-                  {/* Bottom block — same shape as FG sticker, mt-auto +
-                      dashed top border + QR (left) + content (right).
-                      Content is Fab Cut / Fab Sew sign-off lines + Qty.
-                      Wei Siang 2026-05-15: top info bigger (11pt rows,
-                      30mm label column) and sign-off lines need more
-                      breathing room — taller writing area (10mm) and
-                      bigger gap between Cutting / Sewing rows (6mm). */}
-                  <div className="mt-auto pt-[1.5mm] border-t border-dashed border-black">
+                  {/* Notes fills the space above the QR block and clips ITSELF
+                      (flex-1 + overflow-hidden) so a long note never pushes the
+                      QR + sign-off + Qty block off a field-heavy BEDFRAME card
+                      when printed (owner 2026-07-11). */}
+                  <div className="flex items-start gap-[1mm] flex-1 min-h-0 overflow-hidden" style={{ fontSize: "11pt", lineHeight: 1.2 }}>
+                    <span className="font-semibold shrink-0" style={{ width: "35mm", color: "#9A3A2D" }}>Notes</span>
+                    <span className="flex-1 min-w-0 whitespace-normal break-words">
+                      : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
+                    </span>
+                  </div>
+                  {/* Bottom block — dashed top border + QR (left) + Fab Cut/Sew
+                      sign-off + Qty (right). Pinned below the flex-1 Notes. */}
+                  <div className="pt-[1.5mm] border-t border-dashed border-black">
                     <div className="flex items-end gap-[2mm] pt-[1.5mm]">
                       {s.qrDataUrl && (
                         // Fab Cut 100x150mm: QR gets its OWN left/bottom margin

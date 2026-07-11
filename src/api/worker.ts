@@ -961,6 +961,7 @@ import rdTeamMembers from "./routes/rd-team-members";
 import scheduling from "./routes/scheduling";
 import planningSchedule from "./routes/planning-schedule";
 import scheduleProposals from "./routes/schedule-proposals";
+import deliveryAgent, { internal as deliveryAgentInternal } from "./routes/delivery-agent";
 import scanPo from "./routes/scan-po";
 import scanSupplier from "./routes/scan-supplier";
 import scanFinance from "./routes/scan-finance";
@@ -1187,6 +1188,12 @@ app.route("/api/planning", planningSchedule);
 // Phase 2 due-date proposals share the /api/planning prefix (Hono composes
 // multiple sub-routers on one path; the paths don't overlap).
 app.route("/api/planning", scheduleProposals);
+// Delivery Agent (TMS) — brief + LOAD_PLAN/INVOICE_GAP/POD_CHASE proposals.
+// Proposal-only: approve never creates/dispatches DOs (see routes file).
+// The /api/internal/delivery-agent/* trigger is public-path + CRON_SECRET-
+// gated (PUBLIC_PREFIXES in auth-middleware), mirroring /api/internal/reports.
+app.route("/api/delivery-agent", deliveryAgent);
+app.route("/api/internal/delivery-agent", deliveryAgentInternal);
 app.route("/api/scan-po", scanPo);
 app.route("/api/scan-supplier", scanSupplier);
 app.route("/api/scan-finance", scanFinance);

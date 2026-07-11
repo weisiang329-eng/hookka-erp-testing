@@ -75,6 +75,10 @@ const PUBLIC_PREFIXES = [
   // own CRON_SECRET HMAC check (constant-time SHA-256) before doing any
   // work. No session — external cron services can't carry one anyway.
   "/api/internal/reports/",
+  // 2026-07-12 — Delivery Agent cron trigger. Same model as the report
+  // triggers above: the handler does its own CRON_SECRET constant-time
+  // check before any work. See routes/delivery-agent.ts (POST /run-trigger).
+  "/api/internal/delivery-agent/",
   // 2026-06-12 — QR dispatch/deliver scan flow. Drivers scan the QR printed
   // on a DO / Packing List with a normal phone camera — no session exists.
   // The handler's gate is the unguessable 64-hex qrtoken (migration 0167):

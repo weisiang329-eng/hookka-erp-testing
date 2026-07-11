@@ -133,6 +133,7 @@ Built to cut token usage: open the named file at the named line range instead of
 |---|---|---|---|
 | `src/pages/delivery/index.tsx` — DO workbench + 3PL mgmt (6879) | `src/api/routes/delivery-orders.ts` — DO end-to-end (6189) | `delivery_orders` / `delivery_order_items` | `tests/delivery-pipeline.test.mjs` |
 | `src/pages/delivery/detail.tsx` — single DO detail | `src/api/routes/packing-lists.ts` — delivery-side truck runs | `packing_lists` | `tests/do-qr-public.test.mjs` |
+| `src/pages/delivery/agent-tab.tsx` — Delivery Agent tab (brief strip + proposal approve/reject) | `src/api/routes/delivery-agent.ts` — brief.json / proposals / run / cron trigger; lib `src/api/lib/delivery-agent.ts` (runtime self-apply) | `delivery_proposals` / `delivery_briefs` (snake_case) | |
 | `src/pages/consignment/note.tsx` — CN workbench, DO-parity (5219) | `src/api/routes/consignment-notes.ts` — CN lifecycle | `consignment_notes` / `cn_packing_lists` | `tests/do-scan-sort.test.mjs` |
 | `src/pages/consignment/index.tsx` — CO list | `src/api/routes/cn-packing-lists.ts` — CN packing lists | `consignment_orders` | `tests/pl-first-autosplit.test.mjs` |
 | `src/pages/consignment/create.tsx` — create CO (1782) | `src/api/routes/consignment-orders.ts` — CO CRUD (2415) | `drivers` | `tests/three-pl-state-rates.test.mjs` |
@@ -144,7 +145,7 @@ Built to cut token usage: open the named file at the named line range instead of
 - `src/pages/delivery/index.tsx`
   - EditableExpectedDD helper — L69-280
   - TABS list (planning/pending_delivery/pending_dispatch/dispatched/delivered/packing_list) — L467-490
-  - DeliveryPage start + pageTab (orders|3pl) URL state — L801-810
+  - DeliveryPage start + pageTab (orders|3pl|agent) URL state — L801-810
   - 3PL Providers state + vehicles/drivers sub-table state — L911-1090
   - 3PL Provider helpers (CRUD, rates, fleet, drivers) — L1445-1830
   - DO status tally / search / transition logic — L2069-2790

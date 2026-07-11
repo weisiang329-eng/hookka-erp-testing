@@ -36,13 +36,15 @@ export const DEFAULT_SOFA_COMPARTMENTS: string[] = [
   "L(LHF)", "L(RHF)", "CNR", "STOOL",
 ];
 
-/** Bedframe variant product code: `{baseModel}-({sizeCode})` → "1003-(K)". */
+/** Bedframe variant product code: `{baseModel}-({sizeCode})` → "1003-(K)"
+ * (UPPERCASE — owner 2026-07-11: all generated codes/names unified to caps). */
 export function bedframeVariantCode(baseModel: string, sizeCode: string): string {
-  return `${baseModel.trim()}-(${sizeCode.trim()})`;
+  return `${baseModel.trim()}-(${sizeCode.trim()})`.toUpperCase();
 }
 
 /** Bedframe variant name: "`{baseName} ({label}) ({dimensions})`" — empty
- * parentheses dropped so a size with no label/dimensions still reads cleanly. */
+ * parentheses dropped so a size with no label/dimensions still reads cleanly.
+ * UPPERCASE (owner 2026-07-11: all generated text unified to caps). */
 export function bedframeVariantName(baseName: string, size: BedframeSize): string {
   return [
     baseName.trim(),
@@ -50,19 +52,21 @@ export function bedframeVariantName(baseName: string, size: BedframeSize): strin
     size.dimensions.trim() ? `(${size.dimensions.trim()})` : "",
   ]
     .filter(Boolean)
-    .join(" ");
+    .join(" ")
+    .toUpperCase();
 }
 
-/** Sofa variant product code: `{baseModel}-{compartment}` → "5539-1A(LHF)". */
+/** Sofa variant product code: `{baseModel}-{compartment}` → "5539-1A(LHF)"
+ * (UPPERCASE — unified with the rest of the generated fields). */
 export function sofaVariantCode(baseModel: string, compartment: string): string {
-  return `${baseModel.trim()}-${compartment.trim()}`;
+  return `${baseModel.trim()}-${compartment.trim()}`.toUpperCase();
 }
 
 /** Sofa variant name: "`{baseName} {compartment}`", or "`SOFA {model} {compartment}`"
  * when no base name is supplied (matches the existing catalog convention). */
 export function sofaVariantName(baseName: string, baseModel: string, compartment: string): string {
   const b = baseName.trim();
-  return b ? `${b} ${compartment.trim()}` : `SOFA ${baseModel.trim()} ${compartment.trim()}`;
+  return (b ? `${b} ${compartment.trim()}` : `SOFA ${baseModel.trim()} ${compartment.trim()}`).toUpperCase();
 }
 
 // Bedframe size CODE → the human size word used in the auto description
@@ -76,9 +80,9 @@ const BEDFRAME_SIZE_WORDS: Record<string, string> = {
   SP: "special",
 };
 
-/** Bedframe variant description — lowercase "`{baseName} {sizeWord} {label}
- * ({dimensions})`" (matches the live catalog, e.g.
- * "hilton bedframe king 6ft (183x190cm)"). */
+/** Bedframe variant description — UPPERCASE "`{baseName} {sizeWord} {label}
+ * ({dimensions})`" (owner 2026-07-11: unify all generated text to caps, e.g.
+ * "HILTON BEDFRAME KING 6FT (183X190CM)"). */
 export function bedframeVariantDescription(baseName: string, size: BedframeSize): string {
   const word = BEDFRAME_SIZE_WORDS[size.code.trim().toUpperCase()] ?? "";
   return [
@@ -89,11 +93,11 @@ export function bedframeVariantDescription(baseName: string, size: BedframeSize)
   ]
     .filter(Boolean)
     .join(" ")
-    .toLowerCase();
+    .toUpperCase();
 }
 
-/** Sofa variant description — "`sofa {model} module {compartment}`" (matches the
- * live catalog, e.g. "sofa 5530 module 1NA"; the compartment keeps its case). */
+/** Sofa variant description — UPPERCASE "`SOFA {model} MODULE {compartment}`"
+ * (e.g. "SOFA 5530 MODULE 1NA"). */
 export function sofaVariantDescription(baseModel: string, compartment: string): string {
-  return `sofa ${baseModel.trim()} module ${compartment.trim()}`;
+  return `sofa ${baseModel.trim()} module ${compartment.trim()}`.toUpperCase();
 }

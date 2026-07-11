@@ -2039,7 +2039,7 @@ export default function InventoryPage() {
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
                       <div>
                         <label className="block text-xs text-[#6B7280] mb-1">Base Model *</label>
-                        <input value={fgForm.code} onChange={e => setFgForm(f => ({ ...f, code: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. 2990" />
+                        <input value={fgForm.code} onChange={e => setFgForm(f => ({ ...f, code: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder={bulkIsBed ? "e.g. 1003" : "e.g. 5535"} />
                       </div>
                       <div>
                         <label className="block text-xs text-[#6B7280] mb-1">Name{bulkIsBed ? " *" : " (optional)"}</label>

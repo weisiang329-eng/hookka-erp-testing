@@ -45,26 +45,35 @@ test("sofaVariantName — base name wins, else SOFA <model> <compartment>", () =
   assert.equal(m.sofaVariantName("ROMA SOFA", "5539", "1A(LHF)"), "ROMA SOFA 1A(LHF)");
 });
 
-test("bedframeVariantDescription — lowercase name + size word + label + (dims)", () => {
-  // Matches live catalog: "hilton bedframe king 6ft (183x190cm)".
+test("bedframeVariantDescription — UPPERCASE name + size word + label + (dims)", () => {
   assert.equal(
     m.bedframeVariantDescription("HILTON BEDFRAME", { code: "K", label: "6FT", dimensions: "183X190CM" }),
-    "hilton bedframe king 6ft (183x190cm)",
+    "HILTON BEDFRAME KING 6FT (183X190CM)",
   );
   assert.equal(
     m.bedframeVariantDescription("HILTON BEDFRAME", { code: "SS", label: "3.5FT", dimensions: "107X190CM" }),
-    "hilton bedframe super single 3.5ft (107x190cm)",
+    "HILTON BEDFRAME SUPER SINGLE 3.5FT (107X190CM)",
   );
   // Unknown size code → word dropped, still valid.
   assert.equal(
     m.bedframeVariantDescription("ROMA", { code: "ZZ", label: "9FT", dimensions: "" }),
-    "roma 9ft",
+    "ROMA 9FT",
   );
 });
 
-test("sofaVariantDescription — sofa {model} module {compartment}, compartment case kept", () => {
-  assert.equal(m.sofaVariantDescription("5530", "1NA"), "sofa 5530 module 1NA");
-  assert.equal(m.sofaVariantDescription("5539", "1A(LHF)"), "sofa 5539 module 1A(LHF)");
+test("sofaVariantDescription — UPPERCASE SOFA {model} MODULE {compartment}", () => {
+  assert.equal(m.sofaVariantDescription("5530", "1NA"), "SOFA 5530 MODULE 1NA");
+  assert.equal(m.sofaVariantDescription("5539", "1A(LHF)"), "SOFA 5539 MODULE 1A(LHF)");
+});
+
+test("all generated text is UPPERCASE even from lowercase input (owner: unify caps)", () => {
+  assert.equal(m.bedframeVariantCode("jag123", "k"), "JAG123-(K)");
+  assert.equal(
+    m.bedframeVariantName("roma bedframe", { code: "K", label: "6ft", dimensions: "183x190cm" }),
+    "ROMA BEDFRAME (6FT) (183X190CM)",
+  );
+  assert.equal(m.sofaVariantName("roma sofa", "5535", "1a(lhf)"), "ROMA SOFA 1A(LHF)");
+  assert.equal(m.sofaVariantCode("5535", "1a(lhf)"), "5535-1A(LHF)");
 });
 
 test("seed catalogs — bedframe sizes + sofa compartments present", () => {

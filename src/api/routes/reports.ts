@@ -42,6 +42,11 @@ import {
   renderBriefHtml,
   renderBriefEmailText,
 } from "../lib/production-brief";
+import {
+  collectOperationsReport,
+  type OperationsPeriodKind,
+} from "../lib/operations-report";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 export default app;
@@ -249,6 +254,36 @@ app.get("/efficiency.json", async (c) => {
     return c.json({ success: true, data });
   } catch (err) {
     console.error("[reports/efficiency.json] failed:", err);
+    return c.json({ success: false, error: "report generation failed" }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/reports/operations.json?period=daily|weekly|monthly&date=YYYY-MM-DD
+// The Operations Report (newspaper). One payload, all sections, scoped to the
+// period's date range. Reuses existing calc logic so numbers tie to the system.
+// ---------------------------------------------------------------------------
+
+app.get("/operations.json", async (c) => {
+  const denied = await requirePermission(c, "workers", "read");
+  if (denied) return denied;
+
+  const rawPeriod = c.req.query("period");
+  const period: OperationsPeriodKind =
+    rawPeriod === "daily" || rawPeriod === "weekly" || rawPeriod === "monthly"
+      ? rawPeriod
+      : "monthly";
+
+  const q = c.req.query("date");
+  const date =
+    typeof q === "string" && /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : todayYmdSgt();
+
+  try {
+    const orgId = getOrgId(c);
+    const data = await collectOperationsReport(c.var.DB, orgId, period, date);
+    return c.json({ success: true, data });
+  } catch (err) {
+    console.error("[reports/operations.json] failed:", err);
     return c.json({ success: false, error: "report generation failed" }, 500);
   }
 });

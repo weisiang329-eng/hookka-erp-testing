@@ -96,7 +96,18 @@ Owner + Fable 5 定稿于 2026-07-12。这是全公司 Agent 化的执行大纲�
 
 ---
 
-## 执行顺序（每个 ≈ 数天，不是数月）
+## 执行顺序（owner 定案 2026-07-12：先做两个）
+
+**第一优先：① Production Agent（排产）+ ② Delivery Agent（TMS）** —— 其余按下表顺延。
+
+**Delivery Agent（TMS 式，owner 原话范围）**：管整条送货生命线
+pending delivery → 装车/派车（拼车建议、3PL vs 自车、州费率、hub 规则、PL-first）
+→ dispatch → delivered（POD 跟踪、未签收提醒）→ 开 invoice（漏开票闭环，
+接 compliance soNoInvoice）→ delivery return（退货 DO/换货，接 service case 链）。
+学习环：3PL 准时率与实际运费 vs 报价、每客户收货窗口。现成底子：3PL 州费率+
+PL-first+hub 完整性已上线、Dispatch/Delivered 客户通知邮件已上线、DO 价值统计共享。
+
+## 原执行顺序（参考，每个 ≈ 数天）
 
 ```
 ① Production P2 验收 + P3 学习环   ← 现在

@@ -662,8 +662,14 @@ function NonprodApprovalsCard({
   const { confirm, confirmDialog } = useConfirm();
   const [reqs, setReqs] = useState<NonprodReq[]>([]);
   const [approvedReqs, setApprovedReqs] = useState<NonprodReq[]>([]);
+  const [rejectedReqs, setRejectedReqs] = useState<NonprodReq[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Owner 2026-07-11: the Approved / Rejected history lists can get long, so
+  // they collapse to the most recent few with a "Show all" toggle.
+  const [showAllApproved, setShowAllApproved] = useState(false);
+  const [showAllRejected, setShowAllRejected] = useState(false);
+  const HISTORY_PREVIEW = 5;
   const deptName = useCallback(
     (code: string) =>
       departments.find((d) => d.code === code)?.shortName ||
@@ -675,19 +681,23 @@ function NonprodApprovalsCard({
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      // PENDING (Approve/Reject) + APPROVED (Remove) in one refresh so the
-      // office can both decide new claims and delete a bad approved one.
-      const [pRes, aRes] = await Promise.all([
+      // PENDING (Approve/Reject) + APPROVED (Remove) + REJECTED (history, with
+      // the reason) in one refresh so the office sees the full picture.
+      const [pRes, aRes, rRes] = await Promise.all([
         fetch("/api/working-hour-entries/nonprod-requests?status=PENDING"),
         fetch("/api/working-hour-entries/nonprod-requests?status=APPROVED"),
+        fetch("/api/working-hour-entries/nonprod-requests?status=REJECTED"),
       ]);
       const pj = (await pRes.json()) as { success?: boolean; data?: NonprodReq[] };
       const aj = (await aRes.json()) as { success?: boolean; data?: NonprodReq[] };
+      const rj = (await rRes.json()) as { success?: boolean; data?: NonprodReq[] };
       setReqs(Array.isArray(pj?.data) ? pj.data : []);
       setApprovedReqs(Array.isArray(aj?.data) ? aj.data : []);
+      setRejectedReqs(Array.isArray(rj?.data) ? rj.data : []);
     } catch {
       setReqs([]);
       setApprovedReqs([]);
+      setRejectedReqs([]);
     } finally {
       setLoading(false);
     }
@@ -798,9 +808,9 @@ function NonprodApprovalsCard({
             {approvedReqs.length > 0 && (
               <>
                 <p className="pt-2 text-[11px] font-semibold uppercase tracking-wide text-[#8A8680]">
-                  Approved adjustments
+                  Approved adjustments ({approvedReqs.length})
                 </p>
-                {approvedReqs.map((r) => {
+                {(showAllApproved ? approvedReqs : approvedReqs.slice(0, HISTORY_PREVIEW)).map((r) => {
                   // Show the APPROVED amount (owner 2026-07-04). If it was a
                   // partial approve (approved < requested), show "1h (of 1h 20min)"
                   // so the office sees both. Legacy rows (approvedHours null) show
@@ -855,6 +865,59 @@ function NonprodApprovalsCard({
                     </div>
                   );
                 })}
+                {approvedReqs.length > HISTORY_PREVIEW && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllApproved((v) => !v)}
+                    className="mt-1 text-xs font-medium text-[#6B5C32] hover:underline"
+                  >
+                    {showAllApproved ? "Show less" : `Show all ${approvedReqs.length}`}
+                  </button>
+                )}
+              </>
+            )}
+
+            {/* Rejected adjustments — history with the office's reason, shown to
+                the worker too. Collapsed to the most recent few. (Owner 2026-07-11) */}
+            {rejectedReqs.length > 0 && (
+              <>
+                <p className="pt-2 text-[11px] font-semibold uppercase tracking-wide text-[#8A8680]">
+                  Rejected ({rejectedReqs.length})
+                </p>
+                {(showAllRejected ? rejectedReqs : rejectedReqs.slice(0, HISTORY_PREVIEW)).map((r) => {
+                  const totalMin = Math.round((r.hours ?? 0) * 60);
+                  return (
+                    <div
+                      key={r.id}
+                      className="rounded-lg border border-[#EAD9D3] bg-[#FCF6F4] px-3 py-2"
+                    >
+                      <p className="text-sm font-medium truncate text-[#1F1D1B]">
+                        {r.workerName} · {fmtMin(totalMin)} · {deptName(r.departmentCode)}
+                        <span className="ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded font-semibold bg-[#F3E0DA] text-[#9A3A2D]">
+                          Rejected
+                        </span>
+                      </p>
+                      <p className="text-xs text-[#8A8680]">
+                        {r.date}
+                        {r.note ? ` — ${r.note}` : ""}
+                      </p>
+                      {r.rejectReason ? (
+                        <p className="mt-0.5 text-xs text-[#9A3A2D]">
+                          <span className="font-semibold">Reason:</span> {r.rejectReason}
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                })}
+                {rejectedReqs.length > HISTORY_PREVIEW && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllRejected((v) => !v)}
+                    className="mt-1 text-xs font-medium text-[#6B5C32] hover:underline"
+                  >
+                    {showAllRejected ? "Show less" : `Show all ${rejectedReqs.length}`}
+                  </button>
+                )}
               </>
             )}
           </div>
@@ -6965,6 +7028,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
       (acc, r) => ({
         basicSalary: acc.basicSalary + r.basicSalary,
         absenceDeductionSen: acc.absenceDeductionSen + (r.absenceDeductionSen || 0),
+        shortHourDeductionSen: acc.shortHourDeductionSen + (r.shortHourDeductionSen || 0),
         otWeekdayHours: acc.otWeekdayHours + r.otWeekdayHours,
         otSundayHours: acc.otSundayHours + r.otSundayHours,
         otPHHours: acc.otPHHours + r.otPHHours,
@@ -6982,7 +7046,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
         netPay: acc.netPay + r.netPay,
       }),
       {
-        basicSalary: 0, absenceDeductionSen: 0, otWeekdayHours: 0, otSundayHours: 0, otPHHours: 0,
+        basicSalary: 0, absenceDeductionSen: 0, shortHourDeductionSen: 0, otWeekdayHours: 0, otSundayHours: 0, otPHHours: 0,
         totalOT: 0, allowances: 0, grossPay: 0, epfEmployee: 0, epfEmployer: 0,
         socsoEmployee: 0, socsoEmployer: 0, eisEmployee: 0, eisEmployer: 0,
         pcb: 0, totalDeductions: 0, netPay: 0,
@@ -7245,40 +7309,42 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
       {confirmDialog}
       {/* Summary Cards */}
       {payslipData.length > 0 && (
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
           <Card>
             <CardContent className="p-4">
-              <p className="text-xs text-[#6B7280] uppercase tracking-wide">Total Payroll Cost</p>
-              <p className="text-xl font-bold text-[#1F1D1B] mt-1">{formatCurrency(totalPayrollCost)}</p>
-              <p className="text-[10px] text-[#9CA3AF] mt-0.5">Gross + Employer contributions</p>
+              <p className="text-xs text-[#6B7280] uppercase tracking-wide">Total Pay</p>
+              <p className="text-xl font-bold text-[#6B5C32] mt-1">{formatCurrency(totalPayrollCost)}</p>
+              <p className="text-[10px] text-[#9CA3AF] mt-0.5">Company outlay — Gross + all employer statutory</p>
             </CardContent>
           </Card>
           <Card>
             <CardContent className="p-4">
-              <p className="text-xs text-[#6B7280] uppercase tracking-wide">Total EPF (EE+ER)</p>
-              <p className="text-xl font-bold text-[#3E6570] mt-1">{formatCurrency(totals.epfEmployee + totals.epfEmployer)}</p>
-              <p className="text-[10px] text-[#9CA3AF] mt-0.5">EE: {formatCurrency(totals.epfEmployee)} | ER: {formatCurrency(totals.epfEmployer)}</p>
+              <p className="text-xs text-[#6B7280] uppercase tracking-wide">Gross Pay</p>
+              <p className="text-xl font-bold text-[#1F1D1B] mt-1">{formatCurrency(totals.grossPay)}</p>
+              <p className="text-[10px] text-[#9CA3AF] mt-0.5">Basic − deductions + OT + allowance</p>
             </CardContent>
           </Card>
           <Card>
             <CardContent className="p-4">
-              <p className="text-xs text-[#6B7280] uppercase tracking-wide">Total SOCSO</p>
-              <p className="text-xl font-bold text-[#6B4A6D] mt-1">{formatCurrency(totals.socsoEmployee + totals.socsoEmployer)}</p>
-              <p className="text-[10px] text-[#9CA3AF] mt-0.5">EE: {formatCurrency(totals.socsoEmployee)} | ER: {formatCurrency(totals.socsoEmployer)}</p>
+              <p className="text-xs text-[#6B7280] uppercase tracking-wide">Net Pay</p>
+              <p className="text-xl font-bold text-[#1F1D1B] mt-1">{formatCurrency(totals.netPay)}</p>
+              <p className="text-[10px] text-[#9CA3AF] mt-0.5">Total take-home after statutory</p>
             </CardContent>
           </Card>
           <Card>
-            <CardContent className="p-4">
-              <p className="text-xs text-[#6B7280] uppercase tracking-wide">Total EIS</p>
-              <p className="text-xl font-bold text-[#3E6570] mt-1">{formatCurrency(totals.eisEmployee + totals.eisEmployer)}</p>
-              <p className="text-[10px] text-[#9CA3AF] mt-0.5">EE: {formatCurrency(totals.eisEmployee)} | ER: {formatCurrency(totals.eisEmployer)}</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <p className="text-xs text-[#6B7280] uppercase tracking-wide">Total PCB</p>
-              <p className="text-xl font-bold text-[#9C6F1E] mt-1">{totals.pcb > 0 ? formatCurrency(totals.pcb) : "RM 0.00"}</p>
-              <p className="text-[10px] text-[#9CA3AF] mt-0.5">Monthly tax deduction</p>
+            <CardContent className="p-4" title="All statutory contributions combined — EPF (employee + employer), SOCSO, EIS and PCB.">
+              <p className="text-xs text-[#6B7280] uppercase tracking-wide">Statutory (all)</p>
+              <p className="text-xl font-bold text-[#3E6570] mt-1">
+                {formatCurrency(
+                  totals.epfEmployee + totals.epfEmployer +
+                  totals.socsoEmployee + totals.socsoEmployer +
+                  totals.eisEmployee + totals.eisEmployer +
+                  totals.pcb,
+                )}
+              </p>
+              <p className="text-[10px] text-[#9CA3AF] mt-0.5">
+                EPF {formatCurrency(totals.epfEmployee + totals.epfEmployer)} · SOCSO {formatCurrency(totals.socsoEmployee + totals.socsoEmployer)} · EIS {formatCurrency(totals.eisEmployee + totals.eisEmployer)} · PCB {formatCurrency(totals.pcb)}
+              </p>
             </CardContent>
           </Card>
         </div>
@@ -7394,7 +7460,8 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                     <th className="h-10 px-3 text-left font-medium text-[#374151] min-w-[180px] whitespace-nowrap">Employee</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Basic (RM)</th>
                     <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Days</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Absence</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap" title="Whole days the worker was absent (0 hours logged) — deducted at the ÷26 daily rate.">Absence</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap" title="Late / short-hour dock — hours short on days the worker DID work (late past grace, left early, or under a full 9h day), auto-docked at the ÷26 hourly rate. Separate from Absence (whole days missed).">Late/Short</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Part-month</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT Wk</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT Sun</th>
@@ -7434,6 +7501,11 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                             ? <span>−{formatCurrency(r.absenceDeductionSen)}<span className="text-[10px] text-[#9CA3AF]"> ({r.absentDays}d)</span></span>
                             : "-"}
                         </td>
+                        <td className="h-10 px-3 text-right whitespace-nowrap text-[#B45309]" title="Late / short-hour dock — hours short on days the worker DID work, auto-docked. Click the row to see which days.">
+                          {(r.shortHourDeductionSen ?? 0) > 0
+                            ? <span>−{formatCurrency(r.shortHourDeductionSen ?? 0)}{r.lateDays && r.lateDays.length > 0 ? <span className="text-[10px] text-[#9CA3AF]"> ({r.lateDays.length}d)</span> : null}</span>
+                            : "-"}
+                        </td>
                         <td className="h-10 px-3 text-right whitespace-nowrap text-[#9A3A2D]" title="Part-month (legacy months only): payslips stored before the unified rule, paid for days served">
                           {prorationSenOf(r) > 1 ? `−${formatCurrency(prorationSenOf(r))}` : "-"}
                         </td>
@@ -7468,7 +7540,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                       {/* Expanded Detail Row */}
                       {expandedRow === r.id && (
                         <tr className="bg-[#FDFCFB]">
-                          <td colSpan={21} className="px-6 py-4">
+                          <td colSpan={22} className="px-6 py-4">
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                               {/* OT Calculation Breakdown */}
                               <div className="space-y-2">
@@ -7657,6 +7729,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                     <td className="h-10 px-3 text-right">{formatCurrency(totals.basicSalary)}</td>
                     <td className="h-10 px-2"></td>
                     <td className="h-10 px-3 text-right text-[#9A3A2D]">{totals.absenceDeductionSen > 0 ? `−${formatCurrency(totals.absenceDeductionSen)}` : "-"}</td>
+                    <td className="h-10 px-3 text-right text-[#B45309]">{totals.shortHourDeductionSen > 0 ? `−${formatCurrency(totals.shortHourDeductionSen)}` : "-"}</td>
                     <td className="h-10 px-3 text-right text-[#9A3A2D]">{totalProrationSen > 0 ? `−${formatCurrency(totalProrationSen)}` : "-"}</td>
                     <td className="h-10 px-2 text-right">{totals.otWeekdayHours}h</td>
                     <td className="h-10 px-2 text-right">{totals.otSundayHours > 0 ? `${totals.otSundayHours}h` : "-"}</td>
@@ -10409,7 +10482,7 @@ function AttendanceTab({
     for (const r of jcSummaryResp?.data ?? []) prodMinsByWorker.set(r.workerId, r.productionMinutes || 0);
     let totalHours = 0;
     let totalProdHours = 0;
-    let present = 0;
+    let totalDays = 0; // Σ each worker's days-with-entries = total worker-days
     const effVals: number[] = [];
     for (const row of hoursSummaryResp?.data ?? []) {
       totalHours += row.totalHours;
@@ -10418,7 +10491,7 @@ function AttendanceTab({
         0,
       );
       totalProdHours += prodHours;
-      if (row.totalHours > 0) present++;
+      totalDays += row.daysWithEntries || 0;
       if (prodHours > 0 && row.daysWithEntries > 0) {
         const pm = prodMinsByWorker.get(row.workerId) ?? 0;
         effVals.push((pm / (prodHours * 60)) * 100);
@@ -10429,8 +10502,10 @@ function AttendanceTab({
       activeCount,
       avgEff,
       avgSalarySen,
-      avgWorkingHours: present ? totalHours / present : 0,
-      avgProdHours: present ? totalProdHours / present : 0,
+      // Per-worker-day averages (owner 2026-07-11): total hours ÷ total worker-days
+      // — the hours ONE worker logs in ONE day, not the whole-month cumulative.
+      avgWorkingHours: totalDays ? totalHours / totalDays : 0,
+      avgProdHours: totalDays ? totalProdHours / totalDays : 0,
     };
   }, [workers, productionDeptCodes, hoursSummaryResp, jcSummaryResp]);
 
@@ -10457,14 +10532,14 @@ function AttendanceTab({
         </CardContent>
       </Card>
       <Card>
-        <CardContent className="p-3" title="Average working hours logged per worker who has entries this month.">
-          <p className="text-xs text-[#6B7280]">Avg Working Hours</p>
+        <CardContent className="p-3" title="Average working hours ONE worker logs in ONE day this month (total logged hours ÷ total worker-days).">
+          <p className="text-xs text-[#6B7280]">Avg Working Hrs <span className="text-[#9CA3AF]">/ day</span></p>
           <p className="text-lg font-bold text-[#1F1D1B]">{monthKpis.avgWorkingHours.toFixed(1)}h</p>
         </CardContent>
       </Card>
       <Card>
-        <CardContent className="p-3" title="Average production-dept hours per worker who has entries this month (the efficiency denominator).">
-          <p className="text-xs text-[#6B7280]">Avg Production Hours</p>
+        <CardContent className="p-3" title="Average production-dept hours ONE worker logs in ONE day this month (total production hours ÷ total worker-days).">
+          <p className="text-xs text-[#6B7280]">Avg Production Hrs <span className="text-[#9CA3AF]">/ day</span></p>
           <p className="text-lg font-bold text-[#1F1D1B]">{monthKpis.avgProdHours.toFixed(1)}h</p>
         </CardContent>
       </Card>
